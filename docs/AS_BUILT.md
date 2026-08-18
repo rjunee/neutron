@@ -24758,3 +24758,53 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-18 — a cache miss is not an absence of deletion, and a refused receipt is not a sent one (#411-followup)
+
+Two defects in #409, found by the cross-model and adversarial review that #409 was
+merged WITHOUT. Both were live on the reference deployment before this landed.
+
+**A deleted project's transcript could come back.** The `projects_changed`
+invalidation iterated `transcriptCache.keys()` and raised its `dropped` flag only
+when a delete FOUND an entry — so a topic whose FIRST read was still in flight,
+which is precisely the case the epoch guard exists for, could not raise it. The
+epoch stayed put, the read's write-back passed the guard at `controller.ts`
+`handleChange`, and the deleted project's history was re-created in the cache where
+a later `setProject` would serve it. The mechanism the comment described was right;
+the condition gating it was keyed on "did the map contain it" rather than "did the
+server say it is gone". Invalidation now scans every topic this controller has an
+opinion about, in-flight reads included, via a new `inFlightTranscriptTopics` set
+held only for the duration of the await.
+
+**A read receipt refused by the socket was recorded as sent, permanently.**
+`markVisibleAgentRead` filled its per-topic ledger from the ids it OFFERED, while
+`WebChatSession.markRead` records an id only when `ws.send` succeeds — specifically
+so a failed send is re-offered next time. Filling the ledger from the argument
+cancelled that retry: the id was filtered out of every later call and the receipt
+was never sent again. Not an edge case — on EVERY page load the transcript is read
+from the local store and reported before the WebSocket handshake completes, so the
+whole hydrated transcript was offered into a closed socket, dropped, and ledgered.
+The owner's read watermark never advanced and unread counts returned on messages he
+was looking at. `markRead` now RETURNS the ids it actually sent (web and mobile
+sessions both), and the caller ledgers only those.
+
+**Mutation evidence, both directions.** Restoring the old ledger reds
+`switch-transcript-cache.test.ts` "a receipt the socket REFUSED is offered again"
+(26 pass / 1 fail); restoring the old invalidation reds "A DELETION LANDING WHILE
+THE FIRST READ IS IN FLIGHT STILL STICKS" (26 pass / 1 fail); with both fixes,
+27 pass / 0 fail. `chat-core` 171 pass / 0 fail.
+
+📌 **The first version of the resurrection test was DECORATION and is worth
+recording as such:** it passed with the bug restored, because it stalled the session
+AFTER entering the project, by which time the read had already resolved. A guard that
+cannot fail for the reason under test is not a guard. It was rewritten to register
+the stalled session BEFORE the switch — `createSession` reuses an existing entry —
+and only then did the mutation go red.
+
+📌 **The suite could not see either defect because its session stub accepted every
+receipt unconditionally**, and #409's own test "acknowledges each agent message ONCE"
+pinned the defect as the desired behaviour. The stub now models a closed socket.
+
+**SYSTEM-OVERVIEW.md changes:** none (bug fix inside existing modules; no new module,
+HTTP surface, lifecycle behaviour, deploy step or env flag — `markRead`'s return type
+is a widened contract on an existing method, not a new surface).

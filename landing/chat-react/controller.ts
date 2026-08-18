@@ -252,9 +252,23 @@ export interface ControllerSession {
   ): Promise<void>
   messages(): Promise<ChatMessage[]>
   pendingCount(): Promise<number>
-  /** Track B Phase 4 — report read messages (optional so legacy fakes still
-   *  satisfy the interface). */
-  markRead?(messageIds: readonly string[]): void
+  /**
+   * Track B Phase 4 — report read messages (optional so legacy fakes still
+   * satisfy the interface).
+   *
+   * RETURNS THE IDS IT ACTUALLY SENT, which is not always the ids it was given.
+   * A receipt is best-effort over an open socket: `WebChatSession` records an id
+   * only when `ws.send` succeeds, precisely so a send that failed is retried on
+   * the next call. A caller that keeps its own "already reported" ledger and
+   * fills it from the ARGUMENT instead of the RETURN silently cancels that
+   * retry — the id is filtered out of every subsequent call and the receipt is
+   * never sent again. That is exactly what happened here: a switch served from
+   * cache paints and reports before the new project's socket has finished
+   * connecting, the send fails, and the unread badge and server watermark stall
+   * until a reload. Returning the accepted set is what lets a caller's ledger
+   * mean "confirmed sent" rather than "we tried once".
+   */
+  markRead?(messageIds: readonly string[]): readonly string[]
   /** Track B Phase 4 — add/remove an emoji reaction (optional so legacy fakes
    *  still satisfy the interface). */
   react?(messageId: string, emoji: string, action: ReactionAction): boolean
@@ -579,6 +593,20 @@ export class NeutronChatController {
    * is free, under-invalidating paints the wrong history.
    */
   private transcriptCacheEpoch = 0
+  /**
+   * Topics with a transcript read IN FLIGHT — held only for the duration of the
+   * await in {@link handleChange}.
+   *
+   * It exists because invalidation cannot scan a map for something that has not
+   * been written yet. `projects_changed` iterated `transcriptCache.keys()` and
+   * raised the epoch only when a delete found an entry, so the one case the epoch
+   * is FOR — a first read still in flight when the server says the project is gone
+   * — was the one case that could not raise it, and the read's write-back put the
+   * deleted project's history back. A Set rather than a counter because the
+   * question asked at the invalidation site is per-topic membership, not "is
+   * anything reading".
+   */
+  private readonly inFlightTranscriptTopics = new Set<string>()
   /** message_id → accumulated streaming text (not yet persisted). */
   private readonly streaming = new Map<string, StreamEntry>()
   /**
@@ -1475,8 +1503,27 @@ export class NeutronChatController {
       const live = new Set(projects.map((p) => this.topicForProject(p.id)))
       live.add(this.topicForProject(null))
       live.add(this.topicForProject(this.projectId))
+      // A CACHE MISS IS NOT AN ABSENCE OF DELETION. This used to raise `dropped`
+      // only when `Map.delete` FOUND an entry, and the loop only ever visits topics
+      // that already have one — so the project whose FIRST read is still in flight,
+      // which is precisely the case the epoch exists to defend against, could not
+      // raise it. Its read then resolved through the epoch check below unchanged and
+      // wrote the deleted project's history straight back into the cache, where
+      // `setProject` would serve it if that id ever reappeared. The mechanism the
+      // comment below describes was correct; the condition gating it was not.
+      //
+      // So the trigger is now the SERVER'S STATEMENT — a live topic that this frame
+      // no longer lists — rather than a side effect of the local map. `known` is
+      // every topic this controller has an opinion about, in-flight reads included,
+      // which is the set the old loop was silently missing a member of.
       let dropped = false
-      for (const topic of [...this.transcriptCache.keys()]) {
+      const known = new Set<string>([
+        ...this.transcriptCache.keys(),
+        ...this.readReceipts.keys(),
+        ...this.renderCaches.keys(),
+        ...this.inFlightTranscriptTopics,
+      ])
+      for (const topic of known) {
         if (!live.has(topic)) {
           this.transcriptCache.delete(topic)
           this.readReceipts.delete(topic)
@@ -1522,7 +1569,21 @@ export class NeutronChatController {
     // on purpose — see {@link transcriptCacheEpoch} — so this is the only thing that
     // can stop it re-creating an entry that `stop()` or a deletion just removed.
     const epoch = this.transcriptCacheEpoch
-    const [msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
+    // DECLARE THE READ BEFORE AWAITING IT. A topic with a read in flight but no
+    // cache entry yet was invisible to the `projects_changed` invalidation, which
+    // could only see topics that already had one — so the deletion did not raise
+    // the epoch and this read's write-back below was accepted. Registering the
+    // topic here is what makes an in-flight read a first-class member of the set
+    // that invalidation scans. Removed in `finally` so a throwing read cannot leak
+    // the entry and pin a topic as permanently "in flight".
+    this.inFlightTranscriptTopics.add(topic)
+    let msgs: ChatMessage[]
+    let pending: number
+    try {
+      ;[msgs, pending] = await Promise.all([session.messages(), session.pendingCount()])
+    } finally {
+      this.inFlightTranscriptTopics.delete(topic)
+    }
     // SPLIT ON PURPOSE. The single `transcript` mark covered BOTH the store read
     // and everything after it, so a slow switch could not say which. Measured on
     // the owner's box the biggest topic holds 533 messages — far too few for a
@@ -1665,8 +1726,16 @@ export class NeutronChatController {
       }
     }
     if (ids.length === 0) return
-    for (const id of ids) sent.add(id)
-    this.session.markRead(ids)
+    // RECORD WHAT THE SOCKET ACCEPTED, NOT WHAT WE OFFERED. This used to add every
+    // id to the ledger before calling, which permanently cancelled the session's
+    // own retry: `WebChatSession.markRead` records an id only on a successful
+    // `ws.send`, so a failed send stays unrecorded THERE and is meant to be
+    // re-offered — but the filter above had already dropped it here, so it never
+    // was. The switch cache makes this MORE reachable, not less: a cached switch
+    // paints and reports read before the newly-scoped socket has finished
+    // connecting, which is exactly when the send fails. Symptom was an unread
+    // badge and a server watermark that never advanced until a reload.
+    for (const id of this.session.markRead(ids)) sent.add(id)
   }
 
   /** Report messages the user has viewed (Track B Phase 4). Exposed for a UI

@@ -97,8 +97,19 @@ class StallableSession implements ControllerSession {
   async pendingCount(): Promise<number> {
     return this.pending
   }
-  markRead(ids: readonly string[]): void {
+  /**
+   * A receipt is best-effort over an OPEN socket, and this stub used to accept
+   * unconditionally — which is why the whole suite was blind to the defect below.
+   * `socketOpen = false` models the real `WebChatSession`: `ws.send` returns false,
+   * the id is NOT recorded, and the RETURN omits it so the caller knows not to
+   * ledger it. See `chat-core/web-session.ts` `markRead` / `chat-core/ws-client.ts`
+   * (`send` returns false unless status is 'open').
+   */
+  socketOpen = true
+  markRead(ids: readonly string[]): readonly string[] {
     this.readsRead.push([...ids])
+    if (!this.socketOpen) return []
+    return [...ids]
   }
   release(): void {
     this.stalled = false
@@ -464,6 +475,44 @@ describe('rows that are painted are rows that are read', () => {
     await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
     expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-3'])
   })
+
+  it('a receipt the socket REFUSED is offered again, not ledgered as sent', async () => {
+    // THE SUPPRESSION ABOVE IS CORRECT ONLY FOR IDS THE SOCKET ACCEPTED. The ledger
+    // used to be filled from the ids we OFFERED, so a send that failed was recorded
+    // as done and filtered out of every later call — permanently. The session's own
+    // retry (`readSent` is written only on a successful `ws.send`) depends on the
+    // caller re-offering, and after the suppression landed nothing ever did.
+    //
+    // This is not an edge case. On EVERY page load the transcript is read from the
+    // local store and reported before the WebSocket handshake finishes, so the whole
+    // hydrated transcript was offered into a closed socket, dropped, and ledgered.
+    // The owner's read watermark never advanced and unread counts came back on
+    // messages he was looking at.
+    const { controller, sessions } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
+      msg('app:owner:alpha', 1, 'agent'),
+    ])
+    const alpha = sessions.get('app:owner:alpha')!
+
+    // The socket goes down; a new agent message arrives and is offered but refused.
+    alpha.socketOpen = false
+    alpha.readsRead.length = 0
+    alpha.rows = [...alpha.rows, msg('app:owner:alpha', 2, 'agent')]
+    await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+    expect(alpha.readsRead.flat()).toContain('mid-app:owner:alpha-2')
+
+    // Socket recovers. The refused id MUST be offered again — this is the assertion
+    // that fails when the ledger is filled from the argument instead of the return.
+    alpha.socketOpen = true
+    alpha.readsRead.length = 0
+    await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+    expect(alpha.readsRead.flat()).toContain('mid-app:owner:alpha-2')
+
+    // And once accepted, suppression resumes — the retry must not become a re-send loop.
+    alpha.readsRead.length = 0
+    await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+    expect(alpha.readsRead).toHaveLength(0)
+  })
 })
 
 describe('the cache has a lifecycle, not just a size', () => {
@@ -495,6 +544,60 @@ describe('the cache has a lifecycle, not just a size', () => {
 
     frames.length = 0
     controller.setProject('alpha')
+    expect(frames[0]!.messages).toHaveLength(0)
+  })
+
+  it('A DELETION LANDING WHILE THE FIRST READ IS IN FLIGHT STILL STICKS', async () => {
+    // The test above only covers a topic that ALREADY HAS a cache entry. The
+    // invalidation used to iterate `transcriptCache.keys()` and raise its `dropped`
+    // flag only when a delete FOUND one — so a topic whose first read had not landed
+    // yet was never visited, the epoch was never bumped, and that read's write-back
+    // sailed through the epoch guard and re-created the deleted project's cache.
+    //
+    // Which is the exact case the epoch exists for. The guard was keyed on "did the
+    // map contain it" when the question is "did the server say it is gone".
+    const { controller, sessions, frames, deliver } = setup()
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    // Register alpha's session STALLED BEFORE entering it — `createSession` reuses an
+    // existing entry, so this guarantees the first read blocks and no cache entry is
+    // ever written. Stalling it after the switch would be too late: the read would
+    // already have resolved, which is what made an earlier version of this test pass
+    // against the very bug it is supposed to catch.
+    const alphaSession = new StallableSession('app:owner:alpha')
+    alphaSession.rows = [msg('app:owner:alpha', 1)]
+    alphaSession.stalled = true
+    sessions.set('app:owner:alpha', alphaSession)
+    controller.setProject('alpha')
+    // ...then leave, so alpha is neither active nor cached — only in flight.
+    controller.setProject('beta')
+    await tick()
+
+    // The server says alpha is gone while that read is still outstanding.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }],
+      ts: 1,
+    })
+
+    // The stalled read now lands. It must NOT be allowed to cache what was deleted.
+    alphaSession.release()
+    await tick()
+
+    // Recreated under the same id, with an empty store as a new project has.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'beta', label: 'Beta' }, { id: 'alpha', label: 'Alpha (new)' }],
+      ts: 2,
+    })
+    sessions.get('app:owner:alpha')!.rows = []
+
+    frames.length = 0
+    controller.setProject('alpha')
+    // With the bug, frame 0 paints the DELETED project's message from the cache the
+    // in-flight read resurrected.
     expect(frames[0]!.messages).toHaveLength(0)
   })
 
