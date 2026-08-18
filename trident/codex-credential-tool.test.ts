@@ -99,6 +99,32 @@ describe('codex credential agent tools', () => {
     expect(after.status).toBe('connected')
   })
 
+  // MUTATION: return `own.status` from `poolStatus`, i.e. answer about seat one.
+  //
+  // Agent-native parity is the point of this tool existing beside the HTTP route,
+  // and a status that describes only the FIRST seat breaks it in the direction
+  // that matters: an owner running a single NAMED seat would be told Codex was
+  // not connected, by the tool the agent consults before reporting review
+  // status, while trident was resolving that seat and running reviews with it.
+  test('codex_status reports the POOL, not just the first seat', async () => {
+    const statusTool = registry.get(CODEX_STATUS_TOOL)!
+    const connectTool = registry.get(CODEX_CONNECT_TOOL)!
+    const connected = (await connectTool.handler(
+      { auth: subscriptionAuth(), account: 'work' },
+      CTX,
+    )) as { ok: boolean }
+    expect(connected.ok).toBe(true)
+
+    const res = (await statusTool.handler({}, CTX)) as {
+      status: string
+      accounts: { slot: string }[]
+      next?: string
+    }
+    expect(res.accounts.map((a) => a.slot)).toEqual(['work'])
+    expect(res.status).toBe('connected')
+    expect(res.next).toBe('work')
+  })
+
   test('codex_connect rejects a metered key with ok:false + guidance', async () => {
     const connectTool = registry.get(CODEX_CONNECT_TOOL)!
     const res = (await connectTool.handler({ auth: 'sk-live-abc123456789' }, CTX)) as {
