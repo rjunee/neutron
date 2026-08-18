@@ -2,6 +2,37 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
+
+The `plan:probe` seat now also relays a byte-bounded branch log from
+`git log --name-only <base>..<ref> | head -c 12288`. It has no checksum because
+it is synthesis material, not a persisted relay. `plan:next` returns an optional
+`branchBrief` with BUILT / SEAMS / REJECTED / SUITES sections: evidence-only and
+REGENERATED each round, so any prior round's brief is superseded.
+`clampBranchBrief()` enforces `BRANCH_BRIEF_MAX_BYTES = 4096` in code at the
+single consumption point. `ralphExecuteNote` appends that clamped brief to the
+Forge prompt and emits nothing when the brief is absent or empty. The brief is
+absent from the persisted plan and every checkpoint prompt, leaving no
+accumulation channel. A missing or empty branch log or brief fails open: the cheap
+path remains selected and no header is emitted. The iteration-1 and genuine
+crash-resume `plan:fable` paths remain byte-untouched, guarded by canary assertions.
+
+The measured BEFORE on the 2026-08-18 continuation round of card
+`trident-cannot-review-an-existing-p` was planner 2m54 (versus 9m50 for round-1
+Fable, 3.4x cheaper) and codex build 30m01. FORGE re-deriving branch state was
+estimated at approximately 14 minutes of that build.
+
+The AFTER protocol is: on the next real multi-task card after this merges, for
+each continuation round (`ralphRound >= 1`), read the run's
+`code_trident_stage_events` rows written via `trident/stage-stamp.sh` and
+segmented by `trident/stage-attribution.ts`. The codex build window opens at that
+round's `codex-exec-start` stamp and closes at the round's checkpoint write / the
+next fire's `fire-dispatched`; quote that AFTER duration against the BEFORE 30m01
+in a follow-up entry.
+
+If the continuation-round build duration does not drop, this brief gets REMOVED
+rather than kept, per the card's falsification criterion 4.
+
 ## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
 
 Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Codex

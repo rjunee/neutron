@@ -147,9 +147,13 @@ interface Opts {
   /** The optional synthesis material returned by `plan:probe`. Undefined uses the
    *  small default fixture; null exercises the fail-open missing-log path. */
   probeBranchLog?: string | null
+  /** `true` models an older probe seat that omits the `branchLog` key entirely. */
+  probeOmitsBranchLog?: true
   /** The optional executor brief returned by `plan:next`. Undefined uses the
    *  default four-section fixture; null exercises the no-header path. */
   planNextBrief?: string | null
+  /** `true` models a planner answer that omits the `branchBrief` key entirely. */
+  planNextOmitsBrief?: true
   /** Overrides for what `plan:next` RELAYS BACK, so a test can express a planner
    *  that edited, truncated or miscounted the committed plan it was told to echo
    *  verbatim. Absent → a faithful relay. */
@@ -217,6 +221,9 @@ async function run(opts: Opts = {}): Promise<Out> {
             ...measuredAnswer,
             branchLog: opts.probeBranchLog === undefined ? DEFAULT_BRANCH_LOG : opts.probeBranchLog,
           }
+      if (probeAnswer !== null && opts.probeOmitsBranchLog === true) {
+        delete (probeAnswer as Record<string, unknown>).branchLog
+      }
       return probeAnswer
     }
     if (label === 'plan:next') {
@@ -235,7 +242,9 @@ async function run(opts: Opts = {}): Promise<Out> {
         // `probe`/`planNextRelay`.
         remainingTasks:
           opts.planNextRelay?.remainingTasks ?? Math.max(0, (probeAnswer?.uncheckedCount ?? 1) - 1),
-        branchBrief: opts.planNextBrief === undefined ? DEFAULT_BRANCH_BRIEF : opts.planNextBrief,
+        ...(opts.planNextOmitsBrief === true
+          ? {}
+          : { branchBrief: opts.planNextBrief === undefined ? DEFAULT_BRANCH_BRIEF : opts.planNextBrief }),
       }
     }
     if (label === 'plan:fable') {
@@ -364,6 +373,11 @@ describe('plan:next — iteration 1 and every genuine crash-resume keep the full
     const fable = promptFor(out, 'plan:fable')
     expect(fable).toContain(SURVEY_LINE)
     expect(fable).not.toContain(RESUME_NOTE)
+    // The brief must never leak into the full-planner path.
+    for (const briefMaterial of ['BRANCH-STATE BRIEF', 'BRANCH LOG (measured', 'branchBrief']) {
+      expect(fable).not.toContain(briefMaterial)
+    }
+    expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
   })
 
   test('the branch MOVED under a ralph-task-built checkpoint → full planner', async () => {
@@ -378,7 +392,13 @@ describe('plan:next — iteration 1 and every genuine crash-resume keep the full
     expect(out.labels).not.toContain('plan:next')
     // The resume note is the part of that prompt a resume depends on — it is what
     // tells the planner to read the reused branch rather than only the base.
-    expect(promptFor(out, 'plan:fable')).toContain(RESUME_NOTE)
+    const fable = promptFor(out, 'plan:fable')
+    expect(fable).toContain(RESUME_NOTE)
+    // The brief must never leak into the full-planner path.
+    for (const briefMaterial of ['BRANCH-STATE BRIEF', 'BRANCH LOG (measured', 'branchBrief']) {
+      expect(fable).not.toContain(briefMaterial)
+    }
+    expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
   })
 
   test("a 'forge-done' resume in ralph mode → full planner", async () => {
@@ -389,6 +409,11 @@ describe('plan:next — iteration 1 and every genuine crash-resume keep the full
     expect(out.labels).toContain('plan:fable')
     expect(out.labels).not.toContain('plan:probe')
     expect(out.labels).not.toContain('plan:next')
+    // The brief must never leak into the full-planner path.
+    const fable = promptFor(out, 'plan:fable')
+    for (const briefMaterial of ['BRANCH-STATE BRIEF', 'BRANCH LOG (measured', 'branchBrief']) {
+      expect(fable).not.toContain(briefMaterial)
+    }
   })
 
   test('a launcher that threads NO ralphRound falls back to the full planner', async () => {
@@ -557,6 +582,46 @@ describe('plan:next — the branch-state brief', () => {
     expect(out.labels).toContain('plan:next')
     expect(promptFor(out, 'plan:next')).toContain('(unavailable — write the brief')
     expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
+  })
+
+  test('an EMPTY branchLog still takes the cheap path and Forge gets no brief', async () => {
+    const out = await run(cleanHandoff(2, {
+      probeBranchLog: '',
+      planNextBrief: null,
+    }))
+
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+    expect(promptFor(out, 'plan:next')).toContain('(unavailable — write the brief')
+    expect(promptFor(out, 'plan:next')).not.toContain(DEFAULT_BRANCH_LOG)
+    expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
+  })
+
+  test('a probe that OMITS branchLog entirely fails open the same way', async () => {
+    const out = await run(cleanHandoff(2, {
+      probeOmitsBranchLog: true,
+      planNextOmitsBrief: true,
+    }))
+
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+    expect(promptFor(out, 'plan:next')).toContain('(unavailable — write the brief')
+    expect(promptFor(out, 'forge:build')).not.toContain('BRANCH-STATE BRIEF')
+  })
+
+  test('an absent, null, or whitespace branchBrief emits NO header and never abandons the path', async () => {
+    for (const opts of [
+      { planNextOmitsBrief: true } as const,
+      { planNextBrief: null },
+      { planNextBrief: '  \n\t  ' },
+    ]) {
+      const out = await run(cleanHandoff(2, opts))
+      const forge = promptFor(out, 'forge:build')
+
+      expect(out.labels).toContain('plan:next')
+      expect(forge).not.toContain('BRANCH-STATE BRIEF')
+      expect(forge).toContain('EXECUTION SPEC (follow it exactly)')
+    }
   })
 })
 
