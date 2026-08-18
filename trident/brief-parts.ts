@@ -1,5 +1,8 @@
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('trident-brief-parts')
 
 /**
  * Launcher-side twin of `briefIntegrity` in `inner-workflow.mjs`, pinned by a
@@ -91,7 +94,7 @@ export function writeBriefParts(opts: {
   warn?: (message: string) => void
 }): BriefParts | null {
   if (typeof opts.task !== 'string' || opts.task === '') return null
-  const warn = opts.warn ?? console.error
+  const warn = opts.warn ?? ((message: string) => log.warn('brief_part_write_failed', { message }))
   const safeRunId = String(opts.runId).replace(/[^A-Za-z0-9._-]/g, '-')
   try {
     const dir = opts.dir ?? '/tmp'
