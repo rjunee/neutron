@@ -18,6 +18,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { checkpointRound } from './checkpoint-round.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -719,6 +720,18 @@ export class TridentRunStore {
     if (patch.failure_reason !== undefined) push('failure_reason', patch.failure_reason)
     if (patch.workflow_run_id !== undefined) push('workflow_run_id', patch.workflow_run_id)
     if (patch.inner_checkpoint !== undefined) push('inner_checkpoint', patch.inner_checkpoint)
+    // CANARY round-persist: `round` was dead — 1 on all 195 measured rows while
+    // inner_checkpoint recorded fix-round-2..7. Derive the real round from the
+    // checkpoint being persisted, in the SAME UPDATE, monotonic in SQL (MAX
+    // against the STORED value — never lowered). An explicit patch.round
+    // (tests/sim) still wins and skips the derivation.
+    if (patch.round === undefined && patch.inner_checkpoint !== undefined) {
+      const derived = checkpointRound(patch.inner_checkpoint)
+      if (derived !== null) {
+        sets.push('round = MAX(round, ?)')
+        params.push(derived)
+      }
+    }
     if (patch.inner_checkpoint_head !== undefined) push('inner_checkpoint_head', patch.inner_checkpoint_head)
     if (patch.inner_checkpoint_findings !== undefined)
       push('inner_checkpoint_findings', patch.inner_checkpoint_findings)
@@ -864,7 +877,7 @@ export class TridentRunStore {
   async save(run: TridentRun): Promise<void> {
     await this.db.run(
       `UPDATE code_trident_runs
-          SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
+          SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
               worktree = ?, failure_reason = ?, workflow_run_id = ?,
               inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
@@ -874,6 +887,7 @@ export class TridentRunStore {
       [
         run.phase,
         run.round,
+        checkpointRound(run.inner_checkpoint) ?? 0,
         run.ralph_round,
         run.branch,
         run.pr,
@@ -913,7 +927,7 @@ export class TridentRunStore {
     return this.db.transaction((tx) => {
       const res = tx.runSync(
         `UPDATE code_trident_runs
-            SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
+            SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
@@ -932,6 +946,7 @@ export class TridentRunStore {
         [
           run.phase,
           run.round,
+          checkpointRound(run.inner_checkpoint) ?? 0,
           run.ralph_round,
           run.branch,
           run.pr,
