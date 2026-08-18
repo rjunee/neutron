@@ -482,44 +482,68 @@ clean.
 | timer never told the frame was cache-served | RED — record never completes at the paint |
 ## 2026-08-17 — a readiness poll must wait for the thing it claims to prove (#411)
 
-`gateway/index.ts` `boot()` emits `gateway_signal_handlers_ready` as its LAST
-statement, immediately after the `process.once('SIGTERM'|'SIGINT')` binds, and
-`tests/integration/orphan-survival.test.ts` waits for that line instead of for a
-migration row count plus a fixed sleep.
+`gateway/index.ts` `boot()` now binds `process.once('SIGTERM'|'SIGINT')`
+(`:1078`) BEFORE it announces readiness, and announces it twice: `READY=1`
+(`:1102`) for systemd, then `gateway_signal_handlers_ready` (`:1118`) as the
+last statement before the returned handle.
+`tests/integration/orphan-survival.test.ts` waits for that log line instead of
+for a migration row count plus a fixed sleep.
 
 The old poll broke as soon as `_migrations` held at least one row, then slept
 100 ms, under a comment claiming the poll proved the signal handler was
 registered. Each migration commits in its own transaction, so a non-zero count
 means migration k of 124 (measured breaking at k=2..60), and the handler binds
 much later regardless: `applyMigrationsToProjectDb` at `gateway/index.ts:295`,
-`process.once('SIGTERM')` at `:1080`, with the whole composition and the
-listener bind in between. The same comment's numbered boot path also had the
-handler installing before `Bun.serve`; the code is the reverse. Measured on an
-idle box, the gap between the poll breaking and the handlers binding was
-116-683 ms — already wider than the sleep meant to cover it. Signalling inside
-that gap kills the child at SIGTERM's default disposition (exit 143, DB never
+the binds at `:1078`, with the whole composition and the listener bind at `:831`
+in between. The same comment's numbered boot path also had the handler
+installing before `Bun.serve`; the code is the reverse. Signalling inside that
+gap kills the child at SIGTERM's default disposition (exit 143, DB never
 closed), which is how this test reddened two unrelated PRs in one night.
 
-No existing signal was sufficient, so the log line is new rather than reused.
-Everything else the process emits lands BEFORE the handlers exist — the HTTP
-listener accepts from the `Bun.serve` bind at `:834`, `sdNotify('READY=1')` at
-`:917`, the loop-registry boot line at `:986` (and `bootLine()` can throw, so it
-must stay on the failure-cleanup side of the binds). The new line shares the
-binds' synchronous tick, so observing it means the child can handle the signal.
+`READY=1` used to be sent at the listener bind, ~170 synchronous lines before
+those binds. `Type=notify` lets systemd queue a stop job the instant it lands,
+so `active` meant "accepting traffic", never "will handle a stop" — and the
+sibling systemd test below stopped the unit on exactly that proxy. Moving the
+send below the binds costs nothing (there is no top-level `await` between them,
+so it is the same synchronous tick) and makes the signal true. A throw from
+`sdNotify` now retires the two listeners before rethrowing into the shared
+boot-failure cleanup, which otherwise had no way to know they existed.
 
-Pass rate under identical background load: 0/30 before, 40/40 after; 20/20 at
-3x load, 15/15 idle. Falsifiability re-verified by mutation — removing the
-SIGTERM bind goes red on exit 143.
+The log marker is level-gated at info like any other log call, so it is not an
+unconditional supervisor contract: the comment names the level requirement and
+points systemd users at `READY=1`, which carries the same guarantee with no
+level dependency. The test pins `NEUTRON_LOG_LEVEL=info` on the spawned gateway
+for the same reason — inheriting a runner that exports `warn` or `error` would
+suppress the marker and time the poll out deterministically.
 
-The systemd sibling test had the same defect in its own dialect (fixed 2 s/7 s/
-1 s sleeps for conditions systemd answers directly) and now polls `is-active`
-and a genuinely changed `MainPID`.
+Measured on one loaded box, same load for both arms, 30 consecutive runs each:
+**0/30 pass before, 30/30 after.** Falsifiability re-verified by three observed
+mutation runs against the fixed code:
 
-Also closed a hole the flake was hiding: mutating `shutdown()` to skip
-`db.close()` left every assertion green, because the process exits and SQLite
-replays the WAL on re-open. The test now asserts the `-wal` sidecar is
-checkpointed to zero bytes — a clean close truncates it rather than unlinking
-it, so the assertion is on the byte count, not on existence.
+- remove the `SIGTERM` bind → red, `expected 0, received 143`;
+- skip `db.close()` in `shutdown()` → red, `-wal still holds 86552
+  uncheckpointed bytes`. This is the hole the flake was hiding: the process
+  exits 0 and SQLite replays the WAL on re-open, so every other assertion stays
+  green. The test asserts the sidecar is checkpointed to zero bytes — a clean
+  close truncates rather than unlinks it, so the assertion is on the byte count,
+  not on existence;
+- force the Linux-without-systemd shape → the sibling test reports `1 skip`.
+  Against the pre-fix code the same simulation reports `1 pass` for a test that
+  executed none of its body, because it probed inside the body and `return`ed.
+  Those probes are now hoisted to module scope and feed `test.skipIf`.
+
+The systemd sibling test had the readiness defect in its own dialect (fixed
+2 s/7 s/1 s sleeps for conditions systemd answers directly) and now polls
+`is-active` and a genuinely changed `MainPID`. Its stop-wait comment claimed
+`is-active != active` guarantees the drain finished; it does not — that
+predicate is also true during `deactivating`. The blocking `systemctl stop` is
+the actual guarantee, and the comment now says so.
+
+Two smaller corrections: the SIGTERM subtest reaps its child in the `finally`
+(every readiness-timeout path previously leaked a live gateway, its watchdog
+interval and two stream readers onto a data dir the test then deleted), and its
+outer budget went 30 s → 45 s so a 19 s readiness still fails on the diagnostic
+throw that carries the child's stderr rather than on a bare runner timeout.
 
 ## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
 
