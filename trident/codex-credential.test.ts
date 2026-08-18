@@ -25,6 +25,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { codexAuthPath, readMaterializedAuth } from './codex-auth.ts'
+import { SqliteCodexRotationStore } from './codex-rotation-store.ts'
 import {
   buildRunCodexHomeResolver,
   CODEX_CREDENTIAL_SERVICE,
@@ -51,7 +52,7 @@ function subscriptionAuth(): string {
 }
 
 function newService(): CodexCredentialService {
-  return new CodexCredentialService({ store, codexHome })
+  return new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db) })
 }
 
 beforeEach(() => {

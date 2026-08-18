@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,29 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
 const GATEWAY_ENTRY = join(REPO_ROOT, 'gateway', 'index.ts')
+
+/**
+ * How many rows a COMPLETED `applyMigrations()` leaves in `_migrations` on a
+ * fresh DB — one per migration file, which is the runner's contract.
+ *
+ * Derived from disk rather than hardcoded because it is a readiness THRESHOLD,
+ * not an assertion about the schema: hardcoding it would turn every new
+ * migration into a test edit, which is precisely the maintenance burden that
+ * made the previous "≥ 1 row" shortcut attractive.
+ */
+const MIGRATION_FILE_COUNT = readdirSync(join(REPO_ROOT, 'migrations')).filter((f) =>
+  f.endsWith('.sql'),
+).length
+
+/**
+ * The marker the gateway logs once graph composition has finished.
+ *
+ * Every boot line is built with this literal prefix (`loop/registry.ts`
+ * `bootLine`), and it is emitted after `composeProductionGraph` returns — which
+ * makes it the only cheap evidence available here that the ASYNC composition
+ * step is done, as opposed to a guess at how long it takes.
+ */
+const LOOP_REGISTRY_MARKER = '[loop-registry]'
 
 // Per-file shared tempdir root. Each test's `ownerDir` is a subdir under
 // this root, so a SIGINT/timeout leaks at most ONE top-level dir per file.
@@ -53,6 +76,21 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         stderr: 'pipe',
       })
 
+      // Drain both pipes into strings from the moment the process starts.
+      //
+      // Streaming rather than reading once at the end, because the readiness
+      // poll below needs to SEE a line while the process is still running — and
+      // because a full pipe buffer blocks the child, which on a chatty boot
+      // would deadlock the very startup this test is waiting for.
+      let stdoutBuf = ''
+      let stderrBuf = ''
+      const drain = async (stream: ReadableStream<Uint8Array>, onChunk: (s: string) => void) => {
+        const decoder = new TextDecoder()
+        for await (const chunk of stream) onChunk(decoder.decode(chunk, { stream: true }))
+      }
+      void drain(proc.stdout as ReadableStream<Uint8Array>, (s) => (stdoutBuf += s))
+      void drain(proc.stderr as ReadableStream<Uint8Array>, (s) => (stderrBuf += s))
+
       // The gateway's boot() path is:
       //   1. mkdirSync(dirname(dbPath))
       //   2. ProjectDb.open(dbPath)         ← creates the file
@@ -88,7 +126,15 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
                 const migCount = probe
                   .query<{ count: number }, []>('SELECT COUNT(*) AS count FROM _migrations')
                   .get()
-                if (migCount !== null && migCount.count > 0) {
+                // EVERY migration, not merely the first. The old check broke as
+                // soon as `_migrations` was non-empty — which is the middle of
+                // step 3, not the end of it — and then waited a fixed 100 ms for
+                // steps 5-6. Adding a single migration file was enough to push
+                // the rest of step 3 past that grace period, so SIGTERM landed
+                // before the handler existed and the process died on the default
+                // disposition with 143. The comment below already CLAIMED this
+                // poll proved the handler was registered; now it does.
+                if (migCount !== null && migCount.count >= MIGRATION_FILE_COUNT) {
                   bootMs = Date.now() - (dbReadyDeadline - 15_000)
                   break
                 }
@@ -101,24 +147,46 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
           }
         }
         if (Date.now() >= dbReadyDeadline) {
-          const stderr = await new Response(proc.stderr).text()
-          const stdout = await new Response(proc.stdout).text()
           throw new Error(
-            `gateway boot did not produce a populated _migrations table within 15 s.\n` +
+            `gateway boot did not apply all ${MIGRATION_FILE_COUNT} migrations within 15 s.\n` +
               `dbPath exists: ${existsSync(dbPath)}\n` +
-              `stderr: ${stderr.slice(0, 4000)}\n` +
-              `stdout: ${stdout.slice(0, 1000)}\n`,
+              `stderr: ${stderrBuf.slice(0, 4000)}\n` +
+              `stdout: ${stdoutBuf.slice(0, 1000)}\n`,
           )
         }
         await Bun.sleep(50)
       }
       expect(bootMs).toBeGreaterThan(0)
 
-      // SIGTERM handler is installed AFTER applyMigrations() returns, so the
-      // poll above proves the handler is registered. A small extra wait gives
-      // the listener + WS upgrade path time to bind so SIGTERM lands on a
-      // fully-booted process (production parity).
-      await Bun.sleep(100)
+      // NOW WAIT FOR COMPOSITION, WHICH THE MIGRATION COUNT DOES NOT PROVE.
+      //
+      // The boot order is: migrations (step 3) → composeProductionGraph (step 4,
+      // ASYNC and slow) → SIGTERM handler (step 5) → listen (step 6). The poll
+      // above only reaches the END OF STEP 3, and the previous comment here
+      // claimed it "proves the handler is registered" — it does not, and the
+      // fixed 100 ms that followed was a guess at how long step 4 takes. Under
+      // load it does not take 100 ms, and SIGTERM then lands on a process with
+      // no handler, which dies on the default disposition with 143.
+      //
+      // `[loop-registry]` is emitted at the end of composition, so its presence
+      // is direct evidence step 4 finished rather than an estimate of it. It is
+      // a stable marker: `loop/registry.ts` builds every boot line with that
+      // literal prefix, and two suites already assert on the same emission.
+      const composedDeadline = Date.now() + 15_000
+      while (!stdoutBuf.includes(LOOP_REGISTRY_MARKER)) {
+        if (Date.now() > composedDeadline) {
+          throw new Error(
+            `gateway did not finish composing within 15 s (no '${LOOP_REGISTRY_MARKER}' line).\n` +
+              `stderr: ${stderrBuf.slice(0, 4000)}\n` +
+              `stdout: ${stdoutBuf.slice(0, 1000)}\n`,
+          )
+        }
+        await Bun.sleep(25)
+      }
+      // Steps 5 and 6 are synchronous statements after that log, so a short
+      // settle is enough here — and unlike the old wait it is not covering for
+      // an unbounded async step.
+      await Bun.sleep(50)
 
       // Sanity: DB file should exist before we kill the process.
       const verifyAfterBoot = new Database(dbPath, { readonly: true })

@@ -14,9 +14,21 @@
  * project → global → unset).
  *
  *   GLOBAL (primary — General admin UI):
- *   - `GET    /api/app/codex-auth`                       → global connection status
- *   - `POST   /api/app/codex-auth`                       → connect global (body: { auth })
- *   - `DELETE /api/app/codex-auth`                       → disconnect global
+ *   - `GET    /api/app/codex-auth`                       → global status + every seat
+ *   - `POST   /api/app/codex-auth`                       → connect a seat (body: { auth, account?, label? })
+ *   - `DELETE /api/app/codex-auth[?account=<slot>]`      → disconnect one seat
+ *
+ * MULTIPLE SEATS. The owner may connect more than one ChatGPT subscription; each
+ * is a named `account` slot, and trident picks one per run, skipping any that has
+ * run into its usage cap. Omitting `account` means the FIRST seat, so every client
+ * written before rotation existed keeps behaving identically — and `GET` still
+ * returns all of its original top-level status fields, with `accounts` / `active`
+ * / `next` added alongside rather than replacing them.
+ *
+ * `account` is accepted on the GLOBAL route only. A per-project override is
+ * deliberately outside rotation (it exists to pin one project to one
+ * subscription), so naming a seat there would describe something the resolver
+ * ignores — quietly, which is worse than not offering it.
  *
  *   PROJECT OVERRIDE (optional — per-project Settings):
  *   - `GET    /api/app/projects/<project_id>/codex-auth` → effective status (project→global)
@@ -83,25 +95,73 @@ export function createCodexCredentialSurface(
       // point it is resolved from auth (the spec's known-good construction site).
       const owner_slug = asOwnerHandle(resolved.project_slug)
 
+      // Which SEAT this request is about. Only meaningful on the global route —
+      // a per-project override is deliberately outside rotation, so naming a seat
+      // there would describe something the resolver ignores. Absent means the
+      // first seat, which is what every pre-rotation client sends.
+      const rawAccount = url.searchParams.get('account')
+      const isGlobal = target.scope !== 'project'
+
       switch (req.method) {
         case 'GET': {
           // Status resolves project → global for the override route (effective
           // credential for this project); global route reports the global default.
+          // The legacy top-level fields are kept verbatim so existing clients keep
+          // working; `accounts` / `active` / `next` are additive.
           const status = service.status(owner_slug, target)
-          return jsonOk({ ...status })
+          if (!isGlobal) return jsonOk({ ...status })
+          const accounts = service.listAccounts(owner_slug)
+          const next = service.nextSlot(owner_slug)
+          return jsonOk({
+            ...status,
+            accounts,
+            active: next?.slot ?? null,
+            next: next?.slot ?? null,
+            exhausted: next?.exhausted ?? false,
+          })
         }
         case 'POST': {
           const body = (await readJsonBody(req)) as Record<string, unknown> | null
           if (body === null) return jsonError(400, 'malformed_json', 'expected JSON body')
           // Accept `auth` (canonical) or `auth_json` / `value` aliases.
           const pasted = body['auth'] ?? body['auth_json'] ?? body['value']
-          const result = await service.connect(owner_slug, pasted, target)
+          if (!isGlobal) {
+            const result = await service.connect(owner_slug, pasted, target)
+            if (!result.ok) {
+              return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
+            }
+            return jsonOk({ status: result.status, mode: result.mode, scope: result.scope }, 201)
+          }
+          const requested = body['account'] ?? rawAccount ?? undefined
+          const label = typeof body['label'] === 'string' ? (body['label'] as string) : null
+          const result = await service.connectAccount(owner_slug, pasted, {
+            ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
+            label,
+          })
           if (!result.ok) {
             return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
           }
-          return jsonOk({ status: result.status, mode: result.mode, scope: result.scope }, 201)
+          return jsonOk(
+            { status: result.status, mode: result.mode, scope: result.scope, account: result.slot },
+            201,
+          )
         }
         case 'DELETE': {
+          // `?account=<slot>` removes ONE seat. An UNQUALIFIED delete removes them
+          // ALL, because that is what the single "Disconnect Codex" button in the
+          // shipped clients means. Removing only the first seat would leave the
+          // named seats stored and still selectable by trident while telling the
+          // owner Codex was disconnected.
+          if (isGlobal && rawAccount !== null) {
+            const { ok } = await service.removeAccount(owner_slug, rawAccount)
+            if (!ok) return jsonError(404, 'codex_not_connected', 'no such Codex account to disconnect')
+            return jsonOk({ disconnected: true, account: rawAccount })
+          }
+          if (isGlobal) {
+            const { ok, removed } = await service.disconnectAllAccounts(owner_slug)
+            if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
+            return jsonOk({ disconnected: true, scope: target.scope, accounts: removed })
+          }
           const { ok } = await service.disconnect(owner_slug, target)
           if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
           return jsonOk({ disconnected: true, scope: target.scope })

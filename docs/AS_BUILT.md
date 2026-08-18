@@ -225,6 +225,95 @@ and installs go cold with no signal but the timings. Accepted here (the entry is
 Vendoring `gbrain` would remove the network dependency outright rather than caching around
 it, and would also close the byte-verification gap above by putting the content in the tree
 under review. It is deliberately NOT done here — recorded in #410 rather than lost.
+## 2026-08-17 — a Codex subscription is no longer one account for the whole instance (#407)
+
+PR #407. The owner may connect several ChatGPT seats; trident picks one per run at
+the existing `resolve_codex_home` seam and skips any seat that has hit its usage cap.
+This supersedes the earlier statement in this log that "a Codex subscription is one
+account for the whole instance" — that was true when written and is what changed here.
+
+New: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts` (rollout
+harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0134_codex_rotation.sql`. Edited: `trident/codex-credential.ts`,
+`trident/codex-credential-tool.ts`, `gateway/http/codex-credential-surface.ts`,
+`open/composer.ts`, `app/app/integrations.tsx`, `app/lib/codex-credential-client.ts`.
+Ordinal 0134 skips 0133, which another open branch already claims.
+
+Slot `default` is byte-identical to before — same service row (`codex`), same directory
+(`<owner_home>/.codex`), same bytes — so a one-seat install is unchanged, nothing
+migrates, and rotation is the single code path with no feature flag. Extra seats are
+service `codex-acct-<slot>` at `<owner_home>/.codex/accounts/<slot>/`.
+
+A seat's bundle is NEVER copied between directories. The codex CLI rewrites `auth.json`
+on refresh and that refresh rotates the refresh token, so two live copies of one account
+revoke each other. Selection is a pointer at a directory; the re-materialize guard stays
+only-if-missing. Harvest-back re-encrypts a CLI-refreshed bundle back into the store when
+the on-disk `last_refresh` is newer, which also closes a hazard that predated this change:
+the stored copy used to drift staler with every refresh, so the self-heal path would
+eventually restore a token the server had already invalidated. It runs for the seat that
+just RAN as well as the one about to run — the seat that just refreshed is precisely the
+one whose stored copy is now stale, and it may be cooling for a week before it is resolved
+again.
+
+The exhaustion signal is harvested, not probed — there is no free usage gauge. Every
+session appends a rollout under `<CODEX_HOME>/sessions/`, whose `token_count` events carry
+`rate_limits`. That rollouts follow the run's `CODEX_HOME` was verified live rather than
+assumed: an empty `CODEX_HOME` plus one `codex exec` produced the whole state root there,
+`sessions/` included, on a run that never authenticated. The parser requires `rate_limits`
+to sit on the node whose own `type` is `token_count`, which is the shape a real rollout
+line has, so an unrelated event carrying a same-named object is not read as evidence.
+
+The threshold is keyed on `window_minutes`, NOT on whether the CLI called a window
+`primary` or `secondary`. Measured across 12,582 real `token_count` samples from 600
+rollout files (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a week — in every
+sample and `secondary` was null in every sample. Reading `primary` as the 5-hour window,
+as the design assumed, would have applied a session threshold and a session-length
+cooldown to a weekly cap and rotated a still-capped seat back into service. Windows at or
+under 1440 minutes cool at 98%, longer ones at 99%. The fallback cooldown is the window's
+own length, CLAMPED to 32 days: the same binary declares `daily-limit`, `weekly-limit`,
+`monthly-limit` and `annual-limit`, so an unclamped length would bench a paid seat for a
+year, and an absurd value reaches `Infinity`, which SQLite round-trips as a REAL that no
+clock comparison can clear. `resets_at` is epoch seconds, converted once at the parse
+boundary, and classified three ways rather than two: a reset already in the PAST means the
+window has rolled over, so that sample is ignored instead of starting a fresh full-length
+cooldown from a stale reading.
+
+NO stderr classifier ships, and that is a correction of an earlier claim in this entry's
+first revision. It stated the patterns had been "measured off the shipped binary's own
+literals". They had not: `weekly limit` and `session limit` each return ZERO hits against
+the literals in codex-cli 0.147.0, while `usage limit` returns 23 and the positive controls
+`codex-cli` and `rate_limit_reached_type` return 9 and 17 — so the search works and those
+two discriminators are simply absent. The binary's real messages never name the window, so
+no pattern can recover it from text. The classifier also had no production caller. Both
+it and `applyFailureCooldown` are deleted. The window class now comes from
+`rate_limit_reached_type`, which the CLI itself sets, rides the `token_count` event the
+harvest already reads, and needs no new seam.
+
+Fail-safe rules, each pinned by a mutation applied and observed red: a harvest that errors
+or finds nothing cools nothing; when every seat is cooling the current one is kept and
+`codex_rotation_exhausted` is logged; a seat whose stored credential is missing or expired
+is cooled `unauthorized` and SKIPPED rather than returning no credential at all; an
+`unauthorized` cooldown ignores the clock until the seat is reconnected; per-project
+overrides resolve first and stay out of rotation. A reconnect stamps `connected_at` and
+clears the previous occupant's cooldown and usage — for the first seat as well as a named
+one — so a different subscription in a reused directory is not judged on its predecessor's
+history, which the seat's own `sessions/` tree would otherwise supply.
+
+The rollout scan is bounded: a positioned tail read rather than a whole-file read, the
+newest date partition visited first, a file cap, and one scan a minute per seat — the
+resolver is reached by a read-only status request as well as a run launch, and the CLI
+never prunes `sessions/`.
+
+Owner-facing, and on screen: the Settings integrations pane lists every seat with its
+state, which one runs next, and a per-seat Remove; the paste box stays available after the
+first connection, with an optional seat name, because adding a second seat is the point.
+Also `codex_connect` with `account: "work"`, or `POST /api/app/codex-auth` with
+`{ auth, account }`. `GET` lists seats, cooldowns and the next seat while keeping every
+legacy top-level field; `DELETE ?account=<slot>` removes one seat, and an UNQUALIFIED
+`DELETE` removes them all — that is the shipped "Disconnect Codex" button, and leaving
+named seats live and selectable behind it would keep using a credential the owner was told
+was gone. Omitting `account` on connect means the first seat, so pre-rotation clients are
+unaffected.
 
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
