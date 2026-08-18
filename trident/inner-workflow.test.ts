@@ -44,6 +44,82 @@ function grabFunction(name: string): string {
   throw new Error(`could not brace-match ${name}`)
 }
 
+function loadCodexForgeSchema(): {
+  required: string[]
+  properties: Record<string, { type?: unknown; description?: string }>
+} {
+  const start = SRC.indexOf('const FORGE_SCHEMA =')
+  const end = SRC.indexOf('const PLAN_SCHEMA =', start)
+  if (start === -1 || end === -1) throw new Error('Forge schemas are missing from inner-workflow.mjs')
+  return new Function(`${SRC.slice(start, end)}; return CODEX_FORGE_SCHEMA`)() as {
+    required: string[]
+    properties: Record<string, { type?: unknown; description?: string }>
+  }
+}
+
+function loadCodexBridgePrompts(): { build: string; collect: string; wait: string } {
+  const factory = new Function(
+    'runId',
+    'slug',
+    'codexBuildSh',
+    'codexBriefByPath',
+    'chunkTextOnLines',
+    'CODEX_BRIEF_CHUNK_BYTES',
+    'briefIntegrity',
+    'codexBuildDiffFile',
+    'dbPath',
+    'checkpointSh',
+    'forgeBranch',
+    'baseBranch',
+    'mergeMode',
+    'codexHome',
+    'NO_INTERACTIVE_RULE',
+    'REDIRECT_RULE',
+    'NO_PATTERN_KILL_RULE',
+    [
+      grabFunction('shSingleQuote'),
+      grabFunction('wrapperErrTailInstruction'),
+      grabFunction('codexBuildPrompt'),
+      grabFunction('codexCollectPrompt'),
+      grabFunction('codexWaitMorePrompt'),
+      `return {
+        build: codexBuildPrompt('r1', 'brief', { envVar: '', model: '' }, 'forge-done'),
+        collect: codexCollectPrompt('r1'),
+        wait: codexWaitMorePrompt('r1'),
+      }`,
+    ].join('\n'),
+  ) as (...args: unknown[]) => { build: string; collect: string; wait: string }
+  return factory(
+    'prompt-pin',
+    'fallback-slug',
+    '/harness/trident/codex-build.sh',
+    () => null,
+    (text: string) => [{ text, mode: 'raw' }],
+    4096,
+    () => '6:receipt',
+    () => '/tmp/reviewer.diff',
+    null,
+    '/harness/trident/checkpoint.sh',
+    'trident/prompt-pin',
+    'main',
+    'pr',
+    '/codex-home',
+    '',
+    '',
+    '',
+  )
+}
+
+function loadCodexDeferralMessage(): (
+  label: string,
+  codexStatus: string,
+  wrapperErrTail: string,
+) => string {
+  return new Function(
+    `${grabFunction('codexDeferralMessage')}; return codexDeferralMessage`,
+  )() as (label: string, codexStatus: string, wrapperErrTail: string) => string
+}
+
 // The checked-in checkpoint-writer the workflow's Bash steps invoke (P10) —
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
 const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
@@ -142,6 +218,43 @@ describe('inner-workflow.mjs — args normalization behavior', () => {
     expect(normalizeWorkflowArgs('"a-bare-string"')).toEqual({})
     expect(normalizeWorkflowArgs(null)).toEqual({})
     expect(normalizeWorkflowArgs(undefined)).toEqual({})
+  })
+})
+
+describe('inner-workflow.mjs — codex wrapper refusal propagation', () => {
+  const refusal =
+    'CODEX_BUILD_BRIEF_PART_CORRUPT: brief part X measures 27893:ff41febe but its receipt is 28462:9f34d3b0'
+
+  test('CODEX_FORGE_SCHEMA requires the wrapper stderr tail as a string', () => {
+    const schema = loadCodexForgeSchema()
+    expect(schema.properties.wrapperErrTail?.type).toBe('string')
+    expect(schema.required).toContain('wrapperErrTail')
+  })
+
+  test('build, collect, and wait bridges render the same bounded verbatim-tail instruction', () => {
+    const prompts = loadCodexBridgePrompts()
+    const errFile = '/tmp/trident-codex-build-prompt-pin-r1.err'
+    const instruction =
+      `Whenever \`codexStatus !== 'connected'\`, run \`tail -c 400 '${errFile}' 2>/dev/null || true\` and copy its output VERBATIM into \`wrapperErrTail\`; when \`codexStatus === 'connected'\`, set \`wrapperErrTail\` to \`""\`.`
+
+    for (const [bridge, prompt] of Object.entries(prompts)) {
+      expect(prompt, `${bridge} bridge is missing wrapperErrTail`).toContain('wrapperErrTail')
+      expect(prompt, `${bridge} bridge is missing the non-connected condition`).toContain(
+        "codexStatus !== 'connected'",
+      )
+      expect(prompt, `${bridge} bridge is missing the wrapper .err path`).toContain(errFile)
+      expect(prompt, `${bridge} bridge drifted from the bounded-tail instruction`).toContain(instruction)
+    }
+  })
+
+  test('the forge deferral message carries the measured refusal verbatim', () => {
+    const message = loadCodexDeferralMessage()('forge:build', 'deferred', refusal)
+    expect(message).toBe(`forge:build deferred (codexStatus=deferred): ${refusal}`)
+    expect(message).toContain('deferred')
+    expect(message).toContain(refusal)
+    expect(grabFunction('forgeAgent')).toContain(
+      'codexDeferralMessage(opts.label, res.codexStatus, res.wrapperErrTail)',
+    )
   })
 })
 
