@@ -91,6 +91,8 @@ function buildHarness(opts: {
   on_terminal?: TridentTerminalHook
   /** null exercises production base detection instead of the usual deterministic test base. */
   base_branch?: string | null
+  /** Local build ref returned to launch's pre-fire leftover-branch probe; absent by default. */
+  local_branch_tip?: string | null
 }): Harness {
   const hostCalls: string[][] = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
@@ -105,6 +107,11 @@ function buildHarness(opts: {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
     if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    if (joined.includes('rev-parse --verify --quiet refs/heads/')) {
+      return opts.local_branch_tip === undefined || opts.local_branch_tip === null
+        ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        : ok(opts.local_branch_tip)
+    }
     const stubbed = opts.hostResponder?.(cmd)
     if (
       stubbed !== undefined &&
@@ -3416,7 +3423,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(HEAD.toUpperCase())
-        if (joined.includes('rev-list --count')) return ok('16')
+        if (joined.includes('rev-list --count refs/heads/main..refs/remotes/origin/main')) return ok('16')
         return ok()
       },
     })
@@ -3433,6 +3440,113 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
     expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
       .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+    expect(calls.some((c) => c.includes('rev-parse --verify --quiet refs/heads/trident/add-thing'))).toBe(true)
+  })
+
+  test("a fresh launch refuses another lane's local branch without firing", async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(final.failure_reason).toContain("refusing to build on another lane's work")
+    expect(final.failure_reason).toContain('branch -D')
+  })
+
+  test('an ancestor-only local branch leftover proceeds', async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test("this run's own crash-leftover branch proceeds from its prior pin", async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: BASE, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(BASE)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(BASE)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('a checkpointed resume does not fetch or pin a base', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    const run = await resumeRun()
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBeNull()
+    expect(store.get(run.id)?.base_behind).toBeNull()
+  })
+
+  test('a pre-pinned relaunch keeps its original base without fetching again', async () => {
+    const PINNED = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: PINNED, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(PINNED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(PINNED)
+    expect(store.get(run.id)?.base_behind).toBe(7)
   })
 
   test('a checkpointed resume does not fetch or pin a base', async () => {

@@ -2143,8 +2143,10 @@ export function buildTridentOrchestrator(
       }
     }
 
-    const freshBuild = launchRun.inner_checkpoint === null && launchRun.base_sha === null
-    let base_sha: string | null = launchRun.base_sha
+    const freshLaunch = launchRun.inner_checkpoint === null
+    const priorBaseSha = launchRun.base_sha
+    const freshBuild = freshLaunch && priorBaseSha === null
+    let base_sha: string | null = priorBaseSha
     let base_behind: number | null = null
     if (freshBuild && launchRun.merge_mode === 'pr') {
       const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
@@ -2193,6 +2195,51 @@ export function buildTridentOrchestrator(
       if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) base_sha = oid
     }
     const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+
+    if (
+      freshLaunch &&
+      base_sha !== null &&
+      typeof launchRun.branch === 'string' &&
+      launchRun.branch.length > 0
+    ) {
+      const branchTipResult = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', '--quiet', `refs/heads/${launchRun.branch}`],
+        launchRun.repo_path,
+      )
+      const branchTip = branchTipResult.stdout.trim().toLowerCase()
+      // A missing or ambiguous local ref is the normal first-launch shape: Forge
+      // will cut it from pinnedRun.base_sha. Once git resolves a concrete tip,
+      // however, only ancestry can prove that this lane owns what is already there.
+      if (branchTipResult.ok && /^[0-9a-f]{40}$/.test(branchTip)) {
+        const containedInBase = await opts.run_host(
+          ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
+          launchRun.repo_path,
+        )
+        let ownCrashLeftover = false
+        if (!containedInBase.ok && priorBaseSha !== null) {
+          const descendsFromPriorBase = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
+            launchRun.repo_path,
+          )
+          ownCrashLeftover = descendsFromPriorBase.ok
+        }
+        if (!containedInBase.ok && !ownCrashLeftover) {
+          const ahead = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
+            launchRun.repo_path,
+          )
+          const rawAheadCount = ahead.stdout.trim()
+          const aheadCount = /^\d+$/.test(rawAheadCount) ? rawAheadCount : '?'
+          const reason = `branch ${launchRun.branch} already carries ${aheadCount} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. Verify or delete the branch (git -C ${launchRun.repo_path} branch -D ${launchRun.branch}), then re-dispatch.`
+          return {
+            run: failedRun(pinnedRun, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${launchRun.phase} → failed (local branch belongs to another lane — no fire)`,
+          }
+        }
+      }
+    }
 
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
