@@ -154,6 +154,7 @@ describe('switch timing diagnostics', () => {
       marks: { vm_published: 5, frame_rendered: 8, transcript: 10, socket_open: 20 },
       total: 20,
       incomplete: false,
+      superseded: false,
       servedFromCache: false,
     }
 
@@ -192,6 +193,7 @@ describe('switch timing diagnostics', () => {
       marks: { vm_published: 1 },
       total: 1,
       incomplete: true,
+      superseded: false,
       servedFromCache: false,
     }
 
