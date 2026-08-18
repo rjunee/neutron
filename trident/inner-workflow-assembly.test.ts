@@ -176,6 +176,7 @@ async function runWorkflow(
     dbPath: opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
     runId: opts.recordCheckpoints === true ? 'run-assembly-1' : null,
     checkpointScript: opts.recordCheckpoints === true ? '/repo/trident/checkpoint.sh' : null,
+    stageStampScript: '/harness/trident/stage-stamp.sh',
     codexBuildScript: '/harness/trident/codex-build.sh',
     codexReviewScript: '/harness/trident/codex-review.sh',
     resumeCheckpoint: null,
@@ -233,6 +234,19 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     taskIntegrity: briefIntegrity(task),
     reflectionFile: null,
     reflectionIntegrity: null,
+  })
+
+  test('threads the stage writer beside checkpoint coordinates and omits it without them', async () => {
+    const withCoordinates = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      recordCheckpoints: true,
+    })).captured)
+    expect(withCoordinates).toContain(
+      "NEUTRON_CODEX_BUILD_CHECKPOINT_DB='/tmp/does-not-exist.db' NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID='run-assembly-1' NEUTRON_CODEX_BUILD_CHECKPOINT_NAME='forge-done' NEUTRON_CODEX_BUILD_STAGE_SCRIPT='/harness/trident/stage-stamp.sh'",
+    )
+
+    const withoutCoordinates = forgeBuildPrompt((await runWorkflow('', { codexBuild: true })).captured)
+    expect(withoutCoordinates).not.toContain('NEUTRON_CODEX_BUILD_STAGE_SCRIPT=')
   })
 
   test('a >30 KB task travels by path and is absent from every agent prompt', async () => {

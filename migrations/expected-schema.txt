@@ -16,6 +16,9 @@ CREATE INDEX button_prompts_topic_active
 CREATE INDEX button_prompts_topic_created
     ON button_prompts (topic_id, created_at DESC)
 
+[index] code_trident_stage_events_run_idx (tbl=code_trident_stage_events)
+CREATE INDEX code_trident_stage_events_run_idx ON code_trident_stage_events(run_id)
+
 [index] core_global_installations_install_state (tbl=core_global_installations)
 CREATE INDEX core_global_installations_install_state
     ON core_global_installations (install_state)
@@ -602,6 +605,15 @@ CREATE TABLE "code_trident_runs" (
     base_behind         INTEGER,
     infra_retries       INTEGER,
     agent_waked_at      INTEGER
+) STRICT
+
+[table] code_trident_stage_events (tbl=code_trident_stage_events)
+CREATE TABLE code_trident_stage_events (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    at TEXT NOT NULL,
+    meta TEXT
 ) STRICT
 
 [table] codex_rotation_active (tbl=codex_rotation_active)

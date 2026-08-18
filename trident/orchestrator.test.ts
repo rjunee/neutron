@@ -86,6 +86,7 @@ function buildHarness(opts: {
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_active_runs?: () => number
+  record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
   /** null exercises production base detection instead of the usual deterministic test base. */
@@ -131,6 +132,7 @@ function buildHarness(opts: {
   if (opts.resolve_reflection_context !== undefined)
     o.resolve_reflection_context = opts.resolve_reflection_context
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
+  if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
@@ -2400,6 +2402,67 @@ describe('orchestrator — fire did not settle → failed', () => {
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).toBe('failed')
+  })
+})
+
+describe('orchestrator — durable pre-build stage stamps', () => {
+  test('a successful fire stamps launch, dispatch, and settle in order', async () => {
+    const stamped: Array<{ run_id: string; stage: string; meta: string | null | undefined }> = []
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      record_stage: (run_id, stage, meta) => stamped.push({ run_id, stage, meta }),
+    })
+    const created = await createRun()
+    const run = (await store.update(created.id, { round: 3, ralph_round: 2 }))!
+
+    await h.loop.runOnce()
+
+    expect(stamped.map((entry) => entry.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+    ])
+    expect(stamped.every((entry) => entry.run_id === run.id)).toBe(true)
+    expect(stamped[0]!.meta).toContain('round=3')
+    expect(stamped[0]!.meta).toContain('ralph_round=2')
+  })
+
+  test('a failed fire stamps dispatch but never settle', async () => {
+    const stages: string[] = []
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'failed', error: 'boom' } }),
+      record_stage: (_run_id, stage) => stages.push(stage),
+    })
+    await createRun()
+
+    await h.loop.runOnce()
+
+    expect(stages).toEqual(['launch-start', 'fire-dispatched'])
+  })
+
+  test('a throwing record_stage seam cannot prevent the fire from advancing', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      record_stage: () => {
+        throw new Error('ledger unavailable')
+      },
+    })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.subagent_status).toBe('running')
+  })
+
+  test('omitting record_stage preserves the existing successful fire path', async () => {
+    const h = buildHarness({ plan: () => ({ fire: { status: 'fired', error: null } }) })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.subagent_status).toBe('running')
   })
 })
 
