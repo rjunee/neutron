@@ -163,7 +163,16 @@ async function seedWorld(opts: { conflicting: boolean; trailingBlank?: boolean; 
     writeFileSync(join(author, 'feature.txt'), 'feature\n')
   }
   await git(author, 'add', '.')
-  await git(author, ...GIT_ID, 'commit', '-q', '-m', `build ${BRANCH}`)
+  await git(
+    author,
+    ...GIT_ID,
+    'commit',
+    '-q',
+    '-m',
+    `build ${BRANCH}`,
+    '-m',
+    'The real body the builder wrote.',
+  )
   await git(author, 'push', '-q', 'origin', `refs/heads/${BRANCH}:refs/heads/${BRANCH}`)
   const branchTip = (await gitOut(author, 'rev-parse', 'HEAD')).trim()
 
@@ -277,7 +286,116 @@ describe('REAL git + REAL shallow — the publish-time rebase onto main', () => 
     expect(tree).toContain('feature.txt')
     expect(tree).toContain('docs.txt')
     expect((await gitOut(world.checkout, 'show', `${res.head}:feature.txt`)).trim()).toBe('feature')
+    expect((await gitOut(world.checkout, 'log', '-1', '--format=%s', res.head)).trim()).toBe(
+      `build ${BRANCH}`,
+    )
     expect(existsSync(join(world.checkout, '.git', 'shallow'))).toBe(false)
+  }, 60_000)
+
+  test('a local first-publish replay carries the builder subject and body and makes the replay note body-only metadata', async () => {
+    const world = await seedWorld({ conflicting: false })
+    const tipBefore = (await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()
+
+    const res = await rebaseOntoObservedBase(
+      spawnCapture,
+      world.checkout,
+      world.branch,
+      'main',
+      null,
+      scratch(world.checkout, 'subject'),
+    )
+
+    expect(res.rebased).toBe(true)
+    const subject = (await gitOut(world.checkout, 'log', '-1', '--format=%s', res.head)).trim()
+    expect(subject).toBe(`build ${BRANCH}`)
+    // The pre-change behavior made this provenance metadata the subject and destroyed the real one.
+    expect(subject.startsWith('rebase ')).toBe(false)
+    const body = await gitOut(world.checkout, 'log', '-1', '--format=%b', res.head)
+    expect(body).toContain('The real body the builder wrote.')
+    expect(body).toContain(
+      `rebase ${world.branch} onto main @ ${world.newMainTip.slice(0, 7)} (replayed from ${tipBefore.slice(0, 7)})`,
+    )
+  }, 60_000)
+
+  test('a replay of a replay keeps the builder subject and appends exactly one metadata note for each replay', async () => {
+    const world = await seedWorld({ conflicting: false })
+    const tipBefore1 = (await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()
+    const first = await rebaseOntoObservedBase(
+      spawnCapture,
+      world.checkout,
+      world.branch,
+      'main',
+      null,
+      scratch(world.checkout, 'subject-chain-1'),
+    )
+    expect(first.rebased).toBe(true)
+
+    writeFileSync(join(world.author, 'second-main.txt'), 'second intervening change\n')
+    await git(world.author, 'add', 'second-main.txt')
+    await git(world.author, ...GIT_ID, 'commit', '-q', '-m', 'second intervening main commit')
+    await git(world.author, 'push', '-q', 'origin', 'main')
+    const secondMainTip = (await gitOut(world.author, 'rev-parse', 'HEAD')).trim()
+    const tipBefore2 = (await gitOut(world.checkout, 'rev-parse', `refs/heads/${world.branch}`)).trim()
+
+    const second = await rebaseOntoObservedBase(
+      spawnCapture,
+      world.checkout,
+      world.branch,
+      'main',
+      null,
+      scratch(world.checkout, 'subject-chain-2'),
+    )
+
+    expect(second.rebased).toBe(true)
+    expect((await gitOut(world.checkout, 'log', '-1', '--format=%s', second.head)).trim()).toBe(
+      `build ${BRANCH}`,
+    )
+    const body = await gitOut(world.checkout, 'log', '-1', '--format=%b', second.head)
+    const firstNote =
+      `rebase ${world.branch} onto main @ ${world.newMainTip.slice(0, 7)} ` +
+      `(replayed from ${tipBefore1.slice(0, 7)})`
+    const secondNote =
+      `rebase ${world.branch} onto main @ ${secondMainTip.slice(0, 7)} ` +
+      `(replayed from ${tipBefore2.slice(0, 7)})`
+    expect(body).toContain('The real body the builder wrote.')
+    expect(body).toContain(firstNote)
+    expect(body).toContain(secondNote)
+    expect(body.split(firstNote)).toHaveLength(2)
+    expect(body.split(secondNote)).toHaveLength(2)
+  }, 60_000)
+
+  test('a replay fails closed when git cannot read the original commit message', async () => {
+    const world = await seedWorld({ conflicting: false })
+    const wrapper: RunHostCommand = async (cmd, cwd) => {
+      if (cmd.includes('log') && cmd.includes('--format=%B')) {
+        return {
+          ok: false,
+          stdout: '',
+          stderr: 'fatal: cannot read original commit message',
+          exit_code: 128,
+        }
+      }
+      return spawnCapture(cmd, cwd)
+    }
+
+    let caught: unknown = null
+    try {
+      await rebaseOntoObservedBase(
+        wrapper,
+        world.checkout,
+        world.branch,
+        'main',
+        null,
+        scratch(world.checkout, 'subject-read-failure'),
+      )
+    } catch (err) {
+      caught = err
+    }
+
+    expect(caught).toBeInstanceOf(Error)
+    expect((caught as Error).message).toContain('read the commit message of')
+    expect((caught as Error).message).toContain(world.branch)
+    expect((caught as Error).message).toContain('fatal: cannot read original commit message')
   }, 60_000)
 
   test('a branch behind main is replayed onto main OBSERVED tip, re-pushed under a lease, and reads MERGEABLE (acceptance a + d)', async () => {
