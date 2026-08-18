@@ -43,6 +43,7 @@
  */
 
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
+import { ProjectCredentialValidationError } from '@neutronai/project-credentials/store.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
@@ -62,6 +63,20 @@ const GLOBAL_CODEX_AUTH_PATH = '/api/app/codex-auth'
 /** Per-project override route. */
 const PROJECT_PREFIX = '/api/app/projects/'
 const PROJECT_CODEX_AUTH_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/codex-auth$/
+
+/**
+ * The pool's status, for the single legacy field every existing client reads.
+ *
+ * `connected` if ANY seat is usable, else the best thing any seat has to say,
+ * else the first seat's own answer. Preferring `connected` over `expired` is
+ * deliberate: with one healthy seat and one stale one, trident runs, so
+ * reporting anything else would describe a Codex that is not working when it is.
+ */
+function effectiveStatus<S extends string>(own: S, accounts: readonly { status: S }[]): S {
+  const usable = accounts.find((a) => a.status === 'connected')
+  if (usable !== undefined) return usable.status
+  return accounts[0]?.status ?? own
+}
 
 export function createCodexCredentialSurface(
   opts: CodexCredentialSurfaceOptions,
@@ -118,10 +133,19 @@ export function createCodexCredentialSurface(
           await service.refreshSeatLiveness(owner_slug, target)
           const status = service.status(owner_slug, target)
           if (!isGlobal) return jsonOk({ ...status })
-          const accounts = service.listAccounts(owner_slug)
-          const next = service.nextSlot(owner_slug)
+          const { accounts, next } = service.accountsView(owner_slug)
           return jsonOk({
             ...status,
+            // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT.
+            // `service.status` reads the `codex` service row, which is seat
+            // `default` alone — so an owner who connected only a NAMED seat got
+            // `not_connected` here beside a populated `accounts` array. Every
+            // pre-rotation client reads this one field: the mobile header
+            // announced that cross-model review was off, and the web pane hid
+            // Disconnect, while trident was resolving that named seat and
+            // running reviews with it. The clients were not wrong to trust the
+            // field; the field was answering a narrower question than its name.
+            status: effectiveStatus(status.status, accounts),
             accounts,
             active: next?.slot ?? null,
             next: next?.slot ?? null,
@@ -142,15 +166,36 @@ export function createCodexCredentialSurface(
           }
           const requested = body['account'] ?? rawAccount ?? undefined
           const label = typeof body['label'] === 'string' ? (body['label'] as string) : null
-          const result = await service.connectAccount(owner_slug, pasted, {
-            ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
-            label,
-          })
+          // A label the store refuses (over its length ceiling) is a BAD REQUEST,
+          // not a server fault. The store throws a typed validation error and,
+          // unmapped, it escaped as a 500 — telling the owner the instance had
+          // broken when he had simply typed too long a name, and giving him
+          // nothing to correct. The sibling credentials surface has always mapped
+          // this; only this route had missed it.
+          let result: Awaited<ReturnType<typeof service.connectAccount>>
+          try {
+            result = await service.connectAccount(owner_slug, pasted, {
+              ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
+              label,
+            })
+          } catch (err) {
+            if (err instanceof ProjectCredentialValidationError) {
+              return jsonError(400, err.code, err.message)
+            }
+            throw err
+          }
           if (!result.ok) {
             return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
           }
           return jsonOk(
-            { status: result.status, mode: result.mode, scope: result.scope, account: result.slot },
+            {
+              status: result.status,
+              mode: result.mode,
+              scope: result.scope,
+              account: result.slot,
+              // So a client can say what it did rather than what it intended.
+              replaced: result.replaced ?? false,
+            },
             201,
           )
         }
