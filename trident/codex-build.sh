@@ -410,13 +410,17 @@ MERGE_MODE='pr'
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
 
-# Pre-build latency stamp: the durable "build started" instant (2026-08-18 card).
-# Best-effort by contract — stage-stamp.sh always exits 0; `|| true` belts it.
-if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
-  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
-  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
-  bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" wrapper-start || true
-fi
+# Durable build timing stamps. Best-effort by contract — stage-stamp.sh always
+# exits 0; `|| true` also protects the wrapper from a replacement recorder.
+stamp_stage() {
+  if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+    bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" "$1" || true
+  fi
+}
+
+stamp_stage wrapper-start
 
 BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
@@ -1069,10 +1073,13 @@ fi
 # a credential the thing it stands in for cannot see, and would "prove" a publish path
 # that does not exist in production.
 if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
+  stamp_stage codex-exec-start
   if <"$BRIEF_FILE" run_build_child sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+    stamp_stage codex-exec-end
     emit_trailer ok
     exit 0
   fi
+  stamp_stage codex-exec-end
   emit_trailer failed
   echo "CODEX_BUILD_CALL_FAILED: the codex build call failed. DEFERRED — no build happened." >&2
   exit 5
@@ -1146,18 +1153,16 @@ fi
 # reading its own `/proc/self/environ`. Both, because the exclude covers the whole
 # family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
 # matter absolutely.
-# Pre-build latency stamp: codex is about to consume the assembled brief.
-if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
-  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
-  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
-  bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" codex-exec-start || true
-fi
+# Codex duration is the exact durable codex-exec-start→codex-exec-end pair.
+stamp_stage codex-exec-start
 
 if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
+  stamp_stage codex-exec-end
   emit_trailer ok
   exit 0
 fi
+stamp_stage codex-exec-end
 emit_trailer failed
 echo "CODEX_BUILD_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — the build did not complete." >&2
 exit 5
