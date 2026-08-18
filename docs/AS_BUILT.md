@@ -135,7 +135,7 @@ the ledger, provenance, ordinal identity, the rekey, the refusal paths — becau
 replays ARE the coverage that caught four boot-breaking defects. Sites inside otherwise
 converted files that pass a custom migrations directory or assert on the result object stay
 too; those files import both.
-## 2026-08-17 — CI caches the bun install, so a third party's outage stops redding this repo's PRs (#410)
+
 ## 2026-08-17 — CI caches the bun install, so a third party's outage reds this repo's PRs far less often (#410)
 
 `.github/workflows/ci.yml` restores bun's global install cache before every
