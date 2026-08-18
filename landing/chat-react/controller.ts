@@ -872,7 +872,7 @@ export class NeutronChatController {
       // his messages before the store is asked anything. Tell the stopwatch, or it
       // holds the record open for a background refresh nobody waited on and files an
       // instant switch as a slow one blamed on the store.
-      this.switchTimer.servedFromCache()
+      this.switchTimer?.servedFromCache()
     }
     this.lastWorkBoard = null
     this.lastWorkBoardProjectId = undefined
