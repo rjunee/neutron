@@ -249,59 +249,68 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
   })
 
-  /**
-   * THE DEVIATION SUFFIX IS THE ONLY THING THAT SURVIVES THE PROCESS BOUNDARY in pr
-   * mode. The build invocation exits at the publish handoff, so the Forge that
-   * reported it deviated from its exec spec is long gone by the time the SECOND
-   * invocation writes `ralph-task-built*`. The outer publisher's checkpoint string
-   * is the only channel between them — drop the suffix here and the next iteration
-   * silently plans from a document the build no longer matches.
-   */
-  test('a publish handoff carrying deviatedFromSpec suffixes the outer-published checkpoint', async () => {
+  test('an intermediate Ralph publish handoff defers publishing and atomically renames the checkpoint', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    const stale = '9'.repeat(40)
-    let fires = 0
-    let lsRemotes = 0
     const h = buildHarness({
-      plan: () => {
-        fires += 1
-        return fires === 1
-          ? {
-              result: {
-                verdict: 'REQUEST_CHANGES',
-                branch: 'feat-x',
-                checkpoint: 'forge-done',
-                publishRequested: true,
-                publishHead: head,
-                remainingTasks: 2,
-                deviatedFromSpec: true,
-              },
-            }
-          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
-      },
-      hostResponder: (cmd) => {
-        const joined = cmd.join(' ')
-        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
-        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
-          lsRemotes += 1
-          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
-        }
-        if (joined.includes('diff --name-only')) return ok('changed.ts')
-        if (joined.includes('gh pr list')) return ok('42')
-        return ok()
-      },
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+          remainingTasks: 2,
+        },
+      }),
     })
     const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    await store.update(run.id, { inner_checkpoint_head: head })
 
-    await runToTerminal(h, run.id)
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
 
-    // Both the persisted patch and the relaunch input carry it — the row is what a
-    // crashed outer loop re-reads, the input is what the workflow actually parses.
-    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:2:1:deviated`)
-    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:2:1:deviated`)
-    // …and the suffix must not break the recorded-OID extraction the live-head read
-    // is gated on, or the resume would rebuild for the wrong reason.
-    expect(h.inputs[1]!.resume_live_head).toBe(head)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    expect(h.refirePatches).toHaveLength(1)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe('ralph-task-built')
+    expect('inner_checkpoint_head' in h.refirePatches[0]!).toBe(false)
+    expect(store.get(run.id)?.inner_checkpoint_head).toBe(head)
+  })
+
+  /** Deviation now crosses the process boundary as the checkpoint NAME. The
+   * intermediate task is not published, so there is deliberately no
+   * `outer-published:*:deviated` handoff to carry it. */
+  test('a deviated intermediate Ralph handoff uses the deviated checkpoint name without publishing', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+          remainingTasks: 2,
+          deviatedFromSpec: true,
+        },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    await store.update(run.id, { inner_checkpoint_head: head })
+
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    expect(h.refirePatches).toHaveLength(1)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe('ralph-task-built-deviated')
+    expect('inner_checkpoint_head' in h.refirePatches[0]!).toBe(false)
+    expect(store.get(run.id)?.inner_checkpoint_head).toBe(head)
   })
 
   /**
@@ -3322,14 +3331,57 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           : ok(),
     })
 
-  test("a 'ralph-task-built' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
-    const h = unreadable()
-    const run = await resumeRun({ inner_checkpoint: 'ralph-task-built' })
-    await launchOnce(h)
-    expect(h.inputs).toHaveLength(1)
-    expect(h.inputs[0]!.resume_live_head).toBe('')
-    expect(store.get(run.id)!.phase).not.toBe('failed')
-  })
+  test.each(['ralph-task-built', 'ralph-task-built-deviated'] as const)(
+    "a deferred '%s' re-fire reads the local branch tip and never asks stale origin",
+    async (checkpoint) => {
+      const localHead = 'b'.repeat(40)
+      const staleRemoteHead = 'c'.repeat(40)
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/heads/feat-x^{commit}')) return ok(localHead)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+            return ok(`${staleRemoteHead}\trefs/heads/feat-x\n`)
+          }
+          return ok()
+        },
+      })
+      seq += 1
+      const run = await createRun({
+        merge_mode: 'pr' as MergeMode,
+        slug: `deferred-refire-${seq}`,
+        ralph: true,
+      })
+      await store.update(run.id, {
+        subagent_run_id: 'stale-id-from-prior-process',
+        subagent_status: 'running',
+        pr: 42,
+        ralph_round: 1,
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: localHead,
+      })
+
+      await launchOnce(h)
+
+      expect(h.hostCalls).toContainEqual([
+        'git',
+        '-C',
+        '/repo',
+        'rev-parse',
+        '--verify',
+        'refs/heads/feat-x^{commit}',
+      ])
+      expect(
+        h.hostCalls.some((cmd) =>
+          cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x'),
+        ),
+      ).toBe(false)
+      expect(h.inputs).toHaveLength(1)
+      expect(h.inputs[0]!.resume_live_head).toBe(localHead)
+      expect(store.get(run.id)!.phase).not.toBe('failed')
+    },
+  )
 
   test("a RALPH 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
     const h = unreadable()

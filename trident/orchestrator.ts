@@ -2090,7 +2090,14 @@ export function buildTridentOrchestrator(
             {
               repo_path: run.repo_path,
               branch: run.branch,
-              merge_mode: run.merge_mode,
+              // Deferred Ralph waves deliberately leave origin stale. These checkpoints
+              // rebuild regardless of the head; the local match is planner-only, allowing
+              // the clean name to open plan:next through cleanContinuation.
+              merge_mode:
+                resume_checkpoint === 'ralph-task-built' ||
+                resume_checkpoint === 'ralph-task-built-deviated'
+                  ? 'local'
+                  : run.merge_mode,
             },
             // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
             // network call and the consequence of `''` is terminal, so the attempts are
@@ -2383,7 +2390,11 @@ export function buildTridentOrchestrator(
    * resurrect a concurrently force-terminated run; `saveIfActive` still commits the
    * (unchanged, non-terminal) phase under its race guard.
    */
-  async function refireNextRalphTask(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
+  async function refireNextRalphTask(
+    run: TridentRun,
+    result: InnerResult,
+    checkpointNameOverride?: 'ralph-task-built' | 'ralph-task-built-deviated',
+  ): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
     const pr = result.pr_number ?? run.pr
@@ -2428,6 +2439,7 @@ export function buildTridentOrchestrator(
       inner_verdict: null,
       pr,
       branch,
+      ...(checkpointNameOverride !== undefined ? { inner_checkpoint: checkpointNameOverride } : {}),
     }
     await persistRefireReset(run.id, resetPatch)
 
@@ -2445,6 +2457,7 @@ export function buildTridentOrchestrator(
       subagent_status: null,
       inner_result: null,
       inner_verdict: null,
+      ...(checkpointNameOverride !== undefined ? { inner_checkpoint: checkpointNameOverride } : {}),
       last_advanced_at: now(),
     }
     return {
@@ -2478,6 +2491,13 @@ export function buildTridentOrchestrator(
     }
 
     if (result.publish_requested) {
+      if (run.ralph && (result.remaining_tasks ?? 0) > 0) {
+        return refireNextRalphTask(
+          run,
+          result,
+          result.deviated_from_spec ? 'ralph-task-built-deviated' : 'ralph-task-built',
+        )
+      }
       try {
         // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
         // reported no OID is still published — `publishBuiltCommit` reads the head from git.
