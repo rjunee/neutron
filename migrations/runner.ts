@@ -36,6 +36,7 @@ interface MigrationRepair {
   version: number
   recorded_name: string
   file_name: string
+  reapply?: true
   note: string
   date: string
 }
@@ -219,6 +220,18 @@ function loadMigrationRepairs(dir: string): MigrationRepair[] {
   if (!existsSync(path)) return []
   const repairs: unknown = JSON.parse(readFileSync(path, 'utf8'))
   if (!Array.isArray(repairs)) throw new Error(`${path} must contain a JSON array`)
+  for (const [index, raw] of repairs.entries()) {
+    if (raw === null || typeof raw !== 'object' || Array.isArray(raw)) continue
+    const repair = raw as Record<string, unknown>
+    if (!Object.prototype.hasOwnProperty.call(repair, 'reapply')) continue
+    const entry = `${path} entry ${index + 1} (${String(repair['recorded_name'] ?? 'unnamed')})`
+    if (repair['reapply'] !== true) {
+      throw new Error(`${entry}: reapply must be the boolean true when present`)
+    }
+    if (repair['file_name'] !== repair['recorded_name']) {
+      throw new Error(`${entry}: reapply requires file_name to equal recorded_name`)
+    }
+  }
   return repairs as MigrationRepair[]
 }
 
@@ -981,6 +994,34 @@ function readLedger(db: Database): Ledger {
 }
 
 /**
+ * Whether this exact reapply repair has already fired.
+ *
+ * The audit table is runner-owned but optional: it does not exist before the first
+ * active repair, and older or hand-inspected copies may not have the expected shape.
+ * Deciding whether to run must remain a read in either case, so an absent table or
+ * missing key column means "not acknowledged" and lets the later guarded write path
+ * create/use the canonical table rather than failing during classification.
+ */
+function hasRepairAcknowledgement(db: Database, repair: MigrationRepair): boolean {
+  if (!tableExists(db, '_migration_repairs')) return false
+  const columns = tableColumns(db, '_migration_repairs')
+  if (!['version', 'recorded_name', 'file_name'].every((column) => columns.has(column))) {
+    return false
+  }
+  return (
+    db
+      .query<
+        { ok: number },
+        [number, string, string]
+      >(
+        `SELECT 1 AS ok FROM _migration_repairs
+          WHERE version = ? AND recorded_name = ? AND file_name = ?`,
+      )
+      .get(repair.version, repair.recorded_name, repair.file_name) !== null
+  )
+}
+
+/**
  * Every row of a ledger table, whatever provenance columns it does or does not
  * carry. The table is named because the rekey reads the legacy copy with exactly
  * these semantics — a ledger written before provenance shipped has none of the
@@ -1429,12 +1470,16 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
       return row.version === repair.version && row.version !== treeOrdinal
     }),
   )
-  // WHAT AN ACTIVE REPAIR ASSERTS, in two independent halves — the shipped entries
-  // need both. (1) The migration named by `file_name` is ALREADY APPLIED here, hand
-  // verified, so it must not run: on the live instance ordinal 122's schema change
-  // was applied by hand and never recorded, so identity reconciliation would
-  // otherwise re-run its `ALTER`s and fail on duplicate columns. (2) The row itself
-  // is an acknowledged orphan, so the refusal below stays silent about it.
+  // WHAT AN ACTIVE SUPPRESS REPAIR ASSERTS, in two independent halves — the original
+  // shipped entries need both. (1) The migration named by `file_name` is ALREADY
+  // APPLIED here, hand verified, so it must not run. (2) The row itself is an
+  // acknowledged orphan, so the refusal below stays silent about it.
+  //
+  // A REAPPLY REPAIR MAKES ONLY THE SECOND ASSERTION. It acknowledges the incident
+  // row but deliberately does not suppress the file: that row is a false witness for
+  // schema that a later table rebuild removed. The exact repair's audit row is the
+  // durable "this forced apply fired" identity, and is read before any write so a
+  // later boot can stay a normal recorded-by-name skip.
   //
   // BOTH HALVES ARE KEYED ON THE NAME, and the second one has to be or the fix is
   // half a fix. The unexplained-row guard selects its candidates by NAME
@@ -1442,7 +1487,15 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // could fail to exempt a row the guard had already selected — the surviving row of
   // a collapsed pair, same name, different ordinal. Keying both on the name puts the
   // exemption in the same terms as the selection.
-  const repairedNames = new Set(activeRepairs.map((repair) => repair.file_name))
+  const suppressRepairs = activeRepairs.filter((repair) => repair.reapply !== true)
+  const activeReapplyRepairs = activeRepairs.filter((repair) => repair.reapply === true)
+  const firingReapplyRepairs = activeReapplyRepairs.filter(
+    (repair) => !hasRepairAcknowledgement(db, repair),
+  )
+  const firingReapplyByName = new Map(
+    firingReapplyRepairs.map((repair) => [repair.file_name, repair] as const),
+  )
+  const repairedNames = new Set(suppressRepairs.map((repair) => repair.file_name))
   const acknowledgedNames = new Set(activeRepairs.map((repair) => repair.recorded_name))
 
   // EVERY REFUSAL IS DECIDED BEFORE THE FIRST WRITE, and the whole block below is
@@ -1475,7 +1528,16 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     (m) => !repairedNames.has(m.name) && verdicts.get(m.name) === 'pending',
   )
   const pendingNames = new Set(pendingMigrations.map((m) => m.name))
-  const pending = pendingMigrations.length > 0
+  const reapplyMigrations = migrations.filter(
+    (m) =>
+      verdicts.get(m.name) === 'recorded-by-name' && firingReapplyByName.has(m.name),
+  )
+  const reapplyNames = new Set(reapplyMigrations.map((m) => m.name))
+  const runMigrations = migrations.filter(
+    (m) => pendingNames.has(m.name) || reapplyNames.has(m.name),
+  )
+  const runNames = new Set(runMigrations.map((m) => m.name))
+  const pending = runMigrations.length > 0
   // A COLLISION NEEDS CLASSIFYING WHETHER OR NOT THERE IS WORK TO DO, so it is its
   // own trigger for the tree read below. This costs a healthy install nothing: the
   // checks are pure passes over the already-loaded `migrations` array and a clean tree
@@ -1538,11 +1600,12 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // A pending file that is present but untracked is not a migration this build
   // contains, and applying it writes a permanent ledger row for something that will
   // not exist after the next checkout. Fail closed, name the file. ONLY PENDING
-  // files are checked: a migration already recorded is already permanent, and
-  // refusing forever over a stray applied long ago would be an outage with no
-  // remedy. This guard's job is to stop the silent APPLY, the only moment damage is
-  // done. The row sharing the ordinal, if any, is passed for context only.
-  for (const migration of pendingMigrations) {
+  // files are checked, including a recorded-by-name file an active reapply repair
+  // would force into this run. A migration already recorded is ordinarily permanent,
+  // but a reapply is a new write event and therefore gets the full pending-file guard.
+  // This guard's job is to stop the silent APPLY, the only moment damage is done. The
+  // row sharing the ordinal, if any, is passed for context only.
+  for (const migration of runMigrations) {
     const untracked = refusesFile(migration)
     if (untracked !== null) {
       throw new Error(
@@ -1639,7 +1702,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
        )`,
     )
   }
-  for (const repair of activeRepairs) {
+  for (const repair of suppressRepairs) {
     db.run(
       `INSERT OR IGNORE INTO _migration_repairs
        (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
@@ -1664,7 +1727,7 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // it. Nothing pending, nothing written.
   if (pending) ensureLedgerShape(db)
   for (const m of migrations) {
-    if (!pendingNames.has(m.name)) {
+    if (!runNames.has(m.name)) {
       skipped.push(m.version)
       continue
     }
@@ -1684,22 +1747,40 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     db.exec('BEGIN')
     try {
       db.exec(body)
-      // Provenance is written inside the migration's own transaction, so a row
-      // can never exist without naming the build that wrote it — the gap that
-      // made the original incident unanswerable after the fact.
-      db.run(
-        `INSERT INTO _migrations
-           (version, name, applied_at, content_sha256, applied_by_commit, tree_provenance)
-         VALUES (?, ?, ?, ?, ?, ?)`,
-        [
-          m.version,
-          m.name,
-          Date.now() / 1000,
-          migrationContentHash(m.sql),
-          deployedCommit,
-          treeProvenance,
-        ],
-      )
+      const reapply = firingReapplyByName.get(m.name)
+      if (reapply === undefined) {
+        // Provenance is written inside the migration's own transaction, so a row
+        // can never exist without naming the build that wrote it — the gap that
+        // made the original incident unanswerable after the fact.
+        db.run(
+          `INSERT INTO _migrations
+             (version, name, applied_at, content_sha256, applied_by_commit, tree_provenance)
+           VALUES (?, ?, ?, ?, ?, ?)`,
+          [
+            m.version,
+            m.name,
+            Date.now() / 1000,
+            migrationContentHash(m.sql),
+            deployedCommit,
+            treeProvenance,
+          ],
+        )
+      } else {
+        // The scar row already owns this migration's name and is immutable incident
+        // evidence. Record the forced apply beside it, in the SAME transaction as the
+        // body, so neither a crash nor an error can acknowledge SQL that did not land.
+        db.run(
+          `INSERT INTO _migration_repairs
+           (version, recorded_name, file_name, note, acknowledged_at) VALUES (?, ?, ?, ?, ?)`,
+          [
+            reapply.version,
+            reapply.recorded_name,
+            reapply.file_name,
+            reapply.note,
+            Date.now() / 1000,
+          ],
+        )
+      }
       db.exec('COMMIT')
     } catch (err) {
       db.exec('ROLLBACK')
