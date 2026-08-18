@@ -8,8 +8,40 @@ name: ci
 # machine became the fast-feedback path by default. The gates are now INDEPENDENT
 # JOBS that run concurrently, and the suite is SHARDED across runners. Each gate
 # reinstalls deps — that is deliberate: a shared-artifact handoff would couple the
-# gates back together and reintroduce the serialisation this change removes, and
-# `bun install --frozen-lockfile` is cheap next to what each gate then does.
+# gates back together and reintroduce the serialisation this change removes. A
+# CACHE is not a handoff: a cache MISS still installs and still passes, so every
+# job below stays independently runnable on its own.
+#
+# THE INSTALL IS NOT CHEAP, and this comment used to claim it was — a sentence
+# written when the install was assumed to be local work. It is not. `bun.lock`
+# takes `gbrain` as a GIT dependency (`github:garrytan/gbrain#<sha>`), so a cold
+# `bun install --frozen-lockfile` fetches a tarball from api.github.com, and the
+# split above means that now happens TWELVE times per PR — 8 shards plus
+# typecheck, lint, purity and layering. That made a third party's availability a
+# gate on this repo's PRs: on 2026-08-17 that URL answered 504 and redded SIX
+# jobs at once on a PR whose only real defect was a single type error, costing a
+# full review round to work out that the code was never the problem.
+#
+# So each job restores bun's global install cache, keyed on `bun.lock`. Measured
+# on this tree: 118s cold, 36s warm, and 22s warm with ALL outbound HTTP
+# blackholed — a warm cache needs no network whatsoever, which is the point. The
+# cache is keyed on the lockfile because the lockfile is what determines the
+# content; `BUN_INSTALL_CACHE_DIR` is set explicitly at each install rather than
+# leaning on bun's default location, so the directory actions/cache saves and the
+# directory bun writes are the same string by construction rather than by
+# assumption.
+#
+# `restore-keys` gives the lockfile-changed case a partial hit: every package the
+# change did NOT touch still comes from the cache, so a one-line dependency bump
+# costs one download rather than 2500. It is safe for the same reason the cache
+# itself is safe — a stale entry that `bun.lock` no longer names is simply never
+# asked for.
+#
+# A CACHE MUST NEVER MAKE A BUILD WRONG, and `--frozen-lockfile` is what keeps
+# that true. The cache supplies CONTENT; the lockfile still decides what is
+# allowed to be installed. A cached tree that disagrees with `bun.lock` fails the
+# job rather than quietly installing something stale, so the cache can only ever
+# change how long an install takes, never what it produces.
 #
 # THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` and
 # `CodeQL` are REQUIRED status checks on `main` with a strict up-to-date policy.
@@ -81,9 +113,17 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-
       # Install BEFORE tsc so the @neutronai/* workspace symlinks exist; a bare
       # checkout reports phantom TS2307s.
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # G5 — typecheck completeness: `tsc -p` for EVERY tsconfig.json in the repo,
       # not just the root config. Discovery is dynamic, so a new package with a
       # tsconfig is covered automatically; ci-workflow.test.ts guards that.
@@ -97,7 +137,15 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # L5 — relative cross-workspace import guard (eslint import/no-relative-packages
       # + a companion type-query check for the `import('...').Foo` form ESLint can't lint).
       - run: bash scripts/ci/lint.sh
@@ -116,7 +164,15 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # Fails the build if multi-instance vocabulary, owner PII or a Managed
       # module ever regresses into this public tree.
       - name: leak gate
@@ -153,7 +209,15 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # G4 — dependency-cruiser layering ratchet (fails on any NEW cross-band
       # import or cycle; the grandfathered baseline may only shrink).
       - run: bash scripts/ci/depcruise.sh
@@ -229,7 +293,16 @@ jobs:
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      # This is the leg that multiplies: eight shards, eight identical installs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       - name: Test (shard ${{ matrix.shard }} of 8)
         env:
           NEUTRON_TEST_SHARD: ${{ matrix.shard }}/8
