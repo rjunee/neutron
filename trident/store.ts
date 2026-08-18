@@ -196,6 +196,14 @@ export interface TridentRun {
   fenced_paths: string | null
 }
 
+export interface TridentStageEvent {
+  id: number
+  run_id: string
+  stage: string
+  at: string
+  meta: string | null
+}
+
 export interface CreateTridentRunInput {
   /** Optional caller-supplied id; UUID generated if absent. */
   id?: string
@@ -446,6 +454,29 @@ export class TridentRunStore {
       )
       .get(id)
     return row === null ? null : rowToRun(row)
+  }
+
+  async recordStageEvent(
+    run_id: string,
+    stage: string,
+    meta?: string | null,
+  ): Promise<void> {
+    await this.db.run(
+      `INSERT INTO code_trident_stage_events (run_id, stage, at, meta)
+       VALUES (?, ?, ?, ?)`,
+      [run_id, stage, this.now(), meta ?? null],
+    )
+  }
+
+  stageEvents(run_id: string): TridentStageEvent[] {
+    return this.db
+      .prepare<TridentStageEvent, [string]>(
+        `SELECT id, run_id, stage, at, meta
+           FROM code_trident_stage_events
+          WHERE run_id = ?
+          ORDER BY id`,
+      )
+      .all(run_id)
   }
 
   getBySlug(project_slug: string, slug: string): TridentRun | null {

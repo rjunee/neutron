@@ -177,6 +177,7 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // worktree-cleanup.sh below).
   checkpointScript = null,
+  stageStampScript = null,
   codexBuildScript = null,
   codexReviewScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
@@ -277,6 +278,7 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+const stageStampSh = stageStampScript || `${repoPath}/trident/stage-stamp.sh`
 
 // NO repoPath fallback, deliberately — resolving the wrapper from the repo being
 // built is the defect (Open worked by coincidence, everything else 127'd or drifted);
@@ -1622,7 +1624,7 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
   const diffFile = codexBuildDiffFile()
   const checkpointEnv = !dbPath || !runId
     ? ''
-    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)}`
+    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)} NEUTRON_CODEX_BUILD_STAGE_SCRIPT=${shSingleQuote(stageStampSh)}`
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
   // which invokes the wrapper on its own pinned default.

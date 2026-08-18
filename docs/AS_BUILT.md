@@ -2,6 +2,434 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
+
+Migration 0133 adds `code_trident_stage_events`, an append-only SQLite ledger read
+and written through `TridentRunStore`. Host launches now record `launch-start`,
+`fire-dispatched`, and `fire-settled`; the Codex wrapper records `wrapper-start`
+and `codex-exec-start` through the new always-exit-0 `trident/stage-stamp.sh`.
+Every writer uses millisecond ISO-8601 UTC where the host supports it, preserves
+insertion order by row id, and is best-effort so instrumentation cannot change a
+launch or wrapper exit.
+
+These stage names are the fixed vocabulary for deterministic writers. The reserved
+workflow-side names are `plan-start`, `build-agent-start`, and `wrapper-invoke`.
+The previous `/tmp` part-mtime method is retired because part files are rewritten on
+re-fire and can produce negative or cross-fire intervals; completed ledger rows
+instead survive run failure and later re-fire unchanged.
+
+## 2026-08-17 — a Codex subscription is no longer one account for the whole instance (#407)
+
+PR #407. The owner may connect several ChatGPT seats; trident picks one per run at
+the existing `resolve_codex_home` seam and skips any seat that has hit its usage cap.
+This supersedes the earlier statement in this log that "a Codex subscription is one
+account for the whole instance" — that was true when written and is what changed here.
+
+New: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts` (rollout
+harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0134_codex_rotation.sql`. Edited: `trident/codex-credential.ts`,
+`trident/codex-credential-tool.ts`, `gateway/http/codex-credential-surface.ts`,
+`open/composer.ts`, `app/app/integrations.tsx`, `app/lib/codex-credential-client.ts`.
+Ordinal 0134 skips 0133, which another open branch already claims.
+
+Slot `default` is byte-identical to before — same service row (`codex`), same directory
+(`<owner_home>/.codex`), same bytes — so a one-seat install is unchanged, nothing
+migrates, and rotation is the single code path with no feature flag. Extra seats are
+service `codex-acct-<slot>` at `<owner_home>/.codex/accounts/<slot>/`.
+
+A seat's bundle is NEVER copied between directories. The codex CLI rewrites `auth.json`
+on refresh and that refresh rotates the refresh token, so two live copies of one account
+revoke each other. Selection is a pointer at a directory; the re-materialize guard stays
+only-if-missing. Harvest-back re-encrypts a CLI-refreshed bundle back into the store when
+the on-disk `last_refresh` is newer, which also closes a hazard that predated this change:
+the stored copy used to drift staler with every refresh, so the self-heal path would
+eventually restore a token the server had already invalidated. It runs for the seat that
+just RAN as well as the one about to run — the seat that just refreshed is precisely the
+one whose stored copy is now stale, and it may be cooling for a week before it is resolved
+again.
+
+The exhaustion signal is harvested, not probed — there is no free usage gauge. Every
+session appends a rollout under `<CODEX_HOME>/sessions/`, whose `token_count` events carry
+`rate_limits`. That rollouts follow the run's `CODEX_HOME` was verified live rather than
+assumed: an empty `CODEX_HOME` plus one `codex exec` produced the whole state root there,
+`sessions/` included, on a run that never authenticated. The parser requires `rate_limits`
+to sit on the node whose own `type` is `token_count`, which is the shape a real rollout
+line has, so an unrelated event carrying a same-named object is not read as evidence.
+
+The threshold is keyed on `window_minutes`, NOT on whether the CLI called a window
+`primary` or `secondary`. Measured across 12,582 real `token_count` samples from 600
+rollout files (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a week — in every
+sample and `secondary` was null in every sample. Reading `primary` as the 5-hour window,
+as the design assumed, would have applied a session threshold and a session-length
+cooldown to a weekly cap and rotated a still-capped seat back into service. Windows at or
+under 1440 minutes cool at 98%, longer ones at 99%. The fallback cooldown is the window's
+own length, CLAMPED to 32 days: the same binary declares `daily-limit`, `weekly-limit`,
+`monthly-limit` and `annual-limit`, so an unclamped length would bench a paid seat for a
+year, and an absurd value reaches `Infinity`, which SQLite round-trips as a REAL that no
+clock comparison can clear. `resets_at` is epoch seconds, converted once at the parse
+boundary, and classified three ways rather than two: a reset already in the PAST means the
+window has rolled over, so that sample is ignored instead of starting a fresh full-length
+cooldown from a stale reading.
+
+NO stderr classifier ships, and that is a correction of an earlier claim in this entry's
+first revision. It stated the patterns had been "measured off the shipped binary's own
+literals". They had not: `weekly limit` and `session limit` each return ZERO hits against
+the literals in codex-cli 0.147.0, while `usage limit` returns 23 and the positive controls
+`codex-cli` and `rate_limit_reached_type` return 9 and 17 — so the search works and those
+two discriminators are simply absent. The binary's real messages never name the window, so
+no pattern can recover it from text. The classifier also had no production caller. Both
+it and `applyFailureCooldown` are deleted. The window class now comes from
+`rate_limit_reached_type`, which the CLI itself sets, rides the `token_count` event the
+harvest already reads, and needs no new seam.
+
+Fail-safe rules, each pinned by a mutation applied and observed red: a harvest that errors
+or finds nothing cools nothing; when every seat is cooling the current one is kept and
+`codex_rotation_exhausted` is logged; a seat whose stored credential is missing or expired
+is cooled `unauthorized` and SKIPPED rather than returning no credential at all; an
+`unauthorized` cooldown ignores the clock until the seat is reconnected; per-project
+overrides resolve first and stay out of rotation. A reconnect stamps `connected_at` and
+clears the previous occupant's cooldown and usage — for the first seat as well as a named
+one — so a different subscription in a reused directory is not judged on its predecessor's
+history, which the seat's own `sessions/` tree would otherwise supply.
+
+The rollout scan is bounded: a positioned tail read rather than a whole-file read, the
+newest date partition visited first, a file cap, and one scan a minute per seat — the
+resolver is reached by a read-only status request as well as a run launch, and the CLI
+never prunes `sessions/`.
+
+Owner-facing, and on screen: the Settings integrations pane lists every seat with its
+state, which one runs next, and a per-seat Remove; the paste box stays available after the
+first connection, with an optional seat name, because adding a second seat is the point.
+Also `codex_connect` with `account: "work"`, or `POST /api/app/codex-auth` with
+`{ auth, account }`. `GET` lists seats, cooldowns and the next seat while keeping every
+legacy top-level field; `DELETE ?account=<slot>` removes one seat, and an UNQUALIFIED
+`DELETE` removes them all — that is the shipped "Disconnect Codex" button, and leaving
+named seats live and selectable behind it would keep using a credential the owner was told
+was gone. Omitting `account` on connect means the first seat, so pre-rotation clients are
+unaffected.
+## 2026-08-17 — a read in flight outlives the cache it was read from, and the instrument settled on the wrong frame (#409)
+
+Three defects found by review on the switch-latency work, sharing one shape: an
+artefact that is real, current, and about the wrong thing.
+
+**1. The transcript write-back survived its own invalidation.** `handleChange` files a
+resolved read into the transcript cache BEFORE the session-changed-underfoot guard, and
+that ordering is deliberate — a read that lands after the owner has already switched away
+still belongs to its own topic, and filing it is what makes the NEXT entry into that
+topic paint instantly. The same ordering also puts it after `stop()` and after the
+`projects_changed` deletion sweep, so an outstanding read re-created the entry
+milliseconds after the clear. Consequences, in order of severity: a project deleted and
+recreated under the same id could paint the DEAD project's history into its first frame,
+and a stopped controller could paint a transcript on restart. Both of them **after** the
+code written to prevent exactly that had run and reported success — which is why neither
+was visible from the invalidation site.
+
+Fixed with an invalidation generation (`transcriptCacheEpoch`) captured in the same
+synchronous instant as the session and the topic; a read that resolves across a bump is
+not filed. It over-invalidates by one counter — an unrelated read in flight beside a
+deletion is also dropped — which costs that topic one re-read and is the same asymmetry
+the deletion branch was already decided on: over-invalidating is free, under-invalidating
+paints the wrong history.
+
+**2. The paint mark timed an empty pane on a cold switch.** `frame_rendered` was
+scheduled from `setProject` unconditionally. On a cache MISS the frame `setProject`
+publishes is empty and the transcript arrives in a later one, so the mark landed on the
+paint of a blank pane, the record settled, and the switch reported over while the owner
+was still waiting — the original misattribution (an instrument reporting a step that is
+not the step being waited through) reappearing one mark along, inside the fix for it. The
+mark is now scheduled from exactly ONE of the two publishes, chosen by whether the first
+carries what he came to see. Scheduling from both is not a safe middle: the first stamp
+wins, and on a cold switch the first stamp is the empty one.
+
+**3. An abandoned switch was reported as a complete sub-millisecond switch.**
+`supersede()` flushed without recording why, and `incomplete` was derived from the marks
+alone. A cache-served switch's only REQUIRED mark is `vm_published`, stamped in the first
+millisecond — so a switch the owner gave up on at 40 ms satisfied "every required mark is
+in" and entered the sample as a success. Rapid consecutive clicking is what someone does
+when switching is slow, so the metric got better precisely as the product got worse, and
+it is the metric that judges this work. The cause now rides on the record
+(`superseded`), `incomplete` covers it, and the emitted line names it `abandoned=` rather
+than leaving it to read as a failure. `schema` → 4, because filtering a v3 sample on
+`incomplete === false` and a v4 sample the same way selects different populations.
+
+Two smaller ones in the same path. A cache hit on a topic carrying an UNREAD badge is a
+hit on a transcript that provably lacks the message he clicked in to read — an inactive
+topic's `onChange` is discarded, so nothing refreshed it while he was away — and it is no
+longer reported as served-from-cache: it paints instantly and finishes late, like a cold
+switch. And read receipts are now acknowledged once per topic instead of rebuilding the
+full id list on the cached frame, on the resolved read, and on every inbound frame
+thereafter (533 ids per call on the owner's biggest topic).
+
+`switch-render-cost.test.tsx` asserted a TOTAL of two surface renders while its name
+claimed "leaves every background conversation untouched". A total of two is satisfied by
+the two WRONG surfaces, so the assertion could not support the claim; it now captures
+`vm.projectId` per `useChatRuntime` call and asserts the set is exactly the surface left
+and the surface entered, with General's absence as the actual content of the claim.
+
+| Mutant | Result |
+| --- | --- |
+| write-back ungated by the epoch | RED — both lifecycle cases (stop, deletion) |
+| paint mark scheduled unconditionally in `setProject` | RED — cold-switch ordering |
+| `supersede()` without recording the cause | RED — abandonment case |
+| surface-render assertion (control: expected set changed) | RED — reports `alpha, beta`, so the ids are real |
+
+## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render (#409)
+
+The owner's web UI took 3-9 s to switch projects. 47 real `project_switch` samples from
+his client diagnostics read `transcript_read` median 3283 ms / p90 6614 ms / max 9198 ms
+against `vm_published` median 3 ms / max 39 ms, which reads as "rendering is instant, the
+store read is effectively 100% of the switch". Every number in that report is real and
+the conclusion it invites is wrong in both halves.
+
+**The read is not slow, and the reason is structural rather than a benchmark.** Read
+`chat-core/stores/opfs-store.ts:113-115`: `list()` delegates straight to the in-memory index
+(`chat-core/store.ts:413-417`). **There is no OPFS I/O in the read path at all** — the only
+OPFS reads are the one-shot `hydrate()` at boot and the snapshot writes. That is checkable
+from the tree by anyone, needs no timing, and is the actual argument; a copy-and-sort over
+533 in-memory rows cannot cost a second.
+
+⚠️ The corroborating magnitudes below are **one-off measurements against a throwaway
+harness that is NOT committed**, so they cannot be reproduced from this repo and should be
+read as indicative only. Method, for anyone who wants to redo them: drive the real
+`OpfsChatStore` + `SyncEngine` + `SendQueue` over a 12-topic × 533-message store with
+injected per-operation OPFS latencies, then time
+`Promise.all([session.messages(), session.pendingCount()])`. That gave median 0.1 ms / p90
+0.4 ms / max 1.0 ms, 0.2 ms with a 60-upsert write burst in flight, and 184 ms for a
+one-shot 3.8 MB `hydrate()`. No benchmark was added to the suite deliberately: a committed
+timing assertion measures the runner's load, which is the class `scripts/ci/lint.sh`
+CHECK 5 exists to keep out of the tree.
+
+**The mark charges the read for the main thread it waited on.** `vm_published` is stamped
+the instant `publish()` returns, and `publish()` only *schedules* the render: it computes
+the VM and notifies subscribers, and React flushes the resulting render synchronously at
+the END of the discrete event — after `setProject` has already returned. So `vm_published`
+contains none of the paint. `transcript_read` is stamped after an `await` in
+`handleChange`, whose continuation is a microtask, and microtasks cannot run until that
+flush completes — so it contains all of it. The proof is a CONTROL, and is labelled as one
+everywhere it now appears: a subscriber with a deliberately **injected** 250 ms
+synchronous body, driven through React's synthetic discrete-event path, put `render_ended`
+at 256.6 ms and `transcript_read` at 257.6 ms while `vm_published` reported 0.2 ms — and
+the same injected body on a plain (non-React) listener, where React defers, reported
+`transcript_read` **1.8 ms**. That discriminates "the render lands inside the transcript
+window" from "it doesn't", which is all it was built to do. The instrument's own docblock
+— "if this mark is already hundreds of ms the problem is the paint, not the data" — had
+named the right discriminator and then put the mark on the wrong side of it.
+
+**What is NOT established, and must not be read into the above.** Nobody has measured how
+long the owner's 533-row markdown thread actually takes to paint. The 250 ms is an
+injected number, not his. So this change does not claim the 3-9 s shrinks, and no
+committed measurement here shows that it does — `frame_rendered` is precisely the
+instrument that will produce the first real answer, out of his next samples.
+
+Three changes, all in `landing/chat-react/`:
+
+- **`controller.ts` — the switch reads the transcript synchronously.** A bounded
+  per-TOPIC cache (`transcriptCache`, 24 entries, ordered by last use) holds the last
+  resolved `{ msgs, pending }` for every visited topic, written by `handleChange` under
+  the topic captured in the same synchronous instant as the session. `setProject` reads it
+  before it publishes, so the FIRST frame of a re-entered project already carries that
+  project's transcript instead of an empty thread a second render replaces. A first-ever
+  visit still publishes empty and fills from the read, because there is genuinely nothing
+  yet to paint.
+
+  **This removes the empty frame, not the render.** The resolved read still publishes
+  behind it, `handleChange` is still called on every switch, and the total row-construction
+  work is unchanged — 533 rows built once either way. It MOVES into the click-blocking
+  frame, which an adversarial review measured at 0.19 ms → 2.37 ms of synchronous
+  `setProject` cost — their harness, cited rather than reproduced here. What the owner
+  gains is that the first thing he sees is his conversation; what he does not gain, yet,
+  is a shorter wait for it.
+
+- **`controller.ts` — rows that are painted are rows that are read.** The read receipt for
+  the cached rows is now sent from the switch, through the entered project's session,
+  rather than only from the resolved read. Painting agent messages while acknowledging
+  nothing meant a stalled read left the server watermark un-advanced, so its next
+  `projects_changed` restored the unread badge on messages the owner was looking at.
+
+- **`switch-timing.ts` — a `frame_rendered` mark, so this cannot recur.** Stamped from a
+  `requestAnimationFrame` plus a trailing task (a single rAF callback runs *before* that
+  frame's paint), it is the first instant at which the published frame has actually been
+  drawn. `frame_rendered ≈ transcript_read` ⇒ the render is the cost;
+  `frame_rendered ≪ transcript_read` ⇒ the store is. No pair of the original four marks
+  could tell those apart, which is why the report pointed at the wrong subsystem.
+
+  Three things had to be true for it to be worth having, and only the first was at the
+  start. **(1)** Its absence is a NORMAL outcome, reported `not_painted` alongside
+  `socket_open`'s `reused` — rAF does not run in a hidden or backgrounded tab, and a boot
+  deep-link can switch projects in one, so a required paint mark manufactured
+  `Project switch incomplete … never_arrived=frame_rendered` for switches that completed.
+  **(2)** But the recorder still WAITS 250 ms for it once every required mark is in,
+  because the paint necessarily lands a frame after the `transcript` mark that would
+  otherwise flush the record — without that window the mark would be dropped on nearly
+  every switch. **(3)** `incomplete` is now derived from the marks inside `flush()` rather
+  than passed in by whichever timer woke it, so all four flush paths agree on one
+  definition. The deadline also rose 8 s → 30 s: it was shorter than his own measured
+  max of 9198 ms, so the slowest switches — the only ones that mattered — were truncated
+  as incomplete before their last mark could land.
+
+  `buildSwitchReport` now stamps `schema: 2`, because `total` silently changed meaning:
+  it is the largest mark seen and `frame_rendered` is normally the last, so a v2 `total`
+  includes the paint where v1 stopped at `transcript`. The owner has a 47-sample baseline
+  stamped `1`; averaging the two would have read the shift as a regression.
+
+The session-changed-underfoot guard (a real Codex P2) is untouched and now has its own
+tests: a stalled read for the topic the owner LEFT cannot clobber the topic they entered,
+and cannot route the old topic's read receipts through the new project's session. The
+cache write is deliberately on the other side of that guard — the rows belong to the topic
+captured before the await, and filing them under whatever topic happens to be active when
+a slow read lands is precisely how one project's messages would reach another's frame.
+
+Two claims that were in this entry's first draft were **wrong**, found by review, and are
+corrected above rather than quietly dropped: "the switch is off the store's critical path
+entirely" (`handleChange` is still called on every switch) and "there is one render, not
+two" (both frames still render; the second's rows keep their identities so the list memo
+can bail, which is not the same thing). A cache entry was also documented as "a reference
+to rows the store already holds" — `chat-core/store.ts:413-417` builds a fresh `{ ...m }`
+per message, so an entry is a real retained copy and the limit is sized rather than
+assumed. And topic-keying was credited with preventing cross-project serving on id reuse;
+`topicForProject` is a pure function of (userId, projectId), so it prevents nothing of the
+sort — deletion invalidation, driven off the `projects_changed` frame, is what does.
+
+**The misattribution is now a test, not a comment.** `switchTimingNow` injects the
+stopwatch's clock (the same seam `switchConnectingGraceMs` and `switchTimingEmit` already
+are), so the decomposition can be asserted exactly instead of against real elapsed time,
+which measures the runner (ISSUES #438). The test reproduces the report's *shape*:
+`publish()` only SCHEDULES React's render, React flushes it synchronously at the end of the
+discrete event — after `setProject` returns, and therefore before any microtask — and the
+awaited read resumes in a microtask behind it. With a 250 ms render, `vm_published` reads
+**0** and `transcript_read` reads **250**. That is the owner's "3 ms vs 3283 ms" in
+miniature, and it means the two halves of the false conclusion now both fail if the
+mechanism is disturbed. Getting this right took one wrong attempt: modelling the render
+inside the subscriber put it inside `vm_published`, and the entire reason the bug was
+invisible is that it is *not* there.
+
+`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (19 tests) pins all of it,
+and every guard was mutation-tested: **15 mutations, 15 killed, 0 survived.** The one that
+mattered most had to be rebuilt: the original `frame_rendered` test asserted only that the
+mark was PRESENT, and a review mutation that stamped it synchronously — the exact defect
+the mark exists to detect — kept 25 of 25 tests green. Presence is what a broken
+implementation also has. The replacement asserts WHEN the mark lands, deterministically
+(rAF under test control; a second `setProject` supersedes the timer, which flushes on
+demand), and kills both the synchronous stamp and a bare `raf(fn)` that would time the
+render instead of the picture.
+
+One mutation was tried and **discarded rather than counted**: `DEFAULT_DEADLINE_MS` back to
+8 s survives, because no test waits 8 s and any assertion for it would be a constant
+restating a constant. It is a tuning number justified by a measurement in its docblock,
+with no behavioural guard — recording that beats adding a tautological test to make the
+table look complete.
+
+📌 Two lessons, and the second is the one that nearly shipped. **An instrument stamped
+after an `await` measures the queue, not the work** — the number was current, real, and
+about a different subsystem than its name. And **a guard for an ordering property must
+assert the ordering**: a presence check over an async mark passes for the async
+implementation and the synchronous one alike, so it reads as coverage while testing
+nothing. The tell is available for free — mutate the line the test exists to protect and
+watch whether anything goes red.
+
+## 2026-08-17 — the switch was re-rendering every transcript alive, including the ones nobody was looking at (#409)
+
+Takes over #394 (its commits are included verbatim; both of its held P2s are fixed
+here) and closes the actual latency complaint behind it: 3-9 s to switch projects in
+the web client.
+
+**The cause, measured with the render finally separable from the store.** A switch
+re-rendered every mounted conversation's whole transcript. Two independent reasons,
+neither visible from a single-surface measurement:
+
+- `landing/chat-react/controller.ts` kept its render cache in ONE map for the whole
+  controller. `computeVm` builds the next map from the ENTERED topic's rows, so on a
+  switch it consulted a map still holding the topic just LEFT — every lookup missed,
+  every row was minted fresh, and the messages array was new too. Nothing about that
+  looks wrong from outside: the frame is correct and the rows are correct. But the
+  bubble contexts in `ChatApp` are memoized on that array, **a context value change
+  bypasses `React.memo`**, and assistant-ui's converter cache is keyed on message
+  identity — so re-entering a project whose transcript had not changed by a byte
+  re-converted and re-rendered every row in it.
+- `ChatApp` renders EVERY mounted conversation on every publish and nothing was
+  memoized, so each publish also paid for the transcripts of up to seven surfaces the
+  owner was not looking at.
+
+**What the measurement actually supports — and what it does not.** The first pass at
+this entry led with milliseconds: 1106 ms down to 144 ms for one switch at 533 messages
+a side. **Those numbers did not survive being measured twice.** Three back-to-back runs
+of the same UNFIXED tree gave 1322 ms, 415 ms and 368 ms for the identical switch,
+because the first run in a bun process pays JIT and happy-dom warm-up. The spread
+between runs of one tree is larger than the gap being claimed between two trees, so any
+single millisecond figure from that harness is an artefact of run order dressed as a
+property of the code. They are not quoted here, and the earlier draft that did quote
+them was wrong to.
+
+**The counts are the measurement.** Same harness, spies on `useChatRuntime` (once per
+conversation-surface render) and `toThreadMessage` (once per message conversion), plus a
+controller subscriber. Byte-identical on every run and at both transcript sizes:
+
+| one warm switch | before | after |
+| --- | --- | --- |
+| conversation surfaces rendered | 4 | 2 |
+| message conversions | N (50 at N=50, 533 at N=533) | 0 |
+| controller publishes | 2 | 1 |
+| surfaces rendered switching into an EMPTY conversation | 6 | 2 |
+
+`conversions = N` is the whole diagnosis in one number: every message in the project
+being entered was re-converted on entry, so the cost scaled with the transcript exactly
+as the owner experienced it. And the empty-conversation row is the second cause on its
+own — a switch into a conversation with nothing in it still rendered six surfaces,
+paying for transcripts neither on screen nor entered.
+
+The harness is NOT committed (a timing assertion would measure the runner, which is what
+`scripts/ci/lint.sh` CHECK 5 exists to keep out), but the counts above are all asserted
+by `switch-render-cost.test.tsx`, so the claim is reproducible from the tree even though
+the harness is not. Method for redoing the harness: mount `ChatApp` over a
+`NeutronChatController` with two seeded topics, warm both surfaces, then drive one
+`setProject` inside `act()` with the two module spies installed.
+
+**Markdown re-parses were already zero** before any of this, because `Markdown` is
+memoized and the bodies are unchanged strings. Worth recording: it was the obvious
+suspect, the one a profile of a cold mount would have accused, and windowing the list
+to fix it would have optimised something that was not firing.
+
+**Shipped.** The render cache is keyed by topic, alongside the transcript cache it
+mirrors and invalidated with it (deleted project, `stop()`, LRU bound).
+`MountedConversation` is memoized, with every callback prop ref-stabilized at the
+`ChatApp` boundary and `useAttachmentDraft`'s return object memoized — load-bearing,
+not tidiness, since `ProjectShell` passes an inline arrow and one unstable prop turns
+the memo into a no-op silently. `publish()` skips notifying when the frame is
+unchanged, which removes the second full render `setProject` used to force by
+unconditionally kicking a refresh that resolves to what is already on screen; its
+comparator is a record keyed by `keyof ChatViewModel`, so adding a field without
+deciding how it compares is a compile error rather than a frozen update nobody sees.
+
+**The stopwatch's own second misattribution, fixed.** `transcript_read` and
+`transcript` were REQUIRED, so a switch already painted from cache stayed open until a
+background refresh nobody waited on answered, and then reported that wait as the
+store's. That is the same error `frame_rendered` was added to end, reappearing inside
+the fix for it — the first version charged the store for the render it was waiting
+behind, this one charged the switch for work done after the switch was over. Both come
+of treating "the last thing that finished" as "what the user waited for". `setProject`
+now TELLS the timer when the first frame carried cached rows, because the marks cannot
+reveal it: both kinds of switch stamp the same five in the same order and the only
+difference is what was on screen while they were stamped. Report schema 2 to 3, since
+`total` changed meaning again.
+
+`landing/chat-react/__tests__/switch-render-cost.test.tsx` pins all of it in counts and
+object identities, never durations — the per-surface render counter is a spy on
+`useChatRuntime` (called once per surface render) and the per-message counter a spy on
+`toThreadMessage`, so no counter had to be added to the code under test. It also carries
+the inverse case (a refresh that brings something NEW still publishes), because a
+comparator that over-matches freezes the transcript and passes every test that only
+counts publishes downward. `bun test landing/chat-react/` 693 pass / 0 fail; typecheck
+clean.
+
+| Mutant | Result |
+| --- | --- |
+| render-cache lookup mis-keyed (always misses) | RED — array identity, publish count, render count |
+| `publish()` notifies unconditionally | RED — publish count and render count |
+| `MountedConversation` not memoized | RED — 6 surface renders, expected 2 |
+| `onOpenActivity` back to an inline fallback arrow | RED — surface render count |
+| draft object identity unstable | RED — 3 surface renders, expected 2 |
+| timer never told the frame was cache-served | RED — record never completes at the paint |
+
 ## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
 
 `tests/support/migrated-db.ts` seeds a test database by COPYING a template that the
@@ -225,161 +653,6 @@ and installs go cold with no signal but the timings. Accepted here (the entry is
 Vendoring `gbrain` would remove the network dependency outright rather than caching around
 it, and would also close the byte-verification gap above by putting the content in the tree
 under review. It is deliberately NOT done here — recorded in #410 rather than lost.
-## 2026-08-17 — a Codex subscription is no longer one account for the whole instance (#407)
-
-PR #407. The owner may connect several ChatGPT seats; trident picks one per run at
-the existing `resolve_codex_home` seam and skips any seat that has hit its usage cap.
-This supersedes the earlier statement in this log that "a Codex subscription is one
-account for the whole instance" — that was true when written and is what changed here.
-
-New: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts` (rollout
-harvest), `trident/codex-rotation-store.ts` (bookkeeping),
-`migrations/0134_codex_rotation.sql`. Edited: `trident/codex-credential.ts`,
-`trident/codex-credential-tool.ts`, `gateway/http/codex-credential-surface.ts`,
-`open/composer.ts`, `app/app/integrations.tsx`, `app/lib/codex-credential-client.ts`.
-Ordinal 0134 skips 0133, which another open branch already claims.
-
-Slot `default` is byte-identical to before — same service row (`codex`), same directory
-(`<owner_home>/.codex`), same bytes — so a one-seat install is unchanged, nothing
-migrates, and rotation is the single code path with no feature flag. Extra seats are
-service `codex-acct-<slot>` at `<owner_home>/.codex/accounts/<slot>/`.
-
-A seat's bundle is NEVER copied between directories. The codex CLI rewrites `auth.json`
-on refresh and that refresh rotates the refresh token, so two live copies of one account
-revoke each other. Selection is a pointer at a directory; the re-materialize guard stays
-only-if-missing. Harvest-back re-encrypts a CLI-refreshed bundle back into the store when
-the on-disk `last_refresh` is newer, which also closes a hazard that predated this change:
-the stored copy used to drift staler with every refresh, so the self-heal path would
-eventually restore a token the server had already invalidated. It runs for the seat that
-just RAN as well as the one about to run — the seat that just refreshed is precisely the
-one whose stored copy is now stale, and it may be cooling for a week before it is resolved
-again.
-
-The exhaustion signal is harvested, not probed — there is no free usage gauge. Every
-session appends a rollout under `<CODEX_HOME>/sessions/`, whose `token_count` events carry
-`rate_limits`. That rollouts follow the run's `CODEX_HOME` was verified live rather than
-assumed: an empty `CODEX_HOME` plus one `codex exec` produced the whole state root there,
-`sessions/` included, on a run that never authenticated. The parser requires `rate_limits`
-to sit on the node whose own `type` is `token_count`, which is the shape a real rollout
-line has, so an unrelated event carrying a same-named object is not read as evidence.
-
-The threshold is keyed on `window_minutes`, NOT on whether the CLI called a window
-`primary` or `secondary`. Measured across 12,582 real `token_count` samples from 600
-rollout files (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a week — in every
-sample and `secondary` was null in every sample. Reading `primary` as the 5-hour window,
-as the design assumed, would have applied a session threshold and a session-length
-cooldown to a weekly cap and rotated a still-capped seat back into service. Windows at or
-under 1440 minutes cool at 98%, longer ones at 99%. The fallback cooldown is the window's
-own length, CLAMPED to 32 days: the same binary declares `daily-limit`, `weekly-limit`,
-`monthly-limit` and `annual-limit`, so an unclamped length would bench a paid seat for a
-year, and an absurd value reaches `Infinity`, which SQLite round-trips as a REAL that no
-clock comparison can clear. `resets_at` is epoch seconds, converted once at the parse
-boundary, and classified three ways rather than two: a reset already in the PAST means the
-window has rolled over, so that sample is ignored instead of starting a fresh full-length
-cooldown from a stale reading.
-
-NO stderr classifier ships, and that is a correction of an earlier claim in this entry's
-first revision. It stated the patterns had been "measured off the shipped binary's own
-literals". They had not: `weekly limit` and `session limit` each return ZERO hits against
-the literals in codex-cli 0.147.0, while `usage limit` returns 23 and the positive controls
-`codex-cli` and `rate_limit_reached_type` return 9 and 17 — so the search works and those
-two discriminators are simply absent. The binary's real messages never name the window, so
-no pattern can recover it from text. The classifier also had no production caller. Both
-it and `applyFailureCooldown` are deleted. The window class now comes from
-`rate_limit_reached_type`, which the CLI itself sets, rides the `token_count` event the
-harvest already reads, and needs no new seam.
-
-Fail-safe rules, each pinned by a mutation applied and observed red: a harvest that errors
-or finds nothing cools nothing; when every seat is cooling the current one is kept and
-`codex_rotation_exhausted` is logged; a seat whose stored credential is missing or expired
-is cooled `unauthorized` and SKIPPED rather than returning no credential at all; an
-`unauthorized` cooldown ignores the clock until the seat is reconnected; per-project
-overrides resolve first and stay out of rotation. A reconnect stamps `connected_at` and
-clears the previous occupant's cooldown and usage — for the first seat as well as a named
-one — so a different subscription in a reused directory is not judged on its predecessor's
-history, which the seat's own `sessions/` tree would otherwise supply.
-
-The rollout scan is bounded: a positioned tail read rather than a whole-file read, the
-newest date partition visited first, a file cap, and one scan a minute per seat — the
-resolver is reached by a read-only status request as well as a run launch, and the CLI
-never prunes `sessions/`.
-
-Owner-facing, and on screen: the Settings integrations pane lists every seat with its
-state, which one runs next, and a per-seat Remove; the paste box stays available after the
-first connection, with an optional seat name, because adding a second seat is the point.
-Also `codex_connect` with `account: "work"`, or `POST /api/app/codex-auth` with
-`{ auth, account }`. `GET` lists seats, cooldowns and the next seat while keeping every
-legacy top-level field; `DELETE ?account=<slot>` removes one seat, and an UNQUALIFIED
-`DELETE` removes them all — that is the shipped "Disconnect Codex" button, and leaving
-named seats live and selectable behind it would keep using a credential the owner was told
-was gone. Omitting `account` on connect means the first seat, so pre-rotation clients are
-unaffected.
-## 2026-08-17 — a read in flight outlives the cache it was read from, and the instrument settled on the wrong frame (#409)
-
-Three defects found by review on the switch-latency work, sharing one shape: an
-artefact that is real, current, and about the wrong thing.
-
-**1. The transcript write-back survived its own invalidation.** `handleChange` files a
-resolved read into the transcript cache BEFORE the session-changed-underfoot guard, and
-that ordering is deliberate — a read that lands after the owner has already switched away
-still belongs to its own topic, and filing it is what makes the NEXT entry into that
-topic paint instantly. The same ordering also puts it after `stop()` and after the
-`projects_changed` deletion sweep, so an outstanding read re-created the entry
-milliseconds after the clear. Consequences, in order of severity: a project deleted and
-recreated under the same id could paint the DEAD project's history into its first frame,
-and a stopped controller could paint a transcript on restart. Both of them **after** the
-code written to prevent exactly that had run and reported success — which is why neither
-was visible from the invalidation site.
-
-Fixed with an invalidation generation (`transcriptCacheEpoch`) captured in the same
-synchronous instant as the session and the topic; a read that resolves across a bump is
-not filed. It over-invalidates by one counter — an unrelated read in flight beside a
-deletion is also dropped — which costs that topic one re-read and is the same asymmetry
-the deletion branch was already decided on: over-invalidating is free, under-invalidating
-paints the wrong history.
-
-**2. The paint mark timed an empty pane on a cold switch.** `frame_rendered` was
-scheduled from `setProject` unconditionally. On a cache MISS the frame `setProject`
-publishes is empty and the transcript arrives in a later one, so the mark landed on the
-paint of a blank pane, the record settled, and the switch reported over while the owner
-was still waiting — the original misattribution (an instrument reporting a step that is
-not the step being waited through) reappearing one mark along, inside the fix for it. The
-mark is now scheduled from exactly ONE of the two publishes, chosen by whether the first
-carries what he came to see. Scheduling from both is not a safe middle: the first stamp
-wins, and on a cold switch the first stamp is the empty one.
-
-**3. An abandoned switch was reported as a complete sub-millisecond switch.**
-`supersede()` flushed without recording why, and `incomplete` was derived from the marks
-alone. A cache-served switch's only REQUIRED mark is `vm_published`, stamped in the first
-millisecond — so a switch the owner gave up on at 40 ms satisfied "every required mark is
-in" and entered the sample as a success. Rapid consecutive clicking is what someone does
-when switching is slow, so the metric got better precisely as the product got worse, and
-it is the metric that judges this work. The cause now rides on the record
-(`superseded`), `incomplete` covers it, and the emitted line names it `abandoned=` rather
-than leaving it to read as a failure. `schema` → 4, because filtering a v3 sample on
-`incomplete === false` and a v4 sample the same way selects different populations.
-
-Two smaller ones in the same path. A cache hit on a topic carrying an UNREAD badge is a
-hit on a transcript that provably lacks the message he clicked in to read — an inactive
-topic's `onChange` is discarded, so nothing refreshed it while he was away — and it is no
-longer reported as served-from-cache: it paints instantly and finishes late, like a cold
-switch. And read receipts are now acknowledged once per topic instead of rebuilding the
-full id list on the cached frame, on the resolved read, and on every inbound frame
-thereafter (533 ids per call on the owner's biggest topic).
-
-`switch-render-cost.test.tsx` asserted a TOTAL of two surface renders while its name
-claimed "leaves every background conversation untouched". A total of two is satisfied by
-the two WRONG surfaces, so the assertion could not support the claim; it now captures
-`vm.projectId` per `useChatRuntime` call and asserts the set is exactly the surface left
-and the surface entered, with General's absence as the actual content of the claim.
-
-| Mutant | Result |
-| --- | --- |
-| write-back ungated by the epoch | RED — both lifecycle cases (stop, deletion) |
-| paint mark scheduled unconditionally in `setProject` | RED — cold-switch ordering |
-| `supersede()` without recording the cause | RED — abandonment case |
-| surface-render assertion (control: expected set changed) | RED — reports `alpha, beta`, so the ids are real |
-
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
 `.github/workflows/ci.yml` runs the suite on **eight** shard legs, up from four, and
@@ -456,263 +729,6 @@ for a different problem:
   that matters.
 
 Landed by PR #402.
-## 2026-08-17 — the switch was re-rendering every transcript alive, including the ones nobody was looking at (#409)
-
-Takes over #394 (its commits are included verbatim; both of its held P2s are fixed
-here) and closes the actual latency complaint behind it: 3-9 s to switch projects in
-the web client.
-
-**The cause, measured with the render finally separable from the store.** A switch
-re-rendered every mounted conversation's whole transcript. Two independent reasons,
-neither visible from a single-surface measurement:
-
-- `landing/chat-react/controller.ts` kept its render cache in ONE map for the whole
-  controller. `computeVm` builds the next map from the ENTERED topic's rows, so on a
-  switch it consulted a map still holding the topic just LEFT — every lookup missed,
-  every row was minted fresh, and the messages array was new too. Nothing about that
-  looks wrong from outside: the frame is correct and the rows are correct. But the
-  bubble contexts in `ChatApp` are memoized on that array, **a context value change
-  bypasses `React.memo`**, and assistant-ui's converter cache is keyed on message
-  identity — so re-entering a project whose transcript had not changed by a byte
-  re-converted and re-rendered every row in it.
-- `ChatApp` renders EVERY mounted conversation on every publish and nothing was
-  memoized, so each publish also paid for the transcripts of up to seven surfaces the
-  owner was not looking at.
-
-**What the measurement actually supports — and what it does not.** The first pass at
-this entry led with milliseconds: 1106 ms down to 144 ms for one switch at 533 messages
-a side. **Those numbers did not survive being measured twice.** Three back-to-back runs
-of the same UNFIXED tree gave 1322 ms, 415 ms and 368 ms for the identical switch,
-because the first run in a bun process pays JIT and happy-dom warm-up. The spread
-between runs of one tree is larger than the gap being claimed between two trees, so any
-single millisecond figure from that harness is an artefact of run order dressed as a
-property of the code. They are not quoted here, and the earlier draft that did quote
-them was wrong to.
-
-**The counts are the measurement.** Same harness, spies on `useChatRuntime` (once per
-conversation-surface render) and `toThreadMessage` (once per message conversion), plus a
-controller subscriber. Byte-identical on every run and at both transcript sizes:
-
-| one warm switch | before | after |
-| --- | --- | --- |
-| conversation surfaces rendered | 4 | 2 |
-| message conversions | N (50 at N=50, 533 at N=533) | 0 |
-| controller publishes | 2 | 1 |
-| surfaces rendered switching into an EMPTY conversation | 6 | 2 |
-
-`conversions = N` is the whole diagnosis in one number: every message in the project
-being entered was re-converted on entry, so the cost scaled with the transcript exactly
-as the owner experienced it. And the empty-conversation row is the second cause on its
-own — a switch into a conversation with nothing in it still rendered six surfaces,
-paying for transcripts neither on screen nor entered.
-
-The harness is NOT committed (a timing assertion would measure the runner, which is what
-`scripts/ci/lint.sh` CHECK 5 exists to keep out), but the counts above are all asserted
-by `switch-render-cost.test.tsx`, so the claim is reproducible from the tree even though
-the harness is not. Method for redoing the harness: mount `ChatApp` over a
-`NeutronChatController` with two seeded topics, warm both surfaces, then drive one
-`setProject` inside `act()` with the two module spies installed.
-
-**Markdown re-parses were already zero** before any of this, because `Markdown` is
-memoized and the bodies are unchanged strings. Worth recording: it was the obvious
-suspect, the one a profile of a cold mount would have accused, and windowing the list
-to fix it would have optimised something that was not firing.
-
-**Shipped.** The render cache is keyed by topic, alongside the transcript cache it
-mirrors and invalidated with it (deleted project, `stop()`, LRU bound).
-`MountedConversation` is memoized, with every callback prop ref-stabilized at the
-`ChatApp` boundary and `useAttachmentDraft`'s return object memoized — load-bearing,
-not tidiness, since `ProjectShell` passes an inline arrow and one unstable prop turns
-the memo into a no-op silently. `publish()` skips notifying when the frame is
-unchanged, which removes the second full render `setProject` used to force by
-unconditionally kicking a refresh that resolves to what is already on screen; its
-comparator is a record keyed by `keyof ChatViewModel`, so adding a field without
-deciding how it compares is a compile error rather than a frozen update nobody sees.
-
-**The stopwatch's own second misattribution, fixed.** `transcript_read` and
-`transcript` were REQUIRED, so a switch already painted from cache stayed open until a
-background refresh nobody waited on answered, and then reported that wait as the
-store's. That is the same error `frame_rendered` was added to end, reappearing inside
-the fix for it — the first version charged the store for the render it was waiting
-behind, this one charged the switch for work done after the switch was over. Both come
-of treating "the last thing that finished" as "what the user waited for". `setProject`
-now TELLS the timer when the first frame carried cached rows, because the marks cannot
-reveal it: both kinds of switch stamp the same five in the same order and the only
-difference is what was on screen while they were stamped. Report schema 2 to 3, since
-`total` changed meaning again.
-
-`landing/chat-react/__tests__/switch-render-cost.test.tsx` pins all of it in counts and
-object identities, never durations — the per-surface render counter is a spy on
-`useChatRuntime` (called once per surface render) and the per-message counter a spy on
-`toThreadMessage`, so no counter had to be added to the code under test. It also carries
-the inverse case (a refresh that brings something NEW still publishes), because a
-comparator that over-matches freezes the transcript and passes every test that only
-counts publishes downward. `bun test landing/chat-react/` 693 pass / 0 fail; typecheck
-clean.
-
-| Mutant | Result |
-| --- | --- |
-| render-cache lookup mis-keyed (always misses) | RED — array identity, publish count, render count |
-| `publish()` notifies unconditionally | RED — publish count and render count |
-| `MountedConversation` not memoized | RED — 6 surface renders, expected 2 |
-| `onOpenActivity` back to an inline fallback arrow | RED — surface render count |
-| draft object identity unstable | RED — 3 surface renders, expected 2 |
-| timer never told the frame was cache-served | RED — record never completes at the paint |
-
-## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render (#409)
-
-The owner's web UI took 3-9 s to switch projects. 47 real `project_switch` samples from
-his client diagnostics read `transcript_read` median 3283 ms / p90 6614 ms / max 9198 ms
-against `vm_published` median 3 ms / max 39 ms, which reads as "rendering is instant, the
-store read is effectively 100% of the switch". Every number in that report is real and
-the conclusion it invites is wrong in both halves.
-
-**The read is not slow, and the reason is structural rather than a benchmark.** Read
-`chat-core/stores/opfs-store.ts:113-115`: `list()` delegates straight to the in-memory index
-(`chat-core/store.ts:413-417`). **There is no OPFS I/O in the read path at all** — the only
-OPFS reads are the one-shot `hydrate()` at boot and the snapshot writes. That is checkable
-from the tree by anyone, needs no timing, and is the actual argument; a copy-and-sort over
-533 in-memory rows cannot cost a second.
-
-⚠️ The corroborating magnitudes below are **one-off measurements against a throwaway
-harness that is NOT committed**, so they cannot be reproduced from this repo and should be
-read as indicative only. Method, for anyone who wants to redo them: drive the real
-`OpfsChatStore` + `SyncEngine` + `SendQueue` over a 12-topic × 533-message store with
-injected per-operation OPFS latencies, then time
-`Promise.all([session.messages(), session.pendingCount()])`. That gave median 0.1 ms / p90
-0.4 ms / max 1.0 ms, 0.2 ms with a 60-upsert write burst in flight, and 184 ms for a
-one-shot 3.8 MB `hydrate()`. No benchmark was added to the suite deliberately: a committed
-timing assertion measures the runner's load, which is the class `scripts/ci/lint.sh`
-CHECK 5 exists to keep out of the tree.
-
-**The mark charges the read for the main thread it waited on.** `vm_published` is stamped
-the instant `publish()` returns, and `publish()` only *schedules* the render: it computes
-the VM and notifies subscribers, and React flushes the resulting render synchronously at
-the END of the discrete event — after `setProject` has already returned. So `vm_published`
-contains none of the paint. `transcript_read` is stamped after an `await` in
-`handleChange`, whose continuation is a microtask, and microtasks cannot run until that
-flush completes — so it contains all of it. The proof is a CONTROL, and is labelled as one
-everywhere it now appears: a subscriber with a deliberately **injected** 250 ms
-synchronous body, driven through React's synthetic discrete-event path, put `render_ended`
-at 256.6 ms and `transcript_read` at 257.6 ms while `vm_published` reported 0.2 ms — and
-the same injected body on a plain (non-React) listener, where React defers, reported
-`transcript_read` **1.8 ms**. That discriminates "the render lands inside the transcript
-window" from "it doesn't", which is all it was built to do. The instrument's own docblock
-— "if this mark is already hundreds of ms the problem is the paint, not the data" — had
-named the right discriminator and then put the mark on the wrong side of it.
-
-**What is NOT established, and must not be read into the above.** Nobody has measured how
-long the owner's 533-row markdown thread actually takes to paint. The 250 ms is an
-injected number, not his. So this change does not claim the 3-9 s shrinks, and no
-committed measurement here shows that it does — `frame_rendered` is precisely the
-instrument that will produce the first real answer, out of his next samples.
-
-Three changes, all in `landing/chat-react/`:
-
-- **`controller.ts` — the switch reads the transcript synchronously.** A bounded
-  per-TOPIC cache (`transcriptCache`, 24 entries, ordered by last use) holds the last
-  resolved `{ msgs, pending }` for every visited topic, written by `handleChange` under
-  the topic captured in the same synchronous instant as the session. `setProject` reads it
-  before it publishes, so the FIRST frame of a re-entered project already carries that
-  project's transcript instead of an empty thread a second render replaces. A first-ever
-  visit still publishes empty and fills from the read, because there is genuinely nothing
-  yet to paint.
-
-  **This removes the empty frame, not the render.** The resolved read still publishes
-  behind it, `handleChange` is still called on every switch, and the total row-construction
-  work is unchanged — 533 rows built once either way. It MOVES into the click-blocking
-  frame, which an adversarial review measured at 0.19 ms → 2.37 ms of synchronous
-  `setProject` cost — their harness, cited rather than reproduced here. What the owner
-  gains is that the first thing he sees is his conversation; what he does not gain, yet,
-  is a shorter wait for it.
-
-- **`controller.ts` — rows that are painted are rows that are read.** The read receipt for
-  the cached rows is now sent from the switch, through the entered project's session,
-  rather than only from the resolved read. Painting agent messages while acknowledging
-  nothing meant a stalled read left the server watermark un-advanced, so its next
-  `projects_changed` restored the unread badge on messages the owner was looking at.
-
-- **`switch-timing.ts` — a `frame_rendered` mark, so this cannot recur.** Stamped from a
-  `requestAnimationFrame` plus a trailing task (a single rAF callback runs *before* that
-  frame's paint), it is the first instant at which the published frame has actually been
-  drawn. `frame_rendered ≈ transcript_read` ⇒ the render is the cost;
-  `frame_rendered ≪ transcript_read` ⇒ the store is. No pair of the original four marks
-  could tell those apart, which is why the report pointed at the wrong subsystem.
-
-  Three things had to be true for it to be worth having, and only the first was at the
-  start. **(1)** Its absence is a NORMAL outcome, reported `not_painted` alongside
-  `socket_open`'s `reused` — rAF does not run in a hidden or backgrounded tab, and a boot
-  deep-link can switch projects in one, so a required paint mark manufactured
-  `Project switch incomplete … never_arrived=frame_rendered` for switches that completed.
-  **(2)** But the recorder still WAITS 250 ms for it once every required mark is in,
-  because the paint necessarily lands a frame after the `transcript` mark that would
-  otherwise flush the record — without that window the mark would be dropped on nearly
-  every switch. **(3)** `incomplete` is now derived from the marks inside `flush()` rather
-  than passed in by whichever timer woke it, so all four flush paths agree on one
-  definition. The deadline also rose 8 s → 30 s: it was shorter than his own measured
-  max of 9198 ms, so the slowest switches — the only ones that mattered — were truncated
-  as incomplete before their last mark could land.
-
-  `buildSwitchReport` now stamps `schema: 2`, because `total` silently changed meaning:
-  it is the largest mark seen and `frame_rendered` is normally the last, so a v2 `total`
-  includes the paint where v1 stopped at `transcript`. The owner has a 47-sample baseline
-  stamped `1`; averaging the two would have read the shift as a regression.
-
-The session-changed-underfoot guard (a real Codex P2) is untouched and now has its own
-tests: a stalled read for the topic the owner LEFT cannot clobber the topic they entered,
-and cannot route the old topic's read receipts through the new project's session. The
-cache write is deliberately on the other side of that guard — the rows belong to the topic
-captured before the await, and filing them under whatever topic happens to be active when
-a slow read lands is precisely how one project's messages would reach another's frame.
-
-Two claims that were in this entry's first draft were **wrong**, found by review, and are
-corrected above rather than quietly dropped: "the switch is off the store's critical path
-entirely" (`handleChange` is still called on every switch) and "there is one render, not
-two" (both frames still render; the second's rows keep their identities so the list memo
-can bail, which is not the same thing). A cache entry was also documented as "a reference
-to rows the store already holds" — `chat-core/store.ts:413-417` builds a fresh `{ ...m }`
-per message, so an entry is a real retained copy and the limit is sized rather than
-assumed. And topic-keying was credited with preventing cross-project serving on id reuse;
-`topicForProject` is a pure function of (userId, projectId), so it prevents nothing of the
-sort — deletion invalidation, driven off the `projects_changed` frame, is what does.
-
-**The misattribution is now a test, not a comment.** `switchTimingNow` injects the
-stopwatch's clock (the same seam `switchConnectingGraceMs` and `switchTimingEmit` already
-are), so the decomposition can be asserted exactly instead of against real elapsed time,
-which measures the runner (ISSUES #438). The test reproduces the report's *shape*:
-`publish()` only SCHEDULES React's render, React flushes it synchronously at the end of the
-discrete event — after `setProject` returns, and therefore before any microtask — and the
-awaited read resumes in a microtask behind it. With a 250 ms render, `vm_published` reads
-**0** and `transcript_read` reads **250**. That is the owner's "3 ms vs 3283 ms" in
-miniature, and it means the two halves of the false conclusion now both fail if the
-mechanism is disturbed. Getting this right took one wrong attempt: modelling the render
-inside the subscriber put it inside `vm_published`, and the entire reason the bug was
-invisible is that it is *not* there.
-
-`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (19 tests) pins all of it,
-and every guard was mutation-tested: **15 mutations, 15 killed, 0 survived.** The one that
-mattered most had to be rebuilt: the original `frame_rendered` test asserted only that the
-mark was PRESENT, and a review mutation that stamped it synchronously — the exact defect
-the mark exists to detect — kept 25 of 25 tests green. Presence is what a broken
-implementation also has. The replacement asserts WHEN the mark lands, deterministically
-(rAF under test control; a second `setProject` supersedes the timer, which flushes on
-demand), and kills both the synchronous stamp and a bare `raf(fn)` that would time the
-render instead of the picture.
-
-One mutation was tried and **discarded rather than counted**: `DEFAULT_DEADLINE_MS` back to
-8 s survives, because no test waits 8 s and any assertion for it would be a constant
-restating a constant. It is a tuning number justified by a measurement in its docblock,
-with no behavioural guard — recording that beats adding a tautological test to make the
-table look complete.
-
-📌 Two lessons, and the second is the one that nearly shipped. **An instrument stamped
-after an `await` measures the queue, not the work** — the number was current, real, and
-about a different subsystem than its name. And **a guard for an ordering property must
-assert the ordering**: a presence check over an async mark passes for the async
-implementation and the synchronous one alike, so it reads as coverage while testing
-nothing. The tell is available for free — mutate the line the test exists to protect and
-watch whether anything goes red.
-
 ## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
 
 The outer publisher refused to publish when origin's branch ref already equalled the

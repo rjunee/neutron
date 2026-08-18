@@ -90,7 +90,7 @@ test('the live 0125 incident boots, applies later migrations, and leaves row 125
 
   const result = applyMigrations(db, fullDir)
 
-  expect(result.applied).toEqual([127, 130, 131, 132, 134])
+  expect(result.applied).toEqual([127, 130, 131, 132, 133, 134])
   expect(result.skipped).toContain(125)
   const columns = columnNames(db, 'code_trident_runs')
   expect(columns).toContain('base_sha')
@@ -166,7 +166,7 @@ test('without the 125 entry the run no longer needs one — it applies 0125 and 
   const result = applyMigrations(db, fullDir)
 
   // It applied the migration itself, instead of demanding to be told about it.
-  expect(result.applied).toEqual([125, 127, 130, 131, 132, 134])
+  expect(result.applied).toEqual([125, 127, 130, 131, 132, 133, 134])
   expect(columnNames(db, 'code_trident_runs')).toContain('base_sha')
   expect(columnNames(db, 'code_trident_runs')).toContain('base_behind')
   // The incident row is untouched — never renamed, never renumbered, never deleted.

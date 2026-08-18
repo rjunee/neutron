@@ -647,6 +647,9 @@ export function buildCoreModules(
         // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
         // rule and its known over-count live, and which is unit-tested behaviourally.
         orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
+        orchestratorOpts.record_stage = (id, stage, meta) => {
+          void store.recordStageEvent(id, stage, meta ?? null).catch(() => {})
+        }
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome

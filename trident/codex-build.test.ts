@@ -27,6 +27,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -43,6 +44,8 @@ import {
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { applyMigrations } from '../migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
@@ -88,6 +91,14 @@ interface RunOpts {
   holderDirt?: boolean
   /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
   checkpointExit?: number
+  /** Install a stage-event argv recorder; its exit status exercises best effort. */
+  stageExit?: number
+  /** Use this stage writer instead of the argv recorder. */
+  stageScript?: string
+  /** Database coordinate handed to the stage writer. */
+  stageDb?: string
+  /** Run coordinate handed to the stage writer. */
+  stageRunId?: string
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -205,6 +216,7 @@ const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n
 
 interface RunResult {
   checkpointArgs: string
+  stageCalls: string
   status: number | null
   /** The signal the harness killed the wrapper with, or null if it exited by itself. */
   signal: NodeJS.Signals | null
@@ -431,6 +443,18 @@ exit 1
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = 'run-123'
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_NAME'] = 'forge-done'
   }
+  if (opts.stageExit !== undefined) {
+    const stage = join(dir, 'stage-stub.sh')
+    writeFileSync(stage, `#!/bin/sh\nprintf '%s\n' "$*" >> "$HOME/stage-args.txt"\nexit ${opts.stageExit}\n`)
+    chmodSync(stage, 0o755)
+    env['NEUTRON_CODEX_BUILD_STAGE_SCRIPT'] = stage
+  } else if (opts.stageScript !== undefined) {
+    env['NEUTRON_CODEX_BUILD_STAGE_SCRIPT'] = opts.stageScript
+  }
+  if (opts.stageExit !== undefined || opts.stageScript !== undefined) {
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = opts.stageDb ?? '/tmp/stage-run.db'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = opts.stageRunId ?? 'run-stage'
+  }
   Object.assign(env, opts.env ?? {})
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
   const brief = opts.briefParts === undefined
@@ -507,6 +531,7 @@ exit 1
   const trailerRaw = readOr('build.trailer')
   return {
     checkpointArgs: readOr('checkpoint-args.txt'),
+    stageCalls: readOr('stage-args.txt'),
     status: res.status,
     /** Non-null when the harness had to KILL the wrapper — i.e. it did not finish. */
     signal: res.signal ?? null,
@@ -635,6 +660,67 @@ describe('artifact-time checkpoint', () => {
     const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 1, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('CODEX_BUILD_CHECKPOINT_FAILED')
+  })
+})
+
+describe('durable pre-build stage stamps', () => {
+  test('wrapper-start is recorded before a not-connected refusal', () => {
+    const r = run({ authed: false, codexLoginExit: 0, stageExit: 0 })
+    expect(r.status).toBe(10)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+    ])
+  })
+
+  test('a successful Codex path records wrapper-start then codex-exec-start', () => {
+    const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 0 })
+    expect(r.status).toBe(0)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+    ])
+  })
+
+  test('without the stage env the wrapper keeps its exit behaviour and calls no recorder', () => {
+    const r = run({ authed: false, codexLoginExit: 0 })
+    expect(r.status).toBe(10)
+    expect(r.stageCalls).toBe('')
+  })
+
+  test('the real wrapper → stage-stamp.sh → sqlite chain appends a row', () => {
+    const migrated = mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-'))
+    const stageDb = join(migrated, 'project.db')
+    seedMigratedDb(stageDb)
+    const migratedDb = new Database(stageDb)
+    applyMigrations(migratedDb)
+    migratedDb.close()
+    try {
+      const r = run({
+        authed: false,
+        codexLoginExit: 0,
+        stageScript: fileURLToPath(new URL('./stage-stamp.sh', import.meta.url)),
+        stageDb,
+        stageRunId: 'run-real-stage',
+      })
+      expect(r.status).toBe(10)
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query('SELECT run_id, stage FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      expect(rows).toEqual([{ run_id: 'run-real-stage', stage: 'wrapper-start' }])
+    } finally {
+      rmSync(migrated, { recursive: true, force: true })
+    }
+  })
+
+  test('a non-zero stage script cannot change the wrapper exit code', () => {
+    const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 19 })
+    expect(r.status).toBe(0)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+    ])
   })
 })
 

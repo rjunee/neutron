@@ -101,6 +101,8 @@ export interface BuildTridentOrchestratorOptions {
   db_path: string
   /** Host command runner — base-branch detect, existing-PR probe, merge. */
   run_host: RunHostCommand
+  /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
+  record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
   /** Injectable wait, used to SPACE the resume head-read retries
@@ -2003,6 +2005,14 @@ export function buildTridentOrchestrator(
    *  clean fire. Folds any existing PR + the last checkpoint into the args for
    *  idempotent resume. */
   async function launch(run: TridentRun): Promise<AdvanceOutcome> {
+    const stamp = (stage: string, meta?: string): void => {
+      try {
+        opts.record_stage?.(run.id, stage, meta ?? null)
+      } catch {
+        // A stamp must never fail a launch.
+      }
+    }
+    stamp('launch-start', `round=${run.round} ralph_round=${run.ralph_round}`)
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
     // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
@@ -2211,6 +2221,7 @@ export function buildTridentOrchestrator(
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
+    stamp('fire-dispatched')
     const firePromise = fireWorkflow({
       run: pinnedRun,
       base_branch: base,
@@ -2286,6 +2297,7 @@ export function buildTridentOrchestrator(
       }
     }
 
+    stamp('fire-settled')
     fired.add(run.id)
     const next: TridentRun = {
       ...pinnedRun,
