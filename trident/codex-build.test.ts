@@ -49,6 +49,7 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
+const CHECKPOINT_SCRIPT = join(HERE, 'checkpoint.sh')
 const SCRIPT_TEXT = readFileSync(SCRIPT, 'utf8')
 
 /**
@@ -91,6 +92,8 @@ interface RunOpts {
   holderDirt?: boolean
   /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
   checkpointExit?: number
+  /** Stderr emitted by that recorder; the wrapper must never pass it through. */
+  checkpointStderr?: string
   /** Install a stage-event argv recorder; its exit status exercises best effort. */
   stageExit?: number
   /** Use this stage writer instead of the argv recorder. */
@@ -436,7 +439,13 @@ exit 1
   }
   if (opts.checkpointExit !== undefined) {
     const checkpoint = join(dir, 'checkpoint-stub.sh')
-    writeFileSync(checkpoint, `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\nexit ${opts.checkpointExit}\n`)
+    const checkpointStderr = opts.checkpointStderr === undefined
+      ? ''
+      : `printf '%s\\n' ${JSON.stringify(opts.checkpointStderr)} >&2\n`
+    writeFileSync(
+      checkpoint,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\n${checkpointStderr}exit ${opts.checkpointExit}\n`,
+    )
     chmodSync(checkpoint, 0o755)
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT'] = checkpoint
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = '/tmp/run.db'
@@ -1023,6 +1032,49 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     expect(codexStdin).toBe('')
   })
 
+  test('a corrupt whole brief records the exact refusal sentence on the run row', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-corrupt-whole-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'corrupt-whole-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const whole = `${DEFAULT_BRIEF}Then run the tests, commit, and open a PR.\n`
+      const res = run({
+        authed: true,
+        codexLoginExit: 0,
+        brief: DEFAULT_BRIEF,
+        integrity: briefIntegrity(whole),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_CORRUPT: the brief in ${join(res.dir, 'build.brief')} measures ${briefIntegrity(DEFAULT_BRIEF)} but the workflow composed ${briefIntegrity(whole)} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
   test('a brief REWORDED to the same length is still refused', () => {
     // The byte count alone would pass this one. The checksum is what makes "the same
     // size" and "the same text" different questions.
@@ -1148,15 +1200,148 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexStdin).toBe(parts.join(''))
   })
 
-  test('a part altered after its receipt was taken is refused', () => {
+  test('a part altered after its receipt was taken is refused with byte-identical stderr when checkpoint env is absent', () => {
     const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
     const corrupted = [...intended]
     corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
     const res = success(corrupted, { partIntegrity: intended.map(briefIntegrity) })
+    const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
-    expect(res.stderr).toContain('brief-part-1.txt')
+    expect(res.stderr).toBe(`${sentence}\n`)
     expect(res.codexArgv).toBe('')
+  })
+
+  test('a corrupt part records the exact refusal sentence on the run row and still exits 3', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-corrupt-part-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'corrupt-part-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
+      const corrupted = [...intended]
+      corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a missing part also records its exact refusal sentence on the run row', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-missing-part-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'missing-part-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const res = success(['head\n', 'middle\n', 'coda\n'], {
+        missingBriefPartIndex: 1,
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_PART_MISSING: brief part ${join(res.dir, 'missing-brief-part-1.txt')} is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a failed alert write is swallowed and the corrupt-part refusal still exits 3', () => {
+    const intended = ['contract\n', 'middle\n']
+    const corrupted = ['contract\n', 'mangled\n']
+    const res = success(corrupted, {
+      partIntegrity: intended.map(briefIntegrity),
+      checkpointExit: 19,
+      checkpointStderr: 'sqlite: unable to open /sensitive/project.db',
+    })
+    const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+
+    expect(res.status).toBe(3)
+    expect(res.stderr).toBe(
+      `CODEX_BUILD_BRIEF_ALERT_FAILED\n${sentence}\n`,
+    )
+    expect(res.checkpointArgs.trim().split('\n')).toEqual([
+      '/tmp/run.db', 'run-123', 'brief_alert', sentence,
+    ])
+    expect(res.stderr).not.toContain('/sensitive/project.db')
+    expect(Buffer.from(res.stderr).subarray(-400).toString()).toContain(
+      'CODEX_BUILD_BRIEF_PART_CORRUPT',
+    )
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('a checkpoint aimed at a missing run reports alert recording failure', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-'))
+    const dbPath = join(alertDir, 'project.db')
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.close()
+    try {
+      const intended = ['contract\n', 'middle\n']
+      const corrupted = ['contract\n', 'mangled\n']
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: 'no-such-run',
+        },
+      })
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_ALERT_FAILED')
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
   })
 
   test('a missing part refuses before codex is invoked', () => {

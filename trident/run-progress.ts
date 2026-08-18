@@ -83,6 +83,8 @@ export interface RunProgress {
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** The failure reason (e.g. the hang-watchdog reap) when `phase_label==='failed'`. */
   failure_reason: string | null
+  /** Brief-integrity refusal, including one recovered by the bridge retry. */
+  brief_alert: string | null
 }
 
 const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
@@ -197,6 +199,7 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
     pr: run.pr,
     verdict: run.inner_verdict,
     failure_reason: run.failure_reason,
+    brief_alert: run.brief_alert,
   }
 }
 

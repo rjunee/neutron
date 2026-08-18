@@ -185,6 +185,29 @@ function failureReasonText(rp: RunProgress | undefined): string | null {
   return reason !== null && reason.length > 0 ? reason : null
 }
 
+/** Brief-integrity refusals remain visible after a successful bridge retry, when
+ *  the run is live and therefore has no terminal failure reason. */
+function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null
+  const alert = rp.brief_alert
+  return typeof alert === 'string' && alert.length > 0 ? alert : null
+}
+
+interface RunNotice {
+  text: string
+  tone: 'failure' | 'alert'
+}
+
+function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp)
+  if (failure !== null) return { text: failure, tone: 'failure' }
+  // A recovered integrity alert is evidence, not a fallback explanation for an
+  // unrelated terminal failure whose reason happens to be missing.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null
+  const alert = briefAlertText(rp)
+  return alert === null ? null : { text: alert, tone: 'alert' }
+}
+
 interface DotState {
   cls: string
   pulse: boolean
@@ -829,40 +852,48 @@ export function WorkBoardTab({
                 </button>
                 {completedOpen ? (
                   <ul className="cwb-ul cwb-completed-ul" aria-label="Done">
-                    {completed.map((it) => (
-                      <li key={it.id} className="cwb-row cwb-row-done">
-                        <div className="cwb-row-line1">
-                          <span className="cwb-dot cwb-dot-done" aria-label="Done" />
-                          <span className="cwb-title" title={it.title}>
-                            {it.title}
-                          </span>
-                          {confirmDelete?.id === it.id ? (
-                            <InlineConfirm
-                              running={false}
-                              onConfirm={() => confirmRemove(it)}
-                              onCancel={cancelRemove}
-                            />
-                          ) : (
-                            <button
-                              type="button"
-                              className="cwb-btn cwb-btn-icon"
-                              onClick={() => requestRemove(it)}
-                              disabled={busyId === it.id}
-                              title="Delete item"
-                              aria-label="Delete item"
-                            >
-                              ✕
-                            </button>
-                          )}
-                        </div>
-                        {/* A completed row always carries its "Merged · <date>" on line 2. */}
-                        <div className="cwb-row-meta">
-                          <span className="cwb-date">
-                            Merged · {formatCompletedShort(it.completed_at)}
-                          </span>
-                        </div>
-                      </li>
-                    ))}
+                    {completed.map((it) => {
+                      const alert = briefAlertText(it.run_progress)
+                      return (
+                        <li key={it.id} className="cwb-row cwb-row-done">
+                          <div className="cwb-row-line1">
+                            <span className="cwb-dot cwb-dot-done" aria-label="Done" />
+                            <span className="cwb-title" title={it.title}>
+                              {it.title}
+                            </span>
+                            {confirmDelete?.id === it.id ? (
+                              <InlineConfirm
+                                running={false}
+                                onConfirm={() => confirmRemove(it)}
+                                onCancel={cancelRemove}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="cwb-btn cwb-btn-icon"
+                                onClick={() => requestRemove(it)}
+                                disabled={busyId === it.id}
+                                title="Delete item"
+                                aria-label="Delete item"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                          {/* A completed row always carries its "Merged · <date>" on line 2. */}
+                          <div className="cwb-row-meta">
+                            <span className="cwb-date">
+                              Merged · {formatCompletedShort(it.completed_at)}
+                            </span>
+                            {alert !== null ? (
+                              <span className="cwb-brief-alert" title={alert}>
+                                {alert}
+                              </span>
+                            ) : null}
+                          </div>
+                        </li>
+                      )
+                    })}
                   </ul>
                 ) : null}
               </div>
@@ -935,7 +966,7 @@ function WorkBoardRow({
   const dot = dotState(item)
   const tag = stepTag(item.run_progress)
   const round = roundText(item.run_progress)
-  const failReason = failureReasonText(item.run_progress)
+  const notice = runNotice(item.run_progress)
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
@@ -1076,9 +1107,12 @@ function WorkBoardRow({
         <div className="cwb-row-meta">
           {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
           {round !== null ? <span className="cwb-round">{round}</span> : null}
-          {failReason !== null ? (
-            <span className="cwb-fail-reason" title={failReason}>
-              {failReason}
+          {notice !== null ? (
+            <span
+              className={notice.tone === 'failure' ? 'cwb-fail-reason' : 'cwb-brief-alert'}
+              title={notice.text}
+            >
+              {notice.text}
             </span>
           ) : null}
         </div>

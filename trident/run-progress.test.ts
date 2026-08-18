@@ -100,6 +100,14 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.pr).toBe(42)
     expect(p.verdict).toBe('APPROVE')
   })
+
+  test('carries a recovered brief refusal independently of terminal failure', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: persisted bytes disagree. DEFERRED.'
+    const p = deriveRunProgress(run({ phase: 'forge-init', brief_alert: alert }), T0)
+    expect(p.phase_label).toBe('planning')
+    expect(p.failure_reason).toBeNull()
+    expect(p.brief_alert).toBe(alert)
+  })
 })
 
 describe('deriveRunProgress — stall detection', () => {

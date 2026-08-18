@@ -776,13 +776,13 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(store.getByRunId(SLUG, 'no-such-run')).toBeNull()
   })
 
-  test('detachRun(done) clears the binding + completes (datestamped history)', async () => {
+  test('detachRun(done) keeps the evidence binding + completes (datestamped history)', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'finish me' })
     await store.attachRun(SLUG, a.id, 'run-done')
     const done = await store.detachRun(SLUG, 'run-done', 'done')
     expect(done?.status).toBe('done')
-    expect(done?.linked_run_id).toBeNull()
+    expect(done?.linked_run_id).toBe('run-done')
     expect(done?.completed_at).not.toBeNull()
   })
 
@@ -806,10 +806,10 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     const retried = await store.attachRun(SLUG, a.id, 'run-2')
     expect(retried?.status).toBe('in_progress')
     expect(retried?.linked_run_id).toBe('run-2')
-    // ...and a subsequent success completes + unlinks it (no stale failed state).
+    // ...and a subsequent success completes with the NEW terminal evidence link.
     const done = await store.detachRun(SLUG, 'run-2', 'done')
     expect(done?.status).toBe('done')
-    expect(done?.linked_run_id).toBeNull()
+    expect(done?.linked_run_id).toBe('run-2')
   })
 
   test('manually advancing a failed card off the failed lane DETACHES the terminal run', async () => {
@@ -822,6 +822,18 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
     expect(requeued?.status).toBe('upcoming')
     expect(requeued?.linked_run_id).toBeNull()
+  })
+
+  test('moving a completed card out of history clears its terminal evidence link', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'reopen completed work' })
+    await store.attachRun(SLUG, a.id, 'run-done')
+    await store.detachRun(SLUG, 'run-done', 'done')
+
+    const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.status).toBe('upcoming')
+    expect(requeued?.linked_run_id).toBeNull()
+    expect(requeued?.completed_at).toBeNull()
   })
 
   test('detachRun is a safe no-op when no item is bound to the run', async () => {

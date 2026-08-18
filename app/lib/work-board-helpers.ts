@@ -216,6 +216,32 @@ export function failureReasonText(rp: RunProgress | undefined): string | null {
   return reason !== null && reason.length > 0 ? reason : null;
 }
 
+/** A brief-integrity refusal is shown even when the bridge recovered and the run
+ *  continued, which is exactly the case where `failure_reason` stays null. */
+export function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null;
+  const alert = rp.brief_alert;
+  return typeof alert === 'string' && alert.length > 0 ? alert : null;
+}
+
+export interface RunNotice {
+  text: string;
+  tone: 'failure' | 'alert';
+}
+
+/** Terminal failure is the card's outcome; a recovered brief alert is only the
+ * fallback notice while no terminal failure reason exists. */
+export function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp);
+  if (failure !== null) return { text: failure, tone: 'failure' };
+  // A recovered integrity incident is evidence, not a substitute outcome. If a
+  // terminal failure has no recorded reason, do not relabel the earlier alert
+  // as though it caused that failure.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null;
+  const alert = briefAlertText(rp);
+  return alert === null ? null : { text: alert, tone: 'alert' };
+}
+
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */
 export type DotColorKey = 'upcoming' | PhaseColorKey;
 

@@ -525,8 +525,8 @@ export function buildCoreModules(
       // a delivery error is still re-thrown so the loop's try/catch logs it.
       const runTerminalObserver = tridentWiring?.on_run_terminal
       // Work Board Phase 2b — RECONCILE the bound board item on a terminal run:
-      // clear its run binding (fork `⑂` goes dark) and set the lane from the
-      // outcome (done → completed history; failed/stopped → back to upcoming).
+      // keep its terminal evidence binding and set the lane from the outcome
+      // (done → completed history; failed/stopped → failed + retryable).
       // Keyed off `linked_run_id` via `detachRun` (idempotent + a no-op for an
       // unbound run). Best-effort observer — a board write outage must never
       // skip delivery nor un-terminate the run (the loop already transitioned
