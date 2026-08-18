@@ -140,6 +140,7 @@ describe('TridentRunStore', () => {
     expect(run.base_behind).toBeNull()
     expect(run.subagent_status).toBeNull()
     expect(run.infra_retries).toBe(0)
+    expect(run.brief_alert).toBeNull()
     // #317 — channel_kind defaults to telegram (migration 0081 column default).
     expect(run.channel_kind).toBe('telegram')
 
@@ -151,6 +152,15 @@ describe('TridentRunStore', () => {
     expect(got?.started_at).toBe(run.started_at)
     expect(got?.channel_kind).toBe('telegram')
     expect(got?.infra_retries).toBe(0)
+  })
+
+  test('brief_alert written by the host checkpoint maps onto the run object', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'brief-alert', project_slug: 't1', repo_path: '/r', task: 't' })
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [alert, run.id])
+
+    expect(store.get(run.id)?.brief_alert).toBe(alert)
   })
 
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
@@ -874,22 +884,22 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the 37 snapshot-writable table columns', () => {
+  test('COLS matches the 38 snapshot-writable table columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 37 is deliberate — adding a column must be a
+    // arity/order). The literal 38 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(37)
+    expect(cols).toHaveLength(38)
     // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
     // writer, so a full snapshot can never clear an already-won delivery claim.
-    // The table therefore has 38 columns and COLS has 37 — compare against the
+    // The table therefore has 39 columns and COLS has 38 — compare against the
     // snapshot-writable set, not the raw pragma count.
     const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
     expect(cols).toHaveLength(snapshotWritable.length)

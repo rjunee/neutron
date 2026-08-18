@@ -789,6 +789,15 @@ if [ -n "$BRIEF_PARTS" ]; then
     n=$((n + 1))
     if [ ! -s "$part" ]; then
       echo "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." >&2
+      if [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT:-}" ] \
+        && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+        && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+        "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
+          "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
+          "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
+          brief_alert "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." \
+          || echo "CODEX_BUILD_BRIEF_ALERT_FAILED: brief refusal alert could not be written; continuing." >&2
+      fi
       exit 3
     fi
     receipt="$(printf '%s\n' "$PART_INTEGRITY" | sed -n "${n}p")"
@@ -799,6 +808,15 @@ if [ -n "$BRIEF_PARTS" ]; then
     measured="$(fnv_receipt "$part" 2>/dev/null || true)"
     if [ "$measured" != "$receipt" ]; then
       echo "CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+      if [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT:-}" ] \
+        && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+        && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+        "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
+          "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
+          "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
+          brief_alert "CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." \
+          || echo "CODEX_BUILD_BRIEF_ALERT_FAILED: brief refusal alert could not be written; continuing." >&2
+      fi
       exit 3
     fi
     cat "$part" >> "$BRIEF_FILE"
@@ -835,6 +853,15 @@ if [ -z "$BRIEF_PARTS" ]; then
   BRIEF_MEASURED="$(fnv_receipt "$BRIEF_FILE" 2>/dev/null || true)"
   if [ "$BRIEF_MEASURED" != "$BRIEF_INTEGRITY" ]; then
     echo "CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+    if [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT:-}" ] \
+      && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+      && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
+        "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
+        "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
+        brief_alert "CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." \
+        || echo "CODEX_BUILD_BRIEF_ALERT_FAILED: brief refusal alert could not be written; continuing." >&2
+    fi
     exit 3
   fi
 fi

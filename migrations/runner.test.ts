@@ -97,6 +97,7 @@ test('first apply runs all migrations in order and records them in _migrations',
     // the gap is deliberate — the runner has no contiguity requirement.
     134,
     135,
+    136,
   ])
   expect(result.skipped).toEqual([])
 

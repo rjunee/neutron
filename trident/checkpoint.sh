@@ -21,6 +21,7 @@
 # Fields (whitelisted; anything else is an error):
 #   pr <int>                 → pr=<int>                          (numeric)
 #   branch <str>             → branch='<str>'
+#   brief_alert <str>        → brief_alert='<str>'
 #   inner_checkpoint <str>   → inner_checkpoint='<str>'
 #   inner_checkpoint_head <str>
 #                            → inner_checkpoint_head='<str>'
@@ -142,7 +143,7 @@ while [ "$#" -gt 0 ]; do
       # LIVENESS — frozen on a terminal row.
       sets+=("subagent_status=$(frozen subagent_status "'$(sql_quote "$value")'")")
       ;;
-    branch | inner_checkpoint | inner_verdict | inner_checkpoint_head)
+    branch | brief_alert | inner_checkpoint | inner_verdict | inner_checkpoint_head)
       # `inner_checkpoint_head` is the branch head OID the checkpoint APPLIES TO,
       # and the workflow writes it in the SAME invocation as `inner_checkpoint`
       # so the name and the commit can never drift apart. An EMPTY value is a

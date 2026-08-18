@@ -605,7 +605,7 @@ CREATE TABLE "code_trident_runs" (
     base_behind         INTEGER,
     infra_retries       INTEGER,
     agent_waked_at      INTEGER
-) STRICT
+, brief_alert TEXT) STRICT
 
 [table] code_trident_stage_events (tbl=code_trident_stage_events)
 CREATE TABLE code_trident_stage_events (

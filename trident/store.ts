@@ -93,6 +93,8 @@ export interface TridentRun {
    */
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
+  /** Host-recorded brief-integrity refusal; null until the build wrapper detects one. */
+  brief_alert: string | null
   /**
    * Trident v2 (migration 0089) — the CC workflow run id of the last
    * inner-loop dispatch. Observability only (correlate the row with its
@@ -288,6 +290,7 @@ interface TridentRunDbRow {
   thread_id: string | null
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
+  brief_alert: string | null
   workflow_run_id: string | null
   inner_checkpoint: string | null
   inner_checkpoint_head: string | null
@@ -308,7 +311,7 @@ interface TridentRunDbRow {
 export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
-  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
+  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
@@ -388,6 +391,7 @@ export class TridentRunStore {
       thread_id: input.thread_id ?? null,
       channel_kind: input.channel_kind ?? 'telegram',
       failure_reason: null,
+      brief_alert: null,
       workflow_run_id: null,
       inner_checkpoint: null,
       inner_checkpoint_head: null,
@@ -428,6 +432,7 @@ export class TridentRunStore {
         run.thread_id,
         run.channel_kind,
         run.failure_reason,
+        run.brief_alert,
         run.workflow_run_id,
         run.inner_checkpoint,
         run.inner_checkpoint_head,
@@ -1049,6 +1054,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     thread_id: row.thread_id,
     channel_kind: row.channel_kind,
     failure_reason: row.failure_reason,
+    brief_alert: row.brief_alert,
     workflow_run_id: row.workflow_run_id,
     inner_checkpoint: row.inner_checkpoint,
     inner_checkpoint_head: row.inner_checkpoint_head,
