@@ -280,6 +280,14 @@ const kimiConfigured = kimiConfiguredArg === true
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
 const stageStampSh = stageStampScript || `${repoPath}/trident/stage-stamp.sh`
 
+// Prompt-side stamps ride existing agent turns; they must never create a new seat.
+// Match checkpointEnv's coordinate gate so legacy/dry callers keep byte-identical
+// prompts, and leave failure semantics to stage-stamp.sh (which always exits 0).
+function workflowStageStampCommand(stage) {
+  if (!dbPath || !runId) return null
+  return `bash ${shSingleQuote(stageStampSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${shSingleQuote(stage)}`
+}
+
 // NO repoPath fallback, deliberately — resolving the wrapper from the repo being
 // built is the defect (Open worked by coincidence, everything else 127'd or drifted);
 // a missing arg fails closed by name in forgeAgent.
@@ -1622,6 +1630,12 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     partMissingInstructions += `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_CORRUPT in ${errFile} → read the named file in the error: if it is one of YOUR two segment files (${a1File} or ${a2File}), re-run ALL segment calls from CALL 1 exactly once; if it is a HOST-written part path, no retry by you can fix it and you must NOT rewrite the file — report codexStatus='deferred'.`
   }
   const diffFile = codexBuildDiffFile()
+  const buildAgentStampCommand = workflowStageStampCommand('build-agent-start')
+  const buildAgentStampInstruction = buildAgentStampCommand === null
+    ? ''
+    : `FIRST run exactly this standalone Bash invocation, then proceed; never let it affect your work:\n\`${buildAgentStampCommand}\`\nThis is its own separate Bash call. NEVER merge or combine it with CALL 1 or any chunk write.\n`
+  const wrapperStampCommand = workflowStageStampCommand('wrapper-invoke')
+  const wrapperStampPrefix = wrapperStampCommand === null ? '' : `${wrapperStampCommand}; `
   const checkpointEnv = !dbPath || !runId
     ? ''
     : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)} NEUTRON_CODEX_BUILD_STAGE_SCRIPT=${shSingleQuote(stageStampSh)}`
@@ -1647,11 +1661,11 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
   return `You are the CODEX BUILD bridge for trident. The BUILD ITSELF runs in a codex subprocess; YOUR job is to launch it and report the six values its wrapper measures. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 DO NOT BUILD ANYTHING YOURSELF. Do not edit a file, do not run the tests, do not commit, and do not "finish the job" if the subprocess falls short — this phase was deliberately moved off Claude, and work you do here defeats that. Run the command, read the output, fill the schema.
 Work from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere).
-${writeBriefInstructions}
+${buildAgentStampInstruction}${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -1741,7 +1755,11 @@ For every completed trailer set trailerComplete=true, copy its wrapperExitCode, 
 async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
-    return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
+    const stampCommand = workflowStageStampCommand('build-agent-start')
+    const stampInstruction = stampCommand === null
+      ? ''
+      : `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stampCommand}\`\n\n`
+    return await agent(`${stampInstruction}${brief}`, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
   }
   if (codexBuildSh === null) {
     throw new Error(
@@ -1862,7 +1880,11 @@ function planFablePrompt(resuming) {
   const resumeNote = resuming
     ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
-  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+  const stampCommand = workflowStageStampCommand('plan-start')
+  const stampInstruction = stampCommand === null
+    ? ''
+    : `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stampCommand}\`\n\n`
+  return `${stampInstruction}You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):${resumeNote}
 1. Read SPEC.md (the master spec) at the repo root and the changelog docs/AS_BUILT.md if present, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
 2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
@@ -1899,9 +1921,11 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 
 function planProbePrompt() {
   const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
+  const stampCommand = workflowStageStampCommand('plan-start')
+  const stampStep = stampCommand === null ? '' : `0. \`${stampCommand}\`\n`
   return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
-1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
+${stampStep}1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
 2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
 If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0}\` — that is a normal answer, not an error to retry around.
 Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:

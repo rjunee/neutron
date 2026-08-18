@@ -140,6 +140,9 @@ interface Opts {
    *  seat — which is the only way the CHECKPOINT NAME (as opposed to the returned
    *  result field) shows up in the captured labels. */
   withDb?: boolean
+  dbPath?: string | null
+  runId?: string | null
+  stageStampScript?: string | null
 }
 
 interface Out {
@@ -246,13 +249,20 @@ async function run(opts: Opts = {}): Promise<Out> {
     prNumber: opts.prNumber ?? null,
     branch: opts.branch ?? 'trident/plan-next-run',
     // null → checkpoint()/writeTerminalResult() no-op; the RETURN carries the result.
-    dbPath: opts.withDb === true ? '/tmp/plan-next.db' : null,
-    runId: opts.withDb === true ? 'run-plan-next' : null,
+    dbPath: opts.dbPath !== undefined
+      ? opts.dbPath
+      : opts.withDb === true ? '/tmp/plan-next.db' : null,
+    runId: opts.runId !== undefined
+      ? opts.runId
+      : opts.withDb === true ? 'run-plan-next' : null,
     resumeCheckpoint: opts.resumeCheckpoint ?? null,
     resumeCheckpointHead: opts.resumeCheckpointHead ?? null,
     resumeFindings: null,
     codexHome: null,
     checkpointScript: null,
+    stageStampScript: opts.stageStampScript === undefined
+      ? '/harness/trident/stage-stamp.sh'
+      : opts.stageStampScript,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance: '',
   }
@@ -294,6 +304,10 @@ const SURVEY_LINE = 'Read SPEC.md'
 /** The first bytes of `planFablePrompt`'s resume note, which must survive verbatim
  *  on every genuine crash-resume. */
 const RESUME_NOTE = 'RESUME — a prior run ALREADY committed progress on branch'
+const STAGE_DB = '/tmp/plan-stage-events.db'
+const STAGE_RUN = 'run-plan-stage-events'
+const STAGE_SCRIPT = '/harness/trident/stage-stamp.sh'
+const PLAN_START = `bash '${STAGE_SCRIPT}' '${STAGE_DB}' '${STAGE_RUN}' 'plan-start'`
 
 describe('plan:next — iteration 1 and every genuine crash-resume keep the full planner', () => {
   test('iteration 1 runs plan:fable, with the survey line intact and no resume note', async () => {
@@ -424,6 +438,59 @@ describe('plan:next — a clean continuation plans from the committed plan', () 
       expect(out.labels).not.toContain('plan:next')
     })
   }
+})
+
+describe('plan-stage stamps — existing planner turns only', () => {
+  test('plan:probe lists plan-start as command 0 while plan:next remains command-free and unstamped', async () => {
+    const out = await run(cleanHandoff(2, {
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+      stageStampScript: STAGE_SCRIPT,
+    }))
+    const probe = promptFor(out, 'plan:probe')
+    const next = promptFor(out, 'plan:next')
+
+    expect(probe).toContain(`0. \`${PLAN_START}\`\n1. \`cd `)
+    expect(probe.indexOf(PLAN_START)).toBeLessThan(probe.indexOf('git fetch origin'))
+    expect(next).not.toContain('stage-stamp.sh')
+    expect(next).not.toContain('plan-start')
+    expect(out.labels.some((label) => label.includes('stage'))).toBe(false)
+  })
+
+  test.each([
+    { name: 'dbPath missing', dbPath: null, runId: STAGE_RUN },
+    { name: 'runId missing', dbPath: STAGE_DB, runId: null },
+  ])('$name leaves plan:probe byte-identical to the unstamped output', async ({ dbPath, runId }) => {
+    const common = cleanHandoff(2, { dbPath, runId })
+    const configured = await run({ ...common, stageStampScript: STAGE_SCRIPT })
+    const fallback = await run({ ...common, stageStampScript: null })
+    const configuredProbe = promptFor(configured, 'plan:probe')
+
+    expect(configuredProbe).toBe(promptFor(fallback, 'plan:probe'))
+    expect(configuredProbe).not.toContain('plan-start')
+  })
+
+  test('plan:next never contains a stamp with both coordinates or with either coordinate missing', async () => {
+    const baseline = promptFor(await run(cleanHandoff(2, {
+      dbPath: null,
+      runId: null,
+      stageStampScript: null,
+    })), 'plan:next')
+    for (const coordinates of [
+      { dbPath: STAGE_DB, runId: STAGE_RUN },
+      { dbPath: null, runId: STAGE_RUN },
+      { dbPath: STAGE_DB, runId: null },
+    ]) {
+      const out = await run(cleanHandoff(2, {
+        ...coordinates,
+        stageStampScript: STAGE_SCRIPT,
+      }))
+      const next = promptFor(out, 'plan:next')
+      expect(next).toBe(baseline)
+      expect(next).not.toContain('stage-stamp.sh')
+      expect(next).not.toContain('plan-start')
+    }
+  })
 })
 
 describe('plan:next — the cheap path escalates rather than guessing', () => {
