@@ -1079,6 +1079,21 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   }
   process.once('SIGTERM', handleSignal)
   process.once('SIGINT', handleSignal)
+  // SIGNAL-READINESS MARKER — the LAST statement of boot(), emitted on the same
+  // synchronous tick as the two binds above so nothing can run between them.
+  //
+  // Every other "the gateway is up" signal this process emits lands BEFORE the
+  // handlers exist, and is therefore not evidence that a SIGTERM will be
+  // handled rather than killing the process at its default disposition (exit
+  // 143, DB never closed, WAL left for the next process to replay):
+  //   - the HTTP listener accepts connections from the Bun.serve bind above;
+  //   - sd_notify READY=1 is sent above;
+  //   - the loop-registry boot inventory line is logged above (and bootLine()
+  //     may itself throw, so it must stay on the failure-cleanup side of the
+  //     handler binds — see loop-inventory-boot-atomicity).
+  // An out-of-process supervisor that wants to signal this process and expect a
+  // GRACEFUL shutdown should wait for THIS line, not for any of those.
+  log.info('gateway_signal_handlers_ready', { project_slug, port: boundServer.port })
 
   return { db, graph, server: boundServer, shutdown }
   } catch (err) {

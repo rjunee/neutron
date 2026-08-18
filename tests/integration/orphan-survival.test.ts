@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,29 +11,6 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
 const GATEWAY_ENTRY = join(REPO_ROOT, 'gateway', 'index.ts')
-
-/**
- * How many rows a COMPLETED `applyMigrations()` leaves in `_migrations` on a
- * fresh DB — one per migration file, which is the runner's contract.
- *
- * Derived from disk rather than hardcoded because it is a readiness THRESHOLD,
- * not an assertion about the schema: hardcoding it would turn every new
- * migration into a test edit, which is precisely the maintenance burden that
- * made the previous "≥ 1 row" shortcut attractive.
- */
-const MIGRATION_FILE_COUNT = readdirSync(join(REPO_ROOT, 'migrations')).filter((f) =>
-  f.endsWith('.sql'),
-).length
-
-/**
- * The marker the gateway logs once graph composition has finished.
- *
- * Every boot line is built with this literal prefix (`loop/registry.ts`
- * `bootLine`), and it is emitted after `composeProductionGraph` returns — which
- * makes it the only cheap evidence available here that the ASYNC composition
- * step is done, as opposed to a guess at how long it takes.
- */
-const LOOP_REGISTRY_MARKER = '[loop-registry]'
 
 // Per-file shared tempdir root. Each test's `ownerDir` is a subdir under
 // this root, so a SIGINT/timeout leaks at most ONE top-level dir per file.
@@ -76,119 +53,91 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         stderr: 'pipe',
       })
 
-      // Drain both pipes into strings from the moment the process starts.
+      // WHAT THIS TEST NEEDS TO WAIT FOR, AND WHY NOTHING ELSE WILL DO.
       //
-      // Streaming rather than reading once at the end, because the readiness
-      // poll below needs to SEE a line while the process is still running — and
-      // because a full pipe buffer blocks the child, which on a chatty boot
-      // would deadlock the very startup this test is waiting for.
+      // The assertion below is `exitCode === 0`, i.e. "SIGTERM ran the gateway's
+      // graceful-shutdown handler". Signalling before `process.once('SIGTERM')`
+      // has been bound kills the child at the SIGNAL'S DEFAULT DISPOSITION —
+      // exit 143 — with the DB never closed. So the ONLY sound precondition is
+      // "the handlers are bound". Every cheaper proxy is unsound, because in
+      // gateway/index.ts boot() the handler bind is the LAST thing that happens:
+      //
+      //   ProjectDb.open(dbPath)          creates the DB file
+      //   applyMigrationsToProjectDb(db)  writes the _migrations rows
+      //   composeProductionGraph(...)     async, slow, unbounded under load
+      //   Bun.serve(...)                  the HTTP listener is accepting HERE
+      //   sdNotify('READY=1')             systemd is told "ready" HERE
+      //   log.info(loopRegistry.bootLine) the boot inventory line is logged HERE
+      //   process.once('SIGTERM'|'SIGINT') ← the handlers bind only HERE
+      //   log.info('gateway_signal_handlers_ready')  ← so we wait for THIS
+      //
+      // The previous revision polled `_migrations` for `count > 0` and then
+      // slept a fixed 100 ms, under a comment claiming the poll "proves the
+      // handler is registered". It proves no such thing, twice over: the poll
+      // breaks PART-WAY THROUGH the migration replay (each migration commits in
+      // its own transaction, so a non-zero row count means migration k of 124,
+      // not 124 of 124 — measured breaking at k=2..60), and the handlers are
+      // bound long after the replay finishes anyway. Measured on an IDLE box,
+      // the gap between the poll breaking and the handlers binding was
+      // 116-683 ms — already wider than the 100 ms sleep meant to cover it, and
+      // it widens without bound as the box gets busier. Hence the red CI runs.
+      //
+      // A longer sleep would be the same bug with a wider window, so wait for
+      // the readiness line instead: it is emitted on the same synchronous tick
+      // as the binds, with no `await` between, so observing it means the child
+      // is genuinely able to handle the signal we are about to send.
+      const READY_EVENT = 'event=gateway_signal_handlers_ready'
+
+      // ONE reader per stream for the whole test: the readiness poll and the
+      // timeout diagnostic below both read these buffers. Consuming a stream
+      // twice (the previous `new Response(proc.stdout)` on the timeout path)
+      // would throw on an already-locked stream and mask the real failure.
       let stdoutBuf = ''
       let stderrBuf = ''
       const drain = async (stream: ReadableStream<Uint8Array>, onChunk: (s: string) => void) => {
         const decoder = new TextDecoder()
         for await (const chunk of stream) onChunk(decoder.decode(chunk, { stream: true }))
       }
-      void drain(proc.stdout as ReadableStream<Uint8Array>, (s) => (stdoutBuf += s))
-      void drain(proc.stderr as ReadableStream<Uint8Array>, (s) => (stderrBuf += s))
+      const readers = Promise.all([
+        drain(proc.stdout as ReadableStream<Uint8Array>, (s) => {
+          stdoutBuf += s
+        }).catch(() => {}),
+        drain(proc.stderr as ReadableStream<Uint8Array>, (s) => {
+          stderrBuf += s
+        }).catch(() => {}),
+      ])
 
-      // The gateway's boot() path is:
-      //   1. mkdirSync(dirname(dbPath))
-      //   2. ProjectDb.open(dbPath)         ← creates the file
-      //   3. applyMigrations(db.raw())     ← writes _migrations rows
-      //   4. composeProductionGraph(...)   ← async, can be slow under load
-      //   5. SIGTERM handler installed
-      //   6. Bun.serve(...).listen()
-      //
-      // The previous `Bun.sleep(400)` was a fixed delay sized to step 5; under
-      // heavy parent-process load (full `bun test` suite, Argus/Forge/
-      // orchestrator sharing the box) bun's cold-start + module-graph init
-      // routinely spills past 400 ms and the test fails with SQLITE_CANTOPEN
-      // because the DB file did not exist yet. Replace the fixed sleep with a
-      // poll that waits for the DB file to materialise AND for _migrations to
-      // have at least one row (proves the gateway reached step 3). Cap the
-      // wait at 15 s — well inside the outer 30 s test budget — and surface
-      // the gateway's captured stderr on timeout so the failure mode is
-      // actionable rather than a bare SQLITE_CANTOPEN.
-      const dbReadyDeadline = Date.now() + 15_000
-      let bootMs = 0
-      // eslint-disable-next-line no-constant-condition
-      while (true) {
-        if (existsSync(dbPath) && statSync(dbPath).size > 0) {
-          try {
-            const probe = new Database(dbPath, { readonly: true })
-            try {
-              const row = probe
-                .query<{ count: number }, []>(
-                  "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='table' AND name='_migrations'",
-                )
-                .get()
-              if (row !== null && row.count > 0) {
-                const migCount = probe
-                  .query<{ count: number }, []>('SELECT COUNT(*) AS count FROM _migrations')
-                  .get()
-                // EVERY migration, not merely the first. The old check broke as
-                // soon as `_migrations` was non-empty — which is the middle of
-                // step 3, not the end of it — and then waited a fixed 100 ms for
-                // steps 5-6. Adding a single migration file was enough to push
-                // the rest of step 3 past that grace period, so SIGTERM landed
-                // before the handler existed and the process died on the default
-                // disposition with 143. The comment below already CLAIMED this
-                // poll proved the handler was registered; now it does.
-                if (migCount !== null && migCount.count >= MIGRATION_FILE_COUNT) {
-                  bootMs = Date.now() - (dbReadyDeadline - 15_000)
-                  break
-                }
-              }
-            } finally {
-              probe.close()
-            }
-          } catch {
-            // mid-open from the gateway's writer; back off and retry.
-          }
-        }
-        if (Date.now() >= dbReadyDeadline) {
+      // Cap at 20 s — inside the outer 30 s budget, with room for the shutdown
+      // and DB-reopen assertions that follow.
+      const startedAt = Date.now()
+      const readyDeadline = startedAt + 20_000
+      while (!stdoutBuf.includes(READY_EVENT)) {
+        if (proc.exitCode !== null) {
+          await readers
           throw new Error(
-            `gateway boot did not apply all ${MIGRATION_FILE_COUNT} migrations within 15 s.\n` +
-              `dbPath exists: ${existsSync(dbPath)}\n` +
+            `gateway exited with ${proc.exitCode} during boot, before signal handlers were bound.\n` +
               `stderr: ${stderrBuf.slice(0, 4000)}\n` +
               `stdout: ${stdoutBuf.slice(0, 1000)}\n`,
           )
         }
-        await Bun.sleep(50)
-      }
-      expect(bootMs).toBeGreaterThan(0)
-
-      // NOW WAIT FOR COMPOSITION, WHICH THE MIGRATION COUNT DOES NOT PROVE.
-      //
-      // The boot order is: migrations (step 3) → composeProductionGraph (step 4,
-      // ASYNC and slow) → SIGTERM handler (step 5) → listen (step 6). The poll
-      // above only reaches the END OF STEP 3, and the previous comment here
-      // claimed it "proves the handler is registered" — it does not, and the
-      // fixed 100 ms that followed was a guess at how long step 4 takes. Under
-      // load it does not take 100 ms, and SIGTERM then lands on a process with
-      // no handler, which dies on the default disposition with 143.
-      //
-      // `[loop-registry]` is emitted at the end of composition, so its presence
-      // is direct evidence step 4 finished rather than an estimate of it. It is
-      // a stable marker: `loop/registry.ts` builds every boot line with that
-      // literal prefix, and two suites already assert on the same emission.
-      const composedDeadline = Date.now() + 15_000
-      while (!stdoutBuf.includes(LOOP_REGISTRY_MARKER)) {
-        if (Date.now() > composedDeadline) {
+        if (Date.now() >= readyDeadline) {
           throw new Error(
-            `gateway did not finish composing within 15 s (no '${LOOP_REGISTRY_MARKER}' line).\n` +
+            `gateway did not report signal-handler readiness within 20 s.\n` +
+              `dbPath exists: ${existsSync(dbPath) && statSync(dbPath).size > 0}\n` +
               `stderr: ${stderrBuf.slice(0, 4000)}\n` +
               `stdout: ${stdoutBuf.slice(0, 1000)}\n`,
           )
         }
         await Bun.sleep(25)
       }
-      // Steps 5 and 6 are synchronous statements after that log, so a short
-      // settle is enough here — and unlike the old wait it is not covering for
-      // an unbounded async step.
-      await Bun.sleep(50)
+      // No elapsed-time assertion here on purpose. The loop above IS the
+      // assertion: it either observes the readiness line or throws with the
+      // child's output. The old `expect(bootMs).toBeGreaterThan(0)` measured
+      // wall clock and could not fail for any reason worth catching.
 
-      // Sanity: DB file should exist before we kill the process.
+      // Sanity: the migration replay committed before we kill the process.
+      // (The exhaustive check is the re-open below — a PARTIAL replay would
+      // leave rows for applyMigrations() to apply, failing `applied === []`.)
       const verifyAfterBoot = new Database(dbPath, { readonly: true })
       try {
         const row = verifyAfterBoot
@@ -201,7 +150,30 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
 
       proc.kill('SIGTERM')
       const exitCode = await proc.exited
-      expect(exitCode).toBe(0)
+      await readers
+      // 143 here is SIGTERM at its default disposition — the handlers were not
+      // bound when we signalled, which is exactly what the readiness wait above
+      // exists to prevent. Any other non-zero is a genuine shutdown fault, so
+      // carry the child's own stderr into the failure message either way.
+      expect(exitCode, `gateway stderr:\n${stderrBuf.slice(-2000)}`).toBe(0)
+
+      // …and the DB was actually CLOSED, which the exit code alone does not
+      // prove. Verified by mutation: delete the `db.close()` from shutdown()'s
+      // drain and every other assertion in this test still passes — the process
+      // exits 0, the OS reaps the handle, and SQLite's WAL is replayable enough
+      // that the re-open below succeeds. The discriminating signal is the WAL
+      // itself: closing the last connection CHECKPOINTS it, so the sidecar is
+      // absent or truncated to 0 bytes. Skipping the close leaves the frames
+      // behind (measured: 86 KB). Assert on the byte count, not on existence —
+      // a clean close on this platform truncates the file rather than unlinking
+      // it, so an existence check would pass for the wrong reason.
+      const walPath = `${dbPath}-wal`
+      const walBytes = existsSync(walPath) ? statSync(walPath).size : 0
+      expect(
+        walBytes,
+        `-wal still holds ${walBytes} uncheckpointed bytes after exit — the gateway ` +
+          `exited without closing the DB`,
+      ).toBe(0)
 
       // Re-open the DB with a fresh ProjectDb. WAL frames written during boot
       // should be checkpointed (or at least replayable) — applying migrations
@@ -283,46 +255,72 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         ])
         expect(launch.status).toBe(0)
 
-        // Give the unit time to send READY=1.
-        await Bun.sleep(2_000)
+        // Same defect as the SIGTERM subtest above, in its systemd dialect:
+        // this used three fixed sleeps (2 s / 7 s / 1 s) as stand-ins for three
+        // conditions systemd will answer directly. `systemd-run` returns as
+        // soon as the job is QUEUED, so the unit is `activating` until the
+        // gateway's READY=1 lands — on a loaded runner that is well past 2 s,
+        // and `is-active` then returns `activating` and the test goes red on
+        // work that is fine. Poll the real condition with a generous deadline
+        // instead; the fast path stays fast because it exits on first match.
+        const waitFor = async (
+          what: string,
+          deadlineMs: number,
+          predicate: () => boolean,
+        ): Promise<void> => {
+          const until = Date.now() + deadlineMs
+          while (!predicate()) {
+            if (Date.now() >= until) {
+              const journal = spawnSync('systemctl', ['--user', 'status', unitName, '--no-pager'])
+              throw new Error(
+                `timed out after ${deadlineMs} ms waiting for ${what}\n` +
+                  journal.stdout.toString().slice(0, 2000),
+              )
+            }
+            await Bun.sleep(100)
+          }
+        }
+        const isActive = (): boolean =>
+          spawnSync('systemctl', ['--user', 'is-active', unitName]).stdout.toString().trim() ===
+          'active'
+        const mainPid = (): number =>
+          Number(
+            spawnSync('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', unitName])
+              .stdout.toString()
+              .trim(),
+          )
 
-        const status = spawnSync('systemctl', ['--user', 'is-active', unitName])
-        expect(status.stdout.toString().trim()).toBe('active')
+        // Type=notify: the unit becomes `active` exactly when the gateway sends
+        // READY=1, so this waits on the gateway's own readiness, not a guess.
+        await waitFor('the unit to report READY=1 (is-active == active)', 20_000, isActive)
 
         // Capture the PID, kill the process forcibly, then verify systemd
         // brings up a fresh process within RestartSec=5s + slack.
-        const pidProbe = spawnSync('systemctl', [
-          '--user',
-          'show',
-          '-p',
-          'MainPID',
-          '--value',
-          unitName,
-        ])
-        const oldPid = Number(pidProbe.stdout.toString().trim())
+        const oldPid = mainPid()
         expect(oldPid).toBeGreaterThan(0)
 
         spawnSync('kill', ['-KILL', String(oldPid)])
-        await Bun.sleep(7_000) // RestartSec=5 + boot slack
+        // Restart=always + RestartSec=5. Wait for BOTH facts that matter — a
+        // different MainPID and an active unit — rather than sleeping past the
+        // restart and hoping. A stale-but-active read (systemd has not yet
+        // reaped the killed PID) no longer passes as a respawn.
+        await waitFor(
+          'systemd to respawn the unit with a fresh MainPID',
+          25_000,
+          () => isActive() && mainPid() > 0 && mainPid() !== oldPid,
+        )
 
-        const reactive = spawnSync('systemctl', ['--user', 'is-active', unitName])
-        expect(reactive.stdout.toString().trim()).toBe('active')
-
-        const newPidProbe = spawnSync('systemctl', [
-          '--user',
-          'show',
-          '-p',
-          'MainPID',
-          '--value',
-          unitName,
-        ])
-        const newPid = Number(newPidProbe.stdout.toString().trim())
+        const newPid = mainPid()
         expect(newPid).toBeGreaterThan(0)
         expect(newPid).not.toBe(oldPid)
 
         // Stop cleanly and verify the DB is re-openable with no corruption.
+        // Waiting for the unit to actually leave `active` is what guarantees
+        // the gateway finished its shutdown and CLOSED the DB — reading the
+        // file while the stop is still draining is what would surface as WAL
+        // corruption that isn't really there.
         spawnSync('systemctl', ['--user', 'stop', unitName])
-        await Bun.sleep(1_000)
+        await waitFor('the unit to stop (is-active != active)', 20_000, () => !isActive())
 
         const fresh = ProjectDb.open(dbPath)
         try {
@@ -337,6 +335,10 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         rmSync(ownerDir, { recursive: true, force: true })
       }
     },
-    60_000,
+    // The three waits above are bounded at 20 s + 25 s + 20 s. Budget past
+    // their sum so a genuine stall fails with the waitFor() message (which
+    // carries `systemctl status`) instead of a bare test-timeout that says
+    // nothing about which step hung.
+    90_000,
   )
 })
