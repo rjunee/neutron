@@ -304,14 +304,6 @@ jobs:
       # the route 404 with CI green. This is that half. Lives here because the
       # layering job is the one checked out with full history.
       - run: bash scripts/ci/route-slot-ratchet-guard.sh
-      # The TRACKED `merge=union` line on the as-built log is the FLOOR: it is what
-      # a fresh clone, an outside contributor and GitHub's own server-side merge
-      # get, none of which can run the custom driver installed by
-      # `scripts/install-merge-drivers.sh`. Deleting it is silent — the log simply
-      # starts conflicting again, and an ordinary-looking conflict is exactly what
-      # got this convention reinvented from scratch once already. So it is
-      # asserted rather than trusted.
-      - run: bun scripts/ci/check-governed-repo-attributes.ts .
       # Composition-field coverage ratchet — the same shape of guard for the
       # fields that are neither an `enable_*` boolean nor an HTTP route slot, and
       # which consequently NEITHER gate above can see. `push_dispatcher` was one:

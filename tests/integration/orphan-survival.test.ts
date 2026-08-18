@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,19 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
 const GATEWAY_ENTRY = join(REPO_ROOT, 'gateway', 'index.ts')
+
+/**
+ * How many rows a COMPLETED `applyMigrations()` leaves in `_migrations` on a
+ * fresh DB — one per migration file, which is the runner's contract.
+ *
+ * Derived from disk rather than hardcoded because it is a readiness THRESHOLD,
+ * not an assertion about the schema: hardcoding it would turn every new
+ * migration into a test edit, which is precisely the maintenance burden that
+ * made the previous "≥ 1 row" shortcut attractive.
+ */
+const MIGRATION_FILE_COUNT = readdirSync(join(REPO_ROOT, 'migrations')).filter((f) =>
+  f.endsWith('.sql'),
+).length
 
 // Per-file shared tempdir root. Each test's `ownerDir` is a subdir under
 // this root, so a SIGINT/timeout leaks at most ONE top-level dir per file.
@@ -88,7 +101,15 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
                 const migCount = probe
                   .query<{ count: number }, []>('SELECT COUNT(*) AS count FROM _migrations')
                   .get()
-                if (migCount !== null && migCount.count > 0) {
+                // EVERY migration, not merely the first. The old check broke as
+                // soon as `_migrations` was non-empty — which is the middle of
+                // step 3, not the end of it — and then waited a fixed 100 ms for
+                // steps 5-6. Adding a single migration file was enough to push
+                // the rest of step 3 past that grace period, so SIGTERM landed
+                // before the handler existed and the process died on the default
+                // disposition with 143. The comment below already CLAIMED this
+                // poll proved the handler was registered; now it does.
+                if (migCount !== null && migCount.count >= MIGRATION_FILE_COUNT) {
                   bootMs = Date.now() - (dbReadyDeadline - 15_000)
                   break
                 }
@@ -104,7 +125,7 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
           const stderr = await new Response(proc.stderr).text()
           const stdout = await new Response(proc.stdout).text()
           throw new Error(
-            `gateway boot did not produce a populated _migrations table within 15 s.\n` +
+            `gateway boot did not apply all ${MIGRATION_FILE_COUNT} migrations within 15 s.\n` +
               `dbPath exists: ${existsSync(dbPath)}\n` +
               `stderr: ${stderr.slice(0, 4000)}\n` +
               `stdout: ${stdout.slice(0, 1000)}\n`,
