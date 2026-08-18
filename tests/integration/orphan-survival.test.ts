@@ -231,8 +231,8 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       const walPath = `${dbPath}-wal`
       expect(
         existsSync(walPath),
-        `no ${'`-wal`'} sidecar while the gateway is live — the post-exit ` +
-          `checkpoint assertion below would hold vacuously`,
+        'no -wal sidecar while the gateway is live — the post-exit checkpoint ' +
+          'assertion below would hold vacuously',
       ).toBe(true)
 
       proc.kill('SIGTERM')
@@ -251,7 +251,12 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       // that the re-open below succeeds. The discriminating signal is the WAL
       // itself: closing the last connection CHECKPOINTS it, so the sidecar is
       // absent or truncated to 0 bytes. Skipping the close leaves the frames
-      // behind (measured: 86 KB). Assert on the byte count, not on existence —
+      // behind (measured: 152472 bytes). Take care mutating this to re-check it:
+      // `db.close()` has six call sites in gateway/index.ts and five are error
+      // paths a healthy boot never reaches, so a text-matched edit lands on one
+      // of those, changes nothing, and the resulting green reads as "this
+      // assertion is vacuous" rather than "the mutation was a no-op".
+      // Assert on the byte count, not on existence —
       // a clean close on this platform truncates the file rather than unlinking
       // it, so an existence check would pass for the wrong reason. (That the
       // sidecar existed at all is established above, before the signal.)
