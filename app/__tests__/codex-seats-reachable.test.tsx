@@ -277,6 +277,41 @@ describe('the owner can add a second seat', () => {
     // The pool's shape (which seat is next, what is cooling) only comes from GET.
     expect(codexCalls('GET').length).toBeGreaterThan(1);
   });
+
+  // MUTATION: label the control 'Add seat' whenever a seat name is typed, i.e.
+  // stop comparing the typed name against the connected seats.
+  //
+  // The server normalizes a seat name by trimming and lowercasing it, so `Work`,
+  // ` work ` and `work` are ONE seat. Typing any of them while `work` is
+  // connected OVERWRITES a live subscription bundle, and the owner cannot get it
+  // back without fetching auth.json from the other machine again. The overwrite
+  // is legitimate — it is how a revoked seat is repaired — so the control stays
+  // enabled; what it must not do is call it an addition.
+  it('says REPLACE when the typed seat name is one that already exists', async () => {
+    codexPayload = {
+      status: 'connected',
+      accounts: [seat({ slot: 'default', active: true }), seat({ slot: 'work' })],
+      next: 'default',
+    };
+    await mountIntegrations();
+    const account = byTestId('codex-account-input') as HTMLInputElement | null;
+    if (account === null) throw new Error('the add-a-seat form is not on screen');
+
+    for (const typed of ['work', 'Work', ' WORK ']) {
+      await act(async () => {
+        setValue(account, typed);
+        await new Promise((r) => setTimeout(r, 0));
+      });
+      expect(byTestId('codex-connect')?.textContent ?? '').toContain('Replace seat');
+    }
+
+    // …and a genuinely new name is still an addition.
+    await act(async () => {
+      setValue(account, 'spare');
+      await new Promise((r) => setTimeout(r, 0));
+    });
+    expect(byTestId('codex-connect')?.textContent ?? '').toContain('Add seat');
+  });
 });
 
 describe('the owner can remove one seat without removing the others', () => {
