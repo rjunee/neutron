@@ -1,4 +1,4 @@
-import { writeFileSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 
 /**
@@ -46,6 +46,18 @@ export function briefIntegrity(text: string): string {
 }
 
 /**
+ * Byte-domain twin of `briefIntegrity` and `codex-build.sh`'s `fnv_receipt`.
+ * For every string, including lone surrogates, this invariant holds:
+ * `bufferIntegrity(Buffer.from(s, 'utf8')) === briefIntegrity(s)`. Node replaces
+ * lone surrogates with U+FFFD before exposing their UTF-8 bytes.
+ */
+export function bufferIntegrity(data: Uint8Array): string {
+  let h = 0x811c9dc5
+  for (const byte of data) h = Math.imul(h ^ byte, 0x01000193) >>> 0
+  return `${data.length}:${h.toString(16).padStart(8, '0')}`
+}
+
+/**
  * By-path manifest for launcher-held brief segments. These files never transit
  * a model: T3 consumes the manifest with `NEUTRON_CODEX_BUILD_BRIEF_PARTS` in
  * `codex-build.sh`, fixing defect 2026-08-13 run `000cedc8` where a bridge model
@@ -60,44 +72,73 @@ export interface BriefParts {
 
 /**
  * Write the authoritative launcher-held brief segments by path so they never
- * transit a model. The workflow args carry their receipts; `codex-build.sh`
- * consumes the manifest and verifies every part against its receipt before
- * assembly. This addresses defect 2026-08-13 run `000cedc8`, where a
- * bridge model deterministically dropped about 1,660 bytes while retyping a
- * 26 KB brief. Node's `utf8` encoder also replaces lone surrogates with U+FFFD,
- * so the bytes on disk match the integrity byte count even for malformed input;
- * tests assert that contract.
+ * transit a model. Every receipt is returned only after the file has been read
+ * back and its persisted bytes match the composed text's receipt. A mismatch is
+ * rewritten once, then the whole manifest is refused rather than describing
+ * bytes that are not readable at its paths. `codex-build.sh` independently
+ * verifies the same receipt before assembly. Node's `utf8` encoder replaces
+ * lone surrogates with U+FFFD; parity tests pin that byte contract.
  */
 export function writeBriefParts(opts: {
   runId: string
   task: string
   reflectionGuidance: string
   dir?: string
+  io?: {
+    write_file?: (path: string, data: Uint8Array) => void
+    read_file?: (path: string) => Buffer
+  }
+  warn?: (message: string) => void
 }): BriefParts | null {
+  if (typeof opts.task !== 'string' || opts.task === '') return null
+  const warn = opts.warn ?? console.error
+  const safeRunId = String(opts.runId).replace(/[^A-Za-z0-9._-]/g, '-')
   try {
-    if (typeof opts.task !== 'string' || opts.task === '') return null
     const dir = opts.dir ?? '/tmp'
-    const safeRunId = String(opts.runId).replace(/[^A-Za-z0-9._-]/g, '-')
     const taskFile = join(dir, `trident-brief-${safeRunId}-task.part`)
     const reflectionFile = join(dir, `trident-brief-${safeRunId}-reflection.part`)
+    const writeFile = opts.io?.write_file ?? writeFileSync
+    const readFile = opts.io?.read_file ?? readFileSync
 
-    writeFileSync(taskFile, opts.task, 'utf8')
+    const writeVerified = (file: string, text: string): string | null => {
+      const data = Buffer.from(text, 'utf8')
+      const expected = briefIntegrity(text)
+      writeFile(file, data)
+      let measured = bufferIntegrity(readFile(file))
+      if (measured === expected) return expected
+
+      writeFile(file, data)
+      measured = bufferIntegrity(readFile(file))
+      if (measured === expected) return expected
+
+      warn(
+        `brief-parts: ${file} persisted ${measured} but composed ${expected} (<bytes>:<fnv32>) after one rewrite — refusing to emit a receipt the bytes on disk do not match`,
+      )
+      return null
+    }
+
+    const taskIntegrity = writeVerified(taskFile, opts.task)
+    if (taskIntegrity === null) return null
     if (typeof opts.reflectionGuidance === 'string' && opts.reflectionGuidance !== '') {
-      writeFileSync(reflectionFile, opts.reflectionGuidance, 'utf8')
+      const reflectionIntegrity = writeVerified(reflectionFile, opts.reflectionGuidance)
+      // A task-only manifest here would silently omit non-empty owner guidance.
+      if (reflectionIntegrity === null) return null
       return {
         taskFile,
-        taskIntegrity: briefIntegrity(opts.task),
+        taskIntegrity,
         reflectionFile,
-        reflectionIntegrity: briefIntegrity(opts.reflectionGuidance),
+        reflectionIntegrity,
       }
     }
     return {
       taskFile,
-      taskIntegrity: briefIntegrity(opts.task),
+      taskIntegrity,
       reflectionFile: null,
       reflectionIntegrity: null,
     }
-  } catch {
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    warn(`brief-parts: write failed for run ${safeRunId}: ${message}`)
     return null
   }
 }
