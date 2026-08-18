@@ -34,8 +34,8 @@
  * (`store.attachRun` → `linked_run_id` + status=in_progress), so the board
  * lights the fork `⑂` icon the moment the build starts. The durable
  * `TridentTickLoop` then fires the inner Workflow + harvests by runId; the
- * terminal-reconcile path (`build-core-modules` on_terminal) clears the binding
- * and sets the lane (done / back-to-upcoming) when the run lands terminal.
+ * terminal-reconcile path (`build-core-modules` on_terminal) keeps the terminal
+ * evidence binding and sets the lane (done / failed) when the run lands.
  *
  * Layering: depends only on the run store (`TridentRunStore`), the git-mode /
  * ralph detection helpers, and a STRUCTURAL board binder interface (satisfied

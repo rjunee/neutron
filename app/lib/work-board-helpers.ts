@@ -234,6 +234,10 @@ export interface RunNotice {
 export function runNotice(rp: RunProgress | undefined): RunNotice | null {
   const failure = failureReasonText(rp);
   if (failure !== null) return { text: failure, tone: 'failure' };
+  // A recovered integrity incident is evidence, not a substitute outcome. If a
+  // terminal failure has no recorded reason, do not relabel the earlier alert
+  // as though it caused that failure.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null;
   const alert = briefAlertText(rp);
   return alert === null ? null : { text: alert, tone: 'alert' };
 }

@@ -163,6 +163,22 @@ describe('TridentRunStore', () => {
     expect(store.get(run.id)?.brief_alert).toBe(alert)
   })
 
+  test('save() and saveIfActive() preserve a workflow-owned brief_alert against stale snapshots', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'sticky-brief-alert', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stale = store.get(run.id)!
+
+    const first = 'CODEX_BUILD_BRIEF_PART_CORRUPT: first durable alert. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [first, run.id])
+    await store.save(stale)
+    expect(store.get(run.id)?.brief_alert).toBe(first)
+
+    const second = 'CODEX_BUILD_BRIEF_PART_CORRUPT: second durable alert. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [second, run.id])
+    expect(await store.saveIfActive({ ...stale, phase: 'ralph-plan' })).toBe(true)
+    expect(store.get(run.id)?.brief_alert).toBe(second)
+  })
+
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })

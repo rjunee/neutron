@@ -201,6 +201,9 @@ interface RunNotice {
 function runNotice(rp: RunProgress | undefined): RunNotice | null {
   const failure = failureReasonText(rp)
   if (failure !== null) return { text: failure, tone: 'failure' }
+  // A recovered integrity alert is evidence, not a fallback explanation for an
+  // unrelated terminal failure whose reason happens to be missing.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null
   const alert = briefAlertText(rp)
   return alert === null ? null : { text: alert, tone: 'alert' }
 }
@@ -849,40 +852,48 @@ export function WorkBoardTab({
                 </button>
                 {completedOpen ? (
                   <ul className="cwb-ul cwb-completed-ul" aria-label="Done">
-                    {completed.map((it) => (
-                      <li key={it.id} className="cwb-row cwb-row-done">
-                        <div className="cwb-row-line1">
-                          <span className="cwb-dot cwb-dot-done" aria-label="Done" />
-                          <span className="cwb-title" title={it.title}>
-                            {it.title}
-                          </span>
-                          {confirmDelete?.id === it.id ? (
-                            <InlineConfirm
-                              running={false}
-                              onConfirm={() => confirmRemove(it)}
-                              onCancel={cancelRemove}
-                            />
-                          ) : (
-                            <button
-                              type="button"
-                              className="cwb-btn cwb-btn-icon"
-                              onClick={() => requestRemove(it)}
-                              disabled={busyId === it.id}
-                              title="Delete item"
-                              aria-label="Delete item"
-                            >
-                              ✕
-                            </button>
-                          )}
-                        </div>
-                        {/* A completed row always carries its "Merged · <date>" on line 2. */}
-                        <div className="cwb-row-meta">
-                          <span className="cwb-date">
-                            Merged · {formatCompletedShort(it.completed_at)}
-                          </span>
-                        </div>
-                      </li>
-                    ))}
+                    {completed.map((it) => {
+                      const alert = briefAlertText(it.run_progress)
+                      return (
+                        <li key={it.id} className="cwb-row cwb-row-done">
+                          <div className="cwb-row-line1">
+                            <span className="cwb-dot cwb-dot-done" aria-label="Done" />
+                            <span className="cwb-title" title={it.title}>
+                              {it.title}
+                            </span>
+                            {confirmDelete?.id === it.id ? (
+                              <InlineConfirm
+                                running={false}
+                                onConfirm={() => confirmRemove(it)}
+                                onCancel={cancelRemove}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="cwb-btn cwb-btn-icon"
+                                onClick={() => requestRemove(it)}
+                                disabled={busyId === it.id}
+                                title="Delete item"
+                                aria-label="Delete item"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                          {/* A completed row always carries its "Merged · <date>" on line 2. */}
+                          <div className="cwb-row-meta">
+                            <span className="cwb-date">
+                              Merged · {formatCompletedShort(it.completed_at)}
+                            </span>
+                            {alert !== null ? (
+                              <span className="cwb-brief-alert" title={alert}>
+                                {alert}
+                              </span>
+                            ) : null}
+                          </div>
+                        </li>
+                      )
+                    })}
                   </ul>
                 ) : null}
               </div>

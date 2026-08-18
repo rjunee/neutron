@@ -10,12 +10,19 @@ wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
 fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
 cannot leak the project database path or displace the refusal tag from the bounded
 wrapper-error tail; a short stable failure tag remains when recording itself fails.
+A missing run row is now a nonzero checkpoint result rather than a diagnostic-only
+exit 0, so a mis-threaded run id cannot lose the alert without a trace. Alert-only
+writes do not refresh `last_advanced_at`: recording evidence is not workflow progress.
 
 `deriveRunProgress` now carries the alert through the Work-board HTTP and live
-snapshot shape. Both web and mobile rows show it in a subdued style after a bridge
-retry recovers and lets the run continue; an actual terminal failure reason takes
-precedence as the card's outcome. Tests cover all three persisted refusal paths,
-the store and progress mapping, client parsing, and live web rendering.
+snapshot shape. Terminal reconciliation retains the run link on successful cards,
+so both web and mobile rows show the subdued alert while a recovered run continues
+and in completed history after it merges. Moving completed work back to an active
+lane clears the stale link. An actual terminal failure reason takes precedence as
+the card's outcome; an earlier alert never substitutes for an absent failure reason.
+The alert is explicitly workflow-owned, so stale `save()`/`saveIfActive()` snapshots
+cannot erase it. Tests cover all three persisted refusal paths, store/progress
+mapping, client parsing, recovery→done reconciliation, and both client renderers.
 
 ## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
 

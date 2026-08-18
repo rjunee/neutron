@@ -163,6 +163,17 @@ describe('checkpoint.sh — C1 per-phase checkpoint write (legacy checkpoint() S
     expect(row('run-1').brief_alert).toBe(alert)
     expect(row('run-other').brief_alert).toBeNull()
   })
+
+  test('brief_alert records evidence without re-stamping the active-run heartbeat', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.'
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+
+    expect(res.code).toBe(0)
+    expect(row('run-1')).toMatchObject({
+      brief_alert: alert,
+      last_advanced_at: SEEDED_HEARTBEAT,
+    })
+  })
 })
 
 describe('checkpoint.sh — terminal-result write (legacy writeTerminalResult() SQL)', () => {
@@ -479,7 +490,7 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
   // test may do; the pins stay as environment hardening for CLI builds that DO read it.
   test('an unknown run id reports the skip rather than passing silently', () => {
     const res = sh([dbPath, 'no-such-run', 'inner_checkpoint', 'forge-done'])
-    expect(res.code).toBe(0)
+    expect(res.code).toBe(3)
     expect(res.stderr).toContain('not found — checkpoint NOT applied')
   })
 })

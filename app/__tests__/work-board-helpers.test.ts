@@ -171,6 +171,12 @@ describe('briefAlertText', () => {
       text: 'recovered alert',
       tone: 'alert',
     });
+    expect(runNotice(progress({
+      phase_label: 'failed',
+      step_label: 'failed',
+      failure_reason: null,
+      brief_alert: 'earlier recovered alert',
+    }))).toBeNull();
   });
 });
 

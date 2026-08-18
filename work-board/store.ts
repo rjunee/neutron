@@ -27,11 +27,12 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
-/** The board lane. `failed` is a run-driven terminal lane (a bound trident run
- *  that FAILED): it stays in the active list, KEEPS its `linked_run_id` so the
- *  client shows a red dot + "Failed" tag + the run's `failure_reason`, and is
- *  re-actionable via the ▶/↻ retry. It is NOT a client-writable status — only
- *  the terminal reconcile sets it.
+/** The board lane. Terminal run reconciliation keeps `linked_run_id` on BOTH
+ *  outcomes so terminal evidence stays reachable: `failed` cards show the red
+ *  dot + reason and can retry, while `done` history can still show a recovered
+ *  integrity alert. Moving either card back to an active lane clears the stale
+ *  terminal link; a retry then replaces it through `attachRun`. `failed` is NOT
+ *  a client-writable status — only terminal reconciliation sets it.
  *
  *  `archived` (owner-facing: "Shelved", migration 0130) is the DEPRIORITISE
  *  lane, and it is deliberately NOT `done`. Done means SHIPPED — it stamps
@@ -846,6 +847,10 @@ export class WorkBoardStore {
           // done→archived, where the appended sort_order is simply unused until
           // the card is un-shelved.
           push('completed_at', null)
+          // A completed card retains its terminal run only while it is history,
+          // so recovered alerts remain visible there. Reopening/shelving starts
+          // a new lifecycle and must not derive progress from the old run.
+          if (current.status === 'done') push('linked_run_id', null)
           const max = tx
             .prepare<{ next: number }, [string]>(
               `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
@@ -1044,8 +1049,9 @@ export class WorkBoardStore {
   /**
    * Phase 2b — RECONCILE a bound run that reached a terminal phase. Finds the
    * item by `run_id` and sets the lane from the outcome:
-   *   - `done`   → CLEAR the run binding (fork icon goes dark) + complete the
-   *               item (datestamped history).
+   *   - `done`   → complete the item (datestamped history) and KEEP the run
+   *               binding so terminal evidence such as a recovered brief alert
+   *               remains visible. Reopening the card clears this stale link.
    *   - `failed` → mark the item FAILED and KEEP the run binding (#340). The
    *               still-linked failed run is what the client derives the red dot
    *               + "Failed" tag + `failure_reason` one-liner from (its
@@ -1067,8 +1073,9 @@ export class WorkBoardStore {
       const sets = ['inline_active = 0']
       const params: (string | number | null)[] = []
       if (outcome === 'done') {
-        // Done — clear the binding (fork ⑂ dark) + complete the item.
-        sets.push('linked_run_id = NULL', "status = 'done'")
+        // Done — keep the terminal binding so completed history can still
+        // derive durable run evidence (notably a recovered integrity alert).
+        sets.push("status = 'done'")
         // Stamp the datestamp only on a genuine →done transition.
         if (current.status !== 'done') {
           sets.push('completed_at = ?')

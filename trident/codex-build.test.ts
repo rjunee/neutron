@@ -1316,6 +1316,34 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexArgv).toBe('')
   })
 
+  test('a checkpoint aimed at a missing run reports alert recording failure', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-'))
+    const dbPath = join(alertDir, 'project.db')
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.close()
+    try {
+      const intended = ['contract\n', 'middle\n']
+      const corrupted = ['contract\n', 'mangled\n']
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: 'no-such-run',
+        },
+      })
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_ALERT_FAILED')
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
   test('a missing part refuses before codex is invoked', () => {
     const res = success(['head\n', 'middle\n', 'coda\n'], { missingBriefPartIndex: 1 })
     expect(res.status).toBe(3)

@@ -899,13 +899,13 @@ export class TridentRunStore {
    * `project_slug`, `repo_path`, `task`, `started_at`, the caps, and
    * `chat_id`/`thread_id` are write-once at create time.
    *
-   * `inner_result` is DELIBERATELY NOT written here (Phase 2a): it is
-   * WORKFLOW-OWNED — only the inner workflow's own Bash step writes it (the
-   * harvest-ready signal), and the OUTER loop only ever READS it. Excluding it
-   * from this full-snapshot save means an orchestrator `save()` (e.g. the launch
-   * persist, whose in-memory run still carries a stale null) can never clobber a
-   * result the detached workflow wrote out-of-band. Use `update({inner_result})`
-   * for the workflow-sim write in tests.
+   * `inner_result` and `brief_alert` are DELIBERATELY NOT written here: both are
+   * WORKFLOW-OWNED, out-of-band writes that the OUTER loop only ever READS.
+   * Excluding them from this full-snapshot save means an orchestrator `save()`
+   * (e.g. a launch persist whose in-memory run still carries a stale null) can
+   * never clobber a result or recovered integrity alert. Use
+   * `update({inner_result})` for the workflow-sim result write in tests;
+   * `brief_alert` is written by `trident/checkpoint.sh`.
    *
    * `inner_checkpoint_head`/`inner_checkpoint_findings` (0122) are excluded for the
    * same reason AND a sharper one: they are only meaningful PAIRED with the

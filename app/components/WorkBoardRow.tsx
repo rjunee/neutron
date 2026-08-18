@@ -331,6 +331,7 @@ function WorkBoardRowImpl({
             <Text
               style={notice.tone === 'failure' ? styles.failReason : styles.briefAlert}
               numberOfLines={1}
+              testID={`work-board-run-notice-${notice.tone}`}
             >
               {notice.text}
             </Text>
@@ -365,6 +366,7 @@ function WorkBoardCompletedRowImpl({
   variant?: 'done' | 'archived';
 }) {
   const archived = variant === 'archived';
+  const alert = archived ? null : runNotice(item.run_progress);
   const requestDelete = (): void => {
     Alert.alert('Remove this item?', undefined, [
       { text: 'Keep', style: 'cancel' },
@@ -394,6 +396,15 @@ function WorkBoardCompletedRowImpl({
       {archived ? null : (
         <View style={styles.meta}>
           <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
+          {alert !== null && alert.tone === 'alert' ? (
+            <Text
+              style={styles.briefAlert}
+              numberOfLines={1}
+              testID="work-board-completed-brief-alert"
+            >
+              {alert.text}
+            </Text>
+          ) : null}
         </View>
       )}
     </View>
