@@ -2,6 +2,91 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — the receipt the socket refused, the deletion the cache did not see, and the paint that outran its own window (#419)
+
+Remediation of the review findings on #409, which merged while the review was still
+open — so the defects were live on `main` and this had to be a follow-up rather than a
+push to that branch. Four of them, and they share a shape worth naming: each one is a
+mechanism that RECORDS or PRESERVES the opposite of what it was written to do, and each
+fails in the direction nobody can see.
+
+**A ledger recorded what it had offered, not what was accepted.** The controller kept its
+own `topic → ids` set so it could stop re-offering read receipts.
+`chat-core/web-session.ts:519-525` adds an id to `readSent` only when `ws.send()` returned
+true, and `chat-core/ws-client.ts:234-235` returns false unless the socket is `open`. A
+switch offers its receipts while its own socket is still connecting, so the frames were
+dropped on the wire and simultaneously written down as sent. Nothing re-offered them
+ever: the server's read watermark never advanced, and the unread badge the switch had
+just cleared came back on rows the owner was looking at, permanently, for the life of the
+tab. **Two ledgers for one fact, updated on different conditions, is the whole defect** —
+and only one of them is on the same side of the socket as the send, so the controller's
+is deleted rather than repaired. The suppression that was worth having (do not re-send
+what the wire took) is the session's and is unchanged; what the controller pays instead
+is a scan of an array it is already holding. This also retires the unbounded
+`readReceipts` map a reviewer flagged separately.
+
+**An invalidation keyed on the consequence instead of the event.** The `projects_changed`
+sweep bumped the transcript-cache generation only when it actually DELETED an entry. A
+read that started before a topic's first entry existed — a first-ever visit — or after
+the LRU bound had evicted it leaves the sweep nothing to drop, so the generation stands,
+and the read files the dead project's rows afterwards. A project recreated under the
+reused topic then paints the deleted project's history as its own, which is precisely the
+outcome the sweep exists to make impossible. It now compares the rail it knew against the
+rail it was sent, so a removal invalidates whether or not anything was cached for it.
+
+**A settle window was racing the render it existed to measure.** `frame_rendered` was held
+open by a fixed 250 ms timer armed the instant the last required mark landed. `transcript`
+is stamped right after `publish()`, which only SCHEDULES React's render — so on exactly
+the 3-9 s paints this instrument was built to explain, the timer came due while the main
+thread was still inside the render and flushed the record `not_painted`. **The slower the
+switch, the more certainly its measurement was discarded: an instrument blind in
+proportion to the badness of what it measures.** The window is gone. The caller declares
+that a paint stamp is scheduled (`SwitchTimer.expectPaint`) and the record then waits for
+the stamp or for the deadline; a caller whose document is hidden — where no rAF callback
+will ever run — declares nothing and the record flushes as soon as its required marks are
+in. An exact answer replaces an estimate, and the estimate was the one that could be
+beaten by a slow frame.
+
+**A mark was stamped before the guard that says whose switch it is.** `transcript_read`
+was stamped ahead of the session-changed-underfoot check, so a read for the project the
+owner had just LEFT stamped the timer for the one he had just ENTERED — and first-mark-wins
+then discarded the entered project's own read. The cache write-back still runs ahead of
+that guard on purpose (those rows belong to their topic whatever the owner did next); the
+mark does not, because a mark is a claim about this switch.
+
+Also: `VM_FIELD_EQUAL`'s homomorphic mapped type PRESERVED optionality, so the compile
+error it exists to raise would not have fired for the next optional field added to
+`ChatViewModel`. `keyof Required<ChatViewModel>` — one token, no live defect today.
+
+**Report schema 4 → 5.** In a v4 sample a missing `frame_rendered` means either "nothing
+painted" or "the render outran the window", and the second set is the slow switches —
+the population a reader is most likely to be selecting on, so mixing the two compares a
+paint-time distribution against one missing its own tail. (For the record, since the log
+did not say so at the time: the 3 → 4 bump was the one that made `incomplete` cover
+abandoned switches. The #409 entry below says "schema 2 to 3" and the code went past it
+in the same branch.)
+
+Findings from the same review that later commits on #409 had already fixed, re-checked
+against this tree rather than taken on trust: the cold switch schedules its paint stamp
+against the transcript frame and not the empty one; an abandoned switch is never reported
+complete; a cache hit on a topic the unread count proves stale is treated as cold; the
+background-render guard asserts WHICH surfaces rendered, by name.
+
+Proof is by mutation, each applied to the fixed tree and reverted: re-ledgering offered
+ids kills `A RECEIPT THE SOCKET REFUSED IS OFFERED AGAIN`; bumping the epoch only on a
+dropped entry kills `INVALIDATES ON THE DELETION, NOT ON WHETHER ANYTHING WAS CACHED FOR
+IT`; reinstating the 250 ms window kills `A SLOW RENDER'S PAINT IS RECORDED, NOT RACED
+AGAINST A SETTLE WINDOW`; stamping `transcript_read` before the guard kills `A SUPERSEDED
+READ DOES NOT STAMP ITS LATENCY ON THE NEXT PROJECT'S RECORD`. No wall-clock thresholds
+(ISSUES #438): the slow-render case asserts the record has NOT flushed while the paint is
+outstanding, which is the ordering property itself. `bun test landing/chat-react/` 705
+pass / 0 fail; `tsc -p landing/chat-react` clean.
+
+Still true and not claimed otherwise: a first-ever entry into a project is unimproved by
+any of this, and no committed measurement yet shows the owner's 3-9 s shrinking. The
+third fix is what makes an honest number obtainable at all — before it, the paint samples
+for slow switches were being thrown away by construction.
+
 ## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
 
 `tests/support/migrated-db.ts` seeds a test database by COPYING a template that the

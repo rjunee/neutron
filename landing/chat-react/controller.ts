@@ -407,7 +407,16 @@ const TRANSCRIPT_CACHE_LIMIT = 24
  * that used to happen unconditionally.
  */
 const VM_FIELD_EQUAL: {
-  readonly [K in keyof ChatViewModel]: (a: ChatViewModel[K], b: ChatViewModel[K]) => boolean
+  // `Required<…>` because a homomorphic mapped type PRESERVES optionality, so keys
+  // mapped from an optional field are optional here too — and omitting one compiles
+  // clean. The compile error this type exists to produce would then simply not happen
+  // for the next optional field anybody adds, which is the only kind of field it is
+  // easy to forget. Every field is required today; this is what keeps the guarantee
+  // true of the view-model as it changes rather than of the one it is today.
+  readonly [K in keyof Required<ChatViewModel>]: (
+    a: ChatViewModel[K],
+    b: ChatViewModel[K],
+  ) => boolean
 } = {
   messages: (a, b) => a === b,
   isRunning: (a, b) => a === b,
@@ -667,20 +676,6 @@ export class NeutronChatController {
    * at a blank pane.
    */
   private switchAwaitsPaint = false
-  /**
-   * topic → agent message ids already reported read on that topic's session.
-   *
-   * `markVisibleAgentRead` is called from two places per warm switch (the cached frame
-   * and the resolved read) and again on every inbound frame, and it rebuilt the FULL id
-   * list each time — 533 ids per call on the owner's biggest topic, re-sent for the
-   * lifetime of the conversation. The session de-dups on the wire, so nothing was
-   * wrong; it was just paying O(transcript) to tell the server things it had already
-   * been told, on the exact path being optimised.
-   *
-   * Dropped by `stop()` and by the deletion sweep alongside the transcript it mirrors:
-   * a topic whose cache is gone must not carry a memory of what was acknowledged in it.
-   */
-  private readonly readReceipts = new Map<string, Set<string>>()
   private awaitingReply = false
   /** Newest activity row for the ACTIVE scope while a turn is in flight. */
   private liveActivity: { label: string; detail?: string } | null = null
@@ -839,7 +834,6 @@ export class NeutronChatController {
     // restart — a lifecycle invariant asserted nowhere and held by nothing.
     this.transcriptCache.clear()
     this.renderCaches.clear()
-    this.readReceipts.clear()
     // A read already in flight is a live reference to what was just cleared, and it
     // writes back before it checks anything. Without this bump it refills the cache
     // milliseconds after the clear, and the invariant above is false again.
@@ -898,6 +892,18 @@ export class NeutronChatController {
       ...(this.switchTimingEmit !== undefined ? { emit: this.switchTimingEmit } : {}),
       ...(this.switchTimingNow !== undefined ? { now: this.switchTimingNow } : {}),
     })
+    // EXACTLY ONE of the two publishes below schedules the paint stamp, and the timer
+    // has to know a stamp is coming before the FIRST mark: a cache-served switch needs
+    // only `vm_published`, which is stamped a few lines down, and would otherwise flush
+    // the record in the same call stack that is about to schedule the paint.
+    //
+    // Declared only when this document can actually produce a frame. A hidden tab runs
+    // no rAF callback, so the stamp is scheduled and never runs — and declaring a wait
+    // for it would hold every such switch open to the deadline for a picture nobody
+    // drew. Asked here rather than at schedule time because that is where the answer is
+    // needed; a tab hidden mid-switch simply reports `not_painted` late instead of
+    // wrongly.
+    if (this.canPaint()) this.switchTimer.expectPaint()
     // Keep the outgoing session warm; the bounded cache stops it on eviction.
     // NOT `session.stop()` — tearing the socket down here is the 1-3.1s the
     // owner measured, and once it never came back up at all.
@@ -1007,7 +1013,7 @@ export class NeutronChatController {
     // `entering` was looked up under `enteringTopic`, so the rows and the socket
     // are the same scope. That is the invariant the underfoot guard protects, held
     // here by construction rather than by a check.
-    if (entering !== undefined) this.markVisibleAgentRead(enteringTopic, entering.msgs)
+    if (entering !== undefined) this.markVisibleAgentRead(entering.msgs)
     // Publish the scoped VM immediately — already carrying the entered topic's
     // last-known transcript (see `transcriptCache`), so this is the frame the
     // owner actually wanted rather than an empty one to be replaced.
@@ -1475,19 +1481,31 @@ export class NeutronChatController {
       const live = new Set(projects.map((p) => this.topicForProject(p.id)))
       live.add(this.topicForProject(null))
       live.add(this.topicForProject(this.projectId))
-      let dropped = false
+      // THE INVALIDATION KEYS ON THE REMOVAL, NOT ON WHAT HAPPENS TO BE IN THE MAP.
+      // A project leaving the rail is the EVENT; a cache entry for it is one possible
+      // consequence of that event, and keying on the consequence misses every case
+      // where the entry is not there yet: a read started before the topic's first
+      // cache entry existed, or after its entry was evicted by the LRU bound. In both
+      // the sweep found nothing to drop, left the epoch alone, and the in-flight read
+      // then filed the DELETED project's transcript — which the next project created
+      // under that id paints as its own history. Comparing the rail we knew against
+      // the rail we were just sent is what makes the deletion visible whether or not
+      // anything was cached for it.
+      let removed = false
+      for (const p of this.projects) {
+        if (!live.has(this.topicForProject(p.id))) removed = true
+      }
       for (const topic of [...this.transcriptCache.keys()]) {
         if (!live.has(topic)) {
           this.transcriptCache.delete(topic)
-          this.readReceipts.delete(topic)
-          dropped = true
+          removed = true
         }
       }
       // Deleting the ENTRY is not enough on its own: a store read for that topic may
       // already be in flight, and it writes back before it checks whether anything
       // still wants it. Bumping the epoch is what makes the deletion stick against
       // the read that was started before it. See {@link transcriptCacheEpoch}.
-      if (dropped) this.transcriptCacheEpoch += 1
+      if (removed) this.transcriptCacheEpoch += 1
       // The render cache is the SAME rows one derivation later, keyed the same way,
       // so it inherits the same hazard verbatim — a recreated project reusing a
       // deleted one's topic would otherwise re-enter on the dead project's row
@@ -1539,9 +1557,18 @@ export class NeutronChatController {
     // through React's discrete-event path and outside it on a plain listener, so
     // the window demonstrably contains the render. Read the gap between this and
     // `frame_rendered`, never this number on its own.
-    this.switchTimer?.mark('transcript_read')
+    //
+    // ⚠️ AND IT IS STAMPED ONLY BY THE READ THE STOPWATCH IS ACTUALLY TIMING. It used
+    // to be stamped before the session guard, so a read for the project the owner had
+    // just LEFT stamped `transcript_read` on the timer for the project he had just
+    // ENTERED — first-mark-wins, so the entered project's own read then lost, and the
+    // record reported one project's store latency under another project's name. The
+    // write-back below still runs ahead of the guard on purpose (those rows belong to
+    // their topic whatever the owner did next); the MARK does not, because a mark is a
+    // claim about this switch.
     if (this.transcriptCacheEpoch === epoch) this.cacheTranscript(topic, msgs, pending)
     if (this.session !== session) return
+    this.switchTimer?.mark('transcript_read')
     this.msgs = msgs
     this.pending = pending
     // Drop any streaming buffer whose final message has now persisted, so the
@@ -1553,7 +1580,7 @@ export class NeutronChatController {
         if (persistedIds.has(id)) this.streaming.delete(id)
       }
     }
-    this.markVisibleAgentRead(topic, msgs)
+    this.markVisibleAgentRead(msgs)
     this.publish()
     // The transcript is on screen. This is the instant the switch is genuinely
     // over, whatever the empty frame did earlier.
@@ -1581,6 +1608,18 @@ export class NeutronChatController {
    * there is no rAF (the unit suite, SSR) — the ordering guarantee is weaker
    * there but nothing depends on it except a measurement.
    */
+  /**
+   * Can a frame be drawn at all right now? `requestAnimationFrame` callbacks do not
+   * run while the document is hidden, so a paint stamp scheduled there would never
+   * land. Absent a `document` (the unit suite, SSR) the answer is yes: the fallback
+   * task in {@link afterNextFrame} does run, and treating those as unpaintable would
+   * discard the mark everywhere it is tested.
+   */
+  private canPaint(): boolean {
+    const doc = (globalThis as { document?: { visibilityState?: string } }).document
+    return doc?.visibilityState !== 'hidden'
+  }
+
   private afterNextFrame(fn: () => void): void {
     const raf = (globalThis as { requestAnimationFrame?: (cb: () => void) => unknown })
       .requestAnimationFrame
@@ -1646,26 +1685,35 @@ export class NeutronChatController {
    * Reporting ONLY agent messages (never the user's own sends) means a receipt
    * can't light the sender's own read tick.
    *
-   * Sends only ids not yet reported for `topic` ({@link readReceipts}); a call with
-   * nothing new sends nothing at all. `topic` is passed rather than read from
-   * `this.projectId` so the ledger is keyed by the same scope the caller resolved the
-   * rows under — the invariant that keeps one topic's receipts off another's socket.
+   * ── THE DE-DUP LIVES IN THE SESSION, AND NOWHERE ELSE ────────────────────────
+   * The controller briefly kept its own topic→ids ledger to avoid re-offering ids it
+   * had already offered. It recorded every id it PASSED to `markRead`, and
+   * `web-session.ts:519-525` records an id only when `ws.send()` ACCEPTED the frame —
+   * and `ws-client.ts:234-235` refuses to send at all unless the socket is `open`. A
+   * switch offers its receipts while the socket is still connecting, so every one of
+   * them was dropped on the wire and simultaneously recorded as sent. Nothing ever
+   * re-offered them: the server's watermark never advanced, and the unread badge the
+   * switch had just cleared came back on rows the owner was looking at, permanently,
+   * for the life of the tab.
+   *
+   * Two ledgers for one fact, updated on different conditions, is the whole defect. The
+   * session's is the one that can be right — it is on the same side of the socket as
+   * the send — so this offers the ids and lets it decide. The cost is a scan of an
+   * in-memory array the caller is already holding.
+   *
+   * There is no topic parameter any more because there is no longer anything keyed by
+   * topic here. The scope invariant that keeps one topic's receipts off another's
+   * socket is unchanged and still held by the CALLERS: `setProject` calls this only
+   * after `this.session` is the entered topic's, and `handleChange` only after its
+   * session-changed-underfoot guard.
    */
-  private markVisibleAgentRead(topic: string, msgs: ChatMessage[]): void {
+  private markVisibleAgentRead(msgs: ChatMessage[]): void {
     if (this.session.markRead === undefined) return
-    let sent = this.readReceipts.get(topic)
-    if (sent === undefined) {
-      sent = new Set<string>()
-      this.readReceipts.set(topic, sent)
-    }
     const ids: string[] = []
     for (const m of msgs) {
-      if (m.role === 'agent' && m.message_id !== null && !sent.has(m.message_id)) {
-        ids.push(m.message_id)
-      }
+      if (m.role === 'agent' && m.message_id !== null) ids.push(m.message_id)
     }
     if (ids.length === 0) return
-    for (const id of ids) sent.add(id)
     this.session.markRead(ids)
   }
 

@@ -397,9 +397,12 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'beta', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5,
     })
     timer.servedFromCache()
+    // The controller declares this before the first mark, because `vm_published` is a
+    // cache-served switch's ONLY required mark — undeclared, the record would flush in
+    // the same call stack that is about to schedule the paint.
+    timer.expectPaint()
     t = 4
     timer.mark('vm_published')
     t = 9
@@ -428,8 +431,8 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'gamma', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5,
     })
+    timer.expectPaint()
     t = 4
     timer.mark('vm_published')
     t = 800
@@ -461,9 +464,9 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'beta', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5_000,
     })
     timer.servedFromCache()
+    timer.expectPaint()
     t = 0.3
     timer.mark('vm_published')
     expect(records).toHaveLength(0)
@@ -486,9 +489,9 @@ describe('the stopwatch reports the switch the owner actually waited for', () =>
     const timer = new SwitchTimer('alpha', 'beta', {
       now: () => t,
       emit: (r) => records.push(r),
-      paintSettleMs: 5,
     })
     timer.servedFromCache()
+    timer.expectPaint()
     t = 4
     timer.mark('vm_published')
     t = 9

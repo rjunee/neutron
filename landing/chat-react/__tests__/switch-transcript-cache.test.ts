@@ -79,6 +79,20 @@ class StallableSession implements ControllerSession {
   /** Set to hold `messages()` open; resolve with `release()`. */
   stalled = false
   readonly readsRead: string[][] = []
+  /**
+   * The real session's accept rule, modelled because the controller depends on it:
+   * `chat-core/web-session.ts` remembers an id ONLY when `ws.send()` accepted the
+   * frame, and `chat-core/ws-client.ts` refuses to send at all unless the socket is
+   * `open`. A receipt offered during a switch's handshake is therefore dropped, and
+   * the ONLY thing that ever gets it delivered is being offered again.
+   */
+  socketOpen = true
+  /** Ids the wire accepted — the de-dup ledger, on the side of the socket that can
+   *  tell whether a frame left. */
+  readonly accepted = new Set<string>()
+  /** Ids actually put on the wire, in order, so a test can tell a re-offer that was
+   *  suppressed as a duplicate from one that was re-sent. */
+  readonly sentOnWire: string[] = []
   private waiters: Array<() => void> = []
 
   constructor(readonly topicId: string) {}
@@ -99,6 +113,11 @@ class StallableSession implements ControllerSession {
   }
   markRead(ids: readonly string[]): void {
     this.readsRead.push([...ids])
+    for (const id of ids) {
+      if (this.accepted.has(id) || !this.socketOpen) continue
+      this.sentOnWire.push(id)
+      this.accepted.add(id)
+    }
   }
   release(): void {
     this.stalled = false
@@ -437,12 +456,46 @@ describe('rows that are painted are rows that are read', () => {
     alpha.release()
   })
 
-  it('acknowledges each agent message ONCE, not on every switch and every frame', async () => {
-    // `markVisibleAgentRead` runs from the cached frame AND from the resolved read, and
-    // again on every inbound frame — and it used to rebuild the FULL id list each time.
-    // On the owner's biggest topic that is 533 ids re-sent per call, for the life of the
-    // conversation, on the exact path being optimised. Nothing was incorrect (the wire
-    // de-dups); it was pure O(transcript) work to tell the server what it already knew.
+  it('A RECEIPT THE SOCKET REFUSED IS OFFERED AGAIN, so the badge can actually clear', async () => {
+    // ── THE DEFECT ──────────────────────────────────────────────────────────────
+    // The controller kept its own topic→ids ledger so it could stop re-offering ids
+    // it had already offered. It recorded an id the moment it PASSED it to
+    // `markRead`; the session records one only when `ws.send()` ACCEPTED the frame,
+    // and the socket refuses everything until it is `open`. A switch offers its
+    // receipts while its socket is still connecting — so the frame was dropped on the
+    // wire and simultaneously written down as sent. Nothing re-offered it, ever: the
+    // server's read watermark never advanced, and the unread badge the switch had just
+    // cleared came back on rows the owner was looking at, for the life of the tab.
+    //
+    // Two ledgers for one fact, updated on different conditions. Only the session's
+    // can be right, because only it is on the same side of the socket as the send.
+    const { controller, sessions } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [])
+    const alpha = sessions.get('app:owner:alpha')!
+    // A message arrived on alpha while the owner was reading beta.
+    alpha.rows = [msg('app:owner:alpha', 1), msg('app:owner:alpha', 2)]
+
+    // He switches back, and the entered topic's socket is still shaking hands.
+    alpha.socketOpen = false
+    alpha.sentOnWire.length = 0
+    controller.setProject('alpha')
+    await tick()
+    // Offered, and refused: nothing reached the server.
+    expect(alpha.readsRead.flat()).toContain('mid-app:owner:alpha-2')
+    expect(alpha.sentOnWire).toHaveLength(0)
+
+    // The socket comes up and the next read runs. THIS is what the controller-side
+    // ledger made impossible.
+    alpha.socketOpen = true
+    await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
+    expect(alpha.sentOnWire).toContain('mid-app:owner:alpha-2')
+  })
+
+  it('does not re-send what the wire already took — the de-dup is the session’s', async () => {
+    // The control for the case above. Deleting the controller's ledger must not turn
+    // every frame into a re-send of the whole transcript; the session already suppresses
+    // an id it has delivered, which is the suppression that was worth having.
     const { controller, sessions } = setup()
     await visit(controller, sessions, 'alpha', 'app:owner:alpha', [
       msg('app:owner:alpha', 1),
@@ -450,19 +503,17 @@ describe('rows that are painted are rows that are read', () => {
     ])
     await visit(controller, sessions, 'beta', 'app:owner:beta', [])
     const alpha = sessions.get('app:owner:alpha')!
-    expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-1', 'mid-app:owner:alpha-2'])
+    expect(alpha.sentOnWire).toEqual(['mid-app:owner:alpha-1', 'mid-app:owner:alpha-2'])
 
-    alpha.readsRead.length = 0
+    alpha.sentOnWire.length = 0
     controller.setProject('alpha')
     await tick()
-    // Both the cached frame and the read that follows it find nothing unacknowledged,
-    // so neither sends anything at all — not "one call instead of two".
-    expect(alpha.readsRead).toHaveLength(0)
+    expect(alpha.sentOnWire).toHaveLength(0)
 
-    // Suppression is not silence: a NEW agent message is acknowledged, and alone.
+    // And a genuinely new message still gets through, alone.
     alpha.rows = [...alpha.rows, msg('app:owner:alpha', 3)]
     await (controller as unknown as { handleChange(): Promise<void> }).handleChange()
-    expect(alpha.readsRead.flat()).toEqual(['mid-app:owner:alpha-3'])
+    expect(alpha.sentOnWire).toEqual(['mid-app:owner:alpha-3'])
   })
 })
 
@@ -600,6 +651,60 @@ describe('the cache has a lifecycle, not just a size', () => {
 
     frames.length = 0
     controller.setProject('alpha')
+    expect(frames[0]!.messages).toHaveLength(0)
+  })
+
+  it('INVALIDATES ON THE DELETION, NOT ON WHETHER ANYTHING WAS CACHED FOR IT', async () => {
+    // The sweep used to bump the invalidation generation only when it DELETED a cache
+    // entry — keying on a consequence of the deletion instead of on the deletion. A read
+    // that started before that topic had ever been cached (a first-ever visit, or a topic
+    // whose entry the LRU bound had already evicted) leaves the sweep with nothing to
+    // drop, so the generation stands, and the read files the DEAD project's transcript
+    // afterwards. The next project created under that id then paints it as its own
+    // history — the exact outcome the sweep exists to make impossible, reachable by
+    // deleting a project the client had not happened to cache yet.
+    const { controller, sessions, frames, deliver } = setup()
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    // `gamma` is on the rail and has NEVER been entered, so nothing is cached for it.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'alpha', label: 'Alpha' }, { id: 'beta', label: 'Beta' }, { id: 'gamma', label: 'Gamma' }],
+      ts: 1,
+    })
+    const gamma = new StallableSession('app:owner:gamma')
+    gamma.rows = [msg('app:owner:gamma', 1)]
+    gamma.stalled = true
+    sessions.set('app:owner:gamma', gamma)
+
+    // Enter it — first visit, so the read is the only thing that will ever cache it —
+    // and leave before it answers.
+    controller.setProject('gamma')
+    controller.setProject('beta')
+
+    // Deleted while its very first read is still outstanding.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'alpha', label: 'Alpha' }, { id: 'beta', label: 'Beta' }],
+      ts: 2,
+    })
+    gamma.release()
+    await tick()
+
+    // Recreated under the same id — which is the same topic.
+    deliver('app:owner:beta', {
+      v: 1,
+      type: 'projects_changed',
+      projects: [{ id: 'alpha', label: 'Alpha' }, { id: 'beta', label: 'Beta' }, { id: 'gamma', label: 'Gamma' }],
+      ts: 3,
+    })
+    gamma.rows = []
+
+    frames.length = 0
+    controller.setProject('gamma')
     expect(frames[0]!.messages).toHaveLength(0)
   })
 
@@ -819,26 +924,145 @@ describe('the switch stopwatch can no longer blame the store for the render', ()
     // rAF does not run in a backgrounded tab, so the paint mark cannot arrive.
     // While it was REQUIRED that produced `Project switch incomplete …
     // never_arrived=frame_rendered` after the full deadline, for a switch that
-    // completed correctly. Absent rAF entirely, so nothing schedules the stamp.
-    const g = globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }
+    // completed correctly.
+    //
+    // BOTH halves of a hidden tab are modelled here, because the controller now reads
+    // the one that is decidable. rAF accepts the callback and never runs it, AND the
+    // document reports itself hidden — which is how the controller knows not to hold
+    // the record open for a frame that is not coming. Stubbing only the rAF half would
+    // describe a VISIBLE tab whose frames have stopped, which is a different case with
+    // a different correct answer (wait, and report late).
+    const g = globalThis as {
+      requestAnimationFrame?: (cb: () => void) => unknown
+      document?: unknown
+    }
     const original = g.requestAnimationFrame
+    const originalDoc = Object.getOwnPropertyDescriptor(globalThis, 'document')
     g.requestAnimationFrame = (): number => 1 // accepted, never called: no frames here
+    Object.defineProperty(globalThis, 'document', {
+      value: { visibilityState: 'hidden' },
+      configurable: true,
+      writable: true,
+    })
     try {
       const { controller, sessions, records } = setup()
       await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
       await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
       records.length = 0
-      controller.setProject('alpha')
-      // Long enough for the paint-settle window, far short of the deadline.
+      // A COLD switch, so every mark this case asserts on is a REQUIRED one and the
+      // record cannot be flushed early by a cache-served switch's single requirement.
+      controller.setProject('gamma')
+      // Far short of the deadline: the record is out because its required marks are
+      // in, not because anything timed out.
       await new Promise((r) => setTimeout(r, 400))
 
-      const record = records.find((r) => r.to === 'alpha')
+      const record = records.find((r) => r.to === 'gamma')
       expect(record).toBeDefined()
       expect(record!.marks.frame_rendered).toBeUndefined()
       // The switch DID complete. Only the picture is missing, and that is a fact
       // about the tab, not a failure of the switch.
       expect(record!.incomplete).toBe(false)
       expect(record!.marks.transcript).toBeDefined()
+    } finally {
+      if (original === undefined) delete g.requestAnimationFrame
+      else g.requestAnimationFrame = original
+      if (originalDoc === undefined) delete g.document
+      else Object.defineProperty(globalThis, 'document', originalDoc)
+    }
+  })
+
+  it('A SUPERSEDED READ DOES NOT STAMP ITS LATENCY ON THE NEXT PROJECT’S RECORD', async () => {
+    // `transcript_read` used to be stamped before the session-changed-underfoot guard,
+    // so a read for the project the owner had just LEFT stamped the timer for the one he
+    // had just ENTERED. First-mark-wins then discarded the entered project's own read,
+    // and the record reported one project's store latency under another project's name —
+    // silently, and in the direction that flatters whichever project is slower.
+    let clock = 0
+    const { controller, sessions, records } = setup({ now: () => clock })
+    await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+    await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+    const alpha = sessions.get('app:owner:alpha')!
+    alpha.stalled = true
+    const gamma = new StallableSession('app:owner:gamma')
+    gamma.rows = [msg('app:owner:gamma', 1)]
+    gamma.stalled = true
+    sessions.set('app:owner:gamma', gamma)
+
+    controller.setProject('alpha') // paints from cache; its refresh read stalls
+    records.length = 0
+    controller.setProject('gamma') // cold, and its own read stalls too
+
+    // Alpha's abandoned read answers first, 100 ms into gamma's switch.
+    clock = 100
+    alpha.release()
+    await tick()
+
+    // Gamma's own read — the one this record is about — answers at 500 ms.
+    clock = 500
+    gamma.release()
+    await tick()
+    await tick()
+
+    const record = records.find((r) => r.to === 'gamma')
+    expect(record).toBeDefined()
+    expect(record!.marks.transcript_read).toBe(500)
+  })
+
+  it('A SLOW RENDER’S PAINT IS RECORDED, NOT RACED AGAINST A SETTLE WINDOW', async () => {
+    // ── THE DEFECT THIS EXISTS FOR ───────────────────────────────────────────────
+    // The record used to be held open for the paint by a fixed 250 ms window, armed
+    // the instant the last required mark landed. `transcript` is stamped right after
+    // `publish()`, which only SCHEDULES React's render — so on exactly the 3–9 s
+    // switches this instrument was built to explain, the window came due while the
+    // main thread was still inside that render, and the record flushed `not_painted`
+    // before the frame it was waiting for existed. The slower the switch, the more
+    // certainly its paint was thrown away.
+    //
+    // Modelled without any wall-clock threshold (ISSUES #438): the paint is scheduled
+    // and simply not run for a while, and the assertion is that the record has NOT
+    // flushed in the meantime. Under the old settle window this fails — the record is
+    // already out, `frame_rendered` undefined — whatever the render's real duration is
+    // on the runner.
+    const g = globalThis as { requestAnimationFrame?: (cb: () => void) => unknown }
+    const original = g.requestAnimationFrame
+    let frameCb: (() => void) | null = null
+    g.requestAnimationFrame = (cb: () => void): number => {
+      frameCb = cb
+      return 1
+    }
+    const takeScheduledFrame = (): (() => void) => {
+      if (frameCb === null) throw new Error('the switch scheduled no frame')
+      const cb = frameCb
+      frameCb = null
+      return cb
+    }
+    try {
+      let clock = 0
+      const { controller, sessions, records } = setup({ now: () => clock })
+      await visit(controller, sessions, 'alpha', 'app:owner:alpha', [msg('app:owner:alpha', 1)])
+      await visit(controller, sessions, 'beta', 'app:owner:beta', [msg('app:owner:beta', 1)])
+
+      records.length = 0
+      frameCb = null
+      controller.setProject('alpha')
+      // The render is under way. Every required mark for this cache-served switch is
+      // already in, and real time passes — far more than any settle window.
+      await new Promise((r) => setTimeout(r, 400))
+      expect(records.find((r) => r.to === 'alpha')).toBeUndefined()
+
+      // The frame finally lands, 4.2 s after the click. THAT is the number the owner
+      // felt, and it is in the record instead of missing from it.
+      clock = 4_200
+      takeScheduledFrame()()
+      await tick()
+      await tick()
+
+      const record = records.find((r) => r.to === 'alpha')
+      expect(record).toBeDefined()
+      expect(record!.marks.frame_rendered).toBe(4_200)
+      expect(record!.total).toBe(4_200)
+      expect(record!.incomplete).toBe(false)
     } finally {
       if (original === undefined) delete g.requestAnimationFrame
       else g.requestAnimationFrame = original

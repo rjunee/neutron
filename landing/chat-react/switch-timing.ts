@@ -73,12 +73,30 @@
  * `Project switch incomplete … never_arrived=frame_rendered` for a switch that
  * completed correctly and simply had no picture to draw.
  *
- * ⇒ it is an OPTIONAL mark (absence = `not_painted`, a normal outcome), but one
- * the recorder will WAIT a bounded {@link PAINT_SETTLE_MS} for once every required
- * mark is in. Both halves are load-bearing: without the optionality a hidden tab
- * lies, and without the settle window the mark would be dropped on essentially
- * every switch, because the paint necessarily lands one frame AFTER the
+ * ⇒ it is an OPTIONAL mark (absence = `not_painted`, a normal outcome) that the
+ * recorder nevertheless WAITS for whenever the caller has told it a paint is on the
+ * way ({@link SwitchTimer.expectPaint}). Both halves are load-bearing: without the
+ * optionality a hidden tab lies, and without the wait the mark would be dropped on
+ * essentially every switch, because the paint necessarily lands one frame AFTER the
  * `transcript` mark that would otherwise flush the record.
+ *
+ * ── WHY THE WAIT IS A DECLARATION AND NOT A TIMEOUT (2026-08-18) ────────────────
+ * The wait used to be a fixed 250 ms window armed the moment the last required mark
+ * landed. That window is in a RACE WITH THE RENDER IT EXISTS TO MEASURE, and it loses
+ * exactly the samples that matter: `transcript` is stamped synchronously right after
+ * `publish()` merely SCHEDULES React's render, so on a switch whose render takes the
+ * 3–9 s the owner complained about, the 250 ms task comes due while the main thread is
+ * still inside that render and flushes the record `not_painted` before the frame the
+ * mark is for is ever drawn. The slower the switch, the more certainly its paint was
+ * discarded — an instrument that is blind in proportion to the badness of what it
+ * measures.
+ *
+ * So the caller DECLARES that it has scheduled a paint stamp, and the record then waits
+ * for the stamp or for the deadline, never for a guess about how long a render takes.
+ * A caller that knows no paint is coming (a hidden document, where rAF does not run)
+ * simply does not declare one, and the record flushes the moment its required marks are
+ * in. That is an exact answer where the timeout was an estimate, and it cannot be
+ * defeated by a slow frame.
  *
  * ── ALWAYS ON ──────────────────────────────────────────────────────────────
  * No flag. It is five `performance.now()` reads and one line per switch; a knob
@@ -222,8 +240,6 @@ export interface SwitchTimingOptions {
    * flushing first would report every slow-but-successful switch as incomplete.
    */
   deadlineMs?: number
-  /** How long to wait for `frame_rendered` alone. See {@link PAINT_SETTLE_MS}. */
-  paintSettleMs?: number
   /** How many finished records to keep for retrieval. */
   keep?: number
 }
@@ -240,16 +256,6 @@ export interface SwitchTimingOptions {
  */
 const DEFAULT_DEADLINE_MS = 30_000
 
-/**
- * How long the recorder holds a fully-marked switch open for `frame_rendered`.
- *
- * The paint lands ONE FRAME after the `transcript` mark — both are queued behind
- * the same synchronous render — so a few tens of ms is all a visible tab needs.
- * A hidden tab never paints, and this window is the whole price of finding that
- * out: it expires, the record flushes `not_painted`, and no switch is misreported
- * as incomplete for lack of a picture nobody drew.
- */
-const PAINT_SETTLE_MS = 250
 const DEFAULT_KEEP = 50
 
 /**
@@ -261,12 +267,12 @@ export class SwitchTimer {
   private readonly now: () => number
   private readonly emit: (record: SwitchRecord) => void
   private readonly deadlineMs: number
-  private readonly paintSettleMs: number
   private readonly startedAt: number
   private readonly marks: Partial<Record<SwitchMark, number>> = {}
   private timer: ReturnType<typeof setTimeout> | null = null
-  private paintTimer: ReturnType<typeof setTimeout> | null = null
   private flushed = false
+  /** See {@link expectPaint}. While true the record is held open for the paint. */
+  private paintExpected = false
   /** See {@link servedFromCache}. Decides which marks are REQUIRED and which may set
    *  `total`, and rides out on the record so the reader can derive the rest; never
    *  changes what is measured, only what it is called. */
@@ -282,7 +288,6 @@ export class SwitchTimer {
     this.now = opts.now ?? (() => performance.now())
     this.emit = opts.emit ?? defaultEmit
     this.deadlineMs = opts.deadlineMs ?? DEFAULT_DEADLINE_MS
-    this.paintSettleMs = opts.paintSettleMs ?? PAINT_SETTLE_MS
     this.startedAt = this.now()
     this.timer = this.unrefed(setTimeout(() => this.flush(), this.deadlineMs))
   }
@@ -301,6 +306,26 @@ export class SwitchTimer {
     this.cached = true
   }
 
+  /**
+   * Declare that a `frame_rendered` stamp HAS BEEN SCHEDULED against a frame that has
+   * not been drawn yet, so the record must not settle before it lands.
+   *
+   * Only the caller can know this. The paint is scheduled from a `requestAnimationFrame`
+   * the caller owns, and whether that callback will ever run is a fact about the caller's
+   * document (a hidden tab runs no frames), not about any mark. Declared BEFORE the first
+   * mark, because a cache-served switch's only required mark is `vm_published` and the
+   * record would otherwise be flushed by it, in the same call stack that is about to
+   * schedule the paint.
+   *
+   * Undeclared, the record flushes as soon as its required marks are in and reports
+   * `not_painted` — the correct answer when nothing is going to paint. Declared, it waits
+   * for the stamp or for the deadline: a wait bounded by the same clock that bounds every
+   * other unfinished switch, rather than by a guess about how long a render takes.
+   */
+  expectPaint(): void {
+    this.paintExpected = true
+  }
+
   private get requiredMarks(): readonly SwitchMark[] {
     return this.cached ? REQUIRED_MARKS_WHEN_CACHED : REQUIRED_MARKS
   }
@@ -314,14 +339,13 @@ export class SwitchTimer {
     if (this.marks[mark] !== undefined) return
     this.marks[mark] = round(this.now() - this.startedAt)
     if (!this.requiredMarks.every((m) => this.marks[m] !== undefined)) return
-    // Every required mark is in. The paint is the one absence worth waiting on:
-    // it necessarily arrives a frame AFTER `transcript`, so flushing here would
-    // drop it from every switch — and waiting forever would report every hidden
-    // tab as incomplete. Bounded wait, then report what was actually observed.
-    if (this.marks.frame_rendered !== undefined) this.flush()
-    else if (this.paintTimer === null) {
-      this.paintTimer = this.unrefed(setTimeout(() => this.flush(), this.paintSettleMs))
-    }
+    // Every required mark is in. The paint is the one absence worth waiting on: it
+    // necessarily arrives a frame AFTER `transcript`, so flushing here would drop it
+    // from every switch. Whether one is coming is the caller's to say
+    // ({@link expectPaint}); if it is, the deadline is what bounds the wait, and a
+    // slow render can no longer outrun a settle window and be reported as no render
+    // at all.
+    if (this.marks.frame_rendered !== undefined || !this.paintExpected) this.flush()
   }
 
   /**
@@ -354,7 +378,6 @@ export class SwitchTimer {
     if (this.flushed) return
     this.flushed = true
     this.timer = this.cleared(this.timer)
-    this.paintTimer = this.cleared(this.paintTimer)
     const waited = this.cached ? WAITED_MARKS_WHEN_CACHED : ALL_MARKS
     const seen = waited.map((m) => this.marks[m]).filter((v): v is number => v !== undefined)
     this.emit({
@@ -440,9 +463,15 @@ function defaultEmit(r: SwitchRecord): void {
 /**
  * Build the persisted perf report without ever accepting or embedding a bearer.
  *
- * `schema: 4` because a REPORTED FIELD CHANGED MEANING — the id moves whenever a
+ * `schema: 5` because a REPORTED FIELD CHANGED MEANING — the id moves whenever a
  * definition does, without exception, because a gap in the numbering is free and a
  * collision is a wrong comparison nobody can detect afterwards.
+ *
+ * v5: `frame_rendered` is now waited for rather than raced against a 250 ms window, so
+ * in a v4 sample its ABSENCE means either "nothing painted" or "the render took longer
+ * than the window", and those are the slow switches — the population a reader is most
+ * likely to be selecting on. Mixing v4 and v5 would compare a paint-time distribution
+ * with its own fast tail against one with all of it.
  *
  * v4: `incomplete` now also covers ABANDONED switches. Under v3 an abandoned
  * cache-served switch reported complete (its only required mark is stamped in the
@@ -464,7 +493,7 @@ function defaultEmit(r: SwitchRecord): void {
  */
 export function buildSwitchReport(r: SwitchRecord, createdAt = Date.now()): WebClientReport {
   return {
-    schema: 4,
+    schema: 5,
     report_id: `web-switch-${createdAt}-${randomId()}`,
     created_at: createdAt,
     origin: globalThis.location?.origin ?? '',
