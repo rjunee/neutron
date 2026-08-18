@@ -170,8 +170,10 @@ export type {
   CodeCommandErrorCode,
   TridentCodeContext,
 } from './code-command.ts'
-export { dispatchBoardBoundBuild } from './board-dispatch.ts'
+export { dispatchBoardBoundBuild, makeDispatchLandedProbe } from './board-dispatch.ts'
 export type {
+  AlreadyLandedFinding,
+  DispatchLandedProbe,
   TridentBoardBinder,
   BoardBoundBuildInput,
   BoardBoundBuildDeps,

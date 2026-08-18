@@ -387,6 +387,13 @@ export interface MiscCompositionInput {
      * assertable at the boot-wiring test instead of merely being a function.
      */
     merge_mode_probe: import('@neutronai/trident/git-mode.ts').GitModeProbe
+    /**
+     * The ALREADY-LANDED probe. Like `merge_mode_probe` this is the composer's
+     * to own, because it shells out through the credentialed host runner: it
+     * asks GitHub whether this card's branch already merged, so a lane refuses
+     * to rebuild work that is already on main.
+     */
+    landed_probe?: import('@neutronai/trident/board-dispatch.ts').DispatchLandedProbe
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number
