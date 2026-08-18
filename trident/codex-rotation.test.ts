@@ -49,11 +49,21 @@ let db: ProjectDb
 let store: ProjectCredentialStore
 let codexHome: string
 
-/** A fabricated subscription bundle. `last_refresh` is the harvest-back key. */
-function subscriptionAuth(lastRefresh = '2026-06-30T00:00:00.000Z'): string {
+/**
+ * A fabricated subscription bundle. `last_refresh` is the harvest-back key.
+ *
+ * `account` MUST DIFFER BETWEEN SEATS. `connectAccount` refuses a bundle whose
+ * `tokens.account_id` already occupies another seat, because two seats holding one
+ * ChatGPT account revoke each other's refresh token on the next refresh — the
+ * mutual-revocation hazard the dir-per-account design exists to prevent, which the
+ * UI could previously walk the owner straight into. Every second-seat test below
+ * therefore passes a distinct account: reusing one here would be asserting on a
+ * configuration the service is now required to reject.
+ */
+function subscriptionAuth(lastRefresh = '2026-06-30T00:00:00.000Z', account = 'a'): string {
   return JSON.stringify({
     OPENAI_API_KEY: null,
-    tokens: { id_token: 'id', access_token: 'acc', refresh_token: 'ref', account_id: 'a' },
+    tokens: { id_token: 'id', access_token: 'acc', refresh_token: 'ref', account_id: account },
     last_refresh: lastRefresh,
   })
 }
@@ -622,7 +632,7 @@ describe('the multi-seat credential service', () => {
   test('a second seat gets its OWN directory and service row', async () => {
     const svc = newService()
     await svc.connectAccount(OWNER, subscriptionAuth())
-    const second = await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    const second = await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     expect(second.ok).toBe(true)
     expect(svc.slotHome('work')).toBe(join(codexHome, 'accounts', 'work'))
     expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(true)
@@ -668,7 +678,7 @@ describe('the multi-seat credential service', () => {
   test('a per-project override bypasses rotation entirely', async () => {
     const svc = newService()
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     await svc.connect(OWNER, subscriptionAuth(), { scope: 'project', project_id: 'pinned' })
     // Cool BOTH global seats: rotation would have to pick one of them, and an
     // exhausted pool would be visible here if the override consulted rotation.
@@ -688,7 +698,7 @@ describe('the multi-seat credential service', () => {
     let clock = NOW
     const svc = newService(() => clock)
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     // Register both slots, then write a spent rollout for the active one.
     expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(codexHome)
     writeRollout(codexHome, 'rollout-spent.jsonl', [tokenCountLine({ used_percent: 99.7, window_minutes: 10080 })], 1_800_000_000)
@@ -711,7 +721,7 @@ describe('the multi-seat credential service', () => {
       log: (event) => events.push(event),
     })
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     svc.resolveActiveCodexHome(OWNER, 'proj')
     const rotation = new SqliteCodexRotationStore(db)
     for (const s of ['default', 'work']) {
@@ -730,7 +740,7 @@ describe('the multi-seat credential service', () => {
   test('removing a seat deletes its row, its dir contents and its rotation state', async () => {
     const svc = newService()
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     expect((await svc.removeAccount(OWNER, 'work')).ok).toBe(true)
     expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(false)
     expect(svc.listAccounts(OWNER).map((a) => a.slot)).toEqual(['default'])
@@ -743,10 +753,10 @@ describe('the multi-seat credential service', () => {
     const svc = newService()
     const rotation = new SqliteCodexRotationStore(db)
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     rotation.setCooldown(OWNER, 'work', { cooling_until: NOW, cooling_reason: 'unauthorized' })
     expect(svc.listAccounts(OWNER).find((a) => a.slot === 'work')?.cooling).toBe(true)
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     expect(svc.listAccounts(OWNER).find((a) => a.slot === 'work')?.cooling).toBe(false)
   })
 
@@ -774,7 +784,7 @@ describe('the multi-seat credential service', () => {
   // rollout and be benched before it had run once.
   test('a seat reconnected under a reused name does not inherit the old usage history', async () => {
     const svc = newService()
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     // The previous occupant left a spent-weekly rollout behind in the directory,
     // stamped well before the new seat is connected.
     writeRollout(
@@ -787,7 +797,7 @@ describe('the multi-seat credential service', () => {
     expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(false)
 
     // A new subscription takes the same slot name. Its own rollout tree is empty.
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     svc.resolveActiveCodexHome(OWNER, 'proj')
     expect(svc.listAccounts(OWNER).find((a) => a.slot === 'work')?.cooling).toBe(false)
   })
@@ -795,7 +805,7 @@ describe('the multi-seat credential service', () => {
   test('a seat whose credential was deleted out from under it stops winning selections', async () => {
     const svc = newService()
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     svc.resolveActiveCodexHome(OWNER, 'proj')
     await store.delete(OWNER, '', 'codex-acct-work')
     // A stale row would hand back a directory with no bundle in it.
@@ -816,7 +826,7 @@ describe('the multi-seat credential service', () => {
     const svc = newService()
     const rotation = new SqliteCodexRotationStore(db)
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     // Aim the pointer at 'work', then expire its credential out from under it.
     rotation.setActiveSlot(OWNER, 'work', NOW)
     await store.set(OWNER, {
@@ -851,7 +861,7 @@ describe('the multi-seat credential service', () => {
     const svc = newService()
     const rotation = new SqliteCodexRotationStore(db)
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     rotation.setActiveSlot(OWNER, 'work', NOW)
 
     const workHome = join(codexHome, 'accounts', 'work')
@@ -888,7 +898,7 @@ describe('the multi-seat credential service', () => {
   test('harvesting a refreshed bundle back does not erase the seat label', async () => {
     const svc = newService()
     const rotation = new SqliteCodexRotationStore(db)
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     const before = store.getMeta(OWNER, '', codexSlotService('work'))?.label ?? null
     expect(before).not.toBeNull()
 
