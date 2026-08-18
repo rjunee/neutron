@@ -650,7 +650,13 @@ export class CodexCredentialService {
     return { ok: removed }
   }
 
-  /** Cool a seat from a FAILED codex invocation's stderr. See `classifyCodexFailure`. */
+  /**
+   * Cool a seat from a FAILED codex invocation's stderr. See `classifyCodexFailure`.
+   *
+   * ⚠️ NOT YET WIRED — nothing in production calls this, because codex failures do
+   * not currently reach TypeScript (see the note on `classifyCodexFailure`). Until
+   * they do, seats are cooled only by the rollout harvest.
+   */
   applyFailureCooldown(owner_slug: OwnerHandle, slot: string, cooldown: Cooldown | null): void {
     if (cooldown === null) return
     const normalized = normalizeSlot(slot)

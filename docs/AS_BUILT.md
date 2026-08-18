@@ -266,6 +266,12 @@ cooldown to a weekly cap and rotated a still-capped seat back into service. Wind
 under 1440 minutes cool at 98%, longer ones at 99%, and the fallback cooldown is the
 window's own length. `resets_at` is epoch seconds, converted once at the parse boundary.
 
+Declared gap, not shipped: the stderr classifier (`classifyCodexFailure`,
+`applyFailureCooldown`) has NO production caller. Codex failures surface only inside the
+shell wrappers and the `.mjs` inner workflow, which have no seam back into the service, so
+plumbing one is its own change. Its patterns were measured off the shipped binary's own
+literals and are tested, but until that seam exists only the rollout harvest cools a seat.
+
 Fail-safe rules, each pinned by a mutation proved to kill its test: a harvest that errors
 or finds nothing cools nothing; when every seat is cooling the current one is kept and
 `codex_rotation_exhausted` is logged; an `unauthorized` cooldown (a revoked refresh token)

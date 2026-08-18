@@ -2840,9 +2840,14 @@ therefore connect several seats, and trident picks one per run.
   error, whereas no seat silently removes codex from the review. That case logs
   `codex_rotation_exhausted`.
 - **A revoked refresh token is not a quota problem.** `refresh token was revoked`
-  (and `invalid_grant`) cools a seat with reason `unauthorized`, which ignores the
-  clock and stays ineligible until the owner reconnects that seat — waiting does not
-  fix it. Every unrecognised failure (timeout, 5xx, refusal) retires nothing.
+  (and `invalid_grant`) classifies as reason `unauthorized`, which ignores the clock
+  and stays ineligible until the owner reconnects that seat — waiting does not fix
+  it. Every unrecognised failure (timeout, 5xx, refusal) retires nothing.
+  **KNOWN GAP: the stderr classifier is not wired.** `classifyCodexFailure` and
+  `applyFailureCooldown` have no production caller — codex failures surface only in
+  the shell wrappers and the `.mjs` inner workflow, which have no seam back into the
+  service. The patterns are measured and tested, but until that seam exists ONLY the
+  rollout harvest cools a seat. It is a declared gap, not a working second signal.
 - **Per-project overrides are OUTSIDE rotation** and resolve first, verbatim: an
   override exists to pin one project to one subscription.
 - **Adding a seat.** Chat: `codex_connect` with `account: "work"` plus the pasted

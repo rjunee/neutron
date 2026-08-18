@@ -364,6 +364,15 @@ const UNAUTHORIZED_PATTERNS: readonly RegExp[] = [
 /**
  * Classify a failed codex invocation's stderr into a cooldown, or null.
  *
+ * ⚠️ NOT YET WIRED — this has no production caller, and calling that out here is
+ * the point. Codex failures currently surface only inside the shell wrappers and
+ * the `.mjs` inner workflow, which have no seam back into this service, so
+ * plumbing one is its own change to the orchestrator's failure path. The patterns
+ * below are measured and tested and the function is ready; until something calls
+ * it, ONLY the rollout harvest cools a seat. Treat this as a declared gap rather
+ * than a working second signal — a module that exists but is never invoked is not
+ * a feature.
+ *
  * NULL IS THE DEFAULT AND THE SAFE ANSWER. Timeouts, 5xx, network resets,
  * content-policy refusals and every unrecognised message return null, because
  * none of them is evidence about quota and cooling on them would retire healthy
