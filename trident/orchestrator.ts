@@ -2227,6 +2227,7 @@ export function buildTridentOrchestrator(
     // never fail because the strategy could not be derived. Null → the workflow's
     // contract is byte-identical legacy.
     let test_strategy: string | null = null
+    let test_strategy_intermediate: string | null = null
     // The numbers behind that block, carried into this launch's AdvanceOutcome note so
     // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
     // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
@@ -2256,9 +2257,11 @@ export function buildTridentOrchestrator(
         base_branch: base,
       })
       test_strategy = detail.block
+      test_strategy_intermediate = detail.intermediate_block
       test_strategy_summary = detail.summary
     } catch {
       test_strategy = null
+      test_strategy_intermediate = null
       test_strategy_summary = null
     }
 
@@ -2307,6 +2310,7 @@ export function buildTridentOrchestrator(
       // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
       // workflow into the FORGE build contract only — never the argus review gate.
       test_strategy,
+      test_strategy_intermediate,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.

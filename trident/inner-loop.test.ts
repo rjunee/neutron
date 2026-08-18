@@ -628,6 +628,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(buildWorkflowArgs(input({ test_strategy: null })).testStrategy).toBe('')
   })
 
+  test('args carry the orchestrator-composed testStrategyIntermediate verbatim', () => {
+    const marker = 'TEST EXECUTION\nTASK-2-INTERMEDIATE-MARKER'
+    const args = buildWorkflowArgs(input({ test_strategy_intermediate: marker }))
+    expect(args['testStrategyIntermediate']).toBe(marker)
+  })
+
+  test('args carry an EMPTY testStrategyIntermediate when none was composed', () => {
+    expect(buildWorkflowArgs(input()).testStrategyIntermediate).toBe('')
+    expect(buildWorkflowArgs(input({ test_strategy_intermediate: null })).testStrategyIntermediate).toBe('')
+  })
+
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {
     const fire: FireInnerWorkflow = async () => {
       throw new Error('unexpected launcher crash')
