@@ -87,6 +87,19 @@ export interface BoardBoundBuildInput {
   task: string
   /** The Work Board item this build is bound to. REQUIRED (the hard rule). */
   board_item_id: string | undefined
+  /**
+   * The EXISTING PR this run is bound to; set ⇒ REVIEW-ONLY round against that
+   * PR — the run must never create a branch, commit, or open a PR; populated onto
+   * `code_trident_runs.bound_pr`.
+   *
+   * Cross-lane hazard: the fix-round-contract lane
+   * (.trident/plans/trident/a-fix-round-that-abandons-the-revie.md, tasks 2/4
+   * unbuilt) planned `bound_pr` as a fix-round publish-target pin; THIS card's
+   * semantic (set ⇒ never publishes, enforced fail-closed at launch) governs
+   * now, and that lane must add its own discriminator before shipping
+   * commit-capable bound runs.
+   */
+  bound_pr?: number | null
 }
 
 export interface BoardBoundBuildDeps {
@@ -133,12 +146,35 @@ export interface BoardBoundBuildDeps {
 export type BoardBoundBuildRejectionCode =
   | 'missing_board_item'
   | 'unknown_board_item'
+  | 'invalid_bound_pr'
+  | 'review_needs_bound_pr'
   | 'underspecified'
   | 'backend_error'
 
 export type BoardBoundBuildResult =
   | { ok: true; run: TridentRun; merge_mode: MergeMode; ralph: boolean }
   | { ok: false; code: BoardBoundBuildRejectionCode; message: string }
+
+/**
+ * Detect a request for a review ROUND OF AN EXISTING PR. Over-refusal is CHEAP:
+ * the refusal tells the caller exactly how to re-dispatch. Silent conversion
+ * into a build is the measured defect: PRs #542/#541/#530 were docs PRs ABOUT
+ * reviewing while the target's review-gate stayed red. Therefore this matcher
+ * deliberately errs toward refusing.
+ */
+export function detectReviewIntent(task: string): number | null {
+  const patterns = [
+    /\bre-?review\s+(?:of\s+)?PR\s*#?\s*(\d{1,7})\b/i,
+    /\breview\s+(?:round|pass|sweep)\s+(?:on|of|for|against)\s+PR\s*#?\s*(\d{1,7})\b/i,
+    /\b(?:run|do|perform|start|dispatch)\b[^\n.]{0,40}?\breview\b[^\n.]{0,40}?\bPR\s*#?\s*(\d{1,7})\b/i,
+    /\breview\s+PR\s*#?\s*(\d{1,7})\b/i,
+  ] as const
+  for (const pattern of patterns) {
+    const match = task.match(pattern)
+    if (match?.[1] !== undefined) return Number.parseInt(match[1], 10)
+  }
+  return null
+}
 
 /**
  * Create a board-bound trident run, enforcing the required-item + ask-gate
@@ -171,10 +207,34 @@ export async function dispatchBoardBoundBuild(
     }
   }
 
+  // (2b) A bound review target is a positive integer PR number.
+  const bound_pr = input.bound_pr
+  if (bound_pr !== undefined && bound_pr !== null && (!Number.isInteger(bound_pr) || bound_pr <= 0)) {
+    return {
+      ok: false,
+      code: 'invalid_bound_pr',
+      message: `bound_pr must be a positive integer PR number; got ${JSON.stringify(bound_pr)}. No run was created.`,
+    }
+  }
+
+  // (2c) Review-shaped free text must never fall through into the build path.
+  const wantsReview = detectReviewIntent(input.task)
+  if (wantsReview !== null && (bound_pr === undefined || bound_pr === null)) {
+    return {
+      ok: false,
+      code: 'review_needs_bound_pr',
+      message: `This task asks for a review round of an existing PR (#${wantsReview}), but no bound_pr was supplied. A review dispatch must set bound_pr to the PR number it reviews — free-text "review PR #N" is refused rather than silently converted into a build (a build would open a NEW PR and never touch #${wantsReview}). Re-dispatch with bound_pr: ${wantsReview}.`,
+    }
+  }
+
   // (3) ASK-BEFORE-ACTING — block an underspecified item; the caller must ask.
-  const readiness = assessDispatchReadiness(item)
-  if (!readiness.ready) {
-    return { ok: false, code: 'underspecified', message: readiness.reason ?? 'Plan item is underspecified.' }
+  // The ask-before-acting gate protects underspecified BUILDS; a bound review
+  // round is fully specified by the PR it reviews plus the task text.
+  if (bound_pr === undefined || bound_pr === null) {
+    const readiness = assessDispatchReadiness(item)
+    if (!readiness.ready) {
+      return { ok: false, code: 'underspecified', message: readiness.reason ?? 'Plan item is underspecified.' }
+    }
   }
 
   // Resolve THIS project's own git-initialized build workspace from the owner
@@ -245,6 +305,7 @@ export async function dispatchBoardBoundBuild(
       merge_mode,
       ralph,
       branch: `trident/${slug}`,
+      ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
       ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),
