@@ -53,6 +53,89 @@ clean. The repository runner completed its 1,353-file coverage audit but reporte
 reproduced failures in all 40 (59 failures in each of two 20-file batches), proving
 that full-suite red is pre-existing and not caused by this change.
 
+## 2026-08-18 — a cache miss is not an absence of deletion, and a refused receipt is not a sent one (#411-followup)
+
+Two defects in #409, found by the cross-model and adversarial review that #409 was
+merged WITHOUT. Both were live on the reference deployment before this landed.
+
+**A deleted project's transcript could come back.** The `projects_changed`
+invalidation iterated `transcriptCache.keys()` and raised its `dropped` flag only
+when a delete FOUND an entry — so a topic whose FIRST read was still in flight,
+which is precisely the case the epoch guard exists for, could not raise it. The
+epoch stayed put, the read's write-back passed the guard at `controller.ts`
+`handleChange`, and the deleted project's history was re-created in the cache where
+a later `setProject` would serve it. The mechanism the comment described was right;
+the condition gating it was keyed on "did the map contain it" rather than "did the
+server say it is gone". Invalidation now scans every topic this controller has an
+opinion about, in-flight reads included, via a new `inFlightTranscriptTopics` set
+held only for the duration of the await.
+
+**A read receipt refused by the socket was recorded as sent, permanently.**
+`markVisibleAgentRead` filled its per-topic ledger from the ids it OFFERED, while
+`WebChatSession.markRead` records an id only when `ws.send` succeeds — specifically
+so a failed send is re-offered next time. Filling the ledger from the argument
+cancelled that retry: the id was filtered out of every later call and the receipt
+was never sent again. Not an edge case — on EVERY page load the transcript is read
+from the local store and reported before the WebSocket handshake completes, so the
+whole hydrated transcript was offered into a closed socket, dropped, and ledgered.
+The owner's read watermark never advanced and unread counts returned on messages he
+was looking at. `markRead` now RETURNS the ids it actually sent (web and mobile
+sessions both), and the caller ledgers only those.
+
+**Mutation evidence, both directions.** Restoring the old ledger reds
+`switch-transcript-cache.test.ts` "a receipt the socket REFUSED is offered again"
+(26 pass / 1 fail); restoring the old invalidation reds "A DELETION LANDING WHILE
+THE FIRST READ IS IN FLIGHT STILL STICKS" (26 pass / 1 fail); with both fixes,
+27 pass / 0 fail. `chat-core` 171 pass / 0 fail.
+
+📌 **The first version of the resurrection test was DECORATION and is worth
+recording as such:** it passed with the bug restored, because it stalled the session
+AFTER entering the project, by which time the read had already resolved. A guard that
+cannot fail for the reason under test is not a guard. It was rewritten to register
+the stalled session BEFORE the switch — `createSession` reuses an existing entry —
+and only then did the mutation go red.
+
+📌 **The suite could not see either defect because its session stub accepted every
+receipt unconditionally**, and #409's own test "acknowledges each agent message ONCE"
+pinned the defect as the desired behaviour. The stub now models a closed socket.
+
+**SYSTEM-OVERVIEW.md changes:** none (bug fix inside existing modules; no new module,
+HTTP surface, lifecycle behaviour, deploy step or env flag — `markRead`'s return type
+is a widened contract on an existing method, not a new surface).
+
+### Follow-up — the cross-model review found the receipt fix was only half of one
+
+Codex reviewed the change above and returned two findings.
+
+**A refused receipt was made ELIGIBLE for retry, and nothing retried.** Not
+ledgering a refused id restores the session's retry contract; it does not perform
+one. `handleStatus('open')` only published, and an up-to-date `session_ready` with
+no replay and nothing queued emits no `onChange` — so on a cold load, where the
+transcript is read from the local store and reported before the handshake finishes
+and therefore refused wholesale, the next attempt waited on UNRELATED activity. The
+watermark stayed stale exactly as before, just for a different reason. The socket's
+transition to `open` now re-offers; `markVisibleAgentRead` is idempotent (the ledger
+filters ids already confirmed sent), so it costs nothing when there is nothing owed.
+
+**The in-flight tracker is now reference-counted rather than a Set** — two reads for
+one topic can overlap, and the first to settle removed membership while the second
+was still outstanding.
+
+📌 **That second one is kept on REASONING and the guard for it was DELETED rather
+than shipped.** The test I wrote passed against the Set, because in the ordinary
+overlap the first read to settle writes a cache entry, which keeps the topic in the
+invalidation's `known` set through the cache no matter what the tracker says. The
+real gap needs a read whose write-back is refused — a generation spanning `stop()`
+then `start()` — which was not reproduced. A guard that cannot fail for the reason
+under test is worse than no guard: it reads as coverage. The count is retained
+because it cannot be worse than the Set and costs three lines, and
+`controller.ts` says so at the declaration.
+
+**Mutation:** removing the socket-open re-offer reds "RE-OFFERS refused receipts the
+moment the socket opens" (28 pass / 1 fail). Restored: 29 pass / 0 fail on that
+suite, 208 pass / 0 fail across it plus `switch-render-cost` and `chat-core`,
+`bunx tsc --noEmit` 0 errors.
+
 ## 2026-08-18 — brief-part receipts now attest to persisted bytes
 
 `writeBriefParts` now encodes each task/reflection part once, writes it, reads the
@@ -68,6 +151,103 @@ short-write recovery, reflection-only refusal, unchanged happy-path receipts, an
 loud write failures. The production default remains the existing
 `trident/inner-loop.ts` caller; `trident/codex-build.sh` and
 `trident/inner-workflow.mjs` are unchanged.
+
+## 2026-08-18 — the web pane could destroy every Codex seat, and could only ever write the first one
+
+Three defects found by the adversarial review of #407 — which was merged with its
+verdict standing at REQUEST_CHANGES and no cross-model pass. All three were LIVE on
+the reference deployment, and **all three are on the web pane, which #407 never
+touched**: rotation changed what the server does with an unchanged request, so the
+client became wrong by standing still.
+
+**Disconnect became destructive without changing.** The button posts a bare
+`DELETE /api/app/codex-auth`, which the gateway now maps to `disconnectAllAccounts`.
+Before rotation it removed one credential. After it, one click removes EVERY
+connected subscription — and none can be re-minted without a fresh `codex login` on
+each original machine, which is worse than it sounds because the instance has been
+refreshing those tokens and the copies left behind are likely already revoked. There
+was no confirmation anywhere on the path, and the section copy still read
+*"This is an account-wide credential"* — singular. It now confirms through the tab's
+existing injectable `confirmImpl`, and the message NAMES THE COUNT, because the whole
+failure is that the owner believes he is clearing one thing.
+
+**The multi-seat UI shipped mobile-only.** `WebCodexCredentialClient.connectGlobal`
+took no `account`, so every paste resolved to `DEFAULT_SLOT` server-side: pasting a
+SECOND subscription silently destroyed the first, created nothing, and rendered
+"✓ Connected". The web `CodexStatus` type never declared `accounts` / `next` /
+`exhausted` either — the gateway had been sending all three the whole time — so there
+was no seat list, no cooling state and no per-seat remove. All now rendered, with the
+seat name REQUIRED once any seat exists.
+
+**Nothing stopped one ChatGPT account occupying two seats.** Both clients instruct the
+owner to *"run `codex login` on any machine and paste that account's auth.json"*, so
+pasting a laptop's file and then a desktop's is the documented path — and the CLI
+rotates refresh tokens, so the first refresh in each seat revokes the other. Both die,
+each is cooled `unauthorized` (the one state that never expires on a timer), and
+cross-model review is silently gone. That is ISSUES #573 re-created through the UI.
+`codex-rotation.ts` claims the design prevents it, and that is true of the code — the
+copy is made by the OWNER, not by us, which is the docblock-describes-intent shape.
+`connectAccount` now refuses a bundle whose `tokens.account_id` matches another seat,
+using a discriminator the normalizer already preserved and nothing read. A bundle with
+NO `account_id` is allowed through rather than refused: blocking every unidentifiable
+bundle would make a legitimate second seat impossible on a CLI version that omits the
+field, which is a worse failure than the one being prevented.
+
+**Mutation evidence — four guards, four reds.** Drop the confirm → "DISCONNECT-ALL
+confirms first" fails. Point per-seat Remove at the unqualified route → "REMOVE on one
+seat" fails. Stop sending the seat name → "ADD SEAT sends the seat name" fails. Remove
+the duplicate check → "REFUSES a second seat holding an account another seat already
+has" fails. Restored: `integrations-tab.test.tsx` 23 pass / 0 fail,
+`codex-credential.test.ts` 32 pass / 0 fail. The two ALLOW cases (a genuinely
+different account, and reconnecting the same account into its OWN seat — the repair
+path) stay green under the duplicate mutation, so the guard is not merely
+"no second seat, ever".
+
+**SYSTEM-OVERVIEW.md changes:** none (defect fix on an existing surface; no new module,
+HTTP route, lifecycle behaviour, deploy step or env flag — `connectGlobal` gaining an
+optional argument and `CodexStatus` declaring fields the server already sent are
+widenings of existing contracts).
+
+### Follow-up, same day — the cross-model review found the fix reintroducing the defect
+
+Codex reviewed the change above and returned four findings. Two were P1 and one of
+them was the same bug one step later.
+
+**The pane stored the POST's own reply, which erased the pool it had just fixed.**
+`POST /api/app/codex-auth` answers `{ status, mode, scope, account }`; ONLY the GET
+enriches with `accounts` / `next` / `exhausted`. Saving the POST reply therefore
+dropped the seat list, turned `codexSeatNameRequired` back off, and re-armed the
+blank-name overwrite of `default`. The pane now re-reads `statusGlobal()` after a
+successful connect, which the per-seat remove already did.
+
+📌 **It survived the first review because THE TEST STUB WAS MORE GENEROUS THAN THE
+SERVER** — it returned the full two-seat body from the POST, a shape production
+never sends. A stub that answers better than reality does not merely fail to catch
+the bug; it certifies it. Both stubs are now the real shapes, and the older Codex
+test's GET is STATEFUL (not_connected until the POST lands) because a GET frozen at
+`not_connected` contradicts the POST it just accepted.
+
+**The duplicate-account guard asked the wrong store.** It scanned
+`rotation.listSlots()`, but a rotation row is not proof a seat exists and its absence
+is not proof one does not: on an upgraded install the legacy `codex` credential
+predates rotation, so the list answers EMPTY while the credential is real and in use.
+The guard would find nothing and admit the same account under a named seat. It now
+scans `syncSlots()`, which re-derives seats from the persisted credential rows.
+
+**Two more, both taken:** the pane derived its whole display from the legacy
+top-level `status`, which only inspects the bare `codex` row — so removing `default`
+while named seats remain, or naming a first seat, printed "Not connected" over a
+healthy pool AND hid every control for managing it; it now derives from the pool.
+And `connectAccount` is serialized per owner, because the duplicate check reads and
+then writes, so two concurrent connects for one account could both pass before either
+stored — a double-click on "Add seat" is enough, and the damage needs a fresh
+`codex login` on both machines to undo.
+
+**Mutations, three more reds:** drop the re-read → "RE-READS the pool after
+connecting" fails; derive from legacy status → "shows a NAMED-ONLY pool as connected"
+fails; scan rotation rows instead of syncing → "sees a LEGACY seat that has never been
+through rotation" fails. Restored: `integrations-tab.test.tsx` 25 pass / 0 fail,
+`codex-credential.test.ts` 33 pass / 0 fail, `bunx tsc --noEmit` 0 errors.
 
 ## 2026-08-17 — a readiness poll must wait for the thing it claims to prove (#411)
 
@@ -24971,100 +25151,3 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
-
-## 2026-08-18 — the web pane could destroy every Codex seat, and could only ever write the first one
-
-Three defects found by the adversarial review of #407 — which was merged with its
-verdict standing at REQUEST_CHANGES and no cross-model pass. All three were LIVE on
-the reference deployment, and **all three are on the web pane, which #407 never
-touched**: rotation changed what the server does with an unchanged request, so the
-client became wrong by standing still.
-
-**Disconnect became destructive without changing.** The button posts a bare
-`DELETE /api/app/codex-auth`, which the gateway now maps to `disconnectAllAccounts`.
-Before rotation it removed one credential. After it, one click removes EVERY
-connected subscription — and none can be re-minted without a fresh `codex login` on
-each original machine, which is worse than it sounds because the instance has been
-refreshing those tokens and the copies left behind are likely already revoked. There
-was no confirmation anywhere on the path, and the section copy still read
-*"This is an account-wide credential"* — singular. It now confirms through the tab's
-existing injectable `confirmImpl`, and the message NAMES THE COUNT, because the whole
-failure is that the owner believes he is clearing one thing.
-
-**The multi-seat UI shipped mobile-only.** `WebCodexCredentialClient.connectGlobal`
-took no `account`, so every paste resolved to `DEFAULT_SLOT` server-side: pasting a
-SECOND subscription silently destroyed the first, created nothing, and rendered
-"✓ Connected". The web `CodexStatus` type never declared `accounts` / `next` /
-`exhausted` either — the gateway had been sending all three the whole time — so there
-was no seat list, no cooling state and no per-seat remove. All now rendered, with the
-seat name REQUIRED once any seat exists.
-
-**Nothing stopped one ChatGPT account occupying two seats.** Both clients instruct the
-owner to *"run `codex login` on any machine and paste that account's auth.json"*, so
-pasting a laptop's file and then a desktop's is the documented path — and the CLI
-rotates refresh tokens, so the first refresh in each seat revokes the other. Both die,
-each is cooled `unauthorized` (the one state that never expires on a timer), and
-cross-model review is silently gone. That is ISSUES #573 re-created through the UI.
-`codex-rotation.ts` claims the design prevents it, and that is true of the code — the
-copy is made by the OWNER, not by us, which is the docblock-describes-intent shape.
-`connectAccount` now refuses a bundle whose `tokens.account_id` matches another seat,
-using a discriminator the normalizer already preserved and nothing read. A bundle with
-NO `account_id` is allowed through rather than refused: blocking every unidentifiable
-bundle would make a legitimate second seat impossible on a CLI version that omits the
-field, which is a worse failure than the one being prevented.
-
-**Mutation evidence — four guards, four reds.** Drop the confirm → "DISCONNECT-ALL
-confirms first" fails. Point per-seat Remove at the unqualified route → "REMOVE on one
-seat" fails. Stop sending the seat name → "ADD SEAT sends the seat name" fails. Remove
-the duplicate check → "REFUSES a second seat holding an account another seat already
-has" fails. Restored: `integrations-tab.test.tsx` 23 pass / 0 fail,
-`codex-credential.test.ts` 32 pass / 0 fail. The two ALLOW cases (a genuinely
-different account, and reconnecting the same account into its OWN seat — the repair
-path) stay green under the duplicate mutation, so the guard is not merely
-"no second seat, ever".
-
-**SYSTEM-OVERVIEW.md changes:** none (defect fix on an existing surface; no new module,
-HTTP route, lifecycle behaviour, deploy step or env flag — `connectGlobal` gaining an
-optional argument and `CodexStatus` declaring fields the server already sent are
-widenings of existing contracts).
-
-### Follow-up, same day — the cross-model review found the fix reintroducing the defect
-
-Codex reviewed the change above and returned four findings. Two were P1 and one of
-them was the same bug one step later.
-
-**The pane stored the POST's own reply, which erased the pool it had just fixed.**
-`POST /api/app/codex-auth` answers `{ status, mode, scope, account }`; ONLY the GET
-enriches with `accounts` / `next` / `exhausted`. Saving the POST reply therefore
-dropped the seat list, turned `codexSeatNameRequired` back off, and re-armed the
-blank-name overwrite of `default`. The pane now re-reads `statusGlobal()` after a
-successful connect, which the per-seat remove already did.
-
-📌 **It survived the first review because THE TEST STUB WAS MORE GENEROUS THAN THE
-SERVER** — it returned the full two-seat body from the POST, a shape production
-never sends. A stub that answers better than reality does not merely fail to catch
-the bug; it certifies it. Both stubs are now the real shapes, and the older Codex
-test's GET is STATEFUL (not_connected until the POST lands) because a GET frozen at
-`not_connected` contradicts the POST it just accepted.
-
-**The duplicate-account guard asked the wrong store.** It scanned
-`rotation.listSlots()`, but a rotation row is not proof a seat exists and its absence
-is not proof one does not: on an upgraded install the legacy `codex` credential
-predates rotation, so the list answers EMPTY while the credential is real and in use.
-The guard would find nothing and admit the same account under a named seat. It now
-scans `syncSlots()`, which re-derives seats from the persisted credential rows.
-
-**Two more, both taken:** the pane derived its whole display from the legacy
-top-level `status`, which only inspects the bare `codex` row — so removing `default`
-while named seats remain, or naming a first seat, printed "Not connected" over a
-healthy pool AND hid every control for managing it; it now derives from the pool.
-And `connectAccount` is serialized per owner, because the duplicate check reads and
-then writes, so two concurrent connects for one account could both pass before either
-stored — a double-click on "Add seat" is enough, and the damage needs a fresh
-`codex login` on both machines to undo.
-
-**Mutations, three more reds:** drop the re-read → "RE-READS the pool after
-connecting" fails; derive from legacy status → "shows a NAMED-ONLY pool as connected"
-fails; scan rotation rows instead of syncing → "sees a LEGACY seat that has never been
-through rotation" fails. Restored: `integrations-tab.test.tsx` 25 pass / 0 fail,
-`codex-credential.test.ts` 33 pass / 0 fail, `bunx tsc --noEmit` 0 errors.

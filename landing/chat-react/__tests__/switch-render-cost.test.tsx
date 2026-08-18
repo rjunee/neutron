@@ -119,7 +119,12 @@ class FixedSession implements ControllerSession {
   async pendingCount(): Promise<number> {
     return 0
   }
-  markRead(): void {}
+  /** Accepts everything — this fixture is about RENDER COUNTS, not receipts.
+   *  It must still return the accepted ids: the caller ledgers only what came
+   *  back, so a `void` stub would model a socket that refuses every receipt. */
+  markRead(ids: readonly string[]): readonly string[] {
+    return ids
+  }
 }
 
 const PROJECTS = [
