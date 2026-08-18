@@ -824,6 +824,23 @@ describe('the multi-seat credential service', () => {
     expect(byName.get('work')).toBe('Company')
   })
 
+  // MUTATION: restore `syncSlots` passing `record.label` to `upsertSlot`.
+  //
+  // This is the half the previous test cannot see. With a name supplied, the
+  // credential row and the rotation row agree, so copying one onto the other is
+  // invisible — the test above passes either way, which is exactly why it is not
+  // the proof. With NO name supplied they DIVERGE: the credential row carries the
+  // store's own internal description, written for a credentials list, and the
+  // sync pushed that into the seat table where the settings pane renders it as
+  // the seat's name. A seat the owner never named must read as unnamed, so the
+  // pane falls back to the slot id, rather than inheriting a sentence.
+  test('an unnamed seat does not inherit the credential store’s internal description', async () => {
+    const svc = newService()
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    svc.listAccounts(OWNER)
+    expect(svc.listAccounts(OWNER)[0]?.label).toBeNull()
+  })
+
   // MUTATION: make the re-materialize write unconditional.
   test('resolving never overwrites an auth.json the CLI already owns', async () => {
     const svc = newService()
