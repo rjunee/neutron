@@ -27,10 +27,31 @@ afterAll(() => {
 // invariant of the gateway's shutdown path.
 const IS_LINUX = process.platform === 'linux'
 
+// Probed ONCE, at module scope, so an unavailable systemd registers a real
+// `skip` in the reporter. Probing inside the test body and returning early
+// counts the test as PASSED without running a line of its body — a silent green
+// on exactly the guards this file exists to hold.
+//
+// `systemd-run --version` succeeds even on headless Linux / container images /
+// WSL hosts where the binary exists but `systemd --user` isn't running, so the
+// probe-of-record is `systemctl --user list-units`: it touches the user manager
+// AND the D-Bus session and exits 0 only when both are up. Short-circuits on
+// non-Linux so no spawn happens there at all.
+const SYSTEMD_USER_AVAILABLE = ((): boolean => {
+  if (!IS_LINUX) return false
+  if (spawnSync('systemd-run', ['--version']).status !== 0) return false
+  return spawnSync('systemctl', ['--user', 'list-units', '--no-pager', '--no-legend']).status === 0
+})()
+
 describe('orphan survival — gateway boot + clean shutdown', () => {
   test('SIGTERM cleanup: gateway closes the per-owner DB cleanly; a fresh process re-opens it without WAL corruption', async () => {
     const ownerDir = mkdtempSync(join(FILE_TMPROOT, 'sigterm-'))
     const dbPath = join(ownerDir, 'owner.db')
+    // Declared outside the try so the finally can reap the child on EVERY exit
+    // path. The readiness wait below throws on timeout, and without this the
+    // spawned gateway survives the test — a live server, its watchdog interval,
+    // and two stream readers all holding a data dir we are about to delete.
+    let proc: Bun.Subprocess<'ignore', 'pipe', 'pipe'> | null = null
     try {
       // `--port=0` requests an OS-assigned ephemeral port so the subprocess
       // does NOT collide with the default 7800 — which a dev-mode gateway
@@ -38,7 +59,7 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       // this fix over a fixed alternate port because we don't read the bound
       // port from the subprocess; we only assert clean SIGTERM exit + DB
       // re-openability, both of which are port-agnostic.
-      const proc = Bun.spawn({
+      proc = Bun.spawn({
         cmd: ['bun', 'run', GATEWAY_ENTRY, '--port=0'],
         cwd: REPO_ROOT,
         env: {
@@ -48,6 +69,14 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
           // Without this, an inherited NOTIFY_SOCKET from the test runner could
           // make the gateway throw on a missing socket path.
           NOTIFY_SOCKET: '',
+          // PINNED, not inherited: the readiness marker we poll for below is a
+          // log.info, and the logger drops anything above the resolved level
+          // (logger/index.ts, emit()). Inheriting a runner that exports
+          // NEUTRON_LOG_LEVEL=warn or error would suppress the line and make
+          // this test time out deterministically — a probe that cannot observe
+          // the positive it is looking for. Same pinning as
+          // gateway/__tests__/app-devices-surface.test.ts.
+          NEUTRON_LOG_LEVEL: 'info',
         },
         stdout: 'pipe',
         stderr: 'pipe',
@@ -59,17 +88,23 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       // graceful-shutdown handler". Signalling before `process.once('SIGTERM')`
       // has been bound kills the child at the SIGNAL'S DEFAULT DISPOSITION —
       // exit 143 — with the DB never closed. So the ONLY sound precondition is
-      // "the handlers are bound". Every cheaper proxy is unsound, because in
-      // gateway/index.ts boot() the handler bind is the LAST thing that happens:
+      // "the handlers are bound", and in gateway/index.ts boot() that bind is
+      // the last thing that happens:
       //
       //   ProjectDb.open(dbPath)          creates the DB file
       //   applyMigrationsToProjectDb(db)  writes the _migrations rows
       //   composeProductionGraph(...)     async, slow, unbounded under load
       //   Bun.serve(...)                  the HTTP listener is accepting HERE
-      //   sdNotify('READY=1')             systemd is told "ready" HERE
       //   log.info(loopRegistry.bootLine) the boot inventory line is logged HERE
       //   process.once('SIGTERM'|'SIGINT') ← the handlers bind only HERE
+      //   sdNotify('READY=1')             systemd is told "ready" HERE
       //   log.info('gateway_signal_handlers_ready')  ← so we wait for THIS
+      //
+      // Note where READY=1 sits: this PR moved it BELOW the binds, because
+      // `Type=notify` lets systemd queue a stop job the moment it lands. That is
+      // what makes the sibling systemd subtest's `is-active` wait sound. It is
+      // no use to US, though — NOTIFY_SOCKET is cleared above, so sdNotify is a
+      // no-op here and the log line is the only observable marker.
       //
       // The previous revision polled `_migrations` for `count > 0` and then
       // slept a fixed 100 ms, under a comment claiming the poll "proves the
@@ -107,8 +142,13 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         }).catch(() => {}),
       ])
 
-      // Cap at 20 s — inside the outer 30 s budget, with room for the shutdown
-      // and DB-reopen assertions that follow.
+      // Cap at 20 s, inside a 45 s outer budget. The outer budget must exceed
+      // this cap by more than the work that FOLLOWS it (shutdown drain, then
+      // ProjectDb.open + a full migration replay on the reopen) — otherwise a
+      // 19 s readiness leaves the test to die on the runner's bare timeout,
+      // which reports nothing, instead of on the diagnostic throw below, which
+      // carries the child's stderr. Same reasoning as the sibling systemd
+      // subtest's 90 s budget over its 20+25+20 s of waits.
       const startedAt = Date.now()
       const readyDeadline = startedAt + 20_000
       while (!stdoutBuf.includes(READY_EVENT)) {
@@ -191,43 +231,27 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         fresh.close()
       }
     } finally {
+      // SIGKILL, not SIGTERM: every path that reaches here with a live child is
+      // one where the handlers may never have bound, and SIGTERM to an unbound
+      // child is precisely the condition under test. Await the exit so the dir
+      // removal below can't race a process still writing to it. No-op on the
+      // success path, where `await proc.exited` already ran.
+      if (proc !== null && proc.exitCode === null) {
+        proc.kill('SIGKILL')
+        await proc.exited
+      }
       rmSync(ownerDir, { recursive: true, force: true })
     }
-  }, 30_000)
+  }, 45_000)
 
-  test.skipIf(!IS_LINUX)(
+  test.skipIf(!SYSTEMD_USER_AVAILABLE)(
     'systemd respawn: under `systemd-run --user --service-type=notify`, gateway killed with SIGKILL is restarted within RestartSec; fresh process re-opens DB cleanly',
     async () => {
       // This test exercises the full Type=notify + Restart=always + WatchdogSec
-      // contract. It runs only when the host has systemd available (Linux);
-      // macOS dev / WSL-without-systemd / containerized CI without --privileged
-      // skip via test.skipIf above.
-      //
-      // Re-check the systemd user-manager actually answers — `systemd-run
-      // --version` succeeds even on headless Linux / container images / WSL
-      // hosts where the binary exists but `systemd --user` isn't running.
-      // Without an active user manager + user D-Bus session the subsequent
-      // `systemd-run --user ...` invocation would fail with `Failed to
-      // connect to bus`, which would surface as a test failure rather than a
-      // skip. The probe-of-record is `systemctl --user list-units` because
-      // it touches the user manager + D-Bus and exits 0 only when both are
-      // up; --version alone touches neither.
-      const versionProbe = spawnSync('systemd-run', ['--version'])
-      if (versionProbe.status !== 0) {
-        console.log(
-          'orphan-survival systemd test: skipping — `systemd-run` not on PATH (Linux-without-systemd host)',
-        )
-        return
-      }
-      const userProbe = spawnSync('systemctl', ['--user', 'list-units', '--no-pager', '--no-legend'])
-      if (userProbe.status !== 0) {
-        console.log(
-          'orphan-survival systemd test: skipping — `systemctl --user` failed (no user manager / D-Bus session): ' +
-            userProbe.stderr.toString().trim().slice(0, 200),
-        )
-        return
-      }
-
+      // contract. It runs only where a systemd USER manager answers — macOS dev,
+      // WSL-without-systemd, and containerized CI without --privileged all skip
+      // via the SYSTEMD_USER_AVAILABLE probe above, which registers a reported
+      // `skip` rather than an early return that would read as a pass.
       const ownerDir = mkdtempSync(join(FILE_TMPROOT, 'systemd-'))
       const dbPath = join(ownerDir, 'owner.db')
       const unitName = `test-unit-${process.pid}-${Date.now()}`
@@ -292,6 +316,13 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
 
         // Type=notify: the unit becomes `active` exactly when the gateway sends
         // READY=1, so this waits on the gateway's own readiness, not a guess.
+        // Sound as a shutdown precondition only because this PR moved that
+        // sdNotify BELOW the SIGTERM/SIGINT binds in boot() — while READY=1 was
+        // sent at the listener bind, `active` meant "accepting traffic", not
+        // "will handle a stop", and the `stop` issued further down could land on
+        // a process with no handler. WAL recovery on the reopen is forgiving
+        // enough that the assertions would still have passed, certifying a clean
+        // shutdown that never happened.
         await waitFor('the unit to report READY=1 (is-active == active)', 20_000, isActive)
 
         // Capture the PID, kill the process forcibly, then verify systemd
@@ -314,11 +345,13 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         expect(newPid).toBeGreaterThan(0)
         expect(newPid).not.toBe(oldPid)
 
-        // Stop cleanly and verify the DB is re-openable with no corruption.
-        // Waiting for the unit to actually leave `active` is what guarantees
-        // the gateway finished its shutdown and CLOSED the DB — reading the
-        // file while the stop is still draining is what would surface as WAL
-        // corruption that isn't really there.
+        // Stop cleanly, then verify the DB is re-openable with no corruption.
+        // The blocking `spawnSync` below is what actually guarantees the drain
+        // finished: `systemctl stop` returns only once the job completes, so the
+        // gateway has already closed the DB by the time it returns. The wait
+        // that follows is a cheap belt-and-braces re-read, NOT the guarantee —
+        // `is-active != active` is also true during `deactivating`, i.e. mid
+        // shutdown, so on its own it would prove nothing.
         spawnSync('systemctl', ['--user', 'stop', unitName])
         await waitFor('the unit to stop (is-active != active)', 20_000, () => !isActive())
 

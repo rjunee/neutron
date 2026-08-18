@@ -908,13 +908,11 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   // (rawServerRef already tracks the open socket for the init-failure guard,
   // captured above the moment bindHttpListener returned.)
 
-  // Best-effort READY=1; sdNotify is a no-op when NOTIFY_SOCKET is unset (dev
-  // mode / macOS), and throws on real systemd error paths so a bricked notify
-  // surfaces loudly at boot rather than silently across the whole watchdog
-  // window. We only send READY=1 once the DB is open, the graph is composed,
-  // and the listener is bound — so a successful systemd START_TIMEOUT means
-  // every subsystem is actually ready to take traffic.
-  sdNotify('READY=1')
+  // READY=1 is NOT sent here — it is sent at the end of boot(), after the
+  // SIGTERM/SIGINT handlers are bound. See the SIGNAL-READINESS block below for
+  // why: `Type=notify` lets systemd start a `stop` job the moment READY=1 lands,
+  // and a SIGTERM that arrives before the handlers exist kills the process at
+  // the signal's default disposition with the DB never closed.
 
   // §F2 — the gateway process-liveness loop (sd_notify systemd watchdog +
   // onGatewayTick heartbeat pulse) is a genuine long-lived loop. It is the LAST
@@ -1079,20 +1077,44 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
   }
   process.once('SIGTERM', handleSignal)
   process.once('SIGINT', handleSignal)
-  // SIGNAL-READINESS MARKER — the LAST statement of boot(), emitted on the same
-  // synchronous tick as the two binds above so nothing can run between them.
+
+  // SIGNAL-READINESS — everything below runs on the SAME synchronous tick as the
+  // two binds above (there is no `await` between them), so from any observer's
+  // point of view the handlers are already installed when these signals go out.
   //
-  // Every other "the gateway is up" signal this process emits lands BEFORE the
-  // handlers exist, and is therefore not evidence that a SIGTERM will be
-  // handled rather than killing the process at its default disposition (exit
-  // 143, DB never closed, WAL left for the next process to replay):
-  //   - the HTTP listener accepts connections from the Bun.serve bind above;
-  //   - sd_notify READY=1 is sent above;
-  //   - the loop-registry boot inventory line is logged above (and bootLine()
-  //     may itself throw, so it must stay on the failure-cleanup side of the
-  //     handler binds — see loop-inventory-boot-atomicity).
-  // An out-of-process supervisor that wants to signal this process and expect a
-  // GRACEFUL shutdown should wait for THIS line, not for any of those.
+  // The one "the gateway is up" signal that still lands BEFORE the binds is the
+  // HTTP listener: it accepts connections from the `Bun.serve` bind above. So a
+  // successful `/healthz` is NOT evidence that a SIGTERM will be handled rather
+  // than killing the process at the signal's default disposition (exit 143, DB
+  // never closed, WAL left for the next process to replay). The loop-registry
+  // boot inventory line is also logged above, and bootLine() may itself throw,
+  // so it stays on the failure-cleanup side of the binds — see
+  // loop-inventory-boot-atomicity.
+  //
+  // READY=1 is sent HERE rather than at the listener bind because `Type=notify`
+  // lets systemd queue a `stop` job the instant it lands. Sent earlier, it
+  // promises a graceful stop the process cannot yet honour; sent here, the
+  // promise is true. sdNotify is a no-op when NOTIFY_SOCKET is unset (dev mode /
+  // macOS) and throws on real systemd error paths, so a bricked notify surfaces
+  // loudly at boot rather than silently across the whole watchdog window. Every
+  // subsystem is ready by this point: DB open, graph composed, listener bound.
+  try {
+    sdNotify('READY=1')
+  } catch (err) {
+    // The two binds above are the only state installed after the point
+    // bootFailureCleanup() knows how to undo, so retire them here before
+    // rethrowing into the shared cleanup — otherwise a failed READY=1 leaves
+    // listeners closed over a torn-down boot.
+    process.removeListener('SIGTERM', handleSignal)
+    process.removeListener('SIGINT', handleSignal)
+    throw err
+  }
+
+  // The last statement of boot() before the returned handle. Emitted at INFO, so
+  // an out-of-process supervisor that waits for this line — rather than for the
+  // listener — must run the process at NEUTRON_LOG_LEVEL=info or debug; at warn
+  // or error the logger drops it (logger/index.ts, emit()). Under systemd,
+  // READY=1 above carries the same guarantee with no level dependency.
   log.info('gateway_signal_handlers_ready', { project_slug, port: boundServer.port })
 
   return { db, graph, server: boundServer, shutdown }
