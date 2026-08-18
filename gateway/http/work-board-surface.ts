@@ -81,12 +81,23 @@ export interface TridentRunAccess {
  * Result of a ▶ start/retry dispatch. Decoupled from `trident/board-dispatch`
  * so the surface never imports the dispatch internals — the composer maps its
  * `BoardBoundBuildResult` onto this shape.
+ *
+ * The `code` union is a deliberate hand-copy of `BoardBoundBuildRejectionCode`
+ * and MUST be widened alongside it: the composer assigns that type straight
+ * into this one, so a new rejection code that lands only in `board-dispatch.ts`
+ * fails the typecheck HERE, not there.
  */
 export type WorkBoardStartResult =
   | { ok: true; run_id: string }
   | {
       ok: false
-      code: 'missing_board_item' | 'unknown_board_item' | 'underspecified' | 'backend_error'
+      code:
+        | 'missing_board_item'
+        | 'unknown_board_item'
+        | 'invalid_bound_pr'
+        | 'review_needs_bound_pr'
+        | 'underspecified'
+        | 'backend_error'
       message: string
     }
 
