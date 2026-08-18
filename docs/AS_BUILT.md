@@ -539,6 +539,14 @@ The systemd sibling test had the readiness defect in its own dialect (fixed
 predicate is also true during `deactivating`. The blocking `systemctl stop` is
 the actual guarantee, and the comment now says so.
 
+#407 landed a narrower fix to the same flake while this branch was in review:
+wait for every migration on disk, then for the `[loop-registry]` composition
+line, then sleep 50 ms. The readiness marker is emitted strictly later than
+both, so it subsumes them and the sleep goes away. #407's disk-derived
+`MIGRATION_FILE_COUNT` is kept, promoted from readiness gate to post-boot
+ASSERTION — a partial replay is now a named failure here rather than a confusing
+`applied !== []` on the re-open.
+
 Two smaller corrections: the SIGTERM subtest reaps its child in the `finally`
 (every readiness-timeout path previously leaked a live gateway, its watchdog
 interval and two stream readers onto a data dir the test then deleted), and its

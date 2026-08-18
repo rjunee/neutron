@@ -1,6 +1,6 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, statSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -11,6 +11,20 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const REPO_ROOT = resolve(HERE, '..', '..')
 const GATEWAY_ENTRY = join(REPO_ROOT, 'gateway', 'index.ts')
+
+/**
+ * How many rows a COMPLETED `applyMigrations()` leaves in `_migrations` on a
+ * fresh DB — one per migration file, which is the runner's contract.
+ *
+ * Derived from disk rather than hardcoded so adding a migration never means
+ * editing this test (#407). #407 used it as the READINESS gate; readiness is
+ * now the signal-handler marker, which is emitted strictly later, so this
+ * serves as the post-boot ASSERTION that the replay finished — the strong form
+ * of the `> 0` sanity check it replaces.
+ */
+const MIGRATION_FILE_COUNT = readdirSync(join(REPO_ROOT, 'migrations')).filter((f) =>
+  f.endsWith('.sql'),
+).length
 
 // Per-file shared tempdir root. Each test's `ownerDir` is a subdir under
 // this root, so a SIGINT/timeout leaks at most ONE top-level dir per file.
@@ -175,15 +189,20 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       // child's output. The old `expect(bootMs).toBeGreaterThan(0)` measured
       // wall clock and could not fail for any reason worth catching.
 
-      // Sanity: the migration replay committed before we kill the process.
-      // (The exhaustive check is the re-open below — a PARTIAL replay would
-      // leave rows for applyMigrations() to apply, failing `applied === []`.)
+      // The migration replay committed IN FULL before we kill the process —
+      // every file on disk, not merely a non-empty table. Asserting the exact
+      // count (rather than `> 0`) is #407's contribution, kept: it is what makes
+      // a partial replay a named failure here instead of a confusing
+      // `applied !== []` on the re-open below.
       const verifyAfterBoot = new Database(dbPath, { readonly: true })
       try {
         const row = verifyAfterBoot
           .query<{ count: number }, []>('SELECT COUNT(*) AS count FROM _migrations')
           .get()
-        expect(row?.count).toBeGreaterThan(0)
+        expect(
+          row?.count,
+          `_migrations holds ${row?.count} of ${MIGRATION_FILE_COUNT} migrations on disk`,
+        ).toBe(MIGRATION_FILE_COUNT)
       } finally {
         verifyAfterBoot.close()
       }
