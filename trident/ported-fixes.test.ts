@@ -127,7 +127,8 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async () => ok(),
+      run_host: async (cmd) =>
+        cmd.includes('refs/remotes/origin/main^{commit}') ? ok('a'.repeat(40)) : ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
