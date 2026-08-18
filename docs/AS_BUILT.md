@@ -164,6 +164,21 @@ blackhole was really blocking bun rather than the warm run merely being fast. Bu
 the git dependency in that cache as `@GH@garrytan-gbrain-<sha>@@@1`, so the cached artefact
 is the one the outage denied.
 
+In CI the trade is different and the entry should say so rather than flatter the change.
+Across all 12 legs of #410's cold run vs its warm one, `bun install` drops from a ~13 s
+median to ~9.5 s — but restoring the 237 MB cache costs 5-10 s a cold run never pays, so
+the median leg goes from **~14 s to ~17.5 s**. On a GitHub-hosted runner the network is
+fast enough that downloading the packages beats restoring them, so **this buys reliability
+and costs ~3.5 s per leg**, paid in parallel. That is the right trade: the comparison that
+matters is not 14 s against 17.5 s, it is 17.5 s against a job that fails outright, which
+is what a cold install got on 2026-08-17. The local numbers above are what the cold path
+costs once the third party is merely ordinary rather than fast.
+
+Cache scoping decides when the benefit lands, and it is not obvious: an Actions cache is
+readable from the branch that wrote it and from the default branch, nowhere else. A cache
+written by a PR run warms only that PR. The cross-PR win begins when a `push` run on `main`
+writes the main-scoped entry, after which every PR restores from it until `bun.lock` moves.
+
 Three properties the shape preserves. The jobs stay **independent** — a cache is not the
 shared-artifact handoff the header rules out, because a cache MISS still installs and still
 passes, so every gate remains runnable on its own. The build cannot go **wrong** —

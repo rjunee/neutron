@@ -22,20 +22,51 @@ name: ci
 # jobs at once on a PR whose only real defect was a single type error, costing a
 # full review round to work out that the code was never the problem.
 #
-# So each job restores bun's global install cache, keyed on `bun.lock`. Measured
-# on this tree: 118s cold, 36s warm, and 22s warm with ALL outbound HTTP
-# blackholed — a warm cache needs no network whatsoever, which is the point. The
-# cache is keyed on the lockfile because the lockfile is what determines the
-# content; `BUN_INSTALL_CACHE_DIR` is set explicitly at each install rather than
-# leaning on bun's default location, so the directory actions/cache saves and the
-# directory bun writes are the same string by construction rather than by
-# assumption.
+# So each job restores bun's global install cache, keyed on `bun.lock`. The cache
+# is keyed on the lockfile because the lockfile is what determines the content;
+# `BUN_INSTALL_CACHE_DIR` is set explicitly at each install rather than leaning on
+# bun's default location, so the directory actions/cache saves and the directory
+# bun writes are the same string by construction rather than by assumption. A
+# cache that silently misses every run is indistinguishable from no cache while
+# looking fixed, and an inferred path is how you get that.
+#
+# THIS BUYS RELIABILITY, NOT WALL-CLOCK, and the numbers should say so rather than
+# flatter the change. Measured across all 12 legs, PR #410's cold run vs its warm
+# one: `bun install` itself drops from a ~13s median to ~9.5s, but restoring a
+# 237 MB cache costs 5-10s that a cold run does not pay, so the median leg goes
+# from ~14s to ~17.5s. On a GitHub-hosted runner the network is fast enough that
+# downloading the packages beats restoring them. That is a ~3.5s regression per
+# leg, paid in parallel, and it is worth it: the comparison that matters is not
+# 14s vs 17.5s, it is 17.5s vs a job that FAILS, which is what a cold install got
+# on 2026-08-17. Locally, where the network is ordinary, the same install is 118s
+# cold and 36s warm — so the cold path is only cheap while a third party is
+# healthy and close.
+#
+# The property being bought is provable directly: locally, a warm cache installs
+# all 2501 packages in 22s with ALL outbound HTTP blackholed, while the same
+# blackhole against an empty cache installed nothing at all in ten minutes. A warm
+# cache needs no network whatsoever. That is the whole point of the change.
 #
 # `restore-keys` gives the lockfile-changed case a partial hit: every package the
 # change did NOT touch still comes from the cache, so a one-line dependency bump
 # costs one download rather than 2500. It is safe for the same reason the cache
 # itself is safe — a stale entry that `bun.lock` no longer names is simply never
 # asked for.
+#
+# WHERE THE BENEFIT ACTUALLY LANDS, because the scoping is not obvious and it is
+# the difference between this working and merely looking like it works. Actions
+# caches are readable from the branch that wrote them and from the DEFAULT branch,
+# and nowhere else. A cache written by a PR run is therefore scoped to that PR: it
+# warms that PR's later pushes and no one else's. The cross-PR win starts when a
+# `push` run on `main` writes the main-scoped entry, which every PR can then read.
+# So expect the first run of any PR after a `bun.lock` change to be cold, and
+# everything else to be warm — not "every run is warm from day one".
+#
+# EXPECTED NOISE, so nobody re-debugs it: on a cold run all twelve legs miss and
+# all twelve try to save the same key, so exactly ONE wins and the other eleven
+# log `Failed to save: Unable to reserve cache with key ..., another job may be
+# creating this cache`. That is benign and non-fatal — the cache exists after the
+# first winner, and those jobs pass. It is alarming to read and means nothing.
 #
 # A CACHE MUST NEVER MAKE A BUILD WRONG, and `--frozen-lockfile` is what keeps
 # that true. The cache supplies CONTENT; the lockfile still decides what is
