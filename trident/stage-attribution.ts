@@ -43,6 +43,8 @@ export interface WindowAttribution {
   briefToBuildMs: number | null
   briefToBuildStatus: string | null
   briefToBuildHasBothStamps: boolean
+  codexBuildMs: number | null
+  codexBuildStatus: string | null
   notes: string[]
 }
 
@@ -170,7 +172,7 @@ function durationBetween(
   return { durationMs, status: null, hasBoth: true }
 }
 
-/** Attribute exactly the six planned stage pairs within a single fire window. */
+/** Attribute the six pre-build stage pairs and the separate exact build window. */
 export function computeSegments(fireWindow: FireWindow): WindowAttribution {
   const { first, notes } = firstStages(fireWindow.events)
   const rawSegments = STAGE_SEGMENTS.map(([from, to]) => {
@@ -196,12 +198,15 @@ export function computeSegments(fireWindow: FireWindow): WindowAttribution {
         : (segment.durationMs / attributedSumMs) * 100,
   }))
   const briefToBuild = durationBetween(first, 'fire-dispatched', 'wrapper-start')
+  const codexBuild = durationBetween(first, 'codex-exec-start', 'codex-exec-end')
   return {
     segments,
     attributedSumMs,
     briefToBuildMs: briefToBuild.durationMs,
     briefToBuildStatus: briefToBuild.status,
     briefToBuildHasBothStamps: briefToBuild.hasBoth,
+    codexBuildMs: codexBuild.durationMs,
+    codexBuildStatus: codexBuild.status,
     notes,
   }
 }
@@ -319,6 +324,11 @@ function renderProject(project: string, windows: readonly LoadedWindow[]): strin
         ? `  brief→build (fire-dispatched→wrapper-start): ${attribution.briefToBuildStatus}`
         : `  brief→build (fire-dispatched→wrapper-start): ${formatMs(attribution.briefToBuildMs)}`,
     )
+    lines.push(
+      attribution.codexBuildMs === null
+        ? `  codex build (codex-exec-start→codex-exec-end): ${attribution.codexBuildStatus}`
+        : `  codex build (codex-exec-start→codex-exec-end): ${formatMs(attribution.codexBuildMs)}`,
+    )
     if (attribution.notes.length > 0) lines.push(`  notes: ${attribution.notes.join(', ')}`)
   }
 
@@ -331,6 +341,15 @@ function renderProject(project: string, windows: readonly LoadedWindow[]): strin
     briefMean === null
       ? '  mean brief→build: unattributed (samples=0)'
       : `  mean brief→build: ${formatMs(Number(briefMean.toFixed(3)))} (samples=${briefValues.length})`,
+  )
+  const codexBuildValues = windows
+    .map((item) => item.attribution.codexBuildMs)
+    .filter((value): value is number => value !== null)
+  const codexBuildMean = mean(codexBuildValues)
+  lines.push(
+    codexBuildMean === null
+      ? '  mean codex build: unattributed (samples=0)'
+      : `  mean codex build: ${formatMs(Number(codexBuildMean.toFixed(3)))} (samples=${codexBuildValues.length})`,
   )
 
   const segmentMeans: Array<{ name: string; percentage: number | null }> = []

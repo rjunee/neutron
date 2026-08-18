@@ -681,12 +681,28 @@ describe('durable pre-build stage stamps', () => {
     ])
   })
 
-  test('a successful Codex path records wrapper-start then codex-exec-start', () => {
+  test('a successful Codex path durably brackets the exact execution window', () => {
     const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 0 })
     expect(r.status).toBe(0)
     expect(r.stageCalls.trim().split('\n')).toEqual([
       '/tmp/stage-run.db run-stage wrapper-start',
       '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+
+  test('a failed Codex path still records codex-exec-end', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      stageExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_FAIL },
+    })
+    expect(r.status).toBe(5)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
     ])
   })
 
@@ -729,6 +745,7 @@ describe('durable pre-build stage stamps', () => {
     expect(r.stageCalls.trim().split('\n')).toEqual([
       '/tmp/stage-run.db run-stage wrapper-start',
       '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
     ])
   })
 })

@@ -85,6 +85,7 @@ function completeWindow(runId: string, startMs: number, ralphRound: number): Sta
     event(runId, 'wrapper-invoke', startMs + 1000),
     event(runId, 'wrapper-start', startMs + 1100),
     event(runId, 'codex-exec-start', startMs + 1200),
+    event(runId, 'codex-exec-end', startMs + 2200),
   ]
 }
 
@@ -106,7 +107,7 @@ async function runCli(path: string, label = 'fixture'): Promise<{
 }
 
 describe('stage attribution pure reader', () => {
-  test('happy path computes all six durations, percentages, attributed sum, and brief→build', () => {
+  test('happy path computes six pre-build durations plus exact brief and build windows', () => {
     const events = [
       event('run-happy', 'launch-start', 0, 'round=1 ralph_round=1'),
       event('run-happy', 'fire-dispatched', 100),
@@ -116,6 +117,7 @@ describe('stage attribution pure reader', () => {
       event('run-happy', 'wrapper-invoke', 7_100),
       event('run-happy', 'wrapper-start', 9_100),
       event('run-happy', 'codex-exec-start', 10_100),
+      event('run-happy', 'codex-exec-end', 40_100),
     ]
     const [fireWindow] = groupIntoFireWindows(events)
     expect(fireWindow?.label).toBe('run-happy#0 round=1 ralph_round=1')
@@ -132,6 +134,7 @@ describe('stage attribution pure reader', () => {
     expect(result.segments.map((segment) => segment.percentage)).toEqual([10, 20, 30, 10, 20, 10])
     expect(result.attributedSumMs).toBe(10_000)
     expect(result.briefToBuildMs).toBe(9_000)
+    expect(result.codexBuildMs).toBe(30_000)
   })
 
   test('re-fire interleaving opens isolated windows and never emits a negative duration', () => {
@@ -177,6 +180,10 @@ describe('stage attribution pure reader', () => {
     expect(result.segments[3]).toMatchObject({ durationMs: 100, status: null })
     expect(result.segments[4]).toMatchObject({ durationMs: 100, status: null })
     expect(result.segments[5]).toMatchObject({ durationMs: 100, status: null })
+    expect(result).toMatchObject({
+      codexBuildMs: null,
+      codexBuildStatus: 'unattributed(codex-exec-end)',
+    })
   })
 
   test('orphan rows are retained in a no-launch-start window and duplicates use the first stamp', () => {
@@ -209,7 +216,7 @@ describe('stage attribution pure reader', () => {
 })
 
 describe('stage attribution CLI', () => {
-  test('prints six segments, percentages, direct brief→build, aggregates, and refuses n<5', async () => {
+  test('prints six pre-build segments, direct brief/build windows, aggregates, and refuses n<5', async () => {
     const { path, db } = fixture({ projectSchema: true })
     db.run('INSERT INTO projects (id, name) VALUES (?, ?)', ['project-1', 'Neutron Test'])
     for (let index = 0; index < 4; index += 1) {
@@ -228,6 +235,8 @@ describe('stage attribution CLI', () => {
     expect(result.stdout).toContain('fire-dispatched→fire-settled: 100 ms (0.100 s) (9.09%)')
     expect(result.stdout).toContain('attributed segment sum: 1100 ms (1.100 s)')
     expect(result.stdout).toContain('brief→build (fire-dispatched→wrapper-start): 1000 ms (1.000 s)')
+    expect(result.stdout).toContain('codex build (codex-exec-start→codex-exec-end): 1000 ms (1.000 s)')
+    expect(result.stdout).toContain('mean codex build: 1000 ms (1.000 s) (samples=4)')
     expect(result.stdout).toContain('insufficient samples (n=4 < 5): no conclusion')
     expect(result.stdout).not.toContain('dominant:')
   })

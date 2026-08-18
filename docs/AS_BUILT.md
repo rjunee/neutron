@@ -6,12 +6,16 @@ Running log of what shipped, newest first. One entry per merged change.
 
 The `plan:probe` seat now also relays a byte-bounded branch log from
 `git log --name-only <base>..<ref> | head -c 12288`. It has no checksum because
-it is synthesis material, not a persisted relay. `plan:next` returns an optional
+it is synthesis material, not a persisted relay. The workflow independently
+clamps the relayed value to 12,288 UTF-8 bytes before prompt interpolation and
+fences commit messages as untrusted data. `plan:next` returns an optional
 `branchBrief` with BUILT / SEAMS / REJECTED / SUITES sections: evidence-only and
 REGENERATED each round, so any prior round's brief is superseded.
 `clampBranchBrief()` enforces `BRANCH_BRIEF_MAX_BYTES = 4096` in code at the
 single consumption point. `ralphExecuteNote` appends that clamped brief to the
-Forge prompt and emits nothing when the brief is absent or empty. The brief is
+Forge prompt only when `usePlanNext` selected its authoritative producer; a
+`plan:fable` answer cannot activate the shared schema's optional field. It emits
+nothing when the brief is absent or empty. The brief is
 absent from the persisted plan and every checkpoint prompt, leaving no
 accumulation channel. A missing or empty branch log or brief fails open: the cheap
 path remains selected and no header is emitted. The iteration-1 and genuine
@@ -22,16 +26,17 @@ The measured BEFORE on the 2026-08-18 continuation round of card
 Fable, 3.4x cheaper) and codex build 30m01. FORGE re-deriving branch state was
 estimated at approximately 14 minutes of that build.
 
-The AFTER protocol is: on the next real multi-task card after this merges, for
-each continuation round (`ralphRound >= 1`), read the run's
-`code_trident_stage_events` rows written via `trident/stage-stamp.sh` and
-segmented by `trident/stage-attribution.ts`. The codex build window opens at that
-round's `codex-exec-start` stamp and closes at the round's checkpoint write / the
-next fire's `fire-dispatched`; quote that AFTER duration against the BEFORE 30m01
-in a follow-up entry.
+AFTER: not yet measurable — this branch has not merged, so no real continuation
+round can have consumed the new brief. The wrapper now durably stamps both
+`codex-exec-start` and `codex-exec-end` on success and failure, and
+`trident/stage-attribution.ts` reports that exact pair; checkpoint time and the
+next fire are no longer timing proxies.
 
-If the continuation-round build duration does not drop, this brief gets REMOVED
-rather than kept, per the card's falsification criterion 4.
+Removal gate: the Trident owner must quote the first qualifying post-merge
+multi-task continuation's exact `codex-exec-start→codex-exec-end` AFTER beside
+the BEFORE 30m01, no later than 2026-08-25. If no qualifying measurement is
+recorded by that deadline, or the measured duration does not drop, the owner
+reverts the branch-state brief rather than retaining an unproven optimisation.
 
 ## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
 
@@ -60,7 +65,8 @@ mapping, client parsing, recovery→done reconciliation, and both client rendere
 Migration 0133 adds `code_trident_stage_events`, an append-only SQLite ledger read
 and written through `TridentRunStore`. Host launches now record `launch-start`,
 `fire-dispatched`, and `fire-settled`; the Codex wrapper records `wrapper-start`
-and `codex-exec-start` through the new always-exit-0 `trident/stage-stamp.sh`.
+and brackets execution with `codex-exec-start` / `codex-exec-end` through the
+always-exit-0 `trident/stage-stamp.sh`.
 Every writer uses millisecond ISO-8601 UTC where the host supports it, preserves
 insertion order by row id, and is best-effort so instrumentation cannot change a
 launch or wrapper exit.
