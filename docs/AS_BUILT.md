@@ -24825,3 +24825,59 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-18 — the web pane could destroy every Codex seat, and could only ever write the first one
+
+Three defects found by the adversarial review of #407 — which was merged with its
+verdict standing at REQUEST_CHANGES and no cross-model pass. All three were LIVE on
+the reference deployment, and **all three are on the web pane, which #407 never
+touched**: rotation changed what the server does with an unchanged request, so the
+client became wrong by standing still.
+
+**Disconnect became destructive without changing.** The button posts a bare
+`DELETE /api/app/codex-auth`, which the gateway now maps to `disconnectAllAccounts`.
+Before rotation it removed one credential. After it, one click removes EVERY
+connected subscription — and none can be re-minted without a fresh `codex login` on
+each original machine, which is worse than it sounds because the instance has been
+refreshing those tokens and the copies left behind are likely already revoked. There
+was no confirmation anywhere on the path, and the section copy still read
+*"This is an account-wide credential"* — singular. It now confirms through the tab's
+existing injectable `confirmImpl`, and the message NAMES THE COUNT, because the whole
+failure is that the owner believes he is clearing one thing.
+
+**The multi-seat UI shipped mobile-only.** `WebCodexCredentialClient.connectGlobal`
+took no `account`, so every paste resolved to `DEFAULT_SLOT` server-side: pasting a
+SECOND subscription silently destroyed the first, created nothing, and rendered
+"✓ Connected". The web `CodexStatus` type never declared `accounts` / `next` /
+`exhausted` either — the gateway had been sending all three the whole time — so there
+was no seat list, no cooling state and no per-seat remove. All now rendered, with the
+seat name REQUIRED once any seat exists.
+
+**Nothing stopped one ChatGPT account occupying two seats.** Both clients instruct the
+owner to *"run `codex login` on any machine and paste that account's auth.json"*, so
+pasting a laptop's file and then a desktop's is the documented path — and the CLI
+rotates refresh tokens, so the first refresh in each seat revokes the other. Both die,
+each is cooled `unauthorized` (the one state that never expires on a timer), and
+cross-model review is silently gone. That is ISSUES #573 re-created through the UI.
+`codex-rotation.ts` claims the design prevents it, and that is true of the code — the
+copy is made by the OWNER, not by us, which is the docblock-describes-intent shape.
+`connectAccount` now refuses a bundle whose `tokens.account_id` matches another seat,
+using a discriminator the normalizer already preserved and nothing read. A bundle with
+NO `account_id` is allowed through rather than refused: blocking every unidentifiable
+bundle would make a legitimate second seat impossible on a CLI version that omits the
+field, which is a worse failure than the one being prevented.
+
+**Mutation evidence — four guards, four reds.** Drop the confirm → "DISCONNECT-ALL
+confirms first" fails. Point per-seat Remove at the unqualified route → "REMOVE on one
+seat" fails. Stop sending the seat name → "ADD SEAT sends the seat name" fails. Remove
+the duplicate check → "REFUSES a second seat holding an account another seat already
+has" fails. Restored: `integrations-tab.test.tsx` 23 pass / 0 fail,
+`codex-credential.test.ts` 32 pass / 0 fail. The two ALLOW cases (a genuinely
+different account, and reconnecting the same account into its OWN seat — the repair
+path) stay green under the duplicate mutation, so the guard is not merely
+"no second seat, ever".
+
+**SYSTEM-OVERVIEW.md changes:** none (defect fix on an existing surface; no new module,
+HTTP route, lifecycle behaviour, deploy step or env flag — `connectGlobal` gaining an
+optional argument and `CodexStatus` declaring fields the server already sent are
+widenings of existing contracts).

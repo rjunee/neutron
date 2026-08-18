@@ -23,11 +23,38 @@ export type CodexConnectionStatus = 'connected' | 'expired' | 'not_connected'
 
 export type CodexScope = 'project' | 'global'
 
+/**
+ * One connected seat. Mirrors the mobile client's `CodexAccount` because it is the
+ * SAME server response — the web type simply never declared the fields, so the web
+ * pane could not render a seat list, a cooling state, or a per-seat remove even
+ * though the gateway had been sending all three.
+ */
+export interface CodexAccount {
+  slot: string
+  label: string | null
+  status: CodexConnectionStatus
+  /** Cooling seats are skipped by rotation until `cooling_until` passes. */
+  cooling: boolean
+  cooling_until: number | null
+  cooling_reason: string | null
+  used_percent: number | null
+  window_minutes: number | null
+  plan_type: string | null
+  /** Whether this is the seat the next run will use. */
+  active: boolean
+}
+
 export interface CodexStatus {
   status: CodexConnectionStatus
   materialized?: boolean
   expires_at?: string
   detail?: string
+  /** Every connected seat. Optional because a pre-rotation server omits it. */
+  accounts?: CodexAccount[]
+  /** The seat the next run will use. */
+  next?: string | null
+  /** Every seat is cooling — runs continue on a capped seat rather than none. */
+  exhausted?: boolean
   /** Which scope supplied the resolved credential (project override vs global
    *  default), or null when unset. Present on the effective-status responses. */
   scope?: CodexScope | null
@@ -87,14 +114,42 @@ export class WebCodexCredentialClient {
     return this.req<CodexStatus>(this.globalPath)
   }
 
-  /** Connect the GLOBAL Codex subscription. Throws on a metered key. */
-  async connectGlobal(auth: string): Promise<CodexStatus> {
-    return this.req<CodexStatus>(this.globalPath, { method: 'POST', body: { auth } })
+  /**
+   * Connect a Codex subscription. Throws on a metered key.
+   *
+   * `account` NAMES A SEAT, and omitting it is not neutral: the server resolves an
+   * absent account to `DEFAULT_SLOT`, so a paste with no name REPLACES the first
+   * seat rather than adding one. This client used to have no way to pass it at all,
+   * which meant the web pane could only ever write seat 1 — silently destroying an
+   * existing subscription while reporting "connected".
+   */
+  async connectGlobal(auth: string, account?: string): Promise<CodexStatus> {
+    return this.req<CodexStatus>(this.globalPath, {
+      method: 'POST',
+      body: account === undefined || account.length === 0 ? { auth } : { auth, account },
+    })
   }
 
-  /** Disconnect the GLOBAL Codex subscription. */
-  async disconnectGlobal(): Promise<void> {
+  /**
+   * Forget EVERY connected seat. Unqualified, and named so at the call site.
+   *
+   * The gateway maps a bare DELETE to `disconnectAllAccounts`. Before rotation that
+   * removed one credential and the distinction did not exist; now it is the
+   * difference between clearing one seat and destroying every subscription the
+   * owner has, none of which he can re-mint without a fresh `codex login` on each
+   * original machine. Callers MUST confirm first — see {@link disconnectSeat} for
+   * the one-seat form.
+   */
+  async disconnectAllSeats(): Promise<void> {
     await this.req<{ ok: boolean }>(this.globalPath, { method: 'DELETE' })
+  }
+
+  /** Forget ONE seat, leaving the rest of the pool connected. */
+  async disconnectSeat(account: string): Promise<void> {
+    await this.req<{ ok: boolean }>(
+      `${this.globalPath}?account=${encodeURIComponent(account)}`,
+      { method: 'DELETE' },
+    )
   }
 
   // ── PROJECT OVERRIDE (optional — per-project Settings) ──

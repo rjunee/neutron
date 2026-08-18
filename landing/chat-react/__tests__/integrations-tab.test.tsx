@@ -361,7 +361,11 @@ describe('IntegrationsTab render (happy-dom)', () => {
 
     // The section renders under the account-wide Admin surface.
     expect(container.textContent).toContain('Codex cross-model review')
-    expect(container.textContent).toContain('account-wide credential')
+    // NOT 'account-wide credential' — that singular framing is what made a button
+    // which now removes EVERY seat read as if it cleared one thing. The copy must
+    // say seats are plural and must warn that reusing one account kills both.
+    expect(container.textContent).toContain('one or more ChatGPT')
+    expect(container.textContent).toContain('revoke each')
     expect(container.textContent).toContain('○ Not connected')
 
     const textarea = container.querySelector('#cint-codex-auth') as HTMLTextAreaElement
@@ -798,6 +802,148 @@ describe('IntegrationsTab shared (global) credentials (happy-dom)', () => {
     for (const r of requests.filter((x) => x.url.includes('/credentials'))) {
       expect(r.url).not.toContain('/api/app/projects/')
     }
+    root.unmount()
+  })
+})
+
+describe('Codex seats — the web pane can destroy them, so it must say so', () => {
+  /** A two-seat pool, the shape the gateway has been sending all along. */
+  const TWO_SEATS = {
+    ok: true,
+    status: 'connected',
+    scope: 'global',
+    next: 'default',
+    accounts: [
+      {
+        slot: 'default',
+        label: null,
+        status: 'connected',
+        cooling: false,
+        cooling_until: null,
+        cooling_reason: null,
+        used_percent: 12,
+        window_minutes: 10080,
+        plan_type: 'pro',
+        active: true,
+      },
+      {
+        slot: 'work',
+        label: null,
+        status: 'connected',
+        cooling: true,
+        cooling_until: 99,
+        cooling_reason: 'rate_limited',
+        used_percent: 99,
+        window_minutes: 300,
+        plan_type: 'pro',
+        active: false,
+      },
+    ],
+  }
+
+  const seatHandler =
+    (onDelete: (url: string) => void, onPost?: (body: unknown) => void): Handler =>
+    (url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.includes('/api/app/codex-auth') && (init?.method ?? 'GET') === 'GET') {
+        return json(TWO_SEATS)
+      }
+      if (url.includes('/api/app/codex-auth') && init?.method === 'DELETE') {
+        onDelete(url)
+        return json({ ok: true })
+      }
+      if (url.includes('/api/app/codex-auth') && init?.method === 'POST') {
+        onPost?.(JSON.parse(init.body as string))
+        return json(TWO_SEATS, 201)
+      }
+      return null
+    }
+
+  it('renders every seat, its cooling state, and which one runs next', async () => {
+    // The gateway has always sent `accounts`; the WEB type simply never declared
+    // the field, so this pane showed one opaque "Connected" line for a pool of
+    // seats and no way to act on any of them.
+    const { container, root } = await mount(seatHandler(() => {}))
+    expect(container.textContent).toContain('default')
+    expect(container.textContent).toContain('work')
+    expect(container.textContent).toContain('cooling')
+    expect(container.textContent).toContain('next')
+    root.unmount()
+  })
+
+  it('DISCONNECT-ALL confirms first, names the count, and sends NOTHING when declined', async () => {
+    // This button became destructive without changing: before rotation it removed
+    // one credential, and a bare DELETE now maps to disconnectAllAccounts. An owner
+    // clicking it to re-paste one seat would lose every subscription he has.
+    const deletes: string[] = []
+    const { container, root, act, confirmed } = await mount(seatHandler((u) => deletes.push(u)), {
+      confirm: false,
+    })
+    const btn = container.querySelector(
+      '[data-testid="cint-codex-disconnect-all"]',
+    ) as HTMLButtonElement
+    expect(btn.textContent).toContain('2 seats')
+    await act(async () => {
+      btn.click()
+      await tick()
+    })
+    expect(confirmed.join(' ')).toContain('ALL 2')
+    // Declined means NO request. The assertion that matters: the confirmation is a
+    // gate, not a notification shown after the fact.
+    expect(deletes).toHaveLength(0)
+    root.unmount()
+  })
+
+  it('REMOVE on one seat deletes that seat only, never the unqualified route', async () => {
+    const deletes: string[] = []
+    const { container, root, act } = await mount(seatHandler((u) => deletes.push(u)))
+    const btn = container.querySelector(
+      '[data-testid="cint-codex-seat-remove-work"]',
+    ) as HTMLButtonElement
+    await act(async () => {
+      btn.click()
+      await tick()
+      await tick()
+    })
+    expect(deletes).toHaveLength(1)
+    expect(deletes[0]).toContain('account=work')
+    root.unmount()
+  })
+
+  it('ADD SEAT sends the seat name, and refuses a blank one while a seat exists', async () => {
+    // Omitting `account` is not neutral: the server resolves it to the default slot
+    // and OVERWRITES seat 1. This client could not send the field at all, so the web
+    // pane could only ever replace the first seat while reporting success.
+    const posted: unknown[] = []
+    const { container, root, act } = await mount(seatHandler(() => {}, (b) => posted.push(b)))
+    const auth = container.querySelector('#cint-codex-auth') as HTMLTextAreaElement
+    const setValue = (el: HTMLTextAreaElement | HTMLInputElement, v: string): void => {
+      const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el) as object, 'value')?.set
+      setter?.call(el, v)
+      el.dispatchEvent(new Event('input', { bubbles: true }))
+    }
+    await act(async () => {
+      setValue(auth, '{"tokens":{}}')
+      await tick()
+    })
+    const submit = container.querySelector('[data-testid="cint-codex-connect"]') as HTMLButtonElement
+    // A pasted bundle with NO seat name, while two seats exist: refused.
+    expect(submit.disabled).toBe(true)
+    expect(submit.textContent).toContain('Add seat')
+
+    await act(async () => {
+      setValue(container.querySelector('#cint-codex-account') as HTMLInputElement, 'laptop')
+      await tick()
+    })
+    expect(submit.disabled).toBe(false)
+    await act(async () => {
+      submit.click()
+      await tick()
+      await tick()
+    })
+    expect(posted).toHaveLength(1)
+    expect((posted[0] as { account?: string }).account).toBe('laptop')
     root.unmount()
   })
 })

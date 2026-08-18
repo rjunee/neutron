@@ -31,6 +31,7 @@ import {
   codexProjectHome,
   deriveCodexStatus,
   materializeCodexAuth,
+  readAccountId,
   readMaterializedAuth,
   removeCodexAuth,
   validateCodexSubscriptionAuth,
@@ -641,6 +642,34 @@ export class CodexCredentialService {
    * `connect` path — same service name, same directory, same stored bytes — which
    * is what keeps a single-account install unchanged.
    */
+  /**
+   * The seat already holding the SAME ChatGPT account as `pasted`, or null.
+   *
+   * Compares `tokens.account_id`, which the normalizer preserves. A bundle with no
+   * `account_id` cannot be compared, so it is allowed through rather than refused:
+   * blocking every unidentifiable bundle would make a legitimate second seat
+   * impossible on any CLI version that omits the field, which is a worse failure
+   * than the one being prevented. The seat being (re)connected is excluded — a
+   * reconnect of the same account into its OWN seat is the normal repair path.
+   */
+  private async findSeatWithSameAccount(
+    owner_slug: OwnerHandle,
+    pasted: unknown,
+    requested: string,
+  ): Promise<string | null> {
+    const v = validateCodexSubscriptionAuth(pasted, this.now)
+    if (!v.ok || v.normalized === undefined) return null
+    const incoming = readAccountId(v.normalized)
+    if (incoming === null) return null
+    for (const seat of this.rotation.listSlots(owner_slug)) {
+      if (seat.slot === requested) continue
+      const stored = this.store.resolve(owner_slug, undefined, codexSlotService(seat.slot))
+      if (stored === null) continue
+      if (readAccountId(stored.plaintext) === incoming) return seat.slot
+    }
+    return null
+  }
+
   async connectAccount(
     owner_slug: OwnerHandle,
     pasted: unknown,
@@ -653,6 +682,34 @@ export class CodexCredentialService {
         mode: 'unknown',
         code: 'invalid_account',
         error: `account must be 1-32 chars of lowercase letters, digits and dashes, starting with a letter or digit`,
+      }
+    }
+    // ONE CHATGPT ACCOUNT MUST NOT OCCUPY TWO SEATS. The dir-per-account design
+    // prevents a bundle being COPIED by the code, and its docblock says so — but
+    // the copy that matters is made by the OWNER, not by us. Both clients tell him
+    // to "run `codex login` on any machine and paste that account's auth.json", so
+    // pasting his laptop's file and then his desktop's is the documented happy path
+    // and lands ONE account in two seats. The CLI rotates refresh tokens on every
+    // refresh, so the first refresh in each seat revokes the other: both die,
+    // `resolveActiveCodexHome` cools each of them `unauthorized` (the one state
+    // that never expires on a timer), and cross-model review is silently gone until
+    // he notices. That is ISSUES #573 re-created through the UI.
+    //
+    // The discriminator was already on hand and unused: `validateCodexSubscriptionAuth`
+    // carries `tokens.account_id` into the normalized bundle. Refusing here is the
+    // only place it can be refused — once both bundles are on disk the damage is
+    // already done, and neither seat can tell which of them was the interloper.
+    const dup = await this.findSeatWithSameAccount(owner_slug, pasted, requested)
+    if (dup !== null) {
+      return {
+        ok: false,
+        mode: 'subscription',
+        code: 'duplicate_account',
+        error:
+          `that ChatGPT account is already connected as seat '${dup}'. Connecting one account ` +
+          `twice makes each copy revoke the other's refresh token, so BOTH seats stop working. ` +
+          `Use a different ChatGPT account for this seat, or remove '${dup}' first.`,
+        slot: requested,
       }
     }
     if (requested === DEFAULT_SLOT) {
