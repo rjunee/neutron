@@ -169,10 +169,13 @@ process.on('exit', () => {
  *     seedMigratedDb(join(tmp, 'project.db'))
  *     db = ProjectDb.open(join(tmp, 'project.db'))
  *
- * Throws if `path` already exists and is non-empty. That is the guard that
- * keeps this helper honest: seeding is only equivalent to a replay on a FRESH
- * database, so the one case where it would not be, it refuses. It also throws on
- * an in-memory database, which has no file to copy onto at all.
+ * Throws in three cases, each one a place where a copy would NOT be equivalent
+ * to a replay: a target that already exists and is non-empty (a database with
+ * content may need refusals, repairs or a ledger rekey only the real runner
+ * performs); an in-memory target, which has no file to copy onto at all; and a
+ * `NEUTRON_COMMIT_SHA` that no longer matches the one this process's template
+ * baked into its ledger. It never falls back to a slow path — a call site that
+ * should not be seeding fails loudly and stays on the real runner.
  */
 export function seedMigratedDb(path: string): void {
   // An in-memory database has no file to copy onto, and `copyFileSync` would
@@ -224,9 +227,15 @@ export function seedMigratedDb(path: string): void {
  * already existed by the time anything opened the path read-only. A byte copy
  * has no such handle, which is why seeding without this step broke exactly the
  * call sites whose subject opens read-only (`ProjectDb.open(..., { readonly:
- * true })`) and nothing else. That failure is also platform-shaped — it
- * reproduces locally and not on the Linux CI runner — so it is the kind of bug
- * a green pipeline will happily carry.
+ * true })`) and nothing else.
+ *
+ * The platforms genuinely disagree here, which is why this is worth a paragraph
+ * rather than a line. Measured on both: macOS keeps `-wal`/`-shm` beside the
+ * file through a full close, and refuses the read-only open when they are
+ * missing; the Linux CI runner removes them on close, and lets the read-only
+ * open succeed anyway. So the bug reproduces locally and NOT on CI — a green
+ * pipeline will carry it indefinitely — and on Linux this call is a ~1.4 ms
+ * no-op that keeps the two platforms behaving the same way.
  *
  * `PRAGMA user_version` is the trigger on purpose: it takes a read transaction
  * (which is what builds the index) while touching only the database header.
