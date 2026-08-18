@@ -478,3 +478,74 @@ describe('codexExecutorAvailability — the answer the settings pane shows, and 
     }
   })
 })
+
+describe('one ChatGPT account cannot occupy two seats', () => {
+  /** A bundle for a NAMED ChatGPT account, so two pastes can be same-or-different. */
+  function authFor(accountId: string): string {
+    return JSON.stringify({
+      OPENAI_API_KEY: null,
+      tokens: { id_token: 'id', access_token: 'acc', refresh_token: 'ref', account_id: accountId },
+      last_refresh: '2026-06-30T00:00:00.000Z',
+    })
+  }
+
+  test('REFUSES a second seat holding an account another seat already has', async () => {
+    // Both clients tell the owner to run `codex login` on any machine and paste that
+    // account's auth.json. Pasting his laptop's file and then his desktop's is the
+    // DOCUMENTED path and lands one account in two seats — and because the CLI
+    // rotates refresh tokens, the first refresh in each revokes the other. Both die,
+    // each is cooled `unauthorized` (the state that never expires on a timer), and
+    // cross-model review is silently gone. That is ISSUES #573 through the UI.
+    const svc = newService()
+    const first = await svc.connectAccount(OWNER, authFor('acct-1'))
+    expect(first.ok).toBe(true)
+
+    const dup = await svc.connectAccount(OWNER, authFor('acct-1'), { slot: 'work' })
+    expect(dup.ok).toBe(false)
+    expect(dup.code).toBe('duplicate_account')
+    // It must NAME the seat, because "already connected" without saying where leaves
+    // the owner unable to act.
+    expect(dup.error ?? '').toContain('default')
+
+    // And nothing was written: the refusal has to happen BEFORE the second bundle
+    // reaches disk, since afterwards neither seat can tell which was the interloper.
+    expect(svc.listAccounts(OWNER).some((a) => a.slot === 'work')).toBe(false)
+  })
+
+  test('sees a LEGACY seat that has never been through rotation', async () => {
+    // A rotation row is not proof a seat exists, and its absence is not proof one
+    // does not. On an upgraded install the legacy `codex` credential predates
+    // rotation entirely, so `rotation.listSlots()` answers EMPTY while the
+    // credential is real and in use. A guard scanning that store would find
+    // nothing and admit the same account under a named seat — creating exactly the
+    // mutually-revoking pair it exists to prevent.
+    const svc = newService()
+    // `connect` is the LEGACY path: it writes the `codex` credential row WITHOUT
+    // any rotation bookkeeping, which is the pre-rotation install's state.
+    expect((await svc.connect(OWNER, authFor('acct-legacy'))).ok).toBe(true)
+
+    const dup = await svc.connectAccount(OWNER, authFor('acct-legacy'), { slot: 'work' })
+    expect(dup.ok).toBe(false)
+    expect(dup.code).toBe('duplicate_account')
+  })
+
+  test('ALLOWS a genuinely different account, which is the whole point of seats', async () => {
+    // The control that makes the refusal meaningful: if this also failed, the guard
+    // would be "no second seat, ever" rather than "no DUPLICATE second seat".
+    const svc = newService()
+    expect((await svc.connectAccount(OWNER, authFor('acct-1'))).ok).toBe(true)
+    const second = await svc.connectAccount(OWNER, authFor('acct-2'), { slot: 'work' })
+    expect(second.ok).toBe(true)
+    expect(svc.listAccounts(OWNER).some((a) => a.slot === 'work')).toBe(true)
+  })
+
+  test('ALLOWS reconnecting the same account into its OWN seat — the repair path', async () => {
+    // A seat whose token was revoked is fixed by pasting a fresh bundle for the SAME
+    // account back into the SAME seat. Refusing that would make the guard block the
+    // recovery it exists to protect.
+    const svc = newService()
+    expect((await svc.connectAccount(OWNER, authFor('acct-1'), { slot: 'work' })).ok).toBe(true)
+    const again = await svc.connectAccount(OWNER, authFor('acct-1'), { slot: 'work' })
+    expect(again.ok).toBe(true)
+  })
+})
