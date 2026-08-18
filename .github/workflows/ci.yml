@@ -75,6 +75,15 @@ name: ci
 # cold and 36s warm — so the cold path is only cheap while a third party is
 # healthy and close.
 #
+# RE-MEASURED ON #417 against THIS key, because the numbers above were first
+# quoted from runs on the key that preceded it and a measurement is only as good
+# as the thing it was measured against. All 12 legs reported
+# `Cache restored from key: bun-install-Linux-bun1.3.9-<hash>` — an EXACT-key hit,
+# not a prefix one, which is the direct evidence that the cache hits rather than
+# silently missing. Warm restore ran 4-8s (median 6s) and `bun install` 8-13s
+# (median 9s), so ~15s of restore+install per leg. That reproduces the trade this
+# comment describes rather than merely repeating it.
+#
 # The property being bought is provable directly: locally, a warm cache installs
 # all 2501 packages in 22s with ALL outbound HTTP blackholed, while the same
 # blackhole against an empty cache installed nothing at all in ten minutes. A warm

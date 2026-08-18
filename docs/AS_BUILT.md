@@ -63,6 +63,14 @@ strict superset that `--frozen-lockfile` filters down to what `bun.lock` names. 
 hit restores a tree the lockfile no longer describes and correctness starts depending on bun
 noticing.
 
+**The timings were re-measured against THIS key**, since #410's were quoted from runs on the
+key that preceded it — a measurement is only as good as the thing it was measured against. On
+#417's CI run all **12 legs** reported `Cache restored from key: bun-install-Linux-bun1.3.9-…`,
+an EXACT-key hit rather than a prefix one, which is the direct evidence that the cache HITS
+instead of silently missing. Warm restore 4-8 s (median 6 s), `bun install` 8-13 s (median
+9 s) — ~15 s of restore-plus-install per leg, which reproduces #410's stated trade rather than
+merely repeating it.
+
 Unchanged and restated so it stays recorded: vendoring `gbrain` remains the stronger fix — it
 removes the network dependency outright and closes the byte-verification gap by putting the
 content in the tree under review — and is still deliberately not done.

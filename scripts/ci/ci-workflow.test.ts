@@ -783,9 +783,24 @@ describe('bun install cache wiring', () => {
     ],
   ]
 
+  /**
+   * Mutations are applied to the `jobs:` mapping ONLY, never to the header
+   * comment above it. The header quotes real key strings when it reports what CI
+   * measured (`Cache restored from key: bun-install-…`), so a mutation written as
+   * a bare `.replace(/key: bun-install-…/)` lands in PROSE, changes nothing about
+   * the wiring, and the control then reports a false pass. Two did exactly that
+   * the moment a measurement was added to the header — which is the same
+   * "measured against the wrong thing" failure the guard itself is about.
+   */
+  const mutateJobs = (mutate: (s: string) => string): string => {
+    const at = yml.indexOf('\njobs:\n')
+    expect(at).toBeGreaterThan(0)
+    return yml.slice(0, at) + mutate(yml.slice(at))
+  }
+
   for (const [name, mutate, because] of mutations) {
     test(`catches the break: ${name}`, () => {
-      const mutated = mutate(yml)
+      const mutated = mutateJobs(mutate)
       expect(mutated).not.toBe(yml) // the mutation landed
       expect(whyCacheBroken(mutated)).toContain(because)
     })
@@ -797,7 +812,7 @@ describe('bun install cache wiring', () => {
     // remaining four are still wired correctly, so whyCacheBroken() has nothing
     // to complain about. The hardcoded roster is what notices — which is the
     // whole reason it is hardcoded, and this is the control that proves it.
-    const mutated = yml.replace('\n  typecheck:\n', '\n  Typecheck:\n')
+    const mutated = mutateJobs((s) => s.replace('\n  typecheck:\n', '\n  Typecheck:\n'))
     expect(mutated).not.toBe(yml)
     expect(whyCacheBroken(mutated)).toBeNull()
     expect(installingJobs(mutated).map(([n]) => n).sort()).not.toEqual([
