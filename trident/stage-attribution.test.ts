@@ -202,6 +202,21 @@ describe('stage attribution pure reader', () => {
     expect(windows[1]?.label).toBe('run-orphan#1 round=2 ralph_round=3')
   })
 
+  test('a killed Codex attempt pairs the first end with the retry start immediately before it', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-retry', 'launch-start', 0),
+      event('run-retry', 'codex-exec-start', 700),
+      // No end for the first attempt: the process died before its best-effort stamp.
+      event('run-retry', 'codex-exec-start', 10_700),
+      event('run-retry', 'codex-exec-end', 12_700),
+    ])
+    const result = computeSegments(fireWindow!)
+
+    expect(result.codexBuildMs).toBe(2_000)
+    expect(result.codexBuildStatus).toBeNull()
+    expect(result.notes).toContain('duplicate:codex-exec-start')
+  })
+
   test('logical stage regression becomes unattributed(non-monotonic), never a negative duration', () => {
     const [fireWindow] = groupIntoFireWindows([
       event('run-regression', 'launch-start', 0),

@@ -5,38 +5,53 @@ Running log of what shipped, newest first. One entry per merged change.
 ## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
 
 The `plan:probe` seat now also relays a byte-bounded branch log from
-`git log --name-only <base>..<ref> | head -c 12288`. It has no checksum because
-it is synthesis material, not a persisted relay. The workflow independently
-clamps the relayed value to 12,288 UTF-8 bytes before prompt interpolation and
-fences commit messages as untrusted data. `plan:next` returns an optional
+`git log --name-only <base>..<ref> | head -c 12288 | iconv -c …`. Its Forge-branch
+and base-branch fetches are independent, so a local-only Forge branch cannot
+prevent `origin/<base>` from refreshing. The log has no checksum because it is
+synthesis material, not a persisted relay. The workflow independently clamps the
+relayed value to 12,288 UTF-8 bytes before prompt interpolation, neutralises a
+literal `</BRANCH_LOG_DATA>` from commit text, and fences commit messages as
+untrusted data. `plan:next` returns an optional
 `branchBrief` with BUILT / SEAMS / REJECTED / SUITES sections: evidence-only and
 REGENERATED each round, so any prior round's brief is superseded.
 `clampBranchBrief()` enforces `BRANCH_BRIEF_MAX_BYTES = 4096` in code at the
 single consumption point. `ralphExecuteNote` appends that clamped brief to the
 Forge prompt only when `usePlanNext` selected its authoritative producer; a
-`plan:fable` answer cannot activate the shared schema's optional field. It emits
-nothing when the brief is absent or empty. The brief is
+`plan:fable` answer cannot activate the shared schema's optional field. A missing
+or empty branch log also blocks brief transport in code even if the planner emits
+a schema-valid brief anyway. It emits nothing when the brief is absent or empty.
+The brief is
 absent from the persisted plan and every checkpoint prompt, leaving no
 accumulation channel. A missing or empty branch log or brief fails open: the cheap
 path remains selected and no header is emitted. The iteration-1 and genuine
 crash-resume `plan:fable` paths remain byte-untouched, guarded by canary assertions.
 
-The measured BEFORE on the 2026-08-18 continuation round of card
+The historical BEFORE on the 2026-08-18 continuation round of card
 `trident-cannot-review-an-existing-p` was planner 2m54 (versus 9m50 for round-1
 Fable, 3.4x cheaper) and codex build 30m01. FORGE re-deriving branch state was
-estimated at approximately 14 minutes of that build.
+estimated at approximately 14 minutes of that build. Instrument caveat: that
+30m01 used the legacy wrapper proxy; `codex-exec-end` did not exist yet. It is
+context, not an instrument-matched baseline, and cannot by itself validate an
+AFTER measured with the new exact pair.
 
 AFTER: not yet measurable — this branch has not merged, so no real continuation
 round can have consumed the new brief. The wrapper now durably stamps both
 `codex-exec-start` and `codex-exec-end` on success and failure, and
-`trident/stage-attribution.ts` reports that exact pair; checkpoint time and the
-next fire are no longer timing proxies.
+`trident/stage-attribution.ts` reports that exact pair. If a killed first attempt
+has no end and a retry starts in the same fire window, the first end is paired
+with the latest start before it rather than the abandoned start. Checkpoint time
+and the next fire are no longer timing proxies.
 
-Removal gate: the Trident owner must quote the first qualifying post-merge
-multi-task continuation's exact `codex-exec-start→codex-exec-end` AFTER beside
-the BEFORE 30m01, no later than 2026-08-25. If no qualifying measurement is
-recorded by that deadline, or the measured duration does not drop, the owner
-reverts the branch-state brief rather than retaining an unproven optimisation.
+`BRANCH-BRIEF-MEASUREMENT: PENDING`. Removal gate: by 2026-08-25 the Trident owner
+must replace that marker with the result from a real multi-task continuation,
+quoting its exact `codex-exec-start→codex-exec-end` AFTER beside the historical
+30m01 and explicitly retaining the instrument caveat. An instrument-matched
+no-brief control is required before claiming the delta came from this feature.
+If no qualifying measurement is recorded by the deadline, the exact duration
+does not drop, or no matched control substantiates attribution, the owner reverts
+the branch-state brief rather than retaining an unproven optimisation.
+`trident/inner-workflow-plan-next.test.ts` makes a still-PENDING marker fail the
+suite after that date, so the gate is executable rather than prose-only.
 
 ## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
 

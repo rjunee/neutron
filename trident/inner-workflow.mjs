@@ -1958,7 +1958,8 @@ const BRANCH_BRIEF_MAX_BYTES = 4096
 const BRANCH_LOG_MAX_BYTES = 12288
 
 const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
-// The fetch immediately above the log command refreshes this remote-tracking ref.
+// The independent base fetch above the log command refreshes this remote-tracking
+// ref even when Forge's local-only branch does not exist on origin.
 // A plain local base branch may be stale in non-PR mode and would then make base
 // history look like work from this branch, crowding the useful commits out of the
 // bounded window.
@@ -1970,14 +1971,15 @@ function planProbePrompt() {
   const stampStep = stampCommand === null ? '' : `0. \`${stampCommand}\`\n`
   return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
-${stampStep}1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} 2>/dev/null || true\`
-2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
-If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0, "branchLog": ""}\` — that is a normal answer, not an error to retry around.
+${stampStep}1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
+2. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(baseBranch)} 2>/dev/null || true\`
+3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
+If step 3 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0, "branchLog": ""}\` — that is a normal answer, not an error to retry around.
 Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:
 \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | grep -c '^[[:space:]]*- \\[ \\]'\`
 (\`grep -c\` exits 1 and prints 0 when nothing matches; that is \`uncheckedCount\` = 0, not a failure.)
-3. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | cksum\` — \`cksum\` prints TWO numbers, the CRC then the byte count: report them as \`planCksum\` and \`planBytes\`. The workflow RECOMPUTES that checksum over the \`planBody\` you report, so a body that lost a line, gained a word, re-ordered the checklist, or had a '- [ ] ' silently turned into '- [x] ' on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied, and do not omit them — report exactly what \`cksum\` printed.
-4. \`cd ${shSingleQuote(repoPath)} && git log --no-color --date=short --format='COMMIT %h %ad %s%n%b' --name-only ${shSingleQuote(branchLogBase)}..${shSingleQuote(planProbeRef)} | head -c ${BRANCH_LOG_MAX_BYTES}\` — report EXACTLY what it prints, verbatim, as \`branchLog\`. It is byte-bounded and newest commit first, so truncation drops the oldest history. If the command fails or prints nothing, report \`branchLog\` as \`""\` — that is a normal answer, not an error to retry. The branch log deliberately has no checksum: it is raw synthesis material, not a persisted relay, so a lossy copy can degrade brief quality but never correctness.
+4. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)} | cksum\` — \`cksum\` prints TWO numbers, the CRC then the byte count: report them as \`planCksum\` and \`planBytes\`. The workflow RECOMPUTES that checksum over the \`planBody\` you report, so a body that lost a line, gained a word, re-ordered the checklist, or had a '- [ ] ' silently turned into '- [x] ' on the way into the schema is DETECTED and the whole cheap path is abandoned. Do not compute either number from what you copied, and do not omit them — report exactly what \`cksum\` printed.
+5. \`cd ${shSingleQuote(repoPath)} && git log --no-color --date=short --format='COMMIT %h %ad %s%n%b' --name-only ${shSingleQuote(branchLogBase)}..${shSingleQuote(planProbeRef)} | head -c ${BRANCH_LOG_MAX_BYTES} | iconv -c -f UTF-8 -t UTF-8\` — report EXACTLY what it prints, verbatim, as \`branchLog\`. It is byte-bounded, valid UTF-8, and newest commit first, so truncation drops the oldest history. If the command fails or prints nothing, report \`branchLog\` as \`""\` — that is a normal answer, not an error to retry. The branch log deliberately has no checksum: it is raw synthesis material, not a persisted relay, so a lossy copy can degrade brief quality but never correctness.
 NEVER EXIT SILENTLY.`
 }
 
@@ -1993,6 +1995,10 @@ NEVER EXIT SILENTLY.`
 // execution spec is still the high-value thinking.
 function planNextPrompt(body, forgeBranch, branchLog) {
   const planPath = `.trident/plans/${forgeBranch}.md`
+  // Commit messages are untrusted prompt data, and `clampBranchLog` is where that
+  // is dealt with: it neutralises BOTH fence delimiters before applying the byte
+  // cap. Do not pre-escape here — a second, weaker pass upstream would consume the
+  // tag first and leave the real neutraliser nothing to find.
   const boundedBranchLog = clampBranchLog(branchLog)
   return `You are the CONTINUATION PLANNER for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 A PRIOR ITERATION of this same build regenerated ${planPath} below and committed it to branch ${forgeBranch} with the task it built already marked '- [x]'. That plan is CURRENT. Your job is to pick up where it left off — NOT to re-derive it.
@@ -5779,13 +5785,16 @@ try {
           } → falling through to the full plan:fable`,
         )
       }
+      const branchLog =
+        planProbe !== null && typeof planProbe.branchLog === 'string' ? planProbe.branchLog : ''
+      const hasBranchMaterial = clampBranchLog(branchLog).trim() !== ''
       const plannerLabel = usePlanNext ? 'plan:next' : 'plan:fable'
       const plan = usePlanNext
         ? await agent(
             planNextPrompt(
               planProbe.planBody,
               forgeBranch,
-              typeof planProbe.branchLog === 'string' ? planProbe.branchLog : '',
+              branchLog,
             ),
             withModel({ label: 'plan:next', phase: 'Build', schema: PLAN_SCHEMA }),
           )
@@ -5879,13 +5888,14 @@ try {
       }
       complexityTag = plan.complexity
       // Transport requires BOTH the continuation producer and the evidence it was
-      // meant to digest. `usePlanNext` deliberately never gates on `branchLog` —
-      // a missing log must not cost the cheap planner — but a brief with no branch
-      // material behind it is exactly what the fail-open contract promises never
-      // reaches Forge, so the brief (not the path) is what a missing log disables.
-      const branchMaterialPresent =
-        usePlanNext && typeof planProbe.branchLog === 'string' && clampBranchLog(planProbe.branchLog).trim() !== ''
-      ralphNote = ralphExecuteNote(plan, forgeBranch, branchMaterialPresent)
+      // meant to digest — the SAME material `plan:next` was handed above, which is
+      // why the gate reads the hoisted `hasBranchMaterial` rather than re-deriving
+      // it. `usePlanNext` deliberately never gates on `branchLog` — a missing log
+      // must not cost the cheap planner — but a brief with no branch material
+      // behind it is exactly what the fail-open contract promises never reaches
+      // Forge, so the brief (not the path) is what a missing log disables. That is
+      // also what stops a schema-valid INVENTED brief on the fail-open no-log path.
+      ralphNote = ralphExecuteNote(plan, forgeBranch, usePlanNext && hasBranchMaterial)
       ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
       log(`trident-v2 ${plannerLabel} → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
     }
