@@ -506,3 +506,134 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
     expect(existsSync(join(REPO_ROOT, 'scripts/ci/check-governed-repo-attributes.ts'))).toBe(true)
   })
 })
+
+/**
+ * 2026-08-17 — the bun install cache is TEN UNLINKED LITERALS, so it needs a guard.
+ *
+ * `bun.lock` takes `gbrain` as a git dependency, so `bun install --frozen-lockfile`
+ * is a network fetch from a third-party host — twelve times per PR across five
+ * jobs. Each job now restores bun's install cache first. The wiring that makes
+ * that work is an IDENTITY between two strings written independently in each job:
+ * the `path:` actions/cache saves, and the `BUN_INSTALL_CACHE_DIR` bun writes to.
+ * Nothing in YAML relates them.
+ *
+ * That matters more than a normal duplication, because of the failure MODE. Break
+ * the identity in one job and the cache saves an empty directory and restores it
+ * over and over: no error, no warning, a green job, and an install that fetches
+ * from the third party forever. A cache that silently misses every run is
+ * indistinguishable from no cache at all while looking fixed — which is precisely
+ * the shape the original change was written to prevent, and it shipped with the
+ * ci.yml header claiming the identity held "by construction" when nothing held it.
+ *
+ * So it is asserted here instead, per job, by WALKING the file: the per-job checks
+ * are generated from whatever jobs actually install, so a new installing job is
+ * covered the day it is added rather than whenever someone remembers. The one
+ * hardcoded thing is the roster in the first test, and it is deliberate — it is
+ * the positive control. Without it a walk that silently matched NOTHING would
+ * iterate an empty list and report every check below as passing, which is the
+ * same false-green this whole block exists to stop. Adding an installing job is
+ * meant to fail that one test until the roster names it.
+ *
+ * Mutation-verified when written — each of these reds the suite: breaking the
+ * path identity in one job, restoring the cache after the install, dropping
+ * hashFiles from the key, tag-pinning the action, giving one job its own key,
+ * deleting restore-keys, dropping the bun version from the key, bumping
+ * `bun-version` without touching the key, renaming a job out of the walk's
+ * pattern, and a job that stops installing.
+ */
+describe('bun install cache wiring', () => {
+  /** Split the `jobs:` mapping into { name -> body }. */
+  function jobBlocks(): Map<string, string> {
+    const jobs = yml.slice(yml.indexOf('\njobs:\n') + 1)
+    const out = new Map<string, string>()
+    let name: string | null = null
+    let buf: string[] = []
+    for (const line of jobs.split('\n')) {
+      const m = line.match(/^ {2}([a-z][a-z0-9-]*):$/)
+      if (m) {
+        if (name) out.set(name, buf.join('\n'))
+        name = m[1]!
+        buf = []
+      } else if (name) buf.push(line)
+    }
+    if (name) out.set(name, buf.join('\n'))
+    return out
+  }
+
+  const blocks = jobBlocks()
+  const installing = [...blocks].filter(([, b]) => b.includes('bun install --frozen-lockfile'))
+
+  test('the walk finds the jobs that install — a parser that finds none proves nothing', () => {
+    // Positive control for every assertion below. If jobBlocks() silently stops
+    // matching (an indentation change, a renamed `jobs:` key), every per-job test
+    // below would iterate an EMPTY list and pass vacuously. This is the check that
+    // cannot pass for that reason.
+    expect(installing.map(([n]) => n).sort()).toEqual(['layering', 'lint', 'purity', 'shard', 'typecheck'])
+  })
+
+  for (const [job, block] of installing) {
+    test(`${job}: the cache path and BUN_INSTALL_CACHE_DIR are the same string`, () => {
+      // The identity the whole change rests on. Compared as strings, so a typo,
+      // a different `runner.*` context or a stray trailing segment all fail.
+      const cachePath = block.match(/uses: actions\/cache@[\s\S]*?\n\s+path: (.+)/)?.[1]?.trim()
+      const installDir = block.match(
+        /run: bun install --frozen-lockfile\s*\n\s+env:\s*\n\s+BUN_INSTALL_CACHE_DIR: (.+)/,
+      )?.[1]?.trim()
+      expect(cachePath).toBeDefined()
+      expect(installDir).toBeDefined()
+      expect(installDir).toBe(cachePath)
+    })
+
+    test(`${job}: the cache step runs BEFORE the install`, () => {
+      // Restoring after the install is a no-op that still saves, so it looks
+      // exactly like a working cache while never serving one.
+      const cacheAt = block.indexOf('uses: actions/cache@')
+      const installAt = block.indexOf('run: bun install --frozen-lockfile')
+      expect(cacheAt).toBeGreaterThanOrEqual(0)
+      expect(cacheAt).toBeLessThan(installAt)
+    })
+
+    test(`${job}: the cache key carries the lockfile hash and this job's bun version`, () => {
+      // hashFiles('bun.lock') is what makes a dependency change re-fetch rather
+      // than restore a tree the lockfile no longer describes. The bun version is
+      // in the key because a bun upgrade can change the cache's on-disk layout,
+      // and it is read from THIS job's setup-bun step so the two cannot drift.
+      const key = block.match(/uses: actions\/cache@[\s\S]*?\n\s+key: (.+)/)?.[1]?.trim() ?? ''
+      const bunVersion = block.match(/bun-version: (\S+)/)?.[1]
+      expect(bunVersion).toBeDefined()
+      expect(key).toContain("hashFiles('bun.lock')")
+      expect(key).toContain(`bun${bunVersion}`)
+    })
+
+    test(`${job}: the cache action is pinned to a 40-hex sha`, () => {
+      // Every other pin in this repo is a sha; a tag is mutable and this action
+      // runs with access to the cache the installs then trust.
+      expect(block).toMatch(/uses: actions\/cache@[0-9a-f]{40}\b/)
+    })
+  }
+
+  test('every installing job restores from the SAME key, or they cannot share an entry', () => {
+    // Twelve legs paying for twelve separate entries is not a cache, it is twelve
+    // caches — and it would blow through the repo's Actions cache quota while
+    // still fetching from the third party on most legs.
+    const keys = new Set(
+      installing.map(([, b]) => b.match(/uses: actions\/cache@[\s\S]*?\n\s+key: (.+)/)?.[1]?.trim()),
+    )
+    expect(keys.size).toBe(1)
+  })
+
+  test('a restore-keys prefix exists, so a lockfile change is a partial hit', () => {
+    // Without it a one-line dependency bump re-downloads all 2500 packages — the
+    // exposure this change exists to reduce, reappearing on exactly the PRs that
+    // touch dependencies.
+    const prefixes = new Set(
+      installing.map(([, b]) => b.match(/restore-keys: (.+)/)?.[1]?.trim()),
+    )
+    expect(prefixes.size).toBe(1)
+    const prefix = [...prefixes][0]
+    expect(prefix).toBeDefined()
+    // It must be a genuine PREFIX of the key, or it can never match anything.
+    const key = installing[0]![1].match(/uses: actions\/cache@[\s\S]*?\n\s+key: (.+)/)?.[1]?.trim()
+    expect(key!.startsWith(prefix!)).toBe(true)
+  })
+})

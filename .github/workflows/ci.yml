@@ -22,13 +22,23 @@ name: ci
 # jobs at once on a PR whose only real defect was a single type error, costing a
 # full review round to work out that the code was never the problem.
 #
-# So each job restores bun's global install cache, keyed on `bun.lock`. The cache
-# is keyed on the lockfile because the lockfile is what determines the content;
+# So each job restores bun's global install cache, keyed on `bun.lock` and on the
+# pinned bun version. The lockfile is what determines the content; the bun version
+# is in the key because a bun upgrade may change the cache's on-disk layout, and
+# restoring an older layout under a newer bun is a miss you pay for twice.
 # `BUN_INSTALL_CACHE_DIR` is set explicitly at each install rather than leaning on
 # bun's default location, so the directory actions/cache saves and the directory
-# bun writes are the same string by construction rather than by assumption. A
-# cache that silently misses every run is indistinguishable from no cache while
-# looking fixed, and an inferred path is how you get that.
+# bun writes are the same string.
+#
+# NOTHING IN YAML MAKES THAT IDENTITY TRUE — it is ten separate literals across
+# five jobs with no link between them, and a cache that silently misses every run
+# is indistinguishable from no cache while looking fixed. So it is ASSERTED, not
+# asserted-by-construction: `scripts/ci/ci-workflow.test.ts` ('bun install cache
+# wiring') walks every job in this file, and for each one that installs, checks
+# that a cache step precedes the install, that its `path` is the SAME STRING as
+# that install's `BUN_INSTALL_CACHE_DIR`, that the key carries the lockfile hash
+# and this job's own `bun-version`, and that the action is pinned to a 40-hex sha.
+# Change one of the ten literals without the other nine and that test fails.
 #
 # THIS BUYS RELIABILITY, NOT WALL-CLOCK, and the numbers should say so rather than
 # flatter the change. Measured across all 12 legs, PR #410's cold run vs its warm
@@ -53,6 +63,15 @@ name: ci
 # itself is safe — a stale entry that `bun.lock` no longer names is simply never
 # asked for.
 #
+# Its COST is that the entry only grows. actions/cache saves whenever the exact
+# key missed, so a prefix hit restores the old superset and then saves that
+# superset plus whatever the new lockfile added; nothing prunes what a dependency
+# left behind. Left alone for long enough that reaches the repo's 10 GB Actions
+# cache ceiling, at which point GitHub LRU-evicts and installs go cold again with
+# no signal beyond the timings. That is acceptable here — the entry is ~237 MB and
+# `bun.lock` moves rarely — but it is a slow leak, not a steady state, and the fix
+# if it ever bites is to bump a salt in the key rather than to drop `restore-keys`.
+#
 # WHERE THE BENEFIT ACTUALLY LANDS, because the scoping is not obvious and it is
 # the difference between this working and merely looking like it works. Actions
 # caches are readable from the branch that wrote them and from the DEFAULT branch,
@@ -68,11 +87,28 @@ name: ci
 # creating this cache`. That is benign and non-fatal — the cache exists after the
 # first winner, and those jobs pass. It is alarming to read and means nothing.
 #
-# A CACHE MUST NEVER MAKE A BUILD WRONG, and `--frozen-lockfile` is what keeps
-# that true. The cache supplies CONTENT; the lockfile still decides what is
-# allowed to be installed. A cached tree that disagrees with `bun.lock` fails the
-# job rather than quietly installing something stale, so the cache can only ever
-# change how long an install takes, never what it produces.
+# A CACHE MUST NEVER MAKE A BUILD WRONG — and this is the claim to state
+# NARROWLY, because the obvious version of it is not true. What
+# `--frozen-lockfile` guarantees is RESOLUTION: bun refuses to re-resolve or
+# rewrite `bun.lock`, so the exact set of package identities — every name@version,
+# and the git dep's exact commit — is decided by the committed lockfile and cannot
+# be changed by anything sitting in the cache. A cache entry naming a package the
+# lockfile does not name is simply never asked for; a `package.json` that has
+# drifted from the lockfile fails the install outright.
+#
+# What it does NOT do is re-verify the BYTES of a restored entry. For registry
+# packages the lockfile carries an integrity hash (`bun.lock` line for `zod`:
+# `sha512-…`), but the `gbrain` git dependency carries none — its lockfile tuple
+# ends in the cache folder name `garrytan-gbrain-<sha>`, not a content hash — and
+# bun does not document per-restore content verification either way. So "the
+# cache can only change how long an install takes" is the intent, not a property
+# `--frozen-lockfile` proves.
+#
+# What actually bounds the residual risk is SCOPE, not verification: an Actions
+# cache entry is writable only from runs on this repo's own branches, so poisoning
+# one already requires the ability to run workflow code here — the same privilege
+# as pushing to the repo. Vendoring `gbrain` is what would close it properly, by
+# putting the content in the tree under review instead of behind a fetch.
 #
 # THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` and
 # `CodeQL` are REQUIRED status checks on `main` with a strict up-to-date policy.
@@ -148,8 +184,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-install-cache
-          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-install-${{ runner.os }}-
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       # Install BEFORE tsc so the @neutronai/* workspace symlinks exist; a bare
       # checkout reports phantom TS2307s.
       - run: bun install --frozen-lockfile
@@ -172,8 +208,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-install-cache
-          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-install-${{ runner.os }}-
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
@@ -199,8 +235,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-install-cache
-          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-install-${{ runner.os }}-
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
@@ -244,8 +280,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-install-cache
-          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-install-${{ runner.os }}-
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
@@ -329,8 +365,8 @@ jobs:
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ${{ runner.temp }}/bun-install-cache
-          key: bun-install-${{ runner.os }}-${{ hashFiles('bun.lock') }}
-          restore-keys: bun-install-${{ runner.os }}-
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
         env:
           BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache

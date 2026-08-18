@@ -136,9 +136,17 @@ replays ARE the coverage that caught four boot-breaking defects. Sites inside ot
 converted files that pass a custom migrations directory or assert on the result object stay
 too; those files import both.
 ## 2026-08-17 — CI caches the bun install, so a third party's outage stops redding this repo's PRs (#410)
+## 2026-08-17 — CI caches the bun install, so a third party's outage reds this repo's PRs far less often (#410)
 
 `.github/workflows/ci.yml` restores bun's global install cache before every
-`bun install --frozen-lockfile`, keyed on `bun.lock`.
+`bun install --frozen-lockfile`, keyed on `bun.lock` and the pinned bun version.
+
+"Far less often", not "never" — and the difference is the whole reason the scoping
+paragraph below exists. A warm restore needs no network at all, but a cold leg still
+fetches from the third party, and legs are still cold in three cases: the first run
+after a `bun.lock` change, any run before `main` has published an entry, and any run
+after GitHub LRU-evicts the entry. The change removes the REPEATED exposure — twelve
+identical fetches per PR, every PR — it does not remove the dependency.
 
 The install was never local work. `bun.lock` takes `gbrain` as a **git** dependency
 (`github:garrytan/gbrain#<sha>`), so resolving it is a network fetch from a third-party
@@ -179,23 +187,44 @@ readable from the branch that wrote it and from the default branch, nowhere else
 written by a PR run warms only that PR. The cross-PR win begins when a `push` run on `main`
 writes the main-scoped entry, after which every PR restores from it until `bun.lock` moves.
 
-Three properties the shape preserves. The jobs stay **independent** — a cache is not the
-shared-artifact handoff the header rules out, because a cache MISS still installs and still
-passes, so every gate remains runnable on its own. The build cannot go **wrong** —
-`--frozen-lockfile` means the cache supplies content while `bun.lock` still decides what may
-be installed, so a cached tree that disagrees fails the job instead of silently going stale.
-And the cached path cannot **drift** — `BUN_INSTALL_CACHE_DIR` is set explicitly at each
-install step to the same expression `actions/cache` saves, so the two are one string by
-construction rather than an inference about where bun defaults to. A cache that silently
-misses every run looks exactly like no cache at all, so that identity is asserted rather
-than assumed.
+The jobs stay **independent**. A cache is not the shared-artifact handoff the header rules
+out, because a cache MISS still installs and still passes, so every gate remains runnable on
+its own.
+
+The cached path cannot **drift**, and this is asserted rather than assumed. The wiring is an
+identity between two strings written independently in each of five jobs — the `path`
+`actions/cache` saves, and the `BUN_INSTALL_CACHE_DIR` bun writes to — ten literals with
+nothing in YAML relating them. Break one and the cache saves an empty directory and restores
+it forever: no error, a green job, and every install still going to the third party. The
+first cut of this entry claimed the two were "one string by construction", which was false;
+`scripts/ci/ci-workflow.test.ts` ('bun install cache wiring') now walks every job that
+installs and checks the path identity, the ordering, the key's lockfile hash and bun version,
+the 40-hex pin, and that all five jobs share one key. Ten mutations were run against it —
+including the empty-directory one — and each reds the suite.
+
+The build cannot go **wrong**, stated narrowly, because the loose version of that claim is
+not true. `--frozen-lockfile` guarantees RESOLUTION: bun will not re-resolve or rewrite
+`bun.lock`, so every name@version and the git dep's exact commit come from the committed
+lockfile and no cache entry can change them; an entry the lockfile does not name is never
+asked for. It does **not** re-verify the bytes of a restored entry. Registry packages carry an
+integrity hash in the lockfile (`zod` ends in `sha512-…`), but the `gbrain` git dependency
+does not — its tuple ends in the cache folder name `garrytan-gbrain-<sha>` — and bun documents
+no per-restore content check. What bounds the remaining risk is scope, not verification: an
+Actions cache is writable only from runs on this repo's own branches, so poisoning one needs
+the privilege of pushing here.
 
 `restore-keys` gives a lockfile change a partial hit: packages the change did not touch
-still come from the cache, so a one-line dependency bump costs one download rather than
-2500.
+still come from the cache, so a one-line dependency bump costs one download rather than 2500.
+Its cost is that the entry only ever grows — a prefix hit restores the old superset and then
+saves that superset plus whatever is new, and nothing prunes what a removed dependency left
+behind. Far enough out that reaches the repo's 10 GB Actions cache ceiling, GitHub LRU-evicts,
+and installs go cold with no signal but the timings. Accepted here (the entry is ~237 MB and
+`bun.lock` moves rarely); the fix if it bites is a salt in the key, not dropping
+`restore-keys`.
 
 Vendoring `gbrain` would remove the network dependency outright rather than caching around
-it, and is deliberately NOT done here — recorded in #410 rather than lost.
+it, and would also close the byte-verification gap above by putting the content in the tree
+under review. It is deliberately NOT done here — recorded in #410 rather than lost.
 
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
