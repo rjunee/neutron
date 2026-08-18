@@ -61,6 +61,26 @@ export const FAILURE_LONG_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000
  */
 export const MAX_RESET_HORIZON_MS = 32 * 24 * 60 * 60 * 1000
 
+/**
+ * Ceiling on a cooldown derived from a window's own declared LENGTH.
+ *
+ * The window length is normally the right fallback, but it is a number the
+ * server sends and the shipped CLI declares `daily-limit`, `weekly-limit`,
+ * `monthly-limit` AND `annual-limit` windows (measured: those four ids plus
+ * `five-hour-limit` are all present as literals in codex-cli 0.147.0, with a
+ * positive control proving the same search returns other known strings). An
+ * annual window would bench a paid seat for 365 days off one reading, and a
+ * corrupt or absurd value multiplies straight through to `Infinity`, which
+ * SQLite round-trips as a REAL and no clock comparison can ever clear — a
+ * permanent retirement that looks exactly like a working cooldown.
+ *
+ * Clamping to the same horizon `normalizeResetsAt` already enforces on the other
+ * input makes the two paths symmetric. The cost of clamping too low is one
+ * wasted selection attempt against a still-capped seat, which self-corrects on
+ * the next harvest; the cost of not clamping is a seat that never returns.
+ */
+export const MAX_FALLBACK_COOLDOWN_MS = MAX_RESET_HORIZON_MS
+
 /** Why a slot is not currently eligible. */
 export type CoolingReason =
   | 'short-window'
@@ -75,6 +95,12 @@ export interface RateLimitWindow {
   window_minutes: number
   /** Epoch MILLISECONDS, or null when the CLI omitted it or it failed sanity. */
   resets_at_ms: number | null
+  /**
+   * The window's own `resets_at` is in the PAST, so `used_percent` describes a
+   * window that has since rolled over. See `signalToCooldown` — such a window is
+   * ignored rather than treated as a reading with no reset attached.
+   */
+  expired: boolean
 }
 
 /** The usage picture harvested from one rollout file. */
@@ -222,20 +248,59 @@ export function signalToCooldown(outcome: HarvestOutcome, now: number): Cooldown
   let best: Cooldown | null = null
   for (const w of outcome.snapshot.windows) {
     if (!Number.isFinite(w.used_percent)) continue
+    // A WINDOW WHOSE RESET HAS ALREADY PASSED SAYS NOTHING ABOUT NOW. The
+    // harvest reads whatever the last run happened to write, and a rollout can
+    // be days old — an 8-day-old file reporting 99.6% against a reset that
+    // elapsed a week ago describes a window that has since rolled over and a
+    // quota that has since been refunded. Cooling on it would bench a healthy,
+    // paid-for seat for a fresh full window on the strength of an expired
+    // reading, and because the seat is then skipped it may not run again to
+    // produce a newer one. Skipping is both correct and self-correcting: the
+    // seat stays eligible, runs, and writes a current snapshot.
+    if (w.expired) continue
     if (w.used_percent < coolPercentFor(w.window_minutes)) continue
     const short = isShortWindow(w.window_minutes)
-    // The window's own length is the fallback: right for both regimes, and right
-    // for a regime nobody has seen yet.
-    const fallbackMs = Number.isFinite(w.window_minutes) && w.window_minutes > 0
-      ? w.window_minutes * 60_000
-      : short
-        ? FAILURE_SHORT_COOLDOWN_MS
-        : FAILURE_LONG_COOLDOWN_MS
-    const until = w.resets_at_ms !== null ? w.resets_at_ms : now + fallbackMs
+    const until = w.resets_at_ms !== null ? w.resets_at_ms : now + fallbackCooldownMs(w.window_minutes)
     const reason: CoolingReason = short ? 'short-window' : 'long-window'
     if (best === null || until > best.cooling_until) best = { cooling_until: until, cooling_reason: reason }
   }
+
+  // The CLI saying outright that it HIT a limit outranks any percentage. A
+  // percentage is a reading taken before the wall; `rate_limit_reached_type` is
+  // the wall. It is also the only place the window class survives — the failure
+  // text never names it (see `reachedWindowClass`) — so honouring it here is what
+  // keeps a weekly cap from being cooled for five hours.
+  const hit = reachedWindowClass(outcome.snapshot.reached_type)
+  if (hit !== null) {
+    const match = outcome.snapshot.windows.find(
+      (w) => !w.expired && isShortWindow(w.window_minutes) === (hit === 'short'),
+    )
+    const until =
+      match?.resets_at_ms ??
+      now + (match !== undefined
+        ? fallbackCooldownMs(match.window_minutes)
+        : hit === 'short'
+          ? FAILURE_SHORT_COOLDOWN_MS
+          : FAILURE_LONG_COOLDOWN_MS)
+    const reason: CoolingReason = hit === 'short' ? 'short-window' : 'long-window'
+    if (best === null || until > best.cooling_until) best = { cooling_until: until, cooling_reason: reason }
+  }
   return best
+}
+
+/**
+ * How long to cool a window that reported no usable `resets_at`.
+ *
+ * The window's own length is the natural answer — right for both observed
+ * regimes and right for one nobody has seen yet — but it is clamped, because an
+ * annual window or a corrupt value would otherwise retire a seat for a year or
+ * forever. See `MAX_FALLBACK_COOLDOWN_MS`.
+ */
+export function fallbackCooldownMs(window_minutes: number): number {
+  if (!Number.isFinite(window_minutes) || window_minutes <= 0) {
+    return isShortWindow(window_minutes) ? FAILURE_SHORT_COOLDOWN_MS : FAILURE_LONG_COOLDOWN_MS
+  }
+  return Math.min(window_minutes * 60_000, MAX_FALLBACK_COOLDOWN_MS)
 }
 
 /**
@@ -244,11 +309,35 @@ export function signalToCooldown(outcome: HarvestOutcome, now: number): Cooldown
  * makes the caller fall back to the window length, which is always safe.
  */
 export function normalizeResetsAt(raw: unknown, now: number): number | null {
-  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return null
+  const c = classifyResetsAt(raw, now)
+  return c.kind === 'future' ? c.ms : null
+}
+
+/**
+ * The three genuinely different things a `resets_at` can be.
+ *
+ * Collapsing `expired` into `absent` is the bug this exists to prevent: they
+ * point in OPPOSITE directions. `absent` means the CLI told us nothing about
+ * when the window ends, so a fallback duration is the safe response. `expired`
+ * means the CLI told us the window ended BEFORE NOW, which makes the
+ * accompanying `used_percent` a stale reading of a window that has already
+ * rolled over — the safe response there is to ignore the sample entirely, not to
+ * start a fresh full-length cooldown from it.
+ */
+export type ResetsAtClass =
+  | { kind: 'future'; ms: number }
+  | { kind: 'expired' }
+  | { kind: 'absent' }
+
+export function classifyResetsAt(raw: unknown, now: number): ResetsAtClass {
+  if (typeof raw !== 'number' || !Number.isFinite(raw) || raw <= 0) return { kind: 'absent' }
   const ms = raw * 1000
-  if (ms <= now) return null
-  if (ms > now + MAX_RESET_HORIZON_MS) return null
-  return ms
+  // Still the unit guard: a forgotten ×1000 lands in 1970, which reads as
+  // long-expired. That is caught here as `expired`, and an expired window is
+  // ignored rather than trusted, so the unit bug cannot un-cool a capped seat.
+  if (ms <= now) return { kind: 'expired' }
+  if (ms > now + MAX_RESET_HORIZON_MS) return { kind: 'absent' }
+  return { kind: 'future', ms }
 }
 
 /**
@@ -280,12 +369,13 @@ export function parseRolloutRateLimits(jsonlText: string, now: number): HarvestO
       if (w === null || typeof w !== 'object' || Array.isArray(w)) continue
       const rec = w as Record<string, unknown>
       const used = rec['used_percent']
-      const mins = rec['window_minutes']
       if (typeof used !== 'number' || !Number.isFinite(used)) continue
+      const reset = classifyResetsAt(rec['resets_at'], now)
       windows.push({
         used_percent: used,
-        window_minutes: typeof mins === 'number' && Number.isFinite(mins) ? mins : 0,
-        resets_at_ms: normalizeResetsAt(rec['resets_at'], now),
+        window_minutes: readWindowMinutes(rec),
+        resets_at_ms: reset.kind === 'future' ? reset.ms : null,
+        expired: reset.kind === 'expired',
       })
     }
     const plan = rl['plan_type']
@@ -300,7 +390,38 @@ export function parseRolloutRateLimits(jsonlText: string, now: number): HarvestO
   return { kind: 'snapshot', snapshot: found }
 }
 
-/** Depth-first search for a `rate_limits` object anywhere in a decoded event. */
+/**
+ * The window length, reading BOTH names the CLI ships.
+ *
+ * `window_minutes` is what every local rollout carries, but the shipped binary
+ * also contains `window_duration_mins` (measured on codex-cli 0.147.0: 13
+ * occurrences of the first, 2 of the second). A miss defaults to 0, and 0 is
+ * classed as a LONG window — so reading only one name and guessing wrong would
+ * silently apply the weekly threshold and a week-long fallback to a five-hour
+ * limit. Reading both costs one `??` and removes the guess.
+ */
+function readWindowMinutes(rec: Record<string, unknown>): number {
+  for (const key of ['window_minutes', 'window_duration_mins']) {
+    const v = rec[key]
+    if (typeof v === 'number' && Number.isFinite(v)) return v
+  }
+  return 0
+}
+
+/**
+ * The `event_msg` → `token_count` node that owns a `rate_limits` block.
+ *
+ * The shape is MEASURED, not assumed: a real rollout line decodes to
+ * `{type:'event_msg', payload:{type:'token_count', info:…, rate_limits:{…}}}`,
+ * so `rate_limits` sits directly on the object whose own `type` is
+ * `token_count`. Requiring that co-location is what stops an unrelated
+ * `response_item` that merely happens to carry a nested object of the same name
+ * from being read as a quota snapshot — a model's own message quoting this
+ * schema would otherwise be accepted as evidence and could cool a seat.
+ *
+ * The search still recurses, so a future wrapper level does not break it; what
+ * it will not do is accept a node that never claimed to be a usage event.
+ */
 function findRateLimits(node: unknown): Record<string, unknown> | null {
   if (node === null || typeof node !== 'object') return null
   if (Array.isArray(node)) {
@@ -312,7 +433,9 @@ function findRateLimits(node: unknown): Record<string, unknown> | null {
   }
   const rec = node as Record<string, unknown>
   const rl = rec['rate_limits']
-  if (rl !== null && typeof rl === 'object' && !Array.isArray(rl)) return rl as Record<string, unknown>
+  if (rec['type'] === TOKEN_COUNT_EVENT && rl !== null && typeof rl === 'object' && !Array.isArray(rl)) {
+    return rl as Record<string, unknown>
+  }
   for (const value of Object.values(rec)) {
     const hit = findRateLimits(value)
     if (hit !== null) return hit
@@ -320,77 +443,39 @@ function findRateLimits(node: unknown): Record<string, unknown> | null {
   return null
 }
 
-/**
- * The stderr fragments that mean "this seat is out of quota", measured rather
- * than guessed: each was recovered from the literals inside the shipped codex
- * binary (codex-cli 0.147.0), verified with a positive control proving the same
- * search DOES return strings from that binary — a search that can only come back
- * empty is not evidence of absence.
- *
- * The single-quote character is deliberately NOT part of any pattern. The binary
- * carries the plain ASCII form, terminals and logs have been seen to carry the
- * curly typographic one, and a classifier that hinged on which of the two
- * arrived would fail OPEN — silently declining to cool a capped seat, which is
- * the failure mode that makes the whole policy inert.
- */
-const RATE_LIMIT_PATTERNS: readonly RegExp[] = [
-  /hit your usage limit/i,
-  /reached your usage limit/i,
-  /usage limit reached/i,
-  /rate limit reached/i,
-  /too many requests/i,
-  /quota exceeded/i,
-  /workspace credit limit/i,
-  /\b429\b/,
-]
-
-/** The long-window (weekly) variants, which must cool for a week, not hours. */
-const LONG_LIMIT_PATTERNS: readonly RegExp[] = [/hit your weekly limit/i, /weekly limit/i]
-
-/** The short-window (session) variants. */
-const SHORT_LIMIT_PATTERNS: readonly RegExp[] = [/hit your session limit/i, /session limit/i]
+/** The CLI's own name for the event that carries a usage snapshot. */
+const TOKEN_COUNT_EVENT = 'token_count'
 
 /**
- * A revoked refresh token, verbatim from the binary and from production logs.
- * This is the #573 signature, and it is the one failure that must NOT be
- * treated as a quota problem: waiting does not fix it.
- */
-const UNAUTHORIZED_PATTERNS: readonly RegExp[] = [
-  /refresh token was revoked/i,
-  /invalid_grant/i,
-  /please log out and sign in again/i,
-]
-
-/**
- * Classify a failed codex invocation's stderr into a cooldown, or null.
+ * Which window class the CLI says it actually hit, from `rate_limit_reached_type`.
  *
- * ⚠️ NOT YET WIRED — this has no production caller, and calling that out here is
- * the point. Codex failures currently surface only inside the shell wrappers and
- * the `.mjs` inner workflow, which have no seam back into this service, so
- * plumbing one is its own change to the orchestrator's failure path. The patterns
- * below are measured and tested and the function is ready; until something calls
- * it, ONLY the rollout harvest cools a seat. Treat this as a declared gap rather
- * than a working second signal — a module that exists but is never invoked is not
- * a feature.
+ * THIS FIELD IS THE CLI'S OWN DISCRIMINATOR AND IT REPLACES A STDERR CLASSIFIER
+ * THAT COULD NOT WORK. An earlier revision of this module tried to tell a
+ * session cap from a weekly cap by matching the failure text, using the patterns
+ * `/weekly limit/i` and `/session limit/i`. Both match NOTHING the shipped CLI
+ * can emit: searching the literals inside codex-cli 0.147.0 returns 0 for each,
+ * while `usage limit` returns 23 and the positive controls `codex-cli` and
+ * `rate_limit_reached_type` return 9 and 17 — so the search works and the two
+ * discriminators are simply absent. The binary's real messages interpose the
+ * word "usage" ("You've hit your usage limit") and never name the window at all,
+ * which means no amount of pattern-fixing recovers the distinction from text.
  *
- * NULL IS THE DEFAULT AND THE SAFE ANSWER. Timeouts, 5xx, network resets,
- * content-policy refusals and every unrecognised message return null, because
- * none of them is evidence about quota and cooling on them would retire healthy
- * seats every time the network hiccupped. Only a pattern measured above cools
- * anything; an unfamiliar failure leaves the pool exactly as it was.
+ * `rate_limit_reached_type` does carry it, rides the same `token_count` event
+ * this module already parses, and needs no new seam. The names come from the
+ * limit ids the binary declares: `five-hour-limit`, `daily-limit`,
+ * `weekly-limit`, `monthly-limit`, `annual-limit`.
+ *
+ * An unrecognised value returns null and cools NOTHING, because a name we cannot
+ * place is not evidence about which quota was spent.
  */
-export function classifyCodexFailure(stderr: string, now: number): Cooldown | null {
-  if (typeof stderr !== 'string' || stderr.length === 0) return null
-  for (const re of UNAUTHORIZED_PATTERNS) {
-    if (re.test(stderr)) return { cooling_until: now, cooling_reason: 'unauthorized' }
-  }
-  const rateLimited = RATE_LIMIT_PATTERNS.some((re) => re.test(stderr))
-  const longHit = LONG_LIMIT_PATTERNS.some((re) => re.test(stderr))
-  const shortHit = SHORT_LIMIT_PATTERNS.some((re) => re.test(stderr))
-  if (!rateLimited && !longHit && !shortHit) return null
-  if (longHit) return { cooling_until: now + FAILURE_LONG_COOLDOWN_MS, cooling_reason: 'long-window' }
-  if (shortHit) return { cooling_until: now + FAILURE_SHORT_COOLDOWN_MS, cooling_reason: 'short-window' }
-  return { cooling_until: now + FAILURE_SHORT_COOLDOWN_MS, cooling_reason: 'rate-limited' }
+export function reachedWindowClass(reached: string | null): 'short' | 'long' | null {
+  if (typeof reached !== 'string') return null
+  const v = reached.toLowerCase()
+  if (v.includes('week') || v.includes('month') || v.includes('annual') || v.includes('year')) return 'long'
+  if (v.includes('secondary')) return 'long'
+  if (v.includes('hour') || v.includes('daily') || v.includes('session')) return 'short'
+  if (v.includes('primary')) return 'short'
+  return null
 }
 
 /**

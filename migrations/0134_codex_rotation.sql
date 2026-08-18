@@ -1,4 +1,9 @@
--- 0133 — Codex multi-account rotation state.
+-- 0134 — Codex multi-account rotation state.
+--
+-- Ordinal 0133 was deliberately skipped: another open branch already claims
+-- `0133_work_board_items_pr.sql`, and two migrations sharing an ordinal collide
+-- for whichever merges second while also breaking the hard-coded applied-ordinal
+-- lists in the runner tests.
 --
 -- The owner may connect more than one ChatGPT subscription seat. The encrypted
 -- bundles keep living in `project_credentials` (service `codex` for the original
@@ -34,6 +39,18 @@ CREATE TABLE IF NOT EXISTS codex_rotation_slots (
   last_resets_at      INTEGER,
   last_plan_type      TEXT,
   last_run_at         INTEGER,
+  -- When the bundle currently in this slot was connected, epoch ms.
+  --
+  -- This is the identity boundary between one account and the next in a REUSED
+  -- directory. Disconnecting a seat cannot delete its `sessions/` tree — for the
+  -- first seat that tree is the whole CODEX_HOME and also holds every other
+  -- seat's directory — so without this stamp a different subscription connected
+  -- under the same slot name would inherit its predecessor's usage history and be
+  -- cooled before it had run once. The harvest ignores rollouts older than this.
+  connected_at        INTEGER,
+  -- Last harvest attempt, epoch ms. Throttles the filesystem scan, which sits on
+  -- a synchronous path that read-only status requests also reach.
+  last_harvest_at     INTEGER,
   PRIMARY KEY (owner_slug, slot)
 );
 

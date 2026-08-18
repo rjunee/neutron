@@ -43,7 +43,6 @@ import {
   selectNextSlot,
   shouldHarvestBack,
   signalToCooldown,
-  type Cooldown,
 } from './codex-rotation.ts'
 import { harvestNewestRollout } from './codex-rotation-io.ts'
 import type { CodexRotationStore, SlotRecord } from './codex-rotation-store.ts'
@@ -232,6 +231,16 @@ export interface CodexCredentialServiceDeps {
   log?: (event: string, fields: Record<string, string | number | boolean | null | undefined>) => void
 }
 
+/**
+ * Shortest gap between two usage scans of the same seat.
+ *
+ * The harvest is filesystem work on a synchronous path that a read-only status
+ * request reaches as well as a run launch. Runs are minutes apart and a rollout
+ * is only written while a run is in flight, so a scan more often than this can
+ * only re-read the same bytes.
+ */
+export const HARVEST_MIN_INTERVAL_MS = 60_000
+
 /** One seat as the owner sees it. Never carries token material. */
 export interface CodexAccountSummary {
   slot: string
@@ -394,34 +403,89 @@ export class CodexCredentialService {
 
     // Harvest BEFORE selecting, so a seat that ran itself into its cap during the
     // last run is already cooling by the time this run picks a seat.
-    this.harvestSlot(owner_slug, previousActive)
+    this.harvestSlot(owner_slug, previousActive, slots.find((s) => s.slot === previousActive))
 
-    const selection = selectNextSlot(this.rotation.listSlots(owner_slug), previousActive, this.now())
-    if (selection === null) return null
+    // SYNC THE SEAT THAT JUST RAN, NOT ONLY THE ONE ABOUT TO RUN. The CLI
+    // refreshes `auth.json` during a run, so the bundle that just went stale in
+    // the store belongs to the PREVIOUS seat. Harvesting back only the selected
+    // seat would leave a rotated-away seat's stored copy frozen at a refresh
+    // token the server has already replaced — and since that seat is cooling, it
+    // may not be resolved again for a week, leaving the self-heal path holding a
+    // dead bundle for exactly as long as it is unable to notice.
+    if (previousActive !== null) this.harvestBackOnly(owner_slug, previousActive)
 
-    if (selection.rotated) {
-      this.rotation.setActiveSlot(owner_slug, selection.slot, this.now())
-      this.log('codex_rotation_rotated', { from: previousActive, to: selection.slot })
-    }
-    if (selection.exhausted) {
-      // Keeping a capped seat beats returning null: a capped seat fails with a
-      // legible, retryable error, whereas no seat drops codex out of the review
-      // with nothing to point at.
-      this.log('codex_rotation_exhausted', {
-        slot: selection.slot,
-        slot_count: slots.length,
-        detail: 'every connected Codex seat is cooling; keeping the current seat',
+    // Walking rather than taking one shot: the selected seat's credential row can
+    // be gone or expired, and returning null then would drop codex from the
+    // review while a healthy seat sat next in the ring — failing in the one
+    // direction the policy explicitly forbids.
+    let candidates = this.rotation.listSlots(owner_slug)
+    let from = previousActive
+    for (let attempt = 0; attempt < candidates.length; attempt++) {
+      const selection = selectNextSlot(candidates, from, this.now())
+      if (selection === null) return null
+
+      const stored = this.store.resolve(owner_slug, undefined, codexSlotService(selection.slot))
+      if (stored === null) {
+        // No usable bundle behind this slot. Cool it as `unauthorized` — the one
+        // state that does not expire on a timer — so it stops winning selections
+        // and the owner is told to reconnect it, then try the next seat.
+        this.rotation.setCooldown(owner_slug, selection.slot, {
+          cooling_until: this.now(),
+          cooling_reason: 'unauthorized',
+        })
+        this.log('codex_rotation_unusable_seat', {
+          slot: selection.slot,
+          detail: 'seat has no usable stored credential; reconnect it',
+        })
+        candidates = this.rotation.listSlots(owner_slug)
+        from = selection.slot
+        continue
+      }
+
+      if (selection.rotated) {
+        this.rotation.setActiveSlot(owner_slug, selection.slot, this.now())
+        this.log('codex_rotation_rotated', { from: previousActive, to: selection.slot })
+      }
+      if (selection.exhausted) {
+        // Keeping a capped seat beats returning null: a capped seat fails with a
+        // legible, retryable error, whereas no seat drops codex out of the review
+        // with nothing to point at.
+        this.log('codex_rotation_exhausted', {
+          slot: selection.slot,
+          slot_count: slots.length,
+          detail: 'every connected Codex seat is cooling; keeping the current seat',
+        })
+      }
+
+      const home = this.slotHome(selection.slot)
+      this.selfHealAndHarvestBack(owner_slug, codexSlotService(selection.slot), home, stored.plaintext, {
+        scope: 'global',
+        project_id: '',
       })
+      return home
     }
+    return null
+  }
 
-    const stored = this.store.resolve(owner_slug, undefined, codexSlotService(selection.slot))
-    if (stored === null) return null
-    const home = this.slotHome(selection.slot)
-    this.selfHealAndHarvestBack(owner_slug, codexSlotService(selection.slot), home, stored.plaintext, {
+  /**
+   * Push a seat's CLI-refreshed bundle back into the store, WITHOUT materializing.
+   *
+   * The materialize half of `selfHealAndHarvestBack` is deliberately absent: this
+   * runs for a seat that is not being handed to this run, and writing an
+   * `auth.json` into a directory nothing is about to use is how a stale bundle
+   * gets installed over a live login. Only the disk→store direction is safe for a
+   * seat we are walking away from.
+   */
+  private harvestBackOnly(owner_slug: OwnerHandle, slot: string): void {
+    const service = codexSlotService(slot)
+    const stored = this.store.resolve(owner_slug, undefined, service)
+    if (stored === null) return
+    const home = this.slotHome(slot)
+    if (readMaterializedAuth(home) === null) return
+    this.selfHealAndHarvestBack(owner_slug, service, home, stored.plaintext, {
       scope: 'global',
       project_id: '',
     })
-    return home
   }
 
   /**
@@ -457,9 +521,22 @@ export class CodexCredentialService {
    * retire a healthy seat, because cooling one shrinks a pool the owner is paying
    * for and the mistake is invisible.
    */
-  private harvestSlot(owner_slug: OwnerHandle, slot: string): void {
+  private harvestSlot(owner_slug: OwnerHandle, slot: string, record?: SlotRecord): void {
+    const now = this.now()
+    // THROTTLE. This runs on `resolveActiveCodexHome`, which a read-only HTTP
+    // handler reaches as well as a run launch, and the scan touches the
+    // filesystem. Runs are minutes apart, so re-scanning more than once a minute
+    // can only re-read the same file; skipping cheaply is what keeps a status GET
+    // from paying for a directory walk on every poll.
+    const last = record?.last_harvest_at ?? null
+    if (last !== null && now - last < HARVEST_MIN_INTERVAL_MS) return
+    this.rotation.markHarvested(owner_slug, slot, now)
+
     const home = this.slotHome(slot)
-    const outcome = harvestNewestRollout(home, this.now())
+    // Rollouts predating this seat's connect stamp belong to whatever account
+    // previously occupied the directory; reading them would cool a brand-new
+    // subscription on its predecessor's exhaustion.
+    const outcome = harvestNewestRollout(home, now, record?.connected_at ?? 0)
     if (outcome.kind !== 'snapshot') return
     // The window closest to its limit is the one worth showing the owner.
     const worst = [...outcome.snapshot.windows].sort((a, b) => b.used_percent - a.used_percent)[0]
@@ -472,9 +549,9 @@ export class CodexCredentialService {
         resets_at: worst?.resets_at_ms ?? null,
         plan_type: outcome.snapshot.plan_type,
       },
-      this.now(),
+      now,
     )
-    const cooldown = signalToCooldown(outcome, this.now())
+    const cooldown = signalToCooldown(outcome, now)
     if (cooldown !== null) {
       this.rotation.setCooldown(owner_slug, slot, cooldown)
       this.log('codex_rotation_cooled', {
@@ -526,6 +603,12 @@ export class CodexCredentialService {
     // Fire-and-forget: the resolver is synchronous by contract (the orchestrator
     // calls it at fire time) and a failed re-encrypt must not fail a run — the
     // stored copy simply stays stale until the next resolve tries again.
+    // Carry the EXISTING label through. The store's upsert overwrites `label` on
+    // conflict, so passing null here would erase the name the owner connected the
+    // seat under and leave it anonymous in every generic credential view — a
+    // silent cosmetic regression on a path that runs on its own schedule.
+    const existingLabel =
+      this.store.getMeta(owner_slug, target.project_id, service)?.label ?? null
     fireAndForget(
       'codex_credential_harvest_back',
       this.store
@@ -534,7 +617,7 @@ export class CodexCredentialService {
           plaintext: validated.normalized,
           scope: target.scope,
           project_id: target.project_id,
-          label: null,
+          label: existingLabel,
           expires_at: null,
         })
         .then(() => {
@@ -574,7 +657,16 @@ export class CodexCredentialService {
     }
     if (requested === DEFAULT_SLOT) {
       const result = await this.connect(owner_slug, pasted)
-      if (result.ok) this.rotation.upsertSlot(owner_slug, DEFAULT_SLOT, opts?.label ?? null)
+      if (result.ok) {
+        this.rotation.upsertSlot(owner_slug, DEFAULT_SLOT, opts?.label ?? null)
+        // THE FIRST SEAT RECONNECTS LIKE EVERY OTHER SEAT. This branch delegates
+        // to the legacy `connect` for byte-identical storage, and that is exactly
+        // why the rotation bookkeeping has to be repeated here — `connect` knows
+        // nothing about cooldowns. Without this, pasting a fresh bundle into the
+        // first seat left its old cooldown standing, so the seat the owner had
+        // just fixed went on being skipped until a timer he could not see expired.
+        this.rotation.markConnected(owner_slug, DEFAULT_SLOT, this.now())
+      }
       return { ...result, slot: DEFAULT_SLOT }
     }
     const v = validateCodexSubscriptionAuth(pasted, this.now)
@@ -598,8 +690,9 @@ export class CodexCredentialService {
     const { path } = materializeCodexAuth({ codexHome: this.slotHome(requested), authJson: v.normalized })
     this.rotation.upsertSlot(owner_slug, requested, opts?.label ?? null)
     // A reconnect is the ONLY thing that clears an `unauthorized` cooldown, since
-    // a revoked refresh token does not heal by waiting.
-    this.rotation.setCooldown(owner_slug, requested, null)
+    // a revoked refresh token does not heal by waiting. It also stamps the seat
+    // so the harvest ignores the previous occupant's rollouts.
+    this.rotation.markConnected(owner_slug, requested, this.now())
     const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
     return { ok: true, mode: 'subscription', status: status.status, scope: 'global', path, slot: requested }
   }
@@ -640,6 +733,39 @@ export class CodexCredentialService {
     return { slot: selection.slot, exhausted: selection.exhausted }
   }
 
+  /**
+   * Disconnect EVERY seat. This is what an unqualified "Disconnect Codex" means.
+   *
+   * The shipped web and mobile clients send a DELETE with no account from a
+   * single button labelled "Disconnect Codex". Removing only the first seat there
+   * would leave every named seat stored, materialized and still selectable by
+   * trident — the owner told the instance to stop using Codex and it would keep
+   * using Codex, from a credential the UI no longer showed him. Disconnecting all
+   * of them is the only reading of that button that matches what it says.
+   *
+   * Per-project overrides are NOT touched: they are addressed by their own scope
+   * and are not part of the global seat pool.
+   */
+  async disconnectAllAccounts(owner_slug: OwnerHandle): Promise<{ ok: boolean; removed: string[] }> {
+    const removed: string[] = []
+    for (const slot of this.connectedSlots(owner_slug)) {
+      const { ok } = await this.removeAccount(owner_slug, slot)
+      if (ok) removed.push(slot)
+    }
+    return { ok: removed.length > 0, removed }
+  }
+
+  /** Slot ids that currently have a global credential row, first seat included. */
+  private connectedSlots(owner_slug: OwnerHandle): string[] {
+    const slots = new Set<string>()
+    for (const record of this.store.listGlobal(owner_slug)) {
+      const slot = codexServiceSlot(record.service)
+      if (slot !== null) slots.add(slot)
+    }
+    for (const known of this.rotation.listSlots(owner_slug)) slots.add(known.slot)
+    return [...slots]
+  }
+
   /** Disconnect one seat: delete its credential and remove its `auth.json`. */
   async removeAccount(owner_slug: OwnerHandle, slot: string): Promise<{ ok: boolean }> {
     const normalized = normalizeSlot(slot)
@@ -648,21 +774,6 @@ export class CodexCredentialService {
     removeCodexAuth(this.slotHome(normalized))
     this.rotation.removeSlot(owner_slug, normalized)
     return { ok: removed }
-  }
-
-  /**
-   * Cool a seat from a FAILED codex invocation's stderr. See `classifyCodexFailure`.
-   *
-   * ⚠️ NOT YET WIRED — nothing in production calls this, because codex failures do
-   * not currently reach TypeScript (see the note on `classifyCodexFailure`). Until
-   * they do, seats are cooled only by the rollout harvest.
-   */
-  applyFailureCooldown(owner_slug: OwnerHandle, slot: string, cooldown: Cooldown | null): void {
-    if (cooldown === null) return
-    const normalized = normalizeSlot(slot)
-    if (normalized === null) return
-    this.rotation.setCooldown(owner_slug, normalized, cooldown)
-    this.log('codex_rotation_cooled', { slot: normalized, reason: cooldown.cooling_reason, source: 'stderr' })
   }
 
   /**

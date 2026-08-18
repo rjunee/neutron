@@ -26,7 +26,7 @@ import {
 } from './codex-credential.ts'
 import { SqliteCodexRotationStore } from './codex-rotation-store.ts'
 import {
-  classifyCodexFailure,
+  reachedWindowClass,
   coolPercentFor,
   isCooling,
   normalizeResetsAt,
@@ -187,12 +187,12 @@ describe('threshold policy', () => {
   // MUTATION: change `>=` to `>` in `signalToCooldown`'s percentage compare.
   test('the short-window threshold cools at exactly 98 and holds at 97.9', () => {
     const holds = signalToCooldown(
-      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 97.9, window_minutes: 300, resets_at_ms: null }], plan_type: 'pro', reached_type: null } },
+      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 97.9, window_minutes: 300, resets_at_ms: null, expired: false }], plan_type: 'pro', reached_type: null } },
       NOW,
     )
     expect(holds).toBeNull()
     const cools = signalToCooldown(
-      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 98, window_minutes: 300, resets_at_ms: null }], plan_type: 'pro', reached_type: null } },
+      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 98, window_minutes: 300, resets_at_ms: null, expired: false }], plan_type: 'pro', reached_type: null } },
       NOW,
     )
     expect(cools?.cooling_reason).toBe('short-window')
@@ -205,12 +205,12 @@ describe('threshold policy', () => {
     expect(coolPercentFor(300)).toBe(98)
     expect(coolPercentFor(10080)).toBe(99)
     const weeklyAt98 = signalToCooldown(
-      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 98.5, window_minutes: 10080, resets_at_ms: null }], plan_type: 'pro', reached_type: null } },
+      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 98.5, window_minutes: 10080, resets_at_ms: null, expired: false }], plan_type: 'pro', reached_type: null } },
       NOW,
     )
     expect(weeklyAt98).toBeNull()
     const weeklyAt99 = signalToCooldown(
-      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 99, window_minutes: 10080, resets_at_ms: null }], plan_type: 'pro', reached_type: null } },
+      { kind: 'snapshot', snapshot: { windows: [{ used_percent: 99, window_minutes: 10080, resets_at_ms: null, expired: false }], plan_type: 'pro', reached_type: null } },
       NOW,
     )
     expect(weeklyAt99?.cooling_reason).toBe('long-window')
@@ -224,8 +224,8 @@ describe('threshold policy', () => {
         kind: 'snapshot',
         snapshot: {
           windows: [
-            { used_percent: 99.5, window_minutes: 300, resets_at_ms: NOW + 60_000 },
-            { used_percent: 99.5, window_minutes: 10080, resets_at_ms: NOW + 7 * 86_400_000 },
+            { used_percent: 99.5, window_minutes: 300, resets_at_ms: NOW + 60_000, expired: false },
+            { used_percent: 99.5, window_minutes: 10080, resets_at_ms: NOW + 7 * 86_400_000, expired: false },
           ],
           plan_type: 'pro',
           reached_type: null,
@@ -309,47 +309,55 @@ describe('rollout harvest', () => {
   })
 })
 
-describe('failure classification', () => {
-  // MUTATION: classify the revoked-token string as 'rate-limited'.
-  test('a revoked refresh token cools as unauthorized, which never expires on a timer', () => {
-    const stderr =
-      'ERROR: Your access token could not be refreshed because your refresh token was revoked. Please log out and sign in again.'
-    const cooled = classifyCodexFailure(stderr, NOW)
-    expect(cooled?.cooling_reason).toBe('unauthorized')
-    // A rate-limit classification would let it expire and rotate a dead seat back in.
-    expect(isCooling(slot({ slot: 'a', cooling_until: cooled?.cooling_until ?? 0, cooling_reason: cooled?.cooling_reason ?? null }), NOW + 86_400_000)).toBe(true)
+describe('the CLI reporting that it HIT a limit', () => {
+  // MUTATION: delete the `reachedWindowClass` arm from `signalToCooldown`, i.e.
+  // parse `rate_limit_reached_type` and never read it (which is what the module
+  // did before). The seat then stays eligible while the CLI is telling us
+  // outright that it is capped.
+  test('a reached weekly limit cools even when the percentage is under threshold', () => {
+    const cooled = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 12, window_minutes: 10080, resets_at_ms: NOW + 86_400_000, expired: false }],
+          plan_type: 'pro',
+          reached_type: 'weekly-limit',
+        },
+      },
+      NOW,
+    )
+    expect(cooled?.cooling_reason).toBe('long-window')
+    expect(cooled?.cooling_until).toBe(NOW + 86_400_000)
   })
 
-  test('the measured usage-cap strings cool the seat', () => {
-    for (const line of [
-      "You've hit your usage limit",
-      'Usage limit reached',
-      'rate limit reached',
-      'HTTP error: 429 Too Many Requests',
-      'quota exceeded',
-    ]) {
-      expect(classifyCodexFailure(line, NOW)).not.toBeNull()
-    }
-    // Weekly and session variants must cool for their own window length.
-    expect(classifyCodexFailure("You've hit your weekly limit · resets Aug 20, 11pm (UTC)", NOW)?.cooling_reason).toBe('long-window')
-    expect(classifyCodexFailure("You've hit your session limit · resets 12am (UTC)", NOW)?.cooling_reason).toBe('short-window')
+  // MUTATION: map every reached_type to the short class. A weekly cap would then
+  // be cooled for five hours and the seat would rotate back into the same wall.
+  test('the window class comes from the reached_type name, across the ids the CLI declares', () => {
+    expect(reachedWindowClass('five-hour-limit')).toBe('short')
+    expect(reachedWindowClass('daily-limit')).toBe('short')
+    expect(reachedWindowClass('weekly-limit')).toBe('long')
+    expect(reachedWindowClass('monthly-limit')).toBe('long')
+    expect(reachedWindowClass('annual-limit')).toBe('long')
+    expect(reachedWindowClass('secondary-usage-limit')).toBe('long')
   })
 
-  test('a curly typographic quote classifies identically to a plain ASCII one', () => {
-    expect(classifyCodexFailure('You’ve hit your usage limit', NOW)).not.toBeNull()
-  })
-
-  // MUTATION: make the final `return null` return a cooldown instead.
-  test('an unrecognised failure retires NOTHING', () => {
-    for (const line of [
-      'error: connect ETIMEDOUT',
-      'HTTP error: 503 Service Unavailable',
-      'stream disconnected before completion',
-      'response was refused by content policy',
-      '',
-    ]) {
-      expect(classifyCodexFailure(line, NOW)).toBeNull()
-    }
+  // MUTATION: return 'short' instead of null for an unknown name. An id we cannot
+  // place is not evidence, and guessing would cool healthy seats.
+  test('an unrecognised or absent reached_type cools nothing', () => {
+    expect(reachedWindowClass('some-future-limit')).toBeNull()
+    expect(reachedWindowClass(null)).toBeNull()
+    const untouched = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 12, window_minutes: 10080, resets_at_ms: NOW + 86_400_000, expired: false }],
+          plan_type: 'pro',
+          reached_type: 'some-future-limit',
+        },
+      },
+      NOW,
+    )
+    expect(untouched).toBeNull()
   })
 })
 
@@ -469,12 +477,16 @@ describe('the multi-seat credential service', () => {
   })
 
   test('a spent seat rotates to the other one on the next run', async () => {
-    const svc = newService()
+    // The clock ADVANCES between the two resolves, because two runs never launch
+    // in the same millisecond and the harvest is throttled to one scan a minute.
+    let clock = NOW
+    const svc = newService(() => clock)
     await svc.connectAccount(OWNER, subscriptionAuth())
     await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
     // Register both slots, then write a spent rollout for the active one.
     expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(codexHome)
     writeRollout(codexHome, 'rollout-spent.jsonl', [tokenCountLine({ used_percent: 99.7, window_minutes: 10080 })], 1_800_000_000)
+    clock = NOW + 5 * 60_000
     const home = svc.resolveActiveCodexHome(OWNER, 'proj')
     expect(home).toBe(join(codexHome, 'accounts', 'work'))
     const spent = svc.listAccounts(OWNER).find((a) => a.slot === 'default')
@@ -520,13 +532,57 @@ describe('the multi-seat credential service', () => {
     expect(existsSync(codexAuthPath(codexHome))).toBe(true)
   })
 
+  // MUTATION: drop `markConnected` from the NAMED-seat arm of `connectAccount`.
   test('a reconnect clears an unauthorized cooldown, which nothing else can', async () => {
     const svc = newService()
+    const rotation = new SqliteCodexRotationStore(db)
     await svc.connectAccount(OWNER, subscriptionAuth())
     await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
-    svc.applyFailureCooldown(OWNER, 'work', { cooling_until: NOW, cooling_reason: 'unauthorized' })
+    rotation.setCooldown(OWNER, 'work', { cooling_until: NOW, cooling_reason: 'unauthorized' })
     expect(svc.listAccounts(OWNER).find((a) => a.slot === 'work')?.cooling).toBe(true)
     await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    expect(svc.listAccounts(OWNER).find((a) => a.slot === 'work')?.cooling).toBe(false)
+  })
+
+  // MUTATION: drop `markConnected` from the DEFAULT arm of `connectAccount`.
+  //
+  // This branch delegates to the legacy `connect`, which knows nothing about
+  // rotation — so it is the arm most likely to be forgotten, and the previous
+  // revision did forget it while the named-seat arm above passed. The owner
+  // pastes a fresh bundle into the first seat and it goes on being skipped by a
+  // timer he cannot see.
+  test('reconnecting the FIRST seat clears its cooldown too', async () => {
+    const svc = newService()
+    const rotation = new SqliteCodexRotationStore(db)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    rotation.setCooldown(OWNER, 'default', { cooling_until: NOW, cooling_reason: 'unauthorized' })
+    expect(svc.listAccounts(OWNER).find((a) => a.slot === 'default')?.cooling).toBe(true)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    expect(svc.listAccounts(OWNER).find((a) => a.slot === 'default')?.cooling).toBe(false)
+  })
+
+  // MUTATION: drop the `connected_at` floor passed to `harvestNewestRollout`.
+  //
+  // Disconnecting a seat cannot remove its `sessions/` tree, so a DIFFERENT
+  // subscription connected under the same slot name would read its predecessor's
+  // rollout and be benched before it had run once.
+  test('a seat reconnected under a reused name does not inherit the old usage history', async () => {
+    const svc = newService()
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    // The previous occupant left a spent-weekly rollout behind in the directory,
+    // stamped well before the new seat is connected.
+    writeRollout(
+      join(codexHome, 'accounts', 'work'),
+      'rollout-previous-account.jsonl',
+      [tokenCountLine({ used_percent: 99.9, window_minutes: 10080 })],
+      Math.floor(NOW / 1000) - 86_400,
+    )
+    await svc.removeAccount(OWNER, 'work')
+    expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(false)
+
+    // A new subscription takes the same slot name. Its own rollout tree is empty.
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    svc.resolveActiveCodexHome(OWNER, 'proj')
     expect(svc.listAccounts(OWNER).find((a) => a.slot === 'work')?.cooling).toBe(false)
   })
 

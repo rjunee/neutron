@@ -23,7 +23,7 @@
  * a non-answer can never cool a seat.
  */
 
-import { readdirSync, readFileSync, statSync, type Dirent } from 'node:fs'
+import { closeSync, openSync, readdirSync, readFileSync, readSync, statSync, type Dirent } from 'node:fs'
 import { join } from 'node:path'
 
 import { parseRolloutRateLimits, type HarvestOutcome } from './codex-rotation.ts'
@@ -40,6 +40,16 @@ export const MAX_ROLLOUT_TAIL_BYTES = 512 * 1024
 const MAX_CANDIDATES = 8
 
 /**
+ * Hard ceiling on how many rollout files the walk will collect.
+ *
+ * The CLI never prunes `sessions/`, so this directory only grows; a corpus of a
+ * few thousand files was enough to make the walk take hundreds of milliseconds
+ * synchronously. Only the newest handful can ever be selected (`MAX_CANDIDATES`),
+ * so collecting more than a small multiple of that is pure waste.
+ */
+const MAX_SCAN_FILES = 64
+
+/**
  * The newest rollout file under a CODEX_HOME, or null when there is none.
  *
  * The date-partitioned layout (`sessions/2026/08/17/rollout-*.jsonl`) is walked
@@ -47,8 +57,8 @@ const MAX_CANDIDATES = 8
  * moment a partition scheme changed; modification time is what "newest" actually
  * means here.
  */
-export function findNewestRollout(codexHome: string): string | null {
-  return listRollouts(codexHome)[0]?.path ?? null
+export function findNewestRollout(codexHome: string, minMtimeMs = 0): string | null {
+  return listRollouts(codexHome, minMtimeMs)[0]?.path ?? null
 }
 
 /**
@@ -59,23 +69,37 @@ export function findNewestRollout(codexHome: string): string | null {
  * moment the partition scheme changed; modification time is what "newest"
  * actually means here.
  */
-function listRollouts(codexHome: string): { path: string; mtime: number }[] {
+function listRollouts(codexHome: string, minMtimeMs = 0): { path: string; mtime: number }[] {
   const out: { path: string; mtime: number }[] = []
   const walk = (dir: string, depth: number): void => {
-    if (depth > 5) return
+    if (depth > 5 || out.length >= MAX_SCAN_FILES) return
     let entries: Dirent[]
     try {
       entries = readdirSync(dir, { withFileTypes: true })
     } catch {
       return
     }
-    for (const entry of entries) {
+    // NEWEST PARTITION FIRST, and stop once enough candidates are in hand. The
+    // layout is `sessions/YYYY/MM/DD/`, whose components are zero-padded and so
+    // sort lexicographically in date order; descending therefore visits the most
+    // recent day first. Without this the walk was an unbounded synchronous scan
+    // of every session the CLI has ever written — it never prunes them — sitting
+    // on the path that resolves a run's credential, which a read-only HTTP
+    // handler also reaches. Bounding it keeps the cost proportional to RECENT
+    // activity instead of to lifetime history.
+    const sorted = [...entries].sort((a, b) => b.name.localeCompare(a.name))
+    for (const entry of sorted) {
+      if (out.length >= MAX_SCAN_FILES) return
       const full = join(dir, entry.name)
       if (entry.isDirectory()) {
         walk(full, depth + 1)
       } else if (entry.isFile() && entry.name.endsWith('.jsonl')) {
         try {
-          out.push({ path: full, mtime: statSync(full).mtimeMs })
+          const mtime = statSync(full).mtimeMs
+          // A rollout older than the seat's connect stamp belongs to whatever
+          // account previously occupied this directory. See `harvestNewestRollout`.
+          if (mtime < minMtimeMs) continue
+          out.push({ path: full, mtime })
         } catch {
           // A file that vanished between readdir and stat is not an error worth
           // failing the harvest over — the CLI rotates these while we look.
@@ -97,10 +121,10 @@ function listRollouts(codexHome: string): { path: string; mtime: number }[] {
  * caller must not conflate them, because two of the three say nothing about
  * quota and cooling a seat on them would retire a working account.
  */
-export function harvestNewestRollout(codexHome: string, now: number): HarvestOutcome {
+export function harvestNewestRollout(codexHome: string, now: number, minMtimeMs = 0): HarvestOutcome {
   let newest: string | null
   try {
-    newest = findNewestRollout(codexHome)
+    newest = findNewestRollout(codexHome, minMtimeMs)
   } catch (err) {
     return { kind: 'error', error: err instanceof Error ? err.message : String(err) }
   }
@@ -118,14 +142,19 @@ export function harvestNewestRollout(codexHome: string, now: number): HarvestOut
   // instead of reporting `absent` while the answer sat one file away.
   const first = parseRolloutRateLimits(text, now)
   if (first.kind === 'snapshot') return first
-  return harvestFromCandidates(codexHome, now, newest)
+  return harvestFromCandidates(codexHome, now, newest, minMtimeMs)
 }
 
 /** Try progressively older rollouts when the newest carries no usage event. */
-function harvestFromCandidates(codexHome: string, now: number, skip: string): HarvestOutcome {
+function harvestFromCandidates(
+  codexHome: string,
+  now: number,
+  skip: string,
+  minMtimeMs: number,
+): HarvestOutcome {
   let candidates: { path: string; mtime: number }[]
   try {
-    candidates = listRollouts(codexHome)
+    candidates = listRollouts(codexHome, minMtimeMs)
   } catch {
     return { kind: 'absent' }
   }
@@ -153,8 +182,22 @@ function harvestFromCandidates(codexHome: string, now: number, skip: string): Ha
 function readRollingTail(path: string, maxBytes: number): string {
   const size = statSync(path).size
   if (size <= maxBytes) return readFileSync(path, 'utf8')
-  const fd = readFileSync(path)
-  const tail = fd.subarray(size - maxBytes).toString('utf8')
-  const nl = tail.indexOf('\n')
-  return nl >= 0 ? tail.slice(nl + 1) : tail
+  // A POSITIONED read, not a whole-file read that is sliced afterwards. Slicing
+  // after `readFileSync` would allocate and copy the ENTIRE rollout — defeating
+  // the cap this function exists to enforce, and doing it on the synchronous
+  // path that resolves a run's credential, where a multi-hundred-megabyte
+  // transcript would be loaded in full to reach its last few kilobytes.
+  const fd = openSync(path, 'r')
+  try {
+    const buf = Buffer.allocUnsafe(maxBytes)
+    const read = readSync(fd, buf, 0, maxBytes, size - maxBytes)
+    const tail = buf.subarray(0, read).toString('utf8')
+    // The first line is almost certainly cut mid-record; dropping it matters,
+    // because a half-line fails to parse and — were it the only line carrying
+    // `rate_limits` — would turn a readable file into a silent `absent`.
+    const nl = tail.indexOf('\n')
+    return nl >= 0 ? tail.slice(nl + 1) : tail
+  } finally {
+    closeSync(fd)
+  }
 }

@@ -27,6 +27,19 @@ export interface SlotRecord extends SlotState {
   label: string | null
   usage: SlotUsage
   last_run_at: number | null
+  /**
+   * When the bundle currently in this slot was connected.
+   *
+   * This is the identity boundary between one account and the next in a REUSED
+   * directory. Disconnecting a seat cannot remove its `sessions/` tree — for the
+   * first seat that tree is the whole `.codex` home and also contains every
+   * other seat — so a differently-owned account connected under the same name
+   * would otherwise inherit the previous account's usage history and be cooled
+   * before it had run once. Harvest ignores anything older than this stamp.
+   */
+  connected_at: number | null
+  /** Last harvest attempt, used to throttle the scan. See `markHarvested`. */
+  last_harvest_at: number | null
 }
 
 export interface CodexRotationStore {
@@ -38,6 +51,15 @@ export interface CodexRotationStore {
   setActiveSlot(owner_slug: OwnerHandle, slot: string, now: number): void
   setCooldown(owner_slug: OwnerHandle, slot: string, cooldown: { cooling_until: number; cooling_reason: CoolingReason } | null): void
   recordUsage(owner_slug: OwnerHandle, slot: string, usage: SlotUsage, now: number): void
+  /**
+   * Mark a (re)connection: stamp `connected_at` and DISCARD everything the
+   * previous occupant of this slot left behind — its cooldown and its usage
+   * figures. Pasting a fresh bundle is the owner saying "this seat works now",
+   * and it is the only thing that clears an `unauthorized` state.
+   */
+  markConnected(owner_slug: OwnerHandle, slot: string, now: number): void
+  /** Record that a harvest was attempted, so the next one can be throttled. */
+  markHarvested(owner_slug: OwnerHandle, slot: string, now: number): void
 }
 
 interface SlotRow {
@@ -51,6 +73,8 @@ interface SlotRow {
   last_resets_at: number | null
   last_plan_type: string | null
   last_run_at: number | null
+  connected_at: number | null
+  last_harvest_at: number | null
 }
 
 const VALID_REASONS: readonly CoolingReason[] = [
@@ -84,7 +108,8 @@ export class SqliteCodexRotationStore implements CodexRotationStore {
   listSlots(owner_slug: OwnerHandle): SlotRecord[] {
     const rows = this.db.all<SlotRow>(
       `SELECT slot, position, label, cooling_until, cooling_reason,
-              last_used_percent, last_window_minutes, last_resets_at, last_plan_type, last_run_at
+              last_used_percent, last_window_minutes, last_resets_at, last_plan_type, last_run_at,
+              connected_at, last_harvest_at
          FROM codex_rotation_slots WHERE owner_slug = ? ORDER BY position ASC, slot ASC`,
       [owner_slug],
     )
@@ -95,6 +120,8 @@ export class SqliteCodexRotationStore implements CodexRotationStore {
       cooling_reason: toReason(r.cooling_reason),
       label: r.label,
       last_run_at: r.last_run_at,
+      connected_at: r.connected_at,
+      last_harvest_at: r.last_harvest_at,
       usage: {
         used_percent: r.last_used_percent,
         window_minutes: r.last_window_minutes,
@@ -174,5 +201,28 @@ export class SqliteCodexRotationStore implements CodexRotationStore {
         WHERE owner_slug = ? AND slot = ?`,
       [usage.used_percent, usage.window_minutes, usage.resets_at, usage.plan_type, now, owner_slug, slot],
     )
+  }
+
+  markConnected(owner_slug: OwnerHandle, slot: string, now: number): void {
+    // Clearing the cooldown AND the usage figures in the same statement is the
+    // point: a reconnect may be a different subscription in the same directory,
+    // and carrying either forward would judge the new account on the old one's
+    // record.
+    this.db.runSync(
+      `UPDATE codex_rotation_slots
+          SET connected_at = ?, cooling_until = NULL, cooling_reason = NULL,
+              last_used_percent = NULL, last_window_minutes = NULL,
+              last_resets_at = NULL, last_plan_type = NULL, last_harvest_at = NULL
+        WHERE owner_slug = ? AND slot = ?`,
+      [now, owner_slug, slot],
+    )
+  }
+
+  markHarvested(owner_slug: OwnerHandle, slot: string, now: number): void {
+    this.db.runSync(`UPDATE codex_rotation_slots SET last_harvest_at = ? WHERE owner_slug = ? AND slot = ?`, [
+      now,
+      owner_slug,
+      slot,
+    ])
   }
 }

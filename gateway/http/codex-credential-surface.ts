@@ -147,12 +147,20 @@ export function createCodexCredentialSurface(
           )
         }
         case 'DELETE': {
-          // `?account=<slot>` removes ONE seat; no account removes the first seat,
-          // which is exactly what the pre-rotation DELETE did.
-          if (isGlobal && rawAccount !== null && rawAccount !== 'default') {
+          // `?account=<slot>` removes ONE seat. An UNQUALIFIED delete removes them
+          // ALL, because that is what the single "Disconnect Codex" button in the
+          // shipped clients means. Removing only the first seat would leave the
+          // named seats stored and still selectable by trident while telling the
+          // owner Codex was disconnected.
+          if (isGlobal && rawAccount !== null) {
             const { ok } = await service.removeAccount(owner_slug, rawAccount)
             if (!ok) return jsonError(404, 'codex_not_connected', 'no such Codex account to disconnect')
             return jsonOk({ disconnected: true, account: rawAccount })
+          }
+          if (isGlobal) {
+            const { ok, removed } = await service.disconnectAllAccounts(owner_slug)
+            if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
+            return jsonOk({ disconnected: true, scope: target.scope, accounts: removed })
           }
           const { ok } = await service.disconnect(owner_slug, target)
           if (!ok) return jsonError(404, 'codex_not_connected', 'no Codex credential to disconnect')
