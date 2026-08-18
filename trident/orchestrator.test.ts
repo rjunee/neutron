@@ -88,6 +88,8 @@ function buildHarness(opts: {
   resolve_active_runs?: () => number
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
+  /** null exercises production base detection instead of the usual deterministic test base. */
+  base_branch?: string | null
 }): Harness {
   const hostCalls: string[][] = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
@@ -107,7 +109,6 @@ function buildHarness(opts: {
     fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),
     run_host: host,
-    base_branch: 'main',
     now,
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
     // network call). The suite injects a no-op wait so those attempts stay free.
@@ -120,6 +121,7 @@ function buildHarness(opts: {
       return store.update(id, patch).then(() => {})
     },
   }
+  if (opts.base_branch !== null) o.base_branch = opts.base_branch ?? 'main'
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
@@ -162,6 +164,24 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
     ...over,
   })
 }
+
+test('a bound_pr run never takes the build path', async () => {
+  const h = buildHarness({
+    plan: () => ({ result: { verdict: 'APPROVE', prNumber: 515, branch: 'feat-x' } }),
+    base_branch: null,
+  })
+  const run = await createRun({ bound_pr: 515 })
+
+  await h.loop.runOnce()
+
+  expect(h.inputs).toHaveLength(0)
+  expect(h.hostCalls).toHaveLength(0)
+  const persisted = store.get(run.id)!
+  expect(persisted.phase).toBe('failed')
+  expect(persisted.failure_reason).toContain('PR #515')
+  expect(persisted.failure_reason).toContain('review-only')
+  expect(persisted.failure_reason).toContain('no branch, no commit')
+})
 
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {

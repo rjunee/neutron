@@ -2003,6 +2003,24 @@ export function buildTridentOrchestrator(
    *  clean fire. Folds any existing PR + the last checkpoint into the args for
    *  idempotent resume. */
   async function launch(run: TridentRun): Promise<AdvanceOutcome> {
+    // A review-only bound run fails CLOSED (SPEC card 2026-08-18; bound_pr was 0 of 190 runs).
+    // The measured failure mode is a "review PR #N" dispatch building a docs PR about reviewing
+    // (#542/#541/#530) while #N's review-gate stays red. Guarding at launch covers BOTH call sites
+    // (the fresh launch ~2896 and the crash-recovery relaunch ~2769). When the review executor
+    // lands (plan task 2) this branch becomes its entry point; a fix-round lane that wants
+    // commit-capable bound runs must add a discriminator and change this deliberately.
+    if (run.bound_pr !== null) {
+      return {
+        run: failedRun(
+          run,
+          `run is bound to PR #${run.bound_pr} for a review-only round, but review-only execution is not yet wired — refusing the build path: no branch, no commit, and no new PR were created (the target PR was not touched)`,
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (bound_pr review-only: build path refused, no fire)`,
+      }
+    }
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
     // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded

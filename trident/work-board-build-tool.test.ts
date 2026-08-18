@@ -125,6 +125,37 @@ describe('work_board_dispatch_build tool', () => {
     expect(tool.input_schema.required).toEqual(['board_item_id', 'task'])
   })
 
+  test('the tool advertises bound_pr and passes it through', async () => {
+    let createInput: Parameters<TridentRunStore['create']>[0] | null = null
+    const originalCreate = store.create.bind(store)
+    store.create = async (input) => {
+      createInput = input
+      return originalCreate(input)
+    }
+    const tool = toolFor()
+
+    expect((tool.input_schema.properties as Record<string, unknown> | undefined)?.bound_pr).toBeDefined()
+    expect(tool.input_schema.required).not.toContain('bound_pr')
+    const out = (await tool.handler(
+      { board_item_id: 'ready', task: 'review PR #524', bound_pr: 524 },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(out.ok).toBe(true)
+    expect(createInput).not.toBeNull()
+    expect(createInput!.bound_pr).toBe(524)
+  })
+
+  test('the tool surfaces the review refusal', async () => {
+    const out = (await toolFor().handler(
+      { board_item_id: 'ready', task: 'run a review round on PR #515' },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('bound_pr')
+  })
+
   test('a ready item creates a bound run', async () => {
     const out = (await toolFor().handler(
       { board_item_id: 'ready', task: 'build the export' },

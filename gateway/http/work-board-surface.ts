@@ -94,6 +94,8 @@ export type WorkBoardStartResult =
       code:
         | 'missing_board_item'
         | 'unknown_board_item'
+        | 'invalid_bound_pr'
+        | 'review_needs_bound_pr'
         | 'underspecified'
         | 'already_landed'
         | 'backend_error'
