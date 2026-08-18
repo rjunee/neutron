@@ -1860,6 +1860,32 @@ export function buildTridentOrchestrator(
       }
       return result
     }
+    // Observe the branch before replay: a missing remote ref proves this is the lane's FIRST
+    // publish, which is the only point where the launch pin can prove the branch was cut from
+    // this run's base rather than inherited from another lane. The same observation remains the
+    // push lease below, so a branch that appears while replay is running is still refused.
+    const observed = await runWithRetries(
+      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+    )
+    if (!observed.ok) {
+      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
+    }
+    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
+    // not exist, so a first push of a new card stays correct — and is still refused if the branch
+    // appeared underneath us between this read and the push.
+    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
+    if (expected === '' && run.base_sha !== null) {
+      const cutFromPinnedBase = await opts.run_host(
+        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', run.base_sha, resolvedHead],
+        run.repo_path,
+      )
+      if (!cutFromPinnedBase.ok) {
+        const base = await resolveBase(run)
+        throw new Error(
+          `branch ${branch} does not contain the origin/${base} tip pinned at launch (${run.base_sha.slice(0, 7)}) — not cut from origin/${base}; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+        )
+      }
+    }
     // THE REBASE ONTO CURRENT `main` HAPPENS HERE, BEFORE THE REVIEW IS RE-FIRED.
     //
     // WHEN. In the OUTER publisher, between the local-tip verification above and the lease
@@ -1912,16 +1938,6 @@ export function buildTridentOrchestrator(
     // trusts `refs/remotes/origin/<b>`, which any concurrent `git fetch` can advance — at which
     // point the lease certifies a state nobody ever looked at, and quietly degrades to `--force`.
     // The explicit `<ref>:<sha>` form cannot be undermined that way.
-    const observed = await runWithRetries(
-      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
-    )
-    if (!observed.ok) {
-      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
-    }
-    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
-    // not exist, so a first push of a new card stays correct — and is still refused if the branch
-    // appeared underneath us between this read and the push.
-    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
     // ALREADY PUBLISHED IS A SUCCESS THE PUBLISHER DID NOT HAVE TO PERFORM (3 occurrences
     // 2026-08-17, runs 26ed32c1 / 88efe1ca / 95fcfb91). A resumed or relaunched run whose
     // branch is already fully on origin used to be REFUSED here as "the build left no new
