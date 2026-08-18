@@ -163,11 +163,17 @@ export type BoardBoundBuildResult =
  * deliberately errs toward refusing.
  */
 export function detectReviewIntent(task: string): number | null {
+  // CodeQL js/polynomial-redos: `PR\s*#?\s*` is AMBIGUOUS — when `#?` matches
+  // empty the engine sees `\s*\s*`, so a task string with a long run of spaces
+  // backtracks polynomially. `task` is caller-supplied text, so that input is
+  // reachable. `(?:\s*#)?\s*` accepts exactly the same forms — `PR5`, `PR 5`,
+  // `PR#5`, `PR # 5` — with only one way to match each, so there is nothing to
+  // backtrack over.
   const patterns = [
-    /\bre-?review\s+(?:of\s+)?PR\s*#?\s*(\d{1,7})\b/i,
-    /\breview\s+(?:round|pass|sweep)\s+(?:on|of|for|against)\s+PR\s*#?\s*(\d{1,7})\b/i,
-    /\b(?:run|do|perform|start|dispatch)\b[^\n.]{0,40}?\breview\b[^\n.]{0,40}?\bPR\s*#?\s*(\d{1,7})\b/i,
-    /\breview\s+PR\s*#?\s*(\d{1,7})\b/i,
+    /\bre-?review\s+(?:of\s+)?PR(?:\s*#)?\s*(\d{1,7})\b/i,
+    /\breview\s+(?:round|pass|sweep)\s+(?:on|of|for|against)\s+PR(?:\s*#)?\s*(\d{1,7})\b/i,
+    /\b(?:run|do|perform|start|dispatch)\b[^\n.]{0,40}?\breview\b[^\n.]{0,40}?\bPR(?:\s*#)?\s*(\d{1,7})\b/i,
+    /\breview\s+PR(?:\s*#)?\s*(\d{1,7})\b/i,
   ] as const
   for (const pattern of patterns) {
     const match = task.match(pattern)
