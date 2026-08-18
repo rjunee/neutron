@@ -257,4 +257,32 @@ describe('codex-auth HTTP surface — MULTIPLE SEATS', () => {
     expect(res?.status).toBe(200)
     expect(existsSync(codexAuthPath(codexHome))).toBe(false)
   })
+
+  // MUTATION: route the unqualified DELETE to `disconnect` (first seat only)
+  // instead of `disconnectAllAccounts`.
+  //
+  // This is the shipped "Disconnect Codex" button, which sends no account. If it
+  // removed only the first seat, every named seat would stay stored, materialized
+  // and SELECTABLE BY TRIDENT while the owner had been told Codex was
+  // disconnected — a credential still in use that the UI no longer shows.
+  test('DELETE with no account removes EVERY seat, which is what the button says', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() }))
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'spare' }))
+
+    const res = await surface.handler(req('DELETE', GLOBAL))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { accounts: string[] }
+    expect(body.accounts.sort()).toEqual(['default', 'spare', 'work'])
+
+    // Nothing is left on disk for any seat…
+    expect(existsSync(codexAuthPath(codexHome))).toBe(false)
+    expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(false)
+    expect(existsSync(join(codexHome, 'accounts', 'spare', 'auth.json'))).toBe(false)
+    // …and the surface agrees nothing is connected.
+    const after = await surface.handler(req('GET', GLOBAL))
+    const status = (await after!.json()) as { status: string; accounts: unknown[] }
+    expect(status.status).toBe('not_connected')
+    expect(status.accounts).toEqual([])
+  })
 })

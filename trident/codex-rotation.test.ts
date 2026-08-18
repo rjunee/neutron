@@ -27,8 +27,11 @@ import {
 import { SqliteCodexRotationStore } from './codex-rotation-store.ts'
 import {
   reachedWindowClass,
+  classifyResetsAt,
   coolPercentFor,
+  fallbackCooldownMs,
   isCooling,
+  MAX_FALLBACK_COOLDOWN_MS,
   normalizeResetsAt,
   parseRolloutRateLimits,
   selectNextSlot,
@@ -36,7 +39,7 @@ import {
   signalToCooldown,
   type SlotState,
 } from './codex-rotation.ts'
-import { harvestNewestRollout } from './codex-rotation-io.ts'
+import { harvestNewestRollout, MAX_ROLLOUT_TAIL_BYTES } from './codex-rotation-io.ts'
 
 const OWNER = asOwnerHandle('owner')
 const NOW = Date.parse('2026-08-17T12:00:00.000Z')
@@ -306,6 +309,209 @@ describe('rollout harvest', () => {
     expect(outcome.kind).toBe('snapshot')
     if (outcome.kind !== 'snapshot') throw new Error('expected a snapshot')
     expect(outcome.snapshot.windows[0]?.used_percent).toBe(42)
+  })
+})
+
+describe('the harvest stays cheap on a big rollout', () => {
+  // MUTATION: remove the cap — `if (true) return readFileSync(path, 'utf8')`.
+  // Verified RED.
+  //
+  // NOT a guard on the positioned read, and saying so matters. Replacing the
+  // positioned read with `readFileSync(path).subarray(size - maxBytes)` was
+  // measured to leave this suite GREEN, because both produce the SAME STRING —
+  // the difference is that one allocates the whole file first, and that is a
+  // resource property no output assertion can see. The positioned read is
+  // still the right implementation (a multi-hundred-megabyte transcript would
+  // otherwise be loaded in full on the synchronous path that resolves a run's
+  // credential); it is simply not what this test proves. What this test proves
+  // is that the CAP is honoured at all: a padded file whose only usage event
+  // sits in the head must not be found.
+  test('only the TAIL is read, so a head-only snapshot is not found', () => {
+    const filler = `{"type":"response_item","pad":"${'x'.repeat(4096)}"}`
+    const lines = [tokenCountLine({ used_percent: 99.9, window_minutes: 10080 })]
+    // Push the head event well past the tail window.
+    const fillerCount = Math.ceil((MAX_ROLLOUT_TAIL_BYTES * 2) / filler.length)
+    for (let i = 0; i < fillerCount; i++) lines.push(filler)
+    writeRollout(codexHome, 'rollout-huge.jsonl', lines, 1_800_000_000)
+
+    const outcome = harvestNewestRollout(codexHome, NOW)
+    expect(outcome.kind).toBe('absent')
+  })
+
+  // The positive control: the same oversized file, with the usage event at the
+  // END, must still be found. Without this the test above would also pass
+  // against a reader that returned nothing at all.
+  test('a snapshot in the tail of the same oversized file IS found', () => {
+    const filler = `{"type":"response_item","pad":"${'x'.repeat(4096)}"}`
+    const lines: string[] = []
+    const fillerCount = Math.ceil((MAX_ROLLOUT_TAIL_BYTES * 2) / filler.length)
+    for (let i = 0; i < fillerCount; i++) lines.push(filler)
+    lines.push(tokenCountLine({ used_percent: 77, window_minutes: 10080 }))
+    writeRollout(codexHome, 'rollout-huge-tail.jsonl', lines, 1_800_000_000)
+
+    const outcome = harvestNewestRollout(codexHome, NOW)
+    if (outcome.kind !== 'snapshot') throw new Error('expected a snapshot')
+    expect(outcome.snapshot.windows[0]?.used_percent).toBe(77)
+  })
+})
+
+describe('a reading whose window has already reset', () => {
+  // MUTATION: delete `if (w.expired) continue` from `signalToCooldown`.
+  //
+  // The window then falls through to the no-reset branch and is cooled for a
+  // FRESH FULL WINDOW from now, on the strength of a reading that expired days
+  // ago — benching a healthy, paid-for seat. It is self-perpetuating too: the
+  // benched seat may not run again to produce a newer reading.
+  test('a spent window whose reset has PASSED cools nothing', () => {
+    const stale = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 99.6, window_minutes: 10080, resets_at_ms: null, expired: true }],
+          plan_type: 'pro',
+          reached_type: null,
+        },
+      },
+      NOW,
+    )
+    expect(stale).toBeNull()
+  })
+
+  // MUTATION: collapse `expired` back into `absent` in `classifyResetsAt`.
+  test('expired, absent and future are three different answers', () => {
+    expect(classifyResetsAt((NOW + 3_600_000) / 1000, NOW).kind).toBe('future')
+    expect(classifyResetsAt((NOW - 7 * 86_400_000) / 1000, NOW).kind).toBe('expired')
+    expect(classifyResetsAt(null, NOW).kind).toBe('absent')
+    // The unit guard still holds: a forgotten ×1000 lands in 1970, which reads
+    // as expired — and an expired window is IGNORED, never trusted.
+    expect(classifyResetsAt(1, NOW).kind).toBe('expired')
+    expect(normalizeResetsAt((NOW - 1000) / 1000, NOW)).toBeNull()
+  })
+
+  // Parsed end-to-end, so the flag cannot be lost between parser and policy.
+  test('the parser marks an elapsed reset as expired', () => {
+    const line = JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        rate_limits: {
+          primary: { used_percent: 99.9, window_minutes: 10080, resets_at: (NOW - 86_400_000) / 1000 },
+          secondary: null,
+        },
+      },
+    })
+    const out = parseRolloutRateLimits(line, NOW)
+    if (out.kind !== 'snapshot') throw new Error('expected a snapshot')
+    expect(out.snapshot.windows[0]?.expired).toBe(true)
+    expect(signalToCooldown(out, NOW)).toBeNull()
+  })
+})
+
+describe('the fallback cooldown is bounded', () => {
+  // MUTATION: drop the `Math.min` in `fallbackCooldownMs`.
+  //
+  // The shipped CLI declares monthly and annual limits, so an unclamped window
+  // length benches a seat for 30 or 365 days off one reading; a corrupt value
+  // multiplies through to Infinity, which SQLite round-trips as a REAL that no
+  // clock comparison can ever clear — a permanent retirement that looks exactly
+  // like a working cooldown.
+  test('an annual or absurd window clamps; anything inside the horizon passes through', () => {
+    expect(fallbackCooldownMs(300)).toBe(300 * 60_000)
+    expect(fallbackCooldownMs(10080)).toBe(10080 * 60_000)
+    // A month (30 d) is INSIDE the 32-day horizon and is honoured as declared —
+    // the clamp is a sanity bound, not a second opinion on the CLI's windows.
+    expect(fallbackCooldownMs(43_200)).toBe(43_200 * 60_000)
+    // A year, and a value that would otherwise reach Infinity, do not survive.
+    expect(fallbackCooldownMs(525_600)).toBe(MAX_FALLBACK_COOLDOWN_MS)
+    expect(fallbackCooldownMs(1e308)).toBe(MAX_FALLBACK_COOLDOWN_MS)
+    expect(Number.isFinite(fallbackCooldownMs(1e308))).toBe(true)
+  })
+
+  test('an annual window over its limit does not retire the seat for a year', () => {
+    const cooled = signalToCooldown(
+      {
+        kind: 'snapshot',
+        snapshot: {
+          windows: [{ used_percent: 99.9, window_minutes: 525_600, resets_at_ms: null, expired: false }],
+          plan_type: 'pro',
+          reached_type: null,
+        },
+      },
+      NOW,
+    )
+    expect(cooled?.cooling_until).toBe(NOW + MAX_FALLBACK_COOLDOWN_MS)
+  })
+})
+
+describe('only a real usage event is evidence', () => {
+  // MUTATION: drop the `rec['type'] === 'token_count'` condition from
+  // `findRateLimits`, i.e. accept any nested object called `rate_limits`.
+  //
+  // A model's own message quoting this schema would then be read as a quota
+  // snapshot and could cool a seat on the strength of transcript content.
+  test('a response_item carrying a look-alike rate_limits is NOT a snapshot', () => {
+    const impostor = JSON.stringify({
+      type: 'response_item',
+      payload: {
+        type: 'message',
+        content: [{ rate_limits: { primary: { used_percent: 99.9, window_minutes: 10080 } } }],
+      },
+    })
+    expect(parseRolloutRateLimits(impostor, NOW).kind).toBe('absent')
+  })
+
+  // THE POSITIVE CONTROL for the test above: the same parser, given the shape a
+  // REAL rollout line has, must still return a snapshot. Without this the test
+  // above would pass just as well against a parser that accepted nothing at all.
+  test('the real event_msg → token_count shape still parses', () => {
+    const real = JSON.stringify({
+      timestamp: '2026-08-15T23:47:16.000Z',
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        info: { total_token_usage: { input_tokens: 1 } },
+        rate_limits: {
+          limit_id: 'codex',
+          limit_name: null,
+          primary: { used_percent: 14, window_minutes: 10080, resets_at: Math.floor(NOW / 1000) + 3600 },
+          secondary: null,
+          credits: { has_credits: false, unlimited: false, balance: '0' },
+          individual_limit: null,
+          spend_control_reached: null,
+          plan_type: 'pro',
+          rate_limit_reached_type: null,
+        },
+      },
+    })
+    const out = parseRolloutRateLimits(real, NOW)
+    if (out.kind !== 'snapshot') throw new Error('expected a snapshot')
+    expect(out.snapshot.windows[0]?.used_percent).toBe(14)
+    expect(out.snapshot.windows[0]?.window_minutes).toBe(10080)
+    expect(out.snapshot.plan_type).toBe('pro')
+  })
+
+  // MUTATION: read only `window_minutes` in `readWindowMinutes`.
+  //
+  // Both names ship in the same binary. A miss defaults to 0, and 0 classes as a
+  // LONG window — so the weekly threshold and a week-long fallback would be
+  // applied to a five-hour limit.
+  test('window_duration_mins is read as the window length too', () => {
+    const alt = JSON.stringify({
+      type: 'event_msg',
+      payload: {
+        type: 'token_count',
+        rate_limits: {
+          primary: { used_percent: 98.5, window_duration_mins: 300, resets_at: null },
+          secondary: null,
+        },
+      },
+    })
+    const out = parseRolloutRateLimits(alt, NOW)
+    if (out.kind !== 'snapshot') throw new Error('expected a snapshot')
+    expect(out.snapshot.windows[0]?.window_minutes).toBe(300)
+    // 98.5% of a SHORT window is over its threshold; misread as a long window it
+    // would sit under 99 and cool nothing.
+    expect(signalToCooldown(out, NOW)?.cooling_reason).toBe('short-window')
   })
 })
 
@@ -595,6 +801,108 @@ describe('the multi-seat credential service', () => {
     // A stale row would hand back a directory with no bundle in it.
     expect(svc.listAccounts(OWNER).map((a) => a.slot)).toEqual(['default'])
     expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(codexHome)
+  })
+
+  // MUTATION: `return null` instead of walking on when a selected seat has no
+  // usable stored credential.
+  //
+  // An EXPIRED credential row still appears in the seat listing (only `resolve`
+  // filters on expiry), so it keeps its place in the ring and can win a
+  // selection — and returning null there drops codex out of the review entirely
+  // while a perfectly healthy seat sits next in line. That is the one direction
+  // the policy explicitly forbids: a capped or missing seat must never be worse
+  // than no seat.
+  test('an expired seat is skipped, not fatal — the next healthy seat is used', async () => {
+    const svc = newService()
+    const rotation = new SqliteCodexRotationStore(db)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    // Aim the pointer at 'work', then expire its credential out from under it.
+    rotation.setActiveSlot(OWNER, 'work', NOW)
+    await store.set(OWNER, {
+      service: codexSlotService('work'),
+      plaintext: subscriptionAuth(),
+      scope: 'global',
+      project_id: '',
+      label: null,
+      expires_at: new Date(NOW - 86_400_000).toISOString(),
+    })
+
+    // It must fall through to the healthy first seat rather than returning null.
+    expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(codexHome)
+    const work = svc.listAccounts(OWNER).find((a) => a.slot === 'work')
+    // …and say WHY, so the owner is told to reconnect rather than left waiting
+    // on a timer that would never have fixed it.
+    expect(work?.cooling).toBe(true)
+    expect(work?.cooling_reason).toBe('unauthorized')
+  })
+
+  // MUTATION: drop the `harvestBackOnly(owner_slug, previousActive)` call.
+  //
+  // THE SEAT THAT JUST RAN IS THE ONE WHOSE BUNDLE WENT STALE. The CLI refreshes
+  // `auth.json` during a run and a refresh ROTATES the refresh token, so the
+  // store's copy for the PREVIOUS seat is the one now holding a token the server
+  // has replaced. Syncing only the seat about to run leaves that copy frozen —
+  // and because the previous seat is cooling, it may not be resolved again for a
+  // week, so the self-heal path would sit on a dead bundle for exactly as long
+  // as it is unable to notice. That is the mutual-revocation failure this whole
+  // design exists to avoid.
+  test('the seat that just ran is harvested back, even when rotation moves away from it', async () => {
+    const svc = newService()
+    const rotation = new SqliteCodexRotationStore(db)
+    await svc.connectAccount(OWNER, subscriptionAuth())
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    rotation.setActiveSlot(OWNER, 'work', NOW)
+
+    const workHome = join(codexHome, 'accounts', 'work')
+    // 'work' ran itself into its weekly cap AND refreshed its bundle on disk.
+    writeRollout(workHome, 'rollout-spent.jsonl', [tokenCountLine({ used_percent: 99.8, window_minutes: 10080 })], 1_800_000_000)
+    const refreshed = subscriptionAuth('2026-08-17T09:00:00.000Z')
+    writeFileSync(codexAuthPath(workHome), refreshed)
+
+    // The run rotates AWAY from 'work' to the healthy first seat…
+    expect(svc.resolveActiveCodexHome(OWNER, 'proj')).toBe(codexHome)
+    await Bun.sleep(50)
+
+    // …and 'work's stored bundle still tracks what the CLI left on its disk.
+    // Compared on `last_refresh` rather than on bytes: the store keeps the
+    // NORMALIZED bundle, so a byte comparison would fail for a reason that has
+    // nothing to do with whether the harvest-back ran.
+    const storedWork = store.resolve(OWNER, undefined, codexSlotService('work'))?.plaintext ?? '{}'
+    expect((JSON.parse(storedWork) as { last_refresh?: string }).last_refresh).toBe(
+      '2026-08-17T09:00:00.000Z',
+    )
+    // The control: without the harvest-back it would still hold the connect-time
+    // stamp, which is the stale copy that eventually revokes the live login.
+    expect((JSON.parse(storedWork) as { last_refresh?: string }).last_refresh).not.toBe(
+      '2026-06-30T00:00:00.000Z',
+    )
+  })
+
+  // MUTATION: pass `label: null` in the harvest-back's store write.
+  //
+  // The store's upsert OVERWRITES label on conflict, so a null there quietly
+  // erases the name the seat was connected under — and it happens on a path that
+  // fires on its own schedule, whenever the CLI refreshes, so the seat simply
+  // goes anonymous in every credential view with nothing to point at.
+  test('harvesting a refreshed bundle back does not erase the seat label', async () => {
+    const svc = newService()
+    const rotation = new SqliteCodexRotationStore(db)
+    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    const before = store.getMeta(OWNER, '', codexSlotService('work'))?.label ?? null
+    expect(before).not.toBeNull()
+
+    // The CLI refreshes the seat's bundle on disk: same account, newer stamp.
+    rotation.setActiveSlot(OWNER, 'work', NOW)
+    writeFileSync(
+      codexAuthPath(join(codexHome, 'accounts', 'work')),
+      subscriptionAuth('2026-08-17T09:00:00.000Z'),
+    )
+    svc.resolveActiveCodexHome(OWNER, 'proj')
+    // The write is fire-and-forget by contract (the resolver is synchronous).
+    await Bun.sleep(50)
+
+    expect(store.getMeta(OWNER, '', codexSlotService('work'))?.label ?? null).toBe(before)
   })
 
   test('no account summary ever carries token material', async () => {
