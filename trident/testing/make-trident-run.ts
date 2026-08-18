@@ -55,6 +55,8 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,
+    parent_run_id: null,
+    wave_task_id: null,
     ...over,
   }
 }
