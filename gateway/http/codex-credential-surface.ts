@@ -64,20 +64,6 @@ const GLOBAL_CODEX_AUTH_PATH = '/api/app/codex-auth'
 const PROJECT_PREFIX = '/api/app/projects/'
 const PROJECT_CODEX_AUTH_PATH_RE = /^\/api\/app\/projects\/([^/]+)\/codex-auth$/
 
-/**
- * The pool's status, for the single legacy field every existing client reads.
- *
- * `connected` if ANY seat is usable, else the best thing any seat has to say,
- * else the first seat's own answer. Preferring `connected` over `expired` is
- * deliberate: with one healthy seat and one stale one, trident runs, so
- * reporting anything else would describe a Codex that is not working when it is.
- */
-function effectiveStatus<S extends string>(own: S, accounts: readonly { status: S }[]): S {
-  const usable = accounts.find((a) => a.status === 'connected')
-  if (usable !== undefined) return usable.status
-  return accounts[0]?.status ?? own
-}
-
 export function createCodexCredentialSurface(
   opts: CodexCredentialSurfaceOptions,
 ): CodexCredentialSurface {
@@ -123,21 +109,14 @@ export function createCodexCredentialSurface(
           // credential for this project); global route reports the global default.
           // The legacy top-level fields are kept verbatim so existing clients keep
           // working; `accounts` / `active` / `next` are additive.
-          const status = service.status(owner_slug, target)
-          if (!isGlobal) return jsonOk({ ...status })
+          if (!isGlobal) return jsonOk({ ...service.status(owner_slug, target) })
           const { accounts, next } = service.accountsView(owner_slug)
+          // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT —
+          // and the rule lives on the SERVICE, so this route and the
+          // `codex_status` agent tool cannot drift into different answers about
+          // the same pool. See `CodexCredentialService.poolStatus`.
           return jsonOk({
-            ...status,
-            // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT.
-            // `service.status` reads the `codex` service row, which is seat
-            // `default` alone — so an owner who connected only a NAMED seat got
-            // `not_connected` here beside a populated `accounts` array. Every
-            // pre-rotation client reads this one field: the mobile header
-            // announced that cross-model review was off, and the web pane hid
-            // Disconnect, while trident was resolving that named seat and
-            // running reviews with it. The clients were not wrong to trust the
-            // field; the field was answering a narrower question than its name.
-            status: effectiveStatus(status.status, accounts),
+            ...service.poolStatus(owner_slug, accounts),
             accounts,
             active: next?.slot ?? null,
             next: next?.slot ?? null,

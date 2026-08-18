@@ -813,6 +813,28 @@ export class CodexCredentialService {
     }
   }
 
+  /**
+   * The legacy single-credential status, answered about the POOL.
+   *
+   * `status()` reads the `codex` service row, which is slot `default` and
+   * nothing else — correct before rotation existed and wrong after. An owner who
+   * connected only a NAMED seat got `not_connected` in the one field every
+   * pre-rotation client reads, while trident was resolving that seat and running
+   * reviews with it: the mobile header said cross-model review was off, and the
+   * web pane hid Disconnect for a seat it claimed did not exist.
+   *
+   * `connected` if ANY seat is usable, because with one healthy seat and one
+   * stale one trident runs, and reporting anything else describes a Codex that
+   * is not working when it is. It lives HERE rather than in either surface so
+   * the HTTP route and the agent tool cannot drift into different answers.
+   */
+  poolStatus(owner_slug: OwnerHandle, accounts: readonly CodexAccountSummary[]): CodexStatusResult {
+    const own = this.status(owner_slug)
+    const usable = accounts.find((a) => a.status === 'connected')
+    const status = usable?.status ?? accounts[0]?.status ?? own.status
+    return { ...own, status }
+  }
+
   /** Every connected seat, with cooldowns and last-known usage. No secrets. */
   listAccounts(owner_slug: OwnerHandle): CodexAccountSummary[] {
     return this.accountsView(owner_slug).accounts
