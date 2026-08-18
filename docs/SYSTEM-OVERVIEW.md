@@ -2832,37 +2832,68 @@ therefore connect several seats, and trident picks one per run.
   "the 5-hour window" would apply the session threshold and a session-length
   cooldown to a weekly cap and rotate a still-capped seat back into service. A
   window at or under 1440 minutes cools at 98%, longer windows at 99%, and the
-  fallback cooldown is the window's own declared length.
+  fallback cooldown is the window's own declared length, CLAMPED to 32 days — the
+  same binary also declares `daily-limit`, `monthly-limit` and `annual-limit`, so an
+  unclamped length would bench a paid seat for a year and an absurd value would reach
+  `Infinity`, which SQLite stores as a REAL that no clock comparison can clear.
+- **A `resets_at` already in the PAST means the reading is stale, not that there is
+  no reset.** The window has since rolled over and the quota with it, so that sample
+  is ignored rather than cooling the seat for a fresh full window. Collapsing
+  "expired" into "absent" would bench a healthy seat off a days-old rollout — and
+  because the seat is then skipped, it might never run to produce a newer one.
+- **Only a real usage event counts as evidence.** `rate_limits` is read only from the
+  node whose own `type` is `token_count`, which is the shape a real rollout line has
+  (`event_msg` → `token_count` → `rate_limits`); a same-named object nested anywhere
+  else is ignored. `window_duration_mins` is accepted alongside `window_minutes`,
+  since both names ship in the same binary and a miss would default to 0, which
+  classes as a long window.
+- **The scan is bounded.** A positioned tail read rather than a whole-file read, the
+  newest date partition visited first, a cap on files collected, and at most one scan
+  a minute per seat. The resolver is reached by a read-only status request as well as
+  by a run launch, and the CLI never prunes `sessions/`.
 - **Two rules are load-bearing and inherited from the Anthropic rotator.** A
   harvest that ERRORS or finds nothing cools nothing — a transient read failure must
   never retire a seat the owner is paying for. And when EVERY seat is cooling the
   current one is KEPT, never dropped: a capped seat returns a legible retryable
   error, whereas no seat silently removes codex from the review. That case logs
   `codex_rotation_exhausted`.
-- **A revoked refresh token is not a quota problem.** `refresh token was revoked`
-  (and `invalid_grant`) classifies as reason `unauthorized`, which ignores the clock
-  and stays ineligible until the owner reconnects that seat — waiting does not fix
-  it. Every unrecognised failure (timeout, 5xx, refusal) retires nothing.
-  **KNOWN GAP: the stderr classifier is not wired.** `classifyCodexFailure` and
-  `applyFailureCooldown` have no production caller — codex failures surface only in
-  the shell wrappers and the `.mjs` inner workflow, which have no seam back into the
-  service. The patterns are measured and tested, but until that seam exists ONLY the
-  rollout harvest cools a seat. It is a declared gap, not a working second signal.
+- **A seat with no usable credential is not a quota problem.** A slot whose stored
+  bundle is missing or expired cools as `unauthorized`, which ignores the clock and
+  stays ineligible until the owner reconnects that seat — waiting does not fix it —
+  and selection SKIPS it rather than returning no credential, because dropping codex
+  out of the review is worse than any capped seat.
+  **THERE IS NO STDERR CLASSIFIER, deliberately.** An earlier revision shipped one and
+  it could not have worked: its two window discriminators, `weekly limit` and
+  `session limit`, return ZERO hits against the literals in codex-cli 0.147.0, while
+  `usage limit` returns 23 and the controls `codex-cli` and `rate_limit_reached_type`
+  return 9 and 17 — the search works, the discriminators are absent, and the CLI's real
+  messages never name the window. It also had no production caller, since codex
+  failures surface only in the shell wrappers and the `.mjs` inner workflow. The window
+  class comes instead from `rate_limit_reached_type`, which the CLI sets itself and
+  which rides the same `token_count` event the harvest already reads. The rollout
+  harvest is the ONE signal that cools a seat.
 - **Per-project overrides are OUTSIDE rotation** and resolve first, verbatim: an
   override exists to pin one project to one subscription.
-- **Adding a seat.** Chat: `codex_connect` with `account: "work"` plus the pasted
-  `auth.json`. HTTP: `POST /api/app/codex-auth` with `{ auth, account: "work" }`.
-  `GET /api/app/codex-auth` lists every seat with its cooldown and last usage while
-  keeping all of its original top-level fields, and
-  `DELETE /api/app/codex-auth?account=work` removes one. Omitting `account`
-  everywhere means the first seat, so pre-rotation clients are unaffected.
+- **Adding a seat, from the app.** Settings → Integrations → Model providers lists
+  every seat with its state, marks the one that runs next, and gives each its own
+  Remove. The paste box stays on screen after the first connection — hiding it is what
+  made a second seat unreachable — and takes an optional seat name.
+- **Adding a seat, from chat or HTTP.** `codex_connect` with `account: "work"` plus
+  the pasted `auth.json`. HTTP: `POST /api/app/codex-auth` with
+  `{ auth, account: "work" }`. `GET /api/app/codex-auth` lists every seat with its
+  cooldown and last usage while keeping all of its original top-level fields.
+  `DELETE /api/app/codex-auth?account=work` removes ONE seat; an unqualified
+  `DELETE /api/app/codex-auth` removes them ALL, which is what the single
+  "Disconnect Codex" control means — leaving named seats stored and selectable behind
+  it would keep using a credential the owner had been told was gone. Omitting
+  `account` on connect means the first seat, so pre-rotation clients are unaffected.
 - **Operator rule.** Once a seat is connected to Neutron, stop using that same
   ChatGPT login for codex anywhere else. One seat, one live store — otherwise the
   CLI's refresh rotation revokes whichever copy refreshed earlier.
 
 Code: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts`
 (rollout harvest), `trident/codex-rotation-store.ts` (bookkeeping),
-`migrations/0133_codex_rotation.sql`.
+`migrations/0134_codex_rotation.sql`.
 
 ### Connect GitHub — the device flow, and the control that finally starts it (#551)
 
