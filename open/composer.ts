@@ -509,6 +509,7 @@ import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.
 import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
 import {
   dispatchBoardBoundBuild,
+  makeDispatchLandedProbe,
   type TridentBoardBinder,
 } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
@@ -2116,6 +2117,7 @@ export function buildOpenGraphComposer(
       load: tridentGithubEnv,
     }
     const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
+    const tridentLandedProbe = makeDispatchLandedProbe(tridentHostRunner)
     // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
     // board seam. Shared rather than re-derived so a wiring test can assert the
     // credential the board seam closes over by identity, not by `typeof`.
@@ -2143,6 +2145,7 @@ export function buildOpenGraphComposer(
           // use), so a project with no repo yet still builds.
           repo_path: owner_home,
           resolveMergeMode: resolveTridentMergeMode,
+          landedProbe: tridentLandedProbe,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -4231,6 +4234,7 @@ export function buildOpenGraphComposer(
                 chat_id: chatId,
                 thread_id: null,
                 resolveMergeMode: resolveTridentMergeMode,
+                landedProbe: tridentLandedProbe,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -6697,6 +6701,7 @@ export function buildOpenGraphComposer(
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
               merge_mode_probe: tridentMergeModeProbe,
+              landed_probe: tridentLandedProbe,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.
