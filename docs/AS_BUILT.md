@@ -314,6 +314,71 @@ legacy top-level field; `DELETE ?account=<slot>` removes one seat, and an UNQUAL
 named seats live and selectable behind it would keep using a credential the owner was told
 was gone. Omitting `account` on connect means the first seat, so pre-rotation clients are
 unaffected.
+## 2026-08-17 — a read in flight outlives the cache it was read from, and the instrument settled on the wrong frame (#409)
+
+Three defects found by review on the switch-latency work, sharing one shape: an
+artefact that is real, current, and about the wrong thing.
+
+**1. The transcript write-back survived its own invalidation.** `handleChange` files a
+resolved read into the transcript cache BEFORE the session-changed-underfoot guard, and
+that ordering is deliberate — a read that lands after the owner has already switched away
+still belongs to its own topic, and filing it is what makes the NEXT entry into that
+topic paint instantly. The same ordering also puts it after `stop()` and after the
+`projects_changed` deletion sweep, so an outstanding read re-created the entry
+milliseconds after the clear. Consequences, in order of severity: a project deleted and
+recreated under the same id could paint the DEAD project's history into its first frame,
+and a stopped controller could paint a transcript on restart. Both of them **after** the
+code written to prevent exactly that had run and reported success — which is why neither
+was visible from the invalidation site.
+
+Fixed with an invalidation generation (`transcriptCacheEpoch`) captured in the same
+synchronous instant as the session and the topic; a read that resolves across a bump is
+not filed. It over-invalidates by one counter — an unrelated read in flight beside a
+deletion is also dropped — which costs that topic one re-read and is the same asymmetry
+the deletion branch was already decided on: over-invalidating is free, under-invalidating
+paints the wrong history.
+
+**2. The paint mark timed an empty pane on a cold switch.** `frame_rendered` was
+scheduled from `setProject` unconditionally. On a cache MISS the frame `setProject`
+publishes is empty and the transcript arrives in a later one, so the mark landed on the
+paint of a blank pane, the record settled, and the switch reported over while the owner
+was still waiting — the original misattribution (an instrument reporting a step that is
+not the step being waited through) reappearing one mark along, inside the fix for it. The
+mark is now scheduled from exactly ONE of the two publishes, chosen by whether the first
+carries what he came to see. Scheduling from both is not a safe middle: the first stamp
+wins, and on a cold switch the first stamp is the empty one.
+
+**3. An abandoned switch was reported as a complete sub-millisecond switch.**
+`supersede()` flushed without recording why, and `incomplete` was derived from the marks
+alone. A cache-served switch's only REQUIRED mark is `vm_published`, stamped in the first
+millisecond — so a switch the owner gave up on at 40 ms satisfied "every required mark is
+in" and entered the sample as a success. Rapid consecutive clicking is what someone does
+when switching is slow, so the metric got better precisely as the product got worse, and
+it is the metric that judges this work. The cause now rides on the record
+(`superseded`), `incomplete` covers it, and the emitted line names it `abandoned=` rather
+than leaving it to read as a failure. `schema` → 4, because filtering a v3 sample on
+`incomplete === false` and a v4 sample the same way selects different populations.
+
+Two smaller ones in the same path. A cache hit on a topic carrying an UNREAD badge is a
+hit on a transcript that provably lacks the message he clicked in to read — an inactive
+topic's `onChange` is discarded, so nothing refreshed it while he was away — and it is no
+longer reported as served-from-cache: it paints instantly and finishes late, like a cold
+switch. And read receipts are now acknowledged once per topic instead of rebuilding the
+full id list on the cached frame, on the resolved read, and on every inbound frame
+thereafter (533 ids per call on the owner's biggest topic).
+
+`switch-render-cost.test.tsx` asserted a TOTAL of two surface renders while its name
+claimed "leaves every background conversation untouched". A total of two is satisfied by
+the two WRONG surfaces, so the assertion could not support the claim; it now captures
+`vm.projectId` per `useChatRuntime` call and asserts the set is exactly the surface left
+and the surface entered, with General's absence as the actual content of the claim.
+
+| Mutant | Result |
+| --- | --- |
+| write-back ungated by the epoch | RED — both lifecycle cases (stop, deletion) |
+| paint mark scheduled unconditionally in `setProject` | RED — cold-switch ordering |
+| `supersede()` without recording the cause | RED — abandonment case |
+| surface-render assertion (control: expected set changed) | RED — reports `alpha, beta`, so the ids are real |
 
 ## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
 
@@ -494,7 +559,7 @@ clean.
 | draft object identity unstable | RED — 3 surface renders, expected 2 |
 | timer never told the frame was cache-served | RED — record never completes at the paint |
 
-## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render
+## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render (#409)
 
 The owner's web UI took 3-9 s to switch projects. 47 real `project_switch` samples from
 his client diagnostics read `transcript_read` median 3283 ms / p90 6614 ms / max 9198 ms
