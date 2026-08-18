@@ -312,21 +312,32 @@ export class CodexCredentialService {
    * the store AND written to the scope's `CODEX_HOME/auth.json`, so
    * `codex-review.sh` sees it connected.
    */
-  async connect(owner_slug: OwnerHandle, pasted: unknown, target?: CodexTarget): Promise<CodexConnectResult> {
+  async connect(
+    owner_slug: OwnerHandle,
+    pasted: unknown,
+    target?: CodexTarget,
+    opts?: { label?: string | null },
+  ): Promise<CodexConnectResult> {
     const { scope, project_id } = this.normalizeTarget(target)
     const v = validateCodexSubscriptionAuth(pasted, this.now)
     if (!v.ok || v.normalized === undefined) {
       return { ok: false, mode: v.mode, ...(v.code !== undefined ? { code: v.code } : {}), ...(v.error !== undefined ? { error: v.error } : {}) }
     }
+    // An owner-supplied name wins over the generic description. Without this the
+    // first seat was the ONE seat that could not be named: the label the owner
+    // typed was accepted by the surface, carried through `connectAccount`, and
+    // then dropped on the floor by this delegation.
+    const supplied = typeof opts?.label === 'string' && opts.label.trim().length > 0 ? opts.label.trim() : null
     await this.store.set(owner_slug, {
       service: CODEX_CREDENTIAL_SERVICE,
       plaintext: v.normalized,
       scope,
       project_id,
       label:
-        scope === 'project'
+        supplied ??
+        (scope === 'project'
           ? 'ChatGPT subscription (codex review — project override)'
-          : 'ChatGPT subscription (codex cross-model review)',
+          : 'ChatGPT subscription (codex cross-model review)'),
       expires_at: null,
     })
     const { path } = materializeCodexAuth({ codexHome: this.homeFor(scope, project_id), authJson: v.normalized })
@@ -504,7 +515,12 @@ export class CodexCredentialService {
       const slot = codexServiceSlot(record.service)
       if (slot === null) continue
       present.add(slot)
-      this.rotation.upsertSlot(owner_slug, slot, record.label ?? null)
+      // REGISTER, NEVER RELABEL. The seat's name is set once, at connect, from
+      // what the owner typed. Passing the credential row's label here instead
+      // copied the store's own generic description back over it on the next
+      // sync — and a sync runs on every status poll, so a custom name survived
+      // until the first refresh of the settings pane and then silently reverted.
+      this.rotation.upsertSlot(owner_slug, slot, null)
     }
     for (const known of this.rotation.listSlots(owner_slug)) {
       if (!present.has(known.slot)) this.rotation.removeSlot(owner_slug, known.slot)
@@ -523,12 +539,18 @@ export class CodexCredentialService {
    */
   private harvestSlot(owner_slug: OwnerHandle, slot: string, record?: SlotRecord): void {
     const now = this.now()
+    // Resolve the row when the caller did not supply one. The cooldown-clearing
+    // arm below needs to know the CURRENT reason (an `unauthorized` seat must
+    // not be released by usage evidence), and treating "the caller passed
+    // nothing" as "the seat is not cooling" would have made that check depend on
+    // which call site invoked the harvest.
+    const current = record ?? this.rotation.listSlots(owner_slug).find((s) => s.slot === slot)
     // THROTTLE. This runs on `resolveActiveCodexHome`, which a read-only HTTP
     // handler reaches as well as a run launch, and the scan touches the
     // filesystem. Runs are minutes apart, so re-scanning more than once a minute
     // can only re-read the same file; skipping cheaply is what keeps a status GET
     // from paying for a directory walk on every poll.
-    const last = record?.last_harvest_at ?? null
+    const last = current?.last_harvest_at ?? null
     if (last !== null && now - last < HARVEST_MIN_INTERVAL_MS) return
     this.rotation.markHarvested(owner_slug, slot, now)
 
@@ -536,7 +558,7 @@ export class CodexCredentialService {
     // Rollouts predating this seat's connect stamp belong to whatever account
     // previously occupied the directory; reading them would cool a brand-new
     // subscription on its predecessor's exhaustion.
-    const outcome = harvestNewestRollout(home, now, record?.connected_at ?? 0)
+    const outcome = harvestNewestRollout(home, now, current?.connected_at ?? 0)
     if (outcome.kind !== 'snapshot') return
     // The window closest to its limit is the one worth showing the owner.
     const worst = [...outcome.snapshot.windows].sort((a, b) => b.used_percent - a.used_percent)[0]
@@ -561,7 +583,36 @@ export class CodexCredentialService {
         used_percent: worst?.used_percent ?? null,
         window_minutes: worst?.window_minutes ?? null,
       })
+      return
     }
+
+    // A HEALTHY READING MUST BE ABLE TO END A COOLDOWN, or cooling is one-way.
+    // The cooldown is set from a reset the CLI predicted; the window can reopen
+    // before that, and the seat's own fresh snapshot showing it under threshold
+    // is the CLI itself saying so. Doing nothing on a null decision left the
+    // predicted timestamp standing as the only thing that could release the
+    // seat, so a paid seat sat out the remainder of a cooldown that the evidence
+    // in front of us had already refuted.
+    //
+    // The evidence has to be CURRENT, which is what `fresh` checks:
+    // `signalToCooldown` also returns null for a wholly stale snapshot, and
+    // treating that as proof of health would clear a cooldown on the strength of
+    // a week-old file — the inverse of the bug above and just as wrong.
+    //
+    // `unauthorized` is never cleared here. A revoked refresh token is not a
+    // usage state and no amount of usage evidence repairs it; only a reconnect
+    // does, which is why that reason ignores the clock in `isCooling`.
+    const fresh = outcome.snapshot.windows.some((w) => !w.expired)
+    if (!fresh) return
+    if (current === undefined || current.cooling_until === null) return
+    if (current.cooling_reason === 'unauthorized') return
+    this.rotation.setCooldown(owner_slug, slot, null)
+    this.log('codex_rotation_uncooled', {
+      slot,
+      used_percent: worst?.used_percent ?? null,
+      window_minutes: worst?.window_minutes ?? null,
+      detail: 'a current usage reading shows the seat under threshold',
+    })
   }
 
   /**
@@ -645,7 +696,7 @@ export class CodexCredentialService {
     owner_slug: OwnerHandle,
     pasted: unknown,
     opts?: { slot?: string; label?: string | null },
-  ): Promise<CodexConnectResult & { slot?: string }> {
+  ): Promise<CodexConnectResult & { slot?: string; replaced?: boolean }> {
     const requested = opts?.slot === undefined || opts.slot === null ? DEFAULT_SLOT : normalizeSlot(opts.slot)
     if (requested === null) {
       return {
@@ -655,8 +706,12 @@ export class CodexCredentialService {
         error: `account must be 1-32 chars of lowercase letters, digits and dashes, starting with a letter or digit`,
       }
     }
+    // Whether this paste REPLACES a seat that is already connected. Computed
+    // before the write, because after it every seat looks pre-existing. The
+    // owner-facing control reads this to stop calling an overwrite "Add seat".
+    const replaced = this.store.getMeta(owner_slug, '', codexSlotService(requested)) !== null
     if (requested === DEFAULT_SLOT) {
-      const result = await this.connect(owner_slug, pasted)
+      const result = await this.connect(owner_slug, pasted, undefined, { label: opts?.label ?? null })
       if (result.ok) {
         this.rotation.upsertSlot(owner_slug, DEFAULT_SLOT, opts?.label ?? null)
         // THE FIRST SEAT RECONNECTS LIKE EVERY OTHER SEAT. This branch delegates
@@ -667,7 +722,7 @@ export class CodexCredentialService {
         // just fixed went on being skipped until a timer he could not see expired.
         this.rotation.markConnected(owner_slug, DEFAULT_SLOT, this.now())
       }
-      return { ...result, slot: DEFAULT_SLOT }
+      return { ...result, slot: DEFAULT_SLOT, replaced }
     }
     const v = validateCodexSubscriptionAuth(pasted, this.now)
     if (!v.ok || v.normalized === undefined) {
@@ -694,15 +749,44 @@ export class CodexCredentialService {
     // so the harvest ignores the previous occupant's rollouts.
     this.rotation.markConnected(owner_slug, requested, this.now())
     const status = deriveCodexStatus(v.normalized, { materialized: true, now: this.now })
-    return { ok: true, mode: 'subscription', status: status.status, scope: 'global', path, slot: requested }
+    return { ok: true, mode: 'subscription', status: status.status, scope: 'global', path, slot: requested, replaced }
   }
 
-  /** Every connected seat, with cooldowns and last-known usage. No secrets. */
-  listAccounts(owner_slug: OwnerHandle): CodexAccountSummary[] {
-    const slots = this.syncSlots(owner_slug)
+  /**
+   * The whole pool in ONE pass: every seat, and which one runs next.
+   *
+   * One pass because the status surface needs both halves and computing them
+   * separately did the reconciliation twice per poll — two full passes of
+   * `listGlobal` + an upsert per seat + a delete sweep, for a request that only
+   * reads. It also let the two halves disagree: `nextSlot` re-selected against
+   * state the first pass may have just changed, so the seat listed as `active`
+   * and the seat reported as `next` were answers to two different questions.
+   *
+   * It HARVESTS, which is why a status view is not free. That is the design's
+   * intent and it is what makes the figures the owner reads current rather than
+   * as-of-the-last-run — a seat that capped itself an hour ago shows as cooling
+   * when he opens the pane, instead of looking healthy until the next run
+   * discovers otherwise. The scan is throttled to once a minute per seat
+   * (`HARVEST_MIN_INTERVAL_MS`), so polling costs one directory walk a minute.
+   * Selection is NOT persisted here: reading status must not rotate the pool.
+   */
+  accountsView(owner_slug: OwnerHandle): {
+    accounts: CodexAccountSummary[]
+    next: { slot: string; exhausted: boolean } | null
+  } {
+    const synced = this.syncSlots(owner_slug)
+    const active = this.rotation.getActiveSlot(owner_slug)
+    const incumbent = active ?? synced[0]?.slot ?? null
+    if (incumbent !== null) {
+      this.harvestSlot(owner_slug, incumbent, synced.find((s) => s.slot === incumbent))
+    }
+    // Re-read: the harvest may have just cooled (or released) the incumbent, and
+    // reporting the pre-harvest picture would show the owner the state we had
+    // one statement ago.
+    const slots = this.rotation.listSlots(owner_slug)
     const now = this.now()
-    const selection = selectNextSlot(slots, this.rotation.getActiveSlot(owner_slug), now)
-    return slots.map((s) => {
+    const selection = selectNextSlot(slots, active, now)
+    const accounts = slots.map((s) => {
       const home = this.slotHome(s.slot)
       const stored = this.store.resolve(owner_slug, undefined, codexSlotService(s.slot))
       const materialized = readMaterializedAuth(home) !== null
@@ -723,14 +807,42 @@ export class CodexCredentialService {
         active: selection !== null && selection.slot === s.slot,
       }
     })
+    return {
+      accounts,
+      next: selection === null ? null : { slot: selection.slot, exhausted: selection.exhausted },
+    }
+  }
+
+  /**
+   * The legacy single-credential status, answered about the POOL.
+   *
+   * `status()` reads the `codex` service row, which is slot `default` and
+   * nothing else — correct before rotation existed and wrong after. An owner who
+   * connected only a NAMED seat got `not_connected` in the one field every
+   * pre-rotation client reads, while trident was resolving that seat and running
+   * reviews with it: the mobile header said cross-model review was off, and the
+   * web pane hid Disconnect for a seat it claimed did not exist.
+   *
+   * `connected` if ANY seat is usable, because with one healthy seat and one
+   * stale one trident runs, and reporting anything else describes a Codex that
+   * is not working when it is. It lives HERE rather than in either surface so
+   * the HTTP route and the agent tool cannot drift into different answers.
+   */
+  poolStatus(owner_slug: OwnerHandle, accounts: readonly CodexAccountSummary[]): CodexStatusResult {
+    const own = this.status(owner_slug)
+    const usable = accounts.find((a) => a.status === 'connected')
+    const status = usable?.status ?? accounts[0]?.status ?? own.status
+    return { ...own, status }
+  }
+
+  /** Every connected seat, with cooldowns and last-known usage. No secrets. */
+  listAccounts(owner_slug: OwnerHandle): CodexAccountSummary[] {
+    return this.accountsView(owner_slug).accounts
   }
 
   /** Which seat the next run will use, or null when none is connected. */
   nextSlot(owner_slug: OwnerHandle): { slot: string; exhausted: boolean } | null {
-    const slots = this.syncSlots(owner_slug)
-    const selection = selectNextSlot(slots, this.rotation.getActiveSlot(owner_slug), this.now())
-    if (selection === null) return null
-    return { slot: selection.slot, exhausted: selection.exhausted }
+    return this.accountsView(owner_slug).next
   }
 
   /**

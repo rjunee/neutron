@@ -43,6 +43,7 @@
  */
 
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
+import { ProjectCredentialValidationError } from '@neutronai/project-credentials/store.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import type { CodexCredentialService, CodexTarget } from '@neutronai/trident/codex-credential.ts'
@@ -108,12 +109,14 @@ export function createCodexCredentialSurface(
           // credential for this project); global route reports the global default.
           // The legacy top-level fields are kept verbatim so existing clients keep
           // working; `accounts` / `active` / `next` are additive.
-          const status = service.status(owner_slug, target)
-          if (!isGlobal) return jsonOk({ ...status })
-          const accounts = service.listAccounts(owner_slug)
-          const next = service.nextSlot(owner_slug)
+          if (!isGlobal) return jsonOk({ ...service.status(owner_slug, target) })
+          const { accounts, next } = service.accountsView(owner_slug)
+          // THE TOP-LEVEL STATUS IS ABOUT THE POOL, NOT ABOUT THE FIRST SEAT —
+          // and the rule lives on the SERVICE, so this route and the
+          // `codex_status` agent tool cannot drift into different answers about
+          // the same pool. See `CodexCredentialService.poolStatus`.
           return jsonOk({
-            ...status,
+            ...service.poolStatus(owner_slug, accounts),
             accounts,
             active: next?.slot ?? null,
             next: next?.slot ?? null,
@@ -134,15 +137,36 @@ export function createCodexCredentialSurface(
           }
           const requested = body['account'] ?? rawAccount ?? undefined
           const label = typeof body['label'] === 'string' ? (body['label'] as string) : null
-          const result = await service.connectAccount(owner_slug, pasted, {
-            ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
-            label,
-          })
+          // A label the store refuses (over its length ceiling) is a BAD REQUEST,
+          // not a server fault. The store throws a typed validation error and,
+          // unmapped, it escaped as a 500 — telling the owner the instance had
+          // broken when he had simply typed too long a name, and giving him
+          // nothing to correct. The sibling credentials surface has always mapped
+          // this; only this route had missed it.
+          let result: Awaited<ReturnType<typeof service.connectAccount>>
+          try {
+            result = await service.connectAccount(owner_slug, pasted, {
+              ...(requested === undefined || requested === null ? {} : { slot: String(requested) }),
+              label,
+            })
+          } catch (err) {
+            if (err instanceof ProjectCredentialValidationError) {
+              return jsonError(400, err.code, err.message)
+            }
+            throw err
+          }
           if (!result.ok) {
             return jsonError(400, result.code ?? 'invalid_auth', result.error ?? 'could not connect Codex')
           }
           return jsonOk(
-            { status: result.status, mode: result.mode, scope: result.scope, account: result.slot },
+            {
+              status: result.status,
+              mode: result.mode,
+              scope: result.scope,
+              account: result.slot,
+              // So a client can say what it did rather than what it intended.
+              replaced: result.replaced ?? false,
+            },
             201,
           )
         }

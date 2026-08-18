@@ -77,13 +77,7 @@ interface SlotRow {
   last_harvest_at: number | null
 }
 
-const VALID_REASONS: readonly CoolingReason[] = [
-  'short-window',
-  'long-window',
-  'rate-limited',
-  'unauthorized',
-  'manual',
-]
+const VALID_REASONS: readonly CoolingReason[] = ['short-window', 'long-window', 'unauthorized', 'manual']
 
 /**
  * Narrow a stored reason string back to the union.
@@ -98,6 +92,35 @@ function toReason(raw: string | null): CoolingReason | null {
   return VALID_REASONS.includes(raw as CoolingReason) ? (raw as CoolingReason) : 'manual'
 }
 
+/**
+ * WHY EVERY WRITE HERE IS `runSync`, AND WHAT THAT COSTS.
+ *
+ * The only caller that matters is `resolveActiveCodexHome`, which the
+ * orchestrator invokes at fire time through a SYNCHRONOUS contract
+ * (`resolve_codex_home: (run) => string | null`). Nothing on that path can
+ * `await`, so the async `run()` with its busy-retry and mutex is unavailable.
+ *
+ * `ProjectDb.runSync` documents the consequence (`persistence/db.ts`): called
+ * outside a transaction callback while some other caller's async `transaction()`
+ * is open on the same instance, the write lands inside that BEGIN/COMMIT window
+ * and shares its fate — so an unrelated rollback can discard a cooldown this
+ * module just decided.
+ *
+ * That is survivable HERE, and only because of a property worth stating rather
+ * than assuming: every write on the harvest path is DERIVED, not accumulated.
+ * The cooldown, the usage figures and the `last_harvest_at` throttle stamp are
+ * all recomputed from the seat's rollout file, which is on disk and is the
+ * actual source of truth. They are also written together, so a rollback takes
+ * the throttle stamp with the cooldown — which means the very next resolve is
+ * not throttled, re-reads the same file, and re-derives the same cooldown. A
+ * lost write costs one selection, never a wrong lasting state.
+ *
+ * The property that makes this true is the one to protect: DO NOT ADD A FIELD
+ * HERE THAT CANNOT BE RECOMPUTED FROM DISK. A counter, a running total, or an
+ * append-only log would turn a survivable lost write into silent corruption, and
+ * would need a real transaction — which would need this path to become async,
+ * which would need the orchestrator's resolver contract to change.
+ */
 export class SqliteCodexRotationStore implements CodexRotationStore {
   private readonly db: ProjectDb
 

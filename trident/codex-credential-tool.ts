@@ -100,10 +100,16 @@ export function registerCodexCredentialToolSurface(
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
       const owner = asOwnerHandle(ctx.project_slug)
-      const next = deps.service.nextSlot(owner)
+      // ONE pass, and the POOL's status — the same two corrections the HTTP
+      // route needed, for the same reasons. Asking for the seats and the next
+      // seat separately reconciled the pool twice and let the two halves answer
+      // against different state; and `status(owner)` alone describes seat one, so
+      // an owner running only a NAMED seat would be told Codex was not connected
+      // while trident was running reviews with it.
+      const { accounts, next } = deps.service.accountsView(owner)
       return {
-        ...deps.service.status(owner),
-        accounts: deps.service.listAccounts(owner),
+        ...deps.service.poolStatus(owner, accounts),
+        accounts,
         ...(next !== null ? { next: next.slot, exhausted: next.exhausted } : {}),
       }
     },
