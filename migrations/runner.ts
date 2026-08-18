@@ -1,6 +1,6 @@
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, readdirSync, readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { resolveOpenDbPath } from './db-path.ts'
@@ -189,6 +189,29 @@ export function classifyMigration(
   // cannot see. `recorded-by-content` is sound only when EVERY owner is gone.
   for (const owner of owners) if (treeNames.has(owner)) return 'duplicates-an-applied-file'
   return 'recorded-by-content'
+}
+
+export const MIGRATE_OWNER_MARKER = '.migrate-owner'
+
+/**
+ * Canonicalize an ownership path even when it names a checkout that has since
+ * moved. The fallback keeps that stale marker deterministic and comparable so
+ * a missing old checkout can never turn a refusal into accidental permission.
+ */
+export function canonicalOwnerPath(path: string): string {
+  try {
+    return realpathSync(path)
+  } catch {
+    return resolve(path)
+  }
+}
+
+export function migrateOwnerMismatch(recorded: string, here: string): boolean {
+  return canonicalOwnerPath(recorded) !== canonicalOwnerPath(here)
+}
+
+export function migrateOwnerMarkerPath(dbFilename: string): string {
+  return join(dirname(resolve(dbFilename)), MIGRATE_OWNER_MARKER)
 }
 
 function loadMigrationRepairs(dir: string): MigrationRepair[] {
@@ -613,6 +636,47 @@ function formatUntrackedMigration(
     '',
     'Do NOT reach for migrations/repairs.json. Those entries acknowledge a name mismatch on a row',
     'whose file this tree DOES contain; that is not the situation here.',
+  ].join('\n')
+}
+
+/**
+ * The thrown message for a database whose recorded checkout is not this one.
+ *
+ * Like the migration-name and untracked-file refusals above, this is written
+ * for the operator facing a boot that deliberately stopped. It names every
+ * path used in the decision, states the no-write guarantee the call site earns,
+ * and gives only remedies that preserve the incident record.
+ */
+function formatOwnerRefusal(
+  dbFile: string,
+  markerPath: string,
+  recordedOwner: string,
+  runnerOwner: string,
+  reason: string,
+): string {
+  return [
+    `Migration ownership refusal: ${reason}.`,
+    '',
+    '  database',
+    `    file    ${resolve(dbFile)}`,
+    '  ownership marker',
+    `    file    ${markerPath}`,
+    `    owner   ${recordedOwner}`,
+    '  this runner',
+    `    owner   ${runnerOwner}`,
+    '',
+    'NOTHING HAS BEEN APPLIED and nothing has been written — no migration ran, no _migrations row was written, and the marker was not modified.',
+    '',
+    'A build workspace (for example, a trident worktree) inherited the live NEUTRON_HOME in',
+    'tracker #575. It then migrated the live database: "two incidents, one hole." This guard',
+    'fails closed so that cannot recur. Give the build its OWN data home.',
+    '',
+    'If this checkout moved legitimately, re-run install.sh. Installation is the explicit',
+    'ownership-transfer ceremony and rewrites the marker before migrating. Alternatively, update',
+    'the marker by hand only after verifying that no other checkout migrates this data home.',
+    '',
+    'Never resolve this by deleting or copying the database, and never edit _migrations. The',
+    'runner never auto-rewrites an existing ownership marker.',
   ].join('\n')
 }
 
@@ -1230,6 +1294,72 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // gets it asserted here before any work. The bootstrap SQL also sets it for direct sqlite CLI
   // runs; both paths are required.
   db.exec('PRAGMA foreign_keys = ON')
+  // OWNERSHIP IS DECIDED FIRST, BEFORE THE LEDGER IS EVEN READ. Every other guard in
+  // this function reasons about what a migration tree says; this one reasons about
+  // whether this runner may speak for this database AT ALL. A trident worktree that
+  // inherited the live NEUTRON_HOME must not reach the ledger read, the repair
+  // matching or the tree resolution below — it is refused here, having written
+  // nothing. The only filesystem effect on this path is the tolerant FIRST claim of a
+  // previously absent marker: a file beside the database, never the database.
+  const dbFile = db.filename
+  if (typeof dbFile === 'string' && dbFile.length > 0 && dbFile !== ':memory:') {
+    const markerPath = migrateOwnerMarkerPath(dbFile)
+    const runnerOwner = canonicalOwnerPath(HERE)
+    let marker: string | null = null
+    try {
+      marker = readFileSync(markerPath, 'utf8')
+    } catch (err) {
+      if (!(err instanceof Error && 'code' in err && err.code === 'ENOENT')) {
+        const detail = err instanceof Error ? err.message : String(err)
+        throw new Error(
+          formatOwnerRefusal(
+            dbFile,
+            markerPath,
+            `(unreadable — ${detail})`,
+            runnerOwner,
+            'the ownership marker could not be read',
+          ),
+        )
+      }
+    }
+
+    if (marker === null) {
+      try {
+        writeFileSync(
+          markerPath,
+          `${runnerOwner}\nclaimed_at=${new Date().toISOString()}\nclaimed_by=migrations/runner.ts\n`,
+          { flag: 'wx' },
+        )
+      } catch {
+        // The marker is protective bookkeeping beside the database, never a
+        // database write. Read-only media and backup inspection must still work.
+      }
+    } else {
+      const recordedOwner = marker.split(/\r?\n/, 1)[0]?.trim() ?? ''
+      if (recordedOwner.length === 0) {
+        throw new Error(
+          formatOwnerRefusal(
+            dbFile,
+            markerPath,
+            '(empty or whitespace)',
+            runnerOwner,
+            'the ownership marker is malformed',
+          ),
+        )
+      }
+      if (migrateOwnerMismatch(recordedOwner, HERE)) {
+        throw new Error(
+          formatOwnerRefusal(
+            dbFile,
+            markerPath,
+            canonicalOwnerPath(recordedOwner),
+            runnerOwner,
+            'the recorded owning checkout is not this runner checkout',
+          ),
+        )
+      }
+    }
+  }
   const ledger = readLedger(db)
   const migrations = loadMigrations(dir)
   /**
@@ -1324,6 +1454,10 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
   // so in as many words. It also keeps `applyMigrations` a pure READ for a
   // fully-migrated database, which is what makes opening a backup read-only to
   // inspect it work.
+  //
+  // THE OWNERSHIP REFUSAL IS EARLIER STILL, above the ledger read, and holds the
+  // guarantee in a stronger form: it has not read the ledger either, and it never
+  // modifies an existing marker. See the block at the top of this function.
   //
   // PENDING IS DECIDED BY IDENTITY, NOT BY ORDINAL — the change this whole file
   // turns on. See `classifyMigration`.
