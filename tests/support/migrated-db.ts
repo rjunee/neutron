@@ -30,6 +30,17 @@
  * contents (minus one wall-clock column), and then hands the seeded database to
  * the real runner to certify — it must report every migration already applied.
  *
+ * ONE THING IT DELIBERATELY DOES NOT COPY
+ * ---------------------------------------
+ * The `.migrate-owner` marker the runner drops BESIDE a database it claims
+ * (`migrations/runner.ts`, `migrateOwnerMarkerPath`). Seeding does not write
+ * one, and must not: the marker is a claim by a specific runner checkout over a
+ * specific path, and forging it from a test helper is precisely the kind of
+ * re-implemented runner behaviour this file exists to avoid. Absence is the safe
+ * side of that guard — the runner TOLERANTLY claims a previously absent marker
+ * and only refuses on one that disagrees — so a seeded database that later meets
+ * the real runner gets claimed then, exactly as a fresh one would.
+ *
  * WHEN NOT TO USE IT
  * ------------------
  * - Anything that asserts on an `ApplyResult` (`applied` / `skipped` / refusals)

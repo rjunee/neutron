@@ -51,9 +51,41 @@ decoration:
 | --- | --- |
 | inject one extra `_migrations` row into the seeded database | RED — arm 3, the full-data diff |
 | inject one extra table into the seeded database | RED — arm 1, the schema |
+| drop the WAL-index materialisation from the helper | RED — arm 6, the read-only open |
 
 Each is asserted identical BEFORE its mutation, so the failure is caused by the mutation
 and not by a pre-existing difference.
+
+**Arm 6 exists because the first five could not fail on the bug that shipped.** A copied
+template is a complete, checkpointed WAL database — and a WAL database can only be read
+through its `-shm` shared-memory index, which a READ-ONLY connection is not permitted to
+create. SQLite fails the open outright. A replayed database never hit that, because the
+test held an open read-write handle from `ProjectDb.open` the whole time the migrations
+ran, so the index already existed by the time anything opened the path read-only. A byte
+copy holds no handle, so seeding broke exactly the call sites whose SUBJECT opens read-only
+and nothing else. `seedMigratedDb` now materialises the index itself, with `PRAGMA
+user_version` — a read transaction that touches only the header; reading `sqlite_schema`
+instead also works and costs ~20x more (33 ms/seed against 1.4 ms) because it makes SQLite
+parse the whole 124-migration schema.
+
+Arms 1-5 each open the seeded database READ-WRITE, which creates that index before any
+assertion runs — so they passed, green, against databases no read-only consumer could open.
+Arm 6 is therefore its own test with nothing touching the file before the reader does, and
+it asserts both halves: the sidecar is on disk (fails on every platform if the helper stops
+producing it) and the read-only open succeeds (fails the way a caller does). The bug was
+also platform-shaped — it reproduced locally and NOT on the Linux CI runner — which is the
+combination a green pipeline carries indefinitely.
+
+Two smaller corrections in the same pass. The conformance dump's `ORDER BY` now names
+`"table"."column"` rather than the bare identifier: SQLite resolves a bare name in
+`ORDER BY` against the output ALIASES first, so an allowlisted column — selected as the
+constant `'<wall-clock>' AS "applied_at"` — sorted by that constant and contributed nothing
+to the ordering. It changes no result today, and would have silently on the next allowlist
+entry. And `seedMigratedDb` now refuses to seed once `NEUTRON_COMMIT_SHA` differs from the
+value the template baked in: the template is built once per process and stamps that
+variable into every `applied_by_commit`, so a test that set it would otherwise inherit
+whichever test seeded FIRST — a difference the conformance diff cannot see, because both of
+its databases are built in the same process under the same environment.
 
 **Measured, matched A/B** — 21 converted test files (work-board, cores runtime, auth,
 channels), same machine, same `node_modules`, back to back, `origin/main`'s content for
