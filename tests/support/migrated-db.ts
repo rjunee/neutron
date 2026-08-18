@@ -37,6 +37,10 @@
  *   `applied_at`, not this test's wall clock. Those tests stay on the real runner.
  * - Anything applying a CUSTOM migration directory (sidecar trees, the runner's
  *   own fixture dirs). This helper is hardwired to the default tree.
+ * - Anything that sets `NEUTRON_COMMIT_SHA`. The template is built once per
+ *   process and bakes that variable into every `applied_by_commit`, so the
+ *   value a seeded test gets is whichever test seeded FIRST. `seedMigratedDb`
+ *   throws rather than hand over a mismatched stamp.
  * - Anything migrating a database that already has content. `seedMigratedDb`
  *   REFUSES a non-empty target rather than falling back to a slow path, so a
  *   wrongly-converted call site fails loudly instead of quietly masking a
@@ -52,6 +56,16 @@ import { applyMigrations } from '@neutronai/migrations/runner.ts'
 /** Resolved lazily on first seed, then reused for the life of the process. */
 let templatePath: string | null = null
 let templateDir: string | null = null
+
+/**
+ * The only environment variable that changes what the runner WRITES:
+ * `resolveDeployedCommit` (migrations/provenance.ts) prefers it over the git
+ * checkout when stamping `_migrations.applied_by_commit`.
+ */
+const PROVENANCE_ENV = 'NEUTRON_COMMIT_SHA'
+
+/** Its value at the moment the template was built — see `assertProvenanceEnvUnchanged`. */
+let templateProvenanceEnv: string | undefined
 
 /**
  * Build (or return) this process's template database.
@@ -78,9 +92,11 @@ function template(): string {
     // would have produced on its own.
     applyMigrations(db)
     // Fold the WAL back into the main database file before the copy. A clean
-    // close already checkpoints, but doing it explicitly means the published
-    // template is self-contained: one file, no `-wal`/`-shm` sidecar whose
-    // absence could cost the copy its most recent pages.
+    // close already checkpoints, but doing it explicitly means every page the
+    // migrations wrote is in the ONE file `seedMigratedDb` copies, so the copy
+    // cannot lose the most recent pages to a sidecar it did not take.
+    // (The seeded copy does get its own `-shm` back afterwards — see
+    // `materializeWalIndex`. That is a lock structure, not data.)
     db.exec('PRAGMA wal_checkpoint(TRUNCATE)')
   } finally {
     db.close()
@@ -90,7 +106,41 @@ function template(): string {
   renameSync(building, published)
   templateDir = dir
   templatePath = published
+  templateProvenanceEnv = process.env[PROVENANCE_ENV]
   return published
+}
+
+/**
+ * Refuse to hand out a template whose provenance stamp no longer matches the
+ * caller's environment.
+ *
+ * The template is built ONCE, on the first seed of the process, and it bakes in
+ * whatever `NEUTRON_COMMIT_SHA` was set at that instant — that value is written
+ * into `_migrations.applied_by_commit` for every migration. A test that sets the
+ * variable and then seeds would silently get the FIRST seeding test's commit,
+ * not its own, and a test that seeds after one that set it would inherit a
+ * stamp from a file it has never heard of. Neither is a difference the
+ * conformance diff can see, because both databases in that diff are built in
+ * the same process under the same environment.
+ *
+ * No test does this today (the two that set the variable live in
+ * `migrations/__tests__/` and stay on the real runner by design), so this guard
+ * is here to make sure it stays that way loudly rather than by luck. It costs
+ * one string comparison per seed.
+ */
+function assertProvenanceEnvUnchanged(): void {
+  const now = process.env[PROVENANCE_ENV]
+  if (now === templateProvenanceEnv) return
+  throw new Error(
+    `seedMigratedDb: ${PROVENANCE_ENV} is ${describeEnv(now)} but the template for this ` +
+      `process was built with it ${describeEnv(templateProvenanceEnv)}. The seeded ledger ` +
+      "would carry the template's applied_by_commit, not this test's. A test that cares " +
+      'about migration provenance must use the real runner: applyMigrations(db.raw()).',
+  )
+}
+
+function describeEnv(value: string | undefined): string {
+  return value === undefined ? 'unset' : `set to ${JSON.stringify(value)}`
 }
 
 // The template is scratch state for one process; leave nothing behind.
@@ -140,5 +190,44 @@ export function seedMigratedDb(path: string): void {
         'that only the real runner (applyMigrations) performs. Use that instead.',
     )
   }
-  copyFileSync(template(), path)
+  const source = template()
+  assertProvenanceEnvUnchanged()
+  copyFileSync(source, path)
+  materializeWalIndex(path)
+}
+
+/**
+ * Give the freshly copied database its `-shm` WAL index, by opening it
+ * READ-WRITE once and touching a page.
+ *
+ * This is not cosmetic, and it is not about the copy being incomplete — the
+ * copied file is a complete, checkpointed WAL database. It is about what the
+ * NEXT reader is allowed to do. A WAL database can only be read through its
+ * shared-memory index, and a READ-ONLY connection is not permitted to create
+ * that index: SQLite fails the open outright with `unable to open database
+ * file`. So the first connection to a seeded database has to be a writer, or
+ * there can never be a reader at all.
+ *
+ * A replayed database always satisfied that by accident — the test held an open
+ * read-write handle from `ProjectDb.open` while the migrations ran, so the index
+ * already existed by the time anything opened the path read-only. A byte copy
+ * has no such handle, which is why seeding without this step broke exactly the
+ * call sites whose subject opens read-only (`ProjectDb.open(..., { readonly:
+ * true })`) and nothing else. That failure is also platform-shaped — it
+ * reproduces locally and not on the Linux CI runner — so it is the kind of bug
+ * a green pipeline will happily carry.
+ *
+ * `PRAGMA user_version` is the trigger on purpose: it takes a read transaction
+ * (which is what builds the index) while touching only the database header.
+ * Reading `sqlite_schema` instead would work too and costs ~20x more, because it
+ * makes SQLite parse the whole 124-migration schema — measured 33 ms/seed
+ * against 1.4 ms for the pragma.
+ */
+function materializeWalIndex(path: string): void {
+  const db = new Database(path, { readwrite: true, create: false })
+  try {
+    db.exec('PRAGMA user_version')
+  } finally {
+    db.close(true)
+  }
 }

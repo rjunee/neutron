@@ -10,7 +10,9 @@
  * DIFFED here rather than asserted.
  *
  * Build A with the real `applyMigrations` over the full tree, B with
- * `seedMigratedDb`, then compare on five axes:
+ * `seedMigratedDb`, then compare on five axes — plus a SIXTH arm that has to
+ * stand on its own, below, because the five share a read-write handle that
+ * masks it:
  *
  *   1. SCHEMA, byte-identical, through the SAME serializer the snapshot test
  *      pins (`migrations/schema-serialize.ts`).
@@ -31,6 +33,10 @@
  *      `skipped` — the real classifier, not ours, deciding that this database
  *      is fully migrated, and engaging none of its refusals on the way.
  *   5. `PRAGMA integrity_check` = ok and `PRAGMA foreign_key_check` = empty.
+ *   6. A READ-ONLY consumer can open the seeded database with no writer having
+ *      gone first — the one property arms 1-5 cannot test, because they each
+ *      open it read-write and thereby create the very WAL index whose absence
+ *      is the failure.
  *
  * MUTATION-TESTED BOTH WAYS (a control that cannot fail is decoration): an
  * extra `_migrations` row must break arm 3, and an extra table must break arm
@@ -95,10 +101,18 @@ function dumpTable(db: Database, table: string): string {
     )
     .join(', ')
 
+  // ORDER BY has to name the TABLE's column, not the bare identifier: SQLite
+  // resolves a bare name in ORDER BY against the output aliases first, so an
+  // allowlisted column — which is selected as the constant `'<wall-clock>' AS
+  // "applied_at"` — would sort by that constant and contribute nothing to the
+  // ordering. Qualifying it as `"table"."column"` forces the real column. Today
+  // this changes no result (`_migrations.version` is unique and sorts first),
+  // but the next allowlist entry would land on a table where it silently does.
+  const qualified = JSON.stringify(table)
   const rows = db
     .query<Record<string, unknown>, []>(
-      `SELECT ${selected} FROM ${JSON.stringify(table)} ORDER BY ${columns
-        .map((c) => JSON.stringify(c))
+      `SELECT ${selected} FROM ${qualified} ORDER BY ${columns
+        .map((c) => `${qualified}.${JSON.stringify(c)}`)
         .join(', ')}`,
     )
     .all()
@@ -164,6 +178,43 @@ test('a seeded database is indistinguishable from a real migration replay', () =
     expect(b.query<Record<string, unknown>, []>('PRAGMA foreign_key_check').all()).toEqual([])
   } finally {
     a.close()
+    b.close()
+  }
+})
+
+/**
+ * ARM 6, and it is deliberately its OWN test rather than another assertion in
+ * the one above.
+ *
+ * Every arm of that test opens the seeded database READ-WRITE, and a read-write
+ * open is precisely the thing that repairs the defect this arm is about — it
+ * creates the `-shm` WAL index as a side effect, before any assertion runs. So
+ * the five-arm test is structurally incapable of failing on this class: it
+ * passed, green, on a helper that produced databases no read-only consumer could
+ * open at all. That is what a control looks like when it cannot fail for the
+ * reason under test.
+ *
+ * Here NOTHING opens the database read-write first. The seed happens, and the
+ * next thing to touch the file is the read-only open — which is exactly the
+ * sequence a call site like `trident/gh-authed.ts` performs, and exactly the
+ * sequence that failed.
+ */
+test('a seeded database can be opened READ-ONLY, with no writer having touched it first', () => {
+  const seededPath = join(tmp, 'readonly.db')
+
+  seedMigratedDb(seededPath)
+
+  // The WAL index must be on disk BEFORE any reader arrives. This assertion is
+  // the half that fails on every platform if the helper stops materialising it;
+  // the read-only open below is the half that fails the way a user does.
+  expect(existsSync(`${seededPath}-shm`)).toBe(true)
+
+  const b = new Database(seededPath, { readonly: true, create: false })
+  try {
+    expect(
+      b.query<{ n: number }, []>('SELECT count(*) AS n FROM _migrations').get()?.n,
+    ).toBeGreaterThan(0)
+  } finally {
     b.close()
   }
 })
@@ -237,6 +288,34 @@ test('seedMigratedDb refuses an in-memory target instead of writing a file named
     expect(() => seedMigratedDb(target)).toThrow(/cannot seed the in-memory database/)
     expect(existsSync(target)).toBe(false)
   }
+})
+
+test('seedMigratedDb refuses to seed once NEUTRON_COMMIT_SHA no longer matches the template', () => {
+  // The template is built once per process and stamps whatever
+  // NEUTRON_COMMIT_SHA was set at that moment into every
+  // `_migrations.applied_by_commit`. A test that sets the variable and then
+  // seeds would quietly get the FIRST seeding test's commit instead of its own —
+  // a difference the conformance diff above cannot see, because both of its
+  // databases are built in this same process under this same environment.
+  const before = process.env.NEUTRON_COMMIT_SHA
+
+  // Prove the template exists first, so the throw below is the guard firing and
+  // not the template build picking the variable up legitimately.
+  seedMigratedDb(join(tmp, 'baseline.db'))
+
+  process.env.NEUTRON_COMMIT_SHA = '0123456789abcdef0123456789abcdef01234567'
+  try {
+    expect(() => seedMigratedDb(join(tmp, 'mismatched.db'))).toThrow(
+      /NEUTRON_COMMIT_SHA is set to .* but the template for this process was built with it/,
+    )
+  } finally {
+    if (before === undefined) delete process.env.NEUTRON_COMMIT_SHA
+    else process.env.NEUTRON_COMMIT_SHA = before
+  }
+
+  // And restoring the environment restores seeding — the guard tracks the
+  // variable, it does not permanently poison the helper.
+  expect(() => seedMigratedDb(join(tmp, 'restored.db'))).not.toThrow()
 })
 
 test('seedMigratedDb accepts a zero-length placeholder file', () => {
