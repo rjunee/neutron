@@ -414,21 +414,39 @@ neither visible from a single-surface measurement:
   memoized, so each publish also paid for the transcripts of up to seven surfaces the
   owner was not looking at.
 
-**The measurement that named the second one.** On a throwaway harness (real
-controller + real `ChatApp` under happy-dom, two projects, both surfaces warm, one
-switch timed with a `React.Profiler` and render counters on the bubbles), switching to
-an EMPTY conversation cost 353 ms with two 533-message transcripts alive behind it and
-98 ms with two 50-message ones — **with zero bubble re-renders in both cases.** A
-switch to a conversation with nothing in it was being charged for transcripts neither
-on screen nor entered. Headline pair, 533 messages per project: 1106 ms wall / 438 ms
-in React / 267 bubble re-renders, down to 144 ms / 49 ms / 0.
+**What the measurement actually supports — and what it does not.** The first pass at
+this entry led with milliseconds: 1106 ms down to 144 ms for one switch at 533 messages
+a side. **Those numbers did not survive being measured twice.** Three back-to-back runs
+of the same UNFIXED tree gave 1322 ms, 415 ms and 368 ms for the identical switch,
+because the first run in a bun process pays JIT and happy-dom warm-up. The spread
+between runs of one tree is larger than the gap being claimed between two trees, so any
+single millisecond figure from that harness is an artefact of run order dressed as a
+property of the code. They are not quoted here, and the earlier draft that did quote
+them was wrong to.
 
-⚠️ Those magnitudes come from a harness that is NOT committed and cannot be reproduced
-from this tree; read them as indicative. Method, for anyone redoing it: mount `ChatApp`
-over a `NeutronChatController` with two seeded topics, warm both surfaces, then time one
-`setProject` inside `act()` with a `Profiler` at the root. No timing assertion was added
-to the suite — it would measure the runner, which is what `scripts/ci/lint.sh` CHECK 5
-exists to keep out.
+**The counts are the measurement.** Same harness, spies on `useChatRuntime` (once per
+conversation-surface render) and `toThreadMessage` (once per message conversion), plus a
+controller subscriber. Byte-identical on every run and at both transcript sizes:
+
+| one warm switch | before | after |
+| --- | --- | --- |
+| conversation surfaces rendered | 4 | 2 |
+| message conversions | N (50 at N=50, 533 at N=533) | 0 |
+| controller publishes | 2 | 1 |
+| surfaces rendered switching into an EMPTY conversation | 6 | 2 |
+
+`conversions = N` is the whole diagnosis in one number: every message in the project
+being entered was re-converted on entry, so the cost scaled with the transcript exactly
+as the owner experienced it. And the empty-conversation row is the second cause on its
+own — a switch into a conversation with nothing in it still rendered six surfaces,
+paying for transcripts neither on screen nor entered.
+
+The harness is NOT committed (a timing assertion would measure the runner, which is what
+`scripts/ci/lint.sh` CHECK 5 exists to keep out), but the counts above are all asserted
+by `switch-render-cost.test.tsx`, so the claim is reproducible from the tree even though
+the harness is not. Method for redoing the harness: mount `ChatApp` over a
+`NeutronChatController` with two seeded topics, warm both surfaces, then drive one
+`setProject` inside `act()` with the two module spies installed.
 
 **Markdown re-parses were already zero** before any of this, because `Markdown` is
 memoized and the bodies are unchanged strings. Worth recording: it was the obvious

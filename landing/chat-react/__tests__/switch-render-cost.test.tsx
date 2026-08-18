@@ -7,17 +7,29 @@
  * it was waiting behind, and then the background refresh was blamed for a switch
  * that was already on screen. The actual cost, once the render could be seen
  * separately, was that a switch re-rendered transcripts that were NOT on screen and
- * had NOT changed. On a two-project harness at 533 messages each, one switch cost
- * 1106 ms wall / 438 ms in React / 267 bubble re-renders; the same switch after the
- * fixes costs 144 ms / 49 ms / 0.
+ * had NOT changed. On a two-project harness, one warm switch before and after:
+ *
+ *      surface renders   4 -> 2      (the background conversations stop re-rendering)
+ *      message conversions   N -> 0  (N = every message in the entered project)
+ *      controller publishes  2 -> 1  (the refresh that changes nothing stops notifying)
  *
  * ── WHY THESE ASSERTIONS ARE COUNTS AND IDENTITIES, NOT DURATIONS ───────────────
- * A wall-clock bound in CI is a flake generator on a shared runner and it does not
- * say what regressed. Every assertion here is instead a COUNT of work done or an
- * object IDENTITY preserved — the quantities the fixes actually change. They are
- * also the quantities that decay silently: each fix is one line away from becoming a
- * no-op (a lookup keyed on the wrong thing, one unstable prop, one field missing
- * from a comparator), with nothing failing anywhere to announce it.
+ * Partly the usual reason — a wall-clock bound in CI is a flake generator and it does
+ * not say what regressed. But mostly because the durations DID NOT SURVIVE being
+ * measured twice: three back-to-back runs of the same unfixed tree gave 1322 ms, 415 ms
+ * and 368 ms for the same switch, since the first run in a process pays JIT and DOM
+ * warm-up. A single quoted millisecond figure from that harness would have been an
+ * artefact of run order presented as a property of the code.
+ *
+ * The counts above, by contrast, came back byte-identical on every run AND at both
+ * transcript sizes — and `conversions = N` is the whole diagnosis in one number: every
+ * message in the project being entered was re-converted, so the cost scaled with the
+ * transcript exactly as the owner experienced it.
+ *
+ * Each assertion here is therefore a COUNT of work done or an object IDENTITY
+ * preserved. They are also the quantities that decay silently: each fix is one line
+ * away from becoming a no-op (a lookup keyed on the wrong thing, one unstable prop,
+ * one field missing from a comparator), with nothing failing anywhere to announce it.
  *
  * ── HOW THE RENDER COUNTER WORKS ────────────────────────────────────────────────
  * `ConversationRuntimeHost` calls `useChatRuntime` exactly once per render of a

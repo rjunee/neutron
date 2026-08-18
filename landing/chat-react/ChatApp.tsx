@@ -2129,10 +2129,9 @@ function MountedConversationImpl({
  * to {@link MAX_MOUNTED_CONVERSATIONS}. Without this memo each of those publishes
  * re-rendered the full thread machinery of every kept-alive conversation, including
  * the ones the owner is not looking at, at a cost proportional to THEIR message
- * counts. Measured on a two-project harness, switching to an EMPTY conversation
- * cost ~561 ms with two 533-message surfaces alive behind it and ~34 ms with two
- * 50-message ones — a switch paying for transcripts that were not on screen and had
- * not changed.
+ * counts. Measured on a two-project harness: one switch rendered 4 surfaces before
+ * and renders 2 after, and a switch into an EMPTY conversation rendered 6 — it was
+ * paying for transcripts that were neither on screen nor entered.
  *
  * An inactive surface's props are all stable by construction: `hostVm` is its frozen
  * snapshot, `controller`/`config` live for the app's lifetime, `draft` is memoized,
