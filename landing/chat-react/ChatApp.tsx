@@ -12,7 +12,7 @@
  * CSS framework is bundled.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
@@ -2000,7 +2000,7 @@ const HYDRATION_GRACE_MS = 600
  * surface stay MOUNTED across switches: hidden when inactive, so its scroll
  * position + composer draft survive and switching back is instant.
  */
-function MountedConversation({
+function MountedConversationImpl({
   hostVm,
   active,
   controller,
@@ -2121,6 +2121,35 @@ function MountedConversation({
   )
 }
 
+/**
+ * A surface only re-renders when ITS OWN inputs change (2026-08-17).
+ *
+ * `ChatApp` re-renders on every controller `publish()` — every streaming token,
+ * every ack, every project switch — and it renders EVERY mounted conversation, up
+ * to {@link MAX_MOUNTED_CONVERSATIONS}. Without this memo each of those publishes
+ * re-rendered the full thread machinery of every kept-alive conversation, including
+ * the ones the owner is not looking at, at a cost proportional to THEIR message
+ * counts. Measured on a two-project harness, switching to an EMPTY conversation
+ * cost ~561 ms with two 533-message surfaces alive behind it and ~34 ms with two
+ * 50-message ones — a switch paying for transcripts that were not on screen and had
+ * not changed.
+ *
+ * An inactive surface's props are all stable by construction: `hostVm` is its frozen
+ * snapshot, `controller`/`config` live for the app's lifetime, `draft` is memoized,
+ * and every callback is ref-stabilized in {@link ChatApp} below. So the memo holds
+ * and only the two surfaces whose `active` flips actually re-render on a switch.
+ *
+ * ⚠️ The stabilization is load-bearing, not tidiness: ONE unstable prop silently
+ * turns this memo back into a no-op, with no failure anywhere to notice. That is
+ * what `__tests__/switch-render-cost.test.tsx` pins.
+ */
+const MountedConversation = memo(MountedConversationImpl)
+
+/** A stable no-op for an omitted callback. An inline `?? (() => {})` fallback mints
+ *  a new function every render, which alone would defeat {@link MountedConversation}'s
+ *  memo for every surface. */
+const NOOP = (): void => {}
+
 export function ChatApp({
   vm,
   controller,
@@ -2164,6 +2193,31 @@ export function ChatApp({
   // ever sees ITS conversation's messages — never emptied in place by a foreign
   // switch), keeps per-project scroll + draft, and makes switching back instant.
   const convId = conversationIdOf(vm.projectId)
+
+  // REF-STABILIZED CALLBACKS. Every mounted surface takes these as props, and
+  // `MountedConversation` is memoized — so a caller that passes an inline arrow (as
+  // `ProjectShell` does for `onOpenActivity`) would otherwise hand every surface a
+  // new prop on every render and silently defeat that memo. Stabilizing HERE keeps
+  // the guarantee a property of this component rather than a rule each caller has to
+  // remember, which is the difference between an optimization that holds and one
+  // that decays the next time somebody adds a prop.
+  const cbRef = useRef({ onOpenDocLink, paneOnOpenDoc, onOpenActivity })
+  cbRef.current = { onOpenDocLink, paneOnOpenDoc, onOpenActivity }
+  const stableOpenDocLink = useCallback((projectId: string, path: string): void => {
+    cbRef.current.onOpenDocLink?.(projectId, path)
+  }, [])
+  const stablePaneOpenDoc = useCallback((projectId: string, path: string): void => {
+    cbRef.current.paneOnOpenDoc?.(projectId, path)
+  }, [])
+  const stableOpenActivity = useCallback((projectId: string | null): void => {
+    cbRef.current.onOpenActivity?.(projectId)
+  }, [])
+  // Presence still routes through the caller's own value: a surface renders a doc
+  // link as a plain anchor when no handler was supplied, so the wrapper must not
+  // make an absent handler look present.
+  const openDocLink = onOpenDocLink !== undefined ? stableOpenDocLink : undefined
+  const paneOpenDoc = paneOnOpenDoc !== undefined ? stablePaneOpenDoc : undefined
+  const openActivity = onOpenActivity !== undefined ? stableOpenActivity : NOOP
 
   // Per-conversation frozen-vm cache, keyed by convId. Updated during render for
   // the ACTIVE conversation only, and only when the live vm actually carries this
@@ -2258,7 +2312,7 @@ export function ChatApp({
             config={config}
             draft={draft}
             {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-            {...(onOpenDocLink !== undefined ? { onOpenDocLink } : {})}
+            {...(openDocLink !== undefined ? { onOpenDocLink: openDocLink } : {})}
             showPane={paneEligible === true}
             // Each surface scopes its pane to ITS OWN conversation's project (not
             // the globally-active one), so a kept-alive background surface never
@@ -2268,8 +2322,8 @@ export function ChatApp({
             // (`GENERAL_CONV_ID`) is now collision-proof, but `hostVm.projectId` is
             // still the single source of truth for which board this surface owns.
             paneProjectId={hostVm.projectId ?? ''}
-            onOpenActivity={onOpenActivity ?? ((): void => {})}
-            {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
+            onOpenActivity={openActivity}
+            {...(paneOpenDoc !== undefined ? { paneOnOpenDoc: paneOpenDoc } : {})}
           />
         )
       })}

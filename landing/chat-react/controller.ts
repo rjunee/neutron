@@ -386,6 +386,54 @@ const TRANSCRIPT_CACHE_LIMIT = 24
  * cover every field the VM emits). No JSON.stringify, no deep recursion — flat
  * `===` on scalars, length + element compare on the array/object fields.
  */
+/**
+ * A TOTAL, flat comparator over {@link ChatViewModel} — "would a subscriber see any
+ * difference?". `NeutronChatController.publish` uses it to skip notifying (and so to
+ * skip a whole synchronous React render) for a frame that carries no change.
+ *
+ * ── WHY IT IS A MAPPED TYPE AND NOT A HAND-WRITTEN `&&` CHAIN ────────────────────
+ * The failure mode of a comparator like this is asymmetric and nasty: a field it
+ * FORGETS makes a real update invisible, silently and forever, and no test that does
+ * not exercise that exact field will notice. Written as a record keyed by
+ * `keyof ChatViewModel`, adding a field to the view-model without deciding how it
+ * compares is a COMPILE error instead — the one shape of mistake that matters is the
+ * one the type system can catch for free.
+ *
+ * Every field compares by `===`, which is exact rather than merely cheap: `computeVm`
+ * already reuses row objects ({@link sameRenderMessage}) and the messages array when
+ * a frame is unchanged, and every other field is either a scalar or an object held on
+ * the controller and replaced only when it genuinely changes. So identity here means
+ * "not changed", and a false NEGATIVE (a new-but-equal object) only costs the render
+ * that used to happen unconditionally.
+ */
+const VM_FIELD_EQUAL: {
+  readonly [K in keyof ChatViewModel]: (a: ChatViewModel[K], b: ChatViewModel[K]) => boolean
+} = {
+  messages: (a, b) => a === b,
+  isRunning: (a, b) => a === b,
+  awaitingFirstToken: (a, b) => a === b,
+  liveActivity: (a, b) => a === b,
+  hasActiveWork: (a, b) => a === b,
+  workBoardGrewNonce: (a, b) => a === b,
+  status: (a, b) => a === b,
+  pending: (a, b) => a === b,
+  projectId: (a, b) => a === b,
+  projects: (a, b) => a === b,
+  latestUserDelivery: (a, b) => a === b,
+  importProgress: (a, b) => a === b,
+  systemNotice: (a, b) => a === b,
+}
+
+const VM_FIELDS = Object.keys(VM_FIELD_EQUAL) as (keyof ChatViewModel)[]
+
+function sameViewModel(a: ChatViewModel, b: ChatViewModel): boolean {
+  for (const key of VM_FIELDS) {
+    const eq = VM_FIELD_EQUAL[key] as (x: unknown, y: unknown) => boolean
+    if (!eq(a[key], b[key])) return false
+  }
+  return true
+}
+
 function sameRenderMessage(a: RenderMessage, b: RenderMessage): boolean {
   if (
     a.id !== b.id ||
@@ -524,15 +572,34 @@ export class NeutronChatController {
   private readonly notices: RenderMessage[] = []
   /**
    * Task 6 (chat render fan-out) — per-render-id cache of the LAST emitted
-   * {@link RenderMessage} object. `computeVm` reuses the prior object (identity
-   * preserved) when a freshly-built candidate is structurally identical
-   * ({@link sameRenderMessage}), so assistant-ui's per-message-identity
-   * converter cache + row memos survive an unrelated `publish()`. Rebuilt fresh
-   * each `computeVm` (keyed by the current render id set) so vanished ids
-   * auto-prune. Covers durable rows (keyed by render `id`) and live streaming
-   * bubbles (keyed `stream:<messageId>`).
+   * {@link RenderMessage} object, PLUS the array they were emitted in. `computeVm`
+   * reuses the prior object (identity preserved) when a freshly-built candidate is
+   * structurally identical ({@link sameRenderMessage}), so assistant-ui's
+   * per-message-identity converter cache + row memos survive an unrelated
+   * `publish()`. The `rows` map is rebuilt each `computeVm` (keyed by the current
+   * render id set) so vanished ids auto-prune. Covers durable rows (keyed by render
+   * `id`) and live streaming bubbles (keyed `stream:<messageId>`).
+   *
+   * ── WHY IT IS KEYED BY TOPIC (2026-08-17) ─────────────────────────────────────
+   * It used to be ONE flat map for the whole controller, which made it useless for
+   * the case it mattered most in: a project switch. `computeVm` builds the next map
+   * from the ENTERED topic's rows, so the map it consults still held the LEFT
+   * topic's — every lookup missed, every row was minted as a NEW object, and the
+   * messages array was new too. Downstream that is not a small waste: the bubble
+   * contexts in `ChatApp` are `useMemo`'d on the messages array, a context value
+   * change bypasses `React.memo`, and assistant-ui's converter cache is keyed on
+   * message identity — so a switch BACK into a project whose transcript had not
+   * changed by one byte re-converted and re-rendered every row in it. Keyed by
+   * topic, the same switch reuses both the row objects and the array, the memos
+   * hold, and the incoming surface re-renders nothing.
+   *
+   * Bounded by {@link TRANSCRIPT_CACHE_LIMIT} in last-use order, alongside (and for
+   * the same reason as) {@link transcriptCache}.
    */
-  private renderCache = new Map<string, RenderMessage>()
+  private readonly renderCaches = new Map<
+    string,
+    { rows: Map<string, RenderMessage>; messages: RenderMessage[] }
+  >()
   private connStatus: ConnStatus = 'idle'
   /**
    * Chat-rail stability — true while a project switch's cold socket is doing its
@@ -710,6 +777,7 @@ export class NeutronChatController {
     // holding every visited topic's rows and able to paint them on restart —
     // a lifecycle invariant asserted nowhere and held by nothing.
     this.transcriptCache.clear()
+    this.renderCaches.clear()
   }
 
   setActive(active: boolean): void {
@@ -1311,6 +1379,13 @@ export class NeutronChatController {
       for (const topic of [...this.transcriptCache.keys()]) {
         if (!live.has(topic)) this.transcriptCache.delete(topic)
       }
+      // The render cache is the SAME rows one derivation later, keyed the same way,
+      // so it inherits the same hazard verbatim — a recreated project reusing a
+      // deleted one's topic would otherwise re-enter on the dead project's row
+      // objects. Invalidate both or neither.
+      for (const topic of [...this.renderCaches.keys()]) {
+        if (!live.has(topic)) this.renderCaches.delete(topic)
+      }
       // Refresh the rail list; the active conversation is NOT changed here (see
       // the note above — per-project chat enters a project only via an explicit
       // `setProject`, which re-scopes the socket).
@@ -1411,6 +1486,30 @@ export class NeutronChatController {
       const oldest = this.transcriptCache.keys().next()
       if (oldest.done === true) break
       this.transcriptCache.delete(oldest.value)
+    }
+  }
+
+  /**
+   * File this frame's row objects + messages array under the topic they belong to,
+   * evicting least-recently-used topics past {@link TRANSCRIPT_CACHE_LIMIT}.
+   *
+   * Same insert-or-move-to-end discipline as {@link touchTranscript}, and bounded
+   * for the same reason: a long session that tours many projects must not hold
+   * every transcript's render objects alive forever. Evicting only costs the next
+   * entry into that topic one full re-render, which is exactly what it cost before
+   * this cache existed.
+   */
+  private rememberRenderCache(
+    topic: string,
+    rows: Map<string, RenderMessage>,
+    messages: RenderMessage[],
+  ): void {
+    this.renderCaches.delete(topic)
+    this.renderCaches.set(topic, { rows, messages })
+    while (this.renderCaches.size > TRANSCRIPT_CACHE_LIMIT) {
+      const oldest = this.renderCaches.keys().next()
+      if (oldest.done === true) break
+      this.renderCaches.delete(oldest.value)
     }
   }
 
@@ -1570,8 +1669,34 @@ export class NeutronChatController {
     }
   }
 
+  /**
+   * Recompute the view-model and notify subscribers — UNLESS nothing changed.
+   *
+   * A publish that carries no change is not free: `publish()` notifies React, React
+   * flushes the render SYNCHRONOUSLY inside the event that called it, and the whole
+   * chat surface walks its message list again to conclude it had nothing to do.
+   * `setProject` hits this on its most common path — it paints the entered topic's
+   * cached transcript and then unconditionally `void this.handleChange()`s, whose
+   * resolved read is, for a project nobody wrote to while the owner was away, byte
+   * for byte what was just painted. That was a SECOND full render charged to every
+   * switch for no visible difference.
+   *
+   * The equality is cheap and exact because the hard part is already done upstream:
+   * `computeVm` reuses row objects ({@link sameRenderMessage}) and the messages ARRAY
+   * when a frame is unchanged, so a flat `===` over the VM's own fields decides it.
+   * A no-change publish keeps the PRIOR object, so `getViewModel()` and React's
+   * `useState` bail-out both see an unchanged identity.
+   *
+   * Correctness note: this suppresses a NOTIFICATION, never a state change — every
+   * mutation still happened on `this` before the call, and the very next publish that
+   * does differ emits everything accumulated since. It cannot swallow an update,
+   * because "differs" is computed from the VM that would have been sent.
+   */
   private publish(): void {
-    this.vm = this.computeVm()
+    const next = this.computeVm()
+    const prev = this.vm as ChatViewModel | undefined
+    if (prev !== undefined && sameViewModel(prev, next)) return
+    this.vm = next
     for (const fn of this.listeners) fn(this.vm)
   }
 
@@ -1585,6 +1710,8 @@ export class NeutronChatController {
     // Task 6 — build into a NEW cache keyed by the current render-id set, reusing
     // the prior object (identity preserved) whenever a candidate is byte-identical
     // so assistant-ui's converter cache + row memos survive unrelated publishes.
+    const cacheKey = this.topicForProject(this.projectId)
+    const prevCache = this.renderCaches.get(cacheKey)
     const nextCache = new Map<string, RenderMessage>()
     const durable = this.msgs.filter((m) => !(m.role === 'agent' && isColdStartAck(m.body)))
     const rendered: RenderMessage[] = durable.map((m) => {
@@ -1615,7 +1742,7 @@ export class NeutronChatController {
         // ISSUES #419 — server state first, this session's optimistic tap second.
         chosenValue: spentChoiceValue(m, this.chosen.get(id)),
       }
-      const prev = this.renderCache.get(id)
+      const prev = prevCache?.rows.get(id)
       const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next
       nextCache.set(id, chosen)
       return chosen
@@ -1657,7 +1784,7 @@ export class NeutronChatController {
       // Task 6 — a token append changes `text` → new identity (correct: the
       // bubble re-renders); an UNRELATED publish mid-stream reuses the prior
       // bubble object so only the streaming row (not the transcript) churns.
-      const prev = this.renderCache.get(streamId)
+      const prev = prevCache?.rows.get(streamId)
       const chosen = prev !== undefined && sameRenderMessage(prev, next) ? prev : next
       nextCache.set(streamId, chosen)
       liveStreams.push(chosen)
@@ -1666,17 +1793,17 @@ export class NeutronChatController {
     // errors), ordered together by arrival (`seq`) so a streamed reply and a
     // notice interleave correctly. Both sort AFTER the durable transcript.
     const tail = [...liveStreams, ...this.notices].sort((a, b) => a.createdAt - b.createdAt)
-    // Task 6 — swap in the freshly-built cache (auto-prunes ids that vanished
-    // this frame). Notices are already stable object refs (built once, held on
-    // `this.notices`), so they need no cache entry.
-    this.renderCache = nextCache
     const built = [...rendered, ...tail]
-    // Task 6 — ARRAY identity reuse: if the previous vm's messages array is the
+    // Task 6 — ARRAY identity reuse: if the last array emitted FOR THIS TOPIC is the
     // same length with every element reference-equal (an unrelated publish that
     // touched no row), reuse the PRIOR array so assistant-ui's thread-level memo
-    // sees an unchanged reference and skips the whole list. Read `this.vm`
-    // defensively — computeVm first runs from the constructor before it's set.
-    const prevMessages = (this.vm as ChatViewModel | undefined)?.messages
+    // sees an unchanged reference and skips the whole list.
+    //
+    // Read from the per-topic cache, NOT from `this.vm`: on a switch `this.vm` is
+    // the topic we just LEFT, so comparing against it can only ever fail, and the
+    // one moment this reuse is worth the most — re-entering a project whose
+    // transcript has not changed — was the one moment it could not fire.
+    const prevMessages = prevCache?.messages
     let messages = built
     if (prevMessages !== undefined && prevMessages.length === built.length) {
       let allSame = true
@@ -1688,6 +1815,10 @@ export class NeutronChatController {
       }
       if (allSame) messages = prevMessages
     }
+    // Task 6 — swap in the freshly-built cache (auto-prunes ids that vanished this
+    // frame). Notices are already stable object refs (built once, held on
+    // `this.notices`), so they need no cache entry.
+    this.rememberRenderCache(cacheKey, nextCache, messages)
     // Latest user message's delivery — for a Telegram-style status line.
     let latestUserDelivery: DeliveryState | null = null
     for (let i = rendered.length - 1; i >= 0; i--) {
