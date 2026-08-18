@@ -371,7 +371,14 @@ describe('a switch re-renders the surfaces whose visibility changed, and no othe
       mock.module(chatPath, () => chatExports)
       mock.module(adapterPath, () => adapterExports)
     }
-  })
+    // EXPLICIT BUDGET, well over the default 5 s. This case mounts three real
+    // conversation surfaces and drives four switches through `act()`, and
+    // `mock.module` invalidates the module graph it then re-imports — so it lands a
+    // second or two under the default when run alone and OVER it when run after
+    // other files in the same process. It was green in CI purely because the shard
+    // split happened to give it a cheap neighbourhood, which is a pass for a reason
+    // that has nothing to do with the code under test.
+  }, 60_000)
 })
 
 describe('the stopwatch reports the switch the owner actually waited for', () => {

@@ -250,8 +250,9 @@ export class SwitchTimer {
   private timer: ReturnType<typeof setTimeout> | null = null
   private paintTimer: ReturnType<typeof setTimeout> | null = null
   private flushed = false
-  /** See {@link servedFromCache}. Decides which marks are required and which may
-   *  set `total`; never changes what is measured, only what it is called. */
+  /** See {@link servedFromCache}. Decides which marks are REQUIRED and which may set
+   *  `total`, and rides out on the record so the reader can derive the rest; never
+   *  changes what is measured, only what it is called. */
   private cached = false
 
   constructor(
@@ -283,10 +284,6 @@ export class SwitchTimer {
 
   private get requiredMarks(): readonly SwitchMark[] {
     return this.cached ? REQUIRED_MARKS_WHEN_CACHED : REQUIRED_MARKS
-  }
-
-  private get absenceIsNormal(): ReadonlyMap<SwitchMark, string> {
-    return this.cached ? ABSENCE_IS_NORMAL_WHEN_CACHED : ABSENCE_IS_NORMAL
   }
 
   /**
