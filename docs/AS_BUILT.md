@@ -391,6 +391,91 @@ for a different problem:
   that matters.
 
 Landed by PR #402.
+## 2026-08-17 — the switch was re-rendering every transcript alive, including the ones nobody was looking at (#409)
+
+Takes over #394 (its commits are included verbatim; both of its held P2s are fixed
+here) and closes the actual latency complaint behind it: 3-9 s to switch projects in
+the web client.
+
+**The cause, measured with the render finally separable from the store.** A switch
+re-rendered every mounted conversation's whole transcript. Two independent reasons,
+neither visible from a single-surface measurement:
+
+- `landing/chat-react/controller.ts` kept its render cache in ONE map for the whole
+  controller. `computeVm` builds the next map from the ENTERED topic's rows, so on a
+  switch it consulted a map still holding the topic just LEFT — every lookup missed,
+  every row was minted fresh, and the messages array was new too. Nothing about that
+  looks wrong from outside: the frame is correct and the rows are correct. But the
+  bubble contexts in `ChatApp` are memoized on that array, **a context value change
+  bypasses `React.memo`**, and assistant-ui's converter cache is keyed on message
+  identity — so re-entering a project whose transcript had not changed by a byte
+  re-converted and re-rendered every row in it.
+- `ChatApp` renders EVERY mounted conversation on every publish and nothing was
+  memoized, so each publish also paid for the transcripts of up to seven surfaces the
+  owner was not looking at.
+
+**The measurement that named the second one.** On a throwaway harness (real
+controller + real `ChatApp` under happy-dom, two projects, both surfaces warm, one
+switch timed with a `React.Profiler` and render counters on the bubbles), switching to
+an EMPTY conversation cost 353 ms with two 533-message transcripts alive behind it and
+98 ms with two 50-message ones — **with zero bubble re-renders in both cases.** A
+switch to a conversation with nothing in it was being charged for transcripts neither
+on screen nor entered. Headline pair, 533 messages per project: 1106 ms wall / 438 ms
+in React / 267 bubble re-renders, down to 144 ms / 49 ms / 0.
+
+⚠️ Those magnitudes come from a harness that is NOT committed and cannot be reproduced
+from this tree; read them as indicative. Method, for anyone redoing it: mount `ChatApp`
+over a `NeutronChatController` with two seeded topics, warm both surfaces, then time one
+`setProject` inside `act()` with a `Profiler` at the root. No timing assertion was added
+to the suite — it would measure the runner, which is what `scripts/ci/lint.sh` CHECK 5
+exists to keep out.
+
+**Markdown re-parses were already zero** before any of this, because `Markdown` is
+memoized and the bodies are unchanged strings. Worth recording: it was the obvious
+suspect, the one a profile of a cold mount would have accused, and windowing the list
+to fix it would have optimised something that was not firing.
+
+**Shipped.** The render cache is keyed by topic, alongside the transcript cache it
+mirrors and invalidated with it (deleted project, `stop()`, LRU bound).
+`MountedConversation` is memoized, with every callback prop ref-stabilized at the
+`ChatApp` boundary and `useAttachmentDraft`'s return object memoized — load-bearing,
+not tidiness, since `ProjectShell` passes an inline arrow and one unstable prop turns
+the memo into a no-op silently. `publish()` skips notifying when the frame is
+unchanged, which removes the second full render `setProject` used to force by
+unconditionally kicking a refresh that resolves to what is already on screen; its
+comparator is a record keyed by `keyof ChatViewModel`, so adding a field without
+deciding how it compares is a compile error rather than a frozen update nobody sees.
+
+**The stopwatch's own second misattribution, fixed.** `transcript_read` and
+`transcript` were REQUIRED, so a switch already painted from cache stayed open until a
+background refresh nobody waited on answered, and then reported that wait as the
+store's. That is the same error `frame_rendered` was added to end, reappearing inside
+the fix for it — the first version charged the store for the render it was waiting
+behind, this one charged the switch for work done after the switch was over. Both come
+of treating "the last thing that finished" as "what the user waited for". `setProject`
+now TELLS the timer when the first frame carried cached rows, because the marks cannot
+reveal it: both kinds of switch stamp the same five in the same order and the only
+difference is what was on screen while they were stamped. Report schema 2 to 3, since
+`total` changed meaning again.
+
+`landing/chat-react/__tests__/switch-render-cost.test.tsx` pins all of it in counts and
+object identities, never durations — the per-surface render counter is a spy on
+`useChatRuntime` (called once per surface render) and the per-message counter a spy on
+`toThreadMessage`, so no counter had to be added to the code under test. It also carries
+the inverse case (a refresh that brings something NEW still publishes), because a
+comparator that over-matches freezes the transcript and passes every test that only
+counts publishes downward. `bun test landing/chat-react/` 693 pass / 0 fail; typecheck
+clean.
+
+| Mutant | Result |
+| --- | --- |
+| render-cache lookup mis-keyed (always misses) | RED — array identity, publish count, render count |
+| `publish()` notifies unconditionally | RED — publish count and render count |
+| `MountedConversation` not memoized | RED — 6 surface renders, expected 2 |
+| `onOpenActivity` back to an inline fallback arrow | RED — surface render count |
+| draft object identity unstable | RED — 3 surface renders, expected 2 |
+| timer never told the frame was cache-served | RED — record never completes at the paint |
+
 ## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render
 
 The owner's web UI took 3-9 s to switch projects. 47 real `project_switch` samples from
