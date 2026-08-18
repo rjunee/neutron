@@ -177,6 +177,7 @@ const {
   // thread it falls back to the repo-of-record copy (same precedent as
   // worktree-cleanup.sh below).
   checkpointScript = null,
+  stageStampScript = null,
   codexBuildScript = null,
   codexReviewScript = null,
   // Worktree-cleanup script path (ISSUES #541). Same threading contract as
@@ -277,6 +278,15 @@ const kimiConfigured = kimiConfiguredArg === true
 // launcher that threads those also threads checkpointScript — the repoPath
 // fallback covers only legacy callers.
 const checkpointSh = checkpointScript || `${repoPath}/trident/checkpoint.sh`
+const stageStampSh = stageStampScript || `${repoPath}/trident/stage-stamp.sh`
+
+// Prompt-side stamps ride existing agent turns; they must never create a new seat.
+// Match checkpointEnv's coordinate gate so legacy/dry callers keep byte-identical
+// prompts, and leave failure semantics to stage-stamp.sh (which always exits 0).
+function workflowStageStampCommand(stage) {
+  if (!dbPath || !runId) return null
+  return `bash ${shSingleQuote(stageStampSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${shSingleQuote(stage)}`
+}
 
 // NO repoPath fallback, deliberately — resolving the wrapper from the repo being
 // built is the defect (Open worked by coincidence, everything else 127'd or drifted);
@@ -902,7 +912,14 @@ const FORGE_SCHEMA = {
 const CODEX_FORGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: [...FORGE_SCHEMA.required, 'codexStatus', 'trailerComplete', 'wrapperExitCode', 'preservedWork'],
+  required: [
+    ...FORGE_SCHEMA.required,
+    'codexStatus',
+    'trailerComplete',
+    'wrapperExitCode',
+    'preservedWork',
+    'wrapperErrTail',
+  ],
   properties: {
     // `deviatedFromSpec` RIDES ALONG IN THE SPREAD BUT IS INERT ON THIS ROUTE, and
     // that is deliberate rather than an oversight. The agent filling THIS schema is
@@ -921,6 +938,11 @@ const CODEX_FORGE_SCHEMA = {
     trailerComplete: { type: 'boolean' },
     wrapperExitCode: { type: ['number', 'null'] },
     preservedWork: { type: 'boolean' },
+    wrapperErrTail: {
+      type: 'string',
+      description:
+        'verbatim bounded tail of the wrapper .err file when codexStatus !== connected; empty string "" when connected',
+    },
   },
 }
 
@@ -1533,6 +1555,17 @@ function codexBriefByPath(brief) {
   }
 }
 
+function wrapperErrTailInstruction(errFile) {
+  return `Whenever \`codexStatus !== 'connected'\`, run \`tail -c 400 ${shSingleQuote(errFile)} 2>/dev/null || true\` and copy its output VERBATIM into \`wrapperErrTail\`; when \`codexStatus === 'connected'\`, set \`wrapperErrTail\` to \`""\`.`
+}
+
+function codexDeferralMessage(label, codexStatus, wrapperErrTail) {
+  const tail = typeof wrapperErrTail === 'string' ? wrapperErrTail : ''
+  return tail.length > 0
+    ? `${label} deferred (codexStatus=${codexStatus}): ${tail}`
+    : `${label} deferred (codexStatus=${codexStatus}): wrapper stderr was empty.`
+}
+
 function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   const uniq = runId || slug
   const briefFile = `/tmp/trident-codex-build-${uniq}-${slot}.brief`
@@ -1620,9 +1653,15 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     partMissingInstructions += `\n- EXIT 3 with CODEX_BUILD_BRIEF_PART_CORRUPT in ${errFile} → read the named file in the error: if it is one of YOUR two segment files (${a1File} or ${a2File}), re-run ALL segment calls from CALL 1 exactly once; if it is a HOST-written part path, no retry by you can fix it and you must NOT rewrite the file — report codexStatus='deferred'.`
   }
   const diffFile = codexBuildDiffFile()
+  const buildAgentStampCommand = workflowStageStampCommand('build-agent-start')
+  const buildAgentStampInstruction = buildAgentStampCommand === null
+    ? ''
+    : `FIRST run exactly this standalone Bash invocation, then proceed; never let it affect your work:\n\`${buildAgentStampCommand}\`\nThis is its own separate Bash call. NEVER merge or combine it with CALL 1 or any chunk write.\n`
+  const wrapperStampCommand = workflowStageStampCommand('wrapper-invoke')
+  const wrapperStampPrefix = wrapperStampCommand === null ? '' : `${wrapperStampCommand}; `
   const checkpointEnv = !dbPath || !runId
     ? ''
-    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)}`
+    : ` NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT=${shSingleQuote(checkpointSh)} NEUTRON_CODEX_BUILD_CHECKPOINT_DB=${shSingleQuote(dbPath)} NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID=${shSingleQuote(runId)} NEUTRON_CODEX_BUILD_CHECKPOINT_NAME=${shSingleQuote(artifactCheckpointName)} NEUTRON_CODEX_BUILD_STAGE_SCRIPT=${shSingleQuote(stageStampSh)}`
   // The model assignment, exactly as the review lane does it: the id belongs to the
   // subprocess, never to the wrapping agent. Empty when no registry was threaded,
   // which invokes the wrapper on its own pinned default.
@@ -1645,11 +1684,11 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
   return `You are the CODEX BUILD bridge for trident. The BUILD ITSELF runs in a codex subprocess; YOUR job is to launch it and report the six values its wrapper measures. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 DO NOT BUILD ANYTHING YOURSELF. Do not edit a file, do not run the tests, do not commit, and do not "finish the job" if the subprocess falls short — this phase was deliberately moved off Claude, and work you do here defeats that. Run the command, read the output, fill the schema.
 Work from your CURRENT WORKING DIRECTORY (your isolated worktree — do NOT \`cd\` anywhere).
-${writeBriefInstructions}
+${buildAgentStampInstruction}${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -1668,6 +1707,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
 For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
+${wrapperErrTailInstruction(errFile)}
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
 }
 
@@ -1687,6 +1727,7 @@ function codexCollectPrompt(slot) {
   const trailerFile = `/tmp/trident-codex-build-${uniq}-${slot}.trailer`
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
   const outFile = `/tmp/trident-codex-build-${uniq}-${slot}.out`
+  const errFile = `/tmp/trident-codex-build-${uniq}-${slot}.err`
   return `You are the CODEX BUILD COLLECT bridge for trident. The wrapper for this run ALREADY FINISHED and wrote its completion trailer at ${trailerFile}. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFile}, ${exitFile}, and only the bounded transcript tail needed from ${outFile}, then map the completed build exactly as EXIT 0 below. NEVER EXIT SILENTLY.
 - EXIT 0 → codexStatus='connected'. Set trailerComplete=true and preservedWork=false. Copy the integer in ${exitFile} to wrapperExitCode, or null when it is absent.
@@ -1698,6 +1739,7 @@ Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFil
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+${wrapperErrTailInstruction(errFile)}
 Return via the schema.`
 }
 
@@ -1726,6 +1768,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → codexStatus='deferred'. Do not rewrite the brief or relaunch the wrapper from this wait bridge.
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
 For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values.
+${wrapperErrTailInstruction(errFile)}
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER EXIT SILENTLY.`
 }
 
@@ -1739,7 +1782,11 @@ For every completed trailer set trailerComplete=true, copy its wrapperExitCode, 
 async function forgeAgent(opts, tag, brief, slot) {
   const route = routeModel(opts.label, tag)
   if (route.transport !== 'cli') {
-    return await agent(brief, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
+    const stampCommand = workflowStageStampCommand('build-agent-start')
+    const stampInstruction = stampCommand === null
+      ? ''
+      : `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stampCommand}\`\n\n`
+    return await agent(`${stampInstruction}${brief}`, withModel({ ...opts, schema: FORGE_SCHEMA }, tag))
   }
   if (codexBuildSh === null) {
     throw new Error(
@@ -1811,9 +1858,7 @@ async function forgeAgent(opts, tag, brief, slot) {
     // the owner moved this phase to protect and would do it invisibly. Stop instead:
     // the catch{} persists a terminal failure naming the status, and the operator
     // reconnects codex or moves the phase back themselves.
-    throw new Error(
-      `${opts.label} was routed to the codex executor and NO BUILD HAPPENED (codexStatus=${res.codexStatus}) — see the codex-build wrapper stderr. Refusing to continue: falling back to Claude would silently spend the quota this route exists to save.`,
-    )
+    throw new Error(codexDeferralMessage(opts.label, res.codexStatus, res.wrapperErrTail))
   }
   // THE MEASURED BRANCH IS CHECKED, NOT JUST CARRIED. The wrapper reports the branch it
   // was standing on (`git rev-parse --abbrev-ref HEAD`) and already blanks the sha when
@@ -1860,7 +1905,11 @@ function planFablePrompt(resuming) {
   const resumeNote = resuming
     ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
-  return `You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+  const stampCommand = workflowStageStampCommand('plan-start')
+  const stampInstruction = stampCommand === null
+    ? ''
+    : `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stampCommand}\`\n\n`
+  return `${stampInstruction}You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for a governed, spec-driven Ralph build. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 You do the HIGH-VALUE THINKING; a SUBORDINATE executor (Opus/Sonnet) will carry out your spec verbatim — so be precise and complete. Work READ-ONLY from the repo of record ${repoPath} (base branch ${baseBranch}):${resumeNote}
 1. Read SPEC.md (the master spec) at the repo root and the changelog docs/AS_BUILT.md if present, and survey the CURRENT code SPEC.md governs. SPEC.md is authoritative — do NOT invent a competing plan doc.
 2. Diff the SPEC against the code to find what is still MISSING or WRONG. Regenerate the full IMPLEMENTATION_PLAN.md body as a PRIORITIZED '- [ ] <task>' checklist (mark already-satisfied items '- [x]'). Return it as \`implementationPlan\` (do NOT write it to disk — the executor persists it).
@@ -1897,9 +1946,11 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 
 function planProbePrompt() {
   const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
+  const stampCommand = workflowStageStampCommand('plan-start')
+  const stampStep = stampCommand === null ? '' : `0. \`${stampCommand}\`\n`
   return `Run EXACTLY the commands below from ${repoPath} and report what they print via the schema. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Do NOT modify anything. Do NOT read any other file. Do NOT interpret the plan's content.
-1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
+${stampStep}1. \`cd ${shSingleQuote(repoPath)} && git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true\`
 2. \`cd ${shSingleQuote(repoPath)} && git show ${shSingleQuote(planPath)}\`
 If step 2 fails (the file does not exist on that branch, or the branch does not exist), report \`{"planFound": false, "uncheckedCount": 0, "planBody": "", "planCksum": 0, "planBytes": 0}\` — that is a normal answer, not an error to retry around.
 Otherwise report \`planFound\` = true, \`planBody\` = the file's content VERBATIM (every byte, unedited and untruncated), and \`uncheckedCount\` = the number of still-unchecked task lines, which you MUST measure with \`grep -c\` rather than by eye:

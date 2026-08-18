@@ -44,6 +44,14 @@ function localProbe(): GitModeProbe {
   }
 }
 
+function prProbe(): GitModeProbe {
+  const probe = localProbe()
+  return {
+    ...probe,
+    hasGithubOrigin: async () => true,
+  }
+}
+
 let tmp: string
 let db: ProjectDb
 let store: TridentRunStore
@@ -115,6 +123,37 @@ describe('work_board_dispatch_build tool', () => {
     expect(tool.capability_required).toBe('agent:dispatch_subagent')
     expect(tool.approval_policy).toBe('prompt-user')
     expect(tool.input_schema.required).toEqual(['board_item_id', 'task'])
+  })
+
+  test('the tool advertises bound_pr and passes it through', async () => {
+    let createInput: Parameters<TridentRunStore['create']>[0] | null = null
+    const originalCreate = store.create.bind(store)
+    store.create = async (input) => {
+      createInput = input
+      return originalCreate(input)
+    }
+    const tool = toolFor()
+
+    expect((tool.input_schema.properties as Record<string, unknown> | undefined)?.bound_pr).toBeDefined()
+    expect(tool.input_schema.required).not.toContain('bound_pr')
+    const out = (await tool.handler(
+      { board_item_id: 'ready', task: 'review PR #524', bound_pr: 524 },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(out.ok).toBe(true)
+    expect(createInput).not.toBeNull()
+    expect(createInput!.bound_pr).toBe(524)
+  })
+
+  test('the tool surfaces the review refusal', async () => {
+    const out = (await toolFor().handler(
+      { board_item_id: 'ready', task: 'run a review round on PR #515' },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('bound_pr')
   })
 
   test('a ready item creates a bound run', async () => {
@@ -232,6 +271,34 @@ describe('work_board_dispatch_build tool', () => {
     const out = (await toolFor().handler({ board_item_id: 'ready', task: '   ' }, ctx)) as Record<string, unknown>
     expect(out.ok).toBe(false)
     expect(String(out.error)).toContain('task')
+  })
+
+  test('an already-landed rejection preserves the chokepoint message', async () => {
+    const reg = new ToolRegistry()
+    registerTridentBuildToolSurface(reg, {
+      store,
+      work_board: board(),
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      merge_mode_probe: prProbe(),
+      resolveRalph: async () => false,
+      landed_probe: async () => ({
+        pr: 336,
+        merged_at: null,
+        head_on_base: null,
+        base: 'main',
+      }),
+    })
+    const out = (await reg.get(WORK_BOARD_DISPATCH_BUILD_TOOL)!.handler(
+      { board_item_id: 'ready', task: 'build the export' },
+      ctx,
+    )) as Record<string, unknown>
+
+    expect(out.ok).toBe(false)
+    expect(String(out.error)).toContain('already merged as #336')
+    expect(String(out.error)).toContain('verify the card instead of rebuilding')
+    expect(store.listNonTerminal()).toEqual([])
+    expect(attached).toEqual([])
   })
 })
 

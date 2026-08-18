@@ -86,8 +86,11 @@ function buildHarness(opts: {
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_active_runs?: () => number
+  record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
+  /** null exercises production base detection instead of the usual deterministic test base. */
+  base_branch?: string | null
 }): Harness {
   const hostCalls: string[][] = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
@@ -100,14 +103,29 @@ function buildHarness(opts: {
   const sim = buildSimFirer(store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
-    if (cmd.join(' ').includes('rev-parse --is-shallow-repository')) return ok('false')
-    return opts.hostResponder ? opts.hostResponder(cmd) : ok()
+    const joined = cmd.join(' ')
+    if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    const stubbed = opts.hostResponder?.(cmd)
+    if (
+      stubbed !== undefined &&
+      (!joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}') ||
+        !stubbed.ok ||
+        stubbed.stdout.trim() !== '')
+    ) {
+      return stubbed
+    }
+    // Board-shaped PR runs now pin before every first fire. Most tests do not care
+    // which base commit was observed, so give the harness a valid fetched tip while
+    // preserving any explicit responder value (including failures) above.
+    if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
+      return ok('0'.repeat(40))
+    }
+    return stubbed ?? ok()
   }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),
     run_host: host,
-    base_branch: 'main',
     now,
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
     // network call). The suite injects a no-op wait so those attempts stay free.
@@ -120,6 +138,7 @@ function buildHarness(opts: {
       return store.update(id, patch).then(() => {})
     },
   }
+  if (opts.base_branch !== null) o.base_branch = opts.base_branch ?? 'main'
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
@@ -129,6 +148,7 @@ function buildHarness(opts: {
   if (opts.resolve_reflection_context !== undefined)
     o.resolve_reflection_context = opts.resolve_reflection_context
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
+  if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
@@ -162,6 +182,24 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
     ...over,
   })
 }
+
+test('a bound_pr run never takes the build path', async () => {
+  const h = buildHarness({
+    plan: () => ({ result: { verdict: 'APPROVE', prNumber: 515, branch: 'feat-x' } }),
+    base_branch: null,
+  })
+  const run = await createRun({ bound_pr: 515 })
+
+  await h.loop.runOnce()
+
+  expect(h.inputs).toHaveLength(0)
+  expect(h.hostCalls).toHaveLength(0)
+  const persisted = store.get(run.id)!
+  expect(persisted.phase).toBe('failed')
+  expect(persisted.failure_reason).toContain('PR #515')
+  expect(persisted.failure_reason).toContain('review-only')
+  expect(persisted.failure_reason).toContain('no branch, no commit')
+})
 
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
@@ -2383,6 +2421,67 @@ describe('orchestrator — fire did not settle → failed', () => {
   })
 })
 
+describe('orchestrator — durable pre-build stage stamps', () => {
+  test('a successful fire stamps launch, dispatch, and settle in order', async () => {
+    const stamped: Array<{ run_id: string; stage: string; meta: string | null | undefined }> = []
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      record_stage: (run_id, stage, meta) => stamped.push({ run_id, stage, meta }),
+    })
+    const created = await createRun()
+    const run = (await store.update(created.id, { round: 3, ralph_round: 2 }))!
+
+    await h.loop.runOnce()
+
+    expect(stamped.map((entry) => entry.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+    ])
+    expect(stamped.every((entry) => entry.run_id === run.id)).toBe(true)
+    expect(stamped[0]!.meta).toContain('round=3')
+    expect(stamped[0]!.meta).toContain('ralph_round=2')
+  })
+
+  test('a failed fire stamps dispatch but never settle', async () => {
+    const stages: string[] = []
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'failed', error: 'boom' } }),
+      record_stage: (_run_id, stage) => stages.push(stage),
+    })
+    await createRun()
+
+    await h.loop.runOnce()
+
+    expect(stages).toEqual(['launch-start', 'fire-dispatched'])
+  })
+
+  test('a throwing record_stage seam cannot prevent the fire from advancing', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      record_stage: () => {
+        throw new Error('ledger unavailable')
+      },
+    })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.subagent_status).toBe('running')
+  })
+
+  test('omitting record_stage preserves the existing successful fire path', async () => {
+    const h = buildHarness({ plan: () => ({ fire: { status: 'fired', error: null } }) })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.subagent_status).toBe('running')
+  })
+})
+
 describe('orchestrator — idempotent crash-resume', () => {
   test('a prior partial run threads resume_checkpoint + reuses the existing PR (no dup)', async () => {
     const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' } }) })
@@ -3310,7 +3409,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
   })
 
-  test('a FRESH pr launch fetches and pins origin/main before firing', async () => {
+  test('a FRESH board-shaped pr launch fetches and pins origin/main before firing', async () => {
     const HEAD = 'a'.repeat(40)
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
@@ -3321,7 +3420,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
         return ok()
       },
     })
-    await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
     await launchOnce(h)
 
     expect(h.inputs).toHaveLength(1)
@@ -3334,6 +3433,39 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
     expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
       .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+  })
+
+  test('a checkpointed resume does not fetch or pin a base', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    const run = await resumeRun()
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBeNull()
+    expect(store.get(run.id)?.base_behind).toBeNull()
+  })
+
+  test('a pre-pinned relaunch keeps its original base without fetching again', async () => {
+    const PINNED = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: PINNED, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(PINNED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(PINNED)
+    expect(store.get(run.id)?.base_behind).toBe(7)
   })
 
   test('two failed fresh-base fetches fail loudly without firing', async () => {

@@ -25,6 +25,7 @@ import {
   buildSubstrateWorkflowFire,
   CODEX_BUILD_SCRIPT_PATH,
   CODEX_REVIEW_SCRIPT_PATH,
+  STAGE_STAMP_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -473,6 +474,13 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // containing a space. fileURLToPath decodes; new URL(...).pathname does not.
     expect(threaded).not.toContain('%')
     expect(threaded.startsWith('/')).toBe(true)
+  })
+
+  test('buildWorkflowArgs carries the harness stage-stamp writer path', () => {
+    const threaded = buildWorkflowArgs(input()).stageStampScript
+    expect(threaded).toBe(STAGE_STAMP_SCRIPT_PATH)
+    expect(String(threaded)).toEndWith('/trident/stage-stamp.sh')
+    expect(existsSync(String(threaded))).toBe(true)
   })
 
   test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {

@@ -38,6 +38,8 @@
 #   in  NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY `<bytes>:<fnv32>` for a non-parts brief AS
 #                                       THE WORKFLOW COMPOSED IT. Required only on the
 #                                       chunked bridge-agent fallback path.
+#   in  NEUTRON_CODEX_BUILD_STAGE_SCRIPT optional append-only stage-ledger writer.
+#                                       Best-effort; it can never change build exit.
 #   in  CODEX_HOME                      the per-project subscription credential dir.
 #   in  CODEX_BUILD_MODEL               which GPT tier to build on. A DIFFERENT knob
 #                                       from the reviewer's `CODEX_REVIEW_MODEL` on
@@ -407,6 +409,15 @@ MERGE_MODE='pr'
 [ "${3:-}" = 'local' ] && MERGE_MODE='local'
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
+
+# Pre-build latency stamp: the durable "build started" instant (2026-08-18 card).
+# Best-effort by contract — stage-stamp.sh always exits 0; `|| true` belts it.
+if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
+  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+  bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" wrapper-start || true
+fi
+
 BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
 # local branch tip, and the remote branch tip — one per line. Populated just before
@@ -1116,6 +1127,13 @@ fi
 # reading its own `/proc/self/environ`. Both, because the exclude covers the whole
 # family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
 # matter absolutely.
+# Pre-build latency stamp: codex is about to consume the assembled brief.
+if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
+  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+  && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+  bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" codex-exec-start || true
+fi
+
 if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
   emit_trailer ok

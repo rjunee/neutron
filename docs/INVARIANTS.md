@@ -731,6 +731,7 @@ with cross-references noted inline.
     is never treated as proof that its detached build died. The 90-minute no-advance and 2-hour
     max-inflight backstops remain unchanged.
     `trident/tick.ts`, `trident/liveness.ts`, `trident/liveness-death-e2e.test.ts`.
+117. Brief-part receipts are measured from persisted bytes before a manifest can be returned. `trident/brief-parts.ts` (`writeVerified`), protected by the persistent-truncation regression in `trident/brief-parts.test.ts`.
 
 ## 10. Naming & vocabulary (`critic-naming-vocab.md` §6)
 

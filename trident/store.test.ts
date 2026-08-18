@@ -3,6 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { changeSignatureEntries, COLS, TridentRunStore } from './store.ts'
 
@@ -13,6 +14,7 @@ beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-store-'))
   seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
+  applyMigrations(db.raw())
 })
 
 afterEach(() => {
@@ -60,6 +62,63 @@ describe('TridentRunStore', () => {
       )
       .get('code_trident_runs')
     expect(row?.name).toBe('code_trident_runs')
+  })
+
+  test('recordStageEvent + stageEvents round-trip nullable meta in insertion order', async () => {
+    const times = [
+      '2026-08-18T10:00:00.100Z',
+      '2026-08-18T10:00:00.300Z',
+      '2026-08-18T10:00:00.200Z',
+      '2026-08-18T10:00:00.400Z',
+    ]
+    const store = new TridentRunStore(db, () => times.shift()!)
+    await store.recordStageEvent('run-stage', 'launch-start', 'round=1 ralph_round=0')
+    await store.recordStageEvent('run-stage', 'fire-dispatched')
+    await store.recordStageEvent('run-stage', 'fire-settled', null)
+    await store.recordStageEvent('other-run', 'wrapper-start')
+
+    const got = store.stageEvents('run-stage')
+    expect(got.map(({ stage, at, meta }) => ({ stage, at, meta }))).toEqual([
+      { stage: 'launch-start', at: '2026-08-18T10:00:00.100Z', meta: 'round=1 ralph_round=0' },
+      { stage: 'fire-dispatched', at: '2026-08-18T10:00:00.300Z', meta: null },
+      { stage: 'fire-settled', at: '2026-08-18T10:00:00.200Z', meta: null },
+    ])
+    expect(got[0]!.id).toBeLessThan(got[1]!.id)
+    expect(got[1]!.id).toBeLessThan(got[2]!.id)
+  })
+
+  test('stage events survive a reap and append across a re-fire', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'stage-survival',
+      project_slug: 't1',
+      repo_path: '/repo',
+      task: 'measure the launch',
+    })
+    for (const stage of ['launch-start', 'fire-dispatched', 'fire-settled']) {
+      await store.recordStageEvent(run.id, stage)
+    }
+
+    await store.update(run.id, {
+      phase: 'failed',
+      subagent_status: 'failed',
+      failure_reason: 'launcher reaped',
+    })
+    expect(store.stageEvents(run.id).map((event) => event.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+    ])
+
+    await store.recordStageEvent(run.id, 'launch-start', 'round=2 ralph_round=0')
+    await store.recordStageEvent(run.id, 'fire-dispatched')
+    expect(store.stageEvents(run.id).map((event) => event.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+      'launch-start',
+      'fire-dispatched',
+    ])
   })
 
   test('create + get round-trips every column with defaults', async () => {
