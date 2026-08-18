@@ -120,21 +120,31 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       // no use to US, though — NOTIFY_SOCKET is cleared above, so sdNotify is a
       // no-op here and the log line is the only observable marker.
       //
-      // The previous revision polled `_migrations` for `count > 0` and then
-      // slept a fixed 100 ms, under a comment claiming the poll "proves the
-      // handler is registered". It proves no such thing, twice over: the poll
-      // breaks PART-WAY THROUGH the migration replay (each migration commits in
-      // its own transaction, so a non-zero row count means migration k of 124,
-      // not 124 of 124 — measured breaking at k=2..60), and the handlers are
-      // bound long after the replay finishes anyway. Measured on an IDLE box,
-      // the gap between the poll breaking and the handlers binding was
-      // 116-683 ms — already wider than the 100 ms sleep meant to cover it, and
-      // it widens without bound as the box gets busier. Hence the red CI runs.
+      // TWO REVISIONS PRECEDE THIS ONE; NEITHER WAITED FOR THE BIND.
       //
-      // A longer sleep would be the same bug with a wider window, so wait for
-      // the readiness line instead: it is emitted on the same synchronous tick
-      // as the binds, with no `await` between, so observing it means the child
-      // is genuinely able to handle the signal we are about to send.
+      // The revision that reddened #406 and #407 polled `_migrations` for
+      // `count > 0` and then slept a fixed 100 ms, under a comment claiming the
+      // poll "proved the handler is registered". It proved no such thing, twice
+      // over: each migration commits in its own transaction, so a non-zero row
+      // count means migration k of N, not N of N (measured breaking at
+      // k=2..60), and the handlers bind long after the replay finishes anyway.
+      // Measured on an idle box, the gap between that poll breaking and the
+      // handlers binding was 116-683 ms — already wider than the 100 ms sleep
+      // meant to cover it, and it widens without bound as the box gets busier.
+      //
+      // #407 then landed the revision now on the base branch: poll until
+      // `_migrations` holds every file on disk, wait for the `[loop-registry]`
+      // composition line, then sleep 50 ms. That is a real improvement — the
+      // composition line is direct evidence the slow async step finished — but
+      // the remaining 50 ms is still a guess covering the statements between
+      // that log and the binds, so the race is narrowed rather than removed.
+      //
+      // A sleep of any length is the same bug with a different window, so wait
+      // for the readiness line instead: it is emitted on the same synchronous
+      // tick as the binds, with no `await` between, so observing it means the
+      // child is genuinely able to handle the signal we are about to send. It
+      // is emitted strictly later than both of #407's conditions, so waiting on
+      // it subsumes them and the sleep goes away.
       const READY_EVENT = 'event=gateway_signal_handlers_ready'
 
       // ONE reader per stream for the whole test: the readiness poll and the
@@ -155,6 +165,13 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
           stderrBuf += s
         }).catch(() => {}),
       ])
+      // BOUNDED await of those readers. They resolve on pipe EOF, and EOF needs
+      // every holder of the write end closed — a gateway descendant that
+      // inherited the fds and outlived its parent would hold them open and hang
+      // this test with no diagnostic at all, which is a worse failure than the
+      // one being fixed. 2 s is far past the drain of a few KB of boot logs, and
+      // settling early costs at most a truncated tail in a failure message.
+      const drained = (): Promise<unknown> => Promise.race([readers, Bun.sleep(2_000)])
 
       // Cap at 20 s, inside a 45 s outer budget. The outer budget must exceed
       // this cap by more than the work that FOLLOWS it (shutdown drain, then
@@ -167,7 +184,7 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       const readyDeadline = startedAt + 20_000
       while (!stdoutBuf.includes(READY_EVENT)) {
         if (proc.exitCode !== null) {
-          await readers
+          await drained()
           throw new Error(
             `gateway exited with ${proc.exitCode} during boot, before signal handlers were bound.\n` +
               `stderr: ${stderrBuf.slice(0, 4000)}\n` +
@@ -207,9 +224,20 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         verifyAfterBoot.close()
       }
 
+      // The `-wal` assertion after the exit is only meaningful if a sidecar
+      // existed to be checkpointed. Establish that here, while the gateway still
+      // holds the connection open, so a future change that stopped using WAL
+      // could not silently turn that assertion into a tautology.
+      const walPath = `${dbPath}-wal`
+      expect(
+        existsSync(walPath),
+        `no ${'`-wal`'} sidecar while the gateway is live — the post-exit ` +
+          `checkpoint assertion below would hold vacuously`,
+      ).toBe(true)
+
       proc.kill('SIGTERM')
       const exitCode = await proc.exited
-      await readers
+      await drained()
       // 143 here is SIGTERM at its default disposition — the handlers were not
       // bound when we signalled, which is exactly what the readiness wait above
       // exists to prevent. Any other non-zero is a genuine shutdown fault, so
@@ -225,8 +253,8 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
       // absent or truncated to 0 bytes. Skipping the close leaves the frames
       // behind (measured: 86 KB). Assert on the byte count, not on existence —
       // a clean close on this platform truncates the file rather than unlinking
-      // it, so an existence check would pass for the wrong reason.
-      const walPath = `${dbPath}-wal`
+      // it, so an existence check would pass for the wrong reason. (That the
+      // sidecar existed at all is established above, before the signal.)
       const walBytes = existsSync(walPath) ? statSync(walPath).size : 0
       expect(
         walBytes,
@@ -264,7 +292,12 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
   }, 45_000)
 
   test.skipIf(!SYSTEMD_USER_AVAILABLE)(
-    'systemd respawn: under `systemd-run --user --service-type=notify`, gateway killed with SIGKILL is restarted within RestartSec; fresh process re-opens DB cleanly',
+    // The name deliberately does NOT say "within RestartSec". RestartSec=5 is a
+    // MINIMUM delay systemd waits before retrying, not a deadline it promises to
+    // meet; the respawn also has to cold-start bun and replay every migration.
+    // The wait below is bounded at 25 s for that reason, and a name claiming a
+    // 5 s bound would be asserting something this test does not check.
+    'systemd respawn: under `systemd-run --user --service-type=notify`, gateway killed with SIGKILL is respawned by Restart=always with a fresh MainPID; fresh process re-opens DB cleanly',
     async () => {
       // This test exercises the full Type=notify + Restart=always + WatchdogSec
       // contract. It runs only where a systemd USER manager answers — macOS dev,
@@ -323,9 +356,16 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
             await Bun.sleep(100)
           }
         }
-        const isActive = (): boolean =>
-          spawnSync('systemctl', ['--user', 'is-active', unitName]).stdout.toString().trim() ===
-          'active'
+        // Read the STATE, not a boolean, so predicates can distinguish the
+        // states that matter. `is-active` collapses `activating`, `deactivating`,
+        // `failed` and a systemctl error (empty stdout) into one "not active"
+        // answer, and a stop-wait written as `!isActive()` would therefore be
+        // satisfied mid-shutdown or by a broken systemctl.
+        const activeState = (): string =>
+          spawnSync('systemctl', ['--user', 'show', '-p', 'ActiveState', '--value', unitName])
+            .stdout.toString()
+            .trim()
+        const isActive = (): boolean => activeState() === 'active'
         const mainPid = (): number =>
           Number(
             spawnSync('systemctl', ['--user', 'show', '-p', 'MainPID', '--value', unitName])
@@ -354,25 +394,43 @@ describe('orphan survival — gateway boot + clean shutdown', () => {
         // different MainPID and an active unit — rather than sleeping past the
         // restart and hoping. A stale-but-active read (systemd has not yet
         // reaped the killed PID) no longer passes as a respawn.
-        await waitFor(
-          'systemd to respawn the unit with a fresh MainPID',
-          25_000,
-          () => isActive() && mainPid() > 0 && mainPid() !== oldPid,
-        )
-
-        const newPid = mainPid()
+        //
+        // Capture the PID that SATISFIED the predicate. Re-reading `MainPID`
+        // afterwards to assert on would be a fourth spawn answering a different
+        // question — a second respawn between the two reads would make the
+        // assertions describe a process the wait never saw.
+        let newPid = 0
+        await waitFor('systemd to respawn the unit with a fresh MainPID', 25_000, () => {
+          const pid = mainPid()
+          if (pid <= 0 || pid === oldPid) return false
+          if (!isActive()) return false
+          newPid = pid
+          return true
+        })
         expect(newPid).toBeGreaterThan(0)
         expect(newPid).not.toBe(oldPid)
 
         // Stop cleanly, then verify the DB is re-openable with no corruption.
         // The blocking `spawnSync` below is what actually guarantees the drain
         // finished: `systemctl stop` returns only once the job completes, so the
-        // gateway has already closed the DB by the time it returns. The wait
-        // that follows is a cheap belt-and-braces re-read, NOT the guarantee —
-        // `is-active != active` is also true during `deactivating`, i.e. mid
-        // shutdown, so on its own it would prove nothing.
-        spawnSync('systemctl', ['--user', 'stop', unitName])
-        await waitFor('the unit to stop (is-active != active)', 20_000, () => !isActive())
+        // gateway has already closed the DB by the time it returns. Its exit
+        // status is therefore load-bearing — a stop that never ran (unknown
+        // unit, dead user manager) would otherwise leave the assertions below to
+        // certify a shutdown that was never requested.
+        const stopped = spawnSync('systemctl', ['--user', 'stop', unitName])
+        expect(
+          stopped.status,
+          `systemctl stop failed: ${stopped.stderr.toString().slice(0, 500)}`,
+        ).toBe(0)
+        // Belt-and-braces re-read after the blocking stop. Asserted against the
+        // literal terminal state rather than `!isActive()`, which is also true
+        // while `deactivating` (mid-shutdown) and when systemctl itself errors
+        // and prints nothing — both of which would pass for the wrong reason.
+        await waitFor('the unit to settle in ActiveState=inactive', 20_000, () => {
+          const state = activeState()
+          return state === 'inactive' || state === 'failed'
+        })
+        expect(activeState()).toBe('inactive')
 
         const fresh = ProjectDb.open(dbPath)
         try {
