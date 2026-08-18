@@ -934,12 +934,22 @@ export default function IntegrationsScreen() {
                   pressed && styles.pressed,
                 ]}
               >
+                {/* THE LABEL NAMES WHAT WILL ACTUALLY HAPPEN. A blank seat name
+                    means the FIRST seat, so with seats already connected a paste
+                    REPLACES that seat rather than adding one — and a button that
+                    said "Add seat" while overwriting a working credential would be
+                    the footgun that justified hiding this box in the first place.
+                    Reconnecting seat one is still legitimate (it is how an expired
+                    or revoked first seat is fixed), so the control stays enabled
+                    and simply tells the truth about which it is doing. */}
                 <Text style={styles.primaryBtnText}>
                   {codexBusy
                     ? 'Connecting…'
-                    : (codexStatus?.accounts ?? []).length > 0
+                    : codexAccount.trim().length > 0
                       ? 'Add seat'
-                      : 'Connect'}
+                      : (codexStatus?.accounts ?? []).length > 0
+                        ? 'Replace first seat'
+                        : 'Connect'}
                 </Text>
               </Pressable>
           </View>
