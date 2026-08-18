@@ -21,6 +21,7 @@ import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
+import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -3035,6 +3036,31 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     // not asserted: it depends on this box's live cores/RAM, and the arithmetic is
     // already pinned against fixed inputs in test-strategy.test.ts.
     expect(strategy).toContain('NEUTRON_TEST_JOBS=')
+  })
+
+  test('threads the detail intermediate block to the firer verbatim', async () => {
+    const marker = 'task-2-intermediate-thread-marker'
+    const activeRuns = 1_000_000
+    const repo = knobRepo()
+    const h = buildHarness({
+      plan: approve,
+      resolve_active_runs: () => activeRuns,
+      base_branch: marker,
+    })
+    const run = await createRun({ repo_path: repo })
+    await runToTerminal(h, run.id)
+
+    // A very high active-run count fixes jobs at 1, so the expected rendered bytes
+    // remain stable even if MemAvailable moves between these two budget reads.
+    const budget = readHostBudget()
+    const detail = buildTestStrategyDetail(repo, {
+      cores: budget.cores,
+      active_runs: activeRuns,
+      mem_available_bytes: budget.mem_available_bytes,
+      base_branch: marker,
+    })
+    expect(detail.intermediate_block).toContain(marker)
+    expect(h.inputs[0]?.test_strategy_intermediate).toBe(detail.intermediate_block)
   })
 
   test('a THROWING resolve_active_runs still launches, with a strategy (degrades to 1 run)', async () => {

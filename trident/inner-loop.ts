@@ -154,6 +154,8 @@ export interface InnerLoopInput {
    * Null/empty → the workflow's contract is byte-identical to legacy.
    */
   test_strategy?: string | null
+  /** The subset-scope TEST EXECUTION block for intermediate Ralph tasks. */
+  test_strategy_intermediate?: string | null
   /**
    * OWNER PER-PHASE MODEL OVERRIDES — phase key → `{model?, effort?}`, as validated
    * by `parsePhaseModelConfig` (`trident/phase-models.ts`). Threaded to the workflow
@@ -479,6 +481,8 @@ export function buildWorkflowArgs(
     // carries it. Always a string — `''` for null/absent → a byte-identical legacy
     // contract in the workflow.
     testStrategy: typeof input.test_strategy === 'string' ? input.test_strategy : '',
+    testStrategyIntermediate:
+      typeof input.test_strategy_intermediate === 'string' ? input.test_strategy_intermediate : '',
     // FABLE-ORCHESTRATOR model routing (model routing per the refactor plan protocol,
     // `docs/plans/2026-07-02-world-class-refactor-plan.md` § 1.5; introduced 2026-07-02).
     // The single-source-of-truth model IDS resolved from runtime/models.ts and

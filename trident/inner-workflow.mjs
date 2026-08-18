@@ -241,6 +241,7 @@ const {
   // full suite is mandatory, so its `testsPassed` claim becomes a gate rather than a
   // decoration (see that function).
   testStrategy = '',
+  testStrategyIntermediate = '',
   // OWNER PER-PHASE MODEL OVERRIDES — phase key → {model?, effort?}, ALREADY
   // validated in TypeScript at the settings boundary (`trident/phase-models.ts`
   // `parsePhaseModelConfig`). Absent/null → every phase keeps its default, so an
@@ -1239,7 +1240,10 @@ function forgePushStep(reenter) {
 const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
-function forgeBuildContract(reenter, artifactCheckpointName) {
+function forgeBuildContract(reenter, artifactCheckpointName, suiteScope = 'full-suite') {
+  // The first two parameters preserve the original `function forgeBuildContract(reenter, artifactCheckpointName)` contract.
+  const subsetTestStrategy = suiteScope === 'subset' && testStrategyIntermediate !== ''
+  const scopedTestStrategy = subsetTestStrategy ? testStrategyIntermediate : testStrategy
   const artifactCommand = artifactCheckpointCommand(artifactCheckpointName)
   const artifactStep = artifactCommand === null
     ? ''
@@ -1248,14 +1252,14 @@ function forgeBuildContract(reenter, artifactCheckpointName) {
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
-${NO_PATTERN_KILL_RULE}${testStrategy === '' ? '' : `\n${testStrategy}\n`}
+${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrategy}\n`}
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. ${testStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
+3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='not-run', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
-${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${testStrategy === '' ? '' : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
+${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='not-run', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -5759,11 +5763,25 @@ try {
 
     // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
     // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
-    // planner's complexity tag.
+    // planner's complexity tag. The scope argument extends the original
+    // `forgeBuildContract(resuming, 'forge-done')` call; fix rounds retain it.
+    let buildSuiteScope = 'full-suite'
+    let buildSuiteScopeReason = 'non-ralph'
+    if (ralph === true) {
+      if (!(Number.isFinite(ralphRemaining) && ralphRemaining > 0)) {
+        buildSuiteScopeReason = 'terminal'
+      } else if (testStrategyIntermediate === '') {
+        buildSuiteScopeReason = 'fail-closed: no intermediate block'
+      } else {
+        buildSuiteScope = 'subset'
+        buildSuiteScopeReason = `intermediate: ${ralphRemaining} remain`
+      }
+    }
+    log(`trident-v2 forge:build suite scope=${buildSuiteScope} reason=${buildSuiteScopeReason}`)
     const forge = await forgeAgent(
       { label: 'forge:build', phase: 'Build', isolation: 'worktree' },
       complexityTag,
-      `${forgeBuildContract(resuming, 'forge-done')}${ralphNote}${reuseNote}
+      `${forgeBuildContract(resuming, 'forge-done', buildSuiteScope)}${ralphNote}${reuseNote}
 
 TASK:
 ${task}${reflectionGuidance}`,
