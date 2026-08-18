@@ -502,7 +502,7 @@ before `Bun.serve`; the code is the reverse. Signalling inside that gap kills
 the child at SIGTERM's default disposition (exit 143, DB never closed), which is
 how this test reddened two unrelated PRs in one night.
 
-`READY=1` used to be sent at the listener bind, ~170 synchronous lines before
+`READY=1` used to be sent at the listener bind, ~190 synchronous lines before
 those binds. `Type=notify` lets systemd queue a stop job the instant it lands,
 so `active` meant "accepting traffic", never "will handle a stop" — and the
 sibling systemd test below stopped the unit on exactly that proxy. Moving the
