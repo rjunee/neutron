@@ -198,17 +198,37 @@ test('a seeded database is indistinguishable from a real migration replay', () =
  * next thing to touch the file is the read-only open — which is exactly the
  * sequence a call site like `trident/gh-authed.ts` performs, and exactly the
  * sequence that failed.
+ *
+ * The sidecar assertion is a COMPARISON against a real replay, not an absolute,
+ * and that is a correction of this arm's own first draft. It asserted
+ * `existsSync(-shm) === true`, which is a platform claim wearing the costume of
+ * an invariant: on macOS the sidecars survive a hard close, on the Linux CI
+ * runner SQLite removes them, so the absolute assertion was green locally and
+ * red on CI. What is TRUE on both is that a seeded database must leave a reader
+ * looking at exactly what a replayed one leaves — which is the same standard
+ * every other arm in this file is held to.
  */
 test('a seeded database can be opened READ-ONLY, with no writer having touched it first', () => {
-  const seededPath = join(tmp, 'readonly.db')
+  const replayedPath = join(tmp, 'replayed.db')
+  const seededPath = join(tmp, 'seeded.db')
+
+  // The reference: a real replay, then a full close, so what remains beside the
+  // file is what this platform's SQLite leaves a later reader.
+  const { db: a } = openReplayed(replayedPath)
+  a.close(true)
 
   seedMigratedDb(seededPath)
 
-  // The WAL index must be on disk BEFORE any reader arrives. This assertion is
-  // the half that fails on every platform if the helper stops materialising it;
-  // the read-only open below is the half that fails the way a user does.
-  expect(existsSync(`${seededPath}-shm`)).toBe(true)
+  // Same sidecar state as the replay it is a copy of. On macOS both keep their
+  // `-shm`; on Linux both are cleaned up. Either way they AGREE — and if the
+  // helper stops materialising the WAL index, macOS stops agreeing here.
+  expect(existsSync(`${seededPath}-shm`)).toBe(existsSync(`${replayedPath}-shm`))
+  expect(existsSync(`${seededPath}-wal`)).toBe(existsSync(`${replayedPath}-wal`))
 
+  // And the property those sidecars exist to serve: a reader gets in. This is
+  // the assertion that fails the way a caller does — it went red on macOS
+  // against a seeded database and stayed green against a replayed one, which is
+  // the whole reason this arm exists.
   const b = new Database(seededPath, { readonly: true, create: false })
   try {
     expect(

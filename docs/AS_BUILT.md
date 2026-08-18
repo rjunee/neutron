@@ -70,11 +70,18 @@ parse the whole 124-migration schema.
 
 Arms 1-5 each open the seeded database READ-WRITE, which creates that index before any
 assertion runs — so they passed, green, against databases no read-only consumer could open.
-Arm 6 is therefore its own test with nothing touching the file before the reader does, and
-it asserts both halves: the sidecar is on disk (fails on every platform if the helper stops
-producing it) and the read-only open succeeds (fails the way a caller does). The bug was
-also platform-shaped — it reproduced locally and NOT on the Linux CI runner — which is the
-combination a green pipeline carries indefinitely.
+Arm 6 is therefore its own test, with nothing touching the file before the reader does.
+
+Arm 6's sidecar check is a COMPARISON against a real replay rather than an absolute, and
+that correction is worth recording because the first draft got it wrong in a way that only
+CI could see. It asserted `existsSync(-shm) === true` — a platform claim wearing the costume
+of an invariant. On macOS the sidecars survive a full close; on the Linux runner SQLite
+removes them, and a read-only open there succeeds without one. So the absolute assertion was
+green locally and RED on CI, which is the same class of mistake as the bug it was written to
+catch: the original defect reproduced locally and not on CI, and the first control
+reproduced on CI and not locally. What holds on both is that a seeded database must leave a
+later reader looking at exactly what a replayed one leaves — the standard every other arm in
+the file is already held to.
 
 Two smaller corrections in the same pass. The conformance dump's `ORDER BY` now names
 `"table"."column"` rather than the bare identifier: SQLite resolves a bare name in
