@@ -83,7 +83,7 @@ import {
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
-import type { TridentRun, TridentRunUpdate } from './store.ts'
+import type { TridentRun, TridentRunStore, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
 const log = createLogger('trident')
@@ -360,6 +360,45 @@ export interface BuildTridentOrchestratorOptions {
  * forever. Tune via `max_crash_recoveries` (exists chiefly for tests).
  */
 export const DEFAULT_MAX_CRASH_RECOVERIES = 3
+
+/** Appended (never substituted) to `failure_reason` when a terminal failure's branch was
+ *  published by the git-truth salvage. The run is NOT a success: the lane died, the work
+ *  survived, the PR is unreviewed. Wording is delivery-classifier-safe (see delivery.ts):
+ *  it must never contain 'exhausted', 'conflict', 'hang', 'stalled', 'no progress for',
+ *  'merge failed', 'git ' (with trailing space), 'rebase', 'checkout', 'missing',
+ *  'garbled', 'provenance', 'failed:', or 'not enabled'. */
+export const TRIDENT_SALVAGE_MARKER = 'build survived the failure'
+
+export interface StrandedFailureSweepDeps {
+  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'update'>
+  reconcile: (run: TridentRun) => Promise<TridentRun | null>
+}
+
+/** Best-effort boot reconciliation for failed PR-mode runs. A broken row, git
+ *  checkout, or initial store read must never reject module initialisation. */
+export async function sweepStrandedFailures({
+  store,
+  reconcile,
+}: StrandedFailureSweepDeps): Promise<void> {
+  let rows: TridentRun[]
+  try {
+    rows = await store.listFailedPrRuns()
+  } catch {
+    return
+  }
+  for (const row of rows) {
+    try {
+      const salvaged = await reconcile(row)
+      if (salvaged === null) continue
+      await store.update(row.id, {
+        pr: salvaged.pr,
+        failure_reason: salvaged.failure_reason,
+      })
+    } catch {
+      // One corrupt checkout or failed rescue must not strand later rows.
+    }
+  }
+}
 
 /**
  * Infrastructure retry spacing: one minute, five minutes, then fifteen minutes
@@ -1717,7 +1756,11 @@ export async function resolveClaimedCommit(
 
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
-): { step: TridentStep; drain: () => Promise<void> } {
+): {
+  step: TridentStep
+  drain: () => Promise<void>
+  reconcile_stranded: (run: TridentRun) => Promise<TridentRun | null>
+} {
   const now = opts.now ?? (() => new Date().toISOString())
   /** ms-epoch derived from the (injectable) ISO clock — the `harvested_at`
    *  stamp. Falls back to wall-clock ms if the ISO clock is unparseable. */
@@ -2065,6 +2108,57 @@ export function buildTridentOrchestrator(
       subagent_run_id: keepSubagentId ? run.subagent_run_id : null,
       failure_reason: reason,
       last_advanced_at: now(),
+    }
+  }
+
+  // Rescue failures are observable in the step note, but never persisted on the run. A WeakMap
+  // keeps that diagnostic paired with the exact input object without leaking entries after the
+  // outcome is released.
+  const salvageFailureNotes = new WeakMap<TridentRun, string>()
+
+  /** Git-truth reconciliation for a run about to be recorded `failed` (the card
+   *  "a failed run must be asked whether it built something"). NEVER throws.
+   *  Returns the annotated run to persist, or null when there is nothing to
+   *  salvage or the rescue failed. */
+  async function reconcile_stranded(run: TridentRun): Promise<TridentRun | null> {
+    try {
+      if (run.merge_mode !== 'pr') return null
+      const branch = run.branch ?? `trident/${run.slug}`
+      if ((run.failure_reason ?? '').includes(TRIDENT_SALVAGE_MARKER)) return null
+
+      const local = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', '--verify', `refs/heads/${branch}`],
+        run.repo_path,
+      )
+      const localHead = local.stdout.trim()
+      if (!local.ok || !/^[0-9a-f]{40}$/.test(localHead)) return null
+
+      const base = await resolveBase(run)
+      const ahead = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-list', '--count', `${base}..${localHead}`],
+        run.repo_path,
+      )
+      const aheadText = ahead.stdout.trim()
+      if (!ahead.ok || !/^\d+$/.test(aheadText) || Number.parseInt(aheadText, 10) <= 0) return null
+
+      const remote = await opts.run_host(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+        run.repo_path,
+      )
+      if (remote.ok && remote.stdout.trim().split(/\s+/)[0] === localHead && run.pr !== null) return null
+
+      const published = await publishBuiltCommit(run, null)
+      return {
+        ...run,
+        pr: published.pr,
+        branch,
+        failure_reason: `${run.failure_reason ?? 'run failed'} — ${TRIDENT_SALVAGE_MARKER} — branch ${branch} pushed to origin as PR #${published.pr}, unreviewed`,
+        last_advanced_at: now(),
+      }
+    } catch (err) {
+      const detail = err instanceof Error ? err.message : String(err)
+      salvageFailureNotes.set(run, detail.slice(0, 150))
+      return null
     }
   }
 
@@ -2834,7 +2928,7 @@ export function buildTridentOrchestrator(
     return Math.max(0, n - t)
   }
 
-  async function step(run: TridentRun): Promise<AdvanceOutcome> {
+  async function stepCore(run: TridentRun): Promise<AdvanceOutcome> {
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
@@ -3168,6 +3262,22 @@ export function buildTridentOrchestrator(
     return { run, changed: false, waiting: true, note: `waiting on inner-loop dispatch ${run.subagent_run_id}` }
   }
 
+  async function step(run: TridentRun): Promise<AdvanceOutcome> {
+    const out = await stepCore(run)
+    if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {
+      const salvaged = await reconcile_stranded(out.run)
+      if (salvaged !== null) {
+        return { ...out, run: salvaged, note: `${out.note}; stranded build salvaged → PR #${salvaged.pr}` }
+      }
+      const failureNote = salvageFailureNotes.get(out.run)
+      if (failureNote !== undefined) {
+        salvageFailureNotes.delete(out.run)
+        return { ...out, note: `${out.note}; stranded build salvage failed: ${failureNote}` }
+      }
+    }
+    return out
+  }
+
   /** Resolve once every in-flight FIRE turn has settled (tests + graceful
    *  shutdown). The detached builds are NOT awaited here — the tick loop harvests
    *  their results from the DB. */
@@ -3177,5 +3287,5 @@ export function buildTridentOrchestrator(
     }
   }
 
-  return { step, drain }
+  return { step, drain, reconcile_stranded }
 }
