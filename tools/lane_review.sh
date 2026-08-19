@@ -14,9 +14,10 @@
 #
 # Exit 0 = delivers something. Exit 1 = findings. Exit 2 = the check itself
 # could not run — an unresolvable ref, a failed extraction or an analyzer
-# failure MUST fail loudly, never read as clean. Measured 2026-08-18: an
-# earlier revision printed `unknown ref` and exited 0, and that empty output
-# was indistinguishable from a clean verdict on three PRs at once. There is deliberately NO lenient
+# failure MUST fail loudly, never read as clean. The 2026-08-18 report recorded
+# an earlier revision exiting 0; the surviving precursor measured exit 2, so
+# the report may instead reflect an earlier copy or a `$?`-after-pipe misread.
+# Either way, the shipped contract is pinned. There is deliberately NO lenient
 # default; a caller wanting leniency must add an explicit opt-in flag.
 #
 # Pinned by tools/lane_review.test.ts: the unknown-ref non-zero exit, the
@@ -26,6 +27,10 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANALYZER="$HERE/lane_review_ast.mjs"
+
+ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
+  || { echo "lane_review: could not find the repository root"; exit 2; }
+cd "$ROOT" || { echo "lane_review: could not enter the repository root"; exit 2; }
 
 if [ $# -lt 1 ]; then
   echo "usage: lane_review.sh <branch-or-ref> [base]"
@@ -61,15 +66,12 @@ BASE=$(resolve_ref "$BASE_IN") \
 
 MB=$(git merge-base "$BASE" "$BR") \
   || { echo "lane_review: no merge-base between '$BASE' and '$BR'"; exit 2; }
-findings=0
 
 echo "=== $BR vs $BASE (merge-base ${MB:0:8})"
 git diff --stat "$MB".."$BR" | tail -1
 
 paths_file=$(mktemp)
-symbols_file=$(mktemp)
-callers_file=$(mktemp)
-trap 'rm -f "$paths_file" "$symbols_file" "$callers_file"' EXIT
+trap 'rm -f "$paths_file"' EXIT
 
 if ! git diff --name-only -z "$MB".."$BR" >"$paths_file"; then
   echo "lane_review: could not list changed files — refusing to answer"
@@ -112,9 +114,9 @@ echo "--- production files changed:"
 printf '  %s\n' "${prod[@]}"
 
 # --- class 3: unwired --------------------------------------------------------
-# Compare syntax trees instead of grepping added lines. Besides handling every
-# declaration form (default/abstract/generator/enum/let/export lists), this
-# keeps comments and strings out of the caller question by construction.
+# Compare bound syntax trees instead of grepping added lines. Besides handling
+# every declaration and re-export form, this distinguishes aliases, namespace
+# access and shadows while keeping comments and strings out by construction.
 #
 # A CALLER is a reference in a non-test production file that is not the export
 # site itself. Two rules the analyzer must keep, both paid for in production:
@@ -123,42 +125,14 @@ printf '  %s\n' "${prod[@]}"
 # definition itself is. A symbol defined and USED inside its own module is
 # wired: #395 (verified live in the deployed tree) does exactly that, and an
 # earlier version that skipped the definer reported it as unwired.
-if ! bun "$ANALYZER" exports "$MB" "$BR" "${prod[@]}" >"$symbols_file"; then
-  echo "lane_review: exported-symbol analysis failed — refusing to answer"
+bun "$ANALYZER" analyze "$MB" "$BR" "${prod[@]}"
+analysis_status=$?
+if [ "$analysis_status" -eq 1 ]; then
+  exit 1
+elif [ "$analysis_status" -ne 0 ]; then
+  echo "lane_review: bound production-caller analysis failed — refusing to answer"
   exit 2
 fi
-mapfile -t syms <"$symbols_file"
 
-if [ "${#syms[@]}" -eq 0 ]; then
-  # Stated in words, never implied by absence: "nothing to check" and
-  # "checked, all wired" must not look identical.
-  echo "--- no new exported symbols — nothing to verify; branch edits existing code paths (wiring N/A)"
-else
-  printf '%s' "--- new exported symbols:"
-  printf ' %s' "${syms[@]}"
-  printf '\n'
-
-  if ! bun "$ANALYZER" callers "$BR" "${syms[@]}" >"$callers_file"; then
-    echo "lane_review: production-caller analysis failed — refusing to answer"
-    exit 2
-  fi
-  declare -A real_callers
-  while IFS=$'\t' read -r -d '' symbol caller; do
-    real_callers["$symbol"]+="${real_callers[$symbol]:+$'\n'}$caller"
-  done <"$callers_file"
-
-  for symbol in "${syms[@]}"; do
-    if [ -z "${real_callers[$symbol]:-}" ]; then
-      echo "  FINDING: $symbol has NO non-test production caller — green-and-unwired."
-      findings=$((findings+1))
-    else
-      printf '  ok: %s called by' "$symbol"
-      while IFS= read -r caller; do printf ' %s' "$caller"; done <<<"${real_callers[$symbol]}"
-      printf '\n'
-    fi
-  done
-fi
-
-[ "$findings" -gt 0 ] && exit 1
 echo "=== delivers behaviour: yes"
 exit 0

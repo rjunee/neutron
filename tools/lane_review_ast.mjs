@@ -1,22 +1,36 @@
 #!/usr/bin/env bun
 
-// Syntax-aware half of lane_review.sh. Grep cannot distinguish a reference
-// from a comment, string, import or re-export, and line regexes miss valid
-// TypeScript export forms. Keep those questions on the TypeScript AST; the
-// shell wrapper remains responsible for refs, changed-file policy and output.
+// Syntax-aware half of lane_review.sh. The TypeScript checker, rather than
+// identifier spelling, decides whether a use is bound to a newly exported
+// value. That distinction keeps shadows and re-exports from manufacturing a
+// caller while retaining aliases, namespace access and class heritage uses.
 
 import { spawnSync } from 'node:child_process'
+import path from 'node:path'
 import ts from 'typescript'
 
-const MAX_BUFFER = 64 * 1024 * 1024
+const MAX_BUFFER = 256 * 1024 * 1024
+const VIRTUAL_ROOT = '/__lane_review__'
 
 function die(message) {
   console.error(`lane_review: ${message}`)
   process.exit(2)
 }
 
-function git(args, encoding = 'utf8') {
-  const result = spawnSync('git', args, { encoding, maxBuffer: MAX_BUFFER })
+const rootResult = spawnSync('git', ['rev-parse', '--show-toplevel'], {
+  encoding: 'utf8',
+  maxBuffer: MAX_BUFFER,
+})
+if (rootResult.status !== 0) die('could not find the repository root')
+const REPO_ROOT = rootResult.stdout.trim()
+
+function git(args, encoding = 'utf8', input) {
+  const result = spawnSync('git', args, {
+    cwd: REPO_ROOT,
+    encoding,
+    input,
+    maxBuffer: MAX_BUFFER,
+  })
   if (result.status !== 0) {
     const detail = Buffer.isBuffer(result.stderr)
       ? result.stderr.toString('utf8').trim()
@@ -31,110 +45,219 @@ const treeCache = new Map()
 function pathsAt(ref) {
   let paths = treeCache.get(ref)
   if (paths) return paths
-  const raw = git(['ls-tree', '-r', '-z', '--name-only', ref], 'buffer')
+  const raw = git(['ls-tree', '--full-tree', '-r', '-z', '--name-only', ref], 'buffer')
   paths = new Set(raw.toString('utf8').split('\0').filter(Boolean))
   treeCache.set(ref, paths)
   return paths
 }
 
-function sourceAt(ref, path) {
-  if (!pathsAt(ref).has(path)) return undefined
-  return git(['show', `${ref}:${path}`])
+function sourcesAt(ref, paths) {
+  if (paths.length === 0) return new Map()
+  const input = Buffer.from(paths.map((file) => `${ref}:${file}\0`).join(''))
+  const output = git(['cat-file', '--batch', '-Z'], 'buffer', input)
+  const sources = new Map()
+  let cursor = 0
+
+  for (const file of paths) {
+    const headerEnd = output.indexOf(0, cursor)
+    if (headerEnd < 0) die(`could not read ${file} at ${ref}`)
+    const header = output.subarray(cursor, headerEnd).toString('utf8')
+    const size = Number(header.slice(header.lastIndexOf(' ') + 1))
+    if (!Number.isSafeInteger(size)) die(`could not read ${file} at ${ref}`)
+    const start = headerEnd + 1
+    const end = start + size
+    if (end >= output.length || output[end] !== 0) die(`could not read ${file} at ${ref}`)
+    sources.set(file, output.subarray(start, end).toString('utf8'))
+    cursor = end + 1
+  }
+
+  return sources
 }
 
-function scriptKind(path) {
-  if (path.endsWith('.tsx')) return ts.ScriptKind.TSX
-  if (path.endsWith('.jsx')) return ts.ScriptKind.JSX
-  if (path.endsWith('.js') || path.endsWith('.mjs') || path.endsWith('.cjs')) {
-    return ts.ScriptKind.JS
-  }
+function isSource(file) {
+  return /\.(?:[cm]?[jt]s|jsx|tsx)$/.test(file)
+}
+
+function isProductionSource(file) {
+  return (
+    isSource(file) &&
+    !/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\./.test(file)
+  )
+}
+
+function scriptKind(file) {
+  if (file.endsWith('.tsx')) return ts.ScriptKind.TSX
+  if (file.endsWith('.jsx')) return ts.ScriptKind.JSX
+  if (/\.(?:mjs|cjs|js)$/.test(file)) return ts.ScriptKind.JS
   return ts.ScriptKind.TS
 }
 
-function parse(path, source) {
-  const file = ts.createSourceFile(path, source, ts.ScriptTarget.Latest, true, scriptKind(path))
-  if (file.parseDiagnostics.length > 0) die(`${path} could not be parsed as JavaScript/TypeScript`)
-  return file
+function virtualName(file) {
+  return `${VIRTUAL_ROOT}/${file}`
 }
 
-function hasModifier(node, kind) {
-  return node.modifiers?.some((modifier) => modifier.kind === kind) ?? false
+function repoPath(fileName) {
+  const normalized = path.posix.normalize(fileName)
+  const prefix = `${VIRTUAL_ROOT}/`
+  return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : undefined
 }
 
-function addBindingNames(name, names) {
-  if (ts.isIdentifier(name)) {
-    names.add(name.text)
-    return
+function buildProgram(ref) {
+  const files = [...pathsAt(ref)].filter(isProductionSource).sort()
+  const byPath = sourcesAt(ref, files)
+  const byVirtualName = new Map(
+    [...byPath].map(([file, source]) => [virtualName(file), source]),
+  )
+  const directories = new Set([VIRTUAL_ROOT])
+  for (const fileName of byVirtualName.keys()) {
+    let directory = path.posix.dirname(fileName)
+    while (directory.startsWith(VIRTUAL_ROOT)) {
+      directories.add(directory)
+      if (directory === VIRTUAL_ROOT) break
+      directory = path.posix.dirname(directory)
+    }
   }
-  for (const element of name.elements) {
-    if (!ts.isOmittedExpression(element)) addBindingNames(element.name, names)
+
+  const options = {
+    allowImportingTsExtensions: true,
+    allowJs: true,
+    checkJs: false,
+    jsx: ts.JsxEmit.Preserve,
+    module: ts.ModuleKind.ESNext,
+    moduleResolution: ts.ModuleResolutionKind.Bundler,
+    noEmit: true,
+    noLib: true,
+    skipLibCheck: true,
+    target: ts.ScriptTarget.Latest,
   }
+  const host = ts.createCompilerHost(options, true)
+  host.getCurrentDirectory = () => VIRTUAL_ROOT
+  host.fileExists = (fileName) => byVirtualName.has(path.posix.normalize(fileName))
+  host.readFile = (fileName) => byVirtualName.get(path.posix.normalize(fileName))
+  host.directoryExists = (directory) => directories.has(path.posix.normalize(directory))
+  host.getDirectories = (directory) => {
+    const prefix = `${path.posix.normalize(directory)}/`
+    return [...directories]
+      .filter((candidate) => candidate.startsWith(prefix) && !candidate.slice(prefix.length).includes('/'))
+      .map((candidate) => path.posix.basename(candidate))
+  }
+  host.realpath = (fileName) => path.posix.normalize(fileName)
+  host.getSourceFile = (fileName, languageVersion) => {
+    const normalized = path.posix.normalize(fileName)
+    const source = byVirtualName.get(normalized)
+    if (source === undefined) return undefined
+    return ts.createSourceFile(normalized, source, languageVersion, true, scriptKind(normalized))
+  }
+
+  const program = ts.createProgram({
+    rootNames: [...byVirtualName.keys()],
+    options,
+    host,
+  })
+  const sourceFiles = new Map()
+  for (const sourceFile of program.getSourceFiles()) {
+    const file = repoPath(sourceFile.fileName)
+    if (file === undefined) continue
+    if (sourceFile.parseDiagnostics.length > 0) {
+      die(`${file} could not be parsed as JavaScript/TypeScript`)
+    }
+    sourceFiles.set(file, sourceFile)
+  }
+
+  return { checker: program.getTypeChecker(), sourceFiles }
 }
 
-function exportedSymbols(path, source) {
-  const names = new Set()
-  let opaqueDefault = false
-  const file = parse(path, source)
+function unalias(checker, symbol) {
+  if (!(symbol.flags & ts.SymbolFlags.Alias)) return symbol
+  const target = checker.getAliasedSymbol(symbol)
+  return target.flags & ts.SymbolFlags.Unknown ? symbol : target
+}
 
-  for (const statement of file.statements) {
-    if (ts.isExportDeclaration(statement)) {
-      if (statement.isTypeOnly || !statement.exportClause || !ts.isNamedExports(statement.exportClause)) {
-        continue
+function isRuntimeExport(checker, symbol) {
+  const target = unalias(checker, symbol)
+  if (target.flags & ts.SymbolFlags.Value) return true
+  return symbol.declarations?.some((declaration) => ts.isExportAssignment(declaration)) ?? false
+}
+
+function exportsOf(checker, sourceFile) {
+  const moduleSymbol = checker.getSymbolAtLocation(sourceFile)
+  const result = new Map()
+  if (!moduleSymbol) return result
+  for (const symbol of checker.getExportsOfModule(moduleSymbol)) {
+    if (isRuntimeExport(checker, symbol)) result.set(symbol.getName(), symbol)
+  }
+  return result
+}
+
+function sourcePathOf(node) {
+  return repoPath(node.getSourceFile().fileName)
+}
+
+function addedExports(base, branch, changedPaths) {
+  const added = []
+  for (const modulePath of changedPaths) {
+    const currentFile = branch.sourceFiles.get(modulePath)
+    if (!currentFile) continue
+    const current = exportsOf(branch.checker, currentFile)
+    const previousFile = base.sourceFiles.get(modulePath)
+    const previous = previousFile ? exportsOf(base.checker, previousFile) : new Map()
+    for (const [name, symbol] of current) {
+      if (!previous.has(name)) {
+        let displayName = name
+        if (name === 'default') {
+          const namedDeclaration = symbol.declarations?.find(
+            (declaration) =>
+              (ts.isFunctionDeclaration(declaration) || ts.isClassDeclaration(declaration)) &&
+              declaration.name,
+          )
+          if (namedDeclaration?.name) displayName = namedDeclaration.name.text
+        }
+        added.push({ callers: new Set(), displayName, modulePath, name, symbol })
       }
-      for (const element of statement.exportClause.elements) {
-        if (!element.isTypeOnly) names.add((element.propertyName ?? element.name).text)
-      }
-      continue
-    }
-
-    if (ts.isExportAssignment(statement)) {
-      if (ts.isIdentifier(statement.expression)) names.add(statement.expression.text)
-      else opaqueDefault = true
-      continue
-    }
-
-    if (!hasModifier(statement, ts.SyntaxKind.ExportKeyword)) continue
-
-    if (
-      ts.isFunctionDeclaration(statement) ||
-      ts.isClassDeclaration(statement) ||
-      ts.isEnumDeclaration(statement)
-    ) {
-      if (statement.name) names.add(statement.name.text)
-      else if (hasModifier(statement, ts.SyntaxKind.DefaultKeyword)) opaqueDefault = true
-      continue
-    }
-
-    if (ts.isModuleDeclaration(statement) && ts.isIdentifier(statement.name)) {
-      names.add(statement.name.text)
-      continue
-    }
-
-    if (ts.isVariableStatement(statement)) {
-      for (const declaration of statement.declarationList.declarations) {
-        addBindingNames(declaration.name, names)
-      }
     }
   }
-
-  return { names, opaqueDefault }
+  return added.sort((left, right) =>
+    left.name.localeCompare(right.name) || left.modulePath.localeCompare(right.modulePath),
+  )
 }
 
-function isSource(path) {
-  return /\.(?:[cm]?js|jsx|tsx?)$/.test(path)
+function modulePathForSpecifier(checker, specifier) {
+  const symbol = checker.getSymbolAtLocation(specifier)
+  const declaration = symbol?.declarations?.find(ts.isSourceFile)
+  return declaration ? sourcePathOf(declaration) : undefined
 }
 
-function isProductionSource(path) {
-  return isSource(path) && !/\.test\.|\.spec\.|^tests?\/|__tests__/.test(path)
-}
-
-function isReference(identifier) {
-  let ancestor = identifier.parent
-  while (ancestor && !ts.isStatement(ancestor)) {
-    if (ts.isTypeNode(ancestor)) return false
-    ancestor = ancestor.parent
+function addToSymbolMap(map, symbol, record) {
+  if (!symbol) return
+  let records = map.get(symbol)
+  if (!records) {
+    records = new Set()
+    map.set(symbol, records)
   }
+  records.add(record)
+}
 
+function isInside(node, ancestor) {
+  return node.getSourceFile() === ancestor.getSourceFile() &&
+    node.getStart() >= ancestor.getStart() && node.getEnd() <= ancestor.getEnd()
+}
+
+function isRuntimeHeritageReference(identifier) {
+  for (let ancestor = identifier.parent; ancestor; ancestor = ancestor.parent) {
+    if (ts.isExpressionWithTypeArguments(ancestor) && isInside(identifier, ancestor.expression)) {
+      const heritage = ancestor.parent
+      return (
+        ts.isHeritageClause(heritage) &&
+        heritage.token === ts.SyntaxKind.ExtendsKeyword &&
+        (ts.isClassDeclaration(heritage.parent) || ts.isClassExpression(heritage.parent))
+      )
+    }
+    if (ts.isStatement(ancestor)) break
+  }
+  return false
+}
+
+function isRuntimeReference(identifier) {
   const parent = identifier.parent
   if (!parent) return false
   if (
@@ -162,67 +285,149 @@ function isReference(identifier) {
   ) {
     return false
   }
+  if (isRuntimeHeritageReference(identifier)) return true
+  for (let ancestor = parent; ancestor && !ts.isStatement(ancestor); ancestor = ancestor.parent) {
+    if (ts.isTypeNode(ancestor)) return false
+  }
   return true
 }
 
-function referencesIn(path, source, wanted) {
-  const found = new Set()
-  const file = parse(path, source)
-
-  function visit(node) {
-    if (ts.isIdentifier(node) && wanted.has(node.text) && isReference(node)) found.add(node.text)
-    ts.forEachChild(node, visit)
+function insideAddedDefinition(node, definitions) {
+  for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+    if (definitions.has(ancestor)) return true
   }
-
-  visit(file)
-  return found
+  return false
 }
 
-function runExports(base, branch, paths) {
-  const added = new Set()
-  for (const path of paths) {
-    if (!isSource(path)) continue
-    const currentSource = sourceAt(branch, path)
-    if (currentSource === undefined) continue
-    const current = exportedSymbols(path, currentSource)
-    const baseSource = sourceAt(base, path)
-    const previous =
-      baseSource === undefined ? { names: new Set(), opaqueDefault: false } : exportedSymbols(path, baseSource)
-    if (current.opaqueDefault && !previous.opaqueDefault) {
-      die(`${path} adds an anonymous default export whose caller cannot be identified`)
-    }
-    for (const symbol of current.names) {
-      if (!previous.names.has(symbol)) added.add(symbol)
+function definitionNodes(checker, records, changedPaths) {
+  const changed = new Set(changedPaths)
+  const definitions = new Set()
+  for (const record of records) {
+    const target = unalias(checker, record.symbol)
+    for (const declaration of target.declarations ?? []) {
+      if (
+        changed.has(sourcePathOf(declaration)) &&
+        !ts.isExportSpecifier(declaration) &&
+        !ts.isImportSpecifier(declaration)
+      ) {
+        definitions.add(declaration)
+      }
     }
   }
-  process.stdout.write([...added].sort().join('\n'))
-  if (added.size > 0) process.stdout.write('\n')
+  return definitions
 }
 
-function runCallers(branch, symbols) {
-  const wanted = new Set(symbols)
-  const grepArgs = ['grep', '-l', '-z', '--full-name', '-w']
-  for (const symbol of symbols) grepArgs.push('-e', symbol)
-  grepArgs.push(branch, '--', '*.ts', '*.tsx', '*.js', '*.jsx', '*.mjs', '*.cjs')
-  const result = spawnSync('git', grepArgs, { encoding: 'buffer', maxBuffer: MAX_BUFFER })
-  if (result.status !== 0 && result.status !== 1) die(`git grep failed with exit ${result.status}`)
-  const prefix = `${branch}:`
-  const paths = result.stdout
-    .toString('utf8')
-    .split('\0')
-    .map((path) => (path.startsWith(prefix) ? path.slice(prefix.length) : path))
-    .filter((path) => path && isProductionSource(path))
-
-  for (const path of paths) {
-    const source = sourceAt(branch, path)
-    if (source === undefined) continue
-    for (const symbol of referencesIn(path, source, wanted)) {
-      process.stdout.write(`${symbol}\t${path}\0`)
+function collectCallers(branch, records, changedPaths) {
+  const byModule = new Map()
+  for (const record of records) {
+    let moduleRecords = byModule.get(record.modulePath)
+    if (!moduleRecords) {
+      moduleRecords = new Map()
+      byModule.set(record.modulePath, moduleRecords)
     }
+    moduleRecords.set(record.name, record)
+  }
+
+  const directBindings = new Map()
+  const namespaceBindings = new Map()
+  for (const sourceFile of branch.sourceFiles.values()) {
+    for (const statement of sourceFile.statements) {
+      if (!ts.isImportDeclaration(statement) || !statement.importClause || statement.importClause.isTypeOnly) {
+        continue
+      }
+      const modulePath = modulePathForSpecifier(branch.checker, statement.moduleSpecifier)
+      const moduleRecords = modulePath ? byModule.get(modulePath) : undefined
+      if (!moduleRecords) continue
+      const clause = statement.importClause
+      if (clause.name) {
+        const record = moduleRecords.get('default')
+        if (record) addToSymbolMap(directBindings, branch.checker.getSymbolAtLocation(clause.name), record)
+      }
+      if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+        for (const element of clause.namedBindings.elements) {
+          if (element.isTypeOnly) continue
+          const importedName = (element.propertyName ?? element.name).text
+          const record = moduleRecords.get(importedName)
+          if (record) addToSymbolMap(directBindings, branch.checker.getSymbolAtLocation(element.name), record)
+        }
+      } else if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+        const symbol = branch.checker.getSymbolAtLocation(clause.namedBindings.name)
+        if (symbol) namespaceBindings.set(symbol, moduleRecords)
+      }
+    }
+  }
+
+  const localTargets = new Map()
+  for (const record of records) {
+    addToSymbolMap(localTargets, unalias(branch.checker, record.symbol), record)
+    for (const declaration of record.symbol.declarations ?? []) {
+      const name = 'name' in declaration ? declaration.name : undefined
+      if (name && ts.isIdentifier(name)) {
+        const symbol = branch.checker.getSymbolAtLocation(name)
+        if (symbol) addToSymbolMap(localTargets, unalias(branch.checker, symbol), record)
+      }
+    }
+  }
+  const definitions = definitionNodes(branch.checker, records, changedPaths)
+
+  for (const [callerPath, sourceFile] of branch.sourceFiles) {
+    function visit(node) {
+      if (ts.isIdentifier(node) && isRuntimeReference(node) && !insideAddedDefinition(node, definitions)) {
+        const symbol = branch.checker.getSymbolAtLocation(node)
+        if (symbol) {
+          for (const record of directBindings.get(symbol) ?? []) record.callers.add(callerPath)
+          const target = unalias(branch.checker, symbol)
+          for (const record of localTargets.get(target) ?? []) {
+            if (record.modulePath === callerPath) record.callers.add(callerPath)
+          }
+
+          if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node) {
+            const moduleRecords = namespaceBindings.get(symbol)
+            const record = moduleRecords?.get(node.parent.name.text)
+            if (record) record.callers.add(callerPath)
+          } else if (
+            ts.isElementAccessExpression(node.parent) &&
+            node.parent.expression === node &&
+            ts.isStringLiteral(node.parent.argumentExpression)
+          ) {
+            const moduleRecords = namespaceBindings.get(symbol)
+            const record = moduleRecords?.get(node.parent.argumentExpression.text)
+            if (record) record.callers.add(callerPath)
+          }
+        }
+      }
+      ts.forEachChild(node, visit)
+    }
+    visit(sourceFile)
   }
 }
 
-const [mode, refA, refB, ...rest] = process.argv.slice(2)
-if (mode === 'exports' && refA && refB) runExports(refA, refB, rest)
-else if (mode === 'callers' && refA && refB) runCallers(refA, [refB, ...rest])
+function runAnalyze(baseRef, branchRef, changedPaths) {
+  const productionPaths = changedPaths.filter(isProductionSource)
+  const base = buildProgram(baseRef)
+  const branch = buildProgram(branchRef)
+  const records = addedExports(base, branch, productionPaths)
+
+  if (records.length === 0) {
+    console.log('--- no new exported symbols — nothing to verify; branch edits existing code paths (wiring N/A)')
+    return
+  }
+
+  collectCallers(branch, records, productionPaths)
+  console.log(`--- new exported symbols: ${records.map((record) => record.displayName).join(' ')}`)
+  let findings = 0
+  for (const record of records) {
+    const callers = [...record.callers].sort()
+    if (callers.length === 0) {
+      console.log(`  FINDING: ${record.displayName} has NO non-test production caller — green-and-unwired.`)
+      findings += 1
+    } else {
+      console.log(`  ok: ${record.displayName} called by ${callers.join(' ')}`)
+    }
+  }
+  if (findings > 0) process.exitCode = 1
+}
+
+const [mode, baseRef, branchRef, ...rest] = process.argv.slice(2)
+if (mode === 'analyze' && baseRef && branchRef) runAnalyze(baseRef, branchRef, rest)
 else die('internal analyzer usage error')

@@ -42,6 +42,26 @@ function review(...args: string[]): { code: number | null; out: string } {
   return { code: r.status, out: `${r.stdout}${r.stderr}` }
 }
 
+function reviewFrom(directory: string, ...args: string[]): { code: number | null; out: string } {
+  const r = spawnSync('bash', [SCRIPT, ...args], {
+    cwd: join(repo, directory),
+    encoding: 'utf8',
+    env: env(),
+  })
+  return { code: r.status, out: `${r.stdout}${r.stderr}` }
+}
+
+function fixtureBranch(name: string, files: Record<string, string>): void {
+  git('checkout', '-q', '-b', name)
+  for (const [file, source] of Object.entries(files)) {
+    mkdirSync(join(repo, file, '..'), { recursive: true })
+    writeFileSync(join(repo, file), source)
+  }
+  git('add', '-A')
+  git('commit', '-q', '-m', `fixture: ${name}`)
+  git('checkout', '-q', 'main')
+}
+
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), 'lane-review-'))
   git('init', '-q', '-b', 'main')
@@ -49,6 +69,10 @@ beforeAll(() => {
   writeFileSync(
     join(repo, 'src', 'app.ts'),
     'export function used(): number {\n  return 1\n}\nconsole.log(used())\n',
+  )
+  writeFileSync(
+    join(repo, 'src', 'star-source.ts'),
+    'export function starOnly(): number { return 1 }\n',
   )
   git('add', '-A')
   git('commit', '-q', '-m', 'base')
@@ -64,6 +88,70 @@ beforeAll(() => {
   git('add', '-A')
   git('commit', '-q', '-m', 'edit an existing production path')
   git('checkout', '-q', 'main')
+
+  fixtureBranch('shadowed-binding', {
+    'src/new-shadowed.ts': 'export function duplicatedName(): number { return 1 }\n',
+    'src/unrelated.ts': [
+      'function duplicatedName(): number { return 2 }',
+      'console.log(duplicatedName())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('module-extensions', {
+    'src/orphan.cts': 'export function orphanCts(): number { return 1 }\n',
+    'src/orphan.mts': 'export function orphanMts(): number { return 1 }\n',
+  })
+
+  fixtureBranch('export-star-only', {
+    'src/star-barrel.ts': "export * from './star-source.ts'\n",
+  })
+
+  fixtureBranch('aliased-reexport-only', {
+    'src/aliased-barrel.ts': "export { starOnly as publicStar } from './star-source.ts'\n",
+  })
+
+  fixtureBranch('wired-extends', {
+    'src/new-base.ts': 'export class NewBase {}\n',
+    'src/subclass.ts': [
+      "import { NewBase } from './new-base.ts'",
+      'class Subclass extends NewBase {}',
+      'new Subclass()',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('wired-namespace', {
+    'src/namespace-export.ts': 'export function namespaceFunction(): number { return 1 }\n',
+    'src/namespace-caller.ts': [
+      "import * as functions from './namespace-export.ts'",
+      'console.log(functions.namespaceFunction())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('wired-aliases', {
+    'src/alias-exports.ts': [
+      'function localFunction(): number { return 1 }',
+      'export { localFunction as publicFunction }',
+      'export default function realDefault(): number { return 2 }',
+      '',
+    ].join('\n'),
+    'src/alias-caller.ts': [
+      "import renamedDefault, { publicFunction as invoked } from './alias-exports.ts'",
+      'console.log(invoked(), renamedDefault())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('self-contained-exports', {
+    'src/self-contained.ts': [
+      'export function alpha(): number { return beta() }',
+      'export function beta(): number { return alpha() }',
+      'export class Widget { static make(): Widget { return new Widget() } }',
+      '',
+    ].join('\n'),
+  })
 
   // Unwired branch: adds an exported symbol with ZERO production callers —
   // the class this tool exists to catch (#400).
@@ -99,8 +187,8 @@ beforeAll(() => {
   git('commit', '-q', '-m', 'add unwired exports in common forms')
   git('checkout', '-q', 'main')
 
-  // There is no stable identifier to search for when the default export is an
-  // anonymous expression. That is analyzer-unknown, never "nothing to verify".
+  // An anonymous default has no local name, but its public `default` binding
+  // can still be followed through a default import. Unused remains unwired.
   git('checkout', '-q', '-b', 'anonymous-default')
   writeFileSync(join(repo, 'src', 'anonymous.ts'), 'export default () => 1\n')
   git('add', '-A')
@@ -239,10 +327,10 @@ describe('lane_review.sh fail-closed contract', () => {
     expect(out).not.toContain('no new exported symbols')
   })
 
-  test('an anonymous default export fails closed instead of disappearing', () => {
+  test('an anonymous default export is reported as unwired instead of disappearing', () => {
     const { code, out } = review('anonymous-default')
-    expect(code).toBe(2)
-    expect(out).toContain('anonymous default export whose caller cannot be identified')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: default has NO non-test production caller')
     expect(out).not.toContain('delivers behaviour: yes')
   })
 
@@ -252,6 +340,69 @@ describe('lane_review.sh fail-closed contract', () => {
     expect(out).toContain('FINDING: orphanInSpacedFile')
     expect(out).toContain('FINDING: orphanInUnicodeFile')
     expect(out).not.toContain('no new exported symbols')
+  })
+
+  test('running from a subdirectory analyzes the full repository tree', () => {
+    const { code, out } = reviewFrom('src', 'unwired')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: orphanNeverCalled')
+    expect(out).not.toContain('no new exported symbols')
+  })
+
+  test('.mts and .cts production exports cannot disappear', () => {
+    const { code, out } = review('module-extensions')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: orphanMts')
+    expect(out).toContain('FINDING: orphanCts')
+  })
+
+  test('export-star additions remain visible and are not callers', () => {
+    const { code, out } = review('export-star-only')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: starOnly')
+    expect(out).not.toContain('ok: starOnly')
+  })
+
+  test('an aliased re-export is metadata, not a production caller', () => {
+    const { code, out } = review('aliased-reexport-only')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: publicStar')
+    expect(out).not.toContain('ok: publicStar')
+  })
+
+  test('an unrelated same-named local does not satisfy a new export', () => {
+    const { code, out } = review('shadowed-binding')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: duplicatedName')
+    expect(out).not.toContain('ok: duplicatedName')
+  })
+
+  test('a class heritage expression is a runtime caller', () => {
+    const { code, out } = review('wired-extends')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: NewBase called by src/subclass.ts')
+  })
+
+  test('a namespace-import property use is bound to its export', () => {
+    const { code, out } = review('wired-namespace')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: namespaceFunction called by src/namespace-caller.ts')
+  })
+
+  test('aliased named and renamed default imports retain their bindings', () => {
+    const { code, out } = review('wired-aliases')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: publicFunction called by src/alias-caller.ts')
+    expect(out).toContain('ok: realDefault called by src/alias-caller.ts')
+  })
+
+  test('self and mutual references inside new definitions are not product reachability', () => {
+    const { code, out } = review('self-contained-exports')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: alpha')
+    expect(out).toContain('FINDING: beta')
+    expect(out).toContain('FINDING: Widget')
+    expect(out).not.toContain('ok:')
   })
 
   test('comments and strings are not production callers', () => {
