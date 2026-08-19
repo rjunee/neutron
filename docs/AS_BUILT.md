@@ -2,6 +2,15 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — lane_review.sh fails closed (T1–T4)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
+
+Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
+
+The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
+
+Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
 ## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
 
 Migration repairs now have an explicit, loader-validated `reapply` kind. Unlike the existing
@@ -22,9 +31,6 @@ ships no migration SQL and does not change the schema snapshot.
 its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsified by 0130's
 rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
 `01M095E3F8YN3N9XV5AK4S9XJW`.
-
-## 2026-08-18 — lane_review.sh fails closed (T1–T4)
-tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z, an earlier revision printed `unknown ref` and exited 0, indistinguishable from a clean verdict on three PRs at once); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Pinned by tools/lane_review.test.ts: 6 tests / 17 expect calls against a fixture git repo, ~0.5s, no network. Mutants, one per hardening: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
 
 ## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
 
