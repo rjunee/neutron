@@ -90,7 +90,7 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
-import { infraDeathSentence } from './delivery.ts'
+import { infraDeathSentence } from './infra-block.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'

@@ -67,3 +67,24 @@ export function deriveInfraBlock(
   if (result === null || result.block_kind !== 'infra-only') return null
   return { cause: result.terminal_cause }
 }
+
+/**
+ * T4 (run `f384460d`) — THE one sentence for an INFRASTRUCTURE death.
+ *
+ * The inner workflow threw; nothing about the diff was ever judged. The reason
+ * has to say that in words, because `interpretFailure` reads the reason (not the
+ * verdict) to choose the class the owner is delivered.
+ *
+ * ONE source: the orchestrator WRITES this into `failure_reason` and
+ * `interpretFailure` READS it back to route the `infra` class, so a reworded
+ * sentence can never become one the delivery silently stops recognising.
+ *
+ * IT LIVES HERE, not beside either reader, because both ends need it and they
+ * already point at each other: `delivery.ts` imports `orchestrator.ts`, so
+ * declaring this in `delivery.ts` made the orchestrator import back and closed
+ * a `no-cycles` violation. This module is the infra-classification leaf and
+ * imports neither of them, so it is the one place both can reach.
+ */
+export function infraDeathSentence(round: number, ceiling: number): string {
+  return `build infrastructure failed at round ${round} of ${ceiling} before any review verdict`
+}

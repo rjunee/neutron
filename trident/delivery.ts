@@ -418,19 +418,19 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
 }
 
 /**
- * T4 (run `f384460d`) — THE one sentence for an INFRASTRUCTURE death.
+ * T4's one infra-death sentence now lives in `infra-block.ts`, and is re-exported
+ * here so this module's existing importers keep working unchanged.
  *
- * The inner workflow threw; nothing about the diff was ever judged. The reason
- * has to say that in words, because `interpretFailure` reads the reason (not the
- * verdict) to choose the class the owner is delivered.
- *
- * ONE source: the orchestrator WRITES this into `failure_reason` and
- * `interpretFailure` READS it back to route the `infra` class, so a reworded
- * sentence can never become one the delivery silently stops recognising.
+ * WHY IT MOVED. It is WRITTEN by the orchestrator and READ BACK by
+ * `interpretFailure` in this file, so both ends need it — and `delivery.ts`
+ * already imports `orchestrator.ts`. Declaring it here made the orchestrator
+ * import back, which is a real `delivery → orchestrator → delivery` cycle. CI's
+ * `no-cycles` rule caught it the moment this branch was brought up to a main
+ * that already carried the first edge; on the branch's own stale base neither
+ * PR could see it. A symbol both ends of an edge need belongs at neither end,
+ * so it sits in the infra-classification leaf, which imports neither of them.
  */
-export function infraDeathSentence(round: number, ceiling: number): string {
-  return `build infrastructure failed at round ${round} of ${ceiling} before any review verdict`
-}
+export { infraDeathSentence } from './infra-block.ts'
 
 /**
  * The human-readable name for the work — the `work_board_items.title` the run
