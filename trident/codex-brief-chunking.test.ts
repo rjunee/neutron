@@ -17,7 +17,10 @@
  * rather than a parallel copy that could drift from what ships.
  */
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { execFileSync } from 'node:child_process'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -158,5 +161,163 @@ describe('codex build brief — chunked transport', () => {
     const segs = chunk(brief, CHUNK_BYTES)
     expect(rejoin(segs)).toBe(brief)
     expect(segs.length).toBeLessThanOrEqual(16)
+  })
+})
+
+/**
+ * THE TRANSPORT ENCODING — that what the bridge agent is asked to copy carries no
+ * sentence it could be tempted to improve.
+ *
+ * WHY THIS BLOCK EXISTS. On 2026-08-19 run `4908cbf7` could not start a build. The
+ * workflow composed a 25,548-byte segment; the agent wrote 25,533. The 15 missing
+ * bytes were one phrase — ` via the schema` — removed from the middle of an
+ * instruction sentence, and the contractual retry removed it AGAIN. Chunking was
+ * working perfectly: every piece was the right size and each was still edited. The
+ * segments now travel base64-encoded, so the copy is mechanical.
+ *
+ * These tests execute REAL `bash` against the REAL rendered blocks. A test that only
+ * concatenated `seg.text` would have passed on the day of the outage.
+ */
+const transport = new Function(
+  `${extract('briefIntegrity')}\n${extract('base64Encode')}\n${extract('shSingleQuote')}\n${extract('chunkTextOnLines')}\n${extract('renderBriefChunks')}\nreturn { base64Encode, renderBriefChunks, chunkTextOnLines }`,
+) as () => {
+  base64Encode: (s: string) => string
+  renderBriefChunks: (
+    chunks: Array<{ text: string; mode: string }>,
+    file: string,
+    offset: number,
+    total: number,
+  ) => string
+  chunkTextOnLines: (s: string, max: number) => Array<{ text: string; mode: string }>
+}
+const { base64Encode, renderBriefChunks, chunkTextOnLines: transportChunk } = transport()
+
+/** Run the rendered blocks the way a FAITHFUL copier would: headers stripped, rest verbatim. */
+function executeBlocks(blocks: string): Buffer {
+  const script = blocks
+    .split('\n')
+    .filter((l) => !/^CALL \d+ of \d+:$/.test(l))
+    .join('\n')
+  const dir = mkdtempSync(join(tmpdir(), 'brief-transport-'))
+  const sh = join(dir, 'replay.sh')
+  writeFileSync(sh, script)
+  execFileSync('bash', [sh])
+  return readFileSync(join(dir, 'segment'))
+}
+
+/** Render a whole text through the real transport into `<dir>/segment`. */
+function roundTrip(text: string): { written: Buffer; blocks: string; dir: string } {
+  const dir = mkdtempSync(join(tmpdir(), 'brief-transport-'))
+  const file = join(dir, 'segment')
+  const segs = transportChunk(text, CHUNK_BYTES)
+  const blocks = renderBriefChunks(segs, file, 0, segs.length)
+  const script = blocks
+    .split('\n')
+    .filter((l) => !/^CALL \d+ of \d+:$/.test(l))
+    .join('\n')
+  const sh = join(dir, 'replay.sh')
+  writeFileSync(sh, script)
+  execFileSync('bash', [sh])
+  return { written: readFileSync(file), blocks, dir }
+}
+
+describe('codex build brief — transport encoding', () => {
+  test('base64Encode agrees with the platform encoder, including multi-byte text', () => {
+    for (const s of [
+      '',
+      'a',
+      'ab',
+      'abc',
+      'abcd',
+      'CONTRACT\n1. do the thing\n',
+      'em—dash, “curly”, 日本語, 🛠 emoji\n',
+      'a'.repeat(3071),
+    ]) {
+      expect(base64Encode(s).replace(/\n/g, '')).toBe(Buffer.from(s, 'utf8').toString('base64'))
+    }
+  })
+
+  test('a real-sized brief survives the rendered blocks executed in REAL bash', () => {
+    const brief = `${'a contract line with some words in it\n'.repeat(700)}`
+    const { written } = roundTrip(brief)
+    expect(written.equals(Buffer.from(brief, 'utf8'))).toBe(true)
+  })
+
+  test('the shell-hostile characters that make a brief dangerous survive too', () => {
+    // Quotes, backslashes, `$(…)`, backticks and a line that LOOKS like a terminator.
+    const nasty = [
+      "it's got single 'quotes' and \"doubles\"\n",
+      'a backslash \\ and a $(command substitution) and `backticks`\n',
+      'NEUTRON_CODEX_B64_EOF_P1\n',
+      'NEUTRON_CODEX_BRIEF_EOF_deadbeef_P2\n',
+      '日本語 with 🛠 and an em—dash\n',
+      '\n\n',
+    ].join('')
+    const { written } = roundTrip(nasty)
+    expect(written.toString('utf8')).toBe(nasty)
+  })
+
+  test('a line equal to the heredoc terminator cannot close the heredoc', () => {
+    // The old prose transport had to GROW the marker to make this safe. Base64 makes
+    // it structural: `_` is not in the alphabet, so the terminator cannot be produced.
+    const withTerminator = `before\nNEUTRON_CODEX_B64_EOF_P1\nafter\n`
+    const { written, blocks } = roundTrip(withTerminator)
+    expect(written.toString('utf8')).toBe(withTerminator)
+    // Exactly one terminator line per block, and it is the one the renderer wrote.
+    expect(blocks.split('\n').filter((l) => l === 'NEUTRON_CODEX_B64_EOF_P1')).toHaveLength(1)
+  })
+
+  test('THE 4908cbf7 PROPERTY — no copyable sentence appears in what the agent is handed', () => {
+    // The phrase the model deleted, in the sentence it deleted it from.
+    const phrase = ' via the schema'
+    const contract = `7. Report worktreePath (pwd), branch, commitSha, prNumber, diffFile, testsPassed and suiteOutcome${phrase}. In your final text, also emit the last lines, unfenced:\n`
+    const { written, blocks } = roundTrip(contract)
+    // It still arrives byte-exact…
+    expect(written.toString('utf8')).toBe(contract)
+    // …and it was never legible in transit, which is why it arrives.
+    expect(blocks).not.toContain(phrase)
+    expect(blocks).not.toContain('Report worktreePath')
+  })
+
+  test('NEGATIVE CONTROL — a dropped phrase in transit is still detected', () => {
+    // Proves these assertions are load-bearing: corrupt the payload the way the run
+    // was corrupted, and the round trip must NOT come back equal.
+    const contract = `7. Report testsPassed and suiteOutcome via the schema. Emit the last lines.\n`
+    const dir = mkdtempSync(join(tmpdir(), 'brief-transport-'))
+    const file = join(dir, 'segment')
+    const segs = transportChunk(contract, CHUNK_BYTES)
+    const blocks = renderBriefChunks(segs, file, 0, segs.length)
+    const damaged = blocks.replace(
+      base64Encode(segs[0]!.text),
+      base64Encode(contract.replace(' via the schema', '')),
+    )
+    expect(damaged).not.toBe(blocks) // the corruption actually landed in the payload
+    const script = damaged
+      .split('\n')
+      .filter((l) => !/^CALL \d+ of \d+:$/.test(l))
+      .join('\n')
+    const sh = join(dir, 'replay.sh')
+    writeFileSync(sh, script)
+    execFileSync('bash', [sh])
+    expect(readFileSync(file).toString('utf8')).not.toBe(contract)
+  })
+
+  test('the wrapped payload decodes even if a copier reflows it', () => {
+    // `base64 -d` ignores newlines. A model that re-wraps the block still lands the
+    // right bytes — the one kind of "tidying" that is now harmless.
+    const text = `${'a line of contract text\n'.repeat(200)}`
+    const dir = mkdtempSync(join(tmpdir(), 'brief-transport-'))
+    const file = join(dir, 'segment')
+    const segs = transportChunk(text, CHUNK_BYTES)
+    const blocks = renderBriefChunks(segs, file, 0, segs.length)
+    const reflowed = blocks
+      .split('\n')
+      .map((l) => (/^[A-Za-z0-9+/=]{20,}$/.test(l) ? l.replace(/(.{40})/g, '$1\n') : l))
+      .filter((l) => !/^CALL \d+ of \d+:$/.test(l))
+      .join('\n')
+    const sh = join(dir, 'replay.sh')
+    writeFileSync(sh, reflowed)
+    execFileSync('bash', [sh])
+    expect(readFileSync(file).toString('utf8')).toBe(text)
   })
 })
