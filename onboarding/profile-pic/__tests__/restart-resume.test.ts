@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   GeminiImagenClient,
@@ -53,8 +53,8 @@ let db: ProjectDb
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'pp-resume-'))
   dbPath = join(tmp, 'project.db')
+  seedMigratedDb(dbPath)
   db = ProjectDb.open(dbPath)
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

@@ -9,6 +9,7 @@ describe('makeTridentRun', () => {
       phase: 'forge-init',
       merge_mode: 'local',
       channel_kind: 'telegram',
+      brief_alert: null,
       harvested_at: null,
       crash_recoveries: 0,
       reviewed_head: null,

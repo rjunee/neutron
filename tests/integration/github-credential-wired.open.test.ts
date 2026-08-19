@@ -26,7 +26,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
@@ -64,8 +64,8 @@ async function composeOpen(): Promise<{
   run_host: (cmd: string[], cwd?: string) => Promise<{ ok: boolean; stdout: string }>
   db: ProjectDb
 }> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composition = await buildOpenGraphComposer({ env: process.env })({
     db,
     project_slug: SLUG,

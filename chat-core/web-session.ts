@@ -516,12 +516,33 @@ export class WebChatSession {
    * after reconnect re-reports it because the id only enters {@link readSent}
    * once a frame is actually accepted.
    */
-  markRead(messageIds: readonly string[]): void {
+  /**
+   * Report read messages. Best-effort: an id is recorded ONLY when the socket
+   * accepted the frame, so a send that failed (commonly: the socket is still
+   * connecting right after a project switch) is retried on the next call.
+   *
+   * RETURNS THE IDS ACTUALLY SENT. That retry only works if callers keeping their
+   * own ledger fill it from this RETURN rather than from the argument they passed
+   * — filling it from the argument marks a failed send as done and removes the id
+   * from every later call, so the receipt is never sent again and the unread badge
+   * stalls until a reload. Already-sent ids are included in the return: they are
+   * confirmed sent, which is what a caller's ledger is asking about.
+   */
+  markRead(messageIds: readonly string[]): readonly string[] {
+    const accepted: string[] = []
     for (const message_id of messageIds) {
-      if (message_id.length === 0 || this.readSent.has(message_id)) continue
+      if (message_id.length === 0) continue
+      if (this.readSent.has(message_id)) {
+        accepted.push(message_id)
+        continue
+      }
       const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' }
-      if (this.ws.send(env)) this.readSent.add(message_id)
+      if (this.ws.send(env)) {
+        this.readSent.add(message_id)
+        accepted.push(message_id)
+      }
     }
+    return accepted
   }
 
   /**

@@ -101,6 +101,8 @@ export interface BuildTridentOrchestratorOptions {
   db_path: string
   /** Host command runner — base-branch detect, existing-PR probe, merge. */
   run_host: RunHostCommand
+  /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
+  record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
   /** Injectable wait, used to SPACE the resume head-read retries
@@ -311,6 +313,29 @@ export interface BuildTridentOrchestratorOptions {
    * raised, which is exactly the kind of drift that makes a reader distrust it).
    */
   no_advance_hang_ms?: number
+  /**
+   * POSITIVE LIVENESS EVIDENCE for the hang watchdog: the timestamp of the most
+   * recent stage event for a run, or null when it has none.
+   *
+   * THE PREMISE OF THE WATCHDOG ABOVE IS FALSE, and this is the correction. It
+   * claims "a HEALTHY build re-stamps `last_advanced_at` on every inner-workflow
+   * checkpoint, so it never trips this". Checkpoints land BETWEEN phases; a single
+   * Forge round runs ~40 min and re-stamps nothing while it does. So the field is
+   * stale by construction during exactly the work the watchdog is most likely to
+   * interrupt, and the reaper is really asking "has a phase ended recently".
+   *
+   * MEASURED: run 9bece714 was reaped as "no progress for 90 min — suspected agent
+   * hang" while pid 286859 was alive and its stderr log had been written to seconds
+   * earlier. Three further lanes sat 57-85 min "stale" while actively logging.
+   *
+   * Stage events are written MID-PHASE, so a run that has emitted one recently is
+   * observably progressing. When this reader is supplied and reports an event newer
+   * than the hang threshold, the watchdog STANDS DOWN for that tick — writing
+   * nothing, so the reprieve is recomputed from the evidence next tick and expires
+   * the moment the events stop. Omitted, or returning null, leaves the previous
+   * behaviour exactly as it was: absence is never read as liveness.
+   */
+  latest_stage_event_at?: (run_id: string) => string | null
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
@@ -1346,6 +1371,29 @@ export async function rebaseOntoObservedBase(
       // exactly as an unconflicted apply would — and still faces the full review gate.
       autoResolved = [...everConflicted]
     }
+    // THE REPLAY NOTE IS METADATA, NEVER A SUBJECT. This was measured on main in e6d4610d
+    // (#354), 47144a2a (#348), bce629e2 (#327), and d2680a09 (#328): every PR title on
+    // 2026-08-17/18 was this replay string instead of the builder's subject. Carrying `%B` makes
+    // the note body-only metadata. A replay of a replay reads that carried message again, so the
+    // original subject survives arbitrarily many replays and every replay appends exactly one
+    // provenance line. The read fails CLOSED: committing the note alone when git cannot read the
+    // original would silently reproduce the measured defect precisely when git is broken.
+    const replayNote =
+      `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`
+    const originalMessage = await run_host(
+      ['git', '-C', scratchDir, 'log', '-1', '--format=%B', oldHead],
+      scratchDir,
+    )
+    if (!originalMessage.ok)
+      throw new Error(
+        publishFailureReason(
+          'read the commit message of',
+          branch,
+          originalMessage.stderr || 'git log -1 failed with no output',
+        ),
+      )
+    const carried = originalMessage.stdout.trim()
+    const commitMessage = carried === '' ? replayNote : `${carried}\n\n${replayNote}`
     const committed = await run_host(
       [
         'git',
@@ -1357,7 +1405,7 @@ export async function rebaseOntoObservedBase(
         'user.email=trident@neutron.local',
         'commit',
         '-m',
-        `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`,
+        commitMessage,
       ],
       scratchDir,
     )
@@ -1685,6 +1733,7 @@ export function buildTridentOrchestrator(
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
+  const latestStageEventAt = opts.latest_stage_event_at ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
@@ -1835,6 +1884,32 @@ export function buildTridentOrchestrator(
       }
       return result
     }
+    // Observe the branch before replay: a missing remote ref proves this is the lane's FIRST
+    // publish, which is the only point where the launch pin can prove the branch was cut from
+    // this run's base rather than inherited from another lane. The same observation remains the
+    // push lease below, so a branch that appears while replay is running is still refused.
+    const observed = await runWithRetries(
+      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+    )
+    if (!observed.ok) {
+      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
+    }
+    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
+    // not exist, so a first push of a new card stays correct — and is still refused if the branch
+    // appeared underneath us between this read and the push.
+    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
+    if (expected === '' && run.base_sha !== null) {
+      const cutFromPinnedBase = await opts.run_host(
+        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', run.base_sha, resolvedHead],
+        run.repo_path,
+      )
+      if (!cutFromPinnedBase.ok) {
+        const base = await resolveBase(run)
+        throw new Error(
+          `branch ${branch} does not contain the origin/${base} tip pinned at launch (${run.base_sha.slice(0, 7)}) — not cut from origin/${base}; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+        )
+      }
+    }
     // THE REBASE ONTO CURRENT `main` HAPPENS HERE, BEFORE THE REVIEW IS RE-FIRED.
     //
     // WHEN. In the OUTER publisher, between the local-tip verification above and the lease
@@ -1887,16 +1962,6 @@ export function buildTridentOrchestrator(
     // trusts `refs/remotes/origin/<b>`, which any concurrent `git fetch` can advance — at which
     // point the lease certifies a state nobody ever looked at, and quietly degrades to `--force`.
     // The explicit `<ref>:<sha>` form cannot be undermined that way.
-    const observed = await runWithRetries(
-      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
-    )
-    if (!observed.ok) {
-      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
-    }
-    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
-    // not exist, so a first push of a new card stays correct — and is still refused if the branch
-    // appeared underneath us between this read and the push.
-    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
     // ALREADY PUBLISHED IS A SUCCESS THE PUBLISHER DID NOT HAVE TO PERFORM (3 occurrences
     // 2026-08-17, runs 26ed32c1 / 88efe1ca / 95fcfb91). A resumed or relaunched run whose
     // branch is already fully on origin used to be REFUSED here as "the build left no new
@@ -2003,6 +2068,35 @@ export function buildTridentOrchestrator(
    *  clean fire. Folds any existing PR + the last checkpoint into the args for
    *  idempotent resume. */
   async function launch(run: TridentRun): Promise<AdvanceOutcome> {
+    const stamp = (stage: string, meta?: string): void => {
+      try {
+        opts.record_stage?.(run.id, stage, meta ?? null)
+      } catch {
+        // A stamp must never fail a launch.
+      }
+    }
+    // A review-only bound run fails CLOSED (SPEC card 2026-08-18; bound_pr was 0 of 190 runs).
+    // The measured failure mode is a "review PR #N" dispatch building a docs PR about reviewing
+    // (#542/#541/#530) while #N's review-gate stays red. Guarding at launch covers BOTH call sites
+    // (the fresh launch ~2896 and the crash-recovery relaunch ~2769). When the review executor
+    // lands (plan task 2) this branch becomes its entry point; a fix-round lane that wants
+    // commit-capable bound runs must add a discriminator and change this deliberately.
+    if (run.bound_pr !== null) {
+      return {
+        run: failedRun(
+          run,
+          `run is bound to PR #${run.bound_pr} for a review-only round, but review-only execution is not yet wired — refusing the build path: no branch, no commit, and no new PR were created (the target PR was not touched)`,
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (bound_pr review-only: build path refused, no fire)`,
+      }
+    }
+    // MERGE NOTE: the bound_pr guard above runs BEFORE this stamp on purpose. A refused
+    // run never launches, so stamping first would write a launch-start event for a launch
+    // that never happened — and this stage ledger is exactly what the latency card reads.
+    stamp('launch-start', `round=${run.round} ralph_round=${run.ralph_round}`)
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
     // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
@@ -2036,7 +2130,14 @@ export function buildTridentOrchestrator(
             {
               repo_path: run.repo_path,
               branch: run.branch,
-              merge_mode: run.merge_mode,
+              // Deferred Ralph waves deliberately leave origin stale. These checkpoints
+              // rebuild regardless of the head; the local match is planner-only, allowing
+              // the clean name to open plan:next through cleanContinuation.
+              merge_mode:
+                resume_checkpoint === 'ralph-task-built' ||
+                resume_checkpoint === 'ralph-task-built-deviated'
+                  ? 'local'
+                  : run.merge_mode,
             },
             // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
             // network call and the consequence of `''` is terminal, so the attempts are
@@ -2089,8 +2190,10 @@ export function buildTridentOrchestrator(
       }
     }
 
-    const freshBuild = resume_checkpoint_name === '' && launchRun.branch === null
-    let base_sha: string | null = null
+    const freshLaunch = launchRun.inner_checkpoint === null
+    const priorBaseSha = launchRun.base_sha
+    const freshBuild = freshLaunch && priorBaseSha === null
+    let base_sha: string | null = priorBaseSha
     let base_behind: number | null = null
     if (freshBuild && launchRun.merge_mode === 'pr') {
       const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
@@ -2140,6 +2243,51 @@ export function buildTridentOrchestrator(
     }
     const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
 
+    if (
+      freshLaunch &&
+      base_sha !== null &&
+      typeof launchRun.branch === 'string' &&
+      launchRun.branch.length > 0
+    ) {
+      const branchTipResult = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', '--quiet', `refs/heads/${launchRun.branch}`],
+        launchRun.repo_path,
+      )
+      const branchTip = branchTipResult.stdout.trim().toLowerCase()
+      // A missing or ambiguous local ref is the normal first-launch shape: Forge
+      // will cut it from pinnedRun.base_sha. Once git resolves a concrete tip,
+      // however, only ancestry can prove that this lane owns what is already there.
+      if (branchTipResult.ok && /^[0-9a-f]{40}$/.test(branchTip)) {
+        const containedInBase = await opts.run_host(
+          ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
+          launchRun.repo_path,
+        )
+        let ownCrashLeftover = false
+        if (!containedInBase.ok && priorBaseSha !== null) {
+          const descendsFromPriorBase = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
+            launchRun.repo_path,
+          )
+          ownCrashLeftover = descendsFromPriorBase.ok
+        }
+        if (!containedInBase.ok && !ownCrashLeftover) {
+          const ahead = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
+            launchRun.repo_path,
+          )
+          const rawAheadCount = ahead.stdout.trim()
+          const aheadCount = /^\d+$/.test(rawAheadCount) ? rawAheadCount : '?'
+          const reason = `branch ${launchRun.branch} already carries ${aheadCount} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. Verify or delete the branch (git -C ${launchRun.repo_path} branch -D ${launchRun.branch}), then re-dispatch.`
+          return {
+            run: failedRun(pinnedRun, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${launchRun.phase} → failed (local branch belongs to another lane — no fire)`,
+          }
+        }
+      }
+    }
+
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
       return {
@@ -2173,6 +2321,7 @@ export function buildTridentOrchestrator(
     // never fail because the strategy could not be derived. Null → the workflow's
     // contract is byte-identical legacy.
     let test_strategy: string | null = null
+    let test_strategy_intermediate: string | null = null
     // The numbers behind that block, carried into this launch's AdvanceOutcome note so
     // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
     // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
@@ -2202,15 +2351,18 @@ export function buildTridentOrchestrator(
         base_branch: base,
       })
       test_strategy = detail.block
+      test_strategy_intermediate = detail.intermediate_block
       test_strategy_summary = detail.summary
     } catch {
       test_strategy = null
+      test_strategy_intermediate = null
       test_strategy_summary = null
     }
 
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
+    stamp('fire-dispatched')
     const firePromise = fireWorkflow({
       run: pinnedRun,
       base_branch: base,
@@ -2252,6 +2404,7 @@ export function buildTridentOrchestrator(
       // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
       // workflow into the FORGE build contract only — never the argus review gate.
       test_strategy,
+      test_strategy_intermediate,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.
@@ -2286,6 +2439,7 @@ export function buildTridentOrchestrator(
       }
     }
 
+    stamp('fire-settled')
     fired.add(run.id)
     const next: TridentRun = {
       ...pinnedRun,
@@ -2327,7 +2481,11 @@ export function buildTridentOrchestrator(
    * resurrect a concurrently force-terminated run; `saveIfActive` still commits the
    * (unchanged, non-terminal) phase under its race guard.
    */
-  async function refireNextRalphTask(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
+  async function refireNextRalphTask(
+    run: TridentRun,
+    result: InnerResult,
+    checkpointNameOverride?: 'ralph-task-built' | 'ralph-task-built-deviated',
+  ): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
     const pr = result.pr_number ?? run.pr
@@ -2372,6 +2530,7 @@ export function buildTridentOrchestrator(
       inner_verdict: null,
       pr,
       branch,
+      ...(checkpointNameOverride !== undefined ? { inner_checkpoint: checkpointNameOverride } : {}),
     }
     await persistRefireReset(run.id, resetPatch)
 
@@ -2389,6 +2548,7 @@ export function buildTridentOrchestrator(
       subagent_status: null,
       inner_result: null,
       inner_verdict: null,
+      ...(checkpointNameOverride !== undefined ? { inner_checkpoint: checkpointNameOverride } : {}),
       last_advanced_at: now(),
     }
     return {
@@ -2422,6 +2582,13 @@ export function buildTridentOrchestrator(
     }
 
     if (result.publish_requested) {
+      if (run.ralph && (result.remaining_tasks ?? 0) > 0) {
+        return refireNextRalphTask(
+          run,
+          result,
+          result.deviated_from_spec ? 'ralph-task-built-deviated' : 'ralph-task-built',
+        )
+      }
       try {
         // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
         // reported no OID is still published — `publishBuiltCommit` reads the head from git.
@@ -2862,6 +3029,43 @@ export function buildTridentOrchestrator(
     //     than waiting on the 2h `maxInflightMs` ceiling below. Checked BEFORE
     //     orphan recovery so a wedged orphan is reaped instead of redispatched.
     if (run.subagent_run_id !== null && elapsedSinceAdvance(run) > noAdvanceHangMs) {
+      // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING. The clock
+      //     above measures phase boundaries, not work; a run mid-Forge is stale on
+      //     that field however hard it is working. Stage events are written
+      //     MID-phase, so one that is NEWER than the hang threshold is proof the run
+      //     advanced inside the window the watchdog just called dead.
+      //
+      //     NOTHING IS WRITTEN, DELIBERATELY. The obvious implementation re-stamps
+      //     `last_advanced_at` to the event's timestamp — but `TridentRunUpdate`
+      //     documents that the field "is always re-stamped by `save`/`update` so
+      //     callers never pass it", so that write would silently land as `now()`:
+      //     liveness the run never demonstrated, and a fresh full threshold bought
+      //     by an event that may be 89 minutes old. Returning `changed: false`
+      //     instead means the reprieve is RECOMPUTED FROM THE EVIDENCE on every
+      //     tick and expires the moment the events stop, with no stored state to
+      //     go stale and no timestamp invented anywhere.
+      //
+      //     ABSENCE IS NOT EVIDENCE: a null reader (not wired), an unparseable
+      //     timestamp, or a run with no events at all falls straight through to the
+      //     reap below, byte-identical to the old behaviour.
+      const stageAt = latestStageEventAt === null ? null : latestStageEventAt(run.id)
+      const stageMs = stageAt === null ? NaN : Date.parse(stageAt)
+      const nowMs = Date.parse(now())
+      if (Number.isFinite(stageMs) && Number.isFinite(nowMs) && nowMs - stageMs <= noAdvanceHangMs) {
+        const staleMins = Math.round(elapsedSinceAdvance(run) / 60_000)
+        const evidenceMins = Math.round(Math.max(0, nowMs - stageMs) / 60_000)
+        // DISCLOSED, not silent. A watchdog that quietly declines to fire is as hard
+        // to trust as one that quietly fires; the note names both clocks so the
+        // reason this run survived is legible in the tick log.
+        return {
+          run,
+          changed: false,
+          waiting: true,
+          note:
+            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but a stage ` +
+            `event landed ${evidenceMins} min ago — the run is advancing mid-phase`,
+        }
+      }
       fired.delete(run.id)
       redispatched.delete(run.id)
       const mins = Math.round(noAdvanceHangMs / 60_000)

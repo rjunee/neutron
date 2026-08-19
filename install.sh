@@ -1465,6 +1465,9 @@ NEUTRON_DB_TARGET=$(resolve_db_target "$NEUTRON_HOME_RESOLVED" "$SRC_DIR/.env")
 # Ensure the DB's parent dir exists (a custom NEUTRON_DB_PATH may live outside
 # NEUTRON_HOME); the runner creates the file but not its parent directory.
 mkdir -p "$(dirname "$NEUTRON_DB_TARGET")"
+# Installation is the explicit ownership-transfer ceremony; migrations/runner.ts
+# refuses every other checkout after this marker is refreshed.
+printf '%s\nclaimed_at=%s\nclaimed_by=install.sh\n' "$SRC_DIR/migrations" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$(dirname "$NEUTRON_DB_TARGET")/.migrate-owner"
 spin_start "running database migrations"
 # NEUTRON_MIGRATE_QUIET makes the runner emit one clean summary line
 # (`✓ database ready (N migrations applied)`) instead of dumping the raw

@@ -100,9 +100,9 @@ This is the one check that hashes the whole tree on every boot, and the cost is 
 
 **Deciding costs no write — every refusal, without exception.** `_migrations` is *created* on the path that is about to insert a row and on no other, the provenance columns are added there too, the rekey happens there and nowhere else, and the ledger is read tolerantly of both its absence and its older shapes. A boot that ends in any of the six refusals (a duplicate ordinal, a duplicate name, two files with duplicate content, an unexplained ledger row, an untracked file, an occupied rekey scratch name) leaves the database byte-for-byte as it found it — the guard whose job is to change nothing does not first mutate the schema of the database it just declared untrustworthy. `applyMigrations` against a fully-migrated database is a pure read, which is what makes opening a backup read-only to inspect it work.
 
-That ordering is load-bearing rather than tidy, and it was not always right: the acknowledged-repair write below used to run *before* the untracked check, so on any instance carrying acknowledged repairs — this repository ships two — the refusal's claim that nothing had been written was false, in precisely the incident-recovery state where an operator reads it.
+That ordering is load-bearing rather than tidy, and it was not always right: the acknowledged-repair write below used to run *before* the untracked check, so on any instance carrying acknowledged repairs — this repository ships three suppress entries — the refusal's claim that nothing had been written was false, in precisely the incident-recovery state where an operator reads it.
 
-One write is worth knowing about before pointing a read-only connection at a live database: when `repairs.json` carries an entry whose row is present in this ledger, the runner records the acknowledgement in `_migration_repairs`. It happens on the acknowledged-repair path only, whether or not anything is pending, and only *after* every refusal has been decided. A database whose ledger has no acknowledged repairs opens read-only cleanly; one that does needs a writable copy (or an unmatched `repairs.json`) to inspect.
+One write is worth knowing about before pointing a read-only connection at a live database: an active repair makes the runner ensure `_migration_repairs` exists. An ordinary suppress entry is acknowledged there whether or not anything is pending; a reapply entry writes its firing receipt only when its named file actually runs. Both happen only *after* every refusal has been decided. A database whose ledger has no active repairs opens read-only cleanly; one that does needs a writable copy (or an unmatched `repairs.json`) to inspect.
 
 ## When the runner refuses: an untracked file
 
@@ -140,6 +140,18 @@ Two traps worth naming:
 - **An entry only takes effect where its row exists.** `recorded_name` must match a name the ledger records, which is what keeps these entries inert on every other instance — a fresh install must still run migration 0122, and it does. **Whether `version` is part of the match depends on the name.** For a `recorded_name` this build does NOT ship as a file — an orphan, which is the only kind this runner ever mints — the name is the identity and `version` is context only: one migration can legitimately be recorded at more than one ordinal before the rekey collapses it, and matching on the pair meant an entry naming the row that did not survive that collapse quietly stopped working on the next boot. For a `recorded_name` this build DOES ship, the recorded ordinal is the only thing separating the incident row from legitimate renumber drift, so there the exact pair IS the match — and the entry additionally stays inert on a row sitting where a normal apply would have written it. Stating the orphan rule universally was measured to skip a pending migration silently on an instance the incident was never about.
 
 Entries are permanent incident records. They are never rewritten or removed.
+
+### Reapply repairs
+
+The ordinary repair entry is a **suppress** repair: `file_name` names schema that was
+hand-verified present, so that migration is skipped and the incident row is acknowledged.
+`"reapply": true` means the opposite and is deliberately stricter: `file_name` must equal
+`recorded_name`, the active entry turns that otherwise `recorded-by-name` file into guarded
+work, and the runner executes its SQL without probing the schema or swallowing errors. It
+never rewrites `_migrations`; it inserts the exact firing into `_migration_repairs` inside the
+same transaction as the SQL body. That receipt makes later boots ordinary no-ops. Before the
+named file exists the entry writes no receipt, and on a fresh install it is inert because no
+incident row activates it.
 
 ## PRAGMAs and transactions
 

@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../../tests/support/migrated-db.ts'
 import {
   AppChatEditStore,
   AppChatEditNotAuthorizedError,
@@ -79,8 +79,8 @@ async function sendAgent(adapter: AppWsAdapter, text: string): Promise<string> {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-ws-edits-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

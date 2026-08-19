@@ -21,6 +21,7 @@
 # Fields (whitelisted; anything else is an error):
 #   pr <int>                 → pr=<int>                          (numeric)
 #   branch <str>             → branch='<str>'
+#   brief_alert <str>        → brief_alert='<str>'
 #   inner_checkpoint <str>   → inner_checkpoint='<str>'
 #   inner_checkpoint_head <str>
 #                            → inner_checkpoint_head='<str>'
@@ -38,12 +39,12 @@
 # Every value above is wrapped in `frozen()` when it targets one of the two
 # LIVENESS columns — see the block above the field loop for what that means.
 #
-# `last_advanced_at='<now UTC, %FT%T.%3NZ>'` is ALWAYS appended — both legacy
-# inline call sites unconditionally stamped it via `$(date -u +%FT%TZ)`; the
-# script computes it so the prompt carries no command substitution either, and
-# stamps MILLISECONDS (see the stamp block below for why, and for the
-# whole-second fallback on a `date` without `%3N`). It and `subagent_status` are
-# the LIVENESS pair, frozen on a terminal row.
+# `last_advanced_at='<now UTC, %FT%T.%3NZ>'` is appended for workflow progress
+# checkpoints. A standalone `brief_alert` is observability, not progress, so it
+# deliberately leaves the hang-watchdog heartbeat untouched. The script computes
+# stamps so the prompt carries no command substitution and uses MILLISECONDS (see
+# the stamp block below, including the whole-second fallback). It and
+# `subagent_status` are the LIVENESS pair, frozen on a terminal row.
 #
 # SEMANTICS ARE UNCHANGED from the inline SQL this replaces
 # (trident/inner-workflow.mjs checkpoint()/writeTerminalResult()), EXCEPT that
@@ -119,7 +120,36 @@ frozen() {
   printf 'CASE WHEN phase IN %s THEN %s ELSE %s END' "$terminal_phases" "$1" "$2"
 }
 
+# THE CANONICAL CHECKPOINT → PHASE TABLE, mirrored from
+# `trident/checkpoint-phase.ts` (`phaseForCheckpoint`) and pinned against it by
+# `trident/checkpoint-phase.test.ts`, which parses the case arms below out of THIS
+# file and asserts both copies answer identically for every checkpoint name the
+# inner workflow can emit. Read that module's header for the measurement that
+# motivated this; the short version is that `phase` never moved off `forge-init`
+# for the entire life of a build, and this script is the ONLY writer positioned to
+# fix that — the inner workflow checkpoints by invoking this script, not through
+# `TridentRunStore.update`, so a TypeScript-side derivation would never see the
+# live transitions that matter.
+#
+# Empty output means "this checkpoint implies NOTHING about the phase" and the
+# column is left untouched. That is the answer for terminal-adjacent names
+# (`pr-merged`, and the throw-path `inner-error`/`awaiting-trailer`), for the
+# outer loop's own markers, and for any name this table has never seen — an
+# unrecognised checkpoint must not assert a phase nobody chose.
+phase_for_checkpoint() {
+  case "$1" in
+    forge-done | argus-approved) printf 'argus' ;;
+    fix-round-[0-9] | fix-round-[0-9][0-9] | fix-round-[0-9][0-9][0-9]) printf 'argus' ;;
+    argus-request-changes) printf 'forge-fix' ;;
+    argus-request-changes-round-[0-9] | argus-request-changes-round-[0-9][0-9] | argus-request-changes-round-[0-9][0-9][0-9]) printf 'forge-fix' ;;
+    ralph-task-built) printf 'ralph-task' ;;
+    *) printf '' ;;
+  esac
+}
+
 sets=()
+derived_phase=''
+stamps_liveness=0
 while [ "$#" -gt 0 ]; do
   field="$1"
   if [ "$#" -lt 2 ]; then
@@ -130,6 +160,7 @@ while [ "$#" -gt 0 ]; do
   shift 2
   case "$field" in
     pr)
+      stamps_liveness=1
       case "$value" in
         '' | *[!0-9]*)
           echo "checkpoint.sh: pr must be a non-negative integer, got '$value'" >&2
@@ -139,18 +170,31 @@ while [ "$#" -gt 0 ]; do
       sets+=("pr=$value")
       ;;
     subagent_status)
+      stamps_liveness=1
       # LIVENESS — frozen on a terminal row.
       sets+=("subagent_status=$(frozen subagent_status "'$(sql_quote "$value")'")")
       ;;
+    brief_alert)
+      # Durable observability only. Recording an already-detected refusal must
+      # not make a stalled build look as though its workflow advanced.
+      sets+=("brief_alert='$(sql_quote "$value")'")
+      ;;
     branch | inner_checkpoint | inner_verdict | inner_checkpoint_head)
+      stamps_liveness=1
       # `inner_checkpoint_head` is the branch head OID the checkpoint APPLIES TO,
       # and the workflow writes it in the SAME invocation as `inner_checkpoint`
       # so the name and the commit can never drift apart. An EMPTY value is a
       # legitimate write, not a no-op: it CLEARS a previous checkpoint's OID so a
       # phase that could not report a sha never inherits the last one's.
       sets+=("$field='$(sql_quote "$value")'")
+      # A checkpoint that NAMES a live phase also writes it — see the phase block
+      # below the loop for why this script is the only place that can.
+      if [ "$field" = inner_checkpoint ]; then
+        derived_phase="$(phase_for_checkpoint "$value")"
+      fi
       ;;
     inner_findings_file)
+      stamps_liveness=1
       # The synthesised findings the checkpoint was recorded with, loaded through
       # the same readfile()-CAST-AS-TEXT indirection `inner_result_file` uses so
       # the JSON's own quotes can never break the sqlite argument. A missing file
@@ -160,6 +204,7 @@ while [ "$#" -gt 0 ]; do
       sets+=("inner_checkpoint_findings=CAST(readfile('$(sql_quote "$value")') AS TEXT)")
       ;;
     inner_result_file)
+      stamps_liveness=1
       f="$(sql_quote "$value")"
       sets+=("inner_result=CAST(readfile('$f') AS TEXT)")
       # Two guards, outermost first: the terminal freeze, then the original
@@ -174,8 +219,30 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 
-# Both legacy inline UPDATEs unconditionally re-stamped last_advanced_at. It is
+# THE PHASE WRITE — frozen on a terminal row, and the freeze is load-bearing in a
+# way the liveness columns' is not.
+#
+# `phase` is the ONLY column here that drives control flow. `isTerminalPhase(phase)`
+# is what stops the tick driver loading a run (`tick.ts`), what makes
+# `advanceTridentRun`'s step a no-op (`orchestrator.ts`), and what keeps a stopped
+# run out of the active-lane budget (`active-runs.ts`). Cancelling a build does NOT
+# kill the detached workflow that was building it (rjunee/neutron#177) — the
+# workflow keeps going and keeps checkpointing. Writing `phase` unguarded would
+# therefore let a cancelled run's own orphaned workflow flip `stopped` back to
+# `argus` and RESURRECT it: re-loaded by the driver, re-driven, re-merged. That is
+# strictly worse than the stale liveness claim the existing freeze retracts, which
+# is only ever a display lie.
+#
+# So the freeze is reused deliberately rather than a phase-specific guard being
+# invented: identical terminal set, identical CASE, one thing to keep true.
+if [ -n "$derived_phase" ]; then
+  sets+=("phase=$(frozen phase "'$(sql_quote "$derived_phase")'")")
+fi
+
+# Both legacy progress UPDATEs unconditionally re-stamped last_advanced_at. It is
 # the hang watchdog's heartbeat, so it is LIVENESS — frozen on a terminal row.
+# A brief-alert-only write is excluded: detecting corruption records evidence but
+# does not prove the detached workflow made progress.
 #
 # MILLISECONDS, NOT WHOLE SECONDS, and the reason is the wake-on-change watcher.
 # `TridentRunStore.changeSignature()` builds a PER-RUN signature — one
@@ -193,17 +260,19 @@ case "$now_iso" in
   *[0-9].[0-9][0-9][0-9]Z) : ;;
   *) now_iso="$(date -u +%FT%TZ)" ;;
 esac
-sets+=("last_advanced_at=$(frozen last_advanced_at "'${now_iso}'")")
+if [ "$stamps_liveness" -eq 1 ]; then
+  sets+=("last_advanced_at=$(frozen last_advanced_at "'${now_iso}'")")
+fi
 
 set_clause="$(printf '%s, ' "${sets[@]}")"
 set_clause="${set_clause%, }"
 
 quoted_run="$(sql_quote "$run")"
 
-# A frozen or missing write is NOT an error (the checkpoint step must never fail
-# the build), but it IS reported on stderr so a missing liveness update — or a
-# checkpoint against a run that no longer exists — is explainable rather than
-# silent. `changes()` cannot distinguish the two here: the freeze lives in the SET
+# A frozen write is not an error, but a missing row IS: callers must be able to
+# distinguish "recorded" from "zero rows changed" even when diagnostics are
+# intentionally suppressed. `changes()` cannot distinguish a freeze from a match
+# here: the freeze lives in the SET
 # expressions, not the WHERE clause, so a terminal row still matches and reports
 # 1 change. Hence the second column, which re-reads the row's phase.
 #
@@ -232,6 +301,7 @@ outcome="$(sqlite3 -init /dev/null -list -separator '|' "$db" "PRAGMA busy_timeo
 case "$outcome" in
   0'|'*)
     echo "checkpoint.sh: run '$run' not found — checkpoint NOT applied" >&2
+    exit 3
     ;;
   *'|terminal')
     echo "checkpoint.sh: run '$run' is already terminal — liveness (subagent_status, last_advanced_at) FROZEN; branch/pr/checkpoint/result still recorded" >&2

@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   GENERAL_WORK_BOARD_PROJECT_ID,
@@ -21,8 +21,8 @@ const SLUG = 'acme'
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-work-board-store-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {
@@ -331,6 +331,248 @@ describe('WorkBoardStore', () => {
   })
 })
 
+describe('dependency edges + declared surfaces', () => {
+  function rawItem(id: string): Record<string, unknown> | null {
+    return db
+      .raw()
+      .query<Record<string, unknown>, [string, string]>(
+        'SELECT * FROM work_board_items WHERE project_slug = ? AND id = ?',
+      )
+      .get(SLUG, id)
+  }
+
+  async function validationError(run: () => Promise<unknown>): Promise<WorkBoardValidationError> {
+    try {
+      await run()
+      throw new Error('expected WorkBoardValidationError')
+    } catch (err) {
+      expect(err).toBeInstanceOf(WorkBoardValidationError)
+      return err as WorkBoardValidationError
+    }
+  }
+
+  test('legacy create defaults blockers to empty and surfaces to undeclared', async () => {
+    const store = new WorkBoardStore(db)
+    const created = await store.create(SLUG, { title: 'legacy-shaped card' })
+
+    expect(created.blocked_by).toEqual([])
+    expect(created.declared_surfaces).toBeNull()
+    expect(store.get(SLUG, created.id)?.blocked_by).toEqual([])
+    expect(store.get(SLUG, created.id)?.declared_surfaces).toBeNull()
+  })
+
+  test('create round-trips dependencies and surfaces through get/listActive and stores JSON', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { id: 'A', title: 'A' })
+    const b = await store.create(SLUG, { id: 'B', title: 'B' })
+    const c = await store.create(SLUG, {
+      id: 'C',
+      title: 'C',
+      blocked_by: [a.id, b.id],
+      declared_surfaces: ['trident/**', 'docs/SYSTEM-OVERVIEW.md'],
+    })
+
+    expect(store.get(SLUG, c.id)?.blocked_by).toEqual(['A', 'B'])
+    expect(store.get(SLUG, c.id)?.declared_surfaces).toEqual([
+      'trident/**',
+      'docs/SYSTEM-OVERVIEW.md',
+    ])
+    expect(store.listActive(SLUG).find((item) => item.id === c.id)?.blocked_by).toEqual(['A', 'B'])
+    const stored = db
+      .raw()
+      .query<{ blocked_by: string | null; declared_surfaces: string | null }, [string]>(
+        'SELECT blocked_by, declared_surfaces FROM work_board_items WHERE id = ?',
+      )
+      .get(c.id)
+    expect(stored?.blocked_by).toBe('["A","B"]')
+    expect(stored?.declared_surfaces).toBe('["trident/**","docs/SYSTEM-OVERVIEW.md"]')
+    expect(
+      db
+        .raw()
+        .query<{ blocked_by: string | null }, [string]>(
+          'SELECT blocked_by FROM work_board_items WHERE id = ?',
+        )
+        .get(a.id)?.blocked_by,
+    ).toBeNull()
+  })
+
+  test('update replaces blockers and null/empty surfaces normalize to undeclared', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { id: 'A', title: 'A' })
+    const b = await store.create(SLUG, { id: 'B', title: 'B' })
+    const target = await store.create(SLUG, {
+      id: 'target',
+      title: 'target',
+      blocked_by: [a.id],
+      declared_surfaces: [' old/** '],
+    })
+
+    const replaced = await store.update(SLUG, target.id, {
+      blocked_by: [b.id],
+      declared_surfaces: [' src/** ', 'src/**'],
+    })
+    expect(replaced?.blocked_by).toEqual(['B'])
+    expect(replaced?.declared_surfaces).toEqual(['src/**'])
+
+    const nullCleared = await store.update(SLUG, target.id, {
+      blocked_by: [],
+      declared_surfaces: null,
+    })
+    expect(nullCleared?.blocked_by).toEqual([])
+    expect(nullCleared?.declared_surfaces).toBeNull()
+
+    await store.update(SLUG, target.id, { declared_surfaces: ['docs/**'] })
+    const emptyCleared = await store.update(SLUG, target.id, { declared_surfaces: [] })
+    expect(emptyCleared?.declared_surfaces).toBeNull()
+    const stored = rawItem(target.id)
+    expect(stored?.['blocked_by']).toBeNull()
+    expect(stored?.['declared_surfaces']).toBeNull()
+  })
+
+  test('unknown blockers are refused on create and update without changing a row', async () => {
+    const store = new WorkBoardStore(db)
+    const createErr = await validationError(() =>
+      store.create(SLUG, {
+        id: 'unknown-create-target',
+        title: 'cannot create',
+        blocked_by: ['missing-create'],
+      }),
+    )
+    expect(createErr.code).toBe('unknown_blocker')
+    expect(createErr.message).toContain('missing-create')
+    expect(store.get(SLUG, 'unknown-create-target')).toBeNull()
+
+    const existing = await store.create(SLUG, {
+      id: 'existing',
+      title: 'existing',
+      declared_surfaces: ['src/**'],
+    })
+    const before = rawItem(existing.id)
+    const updateErr = await validationError(() =>
+      store.update(SLUG, existing.id, { blocked_by: ['missing-update'] }),
+    )
+    expect(updateErr.code).toBe('unknown_blocker')
+    expect(updateErr.message).toContain('missing-update')
+    expect(rawItem(existing.id)).toEqual(before)
+  })
+
+  test('a self-edge is refused as a dependency cycle and leaves the row unchanged', async () => {
+    const store = new WorkBoardStore(db)
+    const item = await store.create(SLUG, { id: 'self', title: 'self' })
+    const before = rawItem(item.id)
+
+    const err = await validationError(() =>
+      store.update(SLUG, item.id, { blocked_by: [item.id] }),
+    )
+    expect(err.code).toBe('dependency_cycle')
+    expect(err.message).toContain('self → self')
+    expect(rawItem(item.id)).toEqual(before)
+  })
+
+  test('two-node and three-node cycles are refused and leave their targets unchanged', async () => {
+    const store = new WorkBoardStore(db)
+    await store.create(SLUG, { id: 'A', title: 'A' })
+    await store.create(SLUG, { id: 'B', title: 'B' })
+    await store.update(SLUG, 'A', { blocked_by: ['B'] })
+    const beforeB = rawItem('B')
+
+    const twoNode = await validationError(() =>
+      store.update(SLUG, 'B', { blocked_by: ['A'] }),
+    )
+    expect(twoNode.code).toBe('dependency_cycle')
+    expect(twoNode.message).toContain('B → A → B')
+    expect(rawItem('B')).toEqual(beforeB)
+
+    await store.create(SLUG, { id: 'X', title: 'X' })
+    await store.create(SLUG, { id: 'Y', title: 'Y' })
+    await store.create(SLUG, { id: 'Z', title: 'Z' })
+    await store.update(SLUG, 'X', { blocked_by: ['Y'] })
+    await store.update(SLUG, 'Y', { blocked_by: ['Z'] })
+    const beforeZ = rawItem('Z')
+    const threeNode = await validationError(() =>
+      store.update(SLUG, 'Z', { blocked_by: ['X'] }),
+    )
+    expect(threeNode.code).toBe('dependency_cycle')
+    expect(threeNode.message).toContain('Z → X → Y → Z')
+    expect(rawItem('Z')).toEqual(beforeZ)
+  })
+
+  test('a diamond dependency DAG is accepted', async () => {
+    const store = new WorkBoardStore(db)
+    await store.create(SLUG, { id: 'D', title: 'D' })
+    await store.create(SLUG, { id: 'B', title: 'B', blocked_by: ['D'] })
+    await store.create(SLUG, { id: 'C', title: 'C', blocked_by: ['D'] })
+    const a = await store.create(SLUG, {
+      id: 'A',
+      title: 'A',
+      blocked_by: ['B', 'C'],
+    })
+
+    expect(a.blocked_by).toEqual(['B', 'C'])
+    expect(store.get(SLUG, 'B')?.blocked_by).toEqual(['D'])
+    expect(store.get(SLUG, 'C')?.blocked_by).toEqual(['D'])
+  })
+
+  test('invalid dependency and surface shapes throw typed validation errors', async () => {
+    const store = new WorkBoardStore(db)
+    const nonString = await validationError(() =>
+      store.create(SLUG, {
+        title: 'non-string blocker',
+        blocked_by: [42] as unknown as string[],
+      }),
+    )
+    expect(nonString.code).toBe('invalid_blocked_by')
+
+    const tooManyBlockers = await validationError(() =>
+      store.create(SLUG, {
+        title: 'too many blockers',
+        blocked_by: Array.from({ length: 21 }, (_, i) => `blocker-${i}`),
+      }),
+    )
+    expect(tooManyBlockers.code).toBe('invalid_blocked_by')
+
+    const newline = await validationError(() =>
+      store.create(SLUG, { title: 'newline', declared_surfaces: ['src/**\nsecrets/**'] }),
+    )
+    expect(newline.code).toBe('invalid_declared_surfaces')
+
+    const tooManySurfaces = await validationError(() =>
+      store.create(SLUG, {
+        title: 'too many surfaces',
+        declared_surfaces: Array.from({ length: 65 }, (_, i) => `path/${i}`),
+      }),
+    )
+    expect(tooManySurfaces.code).toBe('invalid_declared_surfaces')
+  })
+
+  test('blocked_by de-duplicates in first-seen order before storage', async () => {
+    const store = new WorkBoardStore(db)
+    const blocker = await store.create(SLUG, { id: 'blocker', title: 'blocker' })
+    const item = await store.create(SLUG, {
+      id: 'deduped',
+      title: 'deduped',
+      blocked_by: [blocker.id, blocker.id],
+    })
+
+    expect(item.blocked_by).toEqual(['blocker'])
+    expect(rawItem(item.id)?.['blocked_by']).toBe('["blocker"]')
+  })
+
+  test('corrupt dependency and surface columns degrade safely on read', async () => {
+    const store = new WorkBoardStore(db)
+    const item = await store.create(SLUG, { id: 'corrupt', title: 'corrupt' })
+    db.raw().run(
+      `UPDATE work_board_items
+          SET blocked_by = 'not json', declared_surfaces = '{"path":true}'
+        WHERE id = ?`,
+      [item.id],
+    )
+
+    expect(store.get(SLUG, item.id)?.blocked_by).toEqual([])
+    expect(store.get(SLUG, item.id)?.declared_surfaces).toBeNull()
+  })
+})
+
 /**
  * The SHELVED lane (migration 0130). Acceptance (b) of the removal card: a
  * deprioritised card must be counted as completed NOWHERE, so `done` and
@@ -534,13 +776,13 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(store.getByRunId(SLUG, 'no-such-run')).toBeNull()
   })
 
-  test('detachRun(done) clears the binding + completes (datestamped history)', async () => {
+  test('detachRun(done) keeps the evidence binding + completes (datestamped history)', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'finish me' })
     await store.attachRun(SLUG, a.id, 'run-done')
     const done = await store.detachRun(SLUG, 'run-done', 'done')
     expect(done?.status).toBe('done')
-    expect(done?.linked_run_id).toBeNull()
+    expect(done?.linked_run_id).toBe('run-done')
     expect(done?.completed_at).not.toBeNull()
   })
 
@@ -564,10 +806,10 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     const retried = await store.attachRun(SLUG, a.id, 'run-2')
     expect(retried?.status).toBe('in_progress')
     expect(retried?.linked_run_id).toBe('run-2')
-    // ...and a subsequent success completes + unlinks it (no stale failed state).
+    // ...and a subsequent success completes with the NEW terminal evidence link.
     const done = await store.detachRun(SLUG, 'run-2', 'done')
     expect(done?.status).toBe('done')
-    expect(done?.linked_run_id).toBeNull()
+    expect(done?.linked_run_id).toBe('run-2')
   })
 
   test('manually advancing a failed card off the failed lane DETACHES the terminal run', async () => {
@@ -580,6 +822,18 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
     expect(requeued?.status).toBe('upcoming')
     expect(requeued?.linked_run_id).toBeNull()
+  })
+
+  test('moving a completed card out of history clears its terminal evidence link', async () => {
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'reopen completed work' })
+    await store.attachRun(SLUG, a.id, 'run-done')
+    await store.detachRun(SLUG, 'run-done', 'done')
+
+    const requeued = await store.update(SLUG, a.id, { status: 'upcoming' })
+    expect(requeued?.status).toBe('upcoming')
+    expect(requeued?.linked_run_id).toBeNull()
+    expect(requeued?.completed_at).toBeNull()
   })
 
   test('detachRun is a safe no-op when no item is bound to the run', async () => {

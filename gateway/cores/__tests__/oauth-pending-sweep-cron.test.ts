@@ -9,9 +9,8 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import {
   CoresOAuthPendingStore,
   PENDING_TTL_MS,
@@ -32,9 +31,7 @@ let db: ProjectDb
 beforeEach(() => {
   workdir = mkdtempSync(join(tmpdir(), 'neutron-cores-oauth-sweep-cron-'))
   const dbPath = join(workdir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   db = ProjectDb.open(dbPath)
 })
 

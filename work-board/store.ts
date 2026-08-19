@@ -27,11 +27,12 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
-/** The board lane. `failed` is a run-driven terminal lane (a bound trident run
- *  that FAILED): it stays in the active list, KEEPS its `linked_run_id` so the
- *  client shows a red dot + "Failed" tag + the run's `failure_reason`, and is
- *  re-actionable via the ▶/↻ retry. It is NOT a client-writable status — only
- *  the terminal reconcile sets it.
+/** The board lane. Terminal run reconciliation keeps `linked_run_id` on BOTH
+ *  outcomes so terminal evidence stays reachable: `failed` cards show the red
+ *  dot + reason and can retry, while `done` history can still show a recovered
+ *  integrity alert. Moving either card back to an active lane clears the stale
+ *  terminal link; a retry then replaces it through `attachRun`. `failed` is NOT
+ *  a client-writable status — only terminal reconciliation sets it.
  *
  *  `archived` (owner-facing: "Shelved", migration 0130) is the DEPRIORITISE
  *  lane, and it is deliberately NOT `done`. Done means SHIPPED — it stamps
@@ -64,6 +65,10 @@ export interface WorkBoardItem {
   design_doc_ref: string | null
   /** #379 — the ▶ routing discriminator ('build' → Trident, 'research' → Atlas). */
   task_type: WorkBoardTaskType
+  /** Same-board cards that must land before this card may dispatch. */
+  blocked_by: string[]
+  /** Expected path/glob writes. Null means undeclared (and later gates fail safe). */
+  declared_surfaces: string[] | null
   /** Lightweight inline (in-topic) work marker. Sub-agent activity is
    *  DERIVED via `linked_run_id` (Phase 2), not stored here. */
   inline_active: boolean
@@ -81,6 +86,8 @@ export interface CreateWorkBoardItemInput {
   design_doc_ref?: string | null
   /** #379 — the ▶ routing kind; defaults to 'build' when absent. */
   task_type?: WorkBoardTaskType
+  blocked_by?: string[]
+  declared_surfaces?: string[]
   /** Test-injectable id; defaults to a fresh ULID. */
   id?: string
 }
@@ -93,6 +100,10 @@ export interface WorkBoardItemUpdate {
    *  an item it is working INLINE in the main topic (caret `›`) vs via a bound
    *  sub-agent/trident run (fork `⑂`, derived from `linked_run_id`). */
   inline_active?: boolean
+  /** Replaces the whole dependency set; an empty array clears it. */
+  blocked_by?: string[]
+  /** Replaces the declaration; null or an empty array clears to undeclared. */
+  declared_surfaces?: string[] | null
 }
 
 /** Outcome of a bound run reaching a terminal phase (drives the reconcile). */
@@ -218,7 +229,8 @@ export function workBoardProjectIdForKey(
 
 const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
-  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type'
+  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
+  'blocked_by, declared_surfaces'
 
 interface WorkBoardItemDbRow {
   id: string
@@ -233,6 +245,8 @@ interface WorkBoardItemDbRow {
   updated_at: string
   completed_at: string | null
   task_type: WorkBoardTaskType
+  blocked_by: string | null
+  declared_surfaces: string | null
 }
 
 /**
@@ -276,6 +290,159 @@ export function validateDesignDocRef(raw: string | null | undefined): string | n
   )
 }
 
+function dedupe(values: string[]): string[] {
+  return [...new Set(values)]
+}
+
+function validateBlockedBy(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    throw new WorkBoardValidationError('invalid_blocked_by', 'blocked_by must be an array')
+  }
+  for (const blocker of raw) {
+    if (typeof blocker !== 'string' || blocker.length === 0 || blocker.length > 128) {
+      throw new WorkBoardValidationError(
+        'invalid_blocked_by',
+        'blocked_by entries must be non-empty strings of at most 128 chars',
+      )
+    }
+  }
+  const normalized = dedupe(raw as string[])
+  if (normalized.length > 20) {
+    throw new WorkBoardValidationError(
+      'invalid_blocked_by',
+      'blocked_by must contain at most 20 unique entries',
+    )
+  }
+  return normalized
+}
+
+function validateDeclaredSurfaces(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    throw new WorkBoardValidationError(
+      'invalid_declared_surfaces',
+      'declared_surfaces must be an array',
+    )
+  }
+  const normalized: string[] = []
+  for (const surface of raw) {
+    if (typeof surface !== 'string') {
+      throw new WorkBoardValidationError(
+        'invalid_declared_surfaces',
+        'declared_surfaces entries must be strings',
+      )
+    }
+    const trimmed = surface.trim()
+    if (trimmed.length === 0 || trimmed.length > 512 || /[\n\0]/.test(trimmed)) {
+      throw new WorkBoardValidationError(
+        'invalid_declared_surfaces',
+        'declared_surfaces entries must be non-empty, at most 512 chars, and contain no newline or NUL',
+      )
+    }
+    normalized.push(trimmed)
+  }
+  const unique = dedupe(normalized)
+  if (unique.length > 64) {
+    throw new WorkBoardValidationError(
+      'invalid_declared_surfaces',
+      'declared_surfaces must contain at most 64 unique entries',
+    )
+  }
+  return unique
+}
+
+function parseStoredStringArray(raw: string | null): string[] | null {
+  if (raw === null) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.every((value) => typeof value === 'string')
+      ? parsed
+      : null
+  } catch {
+    return null
+  }
+}
+
+function serializeStringArray(values: string[]): string | null {
+  return values.length === 0 ? null : JSON.stringify(values)
+}
+
+interface DependencyRow {
+  id: string
+  blocked_by: string | null
+}
+
+function dependencyCyclePath(
+  rows: DependencyRow[],
+  candidateId: string,
+  candidateEdges: string[],
+): string[] | null {
+  const graph = new Map(
+    rows.map((row) => [row.id, parseStoredStringArray(row.blocked_by) ?? []] as const),
+  )
+  graph.set(candidateId, candidateEdges)
+  const visited = new Set<string>()
+
+  const visit = (id: string, path: string[]): string[] | null => {
+    if (visited.has(id)) return null
+    visited.add(id)
+    for (const blocker of graph.get(id) ?? []) {
+      if (blocker === candidateId) return [...path, candidateId]
+      const cycle = visit(blocker, [...path, blocker])
+      if (cycle !== null) return cycle
+    }
+    return null
+  }
+
+  return visit(candidateId, [candidateId])
+}
+
+function validateDependencyWrite(
+  tx: ProjectDb,
+  project_slug: string,
+  candidateId: string,
+  candidateEdges: string[],
+): void {
+  if (candidateEdges.includes(candidateId)) {
+    throw new WorkBoardValidationError(
+      'dependency_cycle',
+      `dependency cycle refused: ${candidateId} → ${candidateId}`,
+    )
+  }
+
+  if (candidateEdges.length > 0) {
+    const placeholders = candidateEdges.map(() => '?').join(', ')
+    const found = new Set(
+      tx
+        .prepare<{ id: string }, string[]>(
+          `SELECT id FROM work_board_items
+            WHERE project_slug = ? AND id IN (${placeholders})`,
+        )
+        .all(project_slug, ...candidateEdges)
+        .map((row) => row.id),
+    )
+    const missing = candidateEdges.filter((blocker) => !found.has(blocker))
+    if (missing.length > 0) {
+      throw new WorkBoardValidationError(
+        'unknown_blocker',
+        `unknown blocker id(s) on board ${project_slug}: ${missing.join(', ')}`,
+      )
+    }
+  }
+
+  const rows = tx
+    .prepare<DependencyRow, [string]>(
+      'SELECT id, blocked_by FROM work_board_items WHERE project_slug = ?',
+    )
+    .all(project_slug)
+  const cycle = dependencyCyclePath(rows, candidateId, candidateEdges)
+  if (cycle !== null) {
+    throw new WorkBoardValidationError(
+      'dependency_cycle',
+      `dependency cycle refused: ${cycle.join(' → ')}`,
+    )
+  }
+}
+
 /**
  * 48-bit timestamp + 80 random bits, Crockford base32 (sortable). Mirrors
  * the `notes` / `comments` stores; there is no `ulid` package in the repo.
@@ -316,6 +483,8 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     updated_at: row.updated_at,
     completed_at: row.completed_at,
     task_type: row.task_type,
+    blocked_by: parseStoredStringArray(row.blocked_by) ?? [],
+    declared_surfaces: parseStoredStringArray(row.declared_surfaces),
   }
 }
 
@@ -383,6 +552,8 @@ export class WorkBoardStore {
     const design_doc_ref = validateDesignDocRef(input.design_doc_ref)
     const completed_at = status === 'done' ? ts : null
     const task_type: WorkBoardTaskType = input.task_type ?? 'build'
+    const blocked_by = validateBlockedBy(input.blocked_by ?? [])
+    const declared_surfaces = validateDeclaredSurfaces(input.declared_surfaces ?? [])
 
     const item: WorkBoardItem = {
       id,
@@ -397,9 +568,17 @@ export class WorkBoardStore {
       updated_at: ts,
       completed_at,
       task_type,
+      blocked_by,
+      // Empty and undeclared are deliberately the same fail-safe state: callers
+      // get an incentive to declare real paths instead of claiming an empty set.
+      declared_surfaces: declared_surfaces.length === 0 ? null : declared_surfaces,
     }
 
     await this.db.transaction(async (tx) => {
+      // Referential + graph reads share the write transaction/mutex. Concurrent
+      // dependency writes therefore cannot each pass a stale graph check and
+      // jointly commit a cycle (the same rationale as MAX(sort_order) below).
+      validateDependencyWrite(tx, project_slug, item.id, item.blocked_by)
       const max = tx
         .prepare<{ next: number }, [string]>(
           `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
@@ -409,7 +588,7 @@ export class WorkBoardStore {
       item.sort_order = max?.next ?? 1
       await tx.run(
         `INSERT INTO work_board_items (${COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.project_slug,
@@ -423,6 +602,8 @@ export class WorkBoardStore {
           item.updated_at,
           item.completed_at,
           item.task_type,
+          serializeStringArray(item.blocked_by),
+          item.declared_surfaces === null ? null : JSON.stringify(item.declared_surfaces),
         ],
       )
     })
@@ -552,6 +733,12 @@ export class WorkBoardStore {
     if (patch.design_doc_ref !== undefined) {
       designDocRef = validateDesignDocRef(patch.design_doc_ref)
     }
+    const blockedBy =
+      patch.blocked_by === undefined ? undefined : validateBlockedBy(patch.blocked_by)
+    const declaredSurfaces =
+      patch.declared_surfaces === undefined || patch.declared_surfaces === null
+        ? patch.declared_surfaces
+        : validateDeclaredSurfaces(patch.declared_surfaces)
 
     // REFUSE to SHELVE a card whose bound run is still live, before any write.
     // A shelf-write is a claim about the world too — that the work is parked —
@@ -579,6 +766,12 @@ export class WorkBoardStore {
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.get(project_slug, id)
       if (current === null) return null
+      if (blockedBy !== undefined) {
+        // This graph snapshot and the eventual UPDATE are protected by the same
+        // write mutex, so no concurrent edge write can create a jointly-committed
+        // cycle between validation and storage.
+        validateDependencyWrite(tx, project_slug, id, blockedBy)
+      }
       // REFUSE any real transition into 'done' while the bound run is still live.
       // "Done" is a claim about the world — that work shipped — and nothing may
       // assert it on behalf of a build that is still running.
@@ -611,6 +804,18 @@ export class WorkBoardStore {
       }
       if (title !== undefined) push('title', title)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
+      if (blockedBy !== undefined) push('blocked_by', serializeStringArray(blockedBy))
+      if (declaredSurfaces !== undefined) {
+        // null and [] both mean UNDECLARED. This fail-safe state intentionally
+        // differs from declaring real paths; later dispatch gates treat it as
+        // touching everything.
+        push(
+          'declared_surfaces',
+          declaredSurfaces === null || declaredSurfaces.length === 0
+            ? null
+            : JSON.stringify(declaredSurfaces),
+        )
+      }
       // A REAL transition OFF the active lane ('done'/'failed'/'archived')
       // UNCONDITIONALLY clears the inline marker — a finished OR SHELVED card can
       // never still claim live inline work (generic-path parity with
@@ -642,6 +847,10 @@ export class WorkBoardStore {
           // done→archived, where the appended sort_order is simply unused until
           // the card is un-shelved.
           push('completed_at', null)
+          // A completed card retains its terminal run only while it is history,
+          // so recovered alerts remain visible there. Reopening/shelving starts
+          // a new lifecycle and must not derive progress from the old run.
+          if (current.status === 'done') push('linked_run_id', null)
           const max = tx
             .prepare<{ next: number }, [string]>(
               `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
@@ -840,8 +1049,9 @@ export class WorkBoardStore {
   /**
    * Phase 2b — RECONCILE a bound run that reached a terminal phase. Finds the
    * item by `run_id` and sets the lane from the outcome:
-   *   - `done`   → CLEAR the run binding (fork icon goes dark) + complete the
-   *               item (datestamped history).
+   *   - `done`   → complete the item (datestamped history) and KEEP the run
+   *               binding so terminal evidence such as a recovered brief alert
+   *               remains visible. Reopening the card clears this stale link.
    *   - `failed` → mark the item FAILED and KEEP the run binding (#340). The
    *               still-linked failed run is what the client derives the red dot
    *               + "Failed" tag + `failure_reason` one-liner from (its
@@ -863,8 +1073,9 @@ export class WorkBoardStore {
       const sets = ['inline_active = 0']
       const params: (string | number | null)[] = []
       if (outcome === 'done') {
-        // Done — clear the binding (fork ⑂ dark) + complete the item.
-        sets.push('linked_run_id = NULL', "status = 'done'")
+        // Done — keep the terminal binding so completed history can still
+        // derive durable run evidence (notably a recovered integrity alert).
+        sets.push("status = 'done'")
         // Stamp the datestamp only on a genuine →done transition.
         if (current.status !== 'done') {
           sets.push('completed_at = ?')

@@ -41,7 +41,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { AnchorWalker } from '../comments/anchor-walker.ts'
@@ -78,8 +78,8 @@ async function startHarness(): Promise<Harness> {
   const owner_home = join(tmp, 'home')
   mkdirSync(owner_home, { recursive: true })
   mkdirSync(join(owner_home, 'Projects', PROJECT, 'docs'), { recursive: true })
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   // Build the docs surface in the same SHAPE the live composer uses
   // (`open/composer.ts:1417` CommentStore, `:2684` AnchorWalker +

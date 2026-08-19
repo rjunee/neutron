@@ -35,6 +35,8 @@ import {
   resolveTestCommand,
   DEFAULT_BUILD_FANOUT,
   FULL_SUITE_REQUIRED,
+  INTERMEDIATE_REPORT_RULE,
+  INTERMEDIATE_SUITE_DEFERRED,
   NO_KNOBS_LINE,
   NO_TIMEOUT_WRAPPER,
   PINNED_KNOBS_LINE,
@@ -625,6 +627,98 @@ describe('renderTestStrategy', () => {
     expect(NO_TIMEOUT_WRAPPER).toContain('590 s')
     // Running out of patience is reported as a non-pass, never as a pass.
     expect(NO_TIMEOUT_WRAPPER).toContain('never report a pass you did not observe')
+  })
+})
+
+describe('per-plan suite scope (subset render)', () => {
+  const resolvedInput = {
+    resolution: { command: 'bash scripts/run-tests.sh', source: 'package-json' as const },
+    knobs: KNOBS,
+    jobs: 4,
+    concurrency: 2,
+    base_branch: 'main',
+  }
+  const unresolvedInput = {
+    resolution: { command: null, source: null },
+    knobs: NO_KNOBS,
+    jobs: 1,
+    base_branch: 'develop',
+  }
+
+  test.each([
+    ['resolved command', resolvedInput],
+    ['unresolved command', unresolvedInput],
+  ])('%s defaults byte-identically to an explicit full-suite scope', (_name, input) => {
+    const defaultBlock = renderTestStrategy(input)
+    const explicitFullBlock = renderTestStrategy({ ...input, scope: 'full-suite' })
+
+    expect(defaultBlock).toBe(explicitFullBlock)
+    expect(defaultBlock).toContain(FULL_SUITE_REQUIRED)
+    expect(defaultBlock).not.toContain(INTERMEDIATE_SUITE_DEFERRED)
+    expect(defaultBlock).not.toContain('STAGE 2 — DEFERRED')
+  })
+
+  test('subset scope carries the intermediate gate and omits every full-suite-only instruction', () => {
+    const subsetBlock = renderTestStrategy({ ...resolvedInput, scope: 'subset' })
+
+    expect(subsetBlock).toContain('TEST EXECUTION')
+    expect(subsetBlock).toContain(INTERMEDIATE_SUITE_DEFERRED)
+    expect(subsetBlock).toContain(`Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files`)
+    expect(subsetBlock).toContain(STAGE_1_REJECT_ONLY)
+    expect(subsetBlock).toContain('STAGE 2 — DEFERRED (do NOT run the full suite this iteration).')
+    expect(subsetBlock).toContain(INTERMEDIATE_REPORT_RULE)
+    expect(subsetBlock).toContain('the tail — never let raw test output flood your context.')
+    expect(subsetBlock).not.toContain(FULL_SUITE_REQUIRED)
+    expect(subsetBlock).not.toContain('Full suite (stage 2), run exactly this')
+    expect(subsetBlock).not.toContain('passed              —')
+    expect(subsetBlock).not.toContain('Do NOT wrap the suite in a timeout wrapper')
+    expect(subsetBlock).not.toContain('export NEUTRON_TEST_')
+  })
+
+  test('full and subset scopes share the stage-1 section verbatim', () => {
+    const extractStage1 = (block: string): string => {
+      const start = block.indexOf('STAGE 1 — fail fast')
+      const end = block.indexOf('\n\nSTAGE 2', start)
+      expect(start).toBeGreaterThanOrEqual(0)
+      expect(end).toBeGreaterThan(start)
+      return block.slice(start, end)
+    }
+    const fullBlock = renderTestStrategy(resolvedInput)
+    const subsetBlock = renderTestStrategy({ ...resolvedInput, scope: 'subset' })
+
+    expect(extractStage1(subsetBlock)).toBe(extractStage1(fullBlock))
+  })
+
+  test('the never-throw fallback honors subset scope', () => {
+    const env = { cores: 8, active_runs: 1, mem_available_bytes: 25 * GiB, base_branch: 'main' }
+    let block = ''
+
+    expect(() => {
+      block = buildTestStrategy('/nonexistent-path-xyz', env, 'subset')
+    }).not.toThrow()
+    expect(block).toContain(INTERMEDIATE_SUITE_DEFERRED)
+    expect(block).not.toContain(FULL_SUITE_REQUIRED)
+  })
+
+  test('strategy detail exposes both scopes without changing its summary', () => {
+    const repo = fixture({
+      'package.json': JSON.stringify({ scripts: { test: 'bash scripts/run-tests.sh' } }),
+      'scripts/run-tests.sh':
+        '#!/usr/bin/env bash\nJOBS="${NEUTRON_TEST_JOBS:-1}"\nCONC="${NEUTRON_TEST_CONCURRENCY:-8}"\n',
+    })
+    const detail = buildTestStrategyDetail(repo, {
+      cores: 8,
+      active_runs: 2,
+      mem_available_bytes: 25 * GiB,
+      base_branch: 'main',
+    })
+
+    expect(detail.block).toContain(FULL_SUITE_REQUIRED)
+    expect(detail.intermediate_block).toContain(INTERMEDIATE_SUITE_DEFERRED)
+    expect(detail.intermediate_block).not.toContain(FULL_SUITE_REQUIRED)
+    expect(detail.summary).toBe(
+      'test-strategy: source=package-json knob=NEUTRON_TEST_JOBS cores=8 active_runs=2 divisor=4 jobs=2 concurrency=4',
+    )
   })
 })
 

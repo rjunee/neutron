@@ -132,6 +132,7 @@ import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import { type GatewayModule } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const moduleLog = createLogger('core-modules')
 // Distinct subsystem tag for the tasks-composer wiring warnings (a boot-time
@@ -524,8 +525,8 @@ export function buildCoreModules(
       // a delivery error is still re-thrown so the loop's try/catch logs it.
       const runTerminalObserver = tridentWiring?.on_run_terminal
       // Work Board Phase 2b — RECONCILE the bound board item on a terminal run:
-      // clear its run binding (fork `⑂` goes dark) and set the lane from the
-      // outcome (done → completed history; failed/stopped → back to upcoming).
+      // keep its terminal evidence binding and set the lane from the outcome
+      // (done → completed history; failed/stopped → failed + retryable).
       // Keyed off `linked_run_id` via `detachRun` (idempotent + a no-op for an
       // unbound run). Best-effort observer — a board write outage must never
       // skip delivery nor un-terminate the run (the loop already transitioned
@@ -588,6 +589,12 @@ export function buildCoreModules(
           fire_workflow,
           db_path: input.db.path,
           run_host: tridentWiring.run_host ?? spawnCapture,
+          // The hang watchdog's positive-liveness reader (see `latest_stage_event_at`
+          // in orchestrator.ts). UNCONDITIONAL, and deliberately not behind a
+          // `tridentWiring` flag: the orchestrator already treats a null answer as
+          // "no evidence" and reaps exactly as before, so gating the wire-up would
+          // be how this fix ships green, tested, and inert in production.
+          latest_stage_event_at: (run_id) => store.latestStageEventAt(run_id),
         }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
@@ -647,6 +654,12 @@ export function buildCoreModules(
         // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
         // rule and its known over-count live, and which is unit-tested behaviourally.
         orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
+        orchestratorOpts.record_stage = (id, stage, meta) => {
+          // The stamp is telemetry: a ledger failure must never hold up or fail
+          // the fire it is describing, so swallow — but through the sanctioned
+          // wrapper, which counts the rejection instead of dropping it silently.
+          fireAndForget('trident_record_stage', store.recordStageEvent(id, stage, meta ?? null))
+        }
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome

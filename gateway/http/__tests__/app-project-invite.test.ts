@@ -16,7 +16,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateKeyPair, type KeyLike } from 'jose'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   canInviteRole,
@@ -38,8 +38,8 @@ const FIXED_NOW = 1_900_000_000_000
 
 beforeEach(async () => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-app-invite-'))
+  seedMigratedDb(join(tmp, 'inviter.db'))
   inviterDb = ProjectDb.open(join(tmp, 'inviter.db'))
-  applyMigrations(inviterDb.raw())
   const { privateKey, publicKey } = await generateKeyPair('EdDSA')
   signing_key = { kid: 'invite-key-1', privateKey, publicKey }
 })
