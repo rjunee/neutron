@@ -151,19 +151,33 @@ describe('verify-workspace-deps — it runs where it is needed', () => {
     // cannot be resolved; an import of one would kill the verifier with the
     // same error class it exists to report.
     const source = await Bun.file(VERIFIER).text()
-    const imports = [...source.matchAll(/^import .* from '([^']+)'/gm)].map((m) => m[1])
+    const imports = [...source.matchAll(/^import .* from '([^']+)'/gm)]
+      .map((m) => m[1])
+      .filter((spec): spec is string => typeof spec === 'string')
+    // Loud-empty: an extraction that found no imports would pass the loop below
+    // vacuously, which is the same defect this repo has shipped twice.
     expect(imports.length).toBeGreaterThan(0)
     for (const spec of imports) expect(spec.startsWith('node:')).toBe(true)
   })
 
-  test('it is cheap enough to sit in front of every suite run', () => {
-    const started = Bun.nanoseconds()
-    run(REPO_ROOT)
-    const ms = (Bun.nanoseconds() - started) / 1_000_000
-    // Measured ~60 ms on this box. The bound is loose because the point is the
-    // ORDER OF MAGNITUDE: this replaces a ~14-minute misleading suite run, and
-    // must never itself become a reason to skip the check.
-    expect(ms).toBeLessThan(5_000)
+  // NO TIMING TEST HERE, DELIBERATELY. The draft of this file asserted the
+  // verifier finishes inside five seconds, to pin the claim that it is cheap
+  // enough to sit in front of every suite run (~60 ms measured). CI's
+  // wall-clock-bound gate rejected it, and correctly: a clock comparison in a
+  // test is the flake class that gate exists to ban, and "cheap" has no
+  // deterministic substitute worth faking one for. The cost claim belongs in
+  // the commit message, where it is a measurement rather than an assertion.
+  // What IS asserted deterministically is that the verifier reads no test
+  // files and runs no suite — it only walks package manifests.
+  test('it spawns nothing — it reads manifests, it does not run the suite', async () => {
+    const source = await Bun.file(VERIFIER).text()
+    const code = source.replace(/\/\*\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/.*$/gm, '')
+    // The first draft of THIS test matched on prose and failed on the file's
+    // own header, which cites `activity-client.test.ts` as the positive
+    // control. Comments are stripped so the assertion is about the code.
+    expect(code).toContain('readdirSync')
+    expect(code).not.toContain('Bun.spawn')
+    expect(code).not.toContain('execFileSync')
   })
 })
 
