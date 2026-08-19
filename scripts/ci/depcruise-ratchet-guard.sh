@@ -12,11 +12,11 @@
 # CI-ENFORCED: the committed baseline may only SHRINK (or stay equal) relative to
 # origin/main's version. Any ADDED grandfathered entry FAILS the build.
 #
-# It reads main's baseline via `git show <ref>:<baseline>` (best-effort
-# `git -C "$ROOT" fetch --depth=1 origin main` first so a shallow CI checkout has the ref),
-# then hands both baselines to the pure comparator (depcruise-ratchet-compare.ts),
-# which keys each violation as `rule|from|to` and fails on any key present in the
-# committed set but absent from main's.
+# It reads main's baseline via `git show <ref>:<baseline>` (best-effort fetching
+# origin/main at depth 1 when the checkout is already shallow, or with a plain
+# fetch when it is full), then hands both baselines to the pure comparator
+# (depcruise-ratchet-compare.ts), which keys each violation as `rule|from|to` and
+# fails on any key present in the committed set but absent from main's.
 #
 # SKIP (exit 0, never fail) in the bootstrap cases:
 #   * no committed baseline at all (nothing to ratchet);
@@ -50,15 +50,22 @@ if [ ! -f "$BASELINE" ]; then
   exit 0
 fi
 
-# Best-effort: make origin/main present on a shallow checkout. Never fatal — an
-# offline/fork run falls through to the skip below rather than blocking.
+# Best-effort: make origin/main present (shallow CI checkout) or fresh (full
+# clone). Never fatal — an offline/fork run falls through to the skip below
+# rather than blocking.
+#
+# NEVER pass --depth into a repo that is not already shallow: `git fetch
+# --depth=1` into a complete repository WRITES `.git/shallow` and truncates the
+# fetched ref's local history. On the shared build checkout (~140 worktrees over
+# one common .git) this exact line re-shallowed the repo of record at 05:21 on
+# 2026-08-19 and poisoned every ancestry judgement on the box — merges refused
+# with "unrelated histories", merge-base returned empty — leaving no trace in
+# stderr or the reflog (the tip was unchanged, so no ref moved; >/dev/null ate
+# the rest). --depth=1 is ONLY for a checkout that is ALREADY shallow
+# (actions/checkout depth-1 in CI), where it makes origin/main resolvable
+# without downloading history the guard will not use.
 if [ "$MAIN_REF" = "origin/main" ]; then
-  # --depth=1 ADDS a ref to a shallow checkout but TRUNCATES a full one, writing
-  # .git/shallow. That is how a line meant to help CI shallowed the shared build
-  # checkout and produced three unrelated-looking failures in one night
-  # (unrelated histories locally, an unresolvable sha and a missing merge base in
-  # CI). Take the shallow path only when the clone is already shallow.
-  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
+  if [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
     git -C "$ROOT" fetch --depth=1 origin main >/dev/null 2>&1 || true
   else
     git -C "$ROOT" fetch origin main >/dev/null 2>&1 || true

@@ -16,6 +16,55 @@ commit and records both dispositions. Real-git falsification tests prove the dir
 HEAD remain byte-identical, the snapshot is addressable from the shared store, raw stash text is
 not persisted, and all added annotations preserve the underlying delivery classification.
 
+## 2026-08-19 — three ratchet guards silently re-shallowed the shared checkout
+
+This was the recurrence of card `01M03CH91WA6X87XG8CS5K4H84`, not a second
+provisioning defect. That prior card removed shallow cloning from `install.sh` and
+made the existing-checkout update path heal shallowness, but three later CI ratchet
+guards each carried the same independent writer:
+`scripts/ci/depcruise-ratchet-guard.sh`,
+`scripts/ci/route-slot-ratchet-guard.sh`, and
+`scripts/ci/composition-field-ratchet-guard.sh` all ran the supposedly best-effort
+freshen `git fetch --depth=1 origin main >/dev/null 2>&1 || true` whenever their
+main ref was the default `origin/main`.
+
+The mechanism was reproduced against fixture-local repositories on this box. A
+plain `git clone file://…` held all three commits and had no `.git/shallow`; running
+that fetch wrote `.git/shallow` and truncated the local `origin/main` history to one
+commit. The incident arithmetic agrees with the reproduction. The truncation root
+was `8a2a51c8`, the sha brought in by the 03:03 deploy pull. The depth-one fetch at
+05:21 made that commit the boundary; the 05:47 `bb976caa` and 05:55 `f2f65ddc`
+fetches then stacked one commit each, producing the observed three-commit history.
+It was invisible by construction: fetching an unchanged tip moved no ref, so the
+reflog recorded nothing, while `>/dev/null 2>&1 || true` discarded every other
+observable from the command. Only `.git/shallow`'s 05:21 ctime survived.
+
+The blast radius was machine-wide. Roughly 140 `wf_*` linked worktrees under
+`.claude/worktrees` share the repo of record's one common `.git` directory. The
+guards are steps in `ci.yml` and lanes run them locally during pre-verification, so
+one stale worktree invoking any one of these copies could rewrite the ancestry seen
+by every lane. That single mutation surfaced as three unrelated-looking failures:
+an empty merge base and “unrelated histories” locally, an unresolvable base sha in
+CI, and then a three-dot diff with no merge base after the named sha was fetched.
+
+Each guard now has two explicit arms. An already-shallow checkout retains the
+depth-one fetch needed by depth-one `actions/checkout` to make `origin/main`
+resolvable; a full clone uses plain `git fetch origin main`, which freshens the ref
+without creating a shallow boundary. The tests prove both sides in each guard. The
+full-clone fixture asserts its precondition, records the three-commit count, runs
+with the literal `origin/main`, and asserts both the absent shallow file and the
+unchanged count afterward. The shallow-CI fixture asserts `.git/shallow` exists
+before deleting `origin/main`, then proves the depth arm restores the ref. Mutation
+proof restored the old stanza and produced exactly the intended full-clone failure
+in all three guard files while each shallow-CI control stayed green; restoring the
+two-arm stanza made all three files green.
+
+One residual writer window deliberately remains for the next task in this plan:
+stale worktrees carry old guard copies until their branches rebase. They can
+temporarily recreate `.git/shallow` even though main has killed the writer. The
+dispatch chokepoint in `ensureProjectBuildWorkspace` therefore still needs its own
+probe-and-unshallow self-heal before any lane is allowed to use the shared checkout.
+
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 
 Follow-up to #410. `scripts/ci/ci-workflow.test.ts` ('bun install cache wiring') is rewritten
@@ -2742,62 +2791,6 @@ files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
 
-## 2026-08-16 — trimming one language alone split the installer from the server
-
-Landed via PR #338.
-
-Follow-up to PR #333, which is already merged. PR #333 moved `resolveOpenDbPath`
-(`migrations/db-path.ts:81`) onto a trimmed predicate and left `install.sh` on
-`!= ""`. Before it, BOTH sides honoured a whitespace-only `NEUTRON_DB_PATH`
-verbatim — `pinned.length > 0` at `migrations/db-path.ts:67` in `5bc6ee3d`, that
-PR's own merge parent. Wrong, but wrong IDENTICALLY, so install migrated exactly
-the file the server opened.
-
-TRIMMING ONE SIDE CONVERTED A SHARED BUG INTO A DIVERGENCE. With
-`NEUTRON_DB_PATH='   '` the installer resolved the literal three spaces
-(`install.sh:445`) while the server resolved `<home>/project.db`
-(`migrations/db-path.ts:81`). `install.sh:440-441` states the invariant that
-breaks, verbatim: "This MUST match the server so install migrates — and uninstall
-removes — the exact same DB file the server reads". `install.sh:1461` migrates
-that path; `uninstall.sh:512` removes it, so on the teardown path the split
-deletes a file named three spaces and LEAVES THE REAL DATABASE ON DISK.
-
-The `config/index.ts` docblock recorded this as a condition it had declined to
-clean up — an installer and its server "can STILL disagree", "deliberately NOT
-fixed here". The word STILL was doing the damage: it framed a regression that
-change introduced as one inherited from before it, which is precisely the defect
-the rest of that docblock exists to record — a claim wider than its proof, now in
-the paragraph disclaiming scope rather than in the paragraph making the claim.
-
-The shell now follows the same blank-is-unset rule. `install.sh` / `uninstall.sh`
-share an `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block;
-`neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
-`DATA_DIR`, which is written into the launchd plist and systemd unit and is what
-the backup timer commits. `resolveRepoRoot`
-(`gateway/boot-listener-registry.ts:361`) was the last `length > 0` in a file
-whose other two resolvers had already been trimmed — a blank `NEUTRON_REPO_ROOT`
-made the bundled-Cores registry walk a directory named three spaces and read as
-"no Cores installed". The duplication across four scripts is REQUIRED, not drift:
-`install.sh` is fetched and run standalone, so it cannot source a shared library,
-which is why `dotenv_get` is already copied four times.
-
-`scripts/__tests__/install-uninstall.test.ts` IS THE TEST `install.sh:396` HAD
-BEEN CITING BY THAT EXACT PATH, AND IT DID NOT EXIST. The block header promised
-"a parity test … asserts the two copies match, so install and uninstall always
-resolve the SAME data dir + DB file" and nothing enforced it — an aspirational
-docblock rather than a stale one, dangerous because it is specific enough that
-the next editor of one twin trusts CI to catch a drift in the other. It runs the
-shell resolvers and the TypeScript resolvers on the SAME inputs and compares the
-answers, so changing one language alone now fails.
-
-Mutation-tested, each with a control proving the mutation landed: reverting the
-shell trim reddens four arms including the cross-language one; drifting ONLY
-`uninstall.sh` reddens exactly one — the parity arm, which nothing else can see,
-and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
-the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
-assertion plus two new arms, which confirms that assertion does exercise the axis
-it names.
-
 ## 2026-08-16 — the citation guard counted citations instead of covering them
 
 Landed via PR #353.
@@ -2854,6 +2847,62 @@ shadow.
 The four installer items in the originating brief were re-verified against the
 merged code and were already fixed there, so this change does not touch the
 installer.
+
+## 2026-08-16 — trimming one language alone split the installer from the server
+
+Landed via PR #338.
+
+Follow-up to PR #333, which is already merged. PR #333 moved `resolveOpenDbPath`
+(`migrations/db-path.ts:81`) onto a trimmed predicate and left `install.sh` on
+`!= ""`. Before it, BOTH sides honoured a whitespace-only `NEUTRON_DB_PATH`
+verbatim — `pinned.length > 0` at `migrations/db-path.ts:67` in `5bc6ee3d`, that
+PR's own merge parent. Wrong, but wrong IDENTICALLY, so install migrated exactly
+the file the server opened.
+
+TRIMMING ONE SIDE CONVERTED A SHARED BUG INTO A DIVERGENCE. With
+`NEUTRON_DB_PATH='   '` the installer resolved the literal three spaces
+(`install.sh:445`) while the server resolved `<home>/project.db`
+(`migrations/db-path.ts:81`). `install.sh:440-441` states the invariant that
+breaks, verbatim: "This MUST match the server so install migrates — and uninstall
+removes — the exact same DB file the server reads". `install.sh:1461` migrates
+that path; `uninstall.sh:512` removes it, so on the teardown path the split
+deletes a file named three spaces and LEAVES THE REAL DATABASE ON DISK.
+
+The `config/index.ts` docblock recorded this as a condition it had declined to
+clean up — an installer and its server "can STILL disagree", "deliberately NOT
+fixed here". The word STILL was doing the damage: it framed a regression that
+change introduced as one inherited from before it, which is precisely the defect
+the rest of that docblock exists to record — a claim wider than its proof, now in
+the paragraph disclaiming scope rather than in the paragraph making the claim.
+
+The shell now follows the same blank-is-unset rule. `install.sh` / `uninstall.sh`
+share an `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block;
+`neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
+`DATA_DIR`, which is written into the launchd plist and systemd unit and is what
+the backup timer commits. `resolveRepoRoot`
+(`gateway/boot-listener-registry.ts:361`) was the last `length > 0` in a file
+whose other two resolvers had already been trimmed — a blank `NEUTRON_REPO_ROOT`
+made the bundled-Cores registry walk a directory named three spaces and read as
+"no Cores installed". The duplication across four scripts is REQUIRED, not drift:
+`install.sh` is fetched and run standalone, so it cannot source a shared library,
+which is why `dotenv_get` is already copied four times.
+
+`scripts/__tests__/install-uninstall.test.ts` IS THE TEST `install.sh:396` HAD
+BEEN CITING BY THAT EXACT PATH, AND IT DID NOT EXIST. The block header promised
+"a parity test … asserts the two copies match, so install and uninstall always
+resolve the SAME data dir + DB file" and nothing enforced it — an aspirational
+docblock rather than a stale one, dangerous because it is specific enough that
+the next editor of one twin trusts CI to catch a drift in the other. It runs the
+shell resolvers and the TypeScript resolvers on the SAME inputs and compares the
+answers, so changing one language alone now fails.
+
+Mutation-tested, each with a control proving the mutation landed: reverting the
+shell trim reddens four arms including the cross-language one; drifting ONLY
+`uninstall.sh` reddens exactly one — the parity arm, which nothing else can see,
+and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
+the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
+assertion plus two new arms, which confirms that assertion does exercise the axis
+it names.
 
 ## 2026-08-16 — a deferral and a rejection no longer share a label
 
