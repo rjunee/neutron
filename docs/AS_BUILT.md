@@ -5,16 +5,20 @@ Running log of what shipped, newest first. One entry per merged change.
 ## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
 
 `reconcile_stranded` now checks both committed and uncommitted work before concluding that a
-failed PR-mode run built nothing. It locates the linked worktree for the run's branch, records
-dirty tracked work with a non-mutating `stash create`, anchors the resulting object at
-`refs/tags/trident-salvage/<run_id>`, and reports file, line, and untracked-name counts on the
-terminal row. A clean branch with matching shared-stash entries is reported as parked work.
+failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
+tracked-and-untracked tree through a private temporary index, anchors the resulting commit at
+`refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
+A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
+their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
+inspection when a live run owns a reused branch.
 
 Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
 outcomes make no remote mutation, while a run with both committed and dirty work publishes the
-commit and records both dispositions. Real-git falsification tests prove the dirty worktree and
-HEAD remain byte-identical, the snapshot is addressable from the shared store, raw stash text is
-not persisted, and all added annotations preserve the underlying delivery classification.
+commit and records both dispositions. A failed capture writes no success marker, and a successful
+snapshot never blocks a commit that appears later. Real-git falsification tests prove untracked
+nested files are recoverable, the dirty worktree and HEAD remain byte-identical, stale/crafted
+stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
+cause while exposing the local recovery ref.
 
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 

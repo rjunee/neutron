@@ -161,6 +161,32 @@ describe('composeTerminalDelivery', () => {
     expect(out!.text).toContain('edited the same code')
   })
 
+  test('salvage metadata keeps the authored cause and exposes the recovery ref', () => {
+    const authored =
+      'The build paused after the executor disappeared; inspect the preserved edits before retrying.'
+    const ref = 'refs/tags/trident-salvage/run-1'
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        failure_reason: `${authored} — 0 commits; 292 uncommitted text line(s) across 3 file(s) (2 untracked) — uncommitted work survived the failure — recovery ref ${ref}`,
+      }),
+    )
+
+    expect(out?.text).toContain(authored)
+    expect(out?.text).toContain(`Recovery snapshot: ${ref}.`)
+    expect(out?.text).not.toContain('The build did not complete.')
+
+    const alreadyPublished = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        pr: 7,
+        failure_reason: `${authored}; plus 12 uncommitted text line(s) across 2 file(s) — uncommitted work survived the failure — recovery ref ${ref}`,
+      }),
+    )
+    expect(alreadyPublished?.text).toContain(authored)
+    expect(alreadyPublished?.text).toContain(`Recovery snapshot: ${ref}.`)
+  })
+
   test('stopped → a plain stopped notice', () => {
     const out = composeTerminalDelivery(runWith({ phase: 'stopped' }))
     expect(out!.text).toContain('🛑')
