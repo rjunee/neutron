@@ -154,6 +154,8 @@ export interface InnerLoopInput {
    * Null/empty → the workflow's contract is byte-identical to legacy.
    */
   test_strategy?: string | null
+  /** The subset-scope TEST EXECUTION block for intermediate Ralph tasks. */
+  test_strategy_intermediate?: string | null
   /**
    * OWNER PER-PHASE MODEL OVERRIDES — phase key → `{model?, effort?}`, as validated
    * by `parsePhaseModelConfig` (`trident/phase-models.ts`). Threaded to the workflow
@@ -339,6 +341,9 @@ export const WORKTREE_CLEANUP_SCRIPT_PATH = fileURLToPath(
  *  and authoritative for ALL projects including Open. */
 export const CODEX_BUILD_SCRIPT_PATH = fileURLToPath(new URL('./codex-build.sh', import.meta.url))
 
+/** The harness-authoritative stage-ledger writer referenced by the build wrapper env. */
+export const STAGE_STAMP_SCRIPT_PATH = fileURLToPath(new URL('./stage-stamp.sh', import.meta.url))
+
 /** The abs path of the sibling Codex REVIEW wrapper, which ships with the
  *  HARNESS, never with the repo being reviewed. `${repoPath}/trident/codex-review.sh`
  *  only ever existed in neutron-open because Open IS the harness repo; every other
@@ -412,6 +417,8 @@ export function buildWorkflowArgs(
     // The checked-in checkpoint-writer the workflow's Bash steps invoke for
     // every code_trident_runs checkpoint/terminal-result UPDATE (P10).
     checkpointScript: CHECKPOINT_SCRIPT_PATH,
+    // The stage-ledger writer the wrapper env references.
+    stageStampScript: STAGE_STAMP_SCRIPT_PATH,
     // The checked-in deterministic worktree cleanup the workflow's `finally{}`
     // runs on every path — dirty worktrees are preserved, never force-removed
     // (#541).
@@ -474,6 +481,8 @@ export function buildWorkflowArgs(
     // carries it. Always a string — `''` for null/absent → a byte-identical legacy
     // contract in the workflow.
     testStrategy: typeof input.test_strategy === 'string' ? input.test_strategy : '',
+    testStrategyIntermediate:
+      typeof input.test_strategy_intermediate === 'string' ? input.test_strategy_intermediate : '',
     // FABLE-ORCHESTRATOR model routing (model routing per the refactor plan protocol,
     // `docs/plans/2026-07-02-world-class-refactor-plan.md` § 1.5; introduced 2026-07-02).
     // The single-source-of-truth model IDS resolved from runtime/models.ts and

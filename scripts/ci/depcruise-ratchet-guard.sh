@@ -13,7 +13,7 @@
 # origin/main's version. Any ADDED grandfathered entry FAILS the build.
 #
 # It reads main's baseline via `git show <ref>:<baseline>` (best-effort
-# `git fetch --depth=1 origin main` first so a shallow CI checkout has the ref),
+# `git -C "$ROOT" fetch --depth=1 origin main` first so a shallow CI checkout has the ref),
 # then hands both baselines to the pure comparator (depcruise-ratchet-compare.ts),
 # which keys each violation as `rule|from|to` and fails on any key present in the
 # committed set but absent from main's.
@@ -53,7 +53,16 @@ fi
 # Best-effort: make origin/main present on a shallow checkout. Never fatal — an
 # offline/fork run falls through to the skip below rather than blocking.
 if [ "$MAIN_REF" = "origin/main" ]; then
-  git fetch --depth=1 origin main >/dev/null 2>&1 || true
+  # --depth=1 ADDS a ref to a shallow checkout but TRUNCATES a full one, writing
+  # .git/shallow. That is how a line meant to help CI shallowed the shared build
+  # checkout and produced three unrelated-looking failures in one night
+  # (unrelated histories locally, an unresolvable sha and a missing merge base in
+  # CI). Take the shallow path only when the clone is already shallow.
+  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
+    git -C "$ROOT" fetch --depth=1 origin main >/dev/null 2>&1 || true
+  else
+    git -C "$ROOT" fetch origin main >/dev/null 2>&1 || true
+  fi
 fi
 
 # Skip on a push-to-main run: HEAD already IS main, so there is nothing to ratchet
@@ -70,6 +79,12 @@ fi
 MAIN_BASELINE="$(mktemp)"
 trap 'rm -f "$MAIN_BASELINE"' EXIT
 if ! git show "$MAIN_REF:$BASELINE_REL" > "$MAIN_BASELINE" 2>/dev/null; then
+  # T3: name shallowness rather than leaving a true-but-useless message. An
+  # "unreachable" ref on a shallow clone is not a fork or an outage, it is the
+  # history simply not being present — the distinction cost hours to find once.
+  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
+    echo "depcruise-ratchet-guard: the checkout is SHALLOW (.git/shallow present), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
+  fi
   echo "depcruise-ratchet-guard: $MAIN_REF has no $BASELINE_REL (bootstrap) or is unreachable — skipping."
   exit 0
 fi

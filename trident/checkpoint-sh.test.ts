@@ -82,6 +82,7 @@ beforeEach(() => {
       CHECK (phase IN (${ALL_PHASES.map((p) => `'${p}'`).join(', ')})),
     pr INTEGER,
     branch TEXT,
+    brief_alert TEXT,
     inner_checkpoint TEXT,
     inner_checkpoint_head TEXT,
     inner_checkpoint_findings TEXT,
@@ -153,6 +154,25 @@ describe('checkpoint.sh — C1 per-phase checkpoint write (legacy checkpoint() S
     expect(res.code).toBe(0)
     expect(row('run-1').branch).toBe("tri'dent")
     expect(row('run-1').inner_checkpoint).toBe("fix'; DROP TABLE code_trident_runs; --")
+  })
+
+  test('brief_alert is whitelisted and SQL-escapes a single quote without truncation', () => {
+    const alert = "CODEX_BUILD_BRIEF_PART_CORRUPT: it's truncated'; DROP TABLE code_trident_runs; --"
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+    expect(res.code).toBe(0)
+    expect(row('run-1').brief_alert).toBe(alert)
+    expect(row('run-other').brief_alert).toBeNull()
+  })
+
+  test('brief_alert records evidence without re-stamping the active-run heartbeat', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.'
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+
+    expect(res.code).toBe(0)
+    expect(row('run-1')).toMatchObject({
+      brief_alert: alert,
+      last_advanced_at: SEEDED_HEARTBEAT,
+    })
   })
 })
 
@@ -334,6 +354,21 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
     })
   })
 
+  test('brief_alert is recorded on a terminal row without thawing liveness', () => {
+    setPhase('run-1', 'failed')
+    const alert = 'CODEX_BUILD_BRIEF_PART_MISSING: brief part vanished. DEFERRED.'
+
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain('already terminal')
+    expect(row('run-1')).toMatchObject({
+      brief_alert: alert,
+      subagent_status: 'pending',
+      last_advanced_at: SEEDED_HEARTBEAT,
+    })
+  })
+
   // THE TWO MUTANTS THESE CASES EXIST TO KILL. Both narrow `frozen()`
   // (trident/checkpoint.sh) by one extra AND-clause on the OLD column value, and
   // both were RUN: each survives the earlier, laxer fixture and dies under this one.
@@ -455,7 +490,7 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
   // test may do; the pins stay as environment hardening for CLI builds that DO read it.
   test('an unknown run id reports the skip rather than passing silently', () => {
     const res = sh([dbPath, 'no-such-run', 'inner_checkpoint', 'forge-done'])
-    expect(res.code).toBe(0)
+    expect(res.code).toBe(3)
     expect(res.stderr).toContain('not found — checkpoint NOT applied')
   })
 })

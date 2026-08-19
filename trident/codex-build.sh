@@ -38,6 +38,8 @@
 #   in  NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY `<bytes>:<fnv32>` for a non-parts brief AS
 #                                       THE WORKFLOW COMPOSED IT. Required only on the
 #                                       chunked bridge-agent fallback path.
+#   in  NEUTRON_CODEX_BUILD_STAGE_SCRIPT optional append-only stage-ledger writer.
+#                                       Best-effort; it can never change build exit.
 #   in  CODEX_HOME                      the per-project subscription credential dir.
 #   in  CODEX_BUILD_MODEL               which GPT tier to build on. A DIFFERENT knob
 #                                       from the reviewer's `CODEX_REVIEW_MODEL` on
@@ -407,6 +409,19 @@ MERGE_MODE='pr'
 [ "${3:-}" = 'local' ] && MERGE_MODE='local'
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
+
+# Durable build timing stamps. Best-effort by contract — stage-stamp.sh always
+# exits 0; `|| true` also protects the wrapper from a replacement recorder.
+stamp_stage() {
+  if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+    bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" "$1" || true
+  fi
+}
+
+stamp_stage wrapper-start
+
 BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
 # local branch tip, and the remote branch tip — one per line. Populated just before
@@ -758,6 +773,19 @@ BRIEF_PARTS="${NEUTRON_CODEX_BUILD_BRIEF_PARTS:-}"
 fnv_receipt() {
   perl -e 'use integer; open my $f, "<:raw", $ARGV[0] or exit 1; local $/; my $d = <$f>; my $h = 0x811c9dc5; for my $b (unpack "C*", $d) { $h = ($h ^ $b) & 0xffffffff; $h = ($h * 0x01000193) & 0xffffffff; } printf "%d:%08x", length($d), $h' "$1"
 }
+record_brief_alert() {
+  if [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+    # Best-effort observability must not weaken the refusal or leak the
+    # project database path through sqlite diagnostics copied into failure_reason.
+    bash "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
+      brief_alert "$1" 2>/dev/null \
+      || echo "CODEX_BUILD_BRIEF_ALERT_FAILED" >&2
+  fi
+}
 if [ -n "$BRIEF_PARTS" ]; then
   if [ -z "$BRIEF_FILE" ]; then
     echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_PARTS is set but NEUTRON_CODEX_BUILD_BRIEF_FILE is unset — there is nowhere to assemble the brief. DEFERRED." >&2
@@ -777,7 +805,9 @@ if [ -n "$BRIEF_PARTS" ]; then
     [ -z "$part" ] && continue
     n=$((n + 1))
     if [ ! -s "$part" ]; then
-      echo "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." >&2
+      brief_alert_msg="CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED."
+      record_brief_alert "$brief_alert_msg"
+      echo "$brief_alert_msg" >&2
       exit 3
     fi
     receipt="$(printf '%s\n' "$PART_INTEGRITY" | sed -n "${n}p")"
@@ -787,7 +817,9 @@ if [ -n "$BRIEF_PARTS" ]; then
     fi
     measured="$(fnv_receipt "$part" 2>/dev/null || true)"
     if [ "$measured" != "$receipt" ]; then
-      echo "CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+      brief_alert_msg="CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote."
+      record_brief_alert "$brief_alert_msg"
+      echo "$brief_alert_msg" >&2
       exit 3
     fi
     cat "$part" >> "$BRIEF_FILE"
@@ -823,7 +855,9 @@ if [ -z "$BRIEF_PARTS" ]; then
   # would round and every checksum after the first byte would be wrong).
   BRIEF_MEASURED="$(fnv_receipt "$BRIEF_FILE" 2>/dev/null || true)"
   if [ "$BRIEF_MEASURED" != "$BRIEF_INTEGRITY" ]; then
-    echo "CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+    brief_alert_msg="CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote."
+    record_brief_alert "$brief_alert_msg"
+    echo "$brief_alert_msg" >&2
     exit 3
   fi
 fi
@@ -1039,10 +1073,13 @@ fi
 # a credential the thing it stands in for cannot see, and would "prove" a publish path
 # that does not exist in production.
 if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
+  stamp_stage codex-exec-start
   if <"$BRIEF_FILE" run_build_child sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+    stamp_stage codex-exec-end
     emit_trailer ok
     exit 0
   fi
+  stamp_stage codex-exec-end
   emit_trailer failed
   echo "CODEX_BUILD_CALL_FAILED: the codex build call failed. DEFERRED — no build happened." >&2
   exit 5
@@ -1116,11 +1153,16 @@ fi
 # reading its own `/proc/self/environ`. Both, because the exclude covers the whole
 # family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
 # matter absolutely.
+# Codex duration is the exact durable codex-exec-start→codex-exec-end pair.
+stamp_stage codex-exec-start
+
 if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
+  stamp_stage codex-exec-end
   emit_trailer ok
   exit 0
 fi
+stamp_stage codex-exec-end
 emit_trailer failed
 echo "CODEX_BUILD_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — the build did not complete." >&2
 exit 5

@@ -14,6 +14,7 @@ import { buildBoardReconcileObserver } from './board-reconcile.ts'
 import { dispatchBoardBoundBuild } from './board-dispatch.ts'
 import { buildSimFirer } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
+import { runProgressForItem } from './run-progress.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
@@ -40,7 +41,7 @@ describe('buildBoardReconcileObserver', () => {
     expect(buildBoardReconcileObserver(undefined)).toBeNull()
   })
 
-  test('a done run completes its bound item; a failed run marks it FAILED and KEEPS the link (#340)', async () => {
+  test('terminal outcomes complete/fail their bound items and KEEP the evidence link', async () => {
     const obs = buildBoardReconcileObserver(board)!
     const a = await board.create('proj-1', { title: 'thing A' })
     const b = await board.create('proj-1', { title: 'thing B' })
@@ -51,7 +52,9 @@ describe('buildBoardReconcileObserver', () => {
     await obs({ project_slug: 'proj-1', id: 'run-b', phase: 'failed' } as never)
 
     expect(board.get('proj-1', a.id)?.status).toBe('done')
-    expect(board.get('proj-1', a.id)?.linked_run_id).toBeNull()
+    // Successful runs retain their link too: completed history may need to show
+    // a recovered alert that is not a terminal failure reason.
+    expect(board.get('proj-1', a.id)?.linked_run_id).toBe('run-a')
     // #340 — a failed run shows FAILED + keeps its run link (so the client
     // derives the red dot + reason + retry), NOT a revert to upcoming/unlinked.
     expect(board.get('proj-1', b.id)?.status).toBe('failed')
@@ -83,6 +86,9 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     expect(board.get('proj-1', item.id)?.linked_run_id).toBe(run_id)
     expect(board.get('proj-1', item.id)?.status).toBe('in_progress')
 
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered after one bridge retry. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [alert, run_id])
+
     // 2. Drive the durable loop with a sim firer + the reconcile observer wired
     //    into on_terminal (exactly as build-core-modules composes it).
     const sim = buildSimFirer(store, () => ({
@@ -91,7 +97,12 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      run_host: async (cmd) => ({
+        ok: true,
+        stdout: cmd.includes('refs/remotes/origin/main^{commit}') ? 'a'.repeat(40) : '',
+        stderr: '',
+        exit_code: 0,
+      }),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
@@ -110,10 +121,12 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     }
 
     expect(final.phase).toBe('done')
-    // 3. The board item is reconciled: completed + binding cleared.
+    // 3. The board item is reconciled as completed, but its terminal binding and
+    // recovered alert remain derivable in completed history.
     const reconciled = board.get('proj-1', item.id)!
     expect(reconciled.status).toBe('done')
-    expect(reconciled.linked_run_id).toBeNull()
+    expect(reconciled.linked_run_id).toBe(run_id)
     expect(reconciled.completed_at).not.toBeNull()
+    expect(runProgressForItem(reconciled, (id) => store.get(id), Date.now())?.brief_alert).toBe(alert)
   })
 })

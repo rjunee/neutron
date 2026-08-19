@@ -2,6 +2,261 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
+
+The `plan:probe` seat now also relays a byte-bounded branch log from
+`git log --name-only <base>..<ref> | head -c 12288 | iconv -c … || true`. Its Forge-branch
+and base-branch fetches are independent, so a local-only Forge branch cannot
+prevent `origin/<base>` from refreshing. The log has no checksum because it is
+synthesis material, not a persisted relay. The workflow independently clamps the
+relayed value to 12,288 UTF-8 bytes before prompt interpolation, neutralises a
+literal `</BRANCH_LOG_DATA>` from commit text, and fences commit messages as
+untrusted data. `plan:next` returns an optional
+`branchBrief` with BUILT / SEAMS / REJECTED / SUITES sections: evidence-only and
+REGENERATED each round, so any prior round's brief is superseded.
+`clampBranchBrief()` enforces `BRANCH_BRIEF_MAX_BYTES = 4096` in code at the
+single consumption point. `ralphExecuteNote` appends that clamped brief to the
+Forge prompt only when `usePlanNext` selected its authoritative producer; a
+`plan:fable` answer cannot activate the shared schema's optional field. A missing
+or empty branch log also blocks brief transport in code even if the planner emits
+a schema-valid brief anyway. It emits nothing when the brief is absent or empty.
+The brief is independently fenced as untrusted reference data before Forge sees
+it, and both fence delimiters are neutralised before the byte cap. It is absent
+from the persisted plan and every checkpoint prompt, leaving no accumulation
+channel. A missing or empty branch log or brief fails open: the cheap path remains
+selected and no header is emitted. The iteration-1 and genuine crash-resume
+`plan:fable` paths remain byte-untouched, guarded by canary assertions.
+
+The historical BEFORE on the 2026-08-18 continuation round of card
+`trident-cannot-review-an-existing-p` was planner 2m54 (versus 9m50 for round-1
+Fable, 3.4x cheaper) and codex build 30m01. FORGE re-deriving branch state was
+estimated at approximately 14 minutes of that build. Instrument caveat: that
+30m01 used the legacy wrapper proxy; `codex-exec-end` did not exist yet. It is
+context, not an instrument-matched baseline, and cannot by itself validate an
+AFTER measured with the new exact pair.
+
+AFTER: not yet measurable — this branch has not merged, so no real continuation
+round can have consumed the new brief. The wrapper now durably stamps both
+`codex-exec-start` and `codex-exec-end` on success and failure, and
+`trident/stage-attribution.ts` reports the latest start/end pair in the fire
+window. This selects the retry when an earlier invocation failed after stamping
+its end, and also handles a killed first attempt with no end. Checkpoint time and
+the next fire are no longer timing proxies.
+
+`BRANCH-BRIEF-MEASUREMENT: PENDING`. Removal gate: by 2026-08-25 the Trident owner
+must replace that marker with the result from a real multi-task continuation,
+quoting its exact `codex-exec-start→codex-exec-end` AFTER beside the historical
+30m01 and explicitly retaining the instrument caveat. An instrument-matched
+no-brief control is required before claiming the delta came from this feature.
+If no qualifying measurement is recorded by the deadline, the exact duration
+does not drop, or no matched control substantiates attribution, the owner reverts
+the branch-state brief rather than retaining an unproven optimisation.
+The deadline remains an operational removal gate; historical test runs do not
+change outcome based on the wall clock.
+
+## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
+
+Migration 0133 adds `code_trident_stage_events`, an append-only SQLite ledger read
+and written through `TridentRunStore`. Host launches now record `launch-start`,
+`fire-dispatched`, and `fire-settled`; the Codex wrapper records `wrapper-start`
+and brackets execution with `codex-exec-start` / `codex-exec-end` through the
+always-exit-0 `trident/stage-stamp.sh`.
+Every writer uses millisecond ISO-8601 UTC where the host supports it, preserves
+insertion order by row id, and is best-effort so instrumentation cannot change a
+launch or wrapper exit.
+
+These stage names are the fixed vocabulary for deterministic writers. The reserved
+workflow-side names are `plan-start`, `build-agent-start`, and `wrapper-invoke`.
+The previous `/tmp` part-mtime method is retired because part files are rewritten on
+re-fire and can produce negative or cross-fire intervals; completed ledger rows
+instead survive run failure and later re-fire unchanged.
+
+## 2026-08-18 — Review-shaped Trident dispatches are refused unless they bind the existing PR
+
+`dispatchBoardBoundBuild` now owns the review-only dispatch contract. It detects
+requests for a review round of an existing PR and refuses review-shaped free text
+that omits `bound_pr`; the refusal names both `bound_pr` and the detected PR number
+instead of silently creating a new build. A supplied `bound_pr` must be a positive
+integer, bypasses only the build-specific ask-before-acting gate, and is persisted
+into the existing `code_trident_runs.bound_pr` column. Malformed and unbound-review
+refusals occur before workspace resolution, run creation, or board attachment.
+
+The `work_board_dispatch_build` schema now advertises and passes through `bound_pr`.
+`work_board_start` remains build-only because it starts a card's saved spec; review
+rounds use the explicit dispatch tool. No production wiring changed: inspection
+confirmed `gateway/composition/build-core-modules.ts` already registers
+`registerTridentBuildToolSurface`, while `McpServer.listToolSchemas()` generically
+exposes each shared-registry tool's `input_schema` to the MCP bridge.
+
+Until the review executor lands, `launch()` fails a bound run closed before
+`resolveBase`: no workflow fire and no host/git command can create a branch, commit,
+or PR. Its terminal reason names the bound PR and states that the target was not
+touched. This is deliberately incompatible with commit-capable fix-round use of
+`bound_pr`; that lane must add a separate discriminator before it ships.
+
+Both load-bearing boundaries were mutation-proved. Disabling the dispatch refusal
+made `a review-shaped task with no bound_pr is REFUSED at dispatch, naming bound_pr`
+fail (`received true` instead of `false`). Moving the launch guard below
+`resolveBase` made `a bound_pr run never takes the build path` fail because one host
+command was recorded instead of zero. Both mutations were restored; the three
+targeted test files then passed 164 tests. The full Trident directory passed
+2,043 tests across 78 files, and `tsc -p trident/tsconfig.json --noEmit` was
+clean. The repository runner completed its 1,353-file coverage audit but reported
+40 failing files; rerunning exactly those files from a detached `main` worktree
+reproduced failures in all 40 (59 failures in each of two 20-file batches), proving
+that full-suite red is pre-existing and not caused by this change.
+
+## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
+
+Migration repairs now have an explicit, loader-validated `reapply` kind. Unlike the existing
+suppress entries, an active reapply does not hide its named file: when the ledger records that
+name at the incident ordinal and the exact firing receipt is absent, the file joins the same
+tracked-tree guards and transactional apply path as pending work. Its SQL body and plain
+`_migration_repairs` receipt commit together; `_migrations` is never inserted, updated, or
+deleted. A body failure rolls both back, and the receipt makes every later boot a no-op.
+
+The shipped row-122 entry is intentionally inert during the deploy window before a file named
+`work_board_items_pr` exists, on fresh installs, and wherever that name is legitimately recorded
+at its tree ordinal. The live-replica harness pins the old silent-skip control, the repaired
+first boot, byte-identical scar row, second-boot idempotence, file-absent rollout order,
+fresh-install behavior, duplicate-column strictness, and untracked-file refusal. This change
+ships no migration SQL and does not change the schema snapshot.
+
+#269 must NOT merge until this is merged AND deployed; after it lands #269 must rebase and fix
+its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsified by 0130's
+rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
+`01M095E3F8YN3N9XV5AK4S9XJW`.
+
+## 2026-08-18 — a cache miss is not an absence of deletion, and a refused receipt is not a sent one (#411-followup)
+
+Two defects in #409, found by the cross-model and adversarial review that #409 was
+merged WITHOUT. Both were live on the reference deployment before this landed.
+
+**A deleted project's transcript could come back.** The `projects_changed`
+invalidation iterated `transcriptCache.keys()` and raised its `dropped` flag only
+when a delete FOUND an entry — so a topic whose FIRST read was still in flight,
+which is precisely the case the epoch guard exists for, could not raise it. The
+epoch stayed put, the read's write-back passed the guard at `controller.ts`
+`handleChange`, and the deleted project's history was re-created in the cache where
+a later `setProject` would serve it. The mechanism the comment described was right;
+the condition gating it was keyed on "did the map contain it" rather than "did the
+server say it is gone". Invalidation now scans every topic this controller has an
+opinion about, in-flight reads included, via a new `inFlightTranscriptTopics` set
+held only for the duration of the await.
+
+**A read receipt refused by the socket was recorded as sent, permanently.**
+`markVisibleAgentRead` filled its per-topic ledger from the ids it OFFERED, while
+`WebChatSession.markRead` records an id only when `ws.send` succeeds — specifically
+so a failed send is re-offered next time. Filling the ledger from the argument
+cancelled that retry: the id was filtered out of every later call and the receipt
+was never sent again. Not an edge case — on EVERY page load the transcript is read
+from the local store and reported before the WebSocket handshake completes, so the
+whole hydrated transcript was offered into a closed socket, dropped, and ledgered.
+The owner's read watermark never advanced and unread counts returned on messages he
+was looking at. `markRead` now RETURNS the ids it actually sent (web and mobile
+sessions both), and the caller ledgers only those.
+
+**Mutation evidence, both directions.** Restoring the old ledger reds
+`switch-transcript-cache.test.ts` "a receipt the socket REFUSED is offered again"
+(26 pass / 1 fail); restoring the old invalidation reds "A DELETION LANDING WHILE
+THE FIRST READ IS IN FLIGHT STILL STICKS" (26 pass / 1 fail); with both fixes,
+27 pass / 0 fail. `chat-core` 171 pass / 0 fail.
+
+📌 **The first version of the resurrection test was DECORATION and is worth
+recording as such:** it passed with the bug restored, because it stalled the session
+AFTER entering the project, by which time the read had already resolved. A guard that
+cannot fail for the reason under test is not a guard. It was rewritten to register
+the stalled session BEFORE the switch — `createSession` reuses an existing entry —
+and only then did the mutation go red.
+
+📌 **The suite could not see either defect because its session stub accepted every
+receipt unconditionally**, and #409's own test "acknowledges each agent message ONCE"
+pinned the defect as the desired behaviour. The stub now models a closed socket.
+
+**SYSTEM-OVERVIEW.md changes:** none (bug fix inside existing modules; no new module,
+HTTP surface, lifecycle behaviour, deploy step or env flag — `markRead`'s return type
+is a widened contract on an existing method, not a new surface).
+
+### Follow-up — the cross-model review found the receipt fix was only half of one
+
+Codex reviewed the change above and returned two findings.
+
+**A refused receipt was made ELIGIBLE for retry, and nothing retried.** Not
+ledgering a refused id restores the session's retry contract; it does not perform
+one. `handleStatus('open')` only published, and an up-to-date `session_ready` with
+no replay and nothing queued emits no `onChange` — so on a cold load, where the
+transcript is read from the local store and reported before the handshake finishes
+and therefore refused wholesale, the next attempt waited on UNRELATED activity. The
+watermark stayed stale exactly as before, just for a different reason. The socket's
+transition to `open` now re-offers; `markVisibleAgentRead` is idempotent (the ledger
+filters ids already confirmed sent), so it costs nothing when there is nothing owed.
+
+**The in-flight tracker is now reference-counted rather than a Set** — two reads for
+one topic can overlap, and the first to settle removed membership while the second
+was still outstanding.
+
+📌 **That second one is kept on REASONING and the guard for it was DELETED rather
+than shipped.** The test I wrote passed against the Set, because in the ordinary
+overlap the first read to settle writes a cache entry, which keeps the topic in the
+invalidation's `known` set through the cache no matter what the tracker says. The
+real gap needs a read whose write-back is refused — a generation spanning `stop()`
+then `start()` — which was not reproduced. A guard that cannot fail for the reason
+under test is worse than no guard: it reads as coverage. The count is retained
+because it cannot be worse than the Set and costs three lines, and
+`controller.ts` says so at the declaration.
+
+**Mutation:** removing the socket-open re-offer reds "RE-OFFERS refused receipts the
+moment the socket opens" (28 pass / 1 fail). Restored: 29 pass / 0 fail on that
+suite, 208 pass / 0 fail across it plus `switch-render-cost` and `chat-core`,
+`bunx tsc --noEmit` 0 errors.
+
+## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
+
+Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Codex
+wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
+`_CORRUPT` refusal through the host checkpoint before retaining the same exit-3
+fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
+cannot leak the project database path or displace the refusal tag from the bounded
+wrapper-error tail; a short stable failure tag remains when recording itself fails.
+A missing run row is now a nonzero checkpoint result rather than a diagnostic-only
+exit 0, so a mis-threaded run id cannot lose the alert without a trace. Alert-only
+writes do not refresh `last_advanced_at`: recording evidence is not workflow progress.
+
+`deriveRunProgress` now carries the alert through the Work-board HTTP and live
+snapshot shape. Terminal reconciliation retains the run link on successful cards,
+so both web and mobile rows show the subdued alert while a recovered run continues
+and in completed history after it merges. Moving completed work back to an active
+lane clears the stale link. An actual terminal failure reason takes precedence as
+the card's outcome; an earlier alert never substitutes for an absent failure reason.
+The alert is explicitly workflow-owned, so stale `save()`/`saveIfActive()` snapshots
+cannot erase it. Tests cover all three persisted refusal paths, store/progress
+mapping, client parsing, recovery→done reconciliation, and both client renderers.
+
+## 2026-08-18 — brief-part receipts now attest to persisted bytes
+
+`writeBriefParts` now encodes each task/reflection part once, writes it, reads the
+file back, and compares a byte-domain FNV receipt with the composed text receipt.
+An unfaithful write is retried exactly once; a persistent mismatch or I/O error is
+reported through a content-safe warning seam and refuses the whole manifest. In
+particular, failed reflection verification can no longer degrade non-empty owner
+guidance into a task-only manifest.
+
+`trident/brief-parts.test.ts` pins byte/string receipt parity (including lone
+surrogates and a >30 KB vector), persistent 569-byte truncation refusal, transient
+short-write recovery, reflection-only refusal, unchanged happy-path receipts, and
+loud write failures. The production default remains the existing
+`trident/inner-loop.ts` caller; `trident/codex-build.sh` and
+`trident/inner-workflow.mjs` are unchanged.
+
+## 2026-08-18 — lane_review.sh fails closed (T1–T4)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
+
+Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
+
+The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
+
+Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 
 Follow-up to #410. `scripts/ci/ci-workflow.test.ts` ('bun install cache wiring') is rewritten
@@ -74,6 +329,249 @@ merely repeating it.
 Unchanged and restated so it stays recorded: vendoring `gbrain` remains the stronger fix — it
 removes the network dependency outright and closes the byte-verification gap by putting the
 content in the tree under review — and is still deliberately not done.
+
+## 2026-08-18 — the web pane could destroy every Codex seat, and could only ever write the first one
+
+Three defects found by the adversarial review of #407 — which was merged with its
+verdict standing at REQUEST_CHANGES and no cross-model pass. All three were LIVE on
+the reference deployment, and **all three are on the web pane, which #407 never
+touched**: rotation changed what the server does with an unchanged request, so the
+client became wrong by standing still.
+
+**Disconnect became destructive without changing.** The button posts a bare
+`DELETE /api/app/codex-auth`, which the gateway now maps to `disconnectAllAccounts`.
+Before rotation it removed one credential. After it, one click removes EVERY
+connected subscription — and none can be re-minted without a fresh `codex login` on
+each original machine, which is worse than it sounds because the instance has been
+refreshing those tokens and the copies left behind are likely already revoked. There
+was no confirmation anywhere on the path, and the section copy still read
+*"This is an account-wide credential"* — singular. It now confirms through the tab's
+existing injectable `confirmImpl`, and the message NAMES THE COUNT, because the whole
+failure is that the owner believes he is clearing one thing.
+
+**The multi-seat UI shipped mobile-only.** `WebCodexCredentialClient.connectGlobal`
+took no `account`, so every paste resolved to `DEFAULT_SLOT` server-side: pasting a
+SECOND subscription silently destroyed the first, created nothing, and rendered
+"✓ Connected". The web `CodexStatus` type never declared `accounts` / `next` /
+`exhausted` either — the gateway had been sending all three the whole time — so there
+was no seat list, no cooling state and no per-seat remove. All now rendered, with the
+seat name REQUIRED once any seat exists.
+
+**Nothing stopped one ChatGPT account occupying two seats.** Both clients instruct the
+owner to *"run `codex login` on any machine and paste that account's auth.json"*, so
+pasting a laptop's file and then a desktop's is the documented path — and the CLI
+rotates refresh tokens, so the first refresh in each seat revokes the other. Both die,
+each is cooled `unauthorized` (the one state that never expires on a timer), and
+cross-model review is silently gone. That is ISSUES #573 re-created through the UI.
+`codex-rotation.ts` claims the design prevents it, and that is true of the code — the
+copy is made by the OWNER, not by us, which is the docblock-describes-intent shape.
+`connectAccount` now refuses a bundle whose `tokens.account_id` matches another seat,
+using a discriminator the normalizer already preserved and nothing read. A bundle with
+NO `account_id` is allowed through rather than refused: blocking every unidentifiable
+bundle would make a legitimate second seat impossible on a CLI version that omits the
+field, which is a worse failure than the one being prevented.
+
+**Mutation evidence — four guards, four reds.** Drop the confirm → "DISCONNECT-ALL
+confirms first" fails. Point per-seat Remove at the unqualified route → "REMOVE on one
+seat" fails. Stop sending the seat name → "ADD SEAT sends the seat name" fails. Remove
+the duplicate check → "REFUSES a second seat holding an account another seat already
+has" fails. Restored: `integrations-tab.test.tsx` 23 pass / 0 fail,
+`codex-credential.test.ts` 32 pass / 0 fail. The two ALLOW cases (a genuinely
+different account, and reconnecting the same account into its OWN seat — the repair
+path) stay green under the duplicate mutation, so the guard is not merely
+"no second seat, ever".
+
+**SYSTEM-OVERVIEW.md changes:** none (defect fix on an existing surface; no new module,
+HTTP route, lifecycle behaviour, deploy step or env flag — `connectGlobal` gaining an
+optional argument and `CodexStatus` declaring fields the server already sent are
+widenings of existing contracts).
+
+### Follow-up, same day — the cross-model review found the fix reintroducing the defect
+
+Codex reviewed the change above and returned four findings. Two were P1 and one of
+them was the same bug one step later.
+
+**The pane stored the POST's own reply, which erased the pool it had just fixed.**
+`POST /api/app/codex-auth` answers `{ status, mode, scope, account }`; ONLY the GET
+enriches with `accounts` / `next` / `exhausted`. Saving the POST reply therefore
+dropped the seat list, turned `codexSeatNameRequired` back off, and re-armed the
+blank-name overwrite of `default`. The pane now re-reads `statusGlobal()` after a
+successful connect, which the per-seat remove already did.
+
+📌 **It survived the first review because THE TEST STUB WAS MORE GENEROUS THAN THE
+SERVER** — it returned the full two-seat body from the POST, a shape production
+never sends. A stub that answers better than reality does not merely fail to catch
+the bug; it certifies it. Both stubs are now the real shapes, and the older Codex
+test's GET is STATEFUL (not_connected until the POST lands) because a GET frozen at
+`not_connected` contradicts the POST it just accepted.
+
+**The duplicate-account guard asked the wrong store.** It scanned
+`rotation.listSlots()`, but a rotation row is not proof a seat exists and its absence
+is not proof one does not: on an upgraded install the legacy `codex` credential
+predates rotation, so the list answers EMPTY while the credential is real and in use.
+The guard would find nothing and admit the same account under a named seat. It now
+scans `syncSlots()`, which re-derives seats from the persisted credential rows.
+
+**Two more, both taken:** the pane derived its whole display from the legacy
+top-level `status`, which only inspects the bare `codex` row — so removing `default`
+while named seats remain, or naming a first seat, printed "Not connected" over a
+healthy pool AND hid every control for managing it; it now derives from the pool.
+And `connectAccount` is serialized per owner, because the duplicate check reads and
+then writes, so two concurrent connects for one account could both pass before either
+stored — a double-click on "Add seat" is enough, and the damage needs a fresh
+`codex login` on both machines to undo.
+
+**Mutations, three more reds:** drop the re-read → "RE-READS the pool after
+connecting" fails; derive from legacy status → "shows a NAMED-ONLY pool as connected"
+fails; scan rotation rows instead of syncing → "sees a LEGACY seat that has never been
+through rotation" fails. Restored: `integrations-tab.test.tsx` 25 pass / 0 fail,
+`codex-credential.test.ts` 33 pass / 0 fail, `bunx tsc --noEmit` 0 errors.
+
+## 2026-08-17 — a readiness poll must wait for the thing it claims to prove (#411)
+
+`gateway/index.ts` `boot()` now binds `process.once('SIGTERM'|'SIGINT')`
+(`:1078`) BEFORE it announces readiness, and announces it twice: `READY=1`
+(`:1102`) for systemd, then `gateway_signal_handlers_ready` (`:1118`) as the
+last statement before the returned handle.
+`tests/integration/orphan-survival.test.ts` waits for that log line instead of
+for a migration row count plus a fixed sleep.
+
+The revision that reddened #406 and #407 broke its poll as soon as `_migrations`
+held at least one row, then slept 100 ms, under a comment claiming the poll
+proved the signal handler was registered. Each migration commits in its own
+transaction, so a non-zero count means migration k of N (measured breaking at
+k=2..60; N is derived from disk and moved 124 → 126 while this branch was in
+review, which is why no count is written down here), and the handler binds much
+later regardless: `applyMigrationsToProjectDb` at `gateway/index.ts:295`, the
+binds at `:1078`, with the whole composition and the listener bind at `:831` in
+between. The same comment's numbered boot path also had the handler installing
+before `Bun.serve`; the code is the reverse. Signalling inside that gap kills
+the child at SIGTERM's default disposition (exit 143, DB never closed), which is
+how this test reddened two unrelated PRs in one night.
+
+`READY=1` used to be sent at the listener bind, ~190 synchronous lines before
+those binds. `Type=notify` lets systemd queue a stop job the instant it lands,
+so `active` meant "accepting traffic", never "will handle a stop" — and the
+sibling systemd test below stopped the unit on exactly that proxy. Moving the
+send below the binds costs nothing (there is no top-level `await` between them,
+so it is the same synchronous tick) and makes the signal true. A throw from
+`sdNotify` now retires the two listeners before rethrowing into the shared
+boot-failure cleanup, which otherwise had no way to know they existed.
+
+The log marker is level-gated at info like any other log call, so it is not an
+unconditional supervisor contract: the comment names the level requirement and
+points systemd users at `READY=1`, which carries the same guarantee with no
+level dependency. The test pins `NEUTRON_LOG_LEVEL=info` on the spawned gateway
+for the same reason — inheriting a runner that exports `warn` or `error` would
+suppress the marker and time the poll out deterministically.
+
+**Pass rate, three arms, each named.** 30 consecutive runs of the file per arm,
+back to back on one box at load average 224-240 across 8 cores (five other lanes
+were live, which is the load this flake needs and an idle box cannot supply):
+
+| arm | what it is | result |
+|---|---|---|
+| pre-#407 | the revision that reddened #406/#407 (`count > 0` + 100 ms) | **0/30 pass** — 30/30 failed with exactly `Received: 143` |
+| base branch | `main`, i.e. #407's revision (all migrations + `[loop-registry]` + 50 ms) | **30/30 pass** |
+| this branch | wait for the signal-handler marker, no sleep | **30/30 pass** |
+
+Naming the baseline matters because it changes the claim. #407 already stopped
+the bleeding: at this load its revision does not reproduce the failure, so this
+branch is **not** measurable as a flake fix against `main`. What it contributes
+over `main` is (a) the residual 50 ms sleep is gone, so the remaining race is
+closed rather than narrowed, (b) `READY=1` no longer promises a graceful stop
+before the handlers exist, and (c) the guards below are falsifiable.
+
+**Falsifiability, four mutation runs against this branch, each observed:**
+
+- control (unmutated) → green, `1 pass 1 skip 8 expect()`;
+- remove both `process.once` binds → **red**, `Expected: 0 / Received: 143`;
+- skip `db.close()` in `shutdown()` → **red**, `-wal still holds 152472
+  uncheckpointed bytes`. This is the hole the flake was hiding: the process
+  exits 0 and SQLite replays the WAL on re-open, so every other assertion stays
+  green. The discriminator is the sidecar byte count — a clean close truncates
+  rather than unlinks it, so an existence check would pass for the wrong reason;
+- take the DB out of WAL mode → **red** at the new pre-signal assertion, `no
+  -wal sidecar while the gateway is live`. That assertion exists so the
+  post-exit "0 bytes" cannot hold vacuously.
+
+Two things the prover itself taught, both of which had produced a false result
+first time:
+
+- `db.close()` appears six times in `gateway/index.ts` and five are error paths
+  a healthy boot never reaches. A text-matched mutation landed on the
+  scope-reconcile failure path at `:363` instead of the shutdown drain at
+  `:1061`, the test stayed green, and that green read as "the guard is
+  vacuous" when it actually meant "the mutation was a no-op". The arm is now
+  anchored on its surrounding lines and greps for its own marker.
+- `journal_mode` is set in two places and persisted in the DB header, so
+  migration 0001's preamble overrides the connection pragma in
+  `persistence/db.ts`. Mutating only the pragma leaves a real `-wal` on disk and
+  proves nothing; the arm mutates both.
+
+Round 2's entry claimed a `86552`-byte figure for the skip-close mutation. That
+number is not reproducible from the mutation it was attributed to — it is what
+the live sidecar measures under a different mutation entirely. Replaced above
+with the measured 152472.
+
+The Linux-without-systemd shape is not re-listed as a mutation arm: the probes
+now sit at module scope feeding `test.skipIf`, which is visible in every run's
+`1 skip` rather than something a mutation has to demonstrate.
+
+The systemd sibling test had the readiness defect in its own dialect (fixed
+2 s/7 s/1 s sleeps for conditions systemd answers directly) and now polls
+`is-active` and a genuinely changed `MainPID`. Four further corrections to it:
+
+- it read `is-active`, which collapses `activating`, `deactivating`, `failed`
+  and a systemctl error into one "not active" answer. It now reads `ActiveState`
+  and the stop-wait requires the terminal `inactive` — `!isActive()` was
+  satisfied mid-shutdown and by a broken systemctl alike;
+- `systemctl stop`'s exit status was discarded. A stop that never ran (unknown
+  unit, dead user manager) would have left the assertions to certify a shutdown
+  nobody requested. It is asserted;
+- the respawn wait re-read `MainPID` a fourth time to assert on, so a second
+  respawn between the two reads would have made the assertions describe a
+  process the wait never saw. The value that satisfied the predicate is
+  captured and asserted instead;
+- the test's NAME said "restarted within RestartSec" while the wait allowed
+  25 s. `RestartSec=5` is a minimum retry delay, not a deadline systemd
+  promises to meet, and the respawn also cold-starts bun and replays every
+  migration. The name now claims only what the test checks — a fresh `MainPID`
+  under `Restart=always` — with the reasoning inline so it is not "fixed" back.
+
+#407 landed a narrower fix to the same flake while this branch was in review:
+wait for every migration on disk, then for the `[loop-registry]` composition
+line, then sleep 50 ms. The readiness marker is emitted strictly later than
+both, so it subsumes them and the sleep goes away. #407's disk-derived
+`MIGRATION_FILE_COUNT` is kept, promoted from readiness gate to post-boot
+ASSERTION — a partial replay is now a named failure here rather than a confusing
+`applied !== []` on the re-open.
+
+Three smaller corrections to the SIGTERM subtest: it reaps its child in the
+`finally` (every readiness-timeout path previously leaked a live gateway, its
+watchdog interval and two stream readers onto a data dir the test then deleted);
+its outer budget went 30 s → 45 s so a 19 s readiness still fails on the
+diagnostic throw that carries the child's stderr rather than on a bare runner
+timeout; and the stdout/stderr drains are now awaited under a 2 s race rather
+than unbounded. Those promises end on pipe EOF, and EOF needs every holder of
+the write end closed — a gateway descendant that inherited the fds would hang
+the test with no diagnostic at all, which is a worse failure than the one being
+fixed.
+
+**One production change, flagged for deliberate acceptance rather than
+incidental merge:** `sdNotify('READY=1')` moves from the listener bind (`:917`
+on the base branch) to `:1102`, after the signal-handler binds — roughly 190
+lines later in `boot()`. It is safe by inspection and by test: there is no
+top-level `await` between the two positions, so it is the same synchronous tick;
+the later throw point is covered by `bootFailureCleanup`, with the two listeners
+explicitly retired first because that cleanup had no way to know they existed;
+and the boot-init-cleanup suite passes on both sides. It is still a change to
+production boot ordering made by a test-flake PR, so it should be accepted on
+purpose. The reason it is in scope: without it, `Type=notify` lets systemd queue
+a stop job the instant `READY=1` lands, so `active` meant "accepting traffic"
+and never "will handle a stop" — the sibling systemd test stopped the unit on
+exactly that proxy, and WAL recovery on the reopen is forgiving enough that its
+assertions would have certified a clean shutdown that never happened.
 
 ## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
 

@@ -136,7 +136,8 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ok(),
+      run_host: async (cmd) =>
+        cmd.includes('refs/remotes/origin/main^{commit}') ? ok('a'.repeat(40)) : ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
