@@ -76,6 +76,7 @@ import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { hasArgusProvenance } from './checkpoint-phase.ts'
+import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseCheckpointFindings,
@@ -128,6 +129,9 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
+  /** Review-only executor seam. Production uses `executeBoundReview`; tests may
+   *  inject a recording executor without running a live review panel. */
+  execute_bound_review?: typeof executeBoundReview
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
   /** Injectable wait, used to SPACE the resume head-read retries
@@ -2296,7 +2300,7 @@ export function buildTridentOrchestrator(
       const created = await runWithRetries(
         ['gh', 'pr', 'create', '--head', branch, '--base', base, '--fill'],
       )
-      if (!created.ok) throw new Error(`outer publisher could not open a PR for branch ${branch}`)
+      if (!created.ok) throw new Error(publishFailureReason('open a PR for', branch, created.stderr))
       pr = await detectExistingPr({ ...run, branch })
     }
     if (pr === null) throw new Error(`outer publisher could not confirm an open PR for branch ${branch}`)
@@ -2823,27 +2827,108 @@ export function buildTridentOrchestrator(
         // A stamp must never fail a launch.
       }
     }
-    // A review-only bound run fails CLOSED (SPEC card 2026-08-18; bound_pr was 0 of 190 runs).
+    // A review-only bound run dispatches CLOSED (SPEC card 2026-08-18; bound_pr was 0 of 190 runs).
     // The measured failure mode is a "review PR #N" dispatch building a docs PR about reviewing
     // (#542/#541/#530) while #N's review-gate stays red. Guarding at launch covers BOTH call sites
-    // (the fresh launch ~2896 and the crash-recovery relaunch ~2769). When the review executor
-    // lands (plan task 2) this branch becomes its entry point; a fix-round lane that wants
-    // commit-capable bound runs must add a discriminator and change this deliberately.
+    // (the fresh launch ~2896 and the crash-recovery relaunch ~2769). The review executor lives
+    // HERE and returns before base resolution, the build workflow, and every publisher/git-write
+    // path. A fix-round lane that wants commit-capable bound runs must add a discriminator and
+    // change this deliberately.
+    // CROSS-LANE COLLISION: `.trident/plans/trident/a-fix-round-that-abandons-the-revie.md`
+    // plans the opposite `bound_pr` meaning and must add its own discriminator before landing.
     if (run.bound_pr !== null) {
-      return {
-        run: failedRun(
-          run,
-          `run is bound to PR #${run.bound_pr} for a review-only round, but review-only execution is not yet wired — refusing the build path: no branch, no commit, and no new PR were created (the target PR was not touched)`,
+      let codexHome: string | null = opts.codex_home ?? null
+      if (opts.resolve_codex_home !== undefined) {
+        try {
+          codexHome = opts.resolve_codex_home(run) ?? codexHome
+        } catch {
+          // Optional peer resolution is best-effort, exactly as on the build path.
+        }
+      }
+      let kimiConfigured = false
+      if (opts.resolve_kimi_configured !== undefined) {
+        try {
+          kimiConfigured = opts.resolve_kimi_configured()
+        } catch {
+          // An unavailable optional peer does not prevent the core panel.
+        }
+      }
+      let phaseModels: Record<string, { model?: string; effort?: string }> | null | undefined
+      if (opts.resolve_phase_models !== undefined) {
+        try {
+          phaseModels = opts.resolve_phase_models()
+        } catch {
+          phaseModels = null
+        }
+      }
+      const reviewDeps = {
+        run_host: opts.run_host,
+        fire_workflow: fireWorkflow,
+        codex_home: codexHome,
+        gh_data_dir: opts.gh_data_dir ?? null,
+        gh_owner_handle: opts.gh_owner_handle ?? null,
+        kimi_configured: kimiConfigured,
+        ...(phaseModels !== undefined ? { phase_models: phaseModels } : {}),
+        panel_timeout_ms: maxInflightMs,
+      }
+      // These direct calls are the non-test wiring proof for both exported entry points:
+      // executeBoundReview calls formatReviewEvidence when it creates the PR comment.
+      const reviewed = opts.execute_bound_review === undefined
+        ? await executeBoundReview(run, reviewDeps)
+        : await opts.execute_bound_review(run, reviewDeps)
+      if (reviewed.status === 'failure') {
+        const failed = failedRun(
+          { ...run, pr: run.bound_pr, branch: null, worktree: null },
+          reviewed.reason,
           false,
-        ),
+        )
+        failed.inner_checkpoint = 'bound-review-failed'
+        return {
+          run: failed,
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (bound PR #${run.bound_pr} review-only executor)`,
+        }
+      }
+      let findings = '[]'
+      try {
+        findings = JSON.stringify(reviewed.findings)
+      } catch {
+        // The evidence formatter has already recorded the serialization failure in the PR
+        // comment. Keep the in-memory snapshot parseable too.
+      }
+      const done: TridentRun = {
+        ...run,
+        phase: 'done',
+        pr: reviewed.pr,
+        // Dispatch creates a prospective branch name before git-mode is known; a review-only
+        // success must not persist that name as if a branch had actually been created.
+        branch: null,
+        worktree: null,
+        subagent_run_id: null,
+        subagent_status: 'completed',
+        failure_reason: null,
+        // `saveIfActive` persists this field, including the gate outcome and reviewed SHA. The
+        // paired head/findings remain on the returned snapshot for direct callers; the checkpoint
+        // is the durable result because those two columns are workflow-owned and excluded from
+        // the outer full-row save.
+        inner_checkpoint: `bound-review-complete:${reviewed.reviewed_sha}:${reviewed.review_gate.status}`,
+        inner_checkpoint_head: reviewed.reviewed_sha,
+        inner_checkpoint_findings: findings,
+        inner_verdict: reviewed.verdict,
+        last_advanced_at: now(),
+      }
+      return {
+        run: done,
         changed: true,
         waiting: false,
-        note: `${run.phase} → failed (bound_pr review-only: build path refused, no fire)`,
+        note: `bound PR #${reviewed.pr} reviewed at ${reviewed.reviewed_sha} → done (${reviewed.review_gate.status})`,
       }
     }
-    // MERGE NOTE: the bound_pr guard above runs BEFORE this stamp on purpose. A refused
-    // run never launches, so stamping first would write a launch-start event for a launch
-    // that never happened — and this stage ledger is exactly what the latency card reads.
+    // MERGE NOTE: the bound_pr branch above returns BEFORE this stamp on purpose. A review-only
+    // run never fires the build workflow, so stamping first would write a launch-start event for
+    // a build launch that never happened — and this stage ledger is exactly what the latency card
+    // reads.
     stamp('launch-start', `round=${run.round} ralph_round=${run.ralph_round}`)
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
