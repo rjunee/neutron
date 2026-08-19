@@ -525,26 +525,44 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
  * the shape the original change was written to prevent, and it shipped with the
  * ci.yml header claiming the identity held "by construction" when nothing held it.
  *
- * So it is asserted here instead, per job, by WALKING the file: the per-job checks
- * are generated from whatever jobs actually install, so a new installing job is
+ * So it is asserted here instead, per job, by WALKING the file: the checks are
+ * generated from whatever jobs actually install, so a new installing job is
  * covered the day it is added rather than whenever someone remembers. The one
  * hardcoded thing is the roster in the first test, and it is deliberate — it is
  * the positive control. Without it a walk that silently matched NOTHING would
- * iterate an empty list and report every check below as passing, which is the
- * same false-green this whole block exists to stop. Adding an installing job is
- * meant to fail that one test until the roster names it.
+ * report every check below as passing, which is the same false-green this whole
+ * block exists to stop. Adding an installing job is meant to fail that one test
+ * until the roster names it.
  *
- * Mutation-verified when written — each of these reds the suite: breaking the
- * path identity in one job, restoring the cache after the install, dropping
- * hashFiles from the key, tag-pinning the action, giving one job its own key,
- * deleting restore-keys, dropping the bun version from the key, bumping
- * `bun-version` without touching the key, renaming a job out of the walk's
- * pattern, and a job that stops installing.
+ * 2026-08-18 — REWRITTEN AS ONE PURE PREDICATE PLUS EXECUTED MUTATIONS, because
+ * the first version's mutation list was PROSE. It claimed ten mutations had been
+ * tried; nothing re-ran them, and review found two the checks did not actually
+ * catch:
+ *
+ *   1. HOISTING THE CACHE STEP ABOVE THE CHECKOUT. `hashFiles('bun.lock')` reads
+ *      the workspace, so before a checkout it returns the EMPTY STRING and the key
+ *      collapses to the `restore-keys` prefix — one entry, frozen forever at
+ *      whatever the first run stored, restored on every later run whatever
+ *      `bun.lock` says. The old checks passed on that mutation because they only
+ *      asserted the key CONTAINED the text `hashFiles('bun.lock')`, which it still
+ *      did. Text presence is not evaluation.
+ *   2. BROADENING `restore-keys` TO `bun-install-`. That defeats the bun-version
+ *      isolation the key exists to carry (a bun upgrade can change the cache's
+ *      on-disk layout), and the old check only asserted the key STARTS WITH the
+ *      prefix — which a shorter prefix satisfies even better.
+ *
+ * Both are now structural: the checkout must precede the cache step, and
+ * `restore-keys` must equal the key with the lockfile-hash expression removed —
+ * nothing broader, nothing narrower. And every mutation below is EXECUTED against
+ * this file's own text, so the list cannot rot into a claim again.
  */
 describe('bun install cache wiring', () => {
-  /** Split the `jobs:` mapping into { name -> body }. */
-  function jobBlocks(): Map<string, string> {
-    const jobs = yml.slice(yml.indexOf('\njobs:\n') + 1)
+  const INSTALL_RUN = 'run: bun install --frozen-lockfile'
+  const LOCK_HASH = "${{ hashFiles('bun.lock') }}"
+
+  /** Split a workflow's `jobs:` mapping into { name -> body }. */
+  function jobBlocks(source: string): Map<string, string> {
+    const jobs = source.slice(source.indexOf('\njobs:\n') + 1)
     const out = new Map<string, string>()
     let name: string | null = null
     let buf: string[] = []
@@ -560,80 +578,293 @@ describe('bun install cache wiring', () => {
     return out
   }
 
-  const blocks = jobBlocks()
-  const installing = [...blocks].filter(([, b]) => b.includes('bun install --frozen-lockfile'))
-
-  test('the walk finds the jobs that install — a parser that finds none proves nothing', () => {
-    // Positive control for every assertion below. If jobBlocks() silently stops
-    // matching (an indentation change, a renamed `jobs:` key), every per-job test
-    // below would iterate an EMPTY list and pass vacuously. This is the check that
-    // cannot pass for that reason.
-    expect(installing.map(([n]) => n).sort()).toEqual(['layering', 'lint', 'purity', 'shard', 'typecheck'])
-  })
-
-  for (const [job, block] of installing) {
-    test(`${job}: the cache path and BUN_INSTALL_CACHE_DIR are the same string`, () => {
-      // The identity the whole change rests on. Compared as strings, so a typo,
-      // a different `runner.*` context or a stray trailing segment all fail.
-      const cachePath = block.match(/uses: actions\/cache@[\s\S]*?\n\s+path: (.+)/)?.[1]?.trim()
-      const installDir = block.match(
-        /run: bun install --frozen-lockfile\s*\n\s+env:\s*\n\s+BUN_INSTALL_CACHE_DIR: (.+)/,
-      )?.[1]?.trim()
-      expect(cachePath).toBeDefined()
-      expect(installDir).toBeDefined()
-      expect(installDir).toBe(cachePath)
-    })
-
-    test(`${job}: the cache step runs BEFORE the install`, () => {
-      // Restoring after the install is a no-op that still saves, so it looks
-      // exactly like a working cache while never serving one.
-      const cacheAt = block.indexOf('uses: actions/cache@')
-      const installAt = block.indexOf('run: bun install --frozen-lockfile')
-      expect(cacheAt).toBeGreaterThanOrEqual(0)
-      expect(cacheAt).toBeLessThan(installAt)
-    })
-
-    test(`${job}: the cache key carries the lockfile hash and this job's bun version`, () => {
-      // hashFiles('bun.lock') is what makes a dependency change re-fetch rather
-      // than restore a tree the lockfile no longer describes. The bun version is
-      // in the key because a bun upgrade can change the cache's on-disk layout,
-      // and it is read from THIS job's setup-bun step so the two cannot drift.
-      const key = block.match(/uses: actions\/cache@[\s\S]*?\n\s+key: (.+)/)?.[1]?.trim() ?? ''
-      const bunVersion = block.match(/bun-version: (\S+)/)?.[1]
-      expect(bunVersion).toBeDefined()
-      expect(key).toContain("hashFiles('bun.lock')")
-      expect(key).toContain(`bun${bunVersion}`)
-    })
-
-    test(`${job}: the cache action is pinned to a 40-hex sha`, () => {
-      // Every other pin in this repo is a sha; a tag is mutable and this action
-      // runs with access to the cache the installs then trust.
-      expect(block).toMatch(/uses: actions\/cache@[0-9a-f]{40}\b/)
-    })
+  function installingJobs(source: string): Array<[string, string]> {
+    return [...jobBlocks(source)].filter(([, b]) => b.includes(INSTALL_RUN))
   }
 
-  test('every installing job restores from the SAME key, or they cannot share an entry', () => {
+  /**
+   * The install step's `BUN_INSTALL_CACHE_DIR`, read from anywhere in that step's
+   * `env:` block rather than from the line immediately after it. The first
+   * version demanded it be the FIRST entry, so adding an unrelated env var above
+   * it reddened the suite with the wiring completely unchanged — a false positive,
+   * and false positives are what teach people to edit the test instead of the bug.
+   */
+  function installCacheDir(block: string): string | undefined {
+    const lines = block.split('\n')
+    const at = lines.findIndex((l) => l.includes(INSTALL_RUN))
+    if (at === -1) return undefined
+    let envAt = -1
+    for (let i = at + 1; i < lines.length; i++) {
+      const line = lines[i] ?? ''
+      if (line.trim() === '') continue
+      if (/^\s*- /.test(line)) break // the next step began; this install has no env:
+      if (/^\s*env:\s*$/.test(line)) {
+        envAt = i
+        break
+      }
+    }
+    if (envAt === -1) return undefined
+    const envIndent = (lines[envAt] ?? '').search(/\S/)
+    for (let i = envAt + 1; i < lines.length; i++) {
+      const line = lines[i] ?? ''
+      if (line.trim() === '') continue
+      if (line.search(/\S/) <= envIndent) break
+      const m = line.match(/^\s*BUN_INSTALL_CACHE_DIR:\s*(.+)$/)
+      if (m) return m[1]!.trim()
+    }
+    return undefined
+  }
+
+  const cacheField = (block: string, field: string): string | undefined =>
+    block.match(new RegExp(String.raw`uses: actions/cache@[\s\S]*?\n\s+${field}: (.+)`))?.[1]?.trim()
+
+  /**
+   * The whole guard as ONE function of the file's text, so the mutations below can
+   * run it. Returns null when the wiring holds, or the reason it does not.
+   */
+  function whyCacheBroken(source: string): string | null {
+    const installing = installingJobs(source)
+    if (installing.length === 0) return 'the walk found no installing jobs'
+
+    const keys = new Set<string>()
+    const prefixes = new Set<string>()
+
+    for (const [job, block] of installing) {
+      const cachePath = cacheField(block, 'path')
+      if (!cachePath) return `${job}: no actions/cache step with a path`
+      const installDir = installCacheDir(block)
+      if (!installDir) return `${job}: the install sets no BUN_INSTALL_CACHE_DIR`
+      // The identity the whole change rests on. Compared as strings, so a typo, a
+      // different `runner.*` context or a stray trailing segment all fail.
+      if (installDir !== cachePath) return `${job}: cache path and BUN_INSTALL_CACHE_DIR differ`
+
+      const checkoutAt = block.indexOf('uses: actions/checkout@')
+      const cacheAt = block.indexOf('uses: actions/cache@')
+      const installAt = block.indexOf(INSTALL_RUN)
+      if (checkoutAt === -1) return `${job}: no checkout step`
+      // hashFiles() reads the workspace: before a checkout it returns "" and the
+      // key collapses to the restore-keys prefix, which then never changes again.
+      if (checkoutAt > cacheAt) return `${job}: the cache is restored before the checkout`
+      // Restoring after the install is a no-op that still saves, so it looks
+      // exactly like a working cache while never serving one.
+      if (cacheAt > installAt) return `${job}: the cache is restored after the install`
+
+      // A tag is mutable, and this action runs with write access to the entry the
+      // installs then trust.
+      if (!/uses: actions\/cache@[0-9a-f]{40}\b/.test(block))
+        return `${job}: the cache action is not pinned to a 40-hex sha`
+
+      const bunVersion = block.match(/bun-version: (\S+)/)?.[1]
+      if (!bunVersion) return `${job}: no bun-version`
+      const key = cacheField(block, 'key')
+      if (!key) return `${job}: the cache step has no key`
+      // hashFiles('bun.lock') is what makes a dependency change re-fetch rather
+      // than restore a tree the lockfile no longer describes. The bun version is
+      // read from THIS job's setup-bun step so the two cannot drift.
+      if (!key.includes(LOCK_HASH)) return `${job}: the key does not carry the lockfile hash`
+      if (!key.includes(`bun${bunVersion}`)) return `${job}: the key does not carry this job's bun version`
+
+      const prefix = block.match(/restore-keys: (.+)/)?.[1]?.trim()
+      // Without restore-keys a one-line dependency bump re-downloads all 2500
+      // packages — the exposure this change exists to reduce, reappearing on
+      // exactly the PRs that touch dependencies.
+      if (!prefix) return `${job}: no restore-keys`
+      // It must be the key MINUS the lockfile hash. `startsWith` was not enough:
+      // a SHORTER prefix also starts the key and throws away the bun-version
+      // isolation, so a cache written under one bun layout is restored under
+      // another.
+      if (key.replace(LOCK_HASH, '') !== prefix)
+        return `${job}: restore-keys is not the key minus the lockfile hash`
+
+      keys.add(key)
+      prefixes.add(prefix)
+    }
+
     // Twelve legs paying for twelve separate entries is not a cache, it is twelve
     // caches — and it would blow through the repo's Actions cache quota while
     // still fetching from the third party on most legs.
-    const keys = new Set(
-      installing.map(([, b]) => b.match(/uses: actions\/cache@[\s\S]*?\n\s+key: (.+)/)?.[1]?.trim()),
-    )
-    expect(keys.size).toBe(1)
+    if (keys.size !== 1) return 'the installing jobs do not share one key'
+    if (prefixes.size !== 1) return 'the installing jobs do not share one restore-keys prefix'
+    return null
+  }
+
+  test('the walk finds the jobs that install — a parser that finds none proves nothing', () => {
+    // Positive control for every assertion below. If jobBlocks() silently stops
+    // matching (an indentation change, a renamed `jobs:` key), whyCacheBroken()
+    // would have nothing to check. It returns a reason for the empty case, but
+    // this is the check that names WHICH jobs are expected.
+    expect(installingJobs(yml).map(([n]) => n).sort()).toEqual([
+      'layering',
+      'lint',
+      'purity',
+      'shard',
+      'typecheck',
+    ])
   })
 
-  test('a restore-keys prefix exists, so a lockfile change is a partial hit', () => {
-    // Without it a one-line dependency bump re-downloads all 2500 packages — the
-    // exposure this change exists to reduce, reappearing on exactly the PRs that
-    // touch dependencies.
-    const prefixes = new Set(
-      installing.map(([, b]) => b.match(/restore-keys: (.+)/)?.[1]?.trim()),
-    )
-    expect(prefixes.size).toBe(1)
-    const prefix = [...prefixes][0]
-    expect(prefix).toBeDefined()
-    // It must be a genuine PREFIX of the key, or it can never match anything.
-    const key = installing[0]![1].match(/uses: actions\/cache@[\s\S]*?\n\s+key: (.+)/)?.[1]?.trim()
-    expect(key!.startsWith(prefix!)).toBe(true)
+  test('every installing job restores a cache that can actually hit', () => {
+    expect(whyCacheBroken(yml)).toBeNull()
   })
+
+  // The controls. Each one is a real edit someone could make while believing the
+  // cache still works, and each must be caught — otherwise the test above proves
+  // only that some strings are present in a file. Two of these (the hoist above
+  // checkout, and the broadened restore-keys) PASSED the first version of this
+  // guard; they are the reason it was rewritten.
+  //
+  // Each control names the reason it must be caught FOR. A control that trips a
+  // different check than the one under test passes for an unrelated reason, which
+  // makes it decoration: it would keep passing after the check it was written to
+  // exercise had been deleted.
+  const mutations: Array<[string, (s: string) => string, string]> = [
+    [
+      'the cache is hoisted above the checkout, so hashFiles reads an empty tree',
+      (s) =>
+        s.replace(
+          /( {6}- uses: actions\/checkout@\S+[^\n]*\n)((?: {6}- uses: oven-sh\/setup-bun@[\s\S]*?\n)?(?: {8}[^\n]*\n)*)((?: {6}#[^\n]*\n)* {6}- uses: actions\/cache@[\s\S]*?restore-keys: [^\n]*\n)/,
+          '$3$1$2',
+        ),
+      'restored before the checkout',
+    ],
+    [
+      'restore-keys is broadened past the bun version',
+      (s) => s.replace(/restore-keys: bun-install-[^\n]*/g, 'restore-keys: bun-install-'),
+      'restore-keys is not the key minus the lockfile hash',
+    ],
+    [
+      'the cache is restored after the install',
+      (s) =>
+        s.replace(
+          /( {6}- uses: actions\/cache@[\s\S]*?restore-keys: [^\n]*\n)( {6}(?:#[^\n]*\n {6})*- run: bun install --frozen-lockfile\n(?: {8}[^\n]*\n)*)/,
+          '$2$1',
+        ),
+      'restored after the install',
+    ],
+    [
+      'the path identity is broken in one job',
+      (s) => s.replace('path: ${{ runner.temp }}/bun-install-cache', 'path: ${{ runner.temp }}/bun-cache'),
+      'cache path and BUN_INSTALL_CACHE_DIR differ',
+    ],
+    [
+      'hashFiles is dropped from the key',
+      (s) => s.replace(/key: bun-install-[^\n]*/, 'key: bun-install-${{ runner.os }}-bun1.3.9-fixed'),
+      'does not carry the lockfile hash',
+    ],
+    [
+      'the cache action is tag-pinned',
+      (s) => s.replace(/uses: actions\/cache@[0-9a-f]{40}[^\n]*/, 'uses: actions/cache@v6'),
+      'not pinned to a 40-hex sha',
+    ],
+    [
+      'one job is given its own key',
+      // Key AND restore-keys, in the first job only. Changing the key alone trips
+      // the key/restore-keys equality check instead, which would make this a
+      // control for a different check than the one it names.
+      (s) =>
+        s
+          .replace(/(key: bun-install-)/, '$1typecheck-')
+          .replace(/(restore-keys: bun-install-)/, '$1typecheck-'),
+      'do not share one key',
+    ],
+    [
+      'restore-keys is deleted',
+      (s) => s.replace(/\n\s+restore-keys: [^\n]*/, ''),
+      'no restore-keys',
+    ],
+    [
+      'bun-version is bumped without touching the key',
+      (s) => s.replace('bun-version: 1.3.9', 'bun-version: 1.4.0'),
+      "does not carry this job's bun version",
+    ],
+    [
+      'the install stops setting BUN_INSTALL_CACHE_DIR',
+      (s) => s.replace(/\n\s+env:\n\s+BUN_INSTALL_CACHE_DIR: [^\n]*/, ''),
+      'sets no BUN_INSTALL_CACHE_DIR',
+    ],
+  ]
+
+  /**
+   * Mutations are applied to the `jobs:` mapping ONLY, never to the header
+   * comment above it. The header quotes real key strings when it reports what CI
+   * measured (`Cache restored from key: bun-install-…`), so a mutation written as
+   * a bare `.replace(/key: bun-install-…/)` lands in PROSE, changes nothing about
+   * the wiring, and the control then reports a false pass. Two did exactly that
+   * the moment a measurement was added to the header — which is the same
+   * "measured against the wrong thing" failure the guard itself is about.
+   */
+  const mutateJobs = (mutate: (s: string) => string): string => {
+    const at = yml.indexOf('\njobs:\n')
+    expect(at).toBeGreaterThan(0)
+    return yml.slice(0, at) + mutate(yml.slice(at))
+  }
+
+  for (const [name, mutate, because] of mutations) {
+    test(`catches the break: ${name}`, () => {
+      const mutated = mutateJobs(mutate)
+      expect(mutated).not.toBe(yml) // the mutation landed
+      expect(whyCacheBroken(mutated)).toContain(because)
+    })
+  }
+
+  test('the roster catches a job that leaves the walk', () => {
+    // This one is deliberately NOT in the list above: an installing job renamed
+    // out of the `^ {2}[a-z][a-z0-9-]*:$` pattern simply disappears, and the
+    // remaining four are still wired correctly, so whyCacheBroken() has nothing
+    // to complain about. The hardcoded roster is what notices — which is the
+    // whole reason it is hardcoded, and this is the control that proves it.
+    const mutated = mutateJobs((s) => s.replace('\n  typecheck:\n', '\n  Typecheck:\n'))
+    expect(mutated).not.toBe(yml)
+    expect(whyCacheBroken(mutated)).toBeNull()
+    expect(installingJobs(mutated).map(([n]) => n).sort()).not.toEqual([
+      'layering',
+      'lint',
+      'purity',
+      'shard',
+      'typecheck',
+    ])
+  })
+
+  test('a harmless edit is NOT reported — the guard has to be usable', () => {
+    // The inverse control. A guard that reds on a change with identical wiring
+    // teaches people to edit the guard, and then it stops guarding. Adding an
+    // unrelated env var above BUN_INSTALL_CACHE_DIR reddened the first version of
+    // this suite; it must not red this one.
+    const harmless = yml.replace(
+      /( {8}env:\n)( {10}BUN_INSTALL_CACHE_DIR:)/g,
+      '$1          BUN_INSTALL_VERBOSE: "0"\n$2',
+    )
+    expect(harmless).not.toBe(yml)
+    expect(whyCacheBroken(harmless)).toBeNull()
+  })
+})
+
+/**
+ * Every action in every workflow is pinned to a full commit sha.
+ *
+ * 2026-08-18. The cache guard above asserted that actions/cache specifically was
+ * sha-pinned, and its comment justified that with "every other pin in this repo is
+ * a sha". That was false when it was written: `actions/checkout` and
+ * `oven-sh/setup-bun` were on the MOVING tags `@v4` and `@v2`, five of each, and
+ * a moving tag is repointable by whoever owns it — the supply-chain hole the
+ * cache's own pin exists to close, left open on the two actions that run FIRST and
+ * with more access. Both are pinned now, and the claim is a test rather than a
+ * comment so it cannot go stale the same way twice.
+ */
+describe('workflow action pins', () => {
+  const WORKFLOW_DIR = fileURLToPath(new URL('../../.github/workflows', import.meta.url))
+  const files = readdirSync(WORKFLOW_DIR).filter((f) => f.endsWith('.yml') || f.endsWith('.yaml'))
+
+  test('the workflow directory is not empty — a walk over nothing proves nothing', () => {
+    expect(files.length).toBeGreaterThan(0)
+  })
+
+  for (const file of files) {
+    test(`${file}: every uses: is a 40-hex sha`, () => {
+      const source = readFileSync(join(WORKFLOW_DIR, file), 'utf8')
+      const uses = [...source.matchAll(/^\s*(?:- )?uses: (\S+)/gm)].map((m) => m[1]!)
+      expect(uses.length).toBeGreaterThan(0)
+      const unpinned = uses.filter((u) => !/^[^@]+@[0-9a-f]{40}$/.test(u))
+      expect(unpinned).toEqual([])
+    })
+  }
 })
