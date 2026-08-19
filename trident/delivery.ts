@@ -38,6 +38,11 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import {
+  TRIDENT_SALVAGE_MARKER,
+  TRIDENT_SNAPSHOT_FAILURE_MARKER,
+  TRIDENT_STASH_PARKED_MARKER,
+} from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -143,6 +148,48 @@ function isToolsNotEnabled(reasonLower: string): boolean {
   )
 }
 
+/** Salvage metadata is machine-authored and can be much longer than the
+ * operator-authored cause. Classify only the cause; the recovery pointer is
+ * rendered separately by `composeTerminalDelivery`. */
+function authoredFailureReason(reason: string): string {
+  const salvageMarker = TRIDENT_SALVAGE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const captureFailureMarker = TRIDENT_SNAPSHOT_FAILURE_MARKER.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  )
+  const annotation = reason.match(
+    new RegExp(
+      `(?:\\s+—\\s+(?:0 commits\\b|\\d+ commit\\(s\\),\\s+${salvageMarker}\\b|${salvageMarker}\\b|\\d+ uncommitted\\b)|;\\s+plus\\s+(?:\\d+ uncommitted\\b|\\d+ stash\\b|${captureFailureMarker}\\b))`,
+    ),
+  )
+  return (annotation === null ? reason : reason.slice(0, annotation.index)).trim()
+}
+
+function salvageRecoveryTrail(run: TridentRun): string {
+  const reason = run.failure_reason ?? ''
+  const trails: string[] = []
+  const snapshotRef = reason.match(/refs\/tags\/trident-salvage\/[^\s;—]+/)?.[0]
+  if (snapshotRef !== undefined) trails.push(`Recovery snapshot: ${snapshotRef}.`)
+  if (reason.includes(TRIDENT_STASH_PARKED_MARKER)) {
+    trails.push("Recovery note: work was detected in this run's stash window.")
+  }
+  const captureFailure = reason.match(
+    new RegExp(
+      `${TRIDENT_SNAPSHOT_FAILURE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*(.*?)(?:\\s+—\\s+\\d+ commit\\(s\\),|$)`,
+    ),
+  )?.[1]
+  if (captureFailure !== undefined) {
+    trails.push(`Recovery warning: ${captureFailure.replace(/\.+$/, '')}.`)
+  }
+  const captureWarning = reason.match(
+    /capture warning:\s*(.*?)(?:\s+—\s+\d+ commit\(s\),|$)/,
+  )?.[1]
+  if (captureWarning !== undefined) {
+    trails.push(`Recovery warning: ${captureWarning.replace(/\.+$/, '')}.`)
+  }
+  return trails.length === 0 ? '' : `\n${trails.join('\n')}`
+}
+
 /**
  * #352 — INTERPRET a terminal failure into a plain-language summary + the specific
  * input needed, NEVER a raw error paste. Pure + deterministic (a bounded classifier
@@ -164,7 +211,7 @@ function isToolsNotEnabled(reasonLower: string): boolean {
  * keyword, and a deferral must never be told as a rejection.
  */
 export function interpretFailure(run: TridentRun): FailureInterpretation {
-  const reason = (run.failure_reason ?? '').trim()
+  const reason = authoredFailureReason((run.failure_reason ?? '').trim())
   const r = reason.toLowerCase()
   const retry = 'Reply to retry the build, or take it from here manually.'
   const saved = 'Your progress is saved.'
@@ -427,10 +474,12 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // already auto-recovered upstream (stale merge state, the #342 conflict
       // resolver), so a run reaching here is genuinely unrecoverable.
       const interp = interpretFailure(run)
-      const trail =
+      const recoveryTrail = salvageRecoveryTrail(run)
+      const prTrail =
         run.merge_mode === 'pr' && run.pr !== null && run.pr > 0
           ? `\nPR #${run.pr} left open for review.`
           : ''
+      const trail = `${recoveryTrail}${prTrail}`
       // A DEFERRAL IS NOT A REJECTION. An infra-only block never reached a reviewer, so
       // it must not wear ❌ + rejection language: it leads with 🚧 and says "deferred".
       // Every other class keeps the ❌ line byte-identical.

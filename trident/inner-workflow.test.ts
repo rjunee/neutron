@@ -248,6 +248,19 @@ describe('inner-workflow.mjs — codex wrapper refusal propagation', () => {
     }
   })
 
+  test('build, collect, and wait EXIT-0 bridges preserve an instructed deferred outcome', () => {
+    const prompts = loadCodexBridgePrompts()
+    const instruction =
+      "'deferred' when the transcript explicitly reports that instructed intermediate-task outcome"
+
+    for (const [bridge, prompt] of Object.entries(prompts)) {
+      expect(prompt, `${bridge} bridge cannot transcribe an intermediate deferral`).toContain(instruction)
+      expect(prompt, `${bridge} bridge must keep missing-suite reports distinct`).toContain(
+        "or 'not-run' when the transcript does not say the full suite completed",
+      )
+    }
+  })
+
   test('the forge deferral message carries the measured refusal verbatim', () => {
     const message = loadCodexDeferralMessage()('forge:build', 'deferred', refusal)
     expect(message).toBe(`forge:build deferred (codexStatus=deferred): ${refusal}`)

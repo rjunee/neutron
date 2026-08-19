@@ -64,6 +64,10 @@ interface RunOpts {
    * the legacy-contract case (the workflow defaults it to '').
    */
   testStrategy?: string
+  /** The rendered subset-scoped TEST EXECUTION block used by intermediate Ralph rounds. */
+  testStrategyIntermediate?: string
+  /** Planner claim used to select terminal (0) versus intermediate (>0) Ralph scope. */
+  planRemainingTasks?: number
   /**
    * What every forge build/fix round reports for `testsPassed`. Defaults to `true`
    * (a healthy build). `false` is the case criterion 5 is about: the build says the
@@ -128,14 +132,14 @@ async function runWorkflow(
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
     }
     if (label === 'plan:fable') {
-      // `remainingTasks: 0` so the run does NOT hand back to the outer loop for a
-      // re-fire — it continues into forge:build + the full review panel.
+      // `remainingTasks: 0` by default so the run does NOT hand back to the outer loop
+      // for a re-fire — it continues into forge:build + the full review panel.
       return {
         implementationPlan: '- [ ] the one task',
         topTask: 'the one task',
         executionSpec: 'TARGET FILES: x.ts',
         complexity: 'reasoning',
-        remainingTasks: 0,
+        remainingTasks: opts.planRemainingTasks ?? 0,
       }
     }
     if ((label === 'argus:kimi' || label === 'argus:kimi-retry' || label === 'argus:codex' || label === 'argus:codex-retry') && prompt.includes('KIMI K3 CROSS-MODEL REVIEW')) {
@@ -202,6 +206,7 @@ async function runWorkflow(
     },
   }
   if (opts.testStrategy !== undefined) args.testStrategy = opts.testStrategy
+  if (opts.testStrategyIntermediate !== undefined) args.testStrategyIntermediate = opts.testStrategyIntermediate
   if (opts.briefParts !== undefined) args.briefParts = opts.briefParts
   if (opts.codexBuild) {
     args.phaseModels = { build: { model: 'gpt' } }
@@ -1096,6 +1101,51 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       })
       expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
     })
+
+    test('deferred on an intermediate Ralph round records no suite finding', async () => {
+      const { captured, result } = await runWorkflow('', {
+        ralph: true,
+        planRemainingTasks: 2,
+        testStrategy: STRATEGY,
+        testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
+        testsPassed: false,
+        suiteOutcome: 'deferred',
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      expect(result.publishRequested).toBe(true)
+      expect(result.remainingTasks).toBe(2)
+      expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
+      expect(checkpointPrompt(captured, 'forge-done')).not.toContain('FULL SUITE NOT PROVEN')
+      expect(forgeBuildPrompt(captured)).toContain("suiteOutcome='deferred'")
+      expect(forgeBuildPrompt(captured)).not.toContain("suiteOutcome='not-run'")
+    })
+
+    test('not-run on the same intermediate Ralph round still records the blocker', async () => {
+      const { captured } = await runWorkflow('', {
+        ralph: true,
+        planRemainingTasks: 2,
+        testStrategy: STRATEGY,
+        testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
+        testsPassed: false,
+        suiteOutcome: 'not-run',
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      expect(checkpointPrompt(captured, 'forge-done')).toContain('FULL SUITE NOT PROVEN')
+    })
+  })
+
+  test('deferred on the terminal Ralph round still blocks', async () => {
+    const { result } = await runWorkflow('', {
+      ralph: true,
+      testStrategy: STRATEGY,
+      testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
+      testsPassed: false,
+      suiteOutcome: 'deferred',
+      approveAll: true,
+    })
+    expect(result.verdict).toBe('REQUEST_CHANGES')
   })
 
   /**
@@ -1181,7 +1231,7 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       expect(result.verdict).toBe('REQUEST_CHANGES')
     })
 
-    test.each(['failed-new', 'not-run', 'failed-preexisting'])(
+    test.each(['failed-new', 'not-run', 'failed-preexisting', 'deferred'])(
       'testsPassed=true with %s is contradictory and fails closed',
       async (outcome) => {
         const { captured, result } = await runWorkflow('', {
@@ -1197,7 +1247,7 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       },
     )
 
-    test.each(['failed-new', 'not-run'])('%s is still a BLOCKER — the hatch is narrow', async (outcome) => {
+    test.each(['failed-new', 'not-run', 'deferred'])('%s is still a BLOCKER — the hatch is narrow', async (outcome) => {
       const { result } = await runWorkflow('', {
         testStrategy: STRATEGY,
         testsPassed: false,

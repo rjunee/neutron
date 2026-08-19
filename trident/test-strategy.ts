@@ -647,7 +647,7 @@ export const INTERMEDIATE_SUITE_DEFERRED =
   'INTERMEDIATE TASK of a multi-task plan — the FULL suite is DEFERRED, not waived: tasks remain after this one, and the full suite runs ONCE, on this plan\'s TERMINAL task, over the whole cumulative branch.'
 
 export const INTERMEDIATE_REPORT_RULE =
-  "Report testsPassed=false and suiteOutcome='not-run'. testsPassed=true still means exactly one thing — the FULL suite completed and passed — and you are not running the full suite this iteration, so a stage-1 pass may NEVER be reported as testsPassed=true. Put the stage-1 result (files run, pass/fail) in your final text instead."
+  "Report testsPassed=false and suiteOutcome='deferred' — the deferral is INSTRUCTED (this plan's terminal task runs the full suite over the whole cumulative branch and is gated on it); 'not-run' stays reserved for a suite that was supposed to run and did not, so do NOT report it here. testsPassed=true still means exactly one thing — the FULL suite completed and passed — and you are not running the full suite this iteration, so a stage-1 pass may NEVER be reported as testsPassed=true. Put the stage-1 result (files run, pass/fail) in your final text instead."
 
 /**
  * THE THREE WAYS A SUITE CAN FAIL TO PASS, AND WHY THE GATE HAS TO TELL THEM APART.
