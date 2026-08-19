@@ -1292,11 +1292,16 @@ describe('the installer under a locked config — the FATAL half-state must be i
      * ORDINARY EDIT — a rename, a reflow, a typo, a merge that grows a file above a citation. It is
      * not a hostile author, and it cannot be: every check here is a regex over prose, and three
      * rounds of an adversarial cross-model reviewer produced a fresh encoding every time — a path
-     * spelled `trident/./orchestrator.ts`, a zero-width joiner inside an identifier, a decoy
+     * carrying a redundant same-directory segment, a zero-width joiner inside an identifier, a decoy
      * declaration inside a template literal, a non-ASCII filename. Each is real and none is reachable
      * by the failure this exists to catch. Chasing them buys encodings and costs the thing that makes
      * a guard useful, which is that a red means something. Thirteen mutations drawn from the ordinary
      * class are pinned by this test, each measured red with a control and a clean baseline.
+     *
+     * (That first encoding used to be spelled out here and no longer is. The mangled-path check
+     * added below resolves a cited path by its letters and digits alone, so the literal example
+     * became an offender in its own explanation — the same reason the locator forms are described
+     * in words rather than typed.)
      *
      * The known false REDS are left in on the same reasoning, since they cost one edit and announce
      * themselves: prose naming a host with a port after it parses as a line locator, and a citation
@@ -1309,8 +1314,15 @@ describe('the installer under a locked config — the FATAL half-state must be i
      * that DESCRIBES a citation is not a citation, and the paragraphs above are made of exactly that
      * — a check that flagged them would flag the explanation of its own rule. The machine-readable
      * forms are the ones a reader clicks, and those are the ones covered.
+     *
+     * SO THE NAME OF THIS TEST SAYS "MACHINE-READABLE", AND THAT WORD IS THE WHOLE CLAIM. It used to
+     * say no line locator survives ANYWHERE, which the paragraph directly above contradicts in the
+     * same docblock: the prose form is excluded on purpose and always was. A test asserting a
+     * universality its own body disclaims is the defect class this cluster exists to catch — a
+     * docblock describing a MODE the code never enters — and it had it about itself. The scope is
+     * now stated where it can be read without reading the regexes.
      */
-    test('cross-file citations name a symbol that resolves, and no line locator survives', () => {
+    test('cross-file citations resolve, and machine-readable line locators are refused', () => {
       const cluster = ['scripts/install-merge-drivers.sh', 'scripts/git/as-built-merge-realgit.test.ts', 'scripts/git/as-built-merge-driver.ts']
       const read = (rel: string) => readFileSync(join(REPO_ROOT, rel), 'utf8')
 
@@ -1349,12 +1361,36 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // the shape the hosting provider's own "copy permalink to line" button produces — slipped past
       // the ban entirely. That form is a line locator wherever it appears and whatever precedes it,
       // so it is judged alone. (Written in words, not spelled out, for the reason given above.)
-      const LOCATOR = /([\w./-]+\.[A-Za-z0-9]+)(?::)(\d+)/
-      const FRAGMENT = /#L\d+/
+      //
+      // FIVE MORE FORMS ARE MATCHED, EACH ONE MEASURED GREEN BEFORE IT WAS ADDED. The colon rule
+      // above required a file EXTENSION, and the hash rule required a capital letter, so a whole
+      // family of ordinary locators walked through a check whose name said none could: the
+      // lowercase spelling of the hash form (a one-character typo of the very form the rule was
+      // widened for), a colon locator on an extensionless build file, and the parenthesised,
+      // bare-L and at-sign spellings that compilers and review tools emit. All five were injected
+      // into this cluster at the parent commit and left the suite green, with the plain colon form
+      // as a landed control. They are described here rather than typed for the reason given above.
+      //
+      // WHAT EACH ONE COST, because a widened regex is only free if it is measured: the colon rule
+      // no longer needs an extension, which alone would flag an ISO timestamp — the seconds field
+      // parses as a locator — so the character before the colon must not be a digit. The three
+      // path-shaped forms require a SLASH rather than an extension, because without it
+      // `expect(x.exitCode).not.toBe(0)` is a parenthesised locator and this file is full of them.
+      // Run against the cluster at this commit all five match zero lines, so the only thing they
+      // can newly catch is a new offender. The slash requirement is a real limit and is left in
+      // deliberately — see the note on the cited-path check further down about where narrow beats
+      // noisy — so these forms are refused on repository paths, not on every conceivable string.
+      const LOCATORS: RegExp[] = [
+        /[\w./-]*[A-Za-z][\w./-]*[A-Za-z_-]:\d+/, // path (extension optional), colon, line
+        /#[Ll]\d+/, //                               permalink fragment, either case
+        /[\w.-]*\/[\w./-]*\.[A-Za-z0-9]+\(\d+\)/, // path, line in parentheses
+        /[\w.-]*\/[\w./-]*\.[A-Za-z0-9]+\s+L\d+/, // path, space, bare L-number
+        /[\w.-]*\/[\w./-]*\.[A-Za-z0-9]+@\d+/, //    path, at-sign, line
+      ]
       const offenders: string[] = []
       for (const rel of cluster) {
         read(rel).split('\n').forEach((line, i) => {
-          if (!LOCATOR.test(line) && !FRAGMENT.test(line)) return
+          if (!LOCATORS.some((re) => re.test(line))) return
           offenders.push(`${rel} line ${i + 1} — ${line.trim()}`)
         })
       }
@@ -1423,18 +1459,45 @@ describe('the installer under a locked config — the FATAL half-state must be i
        *  merely CONTAINS the symbol from counting as a citation of it. The class it must not admit
        *  is "the symbol plus one more identifier character", so the lookahead covers `$` and any
        *  Unicode letter or digit as well as ASCII: the reviewer got through an ASCII-only version
-       *  with a `$` in the middle of a name, which is legal in an identifier here. */
-      const mentions = (text: string, symbol: string) =>
-        [...text.matchAll(new RegExp('`' + escapeRe(symbol) + '(?![\\p{L}\\p{N}_$])', 'gu'))].length
+       *  with a `$` in the middle of a name, which is legal in an identifier here.
+       *
+       *  THE SPAN HAS TO CLOSE. The first cut required the opening backtick and nothing after the
+       *  symbol, so an unterminated span counted as a citation — and a floor made of counts will
+       *  take any body that raises the number. Measured at the parent commit: misspell one of the
+       *  installer's three citations, which is red on its own, then add a line carrying the symbol
+       *  behind a single opening backtick with no closing one, and the count returns to three and
+       *  the suite goes green on a broken citation. Requiring the rest of the span and its closing
+       *  backtick on the same line costs nothing — every real citation in the cluster is already
+       *  closed, so the counts are unchanged by this — and it removes the cheapest way to
+       *  manufacture one. */
+      const mention = (symbol: string, flags: string) =>
+        new RegExp('`' + escapeRe(symbol) + '(?![\\p{L}\\p{N}_$])[^`\\n]*`', flags)
+      const mentions = (text: string, symbol: string) => [...text.matchAll(mention(symbol, 'gu'))].length
 
-      // A DEFINITION IS CHECKED AGAINST CODE WITH THE COMMENTS TAKEN OUT. Anchoring the pattern to
+      // A DEFINITION IS CHECKED AGAINST CODE WITH THE COMMENTS BLANKED OUT. Anchoring the pattern to
       // the start of a line was not enough: the reviewer left the old declaration inside a block
       // comment, on its own line at column zero, and the anchor matched the corpse. Presence is not
-      // definition, and a comment is the cheapest way to be present. Stripping block and line
-      // comments first is approximate — it would also blank a `/*` inside a string literal — but it
-      // is approximate in the SAFE direction: it can only ever remove text, so it can produce a
-      // false red that one glance explains, never a false green that nothing reports.
-      const stripComments = (src: string) => src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/^[ \t]*\/\/.*$/gm, '')
+      // definition, and a comment is the cheapest way to be present.
+      //
+      // THE COMMENTS ARE OVERWRITTEN IN PLACE RATHER THAN DELETED, AND THAT IS THE WHOLE FIX. The
+      // first cut replaced each comment with the empty string and claimed in this docblock that it
+      // "can only ever remove text, so it can produce a false red … never a false green". That
+      // claim was false, and false in the direction the claim was defending: DELETING a comment
+      // JOINS the line before it to the line after it, which can manufacture a start-of-line the
+      // source never had. Measured at the parent commit — rename the real declaration and prepend a
+      // two-line block comment whose terminator is immediately followed by the old declaration, and
+      // the strip splices them into a column-zero `function` that satisfies the anchor. The suite
+      // stayed GREEN on a function that no longer exists under that name; the same rename without
+      // the corpse was red, so the corpse was doing the work.
+      //
+      // Replacing every non-newline character with a space keeps each line's identity and each
+      // column's offset, so a declaration hiding in a comment stays indented and the anchor refuses
+      // it, while a real declaration at column zero is untouched. This is still approximate — it
+      // also blanks a comment opener inside a string literal — but now it is approximate in the SAFE
+      // direction the docblock always claimed: it can only ever blank text, never splice it.
+      const blankOut = (m: string) => m.replace(/[^\n]/g, ' ')
+      const stripComments = (src: string) =>
+        src.replace(/\/\*[\s\S]*?\*\//g, blankOut).replace(/^[ \t]*\/\/.*$/gm, blankOut)
 
       for (const { symbol, definition, definedIn, citedBy } of anchors) {
         expect(
@@ -1484,9 +1547,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
       const anchorPatterns = new Map<string, Array<{ symbol: string; re: RegExp }>>()
       for (const a of anchors) {
         if (!anchorPatterns.has(a.definedIn)) anchorPatterns.set(a.definedIn, [])
-        anchorPatterns
-          .get(a.definedIn)!
-          .push({ symbol: a.symbol, re: new RegExp('`' + escapeRe(a.symbol) + '(?![\\p{L}\\p{N}_$])', 'u') })
+        anchorPatterns.get(a.definedIn)!.push({ symbol: a.symbol, re: mention(a.symbol, 'u') })
       }
 
       /**
@@ -1497,20 +1558,26 @@ describe('the installer under a locked config — the FATAL half-state must be i
        * path stopped being a site at all, so the whole loop — window, coverage floor and all — never
        * looked at it. The reviewer's version put a misspelled symbol in the same span as a correct
        * path and nothing reported it. Spans are split on whitespace and the path judged as a word.
+       *
+       * Named `spanWords` and not `words`: this file already has a top-level `words` helper that
+       * takes an installed driver COMMAND and returns its two absolute paths. Two different
+       * signatures under one name in a file maintained as documentation is a reader trap, and the
+       * shadowing was legal enough that lint had nothing to say about it.
        */
-      const words = (span: string) => span.split(/\s+/).map((w) => w.replace(/[),.;:]+$/, ''))
+      const spanWords = (span: string) => span.split(/\s+/).map((w) => w.replace(/[),.;:]+$/, ''))
       const targetSpans = (line: string, target: string) =>
-        [...line.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!).filter((s) => words(s).includes(target))
+        [...line.matchAll(/`([^`\n]+)`/g)].map((m) => m[1]!).filter((s) => spanWords(s).includes(target))
 
       const unresolved: string[] = []
-      let sitesChecked = 0
+      const sitesPerPair = new Map<string, number>()
       for (const rel of cluster) {
         const lines = read(rel).split('\n')
         for (const [target, allowed] of anchorPatterns) {
           lines.forEach((line, i) => {
             const spans = targetSpans(line, target)
             if (spans.length === 0) return
-            sitesChecked++
+            const pair = `${rel} → ${target}`
+            sitesPerPair.set(pair, (sitesPerPair.get(pair) ?? 0) + 1)
 
             // A COMPANION INSIDE THE SAME SPAN IS PART OF THE CITATION, and is checked as one. This
             // is the half that recognising mixed spans would otherwise have GIVEN AWAY: before, a
@@ -1521,7 +1588,7 @@ describe('the installer under a locked config — the FATAL half-state must be i
             // in the span unread. Measured exactly that way, which is why the check below exists:
             // any identifier-shaped word sharing a span with the path has to BE one of the anchors.
             for (const span of spans) {
-              for (const w of words(span)) {
+              for (const w of spanWords(span)) {
                 if (w === target) continue
                 if (!/^[A-Za-z_][A-Za-z0-9_]{5,}$/.test(w)) continue
                 if (allowed.some((a) => a.symbol === w)) continue
@@ -1555,11 +1622,83 @@ describe('the installer under a locked config — the FATAL half-state must be i
       // AND THE COVERAGE IS ASSERTED, because every check above is a loop over sites and a loop over
       // zero sites passes. That is the fail-closed-on-the-safety-net shape this repository keeps
       // writing rules about: an unrelated reflow that stopped the sites matching would take the
-      // guard silently to nothing and still print green. Measured at this commit: exactly 7 sites.
-      // The floor is what was measured, so adding a citation is free and losing one is not — and it
-      // has already paid for itself: rewording the docblock above dropped a site and this line is
-      // what said so, in the same session, before the reword was committed.
-      expect(sitesChecked, 'the site loop reached no citations — the guard is checking nothing').toBeGreaterThanOrEqual(7)
+      // guard silently to nothing and still print green.
+      //
+      // THE FLOOR IS PER (FILE → TARGET), NOT ONE NUMBER FOR THE WHOLE CLUSTER, and that is the
+      // difference between a coverage assertion and a headcount. A single total has SLACK: any one
+      // valid citation added anywhere pays for a citation lost anywhere else, so the sum is
+      // conserved and the guard never speaks. Measured at the parent commit, and this is the exact
+      // shape three independent reviewers arrived at separately — mangle one of the installer's
+      // citations of its target path so that no site matches it any more, which is red on its own,
+      // then add one ordinary correct citation in a different cluster file. Total back to seven,
+      // suite GREEN, and the broken citation is still sitting there. The typo also escapes the
+      // cited-path check below, because losing the separators leaves a word with no slash in it and
+      // that check judges a word as a path only when it carries one.
+      //
+      // Keyed per pair, the added citation lands in a different bucket and cannot pay for the lost
+      // one. Slack survives only WITHIN a single (file → target) pair — adding and breaking a
+      // citation of the same target in the same file in one edit — which is a narrower thing than
+      // the guard had before and is stated here rather than implied, because the previous version of
+      // this comment claimed a property ("losing one is not free") that the code did not have.
+      // The mangled-path check below closes that residue from the other side, so the two are
+      // independent: the typo has to defeat both, and neither is the other's fallback.
+      //
+      // The floors are what was MEASURED at this commit, so adding a citation is still free and
+      // losing one is not — and the assertion has already paid for itself: rewording the docblock
+      // above dropped a site and this check is what said so, before the reword was committed.
+      const SITE_FLOORS: Record<string, number> = {
+        'scripts/install-merge-drivers.sh → trident/orchestrator.ts': 3,
+        'scripts/git/as-built-merge-realgit.test.ts → trident/orchestrator.ts': 4,
+      }
+      const thinCoverage = Object.entries(SITE_FLOORS)
+        .filter(([pair, floor]) => (sitesPerPair.get(pair) ?? 0) < floor)
+        .map(([pair, floor]) => `${pair}: ${sitesPerPair.get(pair) ?? 0} sites, floor ${floor}`)
+      expect(thinCoverage, `a citation site was lost — the guard is checking less than it did:\n${thinCoverage.join('\n')}`).toEqual([])
+
+      // …AND A CITED PATH THAT LOST ITS SEPARATORS IS CAUGHT BY ITS LETTERS. This is the other side
+      // of the mutation above and the reason the per-pair floor is not carrying it alone. A path
+      // typo'd into a word with no slash stops being a site, stops being path-shaped, and therefore
+      // stops being checked by anything — the guard's blind spots line up, which is how a single
+      // ordinary typo went green in the first place. So every backticked word is reduced to its
+      // letters and digits, and if that reduction equals a KNOWN citable path's while the word
+      // itself does not, the citation is mangled and it is reported.
+      //
+      // This is deliberately not a general spell-checker. It fires only where the intent is
+      // unambiguous — the word is one separator edit away from a path this cluster actually cites —
+      // so it cannot produce the noise the cited-path check below explains its own narrowness by.
+      // Run against the cluster at this commit it matches zero words. It also subsumes the
+      // same-directory-segment encoding the cross-model reviewer used three rounds ago, which is
+      // why that example is now described in words in the docblock instead of typed.
+      // `docs/AS_BUILT.md` is in the citable set explicitly because it is the most-cited path in
+      // the cluster — 9 backticked mentions against 7 for the only anchor target — and it is
+      // neither a cluster file nor an anchor's home, so deriving the set from those two alone left
+      // the most-cited path of all as the one path a mangle could not be reported on.
+      //
+      // That count was itself measured twice, and the first number was wrong in the way this file
+      // keeps warning about. A line-counting grep said 23, because it counts every LINE holding the
+      // string — including the attribute-line prose and the unbackticked narrative, neither of which
+      // this check can see. The instrument has to be the one the code uses: backticked words inside
+      // spans. Nine. A confidently specific number taken with the wrong instrument is the same
+      // defect as a docblock describing a mode the code never enters.
+      const citable = [...cluster, ...anchors.map((a) => a.definedIn), 'docs/AS_BUILT.md']
+      const flatten = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '')
+      const byLetters = new Map(citable.map((p) => [flatten(p), p]))
+      const mangled: string[] = []
+      for (const rel of cluster) {
+        read(rel)
+          .split('\n')
+          .forEach((line, i) => {
+            for (const span of line.matchAll(/`([^`\n]+)`/g)) {
+              for (const w of spanWords(span[1]!)) {
+                const hit = byLetters.get(flatten(w))
+                if (hit && hit !== w) {
+                  mangled.push(`${rel} line ${i + 1} cites \`${w}\`, which is ${hit} with its separators mangled`)
+                }
+              }
+            }
+          })
+      }
+      expect(mangled, `a citation names a mangled form of a real path:\n${mangled.join('\n')}`).toEqual([])
 
       // …and a cited PATH has to exist, which is the other half of the same hole. The site loop
       // above keys on an exact backticked target path, so misspelling the PATH means no site
