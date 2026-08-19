@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { changeSignatureEntries, COLS, TridentRunStore } from './store.ts'
+import { changeSignatureEntries, COLS, TridentRunStore, waveChildSlug } from './store.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -650,6 +650,161 @@ describe('TridentRunStore', () => {
   })
 })
 
+describe('wave children (migration 0137)', () => {
+  test('ordinary rows default both wave-child fields to null', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'ordinary', project_slug: 't1', repo_path: '/r', task: 't',
+    })
+
+    expect(store.get(run.id)).toMatchObject({ parent_run_id: null, wave_task_id: null })
+  })
+
+  test('a wave child round-trips its parent and task identity', async () => {
+    const store = new TridentRunStore(db)
+    const parent = await store.create({
+      slug: 'wave-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+    const child = await store.create({
+      slug: waveChildSlug(parent.slug, 'T3'),
+      project_slug: parent.project_slug,
+      repo_path: '/r',
+      task: 'child',
+      parent_run_id: parent.id,
+      wave_task_id: 'T3',
+    })
+
+    expect(store.get(child.id)).toMatchObject({ parent_run_id: parent.id, wave_task_id: 'T3' })
+    expect(store.get(child.id)).toEqual(child)
+  })
+
+  test('create refuses a half-declared or empty wave-child pair', async () => {
+    const store = new TridentRunStore(db)
+    const parent = await store.create({
+      slug: 'pair-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+    const base = { project_slug: 't1', repo_path: '/r', task: 'child' }
+
+    await expect(
+      store.create({ ...base, slug: 'parent-only', parent_run_id: parent.id }),
+    ).rejects.toThrow(/BOTH/)
+    await expect(
+      store.create({ ...base, slug: 'task-only', wave_task_id: 'T3' }),
+    ).rejects.toThrow(/BOTH/)
+    await expect(
+      store.create({ ...base, slug: 'empty-parent', parent_run_id: '', wave_task_id: 'T3' }),
+    ).rejects.toThrow(/BOTH/)
+  })
+
+  test('wave spawn is idempotent per parent and task', async () => {
+    const store = new TridentRunStore(db)
+    const parentA = await store.create({
+      slug: 'spawn-parent-a', project_slug: 't1', repo_path: '/r', task: 'parent A',
+    })
+    const parentB = await store.create({
+      slug: 'spawn-parent-b', project_slug: 't1', repo_path: '/r', task: 'parent B',
+    })
+    await store.create({
+      id: 'spawn-a-t3-1', slug: 'spawn-a-t3-1', project_slug: 't1', repo_path: '/r', task: 'T3',
+      parent_run_id: parentA.id, wave_task_id: 'T3',
+    })
+
+    await expect(store.create({
+      id: 'spawn-a-t3-2', slug: 'spawn-a-t3-2', project_slug: 't1', repo_path: '/r', task: 'T3 retry',
+      parent_run_id: parentA.id, wave_task_id: 'T3',
+    })).rejects.toThrow(/UNIQUE/)
+    await expect(store.create({
+      slug: 'spawn-a-t4', project_slug: 't1', repo_path: '/r', task: 'T4',
+      parent_run_id: parentA.id, wave_task_id: 'T4',
+    })).resolves.toMatchObject({ parent_run_id: parentA.id, wave_task_id: 'T4' })
+    await expect(store.create({
+      slug: 'spawn-b-t3', project_slug: 't1', repo_path: '/r', task: 'T3',
+      parent_run_id: parentB.id, wave_task_id: 'T3',
+    })).resolves.toMatchObject({ parent_run_id: parentB.id, wave_task_id: 'T3' })
+  })
+
+  test('ordinary rows stay out of the wave-child unique index', async () => {
+    const store = new TridentRunStore(db)
+
+    await expect(store.create({
+      slug: 'plain-one', project_slug: 't1', repo_path: '/r', task: 'one',
+    })).resolves.toMatchObject({ parent_run_id: null, wave_task_id: null })
+    await expect(store.create({
+      slug: 'plain-two', project_slug: 't1', repo_path: '/r', task: 'two',
+    })).resolves.toMatchObject({ parent_run_id: null, wave_task_id: null })
+  })
+
+  test('listChildren returns only one parent\'s members in spawn order', async () => {
+    let clock = '2026-01-01T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    const parentA = await store.create({
+      slug: 'list-parent-a', project_slug: 't1', repo_path: '/r', task: 'parent A',
+    })
+    const parentB = await store.create({
+      slug: 'list-parent-b', project_slug: 't1', repo_path: '/r', task: 'parent B',
+    })
+    clock = '2026-01-01T00:01:00.000Z'
+    const aT2 = await store.create({
+      slug: 'list-a-t2', project_slug: 't1', repo_path: '/r', task: 'T2',
+      parent_run_id: parentA.id, wave_task_id: 'T2',
+    })
+    clock = '2026-01-01T00:02:00.000Z'
+    const aT3 = await store.create({
+      slug: 'list-a-t3', project_slug: 't1', repo_path: '/r', task: 'T3',
+      parent_run_id: parentA.id, wave_task_id: 'T3',
+    })
+    clock = '2026-01-01T00:03:00.000Z'
+    await store.create({
+      slug: 'list-b-t2', project_slug: 't1', repo_path: '/r', task: 'T2',
+      parent_run_id: parentB.id, wave_task_id: 'T2',
+    })
+
+    expect(store.listChildren(parentA.id).map((run) => run.id)).toEqual([aT2.id, aT3.id])
+    expect(store.listChildren(parentA.id).some((run) => run.id === parentA.id)).toBe(false)
+    expect(store.listChildren('missing')).toEqual([])
+  })
+
+  test('latestByProjectScope ignores later and failed wave members', async () => {
+    let clock = '2026-01-01T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    const parent = await store.create({
+      slug: 'latest-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+    clock = '2026-01-01T00:01:00.000Z'
+    const child = await store.create({
+      slug: 'latest-child', project_slug: 't1', repo_path: '/r', task: 'child',
+      parent_run_id: parent.id, wave_task_id: 'T3',
+    })
+    clock = '2026-01-01T00:02:00.000Z'
+    await store.update(child.id, {})
+
+    expect(store.latestByProjectScope('t1')?.id).toBe(parent.id)
+    clock = '2026-01-01T00:03:00.000Z'
+    await store.update(child.id, { phase: 'failed' })
+    expect(store.latestByProjectScope('t1')?.id).toBe(parent.id)
+  })
+
+  test('a child needs its deterministic suffix to avoid its live parent slug', async () => {
+    const store = new TridentRunStore(db)
+    const parent = await store.create({
+      slug: 'collision-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+
+    await expect(store.create({
+      slug: parent.slug, project_slug: 't1', repo_path: '/r', task: 'child',
+      parent_run_id: parent.id, wave_task_id: 'T3',
+    })).rejects.toThrow(/UNIQUE/)
+    await expect(store.create({
+      slug: waveChildSlug(parent.slug, 'T3'), project_slug: 't1', repo_path: '/r', task: 'child',
+      parent_run_id: parent.id, wave_task_id: 'T3',
+    })).resolves.toMatchObject({ slug: 'collision-parent--wT3' })
+  })
+
+  test('waveChildSlug identifies the parent and task', () => {
+    expect(waveChildSlug('a-slug', 'T12')).toBe('a-slug--wT12')
+  })
+})
+
 describe('round persistence (canary)', () => {
   test('update() derives round from a fix checkpoint', async () => {
     const store = new TridentRunStore(db)
@@ -900,22 +1055,22 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the 38 snapshot-writable table columns', () => {
+  test('COLS matches the 40 snapshot-writable table columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 38 is deliberate — adding a column must be a
+    // arity/order). The literal 40 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(38)
+    expect(cols).toHaveLength(40)
     // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
     // writer, so a full snapshot can never clear an already-won delivery claim.
-    // The table therefore has 39 columns and COLS has 38 — compare against the
+    // The table therefore has 41 columns and COLS has 40 — compare against the
     // snapshot-writable set, not the raw pragma count.
     const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
     expect(cols).toHaveLength(snapshotWritable.length)
@@ -962,6 +1117,8 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       chat_id: 'chat-id-distinct',
       thread_id: 'thread-id-distinct',
       channel_kind: 'cli',
+      parent_run_id: 'parent-run-distinct',
+      wave_task_id: 'T7',
     })
 
     expect(store.get(run.id)).toEqual(run)

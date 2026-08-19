@@ -201,6 +201,10 @@ export interface TridentRun {
   bound_pr: number | null
   /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
   fenced_paths: string | null
+  /** WAVE FAN-OUT (migration 0137): the run id this row is a wave MEMBER of; null for every ordinary run. CREATE-ONCE, dispatch-owned: deliberately absent from TridentRunUpdate/update()/save()/saveIfActive(), so no snapshot can ever re-parent a row. */
+  parent_run_id: string | null
+  /** WAVE FAN-OUT (migration 0137): the plan-graph task id (e.g. 'T3') this member builds; non-null iff parent_run_id is non-null; the pair is covered by the partial UNIQUE index so wave spawn is idempotent. */
+  wave_task_id: string | null
 }
 
 export interface TridentStageEvent {
@@ -237,6 +241,9 @@ export interface CreateTridentRunInput {
   reviewed_head?: string | null
   bound_pr?: number | null
   fenced_paths?: string | null
+  /** Both-or-neither; `create` refuses a half-declared pair. */
+  parent_run_id?: string | null
+  wave_task_id?: string | null
 }
 
 /**
@@ -310,6 +317,8 @@ interface TridentRunDbRow {
   reviewed_head: string | null
   bound_pr: number | null
   fenced_paths: string | null
+  parent_run_id: string | null
+  wave_task_id: string | null
 }
 
 /** Exported solely so tests can pin the column-count invariant. */
@@ -320,7 +329,7 @@ export const COLS =
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
-  'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind'
+  'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind, parent_run_id, wave_task_id'
 
 // The nullable launch-pin columns deliberately backfill through their database
 // NULL default; all inserted columns still derive their placeholders here. A
@@ -363,6 +372,17 @@ export class TridentRunStore {
   ) {}
 
   async create(input: CreateTridentRunInput): Promise<TridentRun> {
+    const parentRunId = input.parent_run_id ?? null
+    const waveTaskId = input.wave_task_id ?? null
+    const pairProblems = [
+      parentRunId === null ? 'parent_run_id is missing' : parentRunId === '' ? 'parent_run_id is empty' : null,
+      waveTaskId === null ? 'wave_task_id is missing' : waveTaskId === '' ? 'wave_task_id is empty' : null,
+    ].filter((problem): problem is string => problem !== null)
+    if ((parentRunId === null) !== (waveTaskId === null) || parentRunId === '' || waveTaskId === '') {
+      throw new Error(
+        `wave child rows need BOTH parent_run_id and wave_task_id (${pairProblems.join(', ')})`,
+      )
+    }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()
     const run: TridentRun = {
@@ -411,6 +431,8 @@ export class TridentRunStore {
       reviewed_head: input.reviewed_head ?? null,
       bound_pr: input.bound_pr ?? null,
       fenced_paths: input.fenced_paths ?? null,
+      parent_run_id: parentRunId,
+      wave_task_id: waveTaskId,
     }
     await this.db.run(
       `INSERT INTO code_trident_runs (${INSERT_COLS.join(', ')})
@@ -452,6 +474,8 @@ export class TridentRunStore {
         run.reviewed_head,
         run.bound_pr,
         run.fenced_paths,
+        run.parent_run_id,
+        run.wave_task_id,
       ],
     )
     return run
@@ -538,11 +562,27 @@ export class TridentRunStore {
         `SELECT ${COLS}
            FROM code_trident_runs
           WHERE project_slug = ?
+            -- Wave members are internal machinery: the parent is project-facing,
+            -- and a member's later stamp or failure must not shadow it on the board rail.
+            AND parent_run_id IS NULL
           ORDER BY last_advanced_at DESC
           LIMIT 1`,
       )
       .get(project_slug)
     return row === null ? null : rowToRun(row)
+  }
+
+  /** Every wave member spawned by this parent, in spawn order; empty for a run with no wave. */
+  listChildren(parentId: string): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, [string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE parent_run_id = ?
+          ORDER BY started_at ASC, id ASC`,
+      )
+      .all(parentId)
+      .map(rowToRun)
   }
 
   /**
@@ -896,8 +936,9 @@ export class TridentRunStore {
   /**
    * Persist a full run snapshot (the shape `advanceTridentRun` returns).
    * Re-stamps `last_advanced_at`. Mutable columns only — `id`, `slug`,
-   * `project_slug`, `repo_path`, `task`, `started_at`, the caps, and
-   * `chat_id`/`thread_id` are write-once at create time.
+   * `project_slug`, `repo_path`, `task`, `started_at`, the caps,
+   * `chat_id`/`thread_id`, and `parent_run_id`/`wave_task_id` are write-once at
+   * create time.
    *
    * `inner_result` and `brief_alert` are DELIBERATELY NOT written here: both are
    * WORKFLOW-OWNED, out-of-band writes that the OUTER loop only ever READS.
@@ -1076,5 +1117,17 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     reviewed_head: row.reviewed_head,
     bound_pr: row.bound_pr,
     fenced_paths: row.fenced_paths,
+    parent_run_id: row.parent_run_id,
+    wave_task_id: row.wave_task_id,
   }
+}
+
+/**
+ * The slug a wave member runs under. The live-slug UNIQUE index (migration
+ * 0120) spans (project_slug, slug) on LIVE rows, so a member can never reuse
+ * its live parent's slug; this deterministic suffix dodges that collision and
+ * keeps members identifiable.
+ */
+export function waveChildSlug(parentSlug: string, taskId: string): string {
+  return `${parentSlug}--w${taskId}`
 }
