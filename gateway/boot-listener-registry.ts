@@ -368,7 +368,14 @@ export function resolveOwnerHome(env: NodeJS.ProcessEnv): string {
  * (multi-root registry shape — Open returns `[<publicRoot>]`).
  */
 export function resolveRepoRoot(env: NodeJS.ProcessEnv): string {
+  // BLANK IS UNSET (`config/index.ts` § blank-is-unset). This predicate sat on a
+  // bare `length > 0` through the round that trimmed `resolveOwnerHome` and
+  // `resolveRegistryDbPath` in THIS FILE, so `NEUTRON_REPO_ROOT='   '` made the
+  // bundled-Cores registry walk a directory named three spaces, relative to
+  // whatever CWD the gateway booted in — an empty walk that reads as "no Cores
+  // installed" rather than as a misconfiguration. The path is returned verbatim
+  // when it is set; only the emptiness test trims.
   const fromEnv = env['NEUTRON_REPO_ROOT']
-  if (typeof fromEnv === 'string' && fromEnv.length > 0) return fromEnv
+  if (typeof fromEnv === 'string' && fromEnv.trim().length > 0) return fromEnv
   return process.cwd()
 }
