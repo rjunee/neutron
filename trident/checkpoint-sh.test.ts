@@ -82,7 +82,10 @@ beforeEach(() => {
       CHECK (phase IN (${ALL_PHASES.map((p) => `'${p}'`).join(', ')})),
     pr INTEGER,
     branch TEXT,
+    brief_alert TEXT,
     inner_checkpoint TEXT,
+    inner_checkpoint_head TEXT,
+    inner_checkpoint_findings TEXT,
     inner_verdict TEXT,
     inner_result TEXT,
     subagent_status TEXT
@@ -124,8 +127,14 @@ describe('checkpoint.sh — C1 per-phase checkpoint write (legacy checkpoint() S
     expect(r.branch).toBe('trident/add-widget')
     expect(r.inner_checkpoint).toBe('forge-done')
     expect(r.subagent_status).toBe('running')
-    // Timestamp computed in-script (`date -u +%FT%TZ`), like the old Bash step.
-    expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+    // Timestamp computed in-script, like the old Bash step. MILLISECONDS are the
+    // preferred shape (`date -u +%FT%T.%3NZ`) because the wake-on-change watcher
+    // detects a checkpoint through that run's own `last_advanced_at` entry in
+    // `changeSignature()`, and two writes inside one second collapse into one
+    // signature; the whole-second form is the documented fallback for a `date`
+    // without the GNU `%3N` extension, so BOTH are accepted here and the sub-second
+    // case is pinned separately below.
+    expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/)
     // Untouched columns stay untouched; other rows are never selected.
     expect(r.inner_result).toBeNull()
     expect(row('run-other')).toMatchObject({ subagent_status: 'pending', branch: null, inner_checkpoint: null })
@@ -145,6 +154,25 @@ describe('checkpoint.sh — C1 per-phase checkpoint write (legacy checkpoint() S
     expect(res.code).toBe(0)
     expect(row('run-1').branch).toBe("tri'dent")
     expect(row('run-1').inner_checkpoint).toBe("fix'; DROP TABLE code_trident_runs; --")
+  })
+
+  test('brief_alert is whitelisted and SQL-escapes a single quote without truncation', () => {
+    const alert = "CODEX_BUILD_BRIEF_PART_CORRUPT: it's truncated'; DROP TABLE code_trident_runs; --"
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+    expect(res.code).toBe(0)
+    expect(row('run-1').brief_alert).toBe(alert)
+    expect(row('run-other').brief_alert).toBeNull()
+  })
+
+  test('brief_alert records evidence without re-stamping the active-run heartbeat', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.'
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+
+    expect(res.code).toBe(0)
+    expect(row('run-1')).toMatchObject({
+      brief_alert: alert,
+      last_advanced_at: SEEDED_HEARTBEAT,
+    })
   })
 })
 
@@ -182,6 +210,56 @@ describe('checkpoint.sh — terminal-result write (legacy writeTerminalResult() 
     const r = row('run-1')
     expect(r.inner_result).toBeNull()
     expect(r.subagent_status).toBe('pending')
+  })
+})
+
+describe('checkpoint.sh — the checkpoint records WHICH COMMIT it applied to (0122)', () => {
+  // The name alone could not tell a resumed run whether the branch still holds the
+  // code the checkpoint was about, which is why every relaunch had to rebuild. The
+  // OID lands in the SAME UPDATE as the name, so the pair is atomic.
+  test('inner_checkpoint_head is written beside the checkpoint name, in one statement', () => {
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'forge-done', 'inner_checkpoint_head', 'a'.repeat(40)])
+    expect(res.code).toBe(0)
+    const r = row('run-1')
+    expect(r.inner_checkpoint).toBe('forge-done')
+    expect(r.inner_checkpoint_head).toBe('a'.repeat(40))
+    expect(row('run-other').inner_checkpoint_head).toBeNull()
+  })
+
+  test('an EMPTY head CLEARS the previous one (a phase with no sha must not inherit)', () => {
+    sh([dbPath, 'run-1', 'inner_checkpoint', 'fix-round-2', 'inner_checkpoint_head', 'a'.repeat(40)])
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'fix-round-3', 'inner_checkpoint_head', ''])
+    expect(res.code).toBe(0)
+    const r = row('run-1')
+    expect(r.inner_checkpoint).toBe('fix-round-3')
+    // NOT the round-2 sha: a stale OID next to a fresh name is exactly the pairing
+    // a resume would misread as "this code was already reviewed".
+    expect(r.inner_checkpoint_head).toBe('')
+  })
+
+  test('inner_findings_file loads the findings JSON via readfile(), quotes and all', () => {
+    const tmp = join(dir, 'findings.json')
+    const findings = [{ severity: 'blocker', title: "it's broken", evidence: 'a.ts:1' }]
+    writeFileSync(tmp, JSON.stringify(findings))
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-request-changes', 'inner_findings_file', tmp])
+    expect(res.code).toBe(0)
+    expect(JSON.parse(String(row('run-1').inner_checkpoint_findings))).toEqual(findings)
+  })
+
+  test('a MISSING findings file leaves the column NULL and never fails the build', () => {
+    const res = sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-request-changes', 'inner_findings_file', join(dir, 'nope.json')])
+    expect(res.code).toBe(0)
+    expect(row('run-1').inner_checkpoint_findings).toBeNull()
+    // The checkpoint itself still landed — a resume then re-reviews rather than
+    // fixing blind, which is the safe degrade.
+    expect(row('run-1').inner_checkpoint).toBe('argus-request-changes')
+  })
+
+  test('the findings write does NOT flip subagent_status (a mid-run checkpoint is not a result)', () => {
+    const tmp = join(dir, 'findings.json')
+    writeFileSync(tmp, '[{"severity":"blocker"}]')
+    sh([dbPath, 'run-1', 'inner_findings_file', tmp])
+    expect(row('run-1').subagent_status).toBe('pending')
   })
 })
 
@@ -276,6 +354,21 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
     })
   })
 
+  test('brief_alert is recorded on a terminal row without thawing liveness', () => {
+    setPhase('run-1', 'failed')
+    const alert = 'CODEX_BUILD_BRIEF_PART_MISSING: brief part vanished. DEFERRED.'
+
+    const res = sh([dbPath, 'run-1', 'brief_alert', alert])
+
+    expect(res.code).toBe(0)
+    expect(res.stderr).toContain('already terminal')
+    expect(row('run-1')).toMatchObject({
+      brief_alert: alert,
+      subagent_status: 'pending',
+      last_advanced_at: SEEDED_HEARTBEAT,
+    })
+  })
+
   // THE TWO MUTANTS THESE CASES EXIST TO KILL. Both narrow `frozen()`
   // (trident/checkpoint.sh) by one extra AND-clause on the OLD column value, and
   // both were RUN: each survives the earlier, laxer fixture and dies under this one.
@@ -344,9 +437,46 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
       const r = row('run-1')
       expect(r.inner_checkpoint).toBe('argus-approved')
       expect(r.subagent_status).toBe('running')
-      expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+      expect(String(r.last_advanced_at)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{3})?Z$/)
     },
   )
+
+  test('two checkpoints inside ONE SECOND leave two DISTINCT last_advanced_at values', () => {
+    // THE WAKE THAT USED TO BE LOST. `TridentRunStore.changeSignature()` — the
+    // watcher's whole detector — is a PER-RUN list of `id:last_advanced_at`, so two
+    // whole-second stamps on the SAME row inside one second are ONE signature and the
+    // second checkpoint waits out the 90 s backstop: exactly the latency the watcher
+    // exists to remove. Two writes back to back is the ordinary case (a phase that
+    // checkpoints twice quickly), not a contrived one.
+    //
+    // Retried until the pair genuinely shares a second, because that is the case
+    // under test and a boundary crossing would otherwise assert nothing. Bounded, so
+    // a slow box cannot hang the suite.
+    let first = ''
+    let second = ''
+    for (let attempt = 0; attempt < 5; attempt++) {
+      expect(sh([dbPath, 'run-1', 'inner_checkpoint', 'forge-done']).code).toBe(0)
+      first = String(row('run-1').last_advanced_at)
+      expect(sh([dbPath, 'run-1', 'inner_checkpoint', 'argus-approved']).code).toBe(0)
+      second = String(row('run-1').last_advanced_at)
+      if (first.slice(0, 19) === second.slice(0, 19)) break
+    }
+
+    // The FALLBACK is a supported configuration (a `date` without the GNU `%3N`
+    // extension), so the assertion is keyed to what this platform actually produced
+    // rather than asserting a precision the script does not promise everywhere.
+    if (/\.\d{3}Z$/.test(first)) {
+      expect(first.slice(0, 19)).toBe(second.slice(0, 19))
+      expect(second).not.toBe(first)
+      // Chronological order survives the string comparison the signature relies on
+      // once the trailing 'Z' is stripped — which is exactly what the store's MAX
+      // does, because 'Z' sorts ABOVE '.' and the raw strings compare backwards.
+      expect(second.replace('Z', '') > first.replace('Z', '')).toBe(true)
+    } else {
+      expect(first).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/)
+      expect(second.replace('Z', '') >= first.replace('Z', '')).toBe(true)
+    }
+  })
 
   // NOT TESTED HERE, deliberately, and worth saying why rather than leaving a gap that
   // looks like an oversight: the stderr branches parse sqlite3's list-mode 'N|state'
@@ -360,7 +490,7 @@ describe('checkpoint.sh — a TERMINAL row freezes its LIVENESS pair, and ONLY t
   // test may do; the pins stay as environment hardening for CLI builds that DO read it.
   test('an unknown run id reports the skip rather than passing silently', () => {
     const res = sh([dbPath, 'no-such-run', 'inner_checkpoint', 'forge-done'])
-    expect(res.code).toBe(0)
+    expect(res.code).toBe(3)
     expect(res.stderr).toContain('not found — checkpoint NOT applied')
   })
 })

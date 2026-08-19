@@ -306,12 +306,19 @@ describe('ChatApp render (happy-dom)', () => {
       deviceId: 'dev-test',
       token: 'dev:sam',
     }
+    const openedActivity: Array<string | null> = []
     function Harness(): React.JSX.Element {
       const draft = useAttachmentDraft({ token: config.token })
       const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
       return (
         <AssistantRuntimeProvider runtime={runtime}>
-          <ChatApp vm={vm} controller={controller} config={config} draft={draft} />
+          <ChatApp
+            vm={vm}
+            controller={controller}
+            config={config}
+            draft={draft}
+            onOpenActivity={(projectId) => openedActivity.push(projectId)}
+          />
         </AssistantRuntimeProvider>
       )
     }
@@ -335,6 +342,10 @@ describe('ChatApp render (happy-dom)', () => {
     // The typing indicator is up …
     const typing = container.querySelectorAll('.car-bubble-agent.car-typing')
     expect(typing.length).toBe(1)
+    // Match native's gesture with a real-control probe: the dots themselves open
+    // the inspector for the conversation that owns this mounted surface.
+    ;(typing[0] as HTMLButtonElement).click()
+    expect(openedActivity).toEqual([null])
     // … and there is NO empty (non-typing) agent bubble stacked above it.
     const nonTypingAgentBubbles = Array.from(
       container.querySelectorAll('.car-bubble-agent'),
@@ -354,11 +365,19 @@ describe('ChatApp render (happy-dom)', () => {
     })
   })
 
-  it('chat-typing persistence — dots STAY through a background build after the ack, then stop when work is done', async () => {
-    // Ryan live-test 2026-07-01: an ack turn settles (agent_message) but a
-    // long/background build keeps running. The typing dots must stay visible the
-    // whole time work is in flight (the same signal as the flashing Plan-tab
-    // dot) and stop the moment the board reports the work done.
+  it('chat typing is TURN-ONLY — board work in flight does NOT keep the dots up', async () => {
+    // OVERRIDES the 2026-07-01 behaviour this test used to assert. Back then the
+    // dots were deliberately kept up for the whole processing window, spanning a
+    // background build that outlives the ack turn.
+    //
+    // The owner rejected that on 2026-08-11, looking at exactly this state: "The
+    // turn has finished, according to the inspector, but I'm still seeing a typing
+    // indicator... It feels like I should be expecting a chat message from the
+    // agent soon. There is already a progress indicator for work board items."
+    //
+    // He is right about what the signal MEANS: typing dots promise an incoming
+    // message. So the assertion below is INVERTED from what it was — an
+    // in_progress board item must NOT raise the dots.
     const { createRoot } = await import('react-dom/client')
     const { act } = await import('react')
     const { AssistantRuntimeProvider } = await import('@assistant-ui/react')
@@ -481,9 +500,11 @@ describe('ChatApp render (happy-dom)', () => {
       })
       await tick()
     })
-    expect(typingUp()).toBe(1)
+    // INVERTED (2026-08-11): board work is not a chat turn. The dots are already
+    // down because the ack settled, and an in_progress item must not raise them.
+    expect(typingUp()).toBe(0)
 
-    // Build completes: the item flips to done → the dots stop.
+    // And completion changes nothing here — there were no dots to stop.
     await act(async () => {
       sockets[0]!.deliver({
         v: 1,

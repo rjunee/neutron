@@ -29,6 +29,7 @@
     "@neutronai/scribe": "workspace:*",
     "@neutronai/skill-forge": "workspace:*",
     "@neutronai/tasks": "workspace:*",
+    "@neutronai/tools": "workspace:*",
     "@neutronai/trident": "workspace:*",
     "@neutronai/watchdog": "workspace:*",
     "@neutronai/wire-types": "workspace:*",

@@ -17,15 +17,17 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  *     NO Google OAuth client wired.
  *   - DELETE /api/cores/api-keys/<label> clears it.
  *   - unknown label → 400; missing bearer → 401.
+ *   - POST /api/cores/integrations/migrate-orphaned moves credential rows off a
+ *     previous owner handle (T3, card 2026-08-14) — auth-gated like the rest,
+ *     and 405 on a non-POST.
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -42,15 +44,13 @@ afterEach(async () => {
   while (cleanups.length > 0) await cleanups.pop()!()
 })
 
-async function makeBench() {
+async function makeBench(opts: { slug_is_fallback?: boolean } = {}) {
   const home = mkdtempSync(join(tmpdir(), 'neutron-integrations-surface-'))
   cleanups.push(() => rmSync(home, { recursive: true, force: true }))
   const dbDir = join(home, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secrets = new SecretsStore({ data_dir: home, db })
@@ -83,7 +83,11 @@ async function makeBench() {
     registry: cores.registry,
     tokens,
     secretsStore: secrets,
+    // Threaded exactly as `wireCoresSurfaces` wires it in production — the
+    // migrate-orphaned route needs the credential tables.
+    db,
     project_slug: OWNER,
+    slug_is_fallback: opts.slug_is_fallback ?? false,
     auth,
   })
   const server = Bun.serve({
@@ -91,7 +95,7 @@ async function makeBench() {
     fetch: async (req) => (await surface.handler(req)) ?? new Response('nf', { status: 404 }),
   })
   cleanups.push(() => server.stop(true).then(() => undefined))
-  return { secrets, base: `http://127.0.0.1:${server.port}` }
+  return { secrets, db, base: `http://127.0.0.1:${server.port}` }
 }
 
 function authed(base: string, path: string, init: RequestInit = {}): Promise<Response> {
@@ -140,6 +144,35 @@ test('GET /api/cores/integrations lists OAuth + API-key slots with status (no Go
   expect(JSON.stringify(body)).not.toContain('tvly-1')
 })
 
+test('GET /api/cores/integrations declares that a connected GitHub credential is outside its Core-only scope', async () => {
+  const b = await makeBench()
+  const githubSecret = 'github-secret-positive-control'
+  await b.secrets.put({
+    owner_handle: OWNER,
+    kind: 'oauth_token',
+    label: 'github',
+    plaintext: githubSecret,
+  })
+
+  const res = await authed(b.base, '/api/cores/integrations')
+  const body = (await res.json()) as {
+    scope: { kind: string; description: string }
+    oauth: Array<{ label: string; connected: boolean }>
+    api_keys: Array<{ label: string; connected: boolean }>
+  }
+  const serialized = JSON.stringify(body)
+
+  expect(body.scope.kind).toBe('cores')
+  expect(body.scope.description).toContain('bundled Core credential slots only')
+  expect(body.scope.description).toContain('Other connected credentials are not included')
+  expect(body.oauth.some(({ label }) => label === 'github')).toBe(false)
+  expect(body.oauth.some(({ label }) => label === 'gmail_compose')).toBe(true)
+  expect(body.oauth.some(({ label }) => label === 'google_calendar')).toBe(true)
+  expect(body.api_keys.some(({ label }) => label === 'tavily')).toBe(true)
+  expect(JSON.stringify({ value: githubSecret })).toContain(githubSecret)
+  expect(serialized).not.toContain(githubSecret)
+})
+
 test('POST then DELETE /api/cores/api-keys/tavily mutates stored state (no Google client wired)', async () => {
   const b = await makeBench()
   const setRes = await authed(b.base, '/api/cores/api-keys/tavily', {
@@ -175,4 +208,134 @@ test('GET /api/cores/integrations without bearer returns 401', async () => {
   const b = await makeBench()
   const res = await fetch(`${b.base}/api/cores/integrations`)
   expect(res.status).toBe(401)
+})
+
+// ── T3.6 the migrate-orphaned route (card 2026-08-14) ─────────────────────
+const MIGRATE_PATH = '/api/cores/integrations/migrate-orphaned'
+/** The pre-provisioning handle the seeded row is frozen under. */
+const STALE_HANDLE = asOwnerHandle('dev-old')
+
+test('POST /api/cores/integrations/migrate-orphaned without bearer returns 401', async () => {
+  const b = await makeBench()
+  const res = await fetch(`${b.base}${MIGRATE_PATH}`, { method: 'POST' })
+  expect(res.status).toBe(401)
+})
+
+test('authed POST /api/cores/integrations/migrate-orphaned moves rows off the previous handle', async () => {
+  const b = await makeBench()
+  // Same store, a DIFFERENT handle — exactly how a pre-provisioning row is
+  // frozen out of reach of this instance.
+  await b.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const res = await authed(b.base, MIGRATE_PATH, { method: 'POST' })
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as { ok: boolean; total_moved: number; message: string }
+  expect(body.ok).toBe(true)
+  expect(body.total_moved).toBeGreaterThanOrEqual(1)
+  // The row is now readable under THIS instance's handle — and no plaintext
+  // rode back out on the response.
+  expect(
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBe('tvly-stale')
+  expect(JSON.stringify(body)).not.toContain('tvly-stale')
+})
+
+test('GET /api/cores/integrations/migrate-orphaned returns 405 (POST-only mutation)', async () => {
+  const b = await makeBench()
+  const res = await authed(b.base, MIGRATE_PATH)
+  expect(res.status).toBe(405)
+  expect((await res.json() as { code: string }).code).toBe('method_not_allowed')
+})
+
+// ── THE PUBLIC BOUNDARY OF THE DIRECTION GUARD ────────────────────────────
+/**
+ * The guard was already asserted against the shared brain. A review pointed out
+ * that proves the inside of the boundary and not the boundary — which is the
+ * SAME shape as the bug it was written for: the automatic path was guarded and
+ * the explicit one was not, because nobody exercised the explicit one.
+ *
+ * So this drives the real HTTP route on a server composed exactly as
+ * `wireCoresSurfaces` composes it for a fallback boot, and reads the rows back
+ * out of the database rather than trusting the response body.
+ */
+test('the migrate route REFUSES on a fallback boot, and says what to do instead', async () => {
+  const b = await makeBench({ slug_is_fallback: true })
+  await b.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const res = await authed(b.base, MIGRATE_PATH, { method: 'POST' })
+  // Deliberately still 200: the request was well-formed and the server did
+  // exactly what it should. Failing the request would invite a retry, and the
+  // retry would be just as refused.
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as {
+    ok: boolean
+    refused_direction?: true
+    total_moved: number
+    message: string
+  }
+  expect(body.total_moved).toBe(0)
+  // THE WIRE CARRIES THE REFUSAL AS DATA. A 200 with `{ok:true, total_moved:0}`
+  // is structurally identical to a collision skip and to a clean no-op, so this
+  // assertion used to be `body.message).toContain('Refused')` — one English
+  // sentence away from a green test over a disarmed security guard.
+  expect(body.refused_direction).toBe(true)
+  // The operator-facing sentence is a contract of its own and stays asserted —
+  // once, here, deliberately, rather than as the sole evidence in five places.
+  expect(body.message).toContain('Refused')
+  expect(body.message).not.toContain('tvly-stale')
+
+  // ON THE DATA, not the response: a body claiming zero while the row moved is
+  // precisely the failure this whole change exists to prevent.
+  expect(
+    await b.secrets.get({ owner_handle: STALE_HANDLE, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBe('tvly-stale')
+  expect(
+    await b.secrets.get({ owner_handle: OWNER, kind: 'byo_api_key', label: 'tavily' }),
+  ).toBeNull()
+})
+
+test('the status route stops advertising a migration it would refuse', async () => {
+  const b = await makeBench({ slug_is_fallback: true })
+  await b.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+
+  const res = await authed(b.base, '/api/cores/integrations')
+  expect(res.status).toBe(200)
+  const body = (await res.json()) as {
+    orphaned_credentials: { migrate_action: string | null; message: string } | null
+  }
+  const orphans = body.orphaned_credentials
+  expect(orphans).not.toBeNull()
+  // The whole point of the branch: no action offered, and the sentence names
+  // the repair that actually works instead of the one that refuses.
+  expect(orphans!.migrate_action).toBeNull()
+  expect(orphans!.message).toContain('fallback')
+
+  // POSITIVE CONTROL — the same fixture on a configured boot DOES advertise it,
+  // so this test cannot pass by the summary being absent or inert.
+  const configured = await makeBench()
+  await configured.secrets.put({
+    owner_handle: STALE_HANDLE,
+    kind: 'byo_api_key',
+    label: 'tavily',
+    plaintext: 'tvly-stale',
+  })
+  const ok = (await (await authed(configured.base, '/api/cores/integrations')).json()) as {
+    orphaned_credentials: { migrate_action: string | null } | null
+  }
+  expect(ok.orphaned_credentials!.migrate_action).not.toBeNull()
 })

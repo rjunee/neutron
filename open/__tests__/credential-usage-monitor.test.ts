@@ -156,6 +156,67 @@ describe('CredentialUsageMonitor', () => {
     expect(m.snapshot()).toEqual({ available: false, reason: 'probe_failed' })
   })
 
+  // ── WHAT THE LAST LIVE READ LEARNED ABOUT THE CREDENTIAL ──────────────────
+  // ARGUS ROUND 4: the usage card asked the credential FILE whether the Anthropic
+  // pool was connected, and `resolveActiveCredential` performs no validity check —
+  // so a revoked token read as connected forever, wrote no sample, and rendered
+  // "No readings yet.": a promise of a first reading that can never arrive. The
+  // card needs the answer to the OTHER question, and this is where it comes from.
+
+  it('says nothing about the credential before the first tick — null, not healthy', () => {
+    const { m } = monitor({})
+    expect(m.readStanding()).toBeNull()
+  })
+
+  it('reports the credential LAPSED once upstream rejects it', async () => {
+    const { m } = monitor({
+      now: () => 5_000,
+      outcomes: [
+        { kind: 'ok', reading: { session: 0.5, weekly: 0.2 } },
+        { kind: 'unauthorized', httpStatus: 401 },
+      ],
+    })
+    await m.measureOnce()
+    // The control: a working credential is not a refusal, so a reader that called
+    // everything lapsed would fail here before it could pass below.
+    expect(m.readStanding()).toBe('healthy')
+    await m.measureOnce()
+    expect(m.readStanding()).toBe('lapsed')
+  })
+
+  it('a TRANSIENT failure is not a refusal — a dropped packet must not repaint the card', async () => {
+    const { m } = monitor({
+      now: () => 5_000,
+      outcomes: [
+        { kind: 'ok', reading: { session: 0.5, weekly: 0.2 } },
+        { kind: 'error', message: 'socket hang up' },
+      ],
+    })
+    await m.measureOnce()
+    await m.measureOnce()
+    expect(m.readStanding()).toBe('indeterminate')
+    expect(m.readStanding()).not.toBe('lapsed')
+  })
+
+  it('records the standing even when the observer throws', async () => {
+    // The observer posts to chat, which touches a DB and a socket and can throw.
+    // A throw there must not cost the card the fact that the credential was
+    // rejected — which is why the standing is recorded before the observer runs.
+    const m = new CredentialUsageMonitor({
+      env: { ...bareEnv(), CLAUDE_CODE_OAUTH_TOKEN: TOKEN },
+      now: () => 5_000,
+      credentialDeps: noCredentialsOnDisk(),
+      probe: async () => ({ kind: 'unauthorized', httpStatus: 401 }),
+      onStanding: () => {
+        throw new Error('chat is down')
+      },
+      setTimer: () => 0,
+      clearTimer: () => undefined,
+    })
+    await m.measureOnce()
+    expect(m.readStanding()).toBe('lapsed')
+  })
+
   it('drops the reading outright when the credential turns out to be dead', async () => {
     const { m } = monitor({
       now: () => 5_000,

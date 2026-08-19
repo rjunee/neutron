@@ -4,7 +4,8 @@
  *
  * SCOPE: this test boots `composeProductionGraph` DIRECTLY with a minimal input
  * and NO `loop_registry` threaded, so `graph.loopRegistry` holds exactly the
- * loops the production GRAPH starts itself — cron, reminders, trident, watchdog.
+ * loops the production GRAPH starts itself — cron, reminders, trident,
+ * trident-watch, watchdog.
  * It does NOT cover the loops the OPEN COMPOSER starts before the graph composes
  * (the `ChunkedUploadSweeper` + `dispatch-lifecycle-watchdog`) — the COMPLETE
  * Open running set is pinned end-to-end by
@@ -14,7 +15,11 @@
  * Open boot.
  *
  * What this pins:
- *   1. The gateway graph starts EXACTLY {cron, reminders, trident, watchdog}.
+ *   1. The gateway graph starts EXACTLY {cron, reminders, trident, trident-watch,
+ *      watchdog}. `trident-watch` is trident's 2 s wake-on-change detector: a
+ *      SECOND real timer on the same object, registered through
+ *      `TridentTickLoop.describeAll()` so a watcher that is failing every two
+ *      seconds appears in the inventory instead of only in `watch_failed` logs.
  *   2. The two D-7 DORMANT loops (`project-backup-scheduler`, comments
  *      `agent-watcher`) are NOT running — explicitly enumerated in
  *      `DORMANT_LOOPS`, never silently dead.
@@ -35,6 +40,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { LoopRegistry } from '@neutronai/loop'
@@ -43,7 +49,7 @@ import { composeProductionGraph, DORMANT_LOOPS } from '../composition.ts'
 const OWNER = 'loop-inventory-composer-owner'
 
 /** The loops the GATEWAY GRAPH starts itself (no Open-composer loops here). */
-const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'watchdog'] as const
+const EXPECTED_GATEWAY_LOOPS = ['cron', 'reminders', 'trident', 'trident-watch', 'watchdog'] as const
 /** Loops the OPEN COMPOSER starts — absent from a gateway-only registry. */
 const OPEN_COMPOSER_LOOPS = ['chunked-upload-sweeper', 'dispatch-lifecycle-watchdog'] as const
 /** The exact set of D-7 dormant loops (built, never started). */
@@ -65,8 +71,8 @@ interface Harness {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-loop-inventory-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const graph = await composeProductionGraph({
     db,
     project_slug: OWNER,
@@ -90,7 +96,7 @@ afterEach(async () => {
   await harness.close()
 })
 
-test('the gateway graph starts exactly its four loops (no Open-composer loops)', () => {
+test('the gateway graph starts exactly its five loops (no Open-composer loops)', () => {
   expect(harness.graph.loopRegistry.names()).toEqual([...EXPECTED_GATEWAY_LOOPS])
   // The sweeper + lifecycle watchdog are Open-composer loops — they only appear
   // when the composer threads them in via `loop_registry`, NOT from the graph
@@ -139,10 +145,42 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
 test('the ONE boot line names running loops (with cron jobs) + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine(OWNER, DORMANT_LOOPS)
   expect(line).toContain(`project=${OWNER}`)
-  expect(line).toContain('4 loop(s) running')
+  expect(line).toContain('5 loop(s) running')
   for (const name of EXPECTED_GATEWAY_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+})
+
+test('the watcher cadence is CONFIGURABLE from the production wiring, not just the type', async () => {
+  // ARGUS r3 (nit): the card asked for "2 s default, configurable", and the option
+  // existed only on `TridentTickOptions` — no production composition could set it,
+  // which is a knob no operator has. Asserted through the LIVE descriptor, so the
+  // value has to travel input → composer → `TridentTickLoop` → the real timer.
+  const tmp = mkdtempSync(join(tmpdir(), 'neutron-loop-watch-cadence-'))
+  const db = ProjectDb.open(join(tmp, 'owner.db'))
+  try {
+    applyMigrations(db.raw())
+    const graph = await composeProductionGraph({
+      db,
+      project_slug: OWNER,
+      ...noOpInputBase,
+      trident: {
+        // Never fired: the graph is shut down before the 90 s sweep's first tick.
+        fire_inner_workflow: async () => ({ status: 'fired' as const, error: null }),
+        watch_interval_ms: 7_000,
+      },
+    })
+    try {
+      expect(graph.loopRegistry.get('trident-watch')?.cadenceMs).toBe(7_000)
+      // …and the backstop is untouched by the accelerator's cadence.
+      expect(graph.loopRegistry.get('trident')?.cadenceMs).toBe(90_000)
+    } finally {
+      await graph.shutdown()
+    }
+  } finally {
+    db.close()
+    rmSync(tmp, { recursive: true, force: true })
+  }
 })
 
 test('composing with a colliding pre-loaded registry throws + leaks no timer (defect #2)', async () => {

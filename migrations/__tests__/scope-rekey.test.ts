@@ -109,7 +109,7 @@ describe('#451 scope reconciler — conflict policy', () => {
     // Anchor the reconcile on the anchor table.
     seedOnboarding(OLD, 'owner', 'completed', 1_000)
 
-    const result = reconcileInstanceScope(db, NEW, { dbPath })
+    const result = reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
     expect(result.action).toBe('rekeyed')
 
     const rows = db
@@ -136,7 +136,7 @@ describe('#451 scope reconciler — conflict policy', () => {
     seedOnboarding(OLD, 'owner', 'completed', 1_000)
     seedOnboarding(NEW, 'owner', 'signup', 9_999) // newer, but far less authoritative
 
-    reconcileInstanceScope(db, NEW, { dbPath })
+    reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     expect(onboardingRows()).toEqual([{ project_slug: NEW, user_id: 'owner', phase: 'completed' }])
   })
@@ -146,7 +146,7 @@ describe('#451 scope reconciler — conflict policy', () => {
     seedOnboarding(OLD, 'owner', 'signup', 9_000)
     seedOnboarding(NEW, 'owner', 'persona', 1_000)
 
-    reconcileInstanceScope(db, NEW, { dbPath })
+    reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     expect(onboardingRows()).toEqual([{ project_slug: NEW, user_id: 'owner', phase: 'signup' }])
   })
@@ -157,7 +157,7 @@ describe('#451 scope reconciler — conflict policy', () => {
     seedOnboarding(OLD, 'owner', 'signup', 9_999)
     seedOnboarding(NEW, 'owner', 'completed', 1_000)
 
-    reconcileInstanceScope(db, NEW, { dbPath })
+    reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     expect(onboardingRows()).toEqual([{ project_slug: NEW, user_id: 'owner', phase: 'completed' }])
   })
@@ -179,7 +179,7 @@ describe('#451 scope reconciler — scope-key table safety', () => {
     insert.run('wb-lookalike', 'unrelated-project', 'sibling project item', 3)
     seedOnboarding(OLD, 'owner', 'completed', 1_000)
 
-    reconcileInstanceScope(db, NEW, { dbPath })
+    reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     const rows = db
       .query<{ id: string; project_slug: string }, []>(
@@ -205,7 +205,7 @@ describe('#451 scope reconciler — scope-key table safety', () => {
     ).run('mona', 'Mona', OLD)
     seedOnboarding(OLD, 'owner', 'completed', 1_000)
 
-    reconcileInstanceScope(db, NEW, { dbPath })
+    reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     const row = db
       .query<{ home_instance_slug: string }, []>(
@@ -220,7 +220,7 @@ describe('#451 scope reconciler — ledger + idempotency', () => {
   test('a never-renamed install seeds the ledger and moves nothing', () => {
     seedOnboarding(NEW, 'owner', 'completed', 1_000)
 
-    const result = reconcileInstanceScope(db, NEW, { dbPath })
+    const result = reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     expect(result.action).toBe('seeded')
     expect(result.rekeys).toEqual([])
@@ -237,12 +237,12 @@ describe('#451 scope reconciler — ledger + idempotency', () => {
       'America/Los_Angeles',
     )
 
-    const first = reconcileInstanceScope(db, NEW, { dbPath })
+    const first = reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
     expect(first.action).toBe('rekeyed')
     expect(first.moved_total).toBeGreaterThan(0)
     expect(snapshots().length).toBe(1)
 
-    const second = reconcileInstanceScope(db, NEW, { dbPath })
+    const second = reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
     expect(second.action).toBe('noop')
     expect(second.rekeys).toEqual([])
     expect(second.moved_total).toBe(0)
@@ -251,7 +251,7 @@ describe('#451 scope reconciler — ledger + idempotency', () => {
     expect(snapshots().length).toBe(1)
 
     // A third, for the "restart loop doesn't grind the disk" case.
-    expect(reconcileInstanceScope(db, NEW, { dbPath }).action).toBe('noop')
+    expect(reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false }).action).toBe('noop')
     expect(snapshots().length).toBe(1)
 
     // The instance's own metadata row followed the rename.
@@ -268,11 +268,11 @@ describe('#451 scope reconciler — ledger + idempotency', () => {
     seedOnboarding('slug-a', 'owner', 'completed', 1_000)
     let now = 1_000_000
     const clock = (): number => now
-    reconcileInstanceScope(db, 'slug-b', { dbPath, now: clock })
+    reconcileInstanceScope(db, 'slug-b', { dbPath, now: clock, currentSlugIsFallback: false })
     now += 1_000
-    reconcileInstanceScope(db, 'slug-c', { dbPath, now: clock })
+    reconcileInstanceScope(db, 'slug-c', { dbPath, now: clock, currentSlugIsFallback: false })
     now += 1_000
-    const third = reconcileInstanceScope(db, 'slug-d', { dbPath, now: clock })
+    const third = reconcileInstanceScope(db, 'slug-d', { dbPath, now: clock, currentSlugIsFallback: false })
 
     expect(third.action).toBe('rekeyed')
     expect(snapshots().sort()).toEqual([
@@ -303,7 +303,7 @@ describe('#451 scope reconciler — ledger + idempotency', () => {
     db.prepare(`INSERT INTO tasks (id, project_slug, title, created_at, updated_at)
                 VALUES (?, ?, ?, '2026-01-01', '2026-01-01')`).run('t1', OLD, 'stranded task')
 
-    const result = reconcileInstanceScope(db, NEW, { dbPath })
+    const result = reconcileInstanceScope(db, NEW, { dbPath, currentSlugIsFallback: false })
 
     expect(result.action).toBe('rekeyed')
     expect(result.rekeys.map((r) => r.from)).toEqual([OLD])

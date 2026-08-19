@@ -159,8 +159,12 @@ from durable state). The trigger is a per-session BASELINE DELTA (a `WeakMap` ke
 on the `ReplSession` object) so it fires only on growth since the last reset and can
 never re-fire-loop, regardless of whether CC keeps appending the same JSONL after
 `/clear` or rotates to a new file (a respawned session restarts at baseline 0). A
-per-scope 45-min cooldown gates re-resets. The `session-size-watchdog` (5 MB warn /
-10 MB critical) stays the wedge BACKSTOP; Layer B keeps the orchestrator in the good
+per-scope 45-min cooldown gates re-resets. When the installed CLI advertises the
+option, every REPL child receives `--autocompact 300000`, an upstream token budget
+that asks the CLI to compact well before its full context window. The
+`session-size-watchdog` (5 MB warn / 10 MB critical) remains the independent
+downstream byte backstop on the post-compact JSONL to keep `--resume` from wedging;
+the token budget does not replace it. Layer B keeps the orchestrator in the good
 zone. The CLI persistent-REPL context-editing beta (`clear_tool_uses` tool-result
 eviction) is NOT available for the interactive `claude` PTY REPL substrate — no CLI
 flag, no codebase primitive — so this composer-side periodic-reset-and-rehydrate is
@@ -641,10 +645,20 @@ a slash-command.
   calls `setReplToolBridge(graph.get('mcp'))` once the registry is populated;
   shutdown clears it. LLM-less boxes (no graph) leave it unset → no second
   server.
-- **Security (opt-in per substrate).** Only the owner's WARM conversational
-  substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
-  history-import REPL (`cc-import-*`), the per-project onboarding-compose REPL
-  (`cc-compose-*` — see "Per-project isolated onboarding compose" below), and the
+- **Security (opt-in per substrate).** The owner's two WARM conversational
+  substrates set `enableToolBridge: true`: the live chat (`cc-agent-*`) and the
+  background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
+  work-board wakeup). The second is an equal-grant, separate-session twin of the
+  first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
+  frontier-model floor, because a RITUAL composes there and ISSUES #504 settled that
+  a fired ritual must have "access to everything general has access to" — the
+  previous locked-down `cc-ritual-*` lane could not read the owner's calendar and was
+  rejected. What is separate is the SESSION, so a background compose that aborts
+  cannot evict the child the owner is chatting on; the security boundary for that
+  lane remains the ritual APPROVAL GATE (`reminders/ritual-fire.ts`), not the
+  substrate. The untrusted history-import REPL (`cc-import-*`), the per-project
+  onboarding-compose REPL (`cc-compose-*` — see "Per-project isolated onboarding
+  compose" below), and the
   Trident build / fire REPLs (`cc-trident-*` / `cc-trident-fire-*`) leave it off,
   so a prompt-injection in untrusted content can never reach a Core tool. The bridge's MCP namespace is
   permitted via `--allowedTools mcp__neutron`. The built-in `--tools` surface is
@@ -1484,11 +1498,20 @@ a ninth project opens exactly as it does today), the active scope excluded, one
 warm at a time, `WARM_FIRST_DELAY_MS = 2000` after the rail lands and
 `WARM_GAP_MS = 750` between scopes so eight never arrive as a burst at a gateway
 the owner is also talking to. Bytes per scope are bounded by the server, not the
-client: a cold resume replays at most `DEFAULT_REPLAY_LIMIT = 500` messages per
-topic (`persistence/app-chat-store.ts`). There is deliberately **no wifi-vs-
-cellular gate** — that needs a native network module, which would cost the
-OTA-shippability of everything in this section; the bound above is what makes
-cellular acceptable instead.
+client: one replay carries at most `DEFAULT_REPLAY_LIMIT = 500` messages per
+topic — the NEWEST 500 in the range asked for, not the oldest
+(`persistence/app-chat-store.ts`, `persistence/app-chat-event-core.ts`
+`rowsAfter`). It IS a page size now, and the ceiling is a page size times a
+round budget: a client whose page came back full is told so (`history_gap`) and
+walks backwards a page at a time, up to `MAX_HISTORY_BACKFILL_ROUNDS = 3` pages
+per catch-up (`chat-core/sync-engine.ts`), so the per-scope worst case is 2000
+messages rather than 500 and still does not grow with how long the owner's chats
+are. A ceiling that could not be walked past was the previous shape, and it was
+losing the middle of long transcripts permanently — see § Chat sync. There is
+deliberately **no wifi-vs-cellular gate** — that needs a native network module,
+which would cost the OTA-shippability of everything in this section; the bound
+above is what makes cellular acceptable instead, and it is why the bound must
+stay a bound.
 
 **The yield is the load-bearing part.** A prefetch that delays the transcript the
 owner is waiting on has made the app slower at the one interaction it was built
@@ -1588,9 +1611,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    down the socket and stands up a fresh one bound to the new topic, hydrating
 >    that topic's transcript from the shared OPFS store (`main.tsx topicForProject`
 >    / `wsUrlFor`). **Gated on `platform === 'web'`** — mobile keeps its single
->    `app:<user>` socket + `project_id`-field model, unchanged. Reminders/briefs
->    still fan to the bare `app:<user>` (General inbox) topic, so they surface in
->    General (durable rows under `app:<user>`), not the per-project chats.
+>    `app:<user>` socket + `project_id`-field model, unchanged. **Since #293
+>    (2026-08-15)** a fired reminder is delivered to the topic that OWNS the work:
+>    `app:<user>:<project>` when its stored destination names an EXISTING project,
+>    General otherwise (`open/wiring/reminder-topic.ts`). Briefs and ritual posts
+>    carry no destination and still land in General. The durable row and the live
+>    push share that topic, and the deliver seam stamps the project's
+>    `last_activity_at` so the rail pops — an out-of-turn post behaves exactly like
+>    a steady-state agent reply on the same topic.
 >    **Mounted-per-conversation surface cache (#343).** `ChatApp` no longer
 >    remounts the whole chat surface on a project switch (the old `key={convId}`
 >    on the sole runtime host tore down thread + composer, flashed the empty
@@ -1611,6 +1639,14 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    AND every live `app:<user>:<project>` topic (via `appWsRegistry.topics()`),
 >    else creating a project from inside a project would only show up after a
 >    reload (the #132 → this-fix bug).
+>
+>    **Turn-state reconnect snapshot (#570).** On every socket open,
+>    `open/wiring/app-ws.ts` reads the same live-turn set used by the project
+>    rail and sends an explicit `agent_typing` `start` or `end` to that socket.
+>    Clients adopt that level-triggered answer instead of inferring a turn from
+>    remembered start/end edges. A terminal outcome missed during a disconnect
+>    therefore returns as `end`, while a legitimately running turn returns as
+>    `start`; neither outcome depends on a guessed client timeout.
 > 2. **Persistent rail + tab layout.** `TopicRail` is lifted OUT of `ChatApp`
 >    (which is now just the Chat-tab body) to a persistent left column in
 >    `ProjectShell`; the `TabBar` renders in the content pane for BOTH views.
@@ -1644,7 +1680,9 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >    workflow's `inner_checkpoint` (which `trident/inner-workflow.mjs` `checkpoint()`
 >    already re-stamps at every phase boundary), since checkpoints are end-of-phase
 >    markers (`forge-done`→reviewing, `argus-request-changes`→fixing,
->    `fix-round-N`→reviewing, `argus-approved`→merging). CRITICALLY, the durable
+>    `fix-round-N`→reviewing, `argus-approved`→merging, `pr-merged`→merging — #563's
+>    terminal-on-merge checkpoint, so a shipped change never renders as still
+>    building). CRITICALLY, the durable
 >    tick loop (`trident/tick.ts`) now carries an `on_transition` hook: it re-loads
 >    every non-terminal run each tick and, when a run's progress signature
 >    (`phase|inner_checkpoint|round|pr|last_advanced_at`) advances, fans a
@@ -2635,8 +2673,11 @@ credentials UI, project rename + **emoji edit** (a real editable control since
 the rail-redesign sprint — PATCH `{ emoji }` to the settings surface, mirroring
 the name rename), and a display-only, M2-gated collaborators scaffold.
 
-**Credential model.** A credential is a static, long-lived service token (Meta
-Ads, Google Ads, Apify, …) set at **per-project** or **global** scope.
+**Credential model.** A credential is a static, long-lived named value set at
+**per-project** or **global** scope. The owner supplies both the service name and
+value, so a fresh install shows an empty list rather than product-defined empty
+slots. Values are write-only: POST accepts plaintext, while POST and GET responses
+carry metadata only and never render the value back.
 Resolution is **per-project → global → unset** (`ProjectCredentialStore.resolve`)
 so a single-owner install that only sets global tokens keeps working and a
 project can override a service with its own token. Storage is a NEW table
@@ -2758,6 +2799,498 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   global-scoped: the tool context carries only the owner boundary), all dispatching
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
+
+### More than one Codex seat — rotation at the CODEX_HOME resolver
+
+One ChatGPT subscription can run out before its window resets. The owner may
+therefore connect several seats, and trident picks one per run.
+
+- **A seat is a SLOT with its own directory, for its whole life.** The first seat
+  keeps the bare service name `codex` and the bare `<owner_home>/.codex` — so a
+  one-seat install is unchanged and nothing migrates, which is also why there is no
+  feature flag: rotation always runs and with a single slot it trivially selects the
+  credential that was always there. Additional seats are service
+  `codex-acct-<slot>` (the store's service grammar admits dashes,
+  `project-credentials/store.ts:164`) materialized to
+  `<owner_home>/.codex/accounts/<slot>/`, which cannot collide with the override
+  tree at `.codex/projects/<id>/`.
+- **Selection is a POINTER, never a copy.** The codex CLI rewrites `auth.json` when
+  it refreshes and that refresh ROTATES the refresh token, so two live directories
+  holding one account revoke each other — whichever refreshed later wins. Rotation
+  therefore changes only WHICH directory is handed to a run, and the
+  re-materialize guard stays only-if-missing. Copying a stored bundle over a
+  CLI-refreshed file would install a token the server already invalidated.
+- **Harvest-back keeps the stored copy honest.** When a seat's on-disk
+  `last_refresh` is newer than the stored row's, the disk bundle is re-encrypted
+  back into the store. Without it the store drifts staler with every refresh and the
+  self-heal path eventually restores a dead token over a live login — a hazard that
+  predates rotation.
+- **The exhaustion signal is harvested, not probed.** There is no free usage-gauge
+  endpoint. Every `codex` session appends a rollout JSONL under
+  `<CODEX_HOME>/sessions/YYYY/MM/DD/` whose `token_count` events carry
+  `rate_limits` — `used_percent`, `window_minutes`, `resets_at` (epoch SECONDS,
+  converted once at the parse boundary), `plan_type`. That the rollout follows
+  `CODEX_HOME` was verified live: pointing `CODEX_HOME` at an empty directory and
+  running `codex exec` produced the whole state root, `sessions/` included, even
+  though the run never authenticated.
+- **The threshold is keyed on `window_minutes`, not on `primary`/`secondary`.**
+  Measured across 12,582 real `token_count` samples from 600 rollout files
+  (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a WEEK — in every
+  sample and `secondary` was null in every sample. A policy that read `primary` as
+  "the 5-hour window" would apply the session threshold and a session-length
+  cooldown to a weekly cap and rotate a still-capped seat back into service. A
+  window at or under 1440 minutes cools at 98%, longer windows at 99%, and the
+  fallback cooldown is the window's own declared length, CLAMPED to 32 days — the
+  same binary also declares `daily-limit`, `monthly-limit` and `annual-limit`, so an
+  unclamped length would bench a paid seat for a year and an absurd value would reach
+  `Infinity`, which SQLite stores as a REAL that no clock comparison can clear.
+- **A `resets_at` already in the PAST means the reading is stale, not that there is
+  no reset.** The window has since rolled over and the quota with it, so that sample
+  is ignored rather than cooling the seat for a fresh full window. Collapsing
+  "expired" into "absent" would bench a healthy seat off a days-old rollout — and
+  because the seat is then skipped, it might never run to produce a newer one.
+- **Only a real usage event counts as evidence.** `rate_limits` is read only from the
+  node whose own `type` is `token_count`, which is the shape a real rollout line has
+  (`event_msg` → `token_count` → `rate_limits`); a same-named object nested anywhere
+  else is ignored. `window_duration_mins` is accepted alongside `window_minutes`,
+  since both names ship in the same binary and a miss would default to 0, which
+  classes as a long window.
+- **The scan is bounded.** A positioned tail read rather than a whole-file read, the
+  newest date partition visited first, a cap on files collected, and at most one scan
+  a minute per seat. The resolver is reached by a read-only status request as well as
+  by a run launch, and the CLI never prunes `sessions/`.
+- **Two rules are load-bearing and inherited from the Anthropic rotator.** A
+  harvest that ERRORS or finds nothing cools nothing — a transient read failure must
+  never retire a seat the owner is paying for. And when EVERY seat is cooling the
+  current one is KEPT, never dropped: a capped seat returns a legible retryable
+  error, whereas no seat silently removes codex from the review. That case logs
+  `codex_rotation_exhausted`.
+- **A seat with no usable credential is not a quota problem.** A slot whose stored
+  bundle is missing or expired cools as `unauthorized`, which ignores the clock and
+  stays ineligible until the owner reconnects that seat — waiting does not fix it —
+  and selection SKIPS it rather than returning no credential, because dropping codex
+  out of the review is worse than any capped seat.
+  **THERE IS NO STDERR CLASSIFIER, deliberately.** An earlier revision shipped one and
+  it could not have worked: its two window discriminators, `weekly limit` and
+  `session limit`, return ZERO hits against the literals in codex-cli 0.147.0, while
+  `usage limit` returns 23 and the controls `codex-cli` and `rate_limit_reached_type`
+  return 9 and 17 — the search works, the discriminators are absent, and the CLI's real
+  messages never name the window. It also had no production caller, since codex
+  failures surface only in the shell wrappers and the `.mjs` inner workflow. The window
+  class comes instead from `rate_limit_reached_type`, which the CLI sets itself and
+  which rides the same `token_count` event the harvest already reads. The rollout
+  harvest is the ONE signal that cools a seat.
+- **Per-project overrides are OUTSIDE rotation** and resolve first, verbatim: an
+  override exists to pin one project to one subscription.
+- **Adding a seat, from the app.** Settings → Integrations → Model providers lists
+  every seat with its state, marks the one that runs next, and gives each its own
+  Remove. The paste box stays on screen after the first connection — hiding it is what
+  made a second seat unreachable — and takes an optional seat name.
+- **Adding a seat, from chat or HTTP.** `codex_connect` with `account: "work"` plus
+  the pasted `auth.json`. HTTP: `POST /api/app/codex-auth` with
+  `{ auth, account: "work" }`. `GET /api/app/codex-auth` lists every seat with its
+  cooldown and last usage while keeping all of its original top-level fields.
+  `DELETE /api/app/codex-auth?account=work` removes ONE seat; an unqualified
+  `DELETE /api/app/codex-auth` removes them ALL, which is what the single
+  "Disconnect Codex" control means — leaving named seats stored and selectable behind
+  it would keep using a credential the owner had been told was gone. Omitting
+  `account` on connect means the first seat, so pre-rotation clients are unaffected.
+- **Operator rule.** Once a seat is connected to Neutron, stop using that same
+  ChatGPT login for codex anywhere else. One seat, one live store — otherwise the
+  CLI's refresh rotation revokes whichever copy refreshed earlier.
+
+Code: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts`
+(rollout harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0134_codex_rotation.sql`.
+
+### Connect GitHub — the device flow, and the control that finally starts it (#551)
+
+A build pushes a branch and opens a pull request with the OWNER's GitHub token.
+The whole chain for obtaining one has been merged and composed for months —
+`github/device-flow.ts` (protocol), `github/connect.ts` (order),
+`github/credential.ts` (storage), `trident/git-mode.ts` (hands it to every host
+command), and `gateway/http/github-connect-surface.ts` behind route slot
+`app_github_connect_surface` → `/api/app/github-auth`. **No client on any surface
+called it.** The backend tests passed, the route resolved, and a
+composition-coverage test asserted the slot was mounted; none of them asked
+whether a human could start the flow. So the only path to a token was a shell on
+the machine, which is what the agent recommended when a push failed — see
+`MISSING_CREDENTIAL_DOCTRINE` above, the other half of the same fix.
+
+- **The surface (unchanged).** `GET` reports `connected` |
+  `awaiting_owner` (with `user_code`, `verification_uri`, `expires_in_seconds`) |
+  `not_connected`. `POST` starts a flow and answers IMMEDIATELY with the code,
+  polling GitHub in the background — a device flow cannot complete inside a
+  request. It is idempotent: a second `POST` while one is live returns the SAME
+  code rather than minting a rival the server has stopped polling. The
+  `device_code` never leaves that module (it is the bearer half of the exchange),
+  and neither does the token.
+- **Why the UI is NOT the Google rows.** Those drive an OAuth REDIRECT. This is a
+  DEVICE flow, so the screen is built around the CODE: Connect POSTs to start,
+  the `user_code` is displayed large and monospaced, Copy puts it on the
+  clipboard in one press, the `verification_uri` is a real link, and the client
+  POLLS the status route (5s, GitHub's own floor) until it answers `connected`
+  and re-renders. Typing that code into another device IS the interaction. The
+  poll runs ONLY while a code is on screen — `not_connected` never spins one — it
+  is torn down the moment the flow settles, and a poll that fails to reach the
+  server leaves the code where it is rather than reporting a disconnection the
+  owner did not experience.
+- **A failed READ never blanks a live flow, on either surface.** The same rule
+  covers the mount-time status read, not only the poll: that read re-fires
+  whenever the client is rebuilt (the token rotating under a long-lived tab is
+  enough), so `awaiting_owner` survives any failed read and only a SUCCESSFUL one
+  can leave it. Otherwise one flaky moment mid-flow takes the owner's code away
+  and tears down the poll that was about to see the approval. The release valve
+  is the poll itself: the gateway drops a pending grant once it expires and
+  answers `not_connected`, so a code that goes stale clears on the next tick and
+  a Connect control comes back — no reload, no Refresh. That is what keeps this
+  rule from stranding a screen on a code that is no longer good.
+- **Every state that is not connected and not mid-flow offers Connect.** The
+  clients CAST the wire payload to the three-state union without validating it,
+  so a gateway that grows a fourth state arrives as a plain string; gating the
+  control positively on `not_connected` would render a row saying "Not connected"
+  with nothing to press. Both surfaces gate it negatively instead — a screen with
+  no way out is worse than one offering an action that may be redundant.
+- **Both surfaces.** Web `landing/chat-react/IntegrationsTab.tsx` § GitHub over
+  `landing/chat-react/github-connect-client.ts`, rendered OUTSIDE the
+  `/api/cores/integrations` load so a blocked owner's control never waits on an
+  unrelated round trip. Mobile `app/app/integrations.tsx` § GitHub over
+  `app/lib/github-connect-client.ts`, which additionally re-reads status when the
+  app returns to the foreground (the owner taps "Open GitHub", approves, comes
+  back). No feature flag; single code path, on by default.
+- **How it is gated.** Two seams, deliberately. The web reachability gate carries
+  a `github-connect` affordance probed at EVERY layout after walking the real
+  path to Admin (header menu → Admin), so the control cannot silently leave one
+  width. Alongside it, `landing/chat-react/__tests__/github-connect-reachable.test.tsx`
+  and `app/__tests__/github-connect-reachable.test.tsx` PRESS the control and
+  assert the wire: the POST leaves, the code renders, Copy reaches the clipboard,
+  the link opens, the poll flips to connected and then stops, a dropped poll does
+  not blank a flow that is working, and the `device_code` is not rendered even
+  when a response carries one.
+
+### Code-generation model selector — one tier registry, three model families
+
+Which model runs each step of a build is owner-editable, as a TABLE: one row per
+named step — **name · model dropdown · effort dropdown** — plus the step's one-line
+explanation, then Save. Web `landing/chat-react/SettingsTab.tsx` (§ "Code
+generation"), mobile `app/app/codegen.tsx`, both over
+`GET`/`PUT /api/app/trident/phase-models` (`gateway/http/trident-phase-models-surface.ts`).
+
+- **The unit of choice is a TIER, not a model id.** `trident/model-tiers.ts` is the
+  ONE registry: `{tier, provider, model_id, transport, wrapper, env_var, requires}`,
+  where `model_id` is RESOLVED AT CALL TIME (the Claude tiers through
+  `runtime/models.ts`, including the watchdog's adopted `getBestModel()`). Retiring a
+  model is a single edit here. Tiers: `fable`/`opus`/`sonnet`/`fast` (Anthropic),
+  `sol`/`terra`/`luna` (GPT 5.6, via Codex), `k3` (Kimi K3).
+- **A tier carries a TRANSPORT, because that is what makes it reachable.** The
+  workflow cannot reach a non-Anthropic model through `agent({model})` — that
+  resolves against Claude Code's own endpoint (`trident/kimi-review-cli.ts`). So
+  `transport: 'agent'` goes on the spawn, and `transport: 'cli'` is passed to a
+  SUBPROCESS through the wrapper's env knob: `CODEX_REVIEW_MODEL` for
+  `trident/codex-review.sh`, `KIMI_MODEL` for `trident/kimi-review-cli.ts`. The
+  registry is threaded to the workflow as `args.modelTiers` (`trident/inner-loop.ts`
+  `buildWorkflowArgs`), alongside the existing `args.models`, because the `.mjs` has
+  no module resolution.
+- **The cross-model review lanes are routed phases.** `argus:codex` / `argus:kimi`
+  (and their retry lanes) were in `UNROUTED_LABELS`; they are the `review_codex` /
+  `review_kimi` phases in `trident/phase-models.ts`, defaulting to `sol` and `k3` —
+  the same models the wrappers pinned themselves, so an install that never opens the
+  pane is unchanged. `trident/__tests__/model-tiers.test.ts` pins the registry
+  against each wrapper's own default (and against the `${VAR-x}` form that lets an
+  explicitly EMPTY `CODEX_REVIEW_MODEL` mean "the CLI default").
+- **THE BUILD STEP RUNS ON CODEX TOO.** It is the one step with two executors, and
+  the reason is the Anthropic quota: the build is by far the most expensive phase.
+  Pin the **Build** row to `sol`/`terra`/`luna` and `trident/inner-workflow.mjs`
+  hands the assembled Forge brief to `trident/codex-build.sh` instead of to
+  `agent({model})`; no Anthropic model id is requested for the phase. The wrapper
+  runs `codex exec --sandbox danger-full-access` inside the step's isolated worktree,
+  and its own knob is `CODEX_BUILD_MODEL`, never the reviewer's `CODEX_REVIEW_MODEL`.
+
+The two persisted cross-model phase keys now render as provider-agnostic “Cross-model
+review 1” and “Cross-model review 2” slots. Either slot accepts every non-Claude tier
+in the registry, so adding a future CLI reviewer tier automatically adds it to both
+slots. Stored `review_codex` and `review_kimi` overrides keep their keys and therefore
+migrate without losing the selected tier.
+
+Every review phase also accepts the first-class `none` tier. NONE means deliberately
+off: no agent is dispatched and that seat is excluded from completeness. This differs
+from a configured seat that returns no usable verdict, which remains a blocking
+deferral. All four seats may be NONE; synthesis and the terminal result then state that
+no review ran and that merge relied on build and CI gates alone.
+
+Each phase declares its complete `dispatchGroups` once in `trident/phase-models.ts`.
+The generic cross-model review seats accept every executor family. Claude choices
+dispatch directly with the selected tier; Codex and Kimi choices use their CLI bridges
+and never fall back to Claude when unavailable. A panel whose available review seats
+all resolve to one family is accepted with a run warning.
+The settings payload uses that set verbatim, validation accepts exactly its tiers, and
+the workflow route carries the same set. A deliberately Claude-only phase carries an
+actionable `dispatchConstraint` describing the wrapper or executor required to widen it.
+  `workspace-write` writes only inside the workspace and a build writes outside it
+  twice — a worktree's `.git` points at `<repo>/.git/worktrees/<name>`, and the diff
+  goes under `/tmp`; `--add-dir` can widen the write set but cannot grant the network
+  a build needs to fetch a base branch or install a dependency.
+  - **THE PUBLISH BOUNDARY: the inner tree commits; the durable outer loop publishes.**
+    `trident/codex-build.sh` contains no push, PR-create, or GitHub-authentication command.
+    A pr-mode workflow hands its measured local commit to `trident/orchestrator.ts`, then
+    stops. The outer loop verifies the named local branch still points at that commit,
+    pushes an explicit refspec through its credentialed host runner, and independently
+    runs `git ls-remote --heads origin` before it accepts `REMOTE_HEAD`. It similarly
+    reads an existing PR or creates one and reads it back. Only after both facts exist
+    does it re-fire the workflow from `outer-published:<sha>` for review.
+    Before the lease observation the outer loop also REBASES the branch onto the
+    observed base tip (`rebaseOntoObservedBase`): the shared checkout is shallow
+    (#574), so it replays the branch's own diff (`gh pr diff` when a PR exists, the
+    diff from the branch's FORK POINT on first publish — a two-dot `base..branch`
+    diff would replay work `base` already has) onto the base tip in a throwaway
+    worktree with `git apply --3way` and moves the branch ref by compare-and-swap —
+    a stale branch reaches review as `MERGEABLE`. A replay CONFLICT is handed to
+    the bounded Forge `resolve_conflict` resolver first, in that throwaway worktree:
+    this is the autonomous path, so unlike the local-merge path there is no human
+    present to reconcile the branch by hand. The resolver's claim is checked against
+    git, not taken — the unmerged set AND the staged bytes must come back free of
+    conflict markers, and every round must shrink the set. With no resolver
+    configured, on a decline, on a round that makes no progress, or on an exhausted
+    bound, the outcome is the unchanged ATTENTION failure (`TridentRebaseConflict`,
+    naming the conflicting paths), never a `REQUEST_CHANGES`. A resolved conflict
+    shortcuts nothing: resolution is a mergeability operation, not a verdict, and
+    the branch goes through the full review gate exactly as a clean replay does.
+    The outer loop's own credential
+    is injected at the host-command boundary in `open/composer.ts`; it never enters the
+    wrapper command or the Forge transcript.
+  - **THE BUILD SUBSTRATE NOW CARRIES A GITHUB CREDENTIAL OF ITS OWN, and the older
+    "nothing below the inner workflow has one" invariant is RETIRED.** This paragraph
+    used to end "…or any process below the inner workflow", and `SPEC.md` cited
+    `/proc/<pid>/environ` as verified free of `GH_TOKEN`. That was true when the outer
+    loop's `run_host` was the only credentialed path, and it stopped being true with
+    `github_credential` (`gateway/wiring/substrate-profiles.ts`): `PROFILE_EPHEMERAL`
+    (disposable trident / agent-dispatch builds) and `PROFILE_WARM_FIRE` (the trident
+    fire seam) both set it, and `gateway/wiring/build-llm-call-substrate.ts` resolves
+    `githubSpawnEnvRef` and merges `GH_TOKEN` plus the credential helper into the spawn
+    env. Stating the retired invariant beside the shipped grant is worse than stating
+    neither, so: the grant is REAL, it is deliberate, and here is what bounds it.
+    - **Why it exists.** Measured on the owner's instance 2026-08-15: without it every
+      enterprise dispatch against a PRIVATE repo built, committed, and then died at
+      `fatal: could not read Username for 'https://github.com'`, burning a full Forge
+      round each time. A build that cannot reach its own remote is not a build.
+    - **What bounds it.** It is a PER-PROFILE decision, not a per-call one, and the
+      profile list is the audit surface: every attacker-influenced trust class
+      (`PROFILE_UNTRUSTED_IMPORT`, `PROFILE_PHASE_SPEC`, `PROFILE_ISOLATED_COMPOSE`,
+      `PROFILE_TOOLLESS_UTILITY`) is explicitly `github_credential: false`, and
+      `__tests__/substrate-profiles.test.ts` freezes that split. Resolution is per
+      spawn, so a rotated credential is never stale and a revoked one is simply gone.
+    - **What is honestly NOT bounded.** The build agent reads the repository it is
+      building, so repo-authored content (a README, a test fixture, a task card) is in
+      the context of a process that holds the owner's token — the same exposure the
+      owner's own `PROFILE_WARM_CHAT` has always had. The scope of the token is the
+      real limit here, not the process boundary. The one boundary that DOES still hold
+      below this is the codex sandbox's, described next: the wrapper's environment may
+      now hold a credential, and the `codex` child is `env -u`'d free of it.
+  - **The child shell's environment filter STAYS ON.** The sandbox grant says the shell
+    MAY reach the network; it says nothing about what environment it is handed.
+    `codex exec` filters that (`shell_environment_policy`), defaulting to
+    `inherit = "core"` plus a default exclude list of `*KEY*`, `*SECRET*`, `*TOKEN*`.
+    An earlier version of the wrapper turned both off (`inherit=all` +
+    `ignore_default_excludes=true`) to deliver `GH_TOKEN` and `GIT_CONFIG_KEY_0` to the
+    build's push, and that was wrong twice: at the time the credential was wired to
+    trident's OUTER loop only (`open/composer.ts` `run_host`), so the inner workflow that
+    launches the wrapper had nothing to inherit — `SPEC.md` records `/proc/<pid>/environ`
+    as verified free of `GH_TOKEN` and `GIT_CONFIG_*` for that build — while clearing the
+    excludes DID
+    expose the owner's Anthropic credential, which
+    `gateway/wiring/build-import-substrate.ts` puts in that same REPL environment as
+    `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY`. It handed the quota this route
+    exists to conserve to a GPT-driven `danger-full-access` shell, and bought an
+    anonymous push with it. So the defaults stay, plus
+    `-c shell_environment_policy.exclude=["ANTHROPIC_*","CLAUDE_*","KIMI_*","GH_*","GITHUB_*"]`
+    — not redundant, because the defaults catch those only by substring coincidence in
+    another project's pattern list. `--strict-config` is what stops that line becoming
+    decoration: without it an unrecognised `-c` key is accepted and ignored, so a
+    renamed field would silently stop excluding anything. The metered `OPENAI_API_KEY`
+    is `unset` before `codex` is launched, separately and earlier. The two GitHub
+    families are the NEW entries and they are the publish boundary's other half: the
+    wrapper's own environment may now hold a GitHub credential, and the build must not
+    inherit it — so on top of the config line, `GH_TOKEN` and `GITHUB_TOKEN` are
+    `env -u`'d off the `codex` process itself, one level above the CLI's filter, where
+    their absence does not depend on the CLI honouring a config key. The direction is
+    the whole design: the sandbox LOSES a capability, it never gains one.
+    `trident/codex-build.test.ts` asserts that absence against the mock `codex`'s own
+    dumped environment, with a same-family decoy (`GH_TOKEN_DECOY`, which survives) and
+    a `gh` call log showing the HOST had the token in the same run — so the negative is
+    read beside two positives rather than alone.
+  - **The HOST's ability to publish is checked BEFORE the tokens are spent.** The
+    precheck changed SUBJECT with the split, not place: it used to ask whether the
+    sandbox could push, which no longer matters, and now asks whether THIS PROCESS can
+    run the two commands it is going to run — still before `codex` is launched, so a run
+    that cannot deliver costs a round and no tokens instead of a full build reported as
+    "produced no commitSha — nothing was built". Both halves are probed, because having
+    only one is what produced the incident: `git credential fill` against the push
+    remote's host (the same helpers a real push consults) and `gh auth status` (the tool
+    that will open the PR, asked whether it can). Each MEASURES A CAPABILITY rather than
+    testing for `GH_TOKEN`, so any configured mechanism passes; ssh and filesystem
+    remotes are skipped rather than failed (a key authenticates those, never a helper);
+    a missing `gh` is a different DEFERRED message from an unauthenticated one, because
+    they are different things to install; and no secret is ever printed, logged or
+    stored. Both are `pr`-mode-with-an-origin only.
+  - **The merge mode is an ARGUMENT, not an inference.** Five checks are pr-only — the
+    remote baseline, the two publish prechecks, the publish itself, the pushed-sha
+    witness and the `gh pr list` probe — and the wrapper is handed the run's mode as
+    `$3`. Keyed instead on "does an `origin` exist", which asks about the CLONE and not the RUN,
+    any local-mode build in a clone with an unreachable origin hard-DEFERRED before
+    codex launched, every round; and a local build standing on a branch that happened
+    to have an open PR reported that unrelated PR's number where the contract says
+    null. An absent or unrecognised `$3` means `pr`, the strict side of all four.
+  - **The downstream contract is MEASURED, not narrated.** `codex exec` does accept
+    `--output-schema`, but a schema-shaped answer is still the model reporting on
+    itself and the failing case is the build that believes it committed. So after it
+    exits the wrapper WRITES a six-line `NEUTRON_CODEX_BUILD_*` trailer it read from
+    `git rev-parse --verify HEAD`, `git ls-remote`, `gh pr list`, and the diff file's
+    existence. Any value it cannot establish is EMPTY, and empty fails closed at
+    `roundLanded` and at the merge. A thin bridge agent copies those six values into
+    the result schema — the same shape the codex REVIEW seat has, because `agent()` is
+    the only primitive the workflow runtime gives this script.
+  - **The trailer is a FILE, and both shas are about THIS build.** It goes to
+    `NEUTRON_CODEX_BUILD_TRAILER_FILE` (required; the bridge `cat`s exactly that) so a
+    transcript narrating trailer-shaped lines cannot compete with the measurement on
+    disk. The trailer is also the wrapper's sole completion signal: both its success
+    and failure branches write it, so an empty or missing trailer is a hard DEFERRED
+    failure meaning the wrapper was killed before it could report. The terminal result
+    names the trailer, stderr artifact and preserved worktree, including whether that
+    worktree holds uncommitted work; it never calls this state "produced nothing".
+    The trailer and transcript are not one stream. `HEAD` is reported only when it is
+    a commit that did not ALREADY exist
+    — measured against three tips, the worktree HEAD at launch plus the local and
+    remote tips of the target branch — so neither a build that edited without
+    committing nor a re-entry that only ran `git switch` can hand back a sha it did
+    not produce. The diff path is deleted before launch for the same reason: it
+    survives between rounds, and an unrewritten one would point the panel at an
+    earlier round's diff — and when a build DID commit and wrote no diff, the wrapper
+    takes `git diff <base>..HEAD` itself rather than reporting a path it just deleted.
+    A head measured on the WRONG BRANCH is empty for the same reason a missing commit
+    is: a wrong-branch commit passes every later gate while `git merge --no-ff
+    <branch>` lands none of it, and local mode then deletes the branch that held it.
+    The measured branch name still ships and `forgeAgent` compares it, so the run stops
+    naming the branch instead of reporting an unexplained missing sha. Every remote
+    probe is wall-clock bounded and reads THROUGH A FILE — `gh pr list`, both
+    `git ls-remote` probes and the auth precheck, all through one `bounded()` helper:
+    `emit_trailer` runs on the failure path too, so an unbounded call there hangs the
+    phase instead of losing a field, and `$(…)` returns when the PIPE closes rather
+    than when the process exits, which is why the alarm alone was not a bound. `perl`
+    is a declared dependency of the wrapper, refused by name rather than surfacing as
+    a false "auth expired". `REMOTE_HEAD` is that sha CONFIRMED PUSHED — emitted only when the
+    remote tip equals it — because a fresh probe of a shared ref is what
+    `inner-workflow.mjs` forbids for `reviewedHead`: a third-party push read back there
+    would be pinned by `--match-head-commit` and certified as reviewed. That witness
+    probe is asked up to three times, and only when it FAILED: an unanswered one costs
+    the run the whole build ("produced no commitSha — nothing was built" about a build
+    that pushed), while a probe that completed has given a real answer and re-asking it
+    is the one way a true "not pushed" could become a false "pushed". The PRE-LAUNCH
+    baseline probe asks the same three times, because asking once while the witness
+    asked three was itself the bug: a blip that defeats one attempt but not three drops
+    the remote-only tip from the baseline and the witness then confirms it as pushed, so
+    a re-entry that committed nothing reports the previous round's sha as its own. When
+    all three baseline attempts fail the run exits 3 (DEFERRED) instead of building — a
+    baseline nobody measured is not a baseline, and refusing before launch costs a round
+    and no tokens. `remote_tip` distinguishes "the branch is not there" (empty) from
+    "no attempt was answered" (the literal `unknown`); a repo with no `origin` skips the
+    probe without deferring, since it cannot have a remote-only branch.
+  - **Nowhere to write the trailer is refused BEFORE the tokens are spent.** The
+    trailer-file precheck proves the path by writing it (`: > "$TRAILER_FILE"`), not by
+    testing that the variable is set: the single `>` in `emit_trailer` fails silently
+    under `set -uo pipefail`, so an unwritable path let a completed build exit 0 having
+    reported nothing, and the workflow then said "produced no commitSha" about a build
+    that built everything.
+  - **The brief carries a receipt.** The workflow reaches a shell only through a bridge
+    agent that must reproduce the whole brief in a heredoc, so the command ships
+    `<bytes>:<fnv32>` for exactly those bytes and the wrapper recomputes both before
+    spending a token — a truncated or reworded brief is DEFERRED rather than built.
+    FNV-1a/32 because the composing script has no imports and no promised host API; it
+    is a corruption check, not a signature. Its UTF-8 encoder is written out longhand
+    rather than borrowed from `encodeURIComponent`, which THROWS on the unpaired
+    surrogate a length-capped task text leaves behind mid-emoji. And the bridge gets
+    exactly one retry on that specific exit: the wrapper refuses before spending a
+    token, so a re-copy is cheap, while a copying wobble with no retry abandons an
+    already-built branch. A second identical failure is final.
+  - **No fallback to Claude, and no review of nothing.** A lane reporting
+    `not_connected`/`deferred` stops the run with the status named — re-Forging on
+    Opus would spend the quota the owner moved the phase to protect, invisibly. A lane
+    that CONNECTED and produced no sha or no diff stops too: round 1 had no
+    did-it-land gate, so an empty build reached the panel and five reviewers APPROVED
+    a change that did not exist. That gate sits after the PR capture, the `forge-done`
+    checkpoint and the Ralph re-fire — it guards the review PANEL, and an intermediate
+    Ralph task opens none.
+  - **A codex build makes the codex REVIEWER same-family.** The cross-model gate is
+    unchanged and still cannot turn a deferred review into an APPROVE, but on a codex
+    build the panel's family diversity comes from `argus:claude`,
+    `argus:adversarial` and the kimi seat.
+- **The effort cell follows the CHOSEN tier, not just the step.** The payload carries
+  `effort_supported` on each PHASE (does its default executor read one) and on each
+  TIER (does that tier read one), and both clients disable the cell when either says
+  no — the build row keeps its control on `opus` and loses it on `sol`. Both reads are
+  `!== false`, never truthiness: an older gateway omits the field, and `undefined`
+  under a truthiness test would blank every effort control at once. `applyRowEdit`
+  clears an effort the newly-chosen tier cannot use; `parsePhaseModelConfig` drops one
+  that arrives anyway and lets the write SUCCEED, because failing it
+  400s the whole PUT and makes the codex tiers unpickable for anyone who ever touched
+  the build's effort. An effort on a phase that never had a control is still an error.
+- **Otherwise a row offers only its own executor's tiers, and says so about the
+  rest.** The payload carries `groups` (every executor the step dispatches on) beside
+  `group` (its default), and `tierChoices` greys by `groups`. Every tier is listed;
+  one from a group this step cannot reach renders disabled with "<Executor> is not
+  wired for this step yet — it runs on <every executor the step reaches>", and one this
+  install cannot run with the reason that NAMES THE MISSING PIECE — never disappearing.
+  The surface answers availability from the SAME resolvers the build uses (the shared
+  `kimiConfigured()` that `resolve_kimi_configured` also uses), and from ALL THREE
+  preconditions of "can codex run here", via one function
+  (`codexExecutorAvailability` in `trident/codex-credential.ts`, called by
+  `open/composer.ts`): a credential (`resolveActiveCodexHome`), the `codex` CLI, and
+  `perl`. The wrapper hard-fails on each — exit 10, exit 11, exit 3
+  `CODEX_BUILD_NO_PERL` — so the pane and the run cannot disagree. It returns
+  `{ usable: true }` or `{ usable: false, reason }` rather than a boolean, because the
+  gate grew from one condition to three while the string stayed "needs a Codex
+  connection", sending an owner whose login was fine to a `codex login` that changed
+  nothing; the surface derives `available` FROM the reason, so a greyed tier without an
+  explanation is unrepresentable. Both PATH probes require an executable REGULAR FILE —
+  `X_OK` alone passes for any directory named `codex`.
+- **One step is never two rows, and a follower is never settable.**
+  `build_mechanical` is the build step under the planner's internal `[mechanical]`
+  tag; it DECLARES that it follows `build` (`TridentPhase.follows`), the workflow's
+  `phaseOverrideFor` hands it `build`'s setting UNCONDITIONALLY, and neither the
+  surface's `phases` nor its `defaults` renders it. All three are required: inheriting
+  without hiding is a row showing `sonnet` beside a run that dispatched the owner's
+  codex tier, and hiding the row while still accepting a value for the key leaves a
+  stored override the owner can neither see nor clear — which kept `[mechanical]`
+  tasks on Anthropic after Build moved to codex. `parsePhaseModelConfig` rejects the
+  key by name, so the PUT 400s and the read path drops a value stored before the rule.
+- **A refused stored value degrades visibly.** `model` must name a tier (the old
+  literal-id escape hatch is closed: a bare id carries no transport). A retired tier
+  or a legacy literal is rejected at the boundary, the phase falls back to its
+  default, and the payload's `rejected` map lets the row show it struck through with
+  what is running instead. The workflow backstops the same case by logging
+  `trident.phase-override IGNORED … reason=unknown-tier` and keeping the default.
+- **Scope is install-wide and the pane says so.** Storage is
+  `instance_metadata.trident_phase_models` keyed by instance slug — there is no
+  project dimension, so the section is labelled "every project on this computer"
+  rather than pretending to one.
+- **The chain is asserted end to end**, not per layer:
+  `trident/__tests__/cross-model-dispatch.test.ts` runs the REAL `buildWorkflowArgs`
+  output through the REAL `inner-workflow.mjs` and asserts the resolved id lands on
+  the subprocess command line (`CODEX_REVIEW_MODEL='gpt-5.6-terra'`,
+  `CODEX_BUILD_MODEL='gpt-5.6-terra'`), with a positive control beside every absence
+  assertion. `trident/codex-build.test.ts` spawns the wrapper against real temporary
+  git repositories — including a real bare origin and a sha256 repo — and drives it
+  into each state the trailer must tell the truth about.
+- **Review executor topology.** `review_adversarial` joins `build` and
+  `build_mechanical` in declaring `alsoRunsOn: ['codex']`; that declaration makes GPT
+  tiers selectable and is mirrored by the route in `trident/inner-workflow.mjs`.
+  Selecting one changes the adversarial seat from an Anthropic `agent({model})` call
+  to a thin command bridge that runs `trident/codex-review.sh`. The bridge exports
+  both `CODEX_REVIEW_MODEL` and the adversarial rubric, so the subprocess still tries
+  to refute the change rather than silently becoming the generic cross-model seat.
+  `review_rubric` remains Claude-only by default and by capability. CLI tiers expose
+  no effort control; the clients derive that from the selected tier's transport.
+  A deferred or dead codex-backed adversarial seat remains a missing core seat and
+  is forced to `REQUEST_CHANGES` by `enforceCrossModelGate`.
 
 ## Voice-note transcription — the owner picks the backend (`gateway/transcription/`)
 
@@ -3013,7 +3546,13 @@ separate change).
   **hang watchdog** (`trident/orchestrator.ts`, `NO_ADVANCE_HANG_MS` = 25 min)
   reaps a non-terminal run whose `last_advanced_at` has not moved — a suspected
   zero-token agent hang — to `failed` with a named reason, so it surfaces on the
-  Plan item + fires the terminal notification instead of stalling silently.
+  Plan item + fires the terminal notification instead of stalling silently. A
+  **launcher crash is not a dead build**, though: a gateway restart/deploy that
+  kills the warm REPL's child is caught by §1a-crash in `trident/orchestrator.ts`,
+  which atomically claims the crashed row (`TridentRunStore.beginCrashRecovery`)
+  and relaunches it as a continuation from its persisted branch/PR/checkpoint,
+  bounded by the durable `crash_recoveries` budget (default 3) and carrying the
+  measured gateway boot timestamp in the latched failure reason.
 - **▶ play button + on-disk spec persistence (M1).** A Plan card created from a
   NON-TRIVIAL ask now persists the FULL context to a real, user-visible markdown
   doc so it survives session resets and drives the build. `work-board/spec-doc.ts`
@@ -3780,20 +4319,154 @@ with no declared `path`, so the tab survived only in the mobile pre-fetch
 placeholder and vanished the moment `/tabs` answered.
 
 **Push delivery** (`gateway/push/`). A fired reminder also reaches the owner's
-registered devices. `open/composer.ts` builds ONE `DevicePushTokenStore` and
-hands it to both halves — `/api/app/devices/{register,unregister}` (what the app
-calls on every sign-in/sign-out) and `createPushDispatcher`, supplied as
-`composition.push_dispatcher` and attached by `build-core-modules.ts` to
-`ReminderTickLoop.on_fired`. Three properties make it safe to run unconditionally:
-it fires only AFTER a successful nudge dispatch, so push never announces a
-reminder the owner was not already being told about; with zero registered tokens
-`dispatch` returns before issuing any HTTP request, which is the state of every
-fresh install; and a ticket Expo marks `DeviceNotRegistered` DELETES that token
-row, so a dead device is retried once rather than on every reminder forever
-(other ticket errors — rate limits, credential problems — never prune). Failures
-are caught inside the tick, so an unreachable Expo cannot stop a reminder from
-being marked fired. `EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are
-merely rate-limited.
+registered devices, **as a chat-message notification** — there is no
+reminder-shaped and no ritual-shaped notification. `open/composer.ts` builds ONE
+`DevicePushTokenStore` and hands it to both halves:
+`/api/app/devices/{register,unregister}` (what the app calls on every
+sign-in/sign-out) and `createPushDispatcher`, which is now purely the Expo
+TRANSPORT.
+
+The notification is COMPOSED BY THE DELIVERY SEAM. `createDeliver`
+(`gateway/http/deliver.ts`) takes a `notify` sink and calls it for every post that
+got a DURABLE row — `'reply'` (a fired reminder or ritual) and `'inert'` (the
+morning brief, the idle nudge, the overnight report, a system notice) — and never
+for `'none'`, a transient live-only pill with no row for a tap to land on. So every
+out-of-turn producer notifies identically, because a notification is a property of
+the seam rather than of any one producer. (Composing it in
+`gateway/proactive/reminder-outbound.ts` instead was the first attempt: it cured the
+reported message and left every other producer silent, which is the same
+per-producer mistake `deliver` exists to have ended.)
+
+The payload comes from the pure builders in `gateway/push/chat-message-push.ts`:
+title = the project (or `General`), body = the first part of the posted message
+truncated on a word boundary, data = `{ kind: 'agent_message', message_id,
+project_id }`. `project_id` is ALWAYS present; the no-project General scope names
+itself with `GENERAL_RAIL_ID`, defined once in `wire-types/topic-id.ts` and pinned
+to the client's constants by `app/__tests__/general-scope.test.ts`. Omitting it for
+General — the first attempt again — is malformed to every app bundle already
+installed, and a store artifact cannot be upgraded in lockstep with a self-hosted
+gateway.
+
+General has THREE spellings and they are not interchangeable — the rail id
+`'~general'`, the client chat scope `''`, and the HTTP path segment `'general'` —
+so every mobile client that talks to a project-scoped surface maps through
+`app/lib/general-scope.ts`. `reminders-client.ts` was the one that did not: it
+interpolated the rail id raw, and `sanitizeProjectId` rejects `~`, so General's
+Reminders tab and every legacy reminder push tap rendered `invalid_project_id`.
+Note that `encodeURIComponent` does NOT help here — `~` is unreserved and passes
+through unchanged, which is why an "it encodes the segment" test cannot catch this.
+
+Every out-of-turn producer in the Open composer delivers to the owner's BARE
+`app:<user>` topic (suffixing it is the PR #105 deliver-to-nobody bug), so in
+practice every notification is General-scoped and its tap opens the General chat —
+which is where the message actually landed. `chatMessagePushScope` also parses the
+project form `app:<user>:<project>`, the topic the mobile client binds when a
+project chat is open, for the first producer that posts into one.
+
+It used to be composed on the reminder TICK, from the reminder ROW
+(`push_dispatcher` → `ReminderTickLoop.on_fired` → `pushReminder`). All four are
+DELETED (2026-08-09). The tick can only see the row, and a ritual row's `message`
+IS the dispatch token `ritual:<id>` — so the owner's notification literally read
+`ritual:kaizen`, and it carried the instance slug where the tap needed a project
+id. Both symptoms were that one mistake.
+
+Four properties make push safe to run unconditionally: it fires only AFTER a
+durable chat row exists, so a notification never points at a transcript that has
+no such message; with zero registered tokens the transport returns before issuing
+any HTTP request, which is the state of every fresh install; a ticket Expo marks
+`DeviceNotRegistered` DELETES that token row, so a dead device is retried once
+rather than on every send forever (other ticket errors — rate limits, credential
+problems — never prune); an idempotent re-emit (`was_new: false` with
+`was_delivered: true`) is NOT re-notified, so a reconnect re-render or a retried
+approval prompt cannot buzz the owner about a message already in his chat — with the
+ButtonStore contract's exception honoured, since a row he never saw
+(`was_delivered: false`) still needs the notification; and a notification failure is
+swallowed inside `deliver`,
+because an escaping throw would be read by the reminder tick as "the post did not
+happen" and would re-post the same message next tick. The Expo POST also carries an
+`AbortSignal.timeout`, since it is now awaited inside a durable delivery and a
+stalled connection would otherwise park the fire.
+
+That re-emit suppression only works because `deliver` also WRITES the value it reads.
+`was_delivered` comes from `button_prompts.delivered_at`, whose only writers had been
+the onboarding engines — so for one round of review the suppression was INERT: no row
+`deliver` created was ever stamped, the condition could never be true, and the
+double-buzz continued. `deliver` now calls `ButtonStore.markDelivered` after the owner
+has ACTUALLY been reached, which is why `ChatMessagePushSink` resolves a boolean rather
+than `void`: it reports whether a DEVICE was reached, and it FAILS CLOSED. Reading
+`PushResult.ok` is not enough — `ok` means only "no HTTP/network exception" and is
+`true` with `delivered: 0` in two ordinary cases, zero registered devices (the
+dispatcher short-circuits before Expo is called, the state of every fresh install) and
+a batch where every ticket errored. The sink therefore requires a numeric
+`PushResult.delivered >= 1` and treats a result that reports no count as not
+delivered. `delivered` is in turn COUNTED from `status: 'ok'` tickets rather than
+derived as `attempted - errored`, because a 200 carrying fewer tickets than messages
+(or none) made subtraction report a full delivery on a response that accepted nothing —
+which put the zero-delivery stamp back by a second route.
+Stamping is deliberately skipped when nothing was reached, so a message
+that persisted while every transport failed still buzzes on the retry instead of being
+silenced forever. Only `durability: 'reply'` is stamped — `persistInertAgentTurn` writes
+`delivered_at` in its own INSERT. The notification is additionally bounded at 3 s
+(`DEFAULT_NOTIFY_TIMEOUT_MS`) so it can never hold a delivery open: `POST
+/api/app/system-notice` awaits `deliver` to answer its caller, and the only limit
+underneath was Expo's 10 s PER BATCH. A timed-out notification counts as not sent — the
+bound abandons it rather than cancelling it, so a merely-slow send can still land after
+being reported not-sent and the next re-emit will buzz again. That trade is deliberate:
+a duplicate buzz is visible, and the alternative (stamping on no evidence) silences the
+message forever.
+
+The notification is NOT gated on `delivered_live`, deliberately. Android keeps the
+app-ws socket open while the app sits in the background, so a live socket is a render,
+not a read receipt; gating on it would silence exactly the case a notification exists
+for.
+`EXPO_ACCESS_TOKEN` is optional; anonymous sends work and are merely rate-limited.
+
+**But it IS gated on WEB PRESENCE** (2026-08-15), which is the same question asked with a
+real answer instead of an inference. The owner: *"can you also check if I'm actively using
+the web app, and if so dont send push notifications to my phone."* A socket cannot answer
+that — a browser tab holds one open while minimised exactly as Android does — so the web
+client now SAYS so: `chat-core/web-session.ts` sends `{ v:1, type:'presence', state }` on
+every socket open, on every `visibilitychange` (wired at
+`landing/chat-react/useNeutronChat.ts`, which also states the level once on mount because
+`visibilitychange` is an edge), and then repeats `foreground` every
+`WEB_PRESENCE_REFRESH_MS`. The app-ws surface records it per CONNECTION — not per device,
+so two tabs are two screens and closing one does not mark the owner absent — and ONLY for
+`platform=web` sockets, because a native client's foreground is the device's own question
+(`app/lib/push-foreground-policy.ts`, which is untouched and still suppresses the banner
+for the conversation on screen; a push never sent and a push sent-but-not-shown are
+different things).
+
+The decision itself is one wrapper, `suppressPushWhileWebForeground`
+(`gateway/push/web-presence.ts`), applied at the SINGLE `buildChatMessagePushSink`
+construction in `open/composer.ts`, so both pushing paths — `createDeliver`'s `notify` and
+the `ownsNotify` branch of the app-ws send — inherit it and cannot disagree. A suppressed
+push answers `false`, so the row is NOT stamped `delivered_at` and a later re-emit is still
+free to buzz him.
+
+Every uncertain case biases toward NOTIFYING, because the failure this feature can cause is
+SILENCE and nobody notices silence: a `foreground` claim is believed for
+`WEB_PRESENCE_TTL_MS` and no longer (derived as 3× the refresh in
+`wire-types/web-presence.ts`, so the two numbers cannot drift apart), so a browser killed
+without a close frame is forgotten within a minute; an absent tracker, an unknown owner and
+a THROWING presence check all read as not-present; and the decoder refuses any `state` it
+does not recognise rather than treating "not background" as present.
+
+**The tap** (`app/lib/push-deep-link-dispatch.ts`). `agent_message` resolves to
+`/projects/<id>/chat?message_id=<id>`, and the chat route CONSUMES that param:
+`app/app/projects/[id]/chat.tsx` threads it as `targetMessageId`, and
+`ChatSyncSurface` feeds it to `chatDeepLinkAnchor`
+(`app/lib/chat-core/chat-initial-anchor.ts`) twice — once at render, joining
+`projectId` in the frozen-anchor key so a COLD open from a tap anchors the
+latch-friendly way, and once in an effect that calls `scrollToIndex` ONCE per
+target, which is the only way to re-anchor a project whose transcript is ALREADY
+mounted (FlashList applies its initial scroll once and latches
+`isInitialScrollComplete`). Both paths ask the same function, so they cannot land
+in different places. The rule prefers the unread run's START when the referenced
+message is inside it (§ ISSUES #505) and the referenced row itself when it is
+behind the read watermark. With no pushed id, nothing scrolls imperatively. A
+`reminder` kind is still DECODED to `/projects/<id>/reminders?reminder_id=<id>` even
+though nothing sends it any more: a store-published app and a self-hosted gateway do
+not upgrade together, and notifications already in the shade still carry it.
 
 ## Ritual executor — approval-gated code rituals (`reminders/`)
 
@@ -3840,9 +4513,13 @@ ritual content in chat.
   what must be recorded about it? A `nudge` answer composes the row's stored
   message; a `skipped` answer (the fail-closed verdict) writes a durable
   `code_ritual_runs` 'skipped' row and posts NOTHING; a `fire` answer writes a
-  durable `'running'` row and composes the APPROVED PROMPT — on the owner's own
-  warm `cc-agent-*` session, through the same `llm.compose` call and the same
+  durable `'running'` row and composes the APPROVED PROMPT — on the warm BACKGROUND
+  compose session (`cc-nudge-*`), through the same `llm.compose` call and the same
   `deliver()` outbound a nudge uses — then settles the ledger `finished`/`failed`.
+  That session was `cc-agent-*`, the owner's chat REPL, until 2026-08-16: one
+  aborted compose poisoned it and he could not chat until the service restarted
+  (see the AS_BUILT entry). The lane is still ONE fire path with the live-chat
+  `--tools` surface — it simply no longer runs inside the session he is talking to.
   A `silent` ritual skips the success post; a failure posts one one-line notice and
   escalates once per 3-consecutive-failure streak. `reapOrphanRitualRuns` still
   reaps prior-boot orphaned `'running'` rows to `'crashed'` at boot and prunes runs
@@ -3973,6 +4650,107 @@ ritual content in chat.
     (`code_ritual_runs`, no file surface), so kaizen can see which rituals exist by
     globbing `rituals/*.md` but not whether they ran; and live session transcripts
     are SQLite-only, so it reasons from the corrections log and diary instead.
+
+## Owner-approved host deploy — request → approve → execute (`open/host-deploy.ts`)
+
+**The instance holds no deploy capability. It holds the ability to ASK.** A request
+crosses the privilege boundary; a capability never does. Nothing here grants the
+instance deploy rights, host filesystem access, or a privileged credential — the
+only thing that changes is that a deploy can be put in front of the owner, with
+the actual commit list attached, and performed by his explicit act.
+
+The problem it closes: work merged into Open did not reach the box the owner
+actually uses, and **nothing on that box deploys on its own** — its only timers are
+a lane sweeper, a credential rotator, a CLI update doctor and a backup. A deploy
+happens when a human runs one. From the inside that total absence is
+indistinguishable from "deploys land on their own and just lag".
+
+**The flow, in three steps.**
+
+1. **REQUEST** — the agent calls `host_deploy_request` (`gateway/wiring/host-deploy-tool.ts`,
+   registered into the same `neutron` tools registry the tools-bridge advertises, so
+   the REPL sees `mcp__neutron__host_deploy_request`). The service
+   (`open/host-deploy.ts`) resolves what would be deployed: the sha the host runs
+   now (`HEAD`), the target sha for the named ref, and the commits between them.
+   A remote-tracking ref is fetched from its remote with a bounded timeout so the
+   target is current and its objects are available for the approval commit list;
+   a local ref or raw sha is resolved locally (`open/host-deploy-runtime.ts`, over
+   the shared `gateway/git/git-exec.ts` wrapper). READ-ONLY here means the instance
+   cannot change what the host runs: neither the working tree, `HEAD`, nor deployed
+   state is mutated. It then mints a `prompt-user`
+   `tool_approvals` row (`tools/approval.ts`, migration 0004) and emits a
+   CODE-rendered Approve/Deny prompt through the SAME durable `deliver` seam ritual
+   approvals ride. It returns `pending_approval`. **Nothing is dispatched.**
+2. **APPROVE** — the owner taps. The tap is captured deterministically at turn start
+   by the live-turn approval seam (`gateway/wiring/build-live-agent-turn.ts`), which
+   the composer chains across the ritual handler and this one; each returns null for
+   a token that is not its own (`rap:` vs `hdp:`). Eligibility is an EXACT opaque
+   token that was a real offered button on a recent prompt, from the owner's user id.
+   Silence, a timeout, "yes", a paraphrase and any non-owner speaker — the agent
+   included — can never flip the row, so **an agent can never approve its own
+   request**.
+3. **EXECUTE** — the target ref is RE-RESOLVED. If it moved, the approval is STALE:
+   it is killed, nothing deploys, and the owner is told the new sha and asked again.
+   Otherwise the row is CLAIMED — `respondApproval` (`tools/approval.ts`) does its
+   `UPDATE ... WHERE status='pending'` and reports the affected-row count in one
+   transaction, and only the caller it tells `true` may act. ONE authenticated call
+   then goes to the configured control-plane endpoint. The outcome — landed, or
+   refused, or unreachable — posts back to the same chat.
+
+**The claim, not the check, is the gate.** Everything in step 3 before the claim
+happens across `await`s, so two taps arriving in the same tick both see a pending
+row and both pass the stale check. Gating the dispatch on the affected-row count is
+what makes "exactly one deploy" true: two Approves dispatch once, and an Approve
+that interleaves behind a Deny dispatches nothing. A check that a row *was* pending
+is not a claim that this caller *made it* stop being pending.
+
+**A grant has a lifetime.** A pending approval older than five minutes is refused on
+the ANSWER, against the row's own `requested_at` — not left to a sweep, because
+`ApprovalManager.expireStale()` has no production caller on this box. A documented
+window that nothing enforces is not a window.
+
+**The approval renders the commit list, and that is the security.** The owner is the
+only gate, so the thing he is gating has to be legible in the message he taps: the
+current pin, the target sha, and every commit between them (capped at 40 rendered,
+with the true remainder counted — never silently truncated). An approval whose
+content the approver cannot see is a rubber stamp with extra steps. Commit subjects
+are stripped of bidi / zero-width / C0 characters — including CR and LF, the
+line-overwrite and line-forging payloads — and wrapped in a backtick fence longer
+than any run inside them, because a commit subject is chosen by whoever lands the
+commit and the button body is Markdown-rendered.
+
+A ROLLBACK is rendered the same way, from the other direction: when no commits sit
+between the current pin and the target, the approval itemizes the commits the host
+is running now that would be TAKEN AWAY. The content of a rollback is what it
+removes, and an empty block above a warning is the same rubber stamp in reverse.
+
+**The approval binds to ONE sha.** Without the re-resolve, "approve" would quietly
+mean "deploy whatever is newest when this executes" — a different and unbounded
+permission.
+
+**No control plane configured → VISIBLE and DISABLED, with the reason.** A
+self-hoster has no endpoint to call. Both tools still register and still answer:
+`host_deploy_status` reports `enabled:false` and points to Settings → Integrations,
+where the owner can add the generic names `host_deploy_url` and `host_deploy_token`.
+Those rows exist only when an owner adds them. No default endpoint is ever
+fabricated. An option that silently disappears is how a missing capability stays
+invisible for weeks — the rule the model-tier pane follows.
+
+**The endpoint and credential resolve from `ProjectCredentialStore` at CALL time**,
+never captured at composition time (a credential read at composition time is a
+credential that is never there — Decisions Log 2026-08-07). The URL uses the same
+named-value store because that avoids adding a product-specific setting slot; it is
+ordinary configuration, not a secret, and remains visible in useful diagnostics.
+The token never enters a prompt, log line or chat message: it rides an `Authorization`
+header and everything the control plane says is run through
+`scrubHostDeploySecrets` before it is shown or logged — **scrubbed first, then
+truncated**, because the scrubber matches the whole secret and a value cut by the
+length cap would otherwise leave a real prefix of itself behind. A credential too
+short for the scrubber to redact safely is refused as configuration rather than
+accepted and printed: one constant governs both ends.
+
+**A refused contract gate is a NORMAL outcome.** The host saying "the deploy window
+is closed" reads as one sentence in chat, not as a crash.
 
 ## Proactive messaging — idle-nudge sweep (`gateway/proactive/`)
 
@@ -4646,10 +5424,13 @@ the left, the whole fill green under 85%, amber to 95%, red past it. It is the
 divider, not a widget beside one — so it costs no layout and no attention until
 the colour changes.
 
-**Exactly ONE credential is described.** The reading is always the credential the
-box is dispatching with right now. There is no pooling, no averaging, and no
-multi-account concept anywhere in this path — a deployment that swaps credentials
-underneath simply gets the new one measured on the next tick.
+**Exactly ONE credential is described HERE.** The meter's reading is always the
+credential the box is dispatching with right now. There is no pooling, no
+averaging, and no multi-account concept in this path — a deployment that swaps
+credentials underneath simply gets the new one measured on the next tick. The
+readings the probe produces are also persisted, and the surface that reads that
+history is multi-pool and multi-account: see **Usage dashboard** below. The two
+are deliberately different scopes of the same measurement, not two sources of it.
 
 - **Where the numbers come from — `auth/credential-usage-probe.ts`.** Anthropic
   reports utilization on the response headers of an authenticated API call
@@ -4662,7 +5443,16 @@ underneath simply gets the new one measured on the next tick.
   token check, not an LLM call site; it carries no owner content, no `system`
   field and no signature. `parseUnifiedRateLimitHeaders` is exported as a pure
   function so any other consumer of these headers shares one definition of which
-  header means what.
+  header means what — and it takes `now` as a PARAMETER rather than reading a clock,
+  so every consumer also shares the plausibility bound below rather than being able to
+  opt out of it by accident. Each `…-reset` instant is bounded after conversion, the
+  same rule Kimi's equivalents get: refused more than 30 days out (a header already in
+  milliseconds, multiplied again, rendered as a countdown of "11574074d 1h" with
+  nothing flagging it) or more than five minutes of clock skew in the past. A refused
+  instant is absent, and an absent instant renders "unknown" — never "now". The API
+  base is threaded from the composition env (`ANTHROPIC_BASE_URL`, the variable the
+  Anthropic SDK itself reads), so a box pointed at a gateway keeps its gauge pointed
+  where its turns go.
 - **Which credential — `open/active-credential.ts`.** Walks the same precedence
   `resolveOpenLlmPool` uses, resolving one tier further than dispatch needs:
   `CLAUDE_CODE_OAUTH_TOKEN`, then `ANTHROPIC_API_KEY` (per-token billing — no
@@ -4704,6 +5494,244 @@ underneath simply gets the new one measured on the next tick.
   before the meter existed. The clients never coerce a missing number to zero: an
   empty coloured track would assert "0% used", which is a claim, and the whole
   purpose of the unavailable state is that there is none to make.
+
+## Usage dashboard — every connected account, and when capacity comes back
+
+The meter says how full ONE window on ONE credential is. The dashboard answers the
+two questions a single reading cannot, for every provider this instance can see:
+**"is this going to run out before it resets"** (pace, and the cap-out projected
+off it) and **"when does capacity COME BACK"** (a countdown to each window's
+reset). They are opposite questions and both ship — pace says when the wall
+arrives, the countdown says when it moves, and the second one is the input to the
+throughput decision of whether to raise build concurrency.
+
+- **The series — `migrations/0121_usage_pool_samples_account_grain.sql`,
+  `persistence/usage-samples-store.ts`.** One row per (instant, pool, account),
+  30-day retention, pruned by the writers' own ticks. The key carries the account
+  because the dashboard answers a per-account question: two accounts of one pool
+  measured in the same millisecond must be two rows, not one overwrite that serves
+  the second account's numbers under the first one's name. `account_label` is
+  `NOT NULL` with an empty-string sentinel for "nothing can name this account" —
+  a nullable column in a primary key is not a key, since SQLite compares NULL to
+  NULL as unequal — and the store maps that sentinel back to `null` at the
+  boundary, so no surface can mistake it for a name. `session_window_ms` /
+  `weekly_window_ms` carry the window LENGTH the provider reported: pace divides
+  by it, lengths are not a constant across providers, and Codex has already
+  changed regime once, so a series that straddles the change is summarised
+  per-sample rather than with one global constant. A utilisation outside `[0, 1]` is
+  not a reading and is refused HERE, on the write side and again on the read side,
+  because this is the boundary every writer crosses: `Number.isFinite` alone lets a
+  negative through, and a negative fraction divided by elapsed renders as a NEGATIVE
+  pace — "−0.2×", which the card paints as comfortably within the refill rate. The
+  Kimi parser refuses negatives at its own edge; the Anthropic header path does not
+  (`numberHeader` returns any finite parse), so one writer's guard was never the
+  property. Above 1 is refused rather than clamped, because a percent under a
+  fraction's name clamped to 1.0 is an unreadable field rendered as a confident
+  "fully spent".
+- **Pools — `UsagePool = 'anthropic' | 'codex' | 'kimi'`.** Every pool is served
+  every time, in `USAGE_POOLS` order, so a provider can vanish from the screen
+  only by being deleted from that list. Codex has no writer yet (its gauge is
+  harvested from real `codex` runs and lands with the lane writers). With no Codex
+  credential it renders "Not connected."; WITH one it renders `no_gauge` — "this
+  build doesn't meter this provider yet" — and never a row of zeros. `connected`
+  would be wrong there: it means "empty because the first reading has not landed
+  YET", and no writer records `pool: 'codex'` in this binary (the positive controls
+  `pool: 'anthropic'` and `pool: 'kimi'` both appear in `open/composer.ts`), so the
+  card would promise a tick from a poller that does not exist. The state disappears
+  by deletion when the Codex gauge lands — no flag, no second path.
+- **The second gauge — `open/kimi-usage-monitor.ts` + `trident/kimi-usage-probe.ts`.**
+  Kimi publishes no rate-limit headers, so its standing is read from
+  `GET {KIMI_BASE_URL}/v1/usages` on a 10-minute `SupervisedLoop`, armed
+  unconditionally beside the credential probe; the key is read PER TICK from the
+  credential store the Settings pane writes, so a key entered now is metered
+  without a restart. The endpoint is **account-wide** — two keys on one
+  subscription return the same numbers — so per-key attribution is never
+  fabricated and the card is titled accordingly. The response schema is not
+  published: the parser accepts a written-down alias set and answers
+  `unrecognised` (logging the KEY NAMES it saw, never values) for anything else,
+  which writes NO row and leaves the card ageing. Units are checked, not trusted:
+  a percent above 100 and a fraction above 1 are refused rather than clamped — and
+  refusing a PRESENT field never falls through to another alias, so
+  `{used_percent: 150, utilization: 0.5}` refuses the entry instead of answering 0.5
+  under the broken field's meaning. A percent-named value INSIDE `(0, 1]` is
+  ambiguous (`used_percent: 0.85` is either 0.85% or 85%, and dividing anyway is the
+  optimistic reading that paints an 85%-spent window as a 1% bar), so it is resolved
+  from the SAME payload where that payload proves the scale and refused where it does
+  not: a field carrying fractions can never exceed 1, so a sibling window reading
+  `used_percent: 64` is positive proof that this response writes percents. The
+  inference is one-directional — no fraction payload can produce the evidence — and is
+  scoped per payload and per key name. Without it, a healthy 5-hour window sitting at
+  1% beside a readable 64% weekly window discarded BOTH windows and painted the
+  permanent-fault banner ("check the key, then the logs") on a gauge that was answering
+  correctly, flapping in and out of it as the short window crossed 1%. Every reset
+  instant is
+  plausibility-checked against the clock after conversion, so a seconds value read
+  as ms (1970) or an ms value converted again (year 57,000) fails loudly instead of
+  rendering. That plausibility bound is ASYMMETRIC, and each side is measured in the
+  thing that actually bounds it. Going FORWARD it is ONE WINDOW LENGTH, scaled per
+  entry, because a rolling window of length L resets within L and window length is not
+  a constant. Going BACK it is CLOCK SKEW and nothing more (five minutes): the current
+  window's reset is always ahead of now, so the only legitimate past instant is the one
+  that rolled moments ago. Scaling the PAST allowance with the window was itself a
+  defect — it let a five-hour window absorb a reset four hours old, and a reset that
+  has passed reads downstream as "the window rolled, this account is free", so a
+  99%-spent account rendered "1 available now". A PARTIAL read is refused outright for
+  the same reason: one unreadable entry — an unmodelled shape, a missing length, or a
+  second window landing in an already-filled slot — or a list carrying only ONE of the
+  two windows discards the whole response, because nothing downstream can tell a sample
+  carrying one window from a provider that only HAS one window, and an account whose
+  weekly figure was silently dropped would render as one with no weekly limit at all.
+  `KimiUsageSample`'s two windows are non-nullable, so that invariant is a type rather
+  than a habit. TRANSPORT OUTCOMES ARE SPLIT BY WHETHER WAITING HELPS: 401/403 is a
+  dead key, any OTHER 4xx except 408 and 429 is a `rejected` request — permanent, and
+  the likeliest first-install failure given the path is unverified — and a 2xx whose
+  content type is not JSON is `unrecognised` carrying that content type, because the
+  other shape a wrong path takes is a 200 serving an HTML page. Folded into the
+  transient arm, both of those retried every ten minutes forever behind "No readings
+  yet.", a sentence promising a reading that could not arrive. Timeouts, 5xx and
+  transport failures stay transient, and the card keeps ageing.
+- **Staleness is shown, never hidden.** Every reading carries its age, on every
+  card, not only the stale ones. A reading older than its pool's deadline
+  (`POOL_STALE_AFTER_MS` — each polled pool's cadence plus ONE missed probe of
+  grace PLUS the clients' own poll interval, because the deadline is checked on the
+  client against a payload refetched every `USAGE_POLL_MS` and a written row can be one
+  poll away from being on screen; all three are pinned against the pollers' and the
+  clients' own intervals by `open/__tests__/usage-dashboard-wiring.test.ts`) renders
+  FLOORED — "≥ 43%" plus
+  its age — while its window is still running, and unfloored once the window has
+  rolled, because "at least this much" stops being true after a reset. Codex has no
+  cadence (its gauge is harvested, not polled) and therefore gets a flat 30-minute
+  MAX AGE instead: "no cadence" must never become "never stale", or a three-week-old
+  harvested reading would claim "available now" beside a "21d ago" chip. Pace is
+  computed **as of the measurement**, never as of the render clock: dividing a
+  stale fraction by an elapsed-since-now would report a calmer and calmer burn the
+  longer a writer has been dead.
+- **Capacity is the WORST window, never the soonest reset.** A FRESH reading is
+  believed — rolled (the instant has passed) → available; spent (≤5% headroom) →
+  returns at its reset; spent with no instant → unknown; room → available. "Spent" is
+  compared on the FRACTION side (`fraction >= 1 - SPENT_HEADROOM_FRACTION`) rather than
+  by subtracting, because `1 - 0.95` is `0.050000000000000044` in binary floating point
+  and the subtraction form put a window at exactly 95% used one float epsilon on the
+  OPTIMISTIC side of a constant whose whole job is to err pessimistic. A STALE
+  reading proves only that its window was AT LEAST this spent, and only while that
+  same window is still running, so it yields a countdown when it says spent and
+  `unknown` otherwise — including when its window has since rolled, where
+  consumption restarted and nobody measured what followed. An account's standing is the worst of
+  its two, so a 5-hour window resetting in 17 minutes is not reported as capacity
+  while the 7-day window is spent for another three days. **And an account with only
+  ONE of its two windows measured has no standing at all**: a null window is the
+  absence of a measurement, not a measured zero, so ranking the windows that happen to
+  be present and reporting that as the account is the same defect reached by the other
+  road. The measured half still renders in full and only the capacity claim is
+  withheld, with the chip naming the reason. The pool line —
+  "1 available now (5h window 75% used)", or
+  "Next capacity in 3d 0h (7d window; 5h window 98% used)", or "Next capacity
+  unknown" — names the binding window and the other window's utilisation, carries the
+  headline account's own headroom even when it IS available (available is a boolean;
+  the throughput decision it feeds is not), and counts an account nobody can vouch for
+  out loud rather than quietly excluding it. TIES ARE BROKEN BY HEADROOM AT BOTH
+  LEVELS, and neither is cosmetic: every `available` standing ranks equal, so inside an
+  account the tie names the window closest to constraining it, and across a pool the
+  tie names the account with the MOST room. Left to payload order the pool tie kept
+  whichever account was measured most recently — so a pool holding one account at 94%
+  used and one at 5% headlined the spent one and pointed "Next up:" at it. A window
+  whose reset has PASSED counts as fully open in both tie-breaks and is rendered "just
+  reset" rather than at its pre-roll percentage, because its stored fraction describes
+  a window that no longer exists; ranking it anyway printed "1 available now (5h window
+  99% used)" beside a row saying that same window was available.
+- **Store the instant, render the delta — and NOTHING on the wire is a delta.**
+  The payload carries only facts that do not age: each reading's `measured_at`,
+  each window's length, reset instant, pace and projection (both anchored at the
+  measurement), and the pool's `stale_after_ms` THRESHOLD. The age, the staleness
+  verdict, the "≥" floors and every capacity standing are computed by the clients
+  in `projectPool`, on every paint, against their own clock — which ticks on a
+  30-second interval. `persistence/usage-samples-store.ts` cannot bake a delta
+  because `summariseWindow` takes no `now` at all. That is structural rather than
+  reviewed, and it is the difference between a card that ages honestly across a
+  dead poller and one that insists "just now, available" for as long as the tab
+  stays open: both clients fetch once and hold the payload between fetches.
+  `CapacityStanding` is a TAGGED union (`available` / `returns` / `unknown`) rather
+  than a nullable number, so a client cannot render "unknown" as "now" by writing
+  `if (!ms)`; its `returns` arm carries a strictly-positive `in_ms` computed at
+  projection, which is what makes the sentence "capacity in ‹countdown›" unable to
+  render "capacity in available now".
+- **Serving — `gateway/http/app-usage-surface.ts`, `GET /api/app/usage/dashboard`,
+  composed in `open/composer.ts`.** Owner-gated, always 200. Each pool carries a
+  `connection` of `connected` / `not_connected` / `no_meter` / `no_gauge` /
+  `unreadable`, resolved
+  from the SAME functions the rest of the product uses (`kimiConfigured`,
+  `resolveActiveCodexHome`, `resolveActiveCredential`) — a per-token API key is
+  `no_meter`, not "not connected", because telling the owner to reconnect a
+  working account sends them to fix the wrong thing. TWO OF THE FIVE EXIST BECAUSE
+  "No readings yet." IS A PROMISE, and each is a case where nothing can keep it.
+  `unreadable`: the gauge was asked and its
+  answer could not be turned into a reading (a rejected key, a non-auth 4xx from a path
+  this build has wrong, or a payload shape it does not model) — the realistic
+  first-install failure against Kimi's unpublished schema. `no_gauge`: the credential
+  is fine and NOTHING IS POLLING that provider in this build, so no tick is even going
+  to be attempted. They are kept apart because they send the owner to different places
+  — a refusal is a fault to go and fix, an unshipped phase is not.
+
+  IT IS DECIDED BY THE LIVE PROBE, NEVER BY A CREDENTIAL FILE, and on BOTH pools that
+  have a writer. `resolveActiveCredential` answers "is a credential present", which is
+  a different question from "does upstream still accept it" and performs no validity
+  check — so a revoked Anthropic token resolved as connected forever while its 401
+  wrote no sample, leaving the one pool with a shipping writer stuck on "No readings
+  yet." So the composer reads `CredentialUsageMonitor.readStanding()` for Anthropic and
+  `KimiUsageMonitor.readStanding()` for Kimi, PER REQUEST and never latched, so a card
+  recovers the moment a tick succeeds; a transient failure stays `connected` on both,
+  because the next tick retries and a dropped packet must not repaint the card.
+
+  THE NOTE IS A BANNER, NOT A REPLACEMENT FOR THE ROWS. Samples are retained thirty
+  days, so the refusal that actually happens is a pool that read fine for a week and
+  then had its key rotated — behind an "only when the card is empty" gate that card
+  kept ageing silently with nothing saying its figures were the last that would ever be
+  read. The last known values keep rendering with their age chips beside the sentence.
+  An empty refused card still shows no number: loud and empty, never a zero.
+  `open/__tests__/usage-dashboard-unreadable-wiring.test.ts` boots the real composer
+  against a loopback server answering with an unmodelled body, and
+  `open/__tests__/usage-dashboard-lapsed-wiring.test.ts` does the same against one
+  answering 401 with a subscription token on disk; both assert the composed payload,
+  each with a positive control that a pool nobody asked is not reported unreadable.
+- **Both clients — `landing/chat-react/SettingsTab.tsx` (Model usage) and
+  `app/app/usage.tsx`,** over the twin clients `landing/chat-react/usage-dashboard-client.ts`
+  and `app/lib/usage-dashboard-client.ts`. One card per provider, side by side,
+  each in its own unit and never summed: the three providers meter different
+  things, so a combined headline would be a number about nothing. No dollar figure
+  appears anywhere — the subscription is flat, so a currency value would assert a
+  marginal cost the owner does not incur. The formatters are executed side by side
+  by `gateway/__tests__/usage-dashboard-client-parity.test.ts`, because a
+  divergence there is the failure nobody reports: each screen stays
+  self-consistent and the owner gets two different answers about one quota. That
+  parity test is also where the CAPACITY POLICY is pinned, because the policy is a
+  function of the render clock and therefore lives in the clients: `projectPool` is
+  executed on both copies over the same payload at the same instant and the results
+  are compared whole.
+- **And both screens REFETCH on `USAGE_POLL_MS` (30s), on the same interval that
+  advances the render clock.** Computing the deltas at paint is what ages a card
+  honestly across a DEAD poller; on its own it is a slow lie in the other direction,
+  because a screen that only advanced its clock would walk a HEALTHY install into
+  staleness — the Anthropic pool's deadline is two and a half minutes
+  (`60_000 × 2 + 30_000`, the constant rather than a round number in prose), so the
+  card would floor its gauges and drop capacity to "unknown" that soon after the
+  screen opened while a live poller wrote a fresh row every 60 seconds. One timer
+  drives both, so the data and the clock it is measured against cannot drift, and the
+  parity test bounds the RELATIONSHIP rather than the number
+  (`USAGE_POLL_MS × 2 < min(POOL_STALE_AFTER_MS)`, importing the store's own
+  deadlines), so a pool cannot get a deadline tighter than the screens can keep up
+  with. Each screen has a mutation-checked test: a tick that advances the clock and
+  does not refetch turns it red.
+
+  AND THE POLLS ARE SEQUENCED, because they overlap. The interval does not wait for
+  the previous response, so two requests are routinely in flight together and a slow
+  one settling LAST would win by arriving late — repainting a reading already known to
+  be superseded, wearing the newer one's age chip. That is fabricated freshness, the
+  one class this surface exists to prevent, reached from the client side. Each load
+  takes a generation number and a superseded response is dropped rather than rendered.
+  A counter rather than an `AbortController`: a late reading is still a good reading
+  and the next tick is seconds away, so there is nothing to gain by cancelling it —
+  only a discarded one to avoid painting. Both screens pin it with two gated responses
+  released newest-first, and removing the guard turns each red.
 
 ## Message search (chat-history FTS) — `@neutronai/chat-core` + `@neutronai/message-search`
 
@@ -4869,9 +5897,16 @@ indicator. No feature flags — one live path.
     turn (no dup reply, no double LLM spend, no double Bash/Write/Edit side
     effects).
   - **#3 gap-free reconnect** — `session_ready.last_seen_seq` + a
-    `{type:'resume',after_seq}` replay of everything after the client's cursor,
-    so a reply emitted during a socket blip is recovered (no orphaned "hung"
-    reply).
+    `{type:'resume',after_seq}` replay of the NEWEST page after the client's
+    cursor, so a reply emitted during a socket blip is recovered (no orphaned
+    "hung" reply). A page that came back FULL is reported as `history_gap
+    {older_than}`, and the client asks for the page below it with
+    `{type:'resume',after_seq:0,before_seq}` — up to
+    `MAX_HISTORY_BACKFILL_ROUNDS` pages per catch-up, restarting from its own
+    oldest applied seq on the next one, so a transcript longer than one page
+    completes instead of keeping a permanent hole. Both halves are needed: the
+    server is the only party that knows a page was capped, and the client is the
+    only party that knows what it already holds.
   - **#4 receipts / reactions / edits** — persisted + fanned as `receipt_update`
     / `reaction_update` / `edit_update`, replayed on resume.
   - **#4b answered prompts (ISSUES #415 + #419)** — a `button_choice` is CLAIMED
@@ -4904,6 +5939,14 @@ indicator. No feature flags — one live path.
   a real "replying…" affordance for their full duration. The legacy `web:` path's
   `agent_typing_start`/`agent_typing_end` is the prior art; this collapses it into
   one app-ws envelope with a `state` discriminator.
+  Typing tracks the live TURN, not the presence of streamed text. It is
+  level-triggered when a socket connects and edge-triggered thereafter:
+  `on_session_open` reads the same `activeChatProjects` set as the project rail and
+  sends a catch-up `start` only to that socket when its scope is working, so turn
+  state is resynchronised on connect even when no text partial has arrived. The
+  catch-up is a read, not a refcount transition, so it neither changes nesting nor
+  extends the fail-safe. It still bypasses the durable adapter: typing describes
+  only the live present and must never enter history or a `resume` replay.
 - **#7 live history-import progress (`AppWsOutboundImportProgress`).** A long
   ChatGPT/Claude import (minutes, for hundreds of conversations) previously showed
   no live progress on the app-ws surface: the engine's `import-running-cron` emits
@@ -5089,6 +6132,12 @@ indicator. No feature flags — one live path.
 > fresh onboarding renders + advances over the single socket; Documents + Admin
 > tabs render.
 
+The integrations status endpoint and its rendered Admin view cover bundled Core
+credential slots only. Credentials used by non-Core features can live in the
+same `SecretsStore` but are deliberately not enumerated by this view; the JSON
+payload carries a `scope` description and the web client renders it so an absent
+row cannot be interpreted as proof that no credential is connected.
+
 ## Message reactions (Track B Phase 4, slice 3) — `@neutronai/chat-core` + app-ws
 
 Per-message emoji reactions across the web + mobile chat stack, MIRRORING the
@@ -5178,15 +6227,73 @@ deleted, no dual path):
   The orchestrator `step` HARVESTS that row by `runId` each tick: `parseInnerResult`
   decodes the typed column (non-null = harvest-ready), then it advances the state
   machine deterministically in TS — never an LLM-parsed line.
+- **A REVIEWER THAT DIES IS A BLOCKED ROUND, NEVER A DEAD LANE:** every review seat
+  is dispatched through ONE chokepoint, `seatAttempt` in
+  `trident/inner-workflow.mjs` (both core reviewers, `argus:codex`, `argus:kimi`,
+  `argus:synthesis`, the CI probe, the branch-head probe). Every way a seat can fail
+  to produce a usable verdict — a rejected promise (an API 529, a timeout), a
+  synchronous throw, a subprocess exit, a null/undefined/non-object reply, an object
+  with no `verdict` — collapses to the SAME `null` the panel already handles:
+  `retryDeferredPeers` re-dispatches the seat once (bounded, because a 529 is
+  transient), and a seat still empty after that is declared missing, blocked by
+  `enforceCrossModelGate` with a finding NAMING the seat, and classified
+  `infra-only` so the loop stops instead of re-Forging against nothing.
+  `reviewRoundOrInfraBlock` is the outer half of the same guard: a review round may
+  not throw, whatever else inside it does. The failure direction is always a BLOCK —
+  the only value invented is `null`, which is not a verdict — so a panel that lost a
+  seat can never merge (the cross-model rule in `trident/kimi-review.ts`: a review
+  that did not happen may never become an APPROVE, and never falls back to a
+  Claude-family model). Before this, one dying reviewer ended the whole lane at
+  `checkpoint: 'inner-error'` with no verdict, discarding a finished build and every
+  review already paid for.
+- **A REVIEW ROUND HAS PRECONDITIONS:** before any Argus seat is dispatched,
+  `trident/inner-workflow.mjs` reads the PR's mergeability and the named `test`,
+  `lint`, and `typecheck` jobs. A branch conflicting with its base is deferred
+  immediately. An absent job is UNKNOWN rather than passed or failed; a queued or
+  running job is retried three times by the readiness probe, without incrementing
+  or dispatching the review round. Exhausted retries defer with the exact conflict
+  or check name and recovery. Only a mergeable PR where every named job has a
+  terminal result enters the existing panel. A terminal failure still enters the
+  panel and then follows the existing red-CI fix path: "ran and failed" is distinct
+  from "never ran". Local mode remains unchanged because it has no PR checks.
 - **SERVER-GATED verdict provenance:** a merge-eligible `APPROVE` is honoured ONLY
   when the Argus phase's OWN recorded `inner_checkpoint = 'argus-approved'` (written
   by the synthesis-phase Bash step) backs it — a self-asserted `APPROVE` in the
   result line with no recorded provenance is REJECTED to `failed`, never merged.
+- **A MERGE IS TERMINAL (ISSUES #563):** the run lifecycle ENDS where the change
+  ships. The inner loop probes the PR's merge state the instant a Forge round
+  returns — ahead of the review panel, the Ralph re-fire, the round-1 empty-build
+  refusal and any round increment — and a merged PR ends the run right there
+  (`inner_checkpoint = 'pr-merged'`, result `{prMerged:true, verdict:'APPROVE',
+  blockKind:'none'}`, no `reviewedHead`). It had to be probed rather than signalled:
+  the loop-continuation decision is the fix loop's `while` condition (verdict /
+  round / blockKind — no fact about the PR in it) while the merge is performed by a
+  DIFFERENT component (`orchestrator.applyResult` → `cleanupAfterMerge` → `mergePr`,
+  strictly after this workflow's result is harvested) or by an agent INSIDE the run,
+  and the workflow never re-reads its own row (`checkpoint.sh` only WRITES). Before
+  this, a lane that merged spent roughly another review cycle — measured at ~19
+  minutes — fixing a branch the merge had deleted, silently: a merged PR is green,
+  so nothing downstream complains. The OUTER loop reads `pr_merged` BEFORE the
+  verdict branches and finishes the run WITHOUT touching the remote (a second
+  `gh pr merge` on a merged PR fails, which would record a shipped change as
+  `merge failed`). Only GitHub says "merged": one fixed `gh pr view <n> --json
+  state,mergedAt`, classified in JS, where unreadable is `unknown` — never "merged"
+  and never "not merged".
+- **…and a deleted branch is NOT a lost round (#563 × Open #148):** the round-lost
+  guard decides by reading the branch head, and a merge DELETES the branch, so a
+  merged run presents to it as the failure it exists to catch. `roundOutcome`
+  (`inner-workflow.mjs`) is the one place the two are ordered: the merge question is
+  asked BEFORE any `round-lost` verdict is written, and only a non-merge lets the
+  head comparison speak. The guard's behaviour for a fix round that genuinely never
+  pushed is unchanged.
 - **Per-phase SQLite checkpointing (C1) + idempotent crash-resume (C2):** the
   workflow's own `agent()` Bash steps `UPDATE code_trident_runs` mid-run
   (`inner_checkpoint` = `forge-done` / `argus-approved` / `argus-request-changes`
   / `fix-round-N`; timestamps via `date -u +%FT%TZ` since `Date.now` is
-  unavailable in a workflow). A workflow is session-bound (`resumeFromRunId` is
+  unavailable in a workflow). Each checkpoint also records the branch head OID it
+  APPLIES TO (`inner_checkpoint_head`, migration `0122`) in the SAME atomic
+  UPDATE, plus the findings an `argus-request-changes` was recorded with
+  (`inner_checkpoint_findings`) — see MID-LOOP RESUME below. A workflow is session-bound (`resumeFromRunId` is
   same-session only) and the background workflow does NOT survive a process exit,
   so **the tick loop owns liveness**: a persisted `subagent_run_id` THIS process
   never fired + no `inner_result` yet is an ORPHAN → re-fire a FRESH workflow that
@@ -5199,7 +6306,36 @@ deleted, no dual path):
   Migrations `0089` (`workflow_run_id` / `inner_checkpoint` / `inner_verdict`) +
   `0091` (`inner_result`, the harvest signal — WORKFLOW-OWNED; the orchestrator
   only ever reads it, never writes it, so a launch `save()` can't clobber the
-  detached workflow's out-of-band write).
+  detached workflow's out-of-band write) + `0122` (`inner_checkpoint_head` /
+  `inner_checkpoint_findings`, WORKFLOW-OWNED for the same reason and excluded from
+  `save()`/`saveIfActive()`, since a checkpoint NAME paired with a stale OID is
+  exactly what a resume must never read).
+- **MID-LOOP RESUME — the comparison, not the checkpoint name, is the gate:** a
+  relaunched run skips forward past work a dead process already paid for, but ONLY
+  over code the prior phase's outcome is actually about. `classifyResume`
+  (`trident/inner-workflow.mjs`) compares the RECORDED `inner_checkpoint_head`
+  against a live `git ls-remote` (pr) / `git rev-parse` (local) probe of the branch
+  head. **Equal** → the prior verdict is about exactly this code: non-Ralph `forge-done` /
+  `fix-round-N` → skip the Forge build and review the recorded commit (the diff is
+  regenerated as `git diff <base>..<oid>`, BY OID — a branch name is a moving
+  target); `argus-request-changes-round-N` (+ recorded findings) → skip the re-review and
+  go straight to the fix round, inheriting the spent round budget so the cap keeps
+  bounding across crashes; `argus-approved` → skip build+review and let the OUTER
+  loop merge. **Different, unreadable, an abbreviated/malformed sha, a NULL OID (a
+  row written before `0122`), a checkpoint name it does not know
+  (`ralph-task-built`), Ralph `forge-done` (whose remaining-task count was not recorded),
+  or a diff that could not be regenerated** → REBUILD and
+  RE-REVIEW. `reviewedHead` — the OID the outer merge pins with
+  `--match-head-commit` — may only ever be set from the RECORDED value or from a
+  Forge agent's own reported `commitSha`, NEVER from the live probe (#545): a probe
+  can name a commit pushed after the review, and a pin manufactures confidence
+  nobody earned. Behavioural coverage in `trident/inner-workflow-resume.test.ts`
+  asserts which phases did NOT run, since a "resume" that silently re-runs
+  everything is the old behaviour wearing a new name.
+  The outer publisher's `outer-published:<oid>:<remaining>:<round>` checkpoint uses
+  the same classifier. Its encoded OID has precedence over the companion OID
+  column, but never over the live-head equality check; after equality is proven,
+  its diff path and Ralph counters are restored without rebuilding or planning.
 - **Orchestrator surface:** `Workflow` is now on the live-chat agent's constant
   `DEFAULT_TOOL_NAMES` (`build-live-agent-turn.ts`) so the owner's orchestrator
   REPL can fire background tridents directly + stay responsive (readies the
@@ -5207,12 +6343,45 @@ deleted, no dual path):
   the dedicated warm `cc-trident-fire-*` substrate (one warm pool entry per repo
   cwd, since the persistent pool keys on instance not cwd, and the workflow's
   `isolation:'worktree'` forks from the fire turn's git cwd).
-- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` scans `git
-  worktree list` for the deterministic `trident/<slug>` branch and removes it on
-  every path (independent of Forge's return value — the harness only auto-cleans
-  an UNCHANGED worktree, and a Forge build always commits). `merge.ts` adds the
-  OUTER backstop (best-effort `git worktree remove --force` + `prune` after a
-  landed merge), flipping the old "NO `git worktree remove`" lock.
+- **Worktree cleanup ENFORCED (D-1/C3):** the workflow's `finally{}` runs the
+  checked-in `trident/worktree-cleanup.sh` against the deterministic
+  `trident/<slug>` branch on every path (independent of Forge's return value —
+  the harness only auto-cleans an UNCHANGED worktree, and a Forge build always
+  commits). `merge.ts` adds the OUTER backstop (best-effort `git worktree remove`
+  + `prune` after a landed merge), flipping the old "NO `git worktree remove`"
+  lock.
+- **…but cleanup is NEVER destructive (ISSUES #541):** that `finally{}` also
+  fires on THROW and ABORT — exactly when Forge died mid-edit — and it used to be
+  a cheap-model agent told to "ignore individual command failures" while running
+  `git worktree remove --force` + `git branch -D`. On PR #171 it destroyed 197
+  insertions across 7 files. The decision is now deterministic shell with no LLM
+  judgement in it: a worktree that is DIRTY (uncommitted changes **including
+  untracked files**) or unverifiable is PRESERVED, its paths printed, exit 3; a
+  clean one is removed with a plain `git worktree remove` (no `--force`, so git's
+  own dirty check is a second gate); the pr-mode `git branch -D` runs only once
+  `git ls-remote` proves origin holds the same sha (local mode never deletes it).
+  `merge.ts` applies the same gate to every worktree removal it does, and fails
+  the merge with "trident PRESERVED uncommitted work at `<path>`" rather than
+  letting git's raw "already checked out at `<path>`" be the operator's notice.
+  Preserve-by-default only works if it never cries wolf, so: git's stderr is kept
+  out of both probes (a warning on a clean tree is not a dirty path), the SHARED
+  CHECKOUT is skipped entirely (git refuses to remove a main working tree, and
+  `merge.ts` legitimately parks it on a feature branch — a branch it still holds
+  is reported `KEPT … reason=checked-out` at exit 0), the dirt probe requires
+  `rev-parse --show-toplevel` to name the path itself **in both copies** (else a
+  registered path that has stopped being a worktree root reports the enclosing
+  repo's dirt as its own; the shell says `SKIPPED … reason=not-a-worktree-root`),
+  and **only exit 3** means preserved work — 2 is a usage error, 127 a bad script
+  path, and the caller reports those as a cleanup FAILURE that inspected nothing.
+  The gate also cannot break itself: the script's output is capped (a 20k-line
+  dirty tree would push the `RESULT` line out of the transcribing agent's window
+  and invert the alarm), the exit code is read from two sources so a string `"3"`
+  or a dropped field still counts, and the lone network call (`ls-remote`) runs
+  with `GIT_TERMINAL_PROMPT=0` plus a `timeout` deadline so a black-holed origin
+  cannot hang a `finally{}` nobody is watching. A preserved DIRTY merge worktree
+  does wedge every retry — the path is run-keyed and stable — which is the
+  deliberate trade: a wedged merge is recoverable, a force-removed conflict
+  resolution is not, and the error names the path and the way out.
 
 **Prod-boot wiring — what's live in the Open self-host gateway:**
 
@@ -5294,7 +6463,7 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   (`trident/state-machine.ts`): the phase graph
   `forge-init → {argus | ralph-plan} → ralph-task → … → argus ⇄ forge-fix
   → done` with terminal `done | failed | stopped`, the Argus round cap
-  (`max_rounds`, default 8) and the Ralph plan↔task round cap
+  (`max_rounds`, default 10) and the Ralph plan↔task round cap
   (`max_ralph_rounds`, default 20). The pure `computeTransition` owns the
   control flow; `deps.classify` reads the sub-agent outcome. PR-2 shipped
   `stubAdvanceDeps` (always "running"); PR-3 supersedes it with a real
@@ -5333,8 +6502,12 @@ state-machine skeleton; **PR-3 wired the real agentic loop** (below).
   atlas/sentinel SYSTEM personas (`prompts/{atlas,sentinel}.md` via
   `@neutronai/prompts` `loadPrompt`, `trident/agent-prompts.ts` → `dispatchAgent`).
   `trident/merge.ts` fills the
-  `'pr'` (`gh pr merge --squash`) and `'local'` (`git merge --no-ff`) merge
-  bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
+  `'pr'` (`gh pr merge --squash --match-head-commit <reviewed OID>` — #545: the
+  merge is PINNED to the commit the reviewed diff was generated from — the
+  building agent's reported `commitSha`, never a fresh head probe — carried in
+  `inner_result.reviewedHead`, so a head that moved after the APPROVE fails
+  LOUDLY instead of shipping unreviewed code) and
+  `'local'` (`git merge --no-ff`) merge bodies — **no `git worktree remove`** (Open uses plain branches). Battle-
   tested the legacy harness fixes are mapped (see `trident/legacy-fixes.test.ts`): no
   phantom-id poll, no silent exit, loud fail on a missing Ralph
   `REMAINING_TASKS`, the `max_rounds`/`max_ralph_rounds` caps, the
@@ -5415,6 +6588,291 @@ window, so a fresh agent each iteration cannot forget what was agreed.
 Threading the production gateway credential closure into a live
 `TridentDispatch` so boot drives the loop (and the run-creation call site that
 calls `detectRalphMode`) is PR-5.
+
+## Concurrent publishes and the AS_BUILT log — the entry-aware merge driver (`scripts/git/`)
+
+Concurrent builds used to conflict on two shared documents. One is closed: each
+build writes its plan to `.trident/plans/<branch>.md` (#302), so there is no
+shared plan file left to fight over. The other is `docs/AS_BUILT.md`, which is
+**canonical and single by owner lock** (#304) — the split into one file per
+entry was tried and reversed.
+
+That file is newest-first, so every build prepends its entry at the SAME OFFSET
+under the SAME header lines. Two builds therefore write different bytes against
+identical context, which conflicts by construction, not by bad luck: three
+concurrent publishes died on that file and nothing else on 2026-08-15T23:20Z.
+
+The fix is a git merge driver that works on **whole entries**:
+
+- `scripts/git/as-built-log-merge.ts` — the pure three-way merge. It splits each
+  side into a preamble plus `## ` entries, treats an entry present on one side
+  and absent from the base as an ADDITION, and UNIONS the additions. Retained
+  entries keep their existing order (the log is only loosely ordered
+  historically, and re-sorting 300 entries would bury a one-entry change);
+  additions are placed newest-first among them. It is entry-aware and never
+  line-aware on purpose — a `union` driver would interleave two entries, and
+  **every ambiguous case is biased toward refusing.** Concretely, **a removal is
+  honoured only when BOTH sides made it**: a base entry present on one side and
+  absent from the other is a conflict, whatever the surviving side did to it. An
+  earlier rule refused only when a side kept NONE of the base's entries, which
+  let the ordinary failure through — a side truncated to its newest two entries
+  clears a zero-survivor guard with one entry to spare, and every older entry
+  then reads as "deleted by us, untouched by them" and is dropped under a
+  success nobody diffs. Against the real 308-entry log that is 307 entries gone.
+  The zero-survivor guard is still there, ahead of the general rule, only because
+  it names the wholesale-truncation case in a sentence an operator can act on.
+  Entry boundaries ignore `## ` inside a fenced block, and a fence is closed only
+  by its OWN delimiter, at least as long as the one that opened it, with nothing
+  after it: a `~~~` quoted inside a backtick fence used to end the block early,
+  which made the sample heading below it parse as a real entry and let concurrent
+  additions land INSIDE somebody's code block. Fence indentation is bounded at
+  CommonMark's three spaces — `^\s*` accepted any, so a four-space-indented
+  ` ``` ` (which CommonMark reads as ordinary indented-code text) opened a block
+  that swallowed every heading after it. The delimiter's trailing group is
+  `[^\n]*` and **not** `.`, because JavaScript's `.` excludes a carriage return:
+  with `(.*)` the pattern matched **nothing at all** on a CRLF file, so no fence
+  ever opened there and the tracker silently did not run on the one input class
+  where its absence corrupts the file. (Interleaving inside one entry is what
+  produced broken TypeScript in an earlier incident — hence entry-aware.)
+- A refusal also records **whether git may be asked to finish it**
+  (`wouldLoseEntries`). This is the difference between refusing and refusing
+  *effectively*: to a line-based merge a one-sided deletion is a clean hunk, so
+  `git merge-file` resolves it, exits 0 and writes no markers — measured, 3 of 21
+  headings surviving. So a refusal about a MISSING ENTRY is terminated by the
+  driver itself (both sides written whole between conflict markers, non-zero
+  exit, the reason on the marker label), while a textual disagreement — two
+  rewrites of one entry, a diverged header, a file that is not this log — is
+  still delegated, because there git's own three-way is a real answer and is
+  exactly the pre-driver behaviour. **Which kind a refusal is depends on the
+  BASE, not only on the sides.** "Neither side parses as an entry log" was
+  reported as delegable unconditionally — but against an entryful base that is
+  the largest history-loss case in the file, neither side keeping anything, sat
+  one guard above the rule that refuses the strictly smaller case of ONE side
+  keeping nothing. Measured, `git merge-file` conflicts when the two truncations
+  differ and resolves to a file with no entries when they match, so the loud
+  outcome was git's accident rather than the driver's decision.
+- **And the ORDER the refusals are found in is part of that guarantee.** Each one
+  was individually right about its own flag while the function returned whichever
+  the base reached first — so a header disagreement (checked before the base is
+  scanned at all) or a both-sides-rewrote-this-entry refusal from the middle of
+  the scan was returned while a one-sided deletion further down went unexamined,
+  and the driver delegated a file that git then resolved the deletion out of.
+  Measured end to end on a 10-entry base with entry 1 rewritten on both sides and
+  entry 7 dropped from `ours`: markers around entry 1 only, `entry 7` gone, 11
+  headings in and 10 out. A refusal that fires about the wrong thing and loses
+  the entry anyway is indistinguishable from no refusal. A textual refusal is now
+  HELD until both scans complete; a losing one returns immediately, because
+  nothing outranks it.
+- **An undated FIRST entry is "no date", not "the oldest date".** Effective dates
+  carry forward, so the `''` sentinel survives only where nothing before an entry
+  was ever dated — an undated section at the very top of the log. Every addition
+  compares `sortDate >= ''`, so that one entry admitted all of them above it and
+  a dated addition landed OVER an undated preface. An entry with no effective
+  date now orders nothing. Unreachable against the real log, which holds 314
+  entries and ZERO undated ones — the docblocks that said "ten sections carry no
+  date" were last true around `d5ba62b7`, and the correction matters beyond the
+  number: this subsystem has no coverage from the real file and is exercised only
+  by fixtures.
+- An **added undated section** sorts at the date of the entry it continues, not
+  at `''`. Sorting at `''` put it below every real date, i.e. at the very tail of
+  the file, hundreds of entries away from the entry whose text it continues; one
+  added under an entry the base already had is emitted directly after that entry,
+  and one added under an entry **the other side added in the same merge** is
+  folded into that entry's run. The last case is the one an anchor resolved only
+  against base entries could not see: both sides write the same heading, only one
+  writes the follow-up under it, and the section then date-sorted on its own —
+  measured landing ABOVE its own head, because the tie broke on heading bytes.
+- `scripts/git/as-built-merge-driver.ts` — the `%O %A %B %L %P` CLI git calls. A
+  TEXTUAL disagreement it will not merge (both sides editing one entry, a
+  diverged header, a file that does not parse as a log) is handed to
+  `git merge-file`, so that floor is exactly today's behaviour: conflict markers
+  a human reads. A refusal about a MISSING ENTRY, and an unexpected throw, are
+  conflicted here instead — see `wouldLoseEntries` above. It also checks `%P`, so
+  a checkout that points `merge=as-built-log` at other paths through its own
+  `.gitattributes` gets git's merge for them rather than this log's semantics.
+  **`%L` is the one input the checkout supplies, and it is clamped.** git derives
+  it from the path's `conflict-marker-size` attribute, which a TRACKED
+  `.gitattributes` in the merged repo sets — verified by handing git a driver
+  that prints `%L` and reading back a committed `2000000`. The conflict this
+  driver constructs writes that many characters three times, so one refusal grew
+  from 302 bytes to 6,000,281, linearly. Capped at 200 (git's default is 7),
+  **on both conflict paths**. The first cut of the cap covered only the
+  constructed conflict and left `git merge-file` handed `%L` unclamped, on the
+  reasoning that the delegated path must stay byte-for-byte what an unconfigured
+  repo does. That reasoning is false here and the next bullet is why: without the
+  driver this path is `merge=union`, which never conflicts at all, so an
+  unconfigured repo writes **zero** markers rather than six megabytes of them.
+  There was no floor property to protect. (git does not bound `%L` either —
+  measured at the same 6 MB from `git merge-file` alone.)
+- `scripts/install-merge-drivers.sh` — installs the driver config AND the
+  binding. **The binding lives in `.git/info/attributes`, not in a tracked
+  `.gitattributes`** — and the reason is the measured one rather than the
+  dramatic one this used to give. There are TWO ways to have the attribute
+  without a working driver and they do not behave alike (git 2.50.1):
+  `merge.<name>.name` set with no `.driver` is `fatal: … lacks command line`,
+  exit 128; **no `merge.<name>.*` config at all is not fatal** — git falls back
+  to its built-in text merge, exit 1 with ordinary markers. A fresh clone is the
+  second state, so a committed attribute would not brick it; it would silently
+  swap the `merge=union` this path gets today for a conflict on every concurrent
+  append, for every outside contributor and for CI, and leave each of them one
+  stray `merge.<name>.name` away from the 128. Untracked, the attribute is never
+  present without the driver it names — the same rule `install-git-hooks.sh`
+  applies to the leak gate and its denylist. The two half-states are also not
+  symmetric: **attribute without driver is the bad half and is impossible**
+  (written last, and removed again if the driver cannot be read back), while
+  **driver without attribute is inert and IS reachable** (a failed `mkdir`/append
+  exits 3 loudly and leaves the config). The guarantee is "never the bad half,
+  always loudly" — not "never a half".
+- **`--check` verifies WHAT is installed, not merely THAT something is.** It used
+  to ask whether `merge.<name>.driver` was non-empty and whether the attribute
+  line was present, and answered "installed" to any command — so a clone that ran
+  an EARLIER version of the installer reported success while still holding that
+  version's command, and the credential scrub and interpreter-isolation flags
+  never reached it. Measured on git 2.50.1 before the fix: install, replace the
+  config value with the predecessor's `bun <driver> %O %A %B %L %P`, leave the
+  attribute alone, and `--check` printed `merge drivers: installed`, exit 0. It
+  now reports `STALE` (exit 1) with both strings and the remedy, and `NOT
+  installed` stays distinct from `STALE`.
+- **…but WHERE the check runs is not part of WHAT is installed.** The first cut
+  of the above compared the whole command byte-for-byte, and two of its words are
+  absolute paths belonging to the shell asking rather than to the hardening: the
+  driver path came from `${BASH_SOURCE[0]}`, and the config it is compared
+  against lives in the COMMON git dir and is shared by every worktree; the bun
+  path came from `command -v` at check time. So a linked worktree reported a
+  correctly-installed clone STALE (measured on git 2.50.1), contradicting the
+  script's own promise that installing once serves every worktree — and following
+  the remedy it printed from a throwaway worktree wrote that worktree's path into
+  the shared config, where it dangled once the worktree was removed. `--check`
+  now reads both paths back OUT of the installed command, feeds them to the same
+  `driver_command` the install uses, and requires the rebuild to reproduce the
+  configured string byte for byte. Every hardening token is still exact; the two
+  free words are validated for what they must BE — the driver is an
+  `as-built-merge-driver.ts` that exists, the bun is a regular executable file
+  whose final component is `bun` — which also catches a dangling command that
+  parses perfectly and cannot run, and means the check no longer needs a bun on
+  `PATH` at all. Install resolves the driver from
+  the MAIN worktree, so a throwaway checkout cannot write a path that dies with
+  it.
+- **…and three things that PARSE correctly still are not an install.** Each of
+  these rebuilt byte-for-byte and reported `installed`. (1) The interpreter was
+  gated on `[ -x ]`, which is true of nearly every file on a unix box:
+  `/usr/bin/true`, the DIRECTORY `/usr/bin`, and `/bin/sh` all passed. That is
+  not cosmetic — git ran `true`, which exits 0 having written nothing to `%A`, so
+  git took the merge as SUCCESSFUL and one side's entries left the log with no
+  conflict and no message (measured on git 2.50.1: the mainline heading present,
+  zero of the side's). The word must now be a regular executable file named
+  `bun`, judged by NAME rather than by running it — executing a binary named in
+  repo config to decide whether it is safe to let git execute it answers the
+  question by doing the thing. The same three conditions apply at install time,
+  so the check can never reject a command the installer wrote. (2) The attribute
+  line's PRESENCE was being read as the path's BINDING; attributes are
+  last-match-wins, so a later `docs/AS_BUILT.md merge=union` overrides the driver
+  while a `grep -x -F` for the installed line still matches. The verdict now
+  comes from `git check-attr`, the resolver git itself uses. (3) The command
+  names the MAIN worktree's copy on purpose, so the path can be current while the
+  CODE behind it is an older revision; the contents are compared against the
+  invoking checkout's copy. That last one reports STALE for a linked worktree on
+  a differing revision, which is true rather than a false alarm, and its message
+  says re-running will NOT change it — the installer would rewrite the same path.
+  `--check` has no programmatic caller (`CONTRIBUTING.md:118-120` and this
+  document describe it as a human command), so no build gates on that verdict.
+
+**What "the repo merges exactly as it does today" means here, precisely.** It is
+**not** a conflict: `.gitattributes` gives `docs/AS_BUILT.md` `merge=union`,
+which never conflicts and interleaves the two sides line by line. The driver's
+attribute lives in `$GIT_COMMON_DIR/info/attributes`, which git resolves BEFORE
+the tracked `.gitattributes` (measured with `git check-attr merge -- <path>` with
+both present), so a successful install genuinely displaces `union`; an
+unsuccessful one leaves `union` in charge, which is worse than a conflict and is
+the honest floor. The tracked line stays, because removing it would hand every
+fresh clone, outside contributor and CI job the conflict storm it was added to
+stop.
+
+`rebaseOntoObservedBase` (`trident/orchestrator.ts`) binds the driver before it
+replays a branch, so build lanes get this without anyone remembering.
+`ensureAsBuiltMergeDriver` writes the same halves the script does — the driver
+config, then the (cosmetic) `merge.<name>.name`, then the attribute, and the
+attribute only if the driver config landed — **directly, and it executes nothing
+out of the checkout**. The command it configures is *this installation's*
+`scripts/git/as-built-merge-driver.ts` under the interpreter already running
+trident, invoked as `bun --config=/dev/null …`.
+
+**That flag is load-bearing, not tidiness.** git runs a merge driver with its cwd
+at the top of the working tree being merged, and bun reads `bunfig.toml` from its
+cwd — so naming a trusted script is not sufficient while the checkout still
+supplies the configuration that script starts under. A repository committing
+`preload = ["./anything.ts"]` had that file executed inside the driver process,
+before any of our code, on every merge of this path. Measured on bun 1.3.9: with
+the preload present the child printed the `GH_TOKEN` it found in its environment;
+with `--config=/dev/null` it printed nothing and the driver still ran. What was
+measured is the **cwd** `bunfig.toml`, which is the one an untrusted checkout
+controls; nothing here depends on the flag's effect on `$HOME`. The
+property to hold is that **nothing the target checkout contains — not a script,
+not a config, not an environment file, not a `PATH` — decides what runs on the
+publisher host.** Both halves of that are pinned with a control that produces the
+credential before the treatment suppresses it
+(`scripts/git/as-built-merge-realgit.test.ts`,
+`trident/as-built-publish-wiring-realgit.test.ts`).
+
+**`--config` does not cover `.env`, and the credential does not belong there at
+all.** bun auto-loads a `.env` from that same cwd — the merged repository —
+independently of `bunfig.toml`; measured on bun 1.3.9, with `--config=/dev/null`
+alone a checkout's `.env` still reached `process.env` inside the driver, and with
+`--env-file=/dev/null` it did not. Separately, the command is prefixed with
+`env -u GH_TOKEN -u GITHUB_TOKEN -u GIT_CONFIG_COUNT -u GIT_CONFIG_KEY_0 -u
+GIT_CONFIG_VALUE_0`, so the owner's credential and the helper that reads it back
+are simply not in the environment of a process that reads three files and writes
+one. Two independent controls — one over what can get **in**, one over what is
+there to **take** — because "nothing can get in" has already been stated
+confidently and been incomplete twice on this code path. The wiring test proves
+each fails on its own: with the interpreter unconfigured but the credential
+scrubbed, the injected payload still runs and finds nothing.
+
+That matters because the publisher's `run_host` carries the owner's `GH_TOKEN`
+(`open/composer.ts` composes it via `makeLazyCredentialedHostRunner` over
+`github/credential.ts` `githubProcessEnv`). The first cut took the *presence* of
+`scripts/install-merge-drivers.sh` in the checkout as its condition and then ran
+it, so any repository containing a file at that path got it executed on the
+publisher host with the credential that publishes every PR readable from its
+environment. Nothing under the checkout is executed now, at install time or at
+merge time.
+
+Applicability is still decided by what the checkout contains — it needs
+`docs/AS_BUILT.md` **and** `scripts/git/as-built-log-merge.ts` — but both are
+read as data, and what that presence now authorises is only "merge this one path
+with our own reviewed code, or conflict". Repositories failing either are left
+completely untouched.
+
+The standalone `scripts/install-merge-drivers.sh` remains the path for humans
+(`CONTRIBUTING.md`), and enforces the same ordering by hand: it has no `errexit`
+(a `--unset` of an absent key exits 5, a `grep -v` with no output exits 1 — both
+normal there), so each write is checked and both halves are verified before it
+reports success. **The order is what makes the fatal half unreachable rather than
+merely repaired:** `merge.<name>.driver` is written FIRST and nothing else
+happens if it fails, and `merge.<name>.name` — which is only the description
+`git config --get-regexp merge.` prints — is written after and is not fatal.
+Measured on git 2.50.1, a lone `.driver` with no `.name` merges perfectly while a
+lone `.name` with no `.driver` is `lacks command line`, exit 128. The earlier
+version wrote `.name` first and unset it by hand on failure, i.e. it repaired the
+fatal state with a THIRD write that the held `config.lock` causing the failure
+would also have blocked.
+
+Both installers locate `$GIT_COMMON_DIR` with `rev-parse --path-format=absolute`
+and **both fall back to the plain spelling**, resolving a relative answer against
+the repo. That flag arrived in git 2.31 and an older git exits non-zero on it
+rather than ignoring it. The shell installer always had the retry; the
+orchestrator's in-process copy did not, and returned false there — *after*
+`merge.<name>.driver` had been written — so the attribute was never bound, the
+replay went ahead under the tracked `merge=union`, and trident reported the
+driver as unavailable. A downgrade that reports itself as an absence is the shape
+this subsystem keeps producing, so it is now a fallback rather than a return.
+
+Proven against real git, not stubs: `scripts/git/as-built-merge-realgit.test.ts`
+replays two branches onto a moved base and asserts the conflict WITHOUT the
+driver before asserting the clean merge with it, then uninstalls to bring the
+conflict back. `trident/as-built-publish-wiring-realgit.test.ts` drives the real
+publish step and installs nothing itself, so deleting the production call turns
+it red.
 
 ## Agent-dispatch reliability — double-spawn guard + agent-aware watchdog (`runtime/subagent/`)
 
@@ -6001,6 +7459,24 @@ chased a non-bug. The string detector + its test were **removed**.
   `reportFailure`, and re-emits it unchanged — so a slow turn is a recoverable
   single-turn retry (the substrate poisons + respawns the warm session) instead
   of parking the credential and cascading into "all credentials in cooldown".
+- **A BACKGROUND lane cannot park the owner's credential (2026-08-16).** The three
+  fast-paths above are per-SYMPTOM: each names one substrate failure that must not
+  be mistaken for a quota condition. A dead REPL child was not on that list, so it
+  fell through to `mapStatusForPoolCooldown(null, retryable)` → 429; five reminder
+  composes reached `MAX_CONSECUTIVE_FAILURES` and parked the box's single
+  credential for an hour, after which every owner chat turn failed instantly with
+  "all Anthropic credentials are in cooldown". The structural guard is a LANE, not
+  another symptom: `BuildLlmCallSubstrateInput.credential_failure_lane`
+  (`'interactive'` by default, `'background'` on `cc-nudge-*`) makes a background
+  failure leave the pool-wide strike ledger entirely alone (`reportFailure`'s
+  `origin`, `runtime/credential-pool.ts`: neither incremented nor re-read, so it can
+  neither trip the hour-long park nor EXTEND one an interactive turn tripped) and
+  decline to report an INFERRED cooldown at all. "Inferred" is drawn strictly: the
+  retryable→429 default, a parsed status the mapper REWRITES (a retryable `HTTP 503`
+  also maps to 429), and `detectCliAuthFailure`, whose weakest rule is the substring
+  `401` anywhere in the prose. A REAL provider status (a 429/402/401 the provider
+  itself returned, or an adapter-stamped `rate_limited`) still cools on either lane —
+  the owner's next turn would meet that wall a second later regardless.
 - **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
   real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in
@@ -6471,6 +7947,19 @@ the user text). Layer order, top to bottom:
    craft, lighter reframes). It is a FLOOR, not a ceiling — the fragment defers to
    any sharper rule the owner's SOUL states. Spliced into both the assembled path
    and the degraded fallback, so the floor never depends on `assembleSystemPrompt`.
+   Two named rules ride alongside the numbered principles:
+   `BUILD_ROUTING_DOCTRINE` (self-route simple↔inline / complex↔trident) and
+   **`MISSING_CREDENTIAL_DOCTRINE` (#552)** — when a capability is blocked by a
+   missing credential, NAME the in-product surface the owner can reach to supply
+   it (the Integrations surface), and never answer with a shell command as the
+   remedy, because the owner cannot be assumed to have a terminal on the machine
+   the agent runs on. It names GitHub concretely, because the failure that
+   produced the rule was a `git push` / PR creation dying for want of a token
+   while the agent recommended `gh auth login`. Phrased UNCONDITIONALLY — there
+   is no branch on deployment shape, since naming the surface is the right answer
+   either way and a branch is only something for the model to get wrong. Asserted
+   against the COMPOSED prompt (`build-live-agent-turn.test.ts`), not only against
+   the module: a rule nothing splices in is the same defect one layer up.
 3. `<project_persona>` — WAVE 2 Track A: a project topic's own `projects.persona`
    voice, refining the register for that project (never for General).
 4. `<live_agent_context>` — the this-turn scope block + a `<recent_conversation>`
@@ -6788,8 +8277,15 @@ notes (audio upload + Whisper transcription → prompt + scribe).
 **Not yet at parity (documented gaps):** "load earlier" history paging beyond the
 resume replay window — this is the one remaining named-scope gap, and it is NOT
 client-only: chat-core + the app-ws surface are forward-only (a single
-`{type:'resume', after_seq}` replay, `replayAfter` ASC capped at 500), so there
-is no backfill primitive to page OLDER messages. Closing it is an additive
+`{type:'resume', after_seq}` replay, `replayAfter` capped at 500 rows), so there
+is no backfill primitive to page OLDER messages. That gap has TEETH on a topic
+longer than the window: the replay returns the NEWEST 500 after the cursor, and
+because a resume cursor only moves forward, the older messages it skipped are not
+reachable by any later resume — so a very long chat shows its recent history with
+an unmarked hole before it. The window direction was chosen that way on purpose
+(the alternative put the hole where the owner actually reads), but the hole is
+real, it is why the item below is the next thing to build, and it is the reason a
+bigger `DEFAULT_REPLAY_LIMIT` is not the fix. Closing it is an additive
 cross-layer change (a `replayBefore`/`{type:'history', before_seq}` request on
 the app-ws surface + persistence + a `WebChatSession.loadEarlier()` correlation
 + a controller cursor + a "Load earlier" button) that must not destabilize the
@@ -6945,7 +8441,15 @@ and proves each one against the real thing, in the owner's language.
   with the real controller, chat session, tab resolver and usage client; fake
   socket, injected fetch, no model) at **every layout the product ships** (narrow
   390px, wide 1440px) and probes each affordance: compose, send, send-becomes-
-  usable-once-typed, attach, project rail, tabs, usage meter, theme control.
+  usable-once-typed, attach, project rail, tabs, usage meter, theme control,
+  Connect GitHub. The last one added a third probe PHASE (`inAdmin`): the things
+  you ADJUST live behind the header menu rather than in the tab band
+  (`ProjectShell`'s `MENU_TARGETS`), so the probe walks the owner's real path —
+  open the menu, choose Admin — before looking, and those two steps are part of
+  what is being asserted. It joined because #551 was the purest example of the
+  class this gate exists for: a complete, tested, mounted GitHub device-flow
+  backend that no client called, so the owner could not start it and the agent
+  told him to use a terminal he does not have.
 - **`open/__tests__/reachability-inventory.ts` + `reachability.test.ts`** — boots
   the REAL Open composition over a live `Bun.serve`, opens the unified
   `/ws/app/chat` socket and TYPES each declared command with a mocked substrate.
@@ -7022,6 +8526,16 @@ and proves each one against the real thing, in the owner's language.
   ship the way `onVoiceTap` did. (2) Every width branch in the app must be
   `Platform.OS === 'web'`-gated, or recorded with a reason; see the parity note
   below for why that matters.
+
+- **The press-the-control files, for surfaces outside the two shells.** The
+  inventories probe the CHAT shells; a screen reached by its own route gets a
+  dedicated file that presses instead — `app/__tests__/model-providers-reachable.test.tsx`
+  (Codex, Kimi) and, for GitHub, the pair
+  `landing/chat-react/__tests__/github-connect-reachable.test.tsx` +
+  `app/__tests__/github-connect-reachable.test.tsx`. Same rule as the mobile
+  inventory: find the control, press it, and demand an effect a missing handler
+  cannot fake — a POST on the wire, a code on screen, a clipboard write, a URL
+  handed to `Linking`, a poll that flips the screen to connected and then stops.
 
 **Two design rules it is built on.**
 
@@ -7175,7 +8689,7 @@ Native component; ~1,200 app tests covered pure helpers and HTTP clients only, s
 the entire React WIRING layer was untested. That is how mobile chat shipped
 green-on-everything while having **never delivered one message from a phone**
 (`crypto.randomUUID()` in `SendQueue` on a runtime with no `crypto` global — see
-`docs/as-built/2026-07-29-mobile-send-webcrypto-and-keyboard-inset.md`). Unit
+`docs/AS_BUILT.md` § 2026-07-29 — Mobile chat had NEVER sent a message). Unit
 tests, typecheck and lint cannot see a keyboard covering an input, a send that
 never fires, or a loading state that is never left. This harness can see two of
 those three.

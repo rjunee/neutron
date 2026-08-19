@@ -17,11 +17,19 @@
 #   exit 10  NOT_CONNECTED — no CODEX_HOME / no auth.json. GRACEFUL: the review
 #                          falls back to Claude-only + a "codex not connected" note.
 #   exit 11  NOT_CONNECTED — codex CLI not on PATH (best-effort install skipped).
-#   exit 3   DEFERRED    — configured (auth.json present) but `codex login status`
-#                          failed after retries → auth expired/unreachable.
-#   exit 5   DEFERRED    — configured + authed, but the review call itself failed.
+#   exit 3   DEFERRED    — configured (auth.json present) but the review could not
+#                          be PERFORMED: `codex login status` failed after retries
+#                          (auth expired/unreachable), or there was NOTHING to
+#                          review (empty diff — see CODEX_REVIEW_EMPTY_DIFF below).
+#   exit 5   DEFERRED    — configured + authed, but the review call itself failed,
+#                          or codex exited 0 but produced an EMPTY final message —
+#                          including a content-policy REFUSAL (CODEX_REVIEW_REFUSED),
+#                          which `codex exec` reports as exit 0 + empty stdout + the
+#                          refusal on stderr.
 #
-# DEFERRED (3/5) means "configured but the call FAILED" → the synthesis must
+# DEFERRED (3/5) means "configured, but NO REVIEW HAPPENED" — the call failed, or
+# codex returned no review text (including a refusal), or there was nothing to
+# review (empty diff) → the synthesis must
 # NEVER silently APPROVE (mirror the legacy harness CODEX_REVIEW_PRECHECK_FAILED /
 # CODEX_REVIEW_TIMEOUT never-silent-downgrade). NOT_CONNECTED (10/11) is the
 # benign never-set-up path and degrades to Claude-only.
@@ -88,61 +96,149 @@ fi
 # here would see an EMPTY/stale diff and codex could "approve" without reviewing
 # the actual change. Every trident reviewer reviews that diff file; so does codex.
 # Fall back to `git diff base..HEAD` for standalone use (the legacy harness-style).
+# BOTH sources land in FULL_DIFF first so truncation is decided ONE way. `$(<file)`
+# and `$(...)` strip trailing newlines, which is what makes the comparison below
+# exact: a diff whose only "extra" lines are trailing blanks was NOT truncated.
 if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; then
-  DIFF=$(head -n "$DIFF_LINE_LIMIT" "$NEUTRON_CODEX_DIFF_FILE")
+  FULL_DIFF=$(<"$NEUTRON_CODEX_DIFF_FILE")
   DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
 else
-  DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null | head -n "$DIFF_LINE_LIMIT")
+  FULL_DIFF=$(git diff "${BASE_REF}..HEAD" 2>/dev/null)
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
-if [ -z "$DIFF" ]; then
-  # No diff to review (empty branch / bad base / missing diff file) — surface it
-  # but don't fail hard; the reviewer treats an empty codex verdict as no-blocker.
-  echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC}." >&2
+DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")
+# The FULL size, for the disclosure text only. The `printf '%s\n'` is what makes the
+# count exact, NOT the choice of counter: `$(...)` already ate FULL_DIFF's trailing
+# newline, and re-terminating it counts a final unterminated line that the FILE's own
+# newline count (`wc -l < "$NEUTRON_CODEX_DIFF_FILE"`, the shape git writes for
+# "\ No newline at end of file") is one short of. Through THIS pipeline `wc -l` counts
+# the same (measured) — the counter is not the load-bearing part and no claim is made
+# for awk over it; the `case` below is what rejects whatever a counter prints if it is
+# not a bare integer.
+# Truncation itself is decided WITHOUT this count (below), so a missing/broken awk
+# degrades the disclosure's NUMBERS and can never silence the disclosure.
+DIFF_TOTAL_LINES=$(printf '%s\n' "$FULL_DIFF" | awk 'END { print NR }' 2>/dev/null)
+case "$DIFF_TOTAL_LINES" in
+  '' | *[!0-9]*) DIFF_TOTAL_LINES='' ;;
+esac
+
+# A diff that is only WHITESPACE is nothing to review either. `$(...)` already eats
+# trailing newlines, but spaces/tabs survive and would sail past a bare -z test and
+# hand codex a blank DIFF section — the very approval-about-nothing this guards.
+# `case` and not `[ -z "${DIFF//[[:space:]]/}" ]`: that substitution is QUADRATIC in
+# bash (33s on a 550KB diff, and it runs on EVERY review); this form is O(n).
+case "$DIFF" in
+  *[![:space:]]*) ;;
+  *)
+    # NOTHING TO REVIEW — the diff file failed to write, the base ref resolved wrong,
+    # the branch is empty, or the diff could not be read at all. This is DEFERRED,
+    # never an approval: a reviewer handed nothing to review must not answer, or the
+    # cross-model seat returns a confident APPROVE about nothing and the bridge
+    # records it as connected. Mirrors the kimi lane (trident/kimi-review.ts — empty
+    # diff → status 'deferred').
+    echo "CODEX_REVIEW_EMPTY_DIFF: no diff for ${DIFF_SRC} — nothing to review. DEFERRED — do NOT treat as an approval." >&2
+    exit 3
+    ;;
+esac
+
+# ── TRUNCATION DISCLOSURE ─────────────────────────────────────────────────────
+# The diff is capped at DIFF_LINE_LIMIT lines above. Told nothing, the model scopes
+# its verdict to "the diff" and APPROVEs an 11k-line change on the strength of its
+# first 3000 lines. So when we truncate, SAY SO in the prompt and make the verdict
+# scope itself to what was actually read.
+#
+# TRUNCATION IS A STRING COMPARISON, NOT A LINE COUNT. Comparing what we will send
+# against the whole diff is exact and needs no external tool: it can neither MISS a
+# truncation (a line count that failed to compute used to fail OPEN — silently
+# truncated, no notice) nor INVENT one (trailing blank lines used to inflate the
+# count into a false "content was withheld" claim about a diff delivered in full).
+# The line NUMBERS are cosmetic, so they degrade on their own when awk is unusable.
+TRUNCATION_NOTICE=""
+if [ "$DIFF" != "$FULL_DIFF" ]; then
+  if [ -n "$DIFF_TOTAL_LINES" ]; then
+    SEEN="the FIRST ${DIFF_LINE_LIMIT} lines of a ${DIFF_TOTAL_LINES}-line diff; the remaining $((DIFF_TOTAL_LINES - DIFF_LINE_LIMIT)) lines were NOT provided"
+    SCOPE="reviewed only the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} lines"
+    echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} of ${DIFF_TOTAL_LINES} diff lines to codex." >&2
+  else
+    SEEN="the FIRST ${DIFF_LINE_LIMIT} lines of a LONGER diff (its total length could not be measured); the rest was NOT provided"
+    SCOPE="reviewed only the first ${DIFF_LINE_LIMIT} lines of a longer diff"
+    echo "CODEX_REVIEW_DIFF_TRUNCATED: showing the first ${DIFF_LINE_LIMIT} diff lines to codex (total length unmeasurable)." >&2
+  fi
+  TRUNCATION_NOTICE="!! TRUNCATED DIFF — YOU ARE NOT SEEING THE WHOLE CHANGE. You have ONLY ${SEEN} and you cannot request them.
+SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you ${SCOPE}, and NEVER claim the change as a whole is correct or complete. APPROVE means only 'no blocker in the portion I read'.
+"
 fi
 
-PROMPT="You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
-Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.
+REVIEW_RUBRIC="${NEUTRON_CODEX_REVIEW_RUBRIC:-You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
+Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.}"
+
+PROMPT="${REVIEW_RUBRIC}
 Respond with your findings, then END with a SINGLE final line, exactly one of:
   VERDICT: APPROVE
   VERDICT: REQUEST_CHANGES
 Use REQUEST_CHANGES if there is any evidence-backed blocker.
-
+${TRUNCATION_NOTICE}
 DIFF (${DIFF_SRC}):
 ${DIFF}"
 
 # ── Run the review SYNCHRONOUSLY (never backgrounded) ─────────────────────────
 # `codex exec` is the CLI's non-interactive one-shot form. A test seam
 # (NEUTRON_CODEX_EXEC_CMD) replaces the real invocation so tests never call OpenAI.
+CODEX_STDERR_FILE=$(mktemp "${TMPDIR:-/tmp}/trident-codex-review-stderr.XXXXXX") || CODEX_STDERR_FILE=/dev/null
+# With the /dev/null fallback the refusal DIAGNOSIS degrades to the generic
+# empty-output message, but the fail-closed gate itself never degrades.
 if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
-  if printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD"; then
-    exit 0
+  REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD" 2>"$CODEX_STDERR_FILE")
+  CALL_EXIT=$?
+else
+  # Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
+  # diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
+  # ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
+  # PIN THE REVIEW MODEL. Unpinned, `codex exec` takes the CLI's default, and OpenAI
+  # moved auto-review to the cheapest 5.6 tier — so the "independent GPT-5 second
+  # opinion" this panelist exists to provide was quietly being served by the weakest
+  # available model. gpt-5.6-sol is the flagship tier with the strongest capability
+  # for this kind of judgement work.
+  #
+  # Overridable via CODEX_REVIEW_MODEL for a deployment that wants a different tier;
+  # set it to the EMPTY string to fall back to the CLI default (the `-` in `${VAR-x}`
+  # is deliberate — it substitutes only when UNSET, so an explicit empty value is
+  # respected rather than replaced).
+  REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
+  if [ -n "$REVIEW_MODEL" ]; then
+    set -- --model "$REVIEW_MODEL"
+  else
+    set --
   fi
-  echo "CODEX_REVIEW_CALL_FAILED: the codex review call failed. DEFERRED — do NOT treat as an approval." >&2
+  REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>"$CODEX_STDERR_FILE")
+  CALL_EXIT=$?
+fi
+
+# Replay the tool's own stderr so the operator/bridge errFile still sees it
+# (refusal text included).
+if [ "$CODEX_STDERR_FILE" != /dev/null ]; then cat "$CODEX_STDERR_FILE" >&2; fi
+if [ "$CALL_EXIT" -ne 0 ]; then
+  [ -n "$REVIEW_OUTPUT" ] && printf '%s\n' "$REVIEW_OUTPUT"
+  [ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
+  echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero (exit $CALL_EXIT). DEFERRED — do NOT treat as an approval." >&2
   exit 5
 fi
 
-# Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
-# diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
-# ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
-# PIN THE REVIEW MODEL. Unpinned, `codex exec` takes the CLI's default, and OpenAI
-# moved auto-review to the cheapest 5.6 tier — so the "independent GPT-5 second
-# opinion" this panelist exists to provide was quietly being served by the weakest
-# available model. gpt-5.6-sol is the flagship tier with the strongest capability
-# for this kind of judgement work.
-#
-# Overridable via CODEX_REVIEW_MODEL for a deployment that wants a different tier;
-# set it to the EMPTY string to fall back to the CLI default (the `-` in `${VAR-x}`
-# is deliberate — it substitutes only when UNSET, so an explicit empty value is
-# respected rather than replaced).
-REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
-if [ -n "$REVIEW_MODEL" ]; then
-  set -- --model "$REVIEW_MODEL"
+# THE NEW GATE — exit 0 alone is NOT an approval. A content-policy refusal arrives as exit 0 +
+# EMPTY final message + the refusal on stderr, indistinguishable by exit code from
+# a clean review. An empty answer is a review that DID NOT HAPPEN. Same O(n)
+# whitespace case-pattern as the empty-diff guard (never ${VAR//...} — quadratic).
+case "$REVIEW_OUTPUT" in
+  *[![:space:]]*)
+    [ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
+    printf '%s\n' "$REVIEW_OUTPUT"
+    exit 0
+    ;;
+esac
+if grep -qi 'flagged for possible cybersecurity risk' "$CODEX_STDERR_FILE" 2>/dev/null; then
+  echo "CODEX_REVIEW_REFUSED: 'codex exec' exited 0 with an EMPTY final message and its stderr carries a content-policy refusal ('flagged for possible cybersecurity risk'). The reviewer was REFUSED — it did not review this diff, and 'no findings' would be false. DEFERRED — do NOT treat as an approval, and do NOT reword/retry the review to dodge the refusal: the operator must learn the review did not run." >&2
 else
-  set --
+  echo "CODEX_REVIEW_EMPTY_OUTPUT: 'codex exec' exited 0 but produced an EMPTY final message — no review text to parse, and no cause was measured on stderr. DEFERRED — do NOT treat as an approval." >&2
 fi
-if printf '%s' "$PROMPT" | codex exec "$@" -; then
-  exit 0
-fi
-echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — do NOT treat as an approval." >&2
+[ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
 exit 5

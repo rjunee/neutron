@@ -53,7 +53,11 @@ import type {
   AppChatReceiptState,
   AppChatRow,
 } from '@neutronai/persistence/index.ts'
-import { AppChatEditNotAuthorizedError } from '@neutronai/persistence/index.ts'
+import {
+  AppChatEditNotAuthorizedError,
+  DEFAULT_EDIT_REPLAY_LIMIT,
+  DEFAULT_REPLAY_LIMIT,
+} from '@neutronai/persistence/index.ts'
 import type { AppWsSessionRegistry } from './session-registry.ts'
 import {
   sanitizeProjectId,
@@ -160,6 +164,19 @@ function replayCursorAdvanced(
   if (next.seq > prevSeq) return true
   if (next.seq < prevSeq) return false
   return prevMsg !== undefined && next.message_id > prevMsg
+}
+
+/**
+ * One bounded page of a message replay: the envelopes to send, and the seq below
+ * which rows were omitted (`null` when the page was not full, i.e. nothing was
+ * left behind). {@link AppWsAdapter.replayAfter} produces it; the surface turns a
+ * non-null `older_than` into a `history_gap` frame so the client can ask for the
+ * page below it. The truncation is carried in the RETURN TYPE rather than left for
+ * a caller to infer from a row count, because inferring it is what nobody did.
+ */
+export interface AppWsReplayPage {
+  envelopes: AppWsOutbound[]
+  older_than: number | null
 }
 
 export class AppWsAdapter implements ChannelAdapter {
@@ -588,6 +605,7 @@ export class AppWsAdapter implements ChannelAdapter {
   async replayReceiptsAfter(
     channel_topic_id: string,
     after_seq: number,
+    before_seq?: number,
   ): Promise<AppWsOutboundReceiptUpdate[]> {
     const log = this.receipt_log
     if (log === undefined) return []
@@ -609,14 +627,25 @@ export class AppWsAdapter implements ChannelAdapter {
     // shot (old behavior); the concrete production store has it, so prod drains
     // the FULL backlog page-by-page (no silent tail drop, each page bounded).
     if (log.aggregatesAfterPage === undefined) {
-      const aggregates = await log.aggregatesAfter(channel_topic_id, after_seq)
+      const aggregates = await log.aggregatesAfter(
+        channel_topic_id,
+        after_seq,
+        undefined,
+        before_seq,
+      )
       return aggregates.map(toEnv)
     }
     const out: AppWsOutboundReceiptUpdate[] = []
     let seq = after_seq
     let message_id: string | undefined
     for (;;) {
-      const page = await log.aggregatesAfterPage(channel_topic_id, seq, undefined, message_id)
+      const page = await log.aggregatesAfterPage(
+        channel_topic_id,
+        seq,
+        undefined,
+        message_id,
+        before_seq,
+      )
       for (const agg of page.aggregates) out.push(toEnv(agg))
       const next = page.next_cursor
       if (next === null) break
@@ -768,6 +797,7 @@ export class AppWsAdapter implements ChannelAdapter {
   async replayReactionsAfter(
     channel_topic_id: string,
     after_seq: number,
+    before_seq?: number,
   ): Promise<AppWsOutboundReactionUpdate[]> {
     const log = this.reaction_log
     if (log === undefined) return []
@@ -788,14 +818,25 @@ export class AppWsAdapter implements ChannelAdapter {
     // {@link replayReceiptsAfter}): a legacy injected log without it replays in
     // one shot; the concrete production store drains the FULL backlog.
     if (log.aggregatesAfterPage === undefined) {
-      const aggregates = await log.aggregatesAfter(channel_topic_id, after_seq)
+      const aggregates = await log.aggregatesAfter(
+        channel_topic_id,
+        after_seq,
+        undefined,
+        before_seq,
+      )
       return aggregates.map(toEnv)
     }
     const out: AppWsOutboundReactionUpdate[] = []
     let seq = after_seq
     let message_id: string | undefined
     for (;;) {
-      const page = await log.aggregatesAfterPage(channel_topic_id, seq, undefined, message_id)
+      const page = await log.aggregatesAfterPage(
+        channel_topic_id,
+        seq,
+        undefined,
+        message_id,
+        before_seq,
+      )
       for (const agg of page.aggregates) out.push(toEnv(agg))
       const next = page.next_cursor
       if (next === null) break
@@ -878,13 +919,46 @@ export class AppWsAdapter implements ChannelAdapter {
    * device after the message replay. Returns one `edit_update` per edited/deleted
    * message (with seq > after_seq), ascending by seq. `[]` when the edit log
    * isn't wired.
+   *
+   * ONE bounded query, the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT` edit rows after the
+   * cursor — the same shape and the same limit {@link replayAfter} uses, and that
+   * equality is load-bearing rather than incidental. An edit row carries its
+   * MESSAGE's seq, so the two windows cover the same messages: at most `limit`
+   * messages sit at or above the message window's lowest seq, hence at most
+   * `limit` edit rows do, hence the newest `limit` edit rows contain every one of
+   * them. A message that arrives in a capped replay therefore arrives with its
+   * tombstone and its current body — never with a body an edit or delete has
+   * since replaced.
+   *
+   * That alignment is why neither replay is drained. A bounded message window
+   * paired with an un-drained OLDEST-first edit window is the combination that
+   * genuinely loses data: it would deliver a recent deleted message with its
+   * original body and no tombstone, while spending the edit budget on
+   * long-since-settled messages the client already has.
+   *
+   * The invariant it rests on: an edit row's `seq` is a seq in ITS OWN topic. That
+   * invariant was ASSERTED here and was NOT TRUE — the edits store resolved a
+   * message's seq through an unscoped `WHERE message_id = ?`, so an edit naming
+   * ANOTHER topic's message was filed under this topic carrying that topic's seq.
+   * Alien seqs sort newest in this descending window and evict real tombstones from
+   * a capped page, which delivers a DELETED MESSAGE WITH ITS ORIGINAL BODY — the
+   * exact leak the counting argument above exists to prevent. The lookup is now
+   * topic-scoped (`AppChatEventLogCore.lookupMessage`), so a cross-topic edit is
+   * rejected as `message not found` instead of being misfiled, and the invariant
+   * holds because the query enforces it rather than because a comment claims it.
    */
   async replayEditsAfter(
     channel_topic_id: string,
     after_seq: number,
+    before_seq?: number,
   ): Promise<AppWsOutboundEditUpdate[]> {
     if (this.edit_log === undefined) return []
-    const aggregates = await this.edit_log.aggregatesAfter(channel_topic_id, after_seq)
+    const aggregates = await this.edit_log.aggregatesAfter(
+      channel_topic_id,
+      after_seq,
+      DEFAULT_EDIT_REPLAY_LIMIT,
+      before_seq,
+    )
     const ts = this.now()
     return aggregates.map((agg) => {
       const env: AppWsOutboundEditUpdate = {
@@ -903,16 +977,78 @@ export class AppWsAdapter implements ChannelAdapter {
   }
 
   /**
-   * Chat-sync foundation — replay every persisted message after `after_seq`
-   * for a topic as wire envelopes, ascending by seq. The surface sends these
-   * to the single requesting socket (NOT a fan-out) so a reconnecting device
-   * fills its gap without re-broadcasting to other devices. Returns `[]` when
-   * no durable log is wired.
+   * Chat-sync foundation — replay persisted messages in the half-open seq range
+   * `(after_seq, before_seq)` for a topic as wire envelopes, ascending by seq, plus
+   * whether older rows were left behind. The surface sends the envelopes to the
+   * single requesting socket (NOT a fan-out) so a reconnecting device fills its gap
+   * without re-broadcasting to other devices, and turns a non-null `older_than`
+   * into a `history_gap` frame. Returns an empty page when no durable log is wired.
+   *
+   * ONE bounded query per call, and it returns the NEWEST `DEFAULT_REPLAY_LIMIT`
+   * messages in the range rather than the oldest. Which end it takes was the whole
+   * of the first defect here: the store used to answer with the OLDEST page, so a
+   * 1130-message topic replayed seq 1..500 and the owner's chat rendered old
+   * messages and stopped ~630 short of the present. See
+   * `AppChatEventLogCore.rowsAfter` for the SQL.
+   *
+   * `older_than` IS THE FIX FOR THE SECOND DEFECT — the one the newest-window
+   * change introduced. A capped page advances the client's forward cursor past
+   * everything it skipped, and a forward cursor never goes back, so the skipped
+   * middle became permanently unreachable: a self-healing gap turned into a durable
+   * hole, with nothing on the wire admitting it. `older_than` is the page's lowest
+   * seq, reported whenever the page came back FULL, and the client answers it with
+   * `resume { before_seq: older_than }` to receive the page below. The walk
+   * terminates because the bound strictly descends and the last page comes back
+   * short.
+   *
+   * A FULL PAGE IS A HEURISTIC, deliberately. It does not prove older rows exist —
+   * a topic holding exactly one page reports the same thing as one holding a page
+   * and a half — and the cost of being wrong is one empty round trip at the exact
+   * boundary. The alternative is an existence query on every resume, which costs
+   * more, every time, to save that one.
+   *
+   * STILL NOT DRAINED. Nothing here pages on the server's own initiative (the shape
+   * {@link replayReceiptsAfter} and {@link replayReactionsAfter} use): that would
+   * make one cold resume O(messages after the cursor) in rows, JSON bytes and
+   * memory here, per topic — and the mobile transcript warmer opens several topics
+   * at app foreground, so the amplification is multiplied, on cellular, with no
+   * server-side ceiling. The CLIENT asks for each page, so the per-response ceiling
+   * survives while the transcript still converges.
+   *
+   * ALIGNED WITH THE EDIT REPLAY, which is what stops a bounded window leaking
+   * stale bodies: {@link replayEditsAfter} reads the same newest-window SQL with an
+   * equal limit AND THE SAME `before_seq`, and an edit row carries its MESSAGE's
+   * seq, so every message in this window has its edit/tombstone state in that one.
+   * Proof is by counting — at most `limit` messages sit at or above this window's
+   * lowest seq, so at most `limit` edit rows do, and the newest `limit` edit rows
+   * therefore include all of them. Pass the bound to one and not the other and the
+   * argument collapses: an old message page against a recent edit page delivers a
+   * deleted message with its original body.
    */
-  async replayAfter(channel_topic_id: string, after_seq: number): Promise<AppWsOutbound[]> {
-    if (this.chat_log === undefined) return []
-    const rows = await this.chat_log.replayAfter(channel_topic_id, after_seq)
-    return rows.map((r) => appChatRowToEnvelope(r))
+  async replayAfter(
+    channel_topic_id: string,
+    after_seq: number,
+    before_seq?: number,
+  ): Promise<AppWsReplayPage> {
+    if (this.chat_log === undefined) return { envelopes: [], older_than: null }
+    // The limit is passed EXPLICITLY rather than left to the store's default,
+    // because this method is the one that has to recognise a capped page and it
+    // can only do that against a limit it knows. (A store default read through a
+    // constant here would be the same number by luck; an injected log with its own
+    // page size would make the comparison a lie.)
+    const rows = await this.chat_log.replayAfter(
+      channel_topic_id,
+      after_seq,
+      DEFAULT_REPLAY_LIMIT,
+      before_seq,
+    )
+    const envelopes = rows.map((r) => appChatRowToEnvelope(r))
+    const oldest = rows[0]
+    const older_than =
+      rows.length >= DEFAULT_REPLAY_LIMIT && oldest !== undefined && oldest.seq > 0
+        ? oldest.seq
+        : null
+    return { envelopes, older_than }
   }
 
   /** Chat-sync foundation — highest persisted seq for a topic (0 when none /

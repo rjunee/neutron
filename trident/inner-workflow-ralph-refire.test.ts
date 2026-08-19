@@ -45,6 +45,7 @@ async function runRalph(remainingTasks: number): Promise<RalphRun> {
   const agent = async (_prompt: string, opts?: { label?: string }): Promise<unknown> => {
     const label = opts?.label
     if (label !== undefined) labels.push(label)
+    if (String(label).startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
     if (label === 'plan:fable') {
       return {
         implementationPlan: '- [ ] task A\n- [ ] task B\n- [ ] task C',

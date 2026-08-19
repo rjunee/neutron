@@ -36,6 +36,28 @@ export interface MountedScreen {
   byTestId(testId: string): HTMLElement | null;
   /** Let queued microtasks + effects settle. */
   settle(): Promise<void>;
+  /**
+   * Re-render the SAME root with new props, without unmounting.
+   *
+   * The only way to reach a class of bug that a fresh mount cannot: behaviour that
+   * depends on state the component has already latched. A push tap is exactly that
+   * — Expo Router pushes the same chat route with a new `?message_id=`, so the
+   * surface is already mounted, its opening anchor already frozen, and FlashList's
+   * one initial scroll already spent. Remounting instead would test the easy path
+   * and miss the reported one.
+   */
+  rerender(element: ReactElement): Promise<void>;
+  /**
+   * Run something that pushes state in from OUTSIDE React, inside an act window.
+   *
+   * A fake socket's `onopen` / `onmessage` is such a thing: calling it straight from
+   * a test sets state outside act, so React batches the resulting render on its own
+   * schedule and whether an effect has run by the next assertion depends on
+   * timing. That is a flaky test dressed as a passing one — and this suite asserts
+   * on WHEN a scroll happened relative to a frame arriving, which is exactly the
+   * property such a race destroys.
+   */
+  dispatch(fn: () => void): Promise<void>;
   unmount(): void;
 }
 
@@ -122,6 +144,20 @@ export async function mountScreen(element: ReactElement): Promise<MountedScreen>
     text: () => host.textContent ?? '',
     composer,
     settle,
+    async rerender(next: ReactElement): Promise<void> {
+      // Same root, same dock — so React reconciles rather than remounting, which is
+      // the whole point (see the interface docblock).
+      await act(async () => {
+        root.render(withComposerDock(next));
+      });
+      await settle();
+    },
+    async dispatch(fn: () => void): Promise<void> {
+      await act(async () => {
+        fn();
+      });
+      await settle();
+    },
     async type(value: string): Promise<void> {
       const input = composer();
       await act(async () => {

@@ -10,6 +10,7 @@
 import { describe, expect, it } from 'bun:test';
 
 import {
+  briefAlertText,
   canPlay,
   dragReorderTarget,
   dotState,
@@ -19,10 +20,16 @@ import {
   nextStatus,
   reorderTarget,
   roundText,
+  runNotice,
   splitBoard,
   statusLabel,
   stepTag,
 } from '../lib/work-board-helpers';
+import { railDotKind } from '../lib/project-rail-view';
+import {
+  deriveProjectActivity,
+  scanItemsForRailSignals,
+} from '@neutronai/contracts/project-rail.ts';
 import type { RunProgress, WorkBoardItem } from '../lib/work-board-client';
 
 function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
@@ -66,6 +73,10 @@ describe('nextStatus', () => {
     expect(nextStatus('in_progress')).toBe('done');
     expect(nextStatus('done')).toBe('done');
   });
+
+  it('advancing a SHELVED card un-shelves it back to upcoming (never to done)', () => {
+    expect(nextStatus('archived')).toBe('upcoming');
+  });
 });
 
 describe('statusLabel', () => {
@@ -73,6 +84,10 @@ describe('statusLabel', () => {
     expect(statusLabel('upcoming')).toBe('Upcoming');
     expect(statusLabel('in_progress')).toBe('In progress');
     expect(statusLabel('done')).toBe('Done');
+  });
+
+  it("archived reads 'Shelved' — never 'Done'", () => {
+    expect(statusLabel('archived')).toBe('Shelved');
   });
 });
 
@@ -133,6 +148,38 @@ describe('stepTag + roundText derive from step_label (M1 redesign)', () => {
   });
 });
 
+describe('briefAlertText', () => {
+  it('surfaces a recovered brief refusal on a still-live run', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.';
+    expect(briefAlertText(progress({ step_label: 'building', brief_alert: alert }))).toBe(alert);
+    expect(briefAlertText(progress({ brief_alert: null }))).toBeNull();
+    expect(briefAlertText(progress({ brief_alert: '' }))).toBeNull();
+  });
+
+  it('never lets a sticky recovered alert mask the terminal failure outcome', () => {
+    const rp = progress({
+      phase_label: 'failed',
+      step_label: 'failed',
+      failure_reason: 'publish failed: outer publisher could not open a PR',
+      brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.',
+    });
+    expect(runNotice(rp)).toEqual({
+      text: 'publish failed: outer publisher could not open a PR',
+      tone: 'failure',
+    });
+    expect(runNotice(progress({ brief_alert: 'recovered alert' }))).toEqual({
+      text: 'recovered alert',
+      tone: 'alert',
+    });
+    expect(runNotice(progress({
+      phase_label: 'failed',
+      step_label: 'failed',
+      failure_reason: null,
+      brief_alert: 'earlier recovered alert',
+    }))).toBeNull();
+  });
+});
+
 describe('dotState', () => {
   it('pulses in the phase colour while a run walks building→reviewing→fixing→merging', () => {
     expect(dotState(item({ run_progress: progress({ step_label: 'building' }) }))).toEqual({
@@ -166,8 +213,30 @@ describe('dotState', () => {
 
   it('falls back to item.status when there is no run_progress', () => {
     expect(dotState(item({ status: 'done' }))).toEqual({ colorKey: 'merge', pulse: false });
-    expect(dotState(item({ status: 'in_progress' }))).toEqual({ colorKey: 'build', pulse: true });
+    expect(dotState(item({ status: 'in_progress' }))).toEqual({ colorKey: 'build', pulse: false });
     expect(dotState(item({ status: 'upcoming' }))).toEqual({ colorKey: 'upcoming', pulse: false });
+  });
+
+  it('a runless in_progress card renders a STATIC dot — a pulse is a claim a run is live', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: null }))).toEqual({ colorKey: 'build', pulse: false });
+  });
+
+  it('an inline_active card pulses even without a bound run (inline agent action = movement)', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: null, inline_active: true }))).toEqual({ colorKey: 'build', pulse: true });
+  });
+
+  it('an in_progress card with a live bound run (no progress row yet — e.g. a research dispatch) pulses', () => {
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' }))).toEqual({ colorKey: 'build', pulse: true });
+  });
+
+  it('a failed card with NO run progress still paints the durable failed lane (static, never blue/gray)', () => {
+    expect(dotState(item({ status: 'failed', linked_run_id: null }))).toEqual({ colorKey: 'failed', pulse: false });
+  });
+
+  it('a failed card that KEPT its terminal binding (#340 detachRun) is static failed via the run branch', () => {
+    expect(
+      dotState(item({ status: 'failed', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) })),
+    ).toEqual({ colorKey: 'failed', pulse: false });
   });
 });
 
@@ -195,9 +264,47 @@ describe('isLinkedRunning / canPlay / isRetry', () => {
     expect(isRetry(it1)).toBe(true);
   });
 
-  it('in_progress / done items never show play', () => {
-    expect(canPlay(item({ status: 'in_progress' }))).toBe(false);
+  it('a runless in_progress card CAN play; only done suppresses the control outright', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: null }))).toBe(true);
     expect(canPlay(item({ status: 'done' }))).toBe(false);
+  });
+
+  it('an inline_active card (agent working inline) cannot play — no competing build', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: null, inline_active: true }))).toBe(false);
+  });
+
+  it('an in_progress card whose run is DEAD offers ↻ — the card must be recoverable from the UI', () => {
+    const dead = item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) });
+    expect(isLinkedRunning(dead)).toBe(false);
+    expect(canPlay(dead)).toBe(true);
+    expect(isRetry(dead)).toBe(true);
+  });
+
+  it('an in_progress card with a LIVE run never double-offers ▶', () => {
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1' }))).toBe(false);
+    expect(canPlay(item({ status: 'in_progress', linked_run_id: 'r1', run_progress: progress({ phase_label: 'building' }) }))).toBe(false);
+  });
+
+  it('a failed card that kept its binding (#340) retries', () => {
+    const failed = item({ status: 'failed', linked_run_id: 'r1', run_progress: progress({ phase_label: 'failed', step_label: 'failed' }) });
+    expect(canPlay(failed)).toBe(true);
+    expect(isRetry(failed)).toBe(true);
+  });
+
+  it('a failed card that KEPT its #340 binding with NO run_progress (dispatch run / missing run row) is not linked-running and offers ↻', () => {
+    const failed = item({ status: 'failed', linked_run_id: 'r-dead' });
+    // Mutation killed: deleting the status=failed short-circuit makes missing
+    // run_progress linked-running, which hides the retry control.
+    expect(isLinkedRunning(failed)).toBe(false);
+    expect(canPlay(failed)).toBe(true);
+    expect(isRetry(failed)).toBe(true);
+    expect(dotState(failed)).toEqual({ colorKey: 'failed', pulse: false });
+  });
+
+  it('a durable status=failed card with no linked_run_id and no run_progress retries (↻, not ▶)', () => {
+    const runless = item({ status: 'failed', linked_run_id: null });
+    expect(canPlay(runless)).toBe(true);
+    expect(isRetry(runless)).toBe(true);
   });
 });
 
@@ -222,6 +329,30 @@ describe('splitBoard', () => {
     ]);
     expect(active.map((i) => i.id)).toEqual(['a', 'c']);
     expect(completed.map((i) => i.id)).toEqual(['b']);
+  });
+
+  // Acceptance (b), pinned: a SHELVED card is counted as completed NOWHERE, and
+  // is not resurrected into the active lane the server already excluded it from.
+  it('buckets archived THIRD — not active, not completed', () => {
+    const { active, archived, completed } = splitBoard([
+      item({ id: 'a', status: 'in_progress' }),
+      item({ id: 'b', status: 'done' }),
+      item({ id: 'c', status: 'archived' }),
+      item({ id: 'd', status: 'upcoming' }),
+      item({ id: 'e', status: 'failed' }),
+    ]);
+    expect(archived.map((i) => i.id)).toEqual(['c']);
+    expect(active.map((i) => i.id)).toEqual(['a', 'd', 'e']);
+    expect(completed.map((i) => i.id)).toEqual(['b']);
+    // The Done count is what the board reports as progress — it must not move.
+    expect(completed).toHaveLength(1);
+  });
+
+  it("a shelved card's dot is the neutral upcoming outline, and it never pulses", () => {
+    expect(dotState(item({ id: 'c', status: 'archived' }))).toEqual({
+      colorKey: 'upcoming',
+      pulse: false,
+    });
   });
 });
 
@@ -259,5 +390,107 @@ describe('dragReorderTarget (drag-drop reorder persistence)', () => {
   it('is null when either id is not in the active lane', () => {
     expect(dragReorderTarget(active, 'missing', 'b')).toBeNull();
     expect(dragReorderTarget(active, 'a', 'missing')).toBeNull();
+  });
+});
+
+describe('row/rail lockstep — the row dot and the project rail dot must agree (defect 2026-08-12)', () => {
+  // Shared no-op run resolver for runless tests.
+  const noRuns = (_runId: string) => false;
+
+  it('failed-and-runless: item.status=failed → hasFailedNotDone → attention → row paints static failed dot', () => {
+    // SERVER SIDE: scanItemsForRailSignals derives hasFailedNotDone=true from
+    // status='failed' (written only by detachRun/#340) even when linked_run_id
+    // is null. Killing the `item.status === 'failed'` branch in
+    // scanItemsForRailSignals drops hasFailedNotDone to false → activity
+    // becomes 'idle' → this test fails.
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'failed', linked_run_id: null, inline_active: false }],
+      noRuns,
+    );
+    expect(hasFailedNotDone).toBe(true);
+    expect(hasInlineActive).toBe(false);
+
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 0,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('attention');
+
+    // CLIENT SIDE: row dot is static failed, rail dot is attention.
+    expect(dotState(item({ status: 'failed', linked_run_id: null }))).toEqual({
+      colorKey: 'failed',
+      pulse: false,
+    });
+    expect(railDotKind(activity, false)).toBe('attention');
+  });
+
+  it('still-bound terminal-failed run: hasFailedNotDone via isRunTerminalFailed callback', () => {
+    // The run is still linked (pre-reconcile window or kept binding).
+    // Callback returns true → hasFailedNotDone = true.
+    const { hasFailedNotDone } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: 'r-failed', inline_active: false }],
+      (runId) => runId === 'r-failed',
+    );
+    expect(hasFailedNotDone).toBe(true);
+  });
+
+  it('live bound run: the row pulses and the rail shows work — movement is claimed together', () => {
+    // Callback says run is NOT terminal-failed → hasFailedNotDone stays false.
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: 'r1', inline_active: false }],
+      () => false,
+    );
+    expect(hasFailedNotDone).toBe(false);
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 1,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('working');
+
+    expect(dotState(item({ status: 'in_progress', linked_run_id: 'r1' })).pulse).toBe(true);
+    expect(railDotKind(activity, false)).toBe('work');
+  });
+
+  it('runless, non-inline in_progress: NEITHER side claims movement — static row dot, idle rail', () => {
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: null, inline_active: false }],
+      noRuns,
+    );
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 0,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('idle');
+
+    expect(dotState(item({ status: 'in_progress', linked_run_id: null })).pulse).toBe(false);
+    expect(railDotKind(activity, false)).toBe('idle');
+  });
+
+  it('inline_active: row pulses (working) and rail shows work — movement claimed together', () => {
+    const { hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+      [{ status: 'in_progress', linked_run_id: null, inline_active: true }],
+      noRuns,
+    );
+    expect(hasInlineActive).toBe(true);
+    const activity = deriveProjectActivity({
+      chatTurnInProgress: false,
+      liveRunCount: 0,
+      hasInlineActive,
+      hasFailedNotDone,
+      hasStalledLiveRun: false,
+    });
+    expect(activity).toBe('working');
+
+    expect(dotState(item({ status: 'in_progress', inline_active: true, linked_run_id: null })).pulse).toBe(true);
+    expect(railDotKind(activity, false)).toBe('work');
   });
 });

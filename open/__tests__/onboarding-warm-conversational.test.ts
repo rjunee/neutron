@@ -34,7 +34,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildLlmCallSubstrate } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
@@ -121,8 +121,8 @@ async function bootAndCapture(
     captured.push(opts)
     return { start: () => cannedHandle(opts.substrate_instance_id) }
   }
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)

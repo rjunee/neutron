@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -138,11 +138,30 @@ const EXPECTED_COMPOSITION_KEYS = [
   // (`connect/surface-gate.ts`) — see `open-connect-served.test.ts`.
   'connect_api',
   'cores',
+  // `cores_oauth_broker_surface` is DELIBERATELY ABSENT. It is composed only
+  // when a Google client and a declared origin are configured, and this boot
+  // configures neither — the env is cleared above precisely so the key set does
+  // not depend on what the host happens to have exported.
+  //
+  // An earlier revision added it here and called it pre-existing inventory
+  // drift. That was wrong: the field was missing on this developer box's boot
+  // only because the box exports a real Google client, so the "fix" made the
+  // characterization pass locally and fail on CI, which exports none.
   'create_project',
   'cron_jobs',
   'db',
   'doc_search',
+  // Email Core consolidation P1 — the email pipeline's deps bundle. Its
+  // presence HERE is what proves the cron is actually registered on a real
+  // boot: without the field, `build-core-modules.ts` skips registration and
+  // nothing ever polls the inbox.
+  'email_pipeline',
   'heartbeat_tracker',
+  // Owner-approved host deploy — the `host_deploy_request` /
+  // `host_deploy_status` agent tools plus the install hook that hands the
+  // service the graph's ApprovalManager. Its presence HERE is the proof the
+  // capability is wired on a real boot, not merely that the module exists.
+  'host_deploy',
   'import_resume_handler',
   'import_upload_handler',
   'init_ritual_planner',
@@ -172,15 +191,15 @@ const EXPECTED_COMPOSITION_KEYS = [
   'onboarding_overnight_cron',
   'platform',
   'project_slug',
-  // The reminder-fired push hook (`ReminderTickLoop.on_fired`). Registering a
-  // device was only ever half of push; this is the delivery half, and its
-  // absence is why `createPushDispatcher` had no non-test call site.
-  'push_dispatcher',
   'realmode_cleanups',
   'reminder_dispatcher',
   // Executor-mode reminders (plan task 4) — ritual executor factory, set when
   // a credential resolves (llmPool !== null), like `agent_dispatch`/`trident`.
   'skill_forge',
+  // The PROVENANCE of `project_slug`, travelling with it: a fallback 'dev' and a
+  // configured 'dev' are the same string and opposite situations, and only the
+  // boot resolver can tell them apart.
+  'slug_is_fallback',
   'tasks',
   'topic_handler',
   'trident',
@@ -202,6 +221,15 @@ const SAVED_ENV_KEYS = [
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
+  // THE HOST'S OWN GOOGLE CLIENT MUST NOT DECIDE THIS TEST. `cores_oauth_broker
+  // _surface` is composed only when a Google client AND a declared origin are
+  // configured, so leaving these inherited makes the expected key set differ
+  // between a developer box that has them and CI, which does not — the exact
+  // way this characterization went red on CI while passing locally. Cleared
+  // below so the boot is deterministic in both places.
+  'NEUTRON_CORES_GOOGLE_CLIENT_ID',
+  'NEUTRON_CORES_GOOGLE_CLIENT_SECRET',
+  'NEUTRON_CONNECT_PUBLIC_BASE_URL',
 ] as const
 
 let savedEnv: Record<string, string | undefined> = {}
@@ -220,6 +248,9 @@ beforeEach(() => {
   process.env['ANTHROPIC_API_KEY'] = 'sk-ant-test-comp-fields'
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   delete process.env['NOTIFY_SOCKET']
+  delete process.env['NEUTRON_CORES_GOOGLE_CLIENT_ID']
+  delete process.env['NEUTRON_CORES_GOOGLE_CLIENT_SECRET']
+  delete process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL']
 })
 
 afterEach(() => {
@@ -258,8 +289,8 @@ async function bootAndInspect(
     captured.push(opts)
     return { start: () => cannedHandle(opts.substrate_instance_id) }
   }
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   // Only compose the CompositionInput — we deliberately do NOT stand up the
   // production graph (HTTP server + cron schedulers), so this characterization

@@ -40,7 +40,7 @@ import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
 import { buildButtonPromptClaim } from '../wiring/build-button-prompt-claim.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { InMemoryStore, SendQueue, SyncEngine, normalizeInbound } from '@neutronai/chat-core/index.ts'
 
 const TOPIC = 'app:sam'
@@ -50,8 +50,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'no-dd-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 })
 afterEach(() => {
   db.close()
@@ -454,7 +454,7 @@ describe('app-ws — exactly-one-row-per-device convergence (real client SyncEng
 
     // Device B reconnects and replays from cursor 0 — overlaps everything it
     // already applied live.
-    for (const env of await adapter.replayAfter(TOPIC, 0)) B.inbox.push(env)
+    for (const env of (await adapter.replayAfter(TOPIC, 0)).envelopes) B.inbox.push(env)
     await B.drain()
 
     const aRows = await A.rows()

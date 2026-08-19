@@ -72,6 +72,218 @@ const tick = () => new Promise((r) => setTimeout(r, 0))
 const ready = () => ({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
 
 describe('NeutronChatController — view model over chat-core', () => {
+  it('reuses the same session and socket when switching back to a warm project', () => {
+    const sockets: FakeSocket[] = []
+    const sessions: WebChatSession[] = []
+    const controller = new NeutronChatController({
+      topicForProject: (projectId) => projectId === null ? TOPIC : `${TOPIC}:${projectId}`,
+      createSession: (sinks, scope) => {
+        const session = new WebChatSession({
+          url: 'wss://t/ws/app/chat',
+          topic_id: scope.topicId,
+          createSocket: () => {
+            const socket = new FakeSocket()
+            sockets.push(socket)
+            return socket
+          },
+          onChange: sinks.onChange,
+          onStatus: sinks.onStatus,
+          onFrame: sinks.onFrame,
+        })
+        sessions.push(session)
+        return session
+      },
+    })
+    controller.start()
+    const generalSession = sessions[0]!
+    const generalSocket = sockets[0]!
+    controller.setProject('p1')
+    controller.setProject(null)
+    expect(sessions).toHaveLength(2)
+    expect(sockets).toHaveLength(2)
+    expect(sessions[0]).toBe(generalSession)
+    expect(sockets[0]).toBe(generalSocket)
+    expect(generalSocket.closed).toBe(false)
+    controller.stop()
+  })
+
+  // ── liveActivity: say WHAT it is doing, not just that it is ────────────────
+  //
+  // Owner-asked 2026-08-11 after a 277-second turn showed him only three dots.
+  // The re-render guard matters as much as the feature: the activity handler
+  // deliberately did NOT publish() before this, so a keepalive tick could not
+  // re-render the transcript. These pin both halves.
+  const activityFrame = (label: string, scope = 'general', detail?: string, kind = 'tool_start') => ({
+    v: 1,
+    type: 'activity_event',
+    scope_key: scope,
+    event: {
+      seq: 1,
+      at: 1,
+      kind,
+      label,
+      ...(detail !== undefined ? { detail } : {}),
+    },
+    ts: 1,
+  })
+
+  it('is null when nothing is in flight', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    controller.stop()
+  })
+
+  it('reports the step label + detail while a turn is in flight', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('build the email core')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files', 'general', 'SPEC.md'))
+    await tick()
+    // A tool_start's label is the humanized TOOL NAME and wins over any detail —
+    // showing the file path instead would be less informative, not more.
+    expect(controller.getViewModel().liveActivity).toEqual({ label: 'Reading files' })
+    controller.stop()
+  })
+
+  it('a STATUS row shows its DETAIL, because its label is the useless word "status"', async () => {
+    // THE BUG THE OWNER SCREENSHOTTED (2026-08-11): the bubble read literally
+    // "status". `activity-inspector.ts:417` emits {kind:'status', label:'status',
+    // detail: summarize(message)}, so the substrate's message:'working' arrives
+    // with the meaning in `detail`. Rendering `label` showed a kind word and hid
+    // the content behind a hover nobody finds on a phone.
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('status', 'general', 'working', 'status'))
+    await tick()
+    expect(controller.getViewModel().liveActivity).toEqual({ label: 'working' })
+    controller.stop()
+  })
+
+  it('successive STATUS rows with DIFFERENT details each update — the indicator must not freeze', async () => {
+    // The second half of the same bug: the change-guard compared `label`, and every
+    // status row carries the identical label 'status'. So the first one latched and
+    // no later status could replace it — the owner watched one frozen word for a
+    // whole turn. The guard now compares the DISPLAYED text.
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('status', 'general', 'working', 'status'))
+    await tick()
+    expect(controller.getViewModel().liveActivity?.label).toBe('working')
+    sockets[0]!.deliver(activityFrame('status', 'general', 'scoping the plan', 'status'))
+    await tick()
+    expect(controller.getViewModel().liveActivity?.label).toBe('scoping the plan')
+    controller.stop()
+  })
+
+  it('does NOT publish for a repeated label — a chatty tool must not re-render per event', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    let renders = 0
+    const un = controller.subscribe(() => {
+      renders += 1
+    })
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    expect(renders).toBe(0) // same label → no publish
+    sockets[0]!.deliver(activityFrame('Running tests'))
+    await tick()
+    expect(renders).toBeGreaterThan(0) // a real step change DOES publish
+    un()
+    controller.stop()
+  })
+
+  it('ignores an activity event while NOTHING is in flight — an idle transcript never re-renders', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    let renders = 0
+    const un = controller.subscribe(() => {
+      renders += 1
+    })
+    sockets[0]!.deliver(activityFrame('Keepalive'))
+    await tick()
+    expect(renders).toBe(0)
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    un()
+    controller.stop()
+  })
+
+  it('ignores a KEEPALIVE during a turn — a heartbeat is not a step', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    sockets[0]!.deliver(activityFrame('keepalive', 'general', undefined, 'keepalive'))
+    await tick()
+    // The real step survives; the heartbeat did not overwrite it.
+    expect(controller.getViewModel().liveActivity?.label).toBe('Reading files')
+    controller.stop()
+  })
+
+  it('ignores an event for a DIFFERENT scope', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('go')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Someone else work', 'other-project'))
+    await tick()
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    controller.stop()
+  })
+
+  it('a NEW send clears the previous step, so a stale label never leaks in', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    await controller.send('first')
+    await tick()
+    sockets[0]!.deliver(activityFrame('Reading files'))
+    await tick()
+    expect(controller.getViewModel().liveActivity?.label).toBe('Reading files')
+    await controller.send('second')
+    await tick()
+    expect(controller.getViewModel().liveActivity).toBeNull()
+    controller.stop()
+  })
+
   it('renders an optimistic user bubble and flips the typing indicator on send', async () => {
     const { controller, sockets } = setup()
     controller.start()
@@ -738,6 +950,40 @@ describe('NeutronChatController — BUG 7 (no empty bubble above the typing indi
 })
 
 describe('NeutronChatController — server-authoritative typing (agent_typing)', () => {
+  it('HEADLINE: adopts an idle reconnect snapshot and can send after a missed terminal edge', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await controller.send('turn whose terminal edge will be missed')
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+
+    // The reconnect's targeted snapshot enters through the same production
+    // frame sink; transport retry timing is independently owned by chat-core.
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'end', ts: 2 })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(false)
+
+    await controller.send('send immediately after reconnect')
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+    expect(controller.getViewModel().messages.some((m) => m.text === 'send immediately after reconnect')).toBe(true)
+  })
+
+  it('adopts a running reconnect snapshot while a legitimate turn is still live', async () => {
+    const { controller, sockets } = setup()
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver(ready())
+    sockets[0]!.deliver({ v: 1, type: 'agent_typing', state: 'start', ts: 2 })
+    await tick()
+    expect(controller.getViewModel().isRunning).toBe(true)
+    expect(controller.getViewModel().awaitingFirstToken).toBe(true)
+  })
+
   it('shows typing on a start frame and clears it on an end frame', async () => {
     const { controller, sockets } = setup()
     controller.start()
@@ -969,6 +1215,72 @@ describe('NeutronChatController — live work_board_changed (Work Board Phase 1b
     ])
     // The frame's project_id rides along so the tab can drop a sibling project.
     expect(seenPids).toEqual(['p1'])
+    controller.stop()
+  })
+
+  // ── workBoardGrewNonce: the signal that reveals the Work tab ──────────────
+  //
+  // Owner-asked 2026-08-11: the board must "POP open immediate as soon as items
+  // are added". Most of these assert the cases where it must STAY QUIET, because
+  // a signal that fires too eagerly steals him off Chat mid-sentence.
+  it('does NOT bump on the FIRST board frame — a fresh subscription is a baseline, not growth', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    const before = controller.getViewModel().workBoardGrewNonce
+    // Opening a project that ALREADY has items delivers them as one snapshot.
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })]))
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(before)
+    controller.stop()
+  })
+
+  it('bumps when the active board GAINS an item', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' })]))
+    await tick()
+    const base = controller.getViewModel().workBoardGrewNonce
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })]))
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(base + 1)
+    controller.stop()
+  })
+
+  it('does not bump when the board SHRINKS or stays the same — a clear must not pop it open', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })]))
+    await tick()
+    const base = controller.getViewModel().workBoardGrewNonce
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' }), boardItem({ id: 'b' })])) // same
+    await tick()
+    sockets[0]!.deliver(changed([])) // a `clear`
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(base)
+    controller.stop()
+  })
+
+  it('a SIBLING project board growing does not pop open the active project', async () => {
+    const { controller, sockets } = setup('p1')
+    controller.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver(ready())
+    await tick()
+    sockets[0]!.deliver(changed([boardItem({ id: 'a' })]))
+    await tick()
+    const base = controller.getViewModel().workBoardGrewNonce
+    sockets[0]!.deliver({ ...changed([boardItem({ id: 'x' }), boardItem({ id: 'y' })]), project_id: 'other' })
+    await tick()
+    expect(controller.getViewModel().workBoardGrewNonce).toBe(base)
     controller.stop()
   })
 

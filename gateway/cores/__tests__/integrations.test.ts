@@ -16,12 +16,11 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ApiKeyStore } from '@neutronai/auth/api-key-store.ts'
@@ -55,9 +54,7 @@ async function makeBench() {
   const dbDir = join(home, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secrets = new SecretsStore({ data_dir: home, db })
@@ -137,6 +134,7 @@ test('buildIntegrationsStatus reflects connected OAuth account + stored API key'
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   expect(status.oauth.every((o) => !o.connected)).toBe(true)
   expect(status.api_keys.find((k) => k.label === 'tavily')?.connected).toBe(false)
@@ -156,6 +154,7 @@ test('buildIntegrationsStatus reflects connected OAuth account + stored API key'
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   const cal = status.oauth.find((o) => o.label === 'google_calendar')
   expect(cal?.connected).toBe(true)
@@ -258,6 +257,7 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   const slotBefore = before.api_keys.find((k) => k.label === 'openai_api_key')
   expect(slotBefore).toBeDefined()
@@ -289,6 +289,7 @@ test('system openai_api_key slot shares storage with the onboarding key (ND1)', 
     tokens: b.tokens,
     secretsStore: b.secrets,
     project_slug: OWNER,
+    slug_is_fallback: false,
   })
   expect(after.api_keys.find((k) => k.label === 'openai_api_key')!.connected).toBe(true)
 

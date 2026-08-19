@@ -16,6 +16,9 @@ CREATE INDEX button_prompts_topic_active
 CREATE INDEX button_prompts_topic_created
     ON button_prompts (topic_id, created_at DESC)
 
+[index] code_trident_stage_events_run_idx (tbl=code_trident_stage_events)
+CREATE INDEX code_trident_stage_events_run_idx ON code_trident_stage_events(run_id)
+
 [index] core_global_installations_install_state (tbl=core_global_installations)
 CREATE INDEX core_global_installations_install_state
     ON core_global_installations (install_state)
@@ -95,6 +98,12 @@ CREATE INDEX idx_code_trident_runs_active
 [index] idx_code_trident_runs_slug (tbl=code_trident_runs)
 CREATE UNIQUE INDEX idx_code_trident_runs_slug
     ON code_trident_runs (project_slug, slug)
+    WHERE phase NOT IN ('done', 'failed', 'stopped')
+
+[index] idx_code_trident_runs_wave_child (tbl=code_trident_runs)
+CREATE UNIQUE INDEX idx_code_trident_runs_wave_child
+    ON code_trident_runs (parent_run_id, wave_task_id)
+    WHERE parent_run_id IS NOT NULL
 
 [index] idx_connect_guest_invites_project (tbl=connect_guest_invites)
 CREATE INDEX idx_connect_guest_invites_project
@@ -397,10 +406,10 @@ CREATE INDEX wow_events_project_action
 
 [table] _migrations (tbl=_migrations)
 CREATE TABLE _migrations (
-       version INTEGER PRIMARY KEY,
-       name TEXT NOT NULL,
+       version INTEGER NOT NULL,
+       name TEXT NOT NULL PRIMARY KEY,
        applied_at REAL NOT NULL
-     )
+     , content_sha256 TEXT, applied_by_commit TEXT, tree_provenance TEXT)
 
 [table] api_keys (tbl=api_keys)
 CREATE TABLE api_keys (
@@ -550,7 +559,7 @@ CREATE TABLE "code_subagent_registry" (
 ) STRICT
 
 [table] code_trident_runs (tbl=code_trident_runs)
-CREATE TABLE code_trident_runs (
+CREATE TABLE "code_trident_runs" (
     id                  TEXT PRIMARY KEY NOT NULL,
     slug                TEXT NOT NULL,
     project_slug        TEXT NOT NULL,
@@ -581,11 +590,81 @@ CREATE TABLE code_trident_runs (
     chat_id             TEXT,
     thread_id           TEXT,
     failure_reason      TEXT,
-    started_at          TEXT NOT NULL,                  -- ISO-8601 UTC
-    last_advanced_at    TEXT NOT NULL                   -- ISO-8601 UTC
-, channel_kind TEXT NOT NULL DEFAULT 'telegram'
-        CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')), workflow_run_id TEXT, inner_checkpoint TEXT, inner_verdict TEXT
-        CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')), inner_result TEXT, harvested_at INTEGER) STRICT
+    started_at          TEXT NOT NULL,
+    last_advanced_at    TEXT NOT NULL,
+    channel_kind        TEXT NOT NULL DEFAULT 'telegram'
+                            CHECK (channel_kind IN ('telegram', 'app_socket', 'webhook', 'cli')),
+    workflow_run_id     TEXT,
+    inner_checkpoint    TEXT,
+    inner_verdict       TEXT
+                            CHECK (inner_verdict IS NULL OR inner_verdict IN ('APPROVE', 'REQUEST_CHANGES')),
+    inner_result        TEXT,
+    harvested_at        INTEGER,
+    inner_checkpoint_head     TEXT,
+    inner_checkpoint_findings TEXT,
+    crash_recoveries    INTEGER,
+    reviewed_head       TEXT,
+    bound_pr            INTEGER,
+    fenced_paths        TEXT,
+    base_sha            TEXT,
+    base_behind         INTEGER,
+    infra_retries       INTEGER,
+    agent_waked_at      INTEGER
+, brief_alert TEXT, parent_run_id TEXT, wave_task_id TEXT) STRICT
+
+[table] code_trident_stage_events (tbl=code_trident_stage_events)
+CREATE TABLE code_trident_stage_events (
+    id INTEGER PRIMARY KEY,
+    run_id TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    at TEXT NOT NULL,
+    meta TEXT
+) STRICT
+
+[table] codex_rotation_active (tbl=codex_rotation_active)
+CREATE TABLE codex_rotation_active (
+  owner_slug  TEXT PRIMARY KEY,
+  active_slot TEXT    NOT NULL,
+  updated_at  INTEGER
+)
+
+[table] codex_rotation_slots (tbl=codex_rotation_slots)
+CREATE TABLE codex_rotation_slots (
+  owner_slug          TEXT    NOT NULL,
+  slot                TEXT    NOT NULL,
+  -- Round-robin order. Ties are broken by slot name in the selector, so a
+  -- duplicated position degrades to a deterministic order rather than a random one.
+  position            INTEGER NOT NULL DEFAULT 0,
+  -- Optional owner-facing name; the slot id is the fallback label.
+  label               TEXT,
+  -- Epoch ms after which the slot is eligible again. NULL = eligible now.
+  -- Note `cooling_reason = 'unauthorized'` outranks this: a revoked refresh token
+  -- does not heal on a timer, so that state stays ineligible until reconnected.
+  cooling_until       INTEGER,
+  -- 'short-window' | 'long-window' | 'rate-limited' | 'unauthorized' | 'manual'
+  cooling_reason      TEXT,
+  -- Last harvested usage, retained for the status surface. `window_minutes` is
+  -- stored per sample because the window length has changed regime before
+  -- (300 minutes became 10080) and a stored reading is meaningless without it.
+  last_used_percent   REAL,
+  last_window_minutes INTEGER,
+  last_resets_at      INTEGER,
+  last_plan_type      TEXT,
+  last_run_at         INTEGER,
+  -- When the bundle currently in this slot was connected, epoch ms.
+  --
+  -- This is the identity boundary between one account and the next in a REUSED
+  -- directory. Disconnecting a seat cannot delete its `sessions/` tree — for the
+  -- first seat that tree is the whole CODEX_HOME and also holds every other
+  -- seat's directory — so without this stamp a different subscription connected
+  -- under the same slot name would inherit its predecessor's usage history and be
+  -- cooled before it had run once. The harvest ignores rollouts older than this.
+  connected_at        INTEGER,
+  -- Last harvest attempt, epoch ms. Throttles the filesystem scan, which sits on
+  -- a synchronous path that read-only status requests also reach.
+  last_harvest_at     INTEGER,
+  PRIMARY KEY (owner_slug, slot)
+)
 
 [table] connect_guest_invites (tbl=connect_guest_invites)
 CREATE TABLE connect_guest_invites (
@@ -1434,15 +1513,20 @@ CREATE TABLE upload_sessions (
 ) STRICT
 
 [table] usage_pool_samples (tbl=usage_pool_samples)
-CREATE TABLE usage_pool_samples (
-    ts               INTEGER NOT NULL,
-    pool             TEXT    NOT NULL,
-    account_label    TEXT,
-    session          REAL,
-    weekly           REAL,
-    session_reset_at INTEGER,
-    weekly_reset_at  INTEGER,
-    PRIMARY KEY (ts, pool)
+CREATE TABLE "usage_pool_samples" (
+    ts                INTEGER NOT NULL,
+    pool              TEXT    NOT NULL,
+    -- '' means "nothing can name the account", never a name. See the note above.
+    account_label     TEXT    NOT NULL DEFAULT '',
+    session           REAL,
+    weekly            REAL,
+    session_reset_at  INTEGER,
+    weekly_reset_at   INTEGER,
+    -- The length of the window each fraction describes, as the provider reported
+    -- it. NULL = not reported; the reader falls back to the pool's default.
+    session_window_ms INTEGER,
+    weekly_window_ms  INTEGER,
+    PRIMARY KEY (ts, pool, account_label)
 ) STRICT
 
 [table] watchdog_alerts (tbl=watchdog_alerts)
@@ -1461,7 +1545,7 @@ CREATE TABLE "work_board_items" (
     project_slug    TEXT NOT NULL,
     title           TEXT NOT NULL,                  -- ONE line (stripped + capped at the store)
     status          TEXT NOT NULL DEFAULT 'upcoming'
-                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed')),
+                        CHECK (status IN ('upcoming', 'in_progress', 'done', 'failed', 'archived')),
     sort_order      INTEGER NOT NULL,
     design_doc_ref  TEXT,
     inline_active   INTEGER NOT NULL DEFAULT 0
@@ -1469,9 +1553,10 @@ CREATE TABLE "work_board_items" (
     linked_run_id   TEXT,
     created_at      TEXT NOT NULL,                  -- ISO-8601 UTC
     updated_at      TEXT NOT NULL,                  -- ISO-8601 UTC
-    completed_at    TEXT                            -- ISO-8601 UTC; NULL until status='done'
-, task_type TEXT NOT NULL DEFAULT 'build'
-        CHECK (task_type IN ('build', 'research'))) STRICT
+    completed_at    TEXT,                           -- ISO-8601 UTC; NULL until status='done' (NEVER stamped for 'archived')
+    task_type       TEXT NOT NULL DEFAULT 'build'   -- 0105 — the ▶ routing discriminator
+                        CHECK (task_type IN ('build', 'research'))
+, blocked_by TEXT, declared_surfaces TEXT) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

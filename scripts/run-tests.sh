@@ -130,6 +130,15 @@ CONCURRENCY="${NEUTRON_TEST_CONCURRENCY:-$(sysctl -n hw.physicalcpu 2>/dev/null 
 TIMEOUT="${NEUTRON_TEST_TIMEOUT:-15000}"
 JOBS="${NEUTRON_TEST_JOBS:-1}"
 SHARD_SPEC="${NEUTRON_TEST_SHARD:-}"
+# Cost model for the general-lane shard split (§2c). Milliseconds, and only the
+# RATIO between them matters — see "THE WEIGHTS ARE AN ESTIMATE" there. MIG_COST_MS
+# is the measured cost of one `applyMigrations` replay of the whole tree; the base
+# stands in for per-file import and setup. Not configurable by env on purpose: the
+# weights must be identical on every shard runner or the partition breaks, and an
+# env knob is the easiest way to make one runner disagree with the others.
+BASE_COST_MS=150
+MIG_COST_MS=137
+SHARD_WEIGHT_LOG=""
 # Validate the shard spec IMMEDIATELY, before the ~15s of discovery below. A bad
 # spec is a configuration error, and the cost of getting it wrong is severe: a
 # spec silently treated as "no files" would be a green run that tested nothing.
@@ -265,20 +274,48 @@ done
 # slice of what gets VERIFIED. (Sharding earlier would have made each runner
 # blind to a discovery drift affecting files it does not own.)
 #
-# Round-robin by index across the lanes IN SEQUENCE, so each shard gets a
+# The PGLite and device lanes are split round-robin by index, so each shard gets a
 # proportional share of the slow PGLite files instead of one runner absorbing the
-# entire serial lane (same for the device-harness lane).
+# entire serial lane. The GENERAL lane is split by ESTIMATED COST instead — see
+# "WHY THE GENERAL LANE IS WEIGHTED" below.
 #
-# The round-robin cursor CARRIES ACROSS lanes rather than resetting to 0 for each
-# one. That is load-bearing for balance, not a tidiness preference: a per-lane
-# reset sends every lane's remainder to the SAME low-index shards, so with three
-# lanes `max - min` can reach 3 while the partition guard
-# (scripts/__tests__/run-tests-shard.test.ts) requires <= 1. It held on main by
-# arithmetic luck and broke the first time a PR added three files. Carrying the
-# cursor makes the three lanes one continuous round-robin over a fixed
-# concatenated order, so the overall split is balanced within one file BY
-# CONSTRUCTION, while each lane is still spread proportionally. Gaps/overlap are
-# unaffected — it is the same partition function, only phase-shifted per lane.
+# The round-robin cursor CARRIES ACROSS the two round-robin lanes rather than
+# resetting to 0 for each one. That is load-bearing for balance, not a tidiness
+# preference: a per-lane reset sends every lane's remainder to the SAME low-index
+# shards, so `max - min` can exceed the partition guard's tolerance
+# (scripts/__tests__/run-tests-shard.test.ts). It held on main by arithmetic luck
+# and broke the first time a PR added three files. Carrying the cursor makes those
+# lanes one continuous round-robin over a fixed concatenated order, so each is
+# still spread proportionally. Gaps/overlap are unaffected — it is the same
+# partition function, only phase-shifted per lane.
+#
+# WHY THE GENERAL LANE IS WEIGHTED AND NOT ROUND-ROBIN
+# ---------------------------------------------------
+# Round-robin balances FILE COUNT, which is only the right thing to balance if
+# every file costs about the same. In this suite they do not, and the spread is
+# not subtle: a fully-migrated project database is built by replaying the entire
+# migration tree, measured at ~137 ms of CPU per call, and 334 test call sites do
+# exactly that (`applyMigrations(db.raw())`). A file with thirty such tests costs
+# multiple seconds; a file asserting a pure function costs milliseconds. Splitting
+# those by count lets one runner draw a disproportionate share of the expensive
+# ones, and because CI's wall-clock is the SLOWEST shard, that runner alone sets
+# how long every PR waits.
+#
+# So the general lane is bin-packed by estimated cost: weights are assigned from
+# file CONTENT, sorted heaviest-first, and each file goes to whichever shard is
+# currently lightest (longest-processing-time-first, the standard greedy for this).
+# Every shard runs the identical computation over the identical input, so all four
+# reach the same assignment independently — the partition property is unchanged
+# and still asserted directly.
+#
+# THE WEIGHTS ARE AN ESTIMATE, AND THAT IS ENOUGH. `MIG_COST_MS` is the one
+# measured number (~137 ms per migration replay); `BASE_COST_MS` is a stand-in for
+# per-file import and setup. They are not a claim about any file's true runtime,
+# and nothing depends on them being accurate — the bar a cost model has to clear
+# here is "better than assuming every file costs the same", which is what
+# round-robin assumed. Deliberately content-derived rather than a checked-in
+# timing manifest: a manifest is a second source of truth that rots silently every
+# time a test is added, and a stale weight is indistinguishable from a fresh one.
 #
 # The coverage guarantee changes shape and it is worth being explicit: a sharded
 # run can no longer prove on its own that every file ran. It proves it ran
@@ -302,22 +339,161 @@ if [ -n "$SHARD_SPEC" ]; then
     done
     printf '%s\n' ${_out[@]+"${_out[@]}"}
   }
-  _shard_cursor=0
-  _lane_n=${#GENERAL_FILES[@]}
+
+  # --- the general lane: bin-pack by estimated cost ---------------------------
+  # Weight = BASE_COST_MS + MIG_COST_MS × (migration replays in the file). One
+  # batched `grep -c` over the lane (the same shape as the lane-membership greps
+  # above, well under ARG_MAX at this file count) so the whole model costs a
+  # single extra pass over files already on the page cache from discovery.
+  _weigh_and_pack() {
+    [ "$#" -eq 0 ] && return 0
+    # `grep -cH` prints `path:count` per file, including zero-count files, so every
+    # input gets exactly one line and nothing is dropped.
+    #
+    # `-H` IS LOAD-BEARING AND ITS ABSENCE IS A SILENT COVERAGE HOLE. With exactly
+    # ONE input file, plain `grep -c` prints the bare count and NOTHING else — no
+    # path. The weight awk then reads that count AS the path, the restore loop below
+    # matches nothing, and the runner executes ZERO general tests and exits 0. A
+    # single-file general lane is reachable (a `NEUTRON_TEST_ROOT`-scoped run at
+    # shard 1/1), so this is a real path and not a hypothetical. Caught by a
+    # cross-model review of this very change, and pinned by a test below.
+    #
+    # grep's THREE statuses have to be told apart, and a blanket `|| true` throws
+    # away the one that matters: 0 = matched, 1 = matched nothing (entirely normal —
+    # a lane where no file replays migrations), 2+ = could not READ a file, which
+    # must reach the caller's fail-closed check rather than be laundered into a
+    # short list. So 1 is normalised to success here and everything above it is not.
+    _grep_out="$(mktemp "${TMPDIR:-/tmp}/neutron-shard-grep-XXXXXX")" || return 90
+    LC_ALL=C grep -cHE 'applyMigrations(ToProjectDb)?\(' "$@" >"$_grep_out" 2>/dev/null
+    _grep_rc=$?
+    if [ "$_grep_rc" -gt 1 ]; then
+      rm -f "$_grep_out"
+      return "$_grep_rc"
+    fi
+    LC_ALL=C awk -F: -v base="$BASE_COST_MS" -v mig="$MIG_COST_MS" \
+          '{ n = $NF; p = $0; sub(/:[^:]*$/, "", p); print (base + mig * n) "\t" p }' \
+          "$_grep_out" \
+      | LC_ALL=C sort -t"$(printf '\t')" -k1,1nr -k2,2 \
+      | LC_ALL=C awk -F"$(printf '\t')" -v n="$SHARD_N" -v mine="$SHARD_I" '
+          BEGIN { for (b = 1; b <= n; b++) load[b] = 0 }
+          {
+            # Longest-processing-time-first: heaviest remaining file goes to the
+            # lightest bin. Ties break to the LOWEST bin index, which — with the
+            # sort above being total (weight desc, then path asc) — makes the
+            # assignment a pure function of the input. Every shard therefore
+            # computes the same partition without talking to any other shard.
+            pick = 1
+            for (b = 2; b <= n; b++) if (load[b] < load[pick]) pick = b
+            load[pick] += $1
+            if (pick == mine) print $2
+            total[pick] = total[pick] + 1
+          }
+          END {
+            for (b = 1; b <= n; b++) printf("weight\t%d\t%d\t%d\n", b, load[b], total[b]) > "/dev/stderr"
+            # The number of files the packer actually SAW. The caller compares this
+            # against what it handed in, so a truncated pipeline cannot pass as a
+            # small shard. NR here is the count after the sort, i.e. the whole lane.
+            printf("packed\t%d\n", NR) > "/dev/stderr"
+          }
+        '
+    _pipe_rc=$?
+    rm -f "$_grep_out"
+    return "$_pipe_rc"
+  }
+
+  # FAIL CLOSED ON A BROKEN PACKER. Everything below is about one hazard: this step
+  # REPLACES `GENERAL_FILES`, and `SHARD_TOTAL` — the number the coverage audit
+  # holds the run to — is computed AFTERWARD from the replaced array. So a packer
+  # that silently emits fewer files does not trip the audit; it lowers the bar the
+  # audit checks against, and the run goes green having skipped tests. That is the
+  # one failure mode this whole script exists to make impossible, so the packer's
+  # status and its record count are both checked before the array is replaced.
+  SHARD_WEIGHT_LOG="$(mktemp "${TMPDIR:-/tmp}/neutron-shard-weight-XXXXXX")" || {
+    echo "run-tests: FATAL — could not create the shard weight log; refusing to shard blind." >&2
+    exit 1
+  }
+  SHARD_PACK_LIST="$(mktemp "${TMPDIR:-/tmp}/neutron-shard-pack-XXXXXX")" || {
+    echo "run-tests: FATAL — could not create the shard packing list; refusing to shard blind." >&2
+    exit 1
+  }
+  _gen_pre=${#GENERAL_FILES[@]}
+  # Written to a FILE rather than read through a process substitution: a
+  # substitution's exit status is unobservable, so a `grep` that could not read a
+  # file, or an OOM-killed `sort`, would look exactly like a small shard.
+  _pack_rc=0
+  _weigh_and_pack ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"} \
+    >"$SHARD_PACK_LIST" 2>"$SHARD_WEIGHT_LOG" || _pack_rc=$?
+  if [ "$_pack_rc" -ne 0 ]; then
+    echo "run-tests: FATAL — the shard cost-packer exited ${_pack_rc}. Refusing to run a" >&2
+    echo "  partial general lane: a short list would LOWER the coverage audit's own bar" >&2
+    echo "  (SHARD_TOTAL is derived from it) and the run would go green having skipped tests." >&2
+    exit 1
+  fi
+  _packed_seen="$(LC_ALL=C awk -F"$(printf '\t')" '$1 == "packed" { print $2 }' "$SHARD_WEIGHT_LOG" | tail -1)"
+  if [ "$_gen_pre" -gt 0 ] && [ "${_packed_seen:-}" != "$_gen_pre" ]; then
+    echo "run-tests: FATAL — the shard cost-packer saw ${_packed_seen:-0} of ${_gen_pre} general-lane" >&2
+    echo "  files. The pipeline dropped input, so the partition would be incomplete on EVERY" >&2
+    echo "  shard at once and no shard would notice. Refusing to run." >&2
+    exit 1
+  fi
   _tmp=()
-  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${GENERAL_FILES[@]+"${GENERAL_FILES[@]}"})
-  GENERAL_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
-  _shard_cursor=$(( _shard_cursor + _lane_n ))
+  while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done <"$SHARD_PACK_LIST"
+  rm -f "$SHARD_PACK_LIST"
+  # A non-empty lane that assigns this shard nothing is legitimate only when there
+  # are fewer files than shards. Anything else means the restore loop below would
+  # silently produce an empty execution list.
+  if [ "$_gen_pre" -gt 0 ] && [ "${#_tmp[@]}" -eq 0 ] && [ "$_gen_pre" -ge "$SHARD_N" ]; then
+    echo "run-tests: FATAL — ${_gen_pre} general-lane files packed into ${SHARD_N} shards left" >&2
+    echo "  shard ${SHARD_I} with none. That is arithmetically impossible, so the packing" >&2
+    echo "  output was malformed rather than merely lopsided. Refusing to run." >&2
+    exit 1
+  fi
+  # Restore discovery order. The packer emits heaviest-first, and chunk membership
+  # is taken by index off this array, so leaving it weight-sorted would pile every
+  # expensive file into chunk 1 — a needless change to peak RSS shape that has
+  # nothing to do with balancing across shards.
+  GENERAL_FILES=()
+  if [ "${#_tmp[@]}" -gt 0 ]; then
+    _mine=$'\n'"$(printf '%s\n' "${_tmp[@]}")"$'\n'
+    for _f in ${FILES[@]+"${FILES[@]}"}; do
+      case "$_mine" in *$'\n'"$_f"$'\n'*) GENERAL_FILES+=("$_f") ;; esac
+    done
+  fi
+  # The restore loop is a filter over the DISCOVERED set, so a path the packer
+  # emitted that no discovered file matches vanishes here without a trace. Compare
+  # the two counts so a mangled path (the `-H` bug above produced exactly that)
+  # cannot shrink the execution list quietly.
+  if [ "${#GENERAL_FILES[@]}" -ne "${#_tmp[@]}" ]; then
+    echo "run-tests: FATAL — the packer assigned ${#_tmp[@]} files to shard ${SHARD_I} but only" >&2
+    echo "  ${#GENERAL_FILES[@]} of them matched a discovered file. A packed path did not survive" >&2
+    echo "  the round trip, so the execution list is not what was planned. Refusing to run." >&2
+    exit 1
+  fi
+
+  # --- the two serial lanes: unchanged round-robin ----------------------------
+  # Left on round-robin deliberately. Both are small and both are dominated by a
+  # fixed per-file cost (a WASM compile; a DOM + module-registry install) rather
+  # than by how much migration work the file does, so counting IS the cost model
+  # for them and a proportional spread is exactly right.
+  _shard_cursor=0
   _lane_n=${#PGLITE_FILES[@]}
   _tmp=()
   while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${PGLITE_FILES[@]+"${PGLITE_FILES[@]}"})
   PGLITE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
   _shard_cursor=$(( _shard_cursor + _lane_n ))
-  _lane_n=${#DEVICE_FILES[@]}
   _tmp=()
   while IFS= read -r _l; do [ -n "$_l" ] && _tmp+=("$_l"); done < <(_slice "$_shard_cursor" ${DEVICE_FILES[@]+"${DEVICE_FILES[@]}"})
   DEVICE_FILES=( ${_tmp[@]+"${_tmp[@]}"} )
+
   echo "run-tests: SHARD ${SHARD_I}/${SHARD_N} — executing ${#GENERAL_FILES[@]} general + ${#PGLITE_FILES[@]} PGLite + ${#DEVICE_FILES[@]} device of ${TOTAL} discovered"
+  # The estimated general-lane cost per shard, printed by every shard so a future
+  # imbalance is visible in the log rather than only in the wall-clock.
+  if [ -s "$SHARD_WEIGHT_LOG" ]; then
+    LC_ALL=C awk -F"$(printf '\t')" -v i="$SHARD_I" \
+      '$1 == "weight" { printf("run-tests: shard %d general est %dms over %d files%s\n", $2, $3, $4, ($2 == i ? "  <= this shard" : "")) }' \
+      "$SHARD_WEIGHT_LOG"
+  fi
+  rm -f "$SHARD_WEIGHT_LOG"
 fi
 
 NPGLITE=${#PGLITE_FILES[@]}

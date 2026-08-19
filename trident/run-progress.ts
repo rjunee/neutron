@@ -83,6 +83,8 @@ export interface RunProgress {
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** The failure reason (e.g. the hang-watchdog reap) when `phase_label==='failed'`. */
   failure_reason: string | null
+  /** Brief-integrity refusal, including one recovered by the bridge retry. */
+  brief_alert: string | null
 }
 
 const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
@@ -120,7 +122,10 @@ export function deriveStepLabel(phase: TridentPhase, inner_checkpoint: string | 
   const cp = inner_checkpoint
   if (cp === null) return 'building' // round-1 build in flight (no checkpoint yet)
   if (cp === 'argus-approved') return 'merging' // approved → outer loop merging
-  if (cp === 'argus-request-changes') return 'fixing' // changes asked → fix building
+  // #563 — the inner loop found the PR already MERGED and stopped there. The run is
+  // finished in substance; the outer loop stamps `done` on its next tick.
+  if (cp === 'pr-merged') return 'merging'
+  if (cp === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(cp)) return 'fixing'
   if (cp === 'forge-done') return 'reviewing' // build done → review running
   if (/^fix-round-\d+$/.test(cp)) return 'reviewing' // fix built → re-review running
   // `inner-error` / any unrecognised checkpoint → still building (about to fail).
@@ -155,20 +160,37 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
   // floor it at 2 (the very next checkpoint `fix-round-N` carries the precise N).
   let round = run.round > 0 ? run.round : 1
 
-  // Refine the LIVE (non-terminal) label with the inner workflow's checkpoint —
-  // the outer phase alone is stuck on `forge-init` for the whole build.
+  // Refine the LIVE (non-terminal) label with the inner workflow's checkpoint.
+  //
+  // This block used to open "the outer phase alone is stuck on `forge-init` for
+  // the whole build" — true when it was written, and no longer: `checkpoint.sh`
+  // now writes the phase from the same checkpoint via the canonical table in
+  // `checkpoint-phase.ts`. It is KEPT because it is still the only thing that can
+  // read a run written before that landed, and because `merged`/the round
+  // arithmetic below are display concerns the phase column does not carry.
   if (!terminal && run.inner_checkpoint !== null) {
     const cp = run.inner_checkpoint
     const fixRound = /fix-round-(\d+)/.exec(cp)
     if (fixRound !== null) {
       round = Math.max(round, Number(fixRound[1]))
-      phase_label = 'building'
+      // `fix-round-N` marks fix N as BUILT, so the RE-REVIEW is what is running —
+      // which is what `deriveStepLabel` has always said for this checkpoint and
+      // what `phaseForCheckpoint` says now. This line said 'building' (the phase
+      // that had just ENDED), so one snapshot carried both claims at once:
+      // `phase_label: 'building'` beside `step_label: 'reviewing'`.
+      phase_label = 'reviewing'
     } else if (cp === 'forge-done' || cp === 'argus-approved') {
       // Build finished → reviewing (or approved, about to merge).
       phase_label = 'reviewing'
-    } else if (cp === 'argus-request-changes') {
-      // Review asked for changes → a fix round (round ≥ 2) is starting.
-      round = Math.max(round, 2)
+    } else if (cp === 'pr-merged') {
+      // #563 — the PR is merged; the outer loop has yet to stamp `done`. Saying
+      // 'reviewing' here would show a shipped change as still being read.
+      phase_label = 'merged'
+    } else if (cp === 'argus-request-changes' || /^argus-request-changes-round-\d+$/.test(cp)) {
+      // Review asked for changes → the following fix round is starting. New
+      // checkpoints carry the spent review round; the legacy name floors at 2.
+      const reviewedRound = /^argus-request-changes-round-(\d+)$/.exec(cp)
+      round = Math.max(round, reviewedRound === null ? 2 : Number(reviewedRound[1]) + 1)
       phase_label = 'building'
     }
     // `inner-error` / any other checkpoint → keep the base label (about to fail).
@@ -188,6 +210,7 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
     pr: run.pr,
     verdict: run.inner_verdict,
     failure_reason: run.failure_reason,
+    brief_alert: run.brief_alert,
   }
 }
 

@@ -85,6 +85,53 @@ export interface SubstrateProfile {
    */
   readonly skip_permissions: boolean
   /**
+   * Whether a spawn on this profile carries the instance's GitHub credential —
+   * `GH_TOKEN` plus the matching git credential helper (`github/credential.ts`
+   * `githubProcessEnv`). It is what makes `gh` and a raw `git push` work inside
+   * the spawned REPL's Bash.
+   *
+   * REQUIRED, WITH NO DEFAULT, AND THAT IS THE POINT. Handing this to a call
+   * site instead put the decision in nine places nobody rereads: an agent asked
+   * "what PRs are open" and answered out of documentation because ITS site was
+   * never updated (`ISSUES.md` #576), and trident builds against a private repo
+   * died at `fatal: could not read Username` because THEIRS wasn't either. A
+   * required field means a new profile cannot be authored without stating the
+   * grant, and a new substrate inherits whatever its profile already decided.
+   *
+   * ⚠️ IT IS A TRUST DECISION, NOT A CONVENIENCE. `true` gives that spawn push
+   * access to every repo the owner's token reaches, so a profile whose input is
+   * attacker-influenced (imported history, project docs, onboarding text) must
+   * be `false` — the same boundary `enableToolBridge` already draws.
+   *
+   * Resolution is PER SPAWN, from {@link githubSpawnEnvRef}, so a credential
+   * connected after boot works and a rotated one is never stale.
+   */
+  readonly github_credential: boolean
+  /**
+   * Whether a spawn on this profile is OWNER-FACING CONVERSATIONAL, and so must
+   * never come up on a model below the frontier tier — threaded to
+   * `ClaudeCodeSubstrateOptions.frontier_model_floor` and enforced at the
+   * persistent substrate's single spawn chokepoint
+   * (`runtime/adapters/claude-code/persistent/model-floor.ts`).
+   *
+   * WHY IT IS ON THE PROFILE. A spawn's model is resolved as
+   * `record.model ?? getBestModel()`, so a REPL registry row OVERRIDES the best
+   * model, and `spawn.ts` writes the row back with whatever it spawned on — one
+   * bad value is permanent. The owner's project chat ran a full day on Haiku
+   * twice; a hand-edit of the row held for a few hours and it came back. We never
+   * found the writer, so the fix is a floor rather than a patch at one writer.
+   *
+   * ⚠️ IT IS A TRUST-CLASS DECISION, NOT A QUALITY PREFERENCE, and that is why
+   * it is REQUIRED with no default — the same reasoning as `github_credential`
+   * directly above. Several profiles run on `FAST_MODEL` DELIBERATELY (scribe
+   * extraction, reflection/correction judging, phase-prompt rephrasing): they are
+   * latency- and quota-shaped work where Haiku-class quality is the right call,
+   * and a floor there would be a regression, not a fix. Deciding per profile
+   * means the answer is stated once, next to the trust class it belongs to,
+   * instead of being inferred from an instance-id prefix at a spawn site.
+   */
+  readonly frontier_model_floor: boolean
+  /**
    * RESERVED (Phase B) — CC permission mode. `undefined` today; NOT applied by
    * the factory yet (see file header). Reserving it here means Phase B flips a
    * constant, not the factory + 8 sites.
@@ -105,12 +152,24 @@ export interface SubstrateProfile {
    * `BuildLlmCallSubstrateInput.extra_env`; when a profile sets this the factory
    * uses it in place of the legacy per-call `extra_env` input.
    */
-  readonly extra_env?: Record<string, string | undefined>
+  readonly extra_env?: () => Promise<Record<string, string | undefined>>
   /**
    * RESERVED (Phase D) — native OS sandbox config. `undefined` today; NOT
    * applied by the factory yet (see file header). Shape only.
    */
   readonly sandbox?: SubstrateSandboxConfig
+  /**
+   * Per-profile INACTIVITY window (ms), threaded to
+   * `ClaudeCodeSubstrateOptions.turnTimeoutMs`. Absent ⇒ the pool's
+   * `DEFAULT_TURN_INACTIVITY_MS` (90s).
+   *
+   * APPLIED, not reserved — unlike the fields above. It exists because the
+   * default measures liveness as PTY BYTES, and one profile hosts work that is
+   * legitimately silent for minutes (see `PROFILE_WARM_FIRE`). The absolute
+   * ceiling (`turn_absolute_ceiling_ms`, 45min default) remains the real backstop,
+   * so raising this window cannot make a wedged turn immortal.
+   */
+  readonly turn_inactivity_ms?: number
 }
 
 /**
@@ -124,6 +183,12 @@ export interface SubstrateProfile {
  */
 export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
   skip_permissions: true,
+  // scribe / reflection do no git work at all — a credential here would be reach without a use.
+  github_credential: false,
+  // FAST_MODEL here is the DESIGN, not a degradation: extraction and judging are
+  // high-frequency, latency-shaped, schema-constrained work. A floor would be a
+  // quota and latency regression on the memory lane for no quality the owner reads.
+  frontier_model_floor: false,
 }
 
 /**
@@ -132,10 +197,22 @@ export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
  * `PROFILE_UNTRUSTED_IMPORT` even though identical now: the redesign keeps the
  * owner's chat grant while tightening the untrusted-import one.
  *
- * Site: `open/wiring/substrates.ts` (`cc-agent-*` liveAgentSubstrate).
+ * Sites: `open/wiring/substrates.ts` — `cc-agent-*` (liveAgentSubstrate) and
+ * `cc-nudge-*` (reminderComposeSubstrate, the background proactive-compose lane).
+ * The second site is a SESSION split, not a trust split: a fired ritual composes
+ * there and ISSUES #504 settled that it must have "access to everything general
+ * has access to", so it shares this profile deliberately. What it does NOT share
+ * is the pool key — see that file for the outage that forced the split.
  */
 export const PROFILE_WARM_CHAT: SubstrateProfile = {
   skip_permissions: true,
+  // the owner's own chat. `gh pr list` and `git` in its Bash are the point.
+  github_credential: true,
+  // THE ONE PROFILE THAT SETS THIS, and now the two substrates that share it. It
+  // is the surface the owner builds on, it is the surface the Haiku regression
+  // landed on twice in one day, and it is the only one where a lower tier is never
+  // a legitimate choice.
+  frontier_model_floor: true,
 }
 
 /**
@@ -146,6 +223,11 @@ export const PROFILE_WARM_CHAT: SubstrateProfile = {
  */
 export const PROFILE_PHASE_SPEC: SubstrateProfile = {
   skip_permissions: true,
+  // its input is user-controlled onboarding text — a prompt-injection surface.
+  github_credential: false,
+  // rephrasing a phase prompt that already has a static fallback, under a 3s
+  // conversational tier. Fast is the requirement; a floor would spend the budget.
+  frontier_model_floor: false,
 }
 
 /**
@@ -162,6 +244,11 @@ export const PROFILE_PHASE_SPEC: SubstrateProfile = {
  */
 export const PROFILE_ISOLATED_COMPOSE: SubstrateProfile = {
   skip_permissions: true,
+  // composes from imported project docs, which are attacker-influenced content.
+  github_credential: false,
+  // its callers pass their own model explicitly per composition; this profile does
+  // not host the owner's live conversation, so it keeps per-call model choice.
+  frontier_model_floor: false,
 }
 
 /**
@@ -174,6 +261,11 @@ export const PROFILE_ISOLATED_COMPOSE: SubstrateProfile = {
  */
 export const PROFILE_UNTRUSTED_IMPORT: SubstrateProfile = {
   skip_permissions: true,
+  // imported chat history is the prompt-injection surface this profile is named for.
+  github_credential: false,
+  // bulk synthesis over imported history — the callers pick the tier per pass
+  // (BEST with a SONNET Pass-2 fallback, P2-v2 S21). A floor would break that.
+  frontier_model_floor: false,
 }
 
 /**
@@ -186,6 +278,11 @@ export const PROFILE_UNTRUSTED_IMPORT: SubstrateProfile = {
  */
 export const PROFILE_EPHEMERAL: SubstrateProfile = {
   skip_permissions: true,
+  // disposable Trident / agent-dispatch builds: they commit and push.
+  github_credential: true,
+  // agent dispatch is explicitly model-parameterised (a brief names its model);
+  // clamping it would silently overrule a caller's deliberate choice.
+  frontier_model_floor: false,
 }
 
 /**
@@ -194,9 +291,77 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
  * the launching turn's settle so the detached background workflow keeps running.
  * TODAY: `skip_permissions: true`.
  *
+ * THE INACTIVITY WINDOW IS THE LOAD-BEARING FIELD HERE, and it is why this
+ * profile can no longer be a copy of the others.
+ *
+ * The pool's default turn watchdog is an INACTIVITY window of 90s that advances
+ * on every PTY byte the `claude` child emits. That default is right for a chat
+ * turn and WRONG for this profile, because the workflow's agents run as
+ * SIDECHAINS OF THIS SESSION — so the launching turn stays open for the whole
+ * build, and a reasoning-heavy step emits nothing to the terminal while it
+ * thinks. On a trip the substrate does not merely fail the turn: it POISONS AND
+ * RESPAWNS the warm session, which kills the detached build the session is
+ * hosting.
+ *
+ * That is not hypothetical. Both owner attempts at the Email Core P1 build died
+ * this way (2026-08-07 and 2026-08-10). The Aug 7 run: `plan:fable` — Fable at
+ * MAX reasoning effort, reading SPEC.md plus a governed plan doc and surveying
+ * the code — went quiet, the window tripped, the planner's transcript ends with
+ * `[Request interrupted by user]` at 23:19:21, and `repl-respawn ...
+ * cc-trident-fire-juno ... session=77fa6d70` is logged 8 seconds later. No
+ * checkpoint reached, no PR opened, no parseable result — surfacing to the owner
+ * as "terminal result missing/garbled". Ralph mode's FIRST step is the most
+ * expensive one in the pipeline, so the bigger the plan the more certainly it
+ * died: the build could essentially never succeed.
+ *
+ * The irony worth recording: this watchdog REPLACED a fixed 180s wall-clock cap
+ * that was removed on 2026-07-01 precisely because it killed one of the owner's
+ * working builds mid-turn. The replacement kills a working build too — same
+ * outcome, new mechanism — because "actively working" is measured as terminal
+ * chatter, which a thinking model does not produce. The constant's own docblock
+ * still claims an actively-working turn "runs as long as it needs".
+ *
+ * So this profile opts out of the chatter heuristic and relies on the ABSOLUTE
+ * CEILING (45min default) as its backstop. A launcher that is genuinely wedged
+ * still dies; one whose planner is thinking does not.
+ *
  * Site: `open/wiring/substrates.ts` (`makeWarmFireSubstrate`).
  */
 export const PROFILE_WARM_FIRE: SubstrateProfile = {
   skip_permissions: true,
+  // Trident v2's build loop. Without it a run against a PRIVATE repo dies at
+  // `fatal: could not read Username for 'https://github.com'` — measured on the
+  // owner's instance 2026-08-15, where every enterprise dispatch built, committed
+  // and then failed, burning a full Forge round each time.
+  github_credential: true,
+  // the workflow routes its own steps per model (`plan:fable` and friends resolve
+  // from `runtime/models.ts`); the launcher must not overrule them.
+  frontier_model_floor: false,
+  // 30min of silence. Deliberately BELOW the 45min absolute ceiling so the
+  // ceiling stays the terminal authority and this window can never make a turn
+  // immortal, and far above any plausible silent-thinking stretch.
+  turn_inactivity_ms: 30 * 60_000,
 }
 
+/**
+ * The instance's GitHub spawn-env resolver, registered ONCE at composition.
+ *
+ * A module-level holder rather than a factory input for the same reason
+ * `replToolBridgeRef` is one: the value is a property of the single running
+ * instance, and threading it through nine construction sites is exactly the
+ * per-site decision this file exists to remove. Open is single-owner — one
+ * instance, one GitHub credential.
+ *
+ * Unset ⇒ every spawn behaves exactly as it does today, so a build that never
+ * registers one (tests, an instance with no GitHub connected) is unaffected.
+ */
+export const githubSpawnEnvRef: {
+  resolve: (() => Promise<Record<string, string | undefined>>) | undefined
+} = { resolve: undefined }
+
+/** Register the instance's resolver. Called once, by the composer. */
+export function setGithubSpawnEnvResolver(
+  resolve: () => Promise<Record<string, string | undefined>>,
+): void {
+  githubSpawnEnvRef.resolve = resolve
+}

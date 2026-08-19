@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
@@ -46,8 +46,8 @@ let handler: (req: Request) => Promise<Response | null>
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-cred-surface-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   store = new ProjectCredentialStore(db, { crypto: new SecretsStore({ data_dir: tmp, db }) })
   handler = createProjectCredentialsSurface({
     store,
@@ -83,7 +83,7 @@ function get(url: string): Request {
 
 describe('the project route cannot write instance-wide state', () => {
   test('a project POST asking for scope=global is refused AND writes nothing', async () => {
-    const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-1', scope: 'global' }))
+    const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-credential-123456', scope: 'global' }))
     expect(res?.status).toBe(400)
     expect(((await res?.json()) as { code: string }).code).toBe('scope_not_allowed')
     // The store is the witness: no global default appeared, and no project row
@@ -93,7 +93,7 @@ describe('the project route cannot write instance-wide state', () => {
   })
 
   test('a project POST with no scope writes THIS project only', async () => {
-    const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-1' }))
+    const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-credential-123456' }))
     expect(res?.status).toBe(201)
     const rows = store.listForProject(OWNER, 'proj-a')
     expect(rows).toHaveLength(1)
@@ -103,7 +103,7 @@ describe('the project route cannot write instance-wide state', () => {
   })
 
   test("a project POST that says scope=project still writes the project's row", async () => {
-    const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-1', scope: 'project' }))
+    const res = await handler(post(PROJECT_URL, { service: 'openai', token: 'sk-credential-123456', scope: 'project' }))
     expect(res?.status).toBe(201)
     expect(store.listForProject(OWNER, 'proj-a')).toHaveLength(1)
     expect(store.listGlobal(OWNER)).toHaveLength(0)
@@ -147,8 +147,36 @@ describe('the project route cannot write instance-wide state', () => {
 })
 
 describe('the global route is the one writer of instance-wide state', () => {
+  test('named values are write-only on both POST and GET, while the store can resolve them', async () => {
+    const secret = 'positive-secret-value-12345'
+    const created = await handler(post(GLOBAL_URL, { service: 'custom_build', token: secret }))
+    const createdText = await created!.text()
+    expect(created?.status).toBe(201)
+    expect(createdText).toContain('custom_build')
+    expect(createdText).not.toContain(secret)
+
+    const listedText = await (await handler(get(GLOBAL_URL)))!.text()
+    expect(listedText).toContain('custom_build')
+    expect(listedText).not.toContain(secret)
+    expect(store.resolve(OWNER, undefined, 'custom_build')?.plaintext).toBe(secret)
+  })
+
+  test('the named-key field enforces the scrubber floor in both directions', async () => {
+    const tooShort = await handler(
+      post(GLOBAL_URL, { service: 'custom_build', token: 'x'.repeat(15) }),
+    )
+    expect(tooShort?.status).toBe(400)
+    expect(store.listGlobal(OWNER)).toEqual([])
+
+    const accepted = await handler(
+      post(GLOBAL_URL, { service: 'custom_build', token: 'x'.repeat(16) }),
+    )
+    expect(accepted?.status).toBe(201)
+    expect(store.resolve(OWNER, undefined, 'custom_build')?.plaintext).toBe('x'.repeat(16))
+  })
+
   test('a global POST writes the global default and no project row', async () => {
-    const res = await handler(post(GLOBAL_URL, { service: 'openai', token: 'sk-1', label: 'shared' }))
+    const res = await handler(post(GLOBAL_URL, { service: 'openai', token: 'sk-credential-123456', label: 'shared' }))
     expect(res?.status).toBe(201)
     const rows = store.listGlobal(OWNER)
     expect(rows).toHaveLength(1)
@@ -158,7 +186,7 @@ describe('the global route is the one writer of instance-wide state', () => {
   })
 
   test('a global POST asking for scope=project is refused AND writes nothing', async () => {
-    const res = await handler(post(GLOBAL_URL, { service: 'openai', token: 'sk-1', scope: 'project' }))
+    const res = await handler(post(GLOBAL_URL, { service: 'openai', token: 'sk-credential-123456', scope: 'project' }))
     expect(res?.status).toBe(400)
     expect(((await res?.json()) as { code: string }).code).toBe('scope_not_allowed')
     expect(store.listGlobal(OWNER)).toHaveLength(0)

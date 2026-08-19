@@ -87,8 +87,31 @@ while read -r local_ref local_sha remote_ref remote_sha; do
       base="$mb"
     fi
   fi
+  # A MERGE FROM THE MAINLINE HITS THE SAME FALSE POSITIVE THE REBASE BRANCH
+  # ABOVE EXISTS TO STOP, and the floor cannot express it. When `remote_sha` IS
+  # an ancestor — an ordinary fast-forward push — the range is honest about the
+  # branch, but a branch that merged origin/main in carries main's commits inside
+  # it. Those are already on GitHub and already mirrored, they bear the
+  # `Co-authored-by: <owner>` trailer GitHub stamps on a squash merge, and the
+  # person pushing cannot rewrite them. Observed 2026-08-16: merging main to
+  # clear a conflict pulled in two such commits and blocked the push, with the
+  # only "fixes" available being --no-verify or a force-push rebase.
+  #
+  # `--not origin/main` reduces the window to exactly what this push publishes.
+  # NOT applied when the push TARGET is main itself: there the new commits are
+  # the ones landing on main, and excluding main's own ref would empty the window
+  # and check nothing. Nor when origin/main is missing — then there is nothing to
+  # exclude and the range stands as it was.
+  exclude_ref=""
+  case "$remote_ref" in
+    refs/heads/main|main) ;;
+    *) if git -C "$ROOT" rev-parse --verify -q origin/main >/dev/null 2>&1; then
+         exclude_ref=origin/main
+       fi ;;
+  esac
   LEAK_GATE_BASE_SHA="$base" \
   LEAK_GATE_HEAD_SHA="$local_sha" \
+  LEAK_GATE_EXCLUDE_REF="$exclude_ref" \
     bash "$GATE" --tree "$ROOT" --messages-only || STATUS=$?
   [ "$STATUS" -eq 0 ] || break
 done

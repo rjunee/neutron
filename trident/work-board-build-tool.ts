@@ -28,12 +28,14 @@ import type { Topic } from '@neutronai/channels/types.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
+  type DispatchLandedProbe,
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
+import { detectMergeMode, type GitModeProbe } from './git-mode.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
-import type { MergeMode, TridentRunStore } from './store.ts'
+import type { TridentRunStore } from './store.ts'
 
 export const WORK_BOARD_DISPATCH_BUILD_TOOL = 'work_board_dispatch_build'
 export const WORK_BOARD_START_TOOL = 'work_board_start'
@@ -52,6 +54,11 @@ const inputSchema: JsonSchemaDocument = {
       description:
         'The full build task / instructions. Forge builds it, Argus reviews, and it merges ' +
         'autonomously; the result is reported back here when it lands.',
+    },
+    bound_pr: {
+      type: 'number',
+      description:
+        'REVIEW-ONLY MODE: the number of the EXISTING PR to review. When set, the run reviews that PR instead of building — it must never create a branch, a commit, or a new PR. REQUIRED for any task that asks to review an existing PR; a review-shaped task without it is refused.',
     },
   },
   required: ['board_item_id', 'task'],
@@ -73,6 +80,7 @@ const outputSchema: JsonSchemaDocument = {
 interface DispatchBuildArgs {
   board_item_id?: unknown
   task?: unknown
+  bound_pr?: unknown
 }
 
 /**
@@ -91,7 +99,21 @@ export interface TridentBuildToolDeps {
   repo_path: string
   /** Resolve the per-project git workspace; defaults to `ensureProjectBuildWorkspace`. */
   resolveBuildRepo?: (owner_home: string, project_slug: string) => Promise<string>
-  resolveMergeMode?: () => Promise<MergeMode>
+  /**
+   * The merge-mode probe, NOT a resolver function. REQUIRED.
+   *
+   * The distinction is the whole guard. An opaque `(repo_path) => MergeMode`
+   * satisfies its type whether or not it carries the publisher's credential, so
+   * a wiring test could only assert `typeof … === 'function'` — which the buggy
+   * composition passed too. A {@link GitModeProbe} carries `publisher`, so the
+   * composition root's choice of credential is INSPECTABLE at the seam
+   * `work_board_start` actually runs through, and
+   * `open/__tests__/open-trident-prod-boot-wiring.test.ts` asserts it is the
+   * live secrets store rather than the `unwiredPublisherCredential` placeholder.
+   */
+  merge_mode_probe: GitModeProbe
+  /** Shared outer-loop merged-PR probe from the composition root. */
+  landed_probe?: DispatchLandedProbe
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
@@ -169,7 +191,8 @@ export function registerTridentBuildToolSurface(
       'shared code, anything that warrants code review, or large/risky work — and TELL the owner ' +
       'you are routing to trident and why. Build SIMPLE work (a single file, a quick script, a ' +
       'small self-contained edit) INLINE with your own Read/Write/Edit tools instead; do not ' +
-      'dispatch trivia here.',
+      'dispatch trivia here. To run a REVIEW round on an existing PR, set bound_pr to that PR ' +
+      'number — review-shaped tasks without bound_pr are refused.',
     input_schema: inputSchema,
     output_schema: outputSchema,
     capability_required: 'agent:dispatch_subagent',
@@ -182,6 +205,7 @@ export function registerTridentBuildToolSurface(
       const board_item_id_raw = typeof a.board_item_id === 'string' ? a.board_item_id.trim() : ''
       const board_item_id = board_item_id_raw.length > 0 ? board_item_id_raw : undefined
       const task = typeof a.task === 'string' ? a.task.trim() : ''
+      const bound_pr = typeof a.bound_pr === 'number' ? a.bound_pr : undefined
       if (task.length === 0) {
         return { ok: false, error: 'task is required and must be a non-empty string' }
       }
@@ -199,14 +223,18 @@ export function registerTridentBuildToolSurface(
         project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
-        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
+        ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       }
-      const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
+      const result = await dispatchBoardBoundBuild(
+        { board_item_id, task, ...(bound_pr !== undefined ? { bound_pr } : {}) },
+        buildDeps,
+      )
       if (!result.ok) {
         return { ok: false, error: result.message }
       }
@@ -232,6 +260,7 @@ export function registerTridentBuildToolSurface(
     },
   })
 
+  // `work_board_start` deliberately has no bound_pr: saved-spec starts are builds; review rounds use work_board_dispatch_build.
   // `work_board_start` — the agent-native equivalent of the ▶ (play) button:
   // START (never-dispatched item) or RETRY (last run failed/stopped) a build
   // bound to a Plan item, using the item's PERSISTED spec (its design_doc_ref
@@ -309,7 +338,8 @@ export function registerTridentBuildToolSurface(
         project_slug: scope,
         repo_path: deps.repo_path,
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
-        ...(deps.resolveMergeMode !== undefined ? { resolveMergeMode: deps.resolveMergeMode } : {}),
+        resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
+        ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),

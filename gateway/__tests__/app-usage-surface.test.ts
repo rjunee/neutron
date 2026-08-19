@@ -22,13 +22,14 @@ import { createAppUsageSurface } from '../http/app-usage-surface.ts'
 
 const OWNER = 'demo'
 
-/** A pool with nothing recorded — the shape a first render actually gets. */
+/** No accounts — the shape a first render actually gets. The staleness deadline
+ *  rides along even so: it describes the POOL, not any one reading. */
 const EMPTY_POOL: PoolSummary = {
   pool: 'anthropic',
+  connection: 'not_connected',
   measured_at: null,
-  account_label: null,
-  session: null,
-  weekly: null,
+  stale_after_ms: 120_000,
+  accounts: [],
 }
 
 function surfaceFor(
@@ -105,16 +106,29 @@ describe('GET /api/app/usage', () => {
 describe('GET /api/app/usage/dashboard', () => {
   const MEASURED: PoolSummary = {
     pool: 'anthropic',
+    connection: 'connected',
     measured_at: 1_700_000_000_000,
-    account_label: null,
-    session: {
-      fraction: 0.75,
-      reset_at: 1_700_009_000_000,
-      resets_in_ms: 9_000_000,
-      pace: 1.5,
-      exhausts_at: 1_700_003_000_000,
-    },
-    weekly: { fraction: 0.36, reset_at: null, resets_in_ms: null, pace: null, exhausts_at: null },
+    stale_after_ms: 120_000,
+    accounts: [
+      {
+        account_label: null,
+        measured_at: 1_700_000_000_000,
+        session: {
+          fraction: 0.75,
+          window_ms: 18_000_000,
+          reset_at: 1_700_009_000_000,
+          pace: 1.5,
+          exhausts_at: 1_700_003_000_000,
+        },
+        weekly: {
+          fraction: 0.36,
+          window_ms: 604_800_000,
+          reset_at: null,
+          pace: null,
+          exhausts_at: null,
+        },
+      },
+    ],
   }
 
   it('serves the summarised series under a `pools` array', async () => {

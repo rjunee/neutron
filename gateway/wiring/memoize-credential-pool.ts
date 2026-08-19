@@ -225,6 +225,13 @@ export function memoizeCredentialPoolByEnvMtime(
           ) {
             cred.cooldown_until = was.cooldown_until
             if (was.cooldown_reason !== undefined) cred.cooldown_reason = was.cooldown_reason
+            // Carry the park's START too, not just its expiry: `MAX_PARK_MS` is
+            // measured from it, so dropping it would re-anchor the ceiling to this
+            // re-resolve and let a later over-ceiling report walk the park past six
+            // hours — the bound `park` exists to hold.
+            if (was.cooldown_started_at !== undefined) {
+              cred.cooldown_started_at = was.cooldown_started_at
+            }
             cred.consecutive_failures = was.consecutive_failures
           }
         }

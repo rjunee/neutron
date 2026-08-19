@@ -37,7 +37,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
@@ -105,8 +105,8 @@ beforeEach(() => {
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'])
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {
@@ -308,6 +308,9 @@ describe('Open overnight morning-brief delivery wiring (ISSUES #443)', () => {
 
       const wired = buildOvernightEngineHandler({
         db,
+        // The composition supplies the publisher credential; assert it is there
+        // rather than substituting a stub, so an unwired composer fails here.
+        publisher_credential: cfg!.publisher_credential,
         deliver: cfg!.deliver!,
         general_topic_id: cfg!.general_topic_id!,
         now: () => reporterTime,
@@ -331,6 +334,9 @@ describe('Open overnight morning-brief delivery wiring (ISSUES #443)', () => {
       // is what a deliver-only fix would have shipped.
       const topicless = buildOvernightEngineHandler({
         db,
+        // The composition supplies the publisher credential; assert it is there
+        // rather than substituting a stub, so an unwired composer fails here.
+        publisher_credential: cfg!.publisher_credential,
         deliver: cfg!.deliver!,
         now: () => reporterTime,
         listOptedInProjects: () => [],

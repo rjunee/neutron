@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
 import {
@@ -8,6 +8,12 @@ import {
   type ReminderOutbound,
   type ReminderOutboundInput,
 } from './dispatcher.ts'
+import {
+  MAX_DEGRADED_INTENT_CHARS,
+  MAX_NUDGE_BODY_CHARS,
+  overBoundNudgeBody,
+  OVER_BOUND_NUDGE_BODY,
+} from './message-shape.ts'
 import type { Reminder } from './store.ts'
 
 function makeReminder(over: Partial<Reminder> = {}): Reminder {
@@ -240,6 +246,155 @@ describe('buildReminderDispatcher — composition + post', () => {
   })
 })
 
+// #293 defect B, measured: at 14:11 and 14:36 a fire posted 3,413 and 3,336
+// characters of the owner's private operational `message` — run ids, file
+// paths, the agent's own reasoning about him — straight into his chat, because
+// the compose step failed and the degrade path posted `row.message` raw. The
+// bound below is what makes that unpostable; the verbatim degrade for a real
+// one-line reminder is preserved, because that one is designed behaviour.
+describe('buildReminderDispatcher — the refused-body bounds', () => {
+  const LEAK_MARKER = 'LEAK_MARKER_XYZ'
+  const longIntent = `OVERNIGHT BUILD DRIVER ${LEAK_MARKER} `.repeat(150)
+  /** The refusal line for `makeReminder()`'s id — it NAMES the reminder. */
+  const REFUSED_R1 = overBoundNudgeBody('r1')
+
+  test('compose throws on a long intent → the intent is NEVER posted', async () => {
+    expect(longIntent.length).toBeGreaterThan(MAX_NUDGE_BODY_CHARS)
+    const outbound = recordingOutbound()
+    const lines: string[] = []
+    const llm: ReminderLlm = {
+      compose: async () => {
+        throw new Error('substrate down')
+      },
+    }
+    const d = buildReminderDispatcher({ outbound, llm, log: (m) => lines.push(m) })
+
+    await d.dispatch(makeReminder({ message: longIntent }))
+
+    expect(outbound.posts).toHaveLength(1)
+    const body = outbound.posts[0]!.body
+    expect(body).not.toBe(longIntent)
+    expect(body).not.toContain(LEAK_MARKER)
+    expect(body).toBe(REFUSED_R1)
+    expect(body.length).toBeLessThanOrEqual(MAX_DEGRADED_INTENT_CHARS)
+    // The refusal is on the record, against the reminder id.
+    const refusal = lines.find(
+      (l) => l.includes('MAX_DEGRADED_INTENT_CHARS') && l.includes('refused'),
+    )
+    expect(refusal).toBeDefined()
+    expect(refusal).toContain('r1')
+  })
+
+  // ACCEPTANCE CRITERION 3, at the size that actually occurs. 29% of live
+  // reminder rows were 1001–2000 chars: under the round-1 single 2000-char
+  // bound every one of them still posted `row.message` verbatim on a compose
+  // failure. The degrade bound is 300, so they do not.
+  test('compose throws on a 1900-char intent — under MAX_NUDGE_BODY_CHARS — and it is STILL not posted', async () => {
+    const midIntent = `OVERNIGHT BUILD DRIVER ${LEAK_MARKER} `.repeat(48)
+    expect(midIntent.length).toBeGreaterThan(MAX_DEGRADED_INTENT_CHARS)
+    expect(midIntent.length).toBeLessThan(MAX_NUDGE_BODY_CHARS)
+    const outbound = recordingOutbound()
+    const llm: ReminderLlm = {
+      compose: async () => {
+        throw new Error('substrate down')
+      },
+    }
+    const d = buildReminderDispatcher({ outbound, llm })
+
+    await d.dispatch(makeReminder({ message: midIntent }))
+
+    expect(outbound.posts[0]!.body).not.toContain(LEAK_MARKER)
+    expect(outbound.posts[0]!.body).toBe(REFUSED_R1)
+  })
+
+  test('an empty compose result on a long intent also refuses the intent', async () => {
+    const outbound = recordingOutbound()
+    const d = buildReminderDispatcher({ outbound, llm: recordingLlm('   ') })
+
+    await d.dispatch(makeReminder({ message: longIntent }))
+
+    expect(outbound.posts[0]!.body).toBe(REFUSED_R1)
+    expect(outbound.posts[0]!.body).not.toContain(LEAK_MARKER)
+  })
+
+  test('the refusal line names the reminder, so a recurring one is actionable', async () => {
+    const outbound = recordingOutbound()
+    const d = buildReminderDispatcher({ outbound, llm: recordingLlm('   ') })
+
+    await d.dispatch(makeReminder({ id: 'rem-abc123', message: longIntent }))
+
+    expect(outbound.posts[0]!.body).toContain('rem-abc123')
+    expect(outbound.posts[0]!.body).not.toBe(OVER_BOUND_NUDGE_BODY)
+  })
+
+  test('a 3,400-char composed "nudge" is refused, not posted', async () => {
+    const outbound = recordingOutbound()
+    const lines: string[] = []
+    const composed = 'C'.repeat(3_400)
+    const d = buildReminderDispatcher({
+      outbound,
+      llm: recordingLlm(composed),
+      log: (m) => lines.push(m),
+    })
+
+    await d.dispatch(makeReminder({ message: 'take out the trash' }))
+
+    // Refused → treated exactly as a compose failure, so the bounded degrade
+    // posts instead. The over-long body never reaches the topic, whole or cut.
+    expect(outbound.posts[0]!.body).toBe('take out the trash')
+    expect(outbound.posts[0]!.body).not.toContain('CCCC')
+    expect(lines.some((l) => l.includes('over MAX_NUDGE_BODY_CHARS'))).toBe(true)
+  })
+
+  test('a composed body of exactly MAX_NUDGE_BODY_CHARS still posts', async () => {
+    const outbound = recordingOutbound()
+    const composed = 'C'.repeat(MAX_NUDGE_BODY_CHARS)
+    const d = buildReminderDispatcher({ outbound, llm: recordingLlm(composed) })
+
+    await d.dispatch(makeReminder())
+
+    expect(outbound.posts[0]!.body).toBe(composed)
+  })
+
+  // A `>` NEEDS BOTH SIDES OF ITS EDGE. The test above pins the last accepted length and the
+  // 3,400-character test sits far past it — neither can tell a `>` from a `>=`. One character
+  // over is the only case that does, and reading the boundary wrong silently refuses a
+  // legitimate nudge that happens to land exactly on the limit. The degraded-intent limit
+  // already has both halves; this is the composed limit's missing half.
+  test('a composed body ONE character over MAX_NUDGE_BODY_CHARS is refused', async () => {
+    const outbound = recordingOutbound()
+    const lines: string[] = []
+    const composed = 'C'.repeat(MAX_NUDGE_BODY_CHARS + 1)
+    const d = buildReminderDispatcher({
+      outbound,
+      llm: recordingLlm(composed),
+      log: (m) => lines.push(m),
+    })
+
+    await d.dispatch(makeReminder({ message: 'take out the trash' }))
+
+    // Refused → the bounded degrade posts the short literal instead; the over-long body
+    // never reaches the topic, whole or cut.
+    expect(outbound.posts[0]!.body).toBe('take out the trash')
+    expect(outbound.posts[0]!.body).not.toBe(composed)
+    expect(lines.some((l) => l.includes('over MAX_NUDGE_BODY_CHARS'))).toBe(true)
+  })
+
+  test('the short-literal degrade stays byte-identical when compose throws', async () => {
+    const outbound = recordingOutbound()
+    const llm: ReminderLlm = {
+      compose: async () => {
+        throw new Error('substrate down')
+      },
+    }
+    const d = buildReminderDispatcher({ outbound, llm })
+
+    await d.dispatch(makeReminder({ message: 'take out the trash' }))
+
+    expect(outbound.posts[0]!.body).toBe('take out the trash')
+  })
+})
+
 describe('deriveReminderProjectId', () => {
   const base: Reminder = {
     id: 'r',
@@ -277,5 +432,143 @@ describe('deriveReminderProjectId', () => {
     expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner:acme' })).toBe('acme')
     expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner' })).toBe('instance-slug')
     expect(deriveReminderProjectId({ ...base, topic_id: 'web:owner:' })).toBe('instance-slug')
+  })
+
+  test('app-project:~general (the app General SCOPE) → instance, like its web twin', () => {
+    // `~general` is a SCOPE, not a project — the app reminders surface reserves it
+    // for the no-project case (`gateway/http/app-reminders-surface.ts`
+    // `resolveScopeSegment`) precisely because no project can be called that. Left
+    // to fall through, this would return the literal `~general` and the context
+    // source would go looking for `<owner_home>/Projects/~general/STATUS.md`, a
+    // directory that cannot exist. Same answer as `web:owner` above, for the same
+    // reason.
+    expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:~general' })).toBe(
+      'instance-slug',
+    )
+    // And ONLY the exact sentinel — a project id that merely starts with it is a
+    // project. (It cannot reach here through the surface, which rejects `~`, but a
+    // prefix test would be wrong in the same way it is wrong on the client.)
+    expect(deriveReminderProjectId({ ...base, topic_id: 'app-project:~generalize' })).toBe(
+      '~generalize',
+    )
+  })
+})
+
+/**
+ * Degrade-route VISIBILITY (the 2026-08-14 undiagnosable night). Three fired
+ * reminders each degraded and the only journal line was the downstream
+ * `nudge_refused` guard — the per-route diagnostics default onto
+ * `dispatcherLog.debug`, which the production `info` level drops, so nobody
+ * could tell WHICH of the three degrade routes fired. Each route must now emit
+ * ONE structured `warn` (`event=nudge_degraded` + a discriminating `route=`)
+ * on the default console sink — the sink that demonstrably reaches the journal,
+ * because `nudge_refused` (also `warn`) was visible that night.
+ *
+ * The success-path control at the end is the mutation test: it proves the warn
+ * is emitted BY the degrade routes, not unconditionally by every dispatch.
+ */
+describe('buildReminderDispatcher — degrade routes are visible at warn', () => {
+  function captureWarns(): { lines: string[]; restore: () => void } {
+    const lines: string[] = []
+    const spy = spyOn(console, 'warn').mockImplementation((...args: unknown[]) => {
+      lines.push(args.map(String).join(' '))
+    })
+    return { lines, restore: () => spy.mockRestore() }
+  }
+
+  test('no LLM wired → warn names route=no_llm', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const d = buildReminderDispatcher({ outbound, llm: null })
+      await d.dispatch(makeReminder({ message: 'call the dentist' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=no_llm')
+      expect(hit!).toContain('reminder=r1')
+      // Privacy: the structured line carries NONE of the stored intent.
+      expect(hit!).not.toContain('dentist')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('compose throws → warn names route=compose_failed and the cause', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const llm: ReminderLlm = { compose: async () => { throw new Error('substrate down') } }
+      const d = buildReminderDispatcher({ outbound, llm })
+      await d.dispatch(makeReminder({ message: 'pay the rent' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=compose_failed')
+      expect(hit!).toContain('substrate down')
+      expect(hit!).not.toContain('rent')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('compose returns empty → warn names route=compose_failed (empty body reason)', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const d = buildReminderDispatcher({ outbound, llm: recordingLlm('   ') })
+      await d.dispatch(makeReminder({ message: 'feed the cat' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=compose_failed')
+      expect(hit!).toContain('empty body')
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('composed body over MAX_NUDGE_BODY_CHARS → warn names route=over_max_body_chars + size', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const long = 'x'.repeat(MAX_NUDGE_BODY_CHARS + 1)
+      const d = buildReminderDispatcher({ outbound, llm: recordingLlm(long) })
+      await d.dispatch(makeReminder({ message: 'water plants' }))
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      expect(hit!).toContain('route=over_max_body_chars')
+      expect(hit!).toContain(`composed_chars=${MAX_NUDGE_BODY_CHARS + 1}`)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('a compose_failed reason is BOUNDED on the structured line (stacks stay greppable, not dumped)', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const llm: ReminderLlm = {
+        compose: async () => { throw new Error('boom ' + 'y'.repeat(2000)) },
+      }
+      const d = buildReminderDispatcher({ outbound, llm })
+      await d.dispatch(makeReminder())
+      const hit = cap.lines.find((l) => l.includes('event=nudge_degraded'))
+      expect(hit).toBeDefined()
+      // 400-char bound on the reason field + fixed prefix/escaping slack.
+      expect(hit!.length).toBeLessThan(600)
+    } finally {
+      cap.restore()
+    }
+  })
+
+  test('CONTROL — a successful compose emits NO nudge_degraded warn', async () => {
+    const cap = captureWarns()
+    try {
+      const outbound = recordingOutbound()
+      const d = buildReminderDispatcher({ outbound, llm: recordingLlm('all good, on it') })
+      await d.dispatch(makeReminder())
+      expect(outbound.posts[0]!.body).toBe('all good, on it')
+      expect(cap.lines.find((l) => l.includes('event=nudge_degraded'))).toBeUndefined()
+    } finally {
+      cap.restore()
+    }
   })
 })

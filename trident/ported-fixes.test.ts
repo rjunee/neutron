@@ -32,7 +32,8 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { computeTransition } from './state-machine.ts'
-import type { MergeMode, TridentRun } from './store.ts'
+import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
 const fail = (): HostCommandResult => ({ ok: false, stdout: '', stderr: 'boom', exit_code: 1 })
@@ -44,37 +45,20 @@ const INNER_WORKFLOW_SRC = readFileSync(
 )
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'r1',
     slug: 'add-thing',
-    project_slug: 't1',
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'feat-x',
     pr: 42,
-    merge_mode: 'pr' as MergeMode,
+    merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/repo',
-    worktree: null,
     task: 'Add a thing',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
-    harvested_at: null,
     ...over,
-  }
+  })
 }
 
 /**
@@ -143,7 +127,8 @@ describe('FIX 2 — reap → bounded re-dispatch', () => {
     const { step } = buildTridentOrchestrator({
       fire_workflow,
       db_path: '/tmp/db',
-      run_host: async () => ok(),
+      run_host: async (cmd) =>
+        cmd.includes('refs/remotes/origin/main^{commit}') ? ok('a'.repeat(40)) : ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
@@ -363,7 +348,12 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
     expect(src).not.toContain('claude-sonnet-4-6')
     // Every spawn is logged with its resolved model so a run is TALLY-ABLE.
     expect(src).toContain('trident.agent label=')
-    expect(src).toContain('model=codex-runtime')
+    // The cross-model lanes too — and they log the model the SUBPROCESS will run,
+    // not a placeholder. This assertion used to be `model=codex-runtime`, which the
+    // selector work turned into a lie the test could not see: the literal survived
+    // only in a COMMENT, so it kept passing while the log line had changed. Pin the
+    // interpolation instead, which cannot be satisfied by prose.
+    expect(src).toContain('`trident.agent label=${label} model=${route.model || fallback}')
   })
 
   test('FABLE_MODEL is defined in the model registry (single source of truth) and threaded via buildWorkflowArgs', () => {
@@ -393,12 +383,10 @@ describe('FIX 8 — Fable-orchestrator model routing (per-role models in the wor
 // See docs/research/legacy-neutron-fix-reconciliation-2026-06-24.md.
 // ---------------------------------------------------------------------------
 describe('FIX 9 — fleet premature-completion / cross-model-review wedge', () => {
-  test('(a) the live Forge contract orders PR-FIRST, best-effort review, never gate/yield', () => {
-    // The inlined forgePushStep in inner-workflow.mjs (the single live source).
-    expect(INNER_WORKFLOW_SRC).toContain('OPEN THE PR FIRST')
-    expect(INNER_WORKFLOW_SRC).toMatch(/best-effort/i)
-    expect(INNER_WORKFLOW_SRC).toContain('NEVER gate the PR')
-    expect(INNER_WORKFLOW_SRC).toMatch(/yield your turn/i)
+  test('(a) the live Forge contract leaves PR publication to the durable outer loop', () => {
+    expect(INNER_WORKFLOW_SRC).toContain('durable outer loop publishes')
+    expect(INNER_WORKFLOW_SRC).toContain('Do NOT push')
+    expect(INNER_WORKFLOW_SRC).toContain('publishRequested: true')
   })
 
   test('(b) a fire turn that ends without a completion event → failed (paused ≠ finished)', async () => {

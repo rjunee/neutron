@@ -31,7 +31,7 @@ import {
   InMemoryAppWsSessionRegistry,
   createAppWsAuthResolver,
 } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '../composition.ts'
 import { createAppLauncherSurface } from '../http/app-launcher-surface.ts'
@@ -76,8 +76,8 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const owner_home = mkdtempSync(join(tmpdir(), 'neutron-email-composer-'))
+  seedMigratedDb(join(owner_home, 'owner.db'))
   const db = ProjectDb.open(join(owner_home, 'owner.db'))
-  applyMigrations(db.raw())
 
   const resolver = new EmailProjectCacheResolver({ owner_home })
   const client = buildSeededInMemoryGmailClient()

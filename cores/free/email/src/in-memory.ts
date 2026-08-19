@@ -27,6 +27,7 @@ import type {
   GmailClient,
   GmailDraftInput,
   GmailDraftResult,
+  GmailEnsureLabelInput,
   GmailGetInput,
   GmailLabelEnsureInput,
   GmailLabelEnsureResult,
@@ -34,6 +35,8 @@ import type {
   GmailListResult,
   GmailMessageFull,
   GmailMessageMeta,
+  GmailMessageModifyInput,
+  GmailMessageModifyResult,
   GmailSearchInput,
   GmailSendInput,
   GmailSendResult,
@@ -158,6 +161,18 @@ export function buildInMemoryGmailClient(
       msg.label_ids = next
     }
     return Array.from(final)
+  }
+
+  /** Mint-or-return a synthetic label id for an arbitrary label NAME. Shared
+   *  by `ensureProjectLabel` and the generalized `ensureLabel`. */
+  function ensureLabelByName(labelName: string): GmailLabelEnsureResult {
+    const cached = labels.get(labelName)
+    if (cached !== undefined) {
+      return { label_id: cached, label_name: labelName, created: false }
+    }
+    const label_id = `Label_${nextId()}`
+    labels.set(labelName, label_id)
+    return { label_id, label_name: labelName, created: true }
   }
 
   function matchesProjectFilter(
@@ -315,14 +330,26 @@ export function buildInMemoryGmailClient(
     async ensureProjectLabel(
       input: GmailLabelEnsureInput,
     ): Promise<GmailLabelEnsureResult> {
-      const labelName = projectLabelName(input.project_id)
-      const cached = labels.get(labelName)
-      if (cached !== undefined) {
-        return { label_id: cached, label_name: labelName, created: false }
-      }
-      const label_id = `Label_${nextId()}`
-      labels.set(labelName, label_id)
-      return { label_id, label_name: labelName, created: true }
+      return ensureLabelByName(projectLabelName(input.project_id))
+    },
+
+    async ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult> {
+      // Same `labels` map `ensureProjectLabel` uses — an arbitrary name and a
+      // project name share one registry, so a repeat ensure of either returns
+      // the same synthetic id with `created:false`.
+      return ensureLabelByName(input.name)
+    },
+
+    async modifyMessage(
+      input: GmailMessageModifyInput,
+    ): Promise<GmailMessageModifyResult> {
+      const row = messages.get(input.message_id)
+      if (row === undefined) throw new MessageNotFoundError(input.message_id)
+      const next = new Set(row.label_ids)
+      for (const l of input.add_label_ids) next.add(l)
+      for (const l of input.remove_label_ids ?? []) next.delete(l)
+      row.label_ids = Array.from(next)
+      return { message_id: input.message_id, label_ids: [...row.label_ids] }
     },
 
     async modifyThread(
@@ -471,6 +498,18 @@ export function buildSeededInMemoryGmailClient(
       msg.label_ids = Array.from(final)
     }
     return Array.from(final)
+  }
+
+  /** Mint-or-return a synthetic label id for an arbitrary label NAME. Shared
+   *  by `ensureProjectLabel` and the generalized `ensureLabel`. */
+  function ensureLabelByName(labelName: string): GmailLabelEnsureResult {
+    const cached = labels.get(labelName)
+    if (cached !== undefined) {
+      return { label_id: cached, label_name: labelName, created: false }
+    }
+    const label_id = `Label_${nextId()}`
+    labels.set(labelName, label_id)
+    return { label_id, label_name: labelName, created: true }
   }
 
   function matchesProjectFilter(
@@ -632,14 +671,26 @@ export function buildSeededInMemoryGmailClient(
     async ensureProjectLabel(
       input: GmailLabelEnsureInput,
     ): Promise<GmailLabelEnsureResult> {
-      const labelName = projectLabelName(input.project_id)
-      const cached = labels.get(labelName)
-      if (cached !== undefined) {
-        return { label_id: cached, label_name: labelName, created: false }
-      }
-      const label_id = `Label_${nextId()}`
-      labels.set(labelName, label_id)
-      return { label_id, label_name: labelName, created: true }
+      return ensureLabelByName(projectLabelName(input.project_id))
+    },
+
+    async ensureLabel(input: GmailEnsureLabelInput): Promise<GmailLabelEnsureResult> {
+      // Same `labels` map `ensureProjectLabel` uses — an arbitrary name and a
+      // project name share one registry, so a repeat ensure of either returns
+      // the same synthetic id with `created:false`.
+      return ensureLabelByName(input.name)
+    },
+
+    async modifyMessage(
+      input: GmailMessageModifyInput,
+    ): Promise<GmailMessageModifyResult> {
+      const row = messages.get(input.message_id)
+      if (row === undefined) throw new MessageNotFoundError(input.message_id)
+      const next = new Set(row.label_ids)
+      for (const l of input.add_label_ids) next.add(l)
+      for (const l of input.remove_label_ids ?? []) next.delete(l)
+      row.label_ids = Array.from(next)
+      return { message_id: input.message_id, label_ids: [...row.label_ids] }
     },
 
     async modifyThread(

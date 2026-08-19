@@ -11,7 +11,7 @@
  * stub — and pins the complete set:
  *
  *   chunked-upload-sweeper, cron, credential-usage,
- *   dispatch-lifecycle-watchdog, reminders, trident, watchdog
+ *   dispatch-lifecycle-watchdog, kimi-usage, reminders, trident, watchdog
  *
  * A loop that silently stops starting (a wiring regression) OR a silently-added
  * new loop breaks this. MUTATION-VERIFIED: deleting any `loopRegistry.register`
@@ -25,7 +25,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -46,12 +46,24 @@ const EXPECTED_RUNNING_LOOPS = [
   'credential-usage',
   'cron',
   'dispatch-lifecycle-watchdog',
+  // The Kimi gauge, armed on the SAME unconditional terms as the credential
+  // probe: a tick with no key stored does one cheap store read and no network
+  // call, so a key entered in Settings starts being metered without a restart.
+  'kimi-usage',
   // Memory consolidation is ON by default (managed SPEC Decisions Log 2026-07-20,
   // P0-4), so the reflect-consolidation loop always arms.
   'reflect-consolidation',
   'reminders',
   'trident',
+  // Trident's 2 s wake-on-change detector and 15 s launcher liveness probe.
+  'trident-liveness',
+  'trident-watch',
   'watchdog',
+  // The 5-minute server-side continuation tick: re-enters a project's warm chat
+  // session with a continue-work turn for every in-progress Work Board item
+  // with no live bound run. Armed UNCONDITIONALLY (an LLM-less box enumerates
+  // nothing and every tick is a cheap no-op) — `gateway/proactive/work-wakeup.ts`.
+  'work-wakeup',
 ] as const
 /** The D-7 dormant loops (built, never started). */
 const EXPECTED_DORMANT_LOOPS = ['agent-watcher', 'project-backup-scheduler'] as const
@@ -123,8 +135,8 @@ async function bootRealOpen(): Promise<Harness> {
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start: () => cannedHandle(opts.substrate_instance_id),
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   // 1) REAL Open composer — starts the sweeper + (credentialed) lifecycle watchdog
   //    and registers them into `composition.loop_registry`.
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
@@ -189,9 +201,9 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all eight running loops + the dormant set', () => {
+test('the ONE boot line names all eleven running loops + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('8 loop(s) running')
+  expect(line).toContain('12 loop(s) running')
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')

@@ -19,6 +19,8 @@ import {
   resolvePushRoute,
   type PushPayload,
 } from '../lib/push-deep-link-dispatch';
+import { GENERAL_PROJECT_ID } from '../lib/project-rail-view';
+import { PUSH_KINDS } from '@neutronai/wire-types/push-kind.ts';
 
 function recordingWarn(): {
   warn: (msg: string, meta?: Record<string, unknown>) => void;
@@ -35,77 +37,117 @@ function recordingWarn(): {
 }
 
 describe('resolvePushRoute', () => {
-  describe('reminder kind', () => {
-    it('routes to /projects/<pid>/reminders?reminder_id=<rid> via explicit project_id', () => {
-      const payload: PushPayload = {
-        kind: 'reminder',
-        project_id: 'acme',
-        reminder_id: 'rem-abc',
-        project_slug: 't1',
-      };
-      const path = resolvePushRoute(payload);
+  describe('agent_message kind — the ONE shape a chat message takes', () => {
+    it('routes to /projects/<pid>/chat?message_id=<mid> — the CHAT, not the Reminders tab', () => {
+      // The owner's second symptom: *"when I tapped the notification it opened
+      // the app but didn't open in the right project"*. The retired `reminder`
+      // kind routed to `/projects/<pid>/reminders` — a different tab from the one
+      // the message is in — and its project field was the OWNER slug, so it could
+      // not resolve a project at all.
+      const path = resolvePushRoute({
+        kind: 'agent_message',
+        project_id: 'p1',
+        message_id: 'm1',
+      });
+      expect(path).toBe('/projects/p1/chat?message_id=m1');
+    });
+
+    it('routes a project-less payload to the General chat — absence IS the encoding', () => {
+      // The gateway deliberately omits `project_id` for the no-project scope
+      // rather than shipping a copy of General's route sentinel (ISSUES #410/#411
+      // is what a second copy costs). This is the decode half of that contract,
+      // and it is what makes the owner's General ritual land in General.
+      const path = resolvePushRoute({ kind: 'agent_message', message_id: 'm1' });
+      expect(path).toBe(`/projects/${GENERAL_PROJECT_ID}/chat?message_id=m1`);
+    });
+
+    it('the General route id needs no percent-encoding (the #411 constraint)', () => {
+      // `~general` survives `encodeURIComponent` untouched, which is the whole
+      // reason it is a tilde and not `#general`. A route with a `%23` in it landed
+      // on the projects list instead of the chat.
+      const path = resolvePushRoute({ kind: 'agent_message', message_id: 'm1' });
+      expect(path).not.toContain('%');
+    });
+
+    it('opens the chat unanchored (and warns) when message_id is missing', () => {
+      // Half a payload still beats no navigation: the right transcript with its
+      // own unread anchor is closer to what he asked for than staying put.
+      const { warn, entries } = recordingWarn();
+      const path = resolvePushRoute({ kind: 'agent_message', project_id: 'p1' }, { warn });
+      expect(path).toBe('/projects/p1/chat');
+      expect(entries[0]?.msg).toContain('no message_id');
+    });
+
+    it('url-encodes both the project segment and the message id', () => {
+      // Defensive: a malformed payload must not be able to inject path segments.
+      const path = resolvePushRoute({
+        kind: 'agent_message',
+        project_id: 'my proj/x',
+        message_id: 'm?1',
+      });
+      expect(path).toBe('/projects/my%20proj%2Fx/chat?message_id=m%3F1');
+    });
+  });
+
+  describe('the LEGACY `reminder` kind — no sender left, but its payloads are real', () => {
+    // The SENDER is retired: it composed from the reminder ROW, which for a ritual
+    // is the dispatch token `ritual:<id>`, i.e. the string the owner's phone
+    // actually displayed. The DECODER stays, and these are the reasons — each one
+    // an already-delivered payload this resolver will still be handed:
+    //   - a notification sitting undismissed in the shade right now;
+    //   - a self-hosted gateway that has not been upgraded, talking to a store app.
+    // Deleting the decoder would turn those taps into "the app opens and nothing
+    // routes", which is the complaint this whole change exists to end.
+
+    it('an explicit project still lands on that project’s reminders tab', () => {
+      const { warn, entries } = recordingWarn();
+      const path = resolvePushRoute(
+        { kind: 'reminder', project_id: 'acme', reminder_id: 'rem-abc' },
+        { warn },
+      );
       expect(path).toBe('/projects/acme/reminders?reminder_id=rem-abc');
+      expect(entries).toEqual([]);
     });
 
-    it('extracts project_id from the legacy topic_id = "app-project:<id>" encoding', () => {
-      // The existing gateway reminder push payload only carries
-      // `topic_id`; the helper must recover project_id from it so
-      // existing tokens just start working once the listener lands.
-      const payload: PushPayload = {
-        kind: 'reminder',
-        topic_id: 'app-project:northwind',
-        reminder_id: 'rem-1',
-        project_slug: 't1',
-      };
-      const path = resolvePushRoute(payload);
-      expect(path).toBe('/projects/northwind/reminders?reminder_id=rem-1');
-    });
-
-    it('url-encodes both path + query params', () => {
-      // Project ids should never contain weird chars in practice, but
-      // the helper must encode defensively so a malformed payload
-      // cannot inject path segments.
+    it('a PROJECT-scoped legacy payload resolves its project from `topic_id`', () => {
+      // The retired sender wrote the reminder row's own topic when it had one
+      // (`git show main:gateway/push/dispatcher.ts:277`), and a project reminder's
+      // topic is `app-project:<id>` (`reminders/store.ts:474`). That is the ONLY
+      // place a legacy project notification carries its project, so dropping this
+      // decode would land those taps on General instead.
       const path = resolvePushRoute({
         kind: 'reminder',
-        project_id: 'my proj/x',
-        reminder_id: 'r e m?id',
+        reminder_id: 'rem-abc',
+        project_slug: 'owner',
+        topic_id: 'app-project:beacon',
       });
-      expect(path).toBe(
-        '/projects/my%20proj%2Fx/reminders?reminder_id=r%20e%20m%3Fid',
-      );
+      expect(path).toBe('/projects/beacon/reminders?reminder_id=rem-abc');
     });
 
-    it('returns null + warns when project_id is missing entirely', () => {
-      const { warn, entries } = recordingWarn();
-      const path = resolvePushRoute(
-        { kind: 'reminder', reminder_id: 'r1' },
-        { warn },
-      );
-      expect(path).toBeNull();
-      expect(entries[0]?.msg).toContain('reminder payload missing');
+    it('a GENERAL legacy payload falls back to General rather than refusing', () => {
+      // The old sender put the OWNER slug in `project_slug` and no project id
+      // anywhere, so this branch used to return null for every General reminder
+      // notification ever sent — the owner's "it opens the app but not the right
+      // project", in the code.
+      const path = resolvePushRoute({
+        kind: 'reminder',
+        reminder_id: 'rem-abc',
+        project_slug: 'owner',
+      });
+      expect(path).toBe('/projects/~general/reminders?reminder_id=rem-abc');
     });
 
-    it('returns null + warns when reminder_id is missing', () => {
+    it('without a reminder_id there is nothing to open, so it refuses and says why', () => {
       const { warn, entries } = recordingWarn();
-      const path = resolvePushRoute(
-        { kind: 'reminder', project_id: 'p1' },
-        { warn },
-      );
+      const path = resolvePushRoute({ kind: 'reminder', project_id: 'acme' }, { warn });
       expect(path).toBeNull();
-      expect(entries[0]?.msg).toContain('reminder payload missing');
+      expect(entries[0]?.msg).toContain('legacy reminder payload has no reminder_id');
     });
 
-    it('ignores a topic_id that does not carry the app-project: prefix', () => {
-      // A bare Telegram-style topic_id should not be misread as a
-      // project_id — the helper must require either an explicit
-      // project_id or the encoded prefix.
-      const { warn, entries } = recordingWarn();
-      const path = resolvePushRoute(
-        { kind: 'reminder', topic_id: 'telegram:42', reminder_id: 'r1' },
-        { warn },
-      );
-      expect(path).toBeNull();
-      expect(entries[0]?.msg).toContain('reminder payload missing');
+    it('is NOT in the sent list — that list is what the system emits', () => {
+      // Padding `PUSH_KINDS` with a kind nothing sends is how the sent list and the
+      // handled list drifted into being disjoint in the first place.
+      expect((PUSH_KINDS as readonly string[]).includes('reminder')).toBe(false);
     });
   });
 
@@ -115,48 +157,11 @@ describe('resolvePushRoute', () => {
       expect(resolvePushRoute(payload)).toBe('/projects/neutron/chat');
     });
 
-    it('falls back to the topic_id prefix when project_id is omitted', () => {
-      const payload: PushPayload = {
-        kind: 'wow_fired',
-        topic_id: 'app-project:beacon',
-      };
-      expect(resolvePushRoute(payload)).toBe('/projects/beacon/chat');
-    });
-
     it('returns null + warns when project_id is missing', () => {
       const { warn, entries } = recordingWarn();
       const path = resolvePushRoute({ kind: 'wow_fired' }, { warn });
       expect(path).toBeNull();
       expect(entries[0]?.msg).toContain('wow_fired payload missing project_id');
-    });
-  });
-
-  describe('agent_message kind (forward-compatible)', () => {
-    it('routes to /projects/<pid>/chat?message_id=<mid> when message_id is present', () => {
-      const path = resolvePushRoute({
-        kind: 'agent_message',
-        project_id: 'p1',
-        message_id: 'm1',
-      });
-      expect(path).toBe('/projects/p1/chat?message_id=m1');
-    });
-
-    it('routes to /projects/<pid>/chat when message_id is omitted', () => {
-      const path = resolvePushRoute({
-        kind: 'agent_message',
-        project_id: 'p1',
-      });
-      expect(path).toBe('/projects/p1/chat');
-    });
-
-    it('returns null + warns when project_id is missing', () => {
-      const { warn, entries } = recordingWarn();
-      const path = resolvePushRoute(
-        { kind: 'agent_message', message_id: 'm1' },
-        { warn },
-      );
-      expect(path).toBeNull();
-      expect(entries[0]?.msg).toContain('agent_message payload missing project_id');
     });
   });
 

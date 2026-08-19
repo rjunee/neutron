@@ -1,0 +1,537 @@
+/**
+ * @neutronai/email-managed-core — the email pipeline sidecar store.
+ *
+ * Opens `<owner_home>/email/pipeline.db` — INSTANCE-level, not per-project.
+ * The inbox is instance-scoped (the multi-account client merges accounts into
+ * one stream), so there is no `project_id` and no `ProjectSidecarResolver`
+ * here; the per-project sidecars (`cache.ts`) are untouched.
+ *
+ * Open mechanics mirror `cache.ts`'s: `openSidecar(path)` + apply this Core's
+ * SECOND migration tree (`migrations-pipeline/`), because a migration namespace
+ * is per-DB-file and reusing the cache tree would drag `triage_cache` et al.
+ * into the pipeline DB.
+ *
+ * The migrations are applied by the Core's OWN applier (`./migrate.ts`), not the
+ * host runner: a bundled Core may not import `migrations/` (nor the host logger
+ * it pulls in behind it) — see that module's header for why the duplication is
+ * the cheaper side of the trade.
+ *
+ * Per docs/plans/2026-08-06-email-core-consolidation-plan.md § 5.
+ */
+
+import type { Database } from 'bun:sqlite'
+import { mkdirSync } from 'node:fs'
+import { dirname, join } from 'node:path'
+import { fileURLToPath } from 'node:url'
+
+import { applyCoreMigrations } from './migrate.ts'
+import { openSidecar } from '@neutronai/persistence/index.ts'
+
+const HERE = dirname(fileURLToPath(import.meta.url))
+
+/** Instance-level sidecar dir name, under `<owner_home>`. No leading dot —
+ *  same user-visible convention the per-project `email/` dir uses. */
+export const EMAIL_PIPELINE_DIR = 'email'
+export const EMAIL_PIPELINE_DB = 'pipeline.db'
+
+/** This Core's SECOND migration tree — see the module header. */
+export const EMAIL_PIPELINE_MIGRATIONS_DIR = join(HERE, '..', '..', 'migrations-pipeline')
+
+/**
+ * How the poller acted on a message.
+ *
+ * `preexisting` is the BACKLOG marker: mail that was already in the inbox when
+ * the pipeline was switched on. The owner has already triaged it by hand, so it
+ * is recorded as handled and then left completely alone — never classified,
+ * never escalated, never briefed, and never label-mutated. Its row exists for
+ * exactly one reason: `hasEmail` is the steady-state "already handled" test, so
+ * a row here is what keeps the backlog out of the pipeline forever after
+ * WITHOUT re-deciding "is this history?" on every future poll.
+ */
+export type EmailHandling = 'escalate' | 'archive' | 'preexisting'
+
+export interface EmailRow {
+  id: string
+  thread_id: string
+  account_id: string | null
+  sender: string
+  subject: string
+  snippet: string
+  body_text: string | null
+  received_at: number
+  processed_at: number
+  /** NULL ⇒ never classified (pre-cutoff mail). */
+  category: string | null
+  handling: EmailHandling
+  brief_id: number | null
+  escalated_at: number | null
+  escalation_attempts: number
+  last_error: string | null
+  /** NULL ⇒ the Gmail label/archive write is still owed. See the migration. */
+  mutated_at: number | null
+  mutation_attempts: number
+  /** NULL ⇒ the best-effort mobile push has not gone out for this message. */
+  pushed_at: number | null
+}
+
+/** The caller-supplied half of an `emails` row; the rest defaults. */
+export interface InsertEmailInput {
+  id: string
+  thread_id: string
+  account_id?: string | null
+  sender: string
+  subject: string
+  snippet?: string
+  body_text?: string | null
+  received_at: number
+  processed_at: number
+  category: string | null
+  handling: EmailHandling
+  escalation_attempts?: number
+}
+
+/**
+ * One mailbox's pipeline enablement. Absence of a row is DISABLED — this table
+ * is an allow-list, so a mailbox connected for some other reason is never
+ * silently enrolled.
+ */
+export interface AccountSettingRow {
+  account_id: string
+  /** 1 = polled, classified, escalated, labelled. 0 = invisible to the pipeline. */
+  enabled: number
+  /** Display label only, never the identity. NULL when the address is unknown. */
+  account_email: string | null
+  /** When it was last turned ON — the history boundary for its backlog sweep. */
+  enabled_at: number | null
+  updated_at: number
+}
+
+export interface SenderCacheRow {
+  sender: string
+  category: string
+  /** 1 when the learned verdict was IMPORTANT. Stored, never re-derived from
+   *  the category — the two are separate facts and do disagree. */
+  important: number
+  updated_at: number
+}
+
+export type SenderRuleKind = 'sender' | 'domain'
+
+/**
+ * What the owner asked to HAPPEN to mail from this sender. NULL (absent) is a
+ * distinct, common state — "they named a category but not an action" — and
+ * falls through to the cascade; it is not a third behaviour.
+ *
+ * The set is closed because the classifier's reading of it is "escalate, or
+ * else archive". Under free text a typo did not fail, it INVERTED: `esclate`
+ * silently archived the one sender the owner had singled out to be told about.
+ */
+export const SENDER_RULE_HANDLINGS = ['escalate', 'archive'] as const
+export type SenderRuleHandling = (typeof SENDER_RULE_HANDLINGS)[number]
+
+export function isSenderRuleHandling(v: unknown): v is SenderRuleHandling {
+  return typeof v === 'string' && (SENDER_RULE_HANDLINGS as readonly string[]).includes(v)
+}
+
+export interface SenderRule {
+  id: number
+  pattern: string
+  kind: SenderRuleKind
+  category: string | null
+  handling: SenderRuleHandling | null
+  /** 1 ⇒ always important, immune to the mass-mailer downgrade. */
+  protected: number
+  created_at: number
+}
+
+export interface AddSenderRuleInput {
+  pattern: string
+  kind: SenderRuleKind
+  category?: string | null
+  handling?: SenderRuleHandling | null
+  protected?: boolean
+  created_at?: number
+}
+
+export interface EmailPipelineStoreOptions {
+  owner_home: string
+  now?: () => number
+  /** Override the migration tree. Tests only. */
+  migrations_dir?: string
+}
+
+/**
+ * Typed CRUD over the pipeline sidecar. Every statement is prepared once at
+ * construction — a poll tick touches this store once per message.
+ */
+export class EmailPipelineStore {
+  readonly db: Database
+  private readonly now: () => number
+
+  constructor(db: Database, now: () => number) {
+    this.db = db
+    this.now = now
+  }
+
+  /**
+   * "Already handled?" — keyed on (account, message), because Gmail ids are
+   * ACCOUNT-LOCAL. Matching on the id alone would report a message from a
+   * SECOND mailbox as already seen the moment the first mailbox happened to
+   * use that id, and the poller would skip it silently: no classification, no
+   * escalation, no brief row. `account_id` defaults to the '' single-account
+   * sentinel so a single-backend install is unaffected.
+   */
+  hasEmail(id: string, account_id: string | null = null): boolean {
+    const row = this.db
+      .query<{ n: number }, [string, string]>(
+        `SELECT 1 AS n FROM emails WHERE id = ? AND account_id = ?`,
+      )
+      .get(id, account_id ?? '')
+    return row !== null
+  }
+
+  getEmail(id: string, account_id: string | null = null): EmailRow | null {
+    return this.db
+      .query<EmailRow, [string, string]>(
+        `SELECT * FROM emails WHERE id = ? AND account_id = ?`,
+      )
+      .get(id, account_id ?? '')
+  }
+
+  insertEmail(input: InsertEmailInput): void {
+    this.db.run(
+      `INSERT OR REPLACE INTO emails (
+         id, thread_id, account_id, sender, subject, snippet, body_text,
+         received_at, processed_at, category, handling, escalation_attempts
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        input.id,
+        input.thread_id,
+        // '' is the single-account sentinel — NEVER NULL. A NULL component in
+        // the (account_id, id) primary key never compares equal, so the same
+        // message would insert twice and escalate twice.
+        input.account_id ?? '',
+        input.sender,
+        input.subject,
+        input.snippet ?? '',
+        input.body_text ?? null,
+        input.received_at,
+        input.processed_at,
+        input.category,
+        input.handling,
+        input.escalation_attempts ?? 0,
+      ],
+    )
+  }
+
+  /**
+   * EVERY escalation the owner has not been told about, under the attempt cap.
+   * `escalated_at IS NULL` is the dedup guard itself — a delivered escalation
+   * can never come back through this query.
+   *
+   * This deliberately includes rows with ZERO attempts. The query used to
+   * require `attempts > 0` on the reasoning that the first attempt belongs to
+   * the poll path — but that stranded any row inserted just before a crash:
+   * the poll path skips it (`hasEmail` is true) and the resume path skipped it
+   * too, so an important message sat in the store forever, undelivered and
+   * invisible. Nothing is double-posted by including them, because a delivered
+   * row has `escalated_at` set and a row this tick just posted is not visible
+   * to a resume pass that already ran.
+   */
+  listPendingEscalations(max_attempts: number): EmailRow[] {
+    return this.db
+      .query<EmailRow, [number]>(
+        `SELECT * FROM emails
+          WHERE handling = 'escalate'
+            AND escalated_at IS NULL
+            AND escalation_attempts < ?
+          ORDER BY received_at ASC`,
+      )
+      .all(max_attempts)
+  }
+
+  /** The best-effort push has gone out for this message; never send it again. */
+  markPushed(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(
+      `UPDATE emails SET pushed_at = ? WHERE id = ? AND account_id = ?`,
+      [at, id, account_id ?? ''],
+    )
+  }
+
+  /** Account-qualified, like `hasEmail` — the id alone is not an identity. */
+  markEscalated(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(
+      `UPDATE emails SET escalated_at = ?, last_error = NULL WHERE id = ? AND account_id = ?`,
+      [at, id, account_id ?? ''],
+    )
+  }
+
+  /**
+   * Record that an escalation attempt is ABOUT TO BE MADE — before the call,
+   * not after it fails.
+   *
+   * Counting the attempt afterwards left a crash-shaped hole. The row is
+   * inserted before `deliver` runs, so a process exit in between left
+   * `escalated_at NULL` with `escalation_attempts = 0`. The poll path then
+   * skipped that message forever (`hasEmail` is true) and the resume query
+   * skipped it too — it requires `attempts > 0` so a freshly-posted message is
+   * not immediately re-posted. The message existed, was important, and could
+   * never be delivered by anything.
+   *
+   * Incrementing FIRST closes it: an INTERRUPTED attempt becomes
+   * indistinguishable from a FAILED one, which is exactly right — in both cases
+   * the owner has not been told and the work is still owed.
+   */
+  beginEscalationAttempt(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(
+      `UPDATE emails
+          SET escalation_attempts = escalation_attempts + 1,
+              processed_at = ?
+        WHERE id = ? AND account_id = ?`,
+      [at, id, account_id ?? ''],
+    )
+  }
+
+  /** The attempt itself was already counted by `beginEscalationAttempt`. */
+  recordEscalationFailure(
+    id: string,
+    error: string,
+    at: number,
+    account_id: string | null = null,
+  ): void {
+    this.db.run(
+      `UPDATE emails
+          SET last_error = ?,
+              processed_at = ?
+        WHERE id = ? AND account_id = ?`,
+      [error, at, id, account_id ?? ''],
+    )
+  }
+
+  /**
+   * Rows whose Gmail label/archive write is still OWED, under the attempt cap.
+   *
+   * This is the other half of "record before you mutate": the row is written
+   * first so a mutated message always has a durable record, which means the
+   * row's existence proves only that the message was SEEN. Without this query,
+   * a `modifyMessage` failure would be permanent — `hasEmail` skips the
+   * message forever, the archive never happens, and nothing ever retries.
+   *
+   * `preexisting` is excluded because the backlog is never mutated by design.
+   */
+  listPendingMutations(max_attempts: number): EmailRow[] {
+    return this.db
+      .query<EmailRow, [number]>(
+        `SELECT * FROM emails
+          WHERE mutated_at IS NULL
+            AND handling <> 'preexisting'
+            AND mutation_attempts < ?
+          ORDER BY received_at ASC`,
+      )
+      .all(max_attempts)
+  }
+
+  /** Account-qualified, like `hasEmail` — the id alone is not an identity. */
+  markMutated(id: string, at: number, account_id: string | null = null): void {
+    this.db.run(`UPDATE emails SET mutated_at = ? WHERE id = ? AND account_id = ?`, [
+      at,
+      id,
+      account_id ?? '',
+    ])
+  }
+
+  recordMutationFailure(
+    id: string,
+    error: string,
+    account_id: string | null = null,
+  ): void {
+    this.db.run(
+      `UPDATE emails
+          SET mutation_attempts = mutation_attempts + 1,
+              last_error = ?
+        WHERE id = ? AND account_id = ?`,
+      [error, id, account_id ?? ''],
+    )
+  }
+
+  getCheckpoint(key: string): string | null {
+    const row = this.db
+      .query<{ value: string }, [string]>(`SELECT value FROM checkpoints WHERE key = ?`)
+      .get(key)
+    return row === null ? null : row.value
+  }
+
+  setCheckpoint(key: string, value: string): void {
+    this.db.run(
+      `INSERT INTO checkpoints (key, value) VALUES (?, ?)
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value`,
+      [key, value],
+    )
+  }
+
+  getSenderCache(sender: string): SenderCacheRow | null {
+    return this.db
+      .query<SenderCacheRow, [string]>(`SELECT * FROM sender_cache WHERE sender = ?`)
+      .get(sender)
+  }
+
+  upsertSenderCache(sender: string, category: string, important = false, at?: number): void {
+    this.db.run(
+      `INSERT INTO sender_cache (sender, category, important, updated_at) VALUES (?, ?, ?, ?)
+         ON CONFLICT(sender) DO UPDATE SET category = excluded.category,
+                                           important = excluded.important,
+                                           updated_at = excluded.updated_at`,
+      [sender, category, important ? 1 : 0, at ?? this.now()],
+    )
+  }
+
+  /**
+   * The accounts the owner has turned ON. An ALLOW-LIST: absence is disabled,
+   * and an EMPTY result means the pipeline polls nothing — it does not mean
+   * "unconfigured, so poll everything". See `0002_account_settings.sql`.
+   *
+   * Returned as a Set because every caller asks "is this one in?" — handing
+   * back an array invites a `.includes` inside a per-message loop, and the poll
+   * path runs this against every row on every page.
+   */
+  enabledAccounts(): Set<string> {
+    const rows = this.db
+      .query<{ account_id: string }, []>(
+        `SELECT account_id FROM account_settings WHERE enabled = 1`,
+      )
+      .all()
+    return new Set(rows.map((r) => r.account_id))
+  }
+
+  listAccountSettings(): AccountSettingRow[] {
+    return this.db
+      .query<AccountSettingRow, []>(`SELECT * FROM account_settings ORDER BY account_id ASC`)
+      .all()
+  }
+
+  getAccountSetting(account_id: string): AccountSettingRow | null {
+    return this.db
+      .query<AccountSettingRow, [string]>(`SELECT * FROM account_settings WHERE account_id = ?`)
+      .get(account_id)
+  }
+
+  /**
+   * Turn an account on or off.
+   *
+   * `enabled_at` is stamped on the 0→1 transition and left alone otherwise,
+   * because it is not decoration — the sweep reads it as that mailbox's history
+   * boundary. Re-stamping it on a no-op re-enable would move the line forward
+   * and hand the classifier whatever arrived in between.
+   *
+   * Disabling deliberately does NOT touch that account's rows. What was seen
+   * was seen; the brief and the audit trail keep it.
+   */
+  setAccountEnabled(
+    account_id: string,
+    enabled: boolean,
+    account_email: string | null = null,
+    at?: number,
+  ): void {
+    const now = at ?? this.now()
+    const prior = this.getAccountSetting(account_id)
+    const was_enabled = prior !== null && prior.enabled === 1
+    const enabled_at = enabled
+      ? was_enabled
+        ? (prior?.enabled_at ?? now)
+        : now
+      : (prior?.enabled_at ?? null)
+    this.db.run(
+      `INSERT INTO account_settings (account_id, enabled, account_email, enabled_at, updated_at)
+       VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(account_id) DO UPDATE SET
+           enabled = excluded.enabled,
+           account_email = COALESCE(excluded.account_email, account_settings.account_email),
+           enabled_at = excluded.enabled_at,
+           updated_at = excluded.updated_at`,
+      [account_id, enabled ? 1 : 0, account_email, enabled_at, now],
+    )
+  }
+
+  /**
+   * Record that a mailbox EXISTS, without saying anything about whether it is
+   * on. Written by the poller's discovery pass so the operator surface has ids
+   * to show.
+   *
+   * `enabled` IS NEVER TOUCHED — not on insert (a discovered account defaults
+   * to off, which is the whole point of an opt-in list) and not on update. A
+   * discovery pass that could flip the flag either way would be a second,
+   * invisible writer of the owner's decision; this one only ever fills in the
+   * display label, and only when it has one. `enabled_at` is likewise left
+   * alone, because it is the sweep's history boundary and nothing but an
+   * explicit enable may move it.
+   */
+  recordDiscoveredAccount(account_id: string, account_email: string | null): void {
+    const now = this.now()
+    this.db.run(
+      `INSERT INTO account_settings (account_id, enabled, account_email, enabled_at, updated_at)
+       VALUES (?, 0, ?, NULL, ?)
+         ON CONFLICT(account_id) DO UPDATE SET
+           account_email = COALESCE(excluded.account_email, account_settings.account_email),
+           updated_at = CASE
+             WHEN excluded.account_email IS NOT NULL
+              AND account_settings.account_email IS NOT excluded.account_email
+             THEN excluded.updated_at ELSE account_settings.updated_at END`,
+      [account_id, account_email, now],
+    )
+  }
+
+  listSenderRules(): SenderRule[] {
+    return this.db.query<SenderRule, []>(`SELECT * FROM sender_rules ORDER BY id ASC`).all()
+  }
+
+  addSenderRule(input: AddSenderRuleInput): SenderRule {
+    // VALIDATE AT THE BOUNDARY, not just in the schema. The DB CHECK (0003) is
+    // the backstop; this is the error the caller can actually act on, and it
+    // names the legal values rather than surfacing a constraint violation.
+    // Rejecting is the safe direction: a rule that does not exist falls through
+    // to the cascade, while a rule with an unreadable action silently inverts.
+    const handling = input.handling ?? null
+    if (handling !== null && !isSenderRuleHandling(handling)) {
+      throw new Error(
+        `sender rule handling must be one of ${SENDER_RULE_HANDLINGS.join(', ')} (got ${JSON.stringify(handling)})`,
+      )
+    }
+    this.db.run(
+      `INSERT INTO sender_rules (pattern, kind, category, handling, protected, created_at)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        input.pattern,
+        input.kind,
+        input.category ?? null,
+        input.handling ?? null,
+        input.protected === true ? 1 : 0,
+        input.created_at ?? this.now(),
+      ],
+    )
+    // Non-null: the row was just inserted.
+    return this.db
+      .query<SenderRule, []>(`SELECT * FROM sender_rules ORDER BY id DESC LIMIT 1`)
+      .get() as SenderRule
+  }
+
+  close(): void {
+    try {
+      this.db.close()
+    } catch {
+      /* already closed */
+    }
+  }
+}
+
+/**
+ * Open (creating on first use) the instance-level pipeline sidecar and apply
+ * its migration tree. Same two-line open `cache.ts:328-329` performs, minus
+ * the per-project resolver.
+ */
+export function openEmailPipelineStore(input: EmailPipelineStoreOptions): EmailPipelineStore {
+  const dir = join(input.owner_home, EMAIL_PIPELINE_DIR)
+  mkdirSync(dir, { recursive: true })
+  const db = openSidecar(join(dir, EMAIL_PIPELINE_DB))
+  applyCoreMigrations(db, input.migrations_dir ?? EMAIL_PIPELINE_MIGRATIONS_DIR)
+  return new EmailPipelineStore(db, input.now ?? ((): number => Date.now()))
+}

@@ -12,6 +12,9 @@
  *                                 URL; API-key label + value → store the key.
  *   - `integrations_disconnect` — OAuth label → revoke + delete tokens;
  *                                 API-key label → clear the stored key.
+ *   - `integrations_migrate_orphaned` — move credential rows scoped to a
+ *                                 PREVIOUS owner handle onto this one, skipping
+ *                                 (and reporting) any that would collide.
  *
  * Registered against the per-process `ToolRegistry` in
  * gateway/composition/wire-cores-surfaces.ts, alongside the OAuth surface,
@@ -31,6 +34,8 @@ import {
   deleteApiKey,
   disconnectOAuth,
   IntegrationsError,
+  migrateOrphanedCredentials,
+  MIGRATE_ORPHANED_ACTION,
   setApiKey,
   type IntegrationsRegistryView,
 } from './integrations.ts'
@@ -40,6 +45,12 @@ export interface IntegrationsToolsDeps {
   tokens: OAuthTokenManager
   secretsStore: SecretsStore
   project_slug: string
+  /**
+   * True when `project_slug` is the bare FALLBACK rather than a configured
+   * handle. The migrate tool refuses in that case; see
+   * `auth/credential-scope-reconcile.ts`.
+   */
+  slug_is_fallback: boolean
   /**
    * Project DB — threaded so the OAuth-disconnect path can flag every
    * affected Core `install_failed_dependency_missing` via the shared
@@ -70,8 +81,8 @@ function requireLabel(args: unknown): string {
 }
 
 /**
- * Build the three agent-native integration tools. Pure — returns
- * registrations; the caller registers them on the ToolRegistry.
+ * Build the agent-native integration tools. Pure — returns registrations; the
+ * caller registers them on the ToolRegistry.
  */
 export function buildIntegrationsTools(
   deps: IntegrationsToolsDeps,
@@ -79,7 +90,7 @@ export function buildIntegrationsTools(
   const listTool: ToolRegistration = {
     name: 'integrations_list',
     description:
-      'List every connected integration: per-Core Google OAuth accounts and standalone API-key slots, each with its connection status. Returns no secret values.',
+      'List every connected integration: per-Core Google OAuth accounts and standalone API-key slots, each with its connection status. Also reports credentials scoped to a previous owner handle as `orphaned` (needs migration) rather than disconnected. Returns no secret values.',
     input_schema: { type: 'object', properties: {}, additionalProperties: false },
     output_schema: { type: 'object' },
     capability_required: 'read:project_data',
@@ -90,6 +101,8 @@ export function buildIntegrationsTools(
         tokens: deps.tokens,
         secretsStore: deps.secretsStore,
         project_slug: deps.project_slug,
+        slug_is_fallback: deps.slug_is_fallback,
+        db: deps.db,
       }),
   }
 
@@ -216,5 +229,25 @@ export function buildIntegrationsTools(
     },
   }
 
-  return [listTool, connectTool, disconnectTool]
+  // The way OUT of what `integrations_list` reports as `orphaned`. Named from
+  // the `MIGRATE_ORPHANED_ACTION` const the status summary points at — not a
+  // fresh string literal — so the advertised action and the registered tool
+  // cannot drift apart.
+  const migrateOrphanedTool: ToolRegistration = {
+    name: MIGRATE_ORPHANED_ACTION,
+    description:
+      "Migrate credential rows scoped to a previous owner handle onto this instance's handle. Never overwrites an existing credential: rows that would collide are skipped and reported. Returns counts only — no secret values.",
+    input_schema: { type: 'object', properties: {}, additionalProperties: false },
+    output_schema: { type: 'object' },
+    capability_required: 'write:project_data',
+    approval_policy: 'prompt-user',
+    handler: async () =>
+      migrateOrphanedCredentials({
+        db: deps.db,
+        project_slug: deps.project_slug,
+        slug_is_fallback: deps.slug_is_fallback,
+      }),
+  }
+
+  return [listTool, connectTool, disconnectTool, migrateOrphanedTool]
 }

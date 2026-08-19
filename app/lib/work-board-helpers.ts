@@ -92,31 +92,46 @@ export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress';
   if (status === 'done') return 'Done';
   if (status === 'failed') return 'Failed';
+  if (status === 'archived') return 'Shelved';
   return 'Upcoming';
 }
 
 /** Cycle a status forward: upcoming → in_progress → done (done stays done). A
  *  failed item re-queues to upcoming on manual advance (the primary action is
- *  the ▶/↻ retry). */
+ *  the ▶/↻ retry), and so does a SHELVED item — advancing a shelved card
+ *  un-shelves it back onto the active lane. */
 export function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress';
   if (status === 'in_progress') return 'done';
   if (status === 'failed') return 'upcoming';
+  if (status === 'archived') return 'upcoming';
   return 'done';
 }
 
-/** Split a board snapshot into the active lane + the completed history. */
+/**
+ * Split a board snapshot into the active lane + the SHELVED cards + the
+ * completed history.
+ *
+ * Archived is bucketed FIRST-CLASS, never folded into either neighbour. Folding
+ * it into `completed` would report parked work as shipped progress — the exact
+ * misreport the shelved lane exists to kill — and the old two-way
+ * `status === 'done' ? completed : active` bucketing would resurrect a shelved
+ * card in the active lane the server already excluded.
+ */
 export function splitBoard(items: readonly WorkBoardItem[]): {
   active: WorkBoardItem[];
+  archived: WorkBoardItem[];
   completed: WorkBoardItem[];
 } {
   const active: WorkBoardItem[] = [];
+  const archived: WorkBoardItem[] = [];
   const completed: WorkBoardItem[] = [];
   for (const it of items) {
     if (it.status === 'done') completed.push(it);
+    else if (it.status === 'archived') archived.push(it);
     else active.push(it);
   }
-  return { active, completed };
+  return { active, archived, completed };
 }
 
 /**
@@ -201,6 +216,32 @@ export function failureReasonText(rp: RunProgress | undefined): string | null {
   return reason !== null && reason.length > 0 ? reason : null;
 }
 
+/** A brief-integrity refusal is shown even when the bridge recovered and the run
+ *  continued, which is exactly the case where `failure_reason` stays null. */
+export function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null;
+  const alert = rp.brief_alert;
+  return typeof alert === 'string' && alert.length > 0 ? alert : null;
+}
+
+export interface RunNotice {
+  text: string;
+  tone: 'failure' | 'alert';
+}
+
+/** Terminal failure is the card's outcome; a recovered brief alert is only the
+ * fallback notice while no terminal failure reason exists. */
+export function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp);
+  if (failure !== null) return { text: failure, tone: 'failure' };
+  // A recovered integrity incident is evidence, not a substitute outcome. If a
+  // terminal failure has no recorded reason, do not relabel the earlier alert
+  // as though it caused that failure.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null;
+  const alert = briefAlertText(rp);
+  return alert === null ? null : { text: alert, tone: 'alert' };
+}
+
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */
 export type DotColorKey = 'upcoming' | PhaseColorKey;
 
@@ -212,8 +253,10 @@ export interface DotState {
 /**
  * The leading dot's colour bucket + whether it pulses. A live run's step
  * drives the colour (pulsing while building/reviewing/fixing/merging, solid on
- * done/failed); otherwise it falls back to the item's status (done → green,
- * in_progress → running blue-ish "build", upcoming → faint gray outline).
+ * done/failed); otherwise it falls back to the item's status: done → green,
+ * failed → solid failed (amber/red), in_progress → build blue pulsing ONLY
+ * while a live bound run exists (static otherwise), upcoming → faint gray
+ * outline.
  */
 export function dotState(item: WorkBoardItem): DotState {
   const rp = item.run_progress;
@@ -234,7 +277,18 @@ export function dotState(item: WorkBoardItem): DotState {
     }
   }
   if (item.status === 'done') return { colorKey: 'merge', pulse: false };
-  if (item.status === 'in_progress') return { colorKey: 'build', pulse: true };
+  // The lost failure (owner defect 2026-08-12): a failed card whose run
+  // progress is unavailable (a research/dispatch run is not a trident row;
+  // the link may have been cleared by reconcile) still paints the durable
+  // failed lane. `status='failed'` is written only by the terminal reconcile
+  // (`work-board/store.ts` detachRun), so this is positive data — the row is
+  // NOT inferring failure from the absence of run_progress.
+  if (item.status === 'failed') return { colorKey: 'failed', pulse: false };
+  // A pulse is a claim that something is moving (work-board-activity.ts):
+  // either a LIVE bound run OR an inline agent action (`inline_active`). The
+  // status lane alone never earns a pulse — a runless, non-inline in_progress
+  // card renders a STATIC dot.
+  if (item.status === 'in_progress') return { colorKey: 'build', pulse: isLinkedRunning(item) || item.inline_active };
   return { colorKey: 'upcoming', pulse: false };
 }
 
@@ -248,26 +302,57 @@ export function roundText(rp: RunProgress | undefined): string | null {
 
 const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'cancelled'];
 
-/** True when the item is bound to a run that is still live (not terminal). */
+/**
+ * True when the item is bound to a run that is still live (not terminal).
+ *
+ * The durable terminal lane (`status='failed'`, written only by detachRun
+ * #340) wins over the missing-rp inference. attachRun atomically sets
+ * `status='in_progress'` with every fresh binding, so this cannot mask a live
+ * run. A bound run that died without a terminal write is out of scope (#534).
+ */
 export function isLinkedRunning(item: WorkBoardItem): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0;
   if (!linked) return false;
+  if (item.status === 'failed') return false;
   const rp = item.run_progress;
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label);
 }
 
 /**
- * True when the ▶/↻ (start/retry) control should render: the item is NOT
- * in_progress and NOT done and has NO live linked run.
+ * True when the ▶/↻ (start/retry) control should render. Gated on the LIVE
+ * run, not the status lane: an in_progress card whose run is dead must offer
+ * ↻ (owner defect 2026-08-12 — the old `status !== 'in_progress'` clause made
+ * a failed-run in_progress card unrecoverable from the UI). `done` and a live
+ * linked run suppress the control per spec.
+ *
+ * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): the spec's
+ * two-clause form (`!isLinkedRunning && status !== 'done'`) does not mention
+ * inline_active. It suppresses ▶ while the card shows RECENT WRITE ACTIVITY, so
+ * the owner does not launch a Trident build on top of a repo an inline agent was
+ * just rewriting. Say it that way and no stronger: the wire field is now DERIVED
+ * server-side from a 90 s write-evidence window
+ * (`work-board/inline-activity.ts`), which means
+ *   - a crashed session's stale flag reads false on the NEXT read (the old
+ *     permanent pulse+no-▶ state is gone), but it heals on a CLOCK, not on an
+ *     event, so a client that stops re-reading keeps showing the last frame it
+ *     was sent — hence the board screen's quiet re-poll while any card reads
+ *     inline-active; and
+ *   - inline work that writes nothing for 90 s (a long test/build run, a
+ *     research turn) reads NOT active and ▶ comes back. That is a deliberate
+ *     false negative: this is a HINT, never a lock, and nothing here blocks.
+ * This helper keeps reading the wire field unchanged.
  */
 export function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'in_progress' && item.status !== 'done' && !isLinkedRunning(item);
+  return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;
 }
 
-/** ▶ vs ↻ — a card that carries a (now-detached) binding or a failed run RETRIES. */
+/** ▶ vs ↻ — a card that carries a (now-detached) binding, a failed run, or a
+ *  durable `status='failed'` lane RETRIES. The last check covers the runless
+ *  failed card whose link was cleared by reconcile. */
 export function isRetry(item: WorkBoardItem): boolean {
   if (item.linked_run_id !== null && item.linked_run_id.length > 0) return true;
-  return item.run_progress?.step_label === 'failed';
+  if (item.run_progress?.step_label === 'failed') return true;
+  return item.status === 'failed';
 }
 
 const MONTHS = [

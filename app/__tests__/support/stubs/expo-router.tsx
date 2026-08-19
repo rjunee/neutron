@@ -26,7 +26,13 @@
  * changed" is faithful.
  */
 
-import { createElement, useSyncExternalStore, type ComponentType, type ReactNode } from 'react';
+import {
+  createElement,
+  useEffect,
+  useSyncExternalStore,
+  type ComponentType,
+  type ReactNode,
+} from 'react';
 
 export const routerCalls: Array<{ kind: 'push' | 'replace'; href: string }> = [];
 
@@ -119,6 +125,28 @@ const ROUTER = {
 
 export function useRouter(): typeof ROUTER {
   return ROUTER;
+}
+
+/**
+ * `useFocusEffect` — run on focus, clean up on blur.
+ *
+ * A mounted screen in this harness is always the focused one (there is no
+ * navigator stacking screens behind each other), so focus IS mount and blur IS
+ * unmount, and `useEffect` is the faithful model of it here.
+ *
+ * ADDED BECAUSE ITS ABSENCE WAS INVISIBLE IN THE WORST WAY. `ChatSyncSurface`
+ * started importing this hook, the stub did not export it, and the files that
+ * mount that surface stopped LOADING — so the local suite ran 122 FEWER tests
+ * and reported FEWER failures than before the change. A drop in the failure
+ * count read as an improvement while a fifth of the suite silently stopped
+ * running. Count the tests that RAN, not just the ones that failed.
+ *
+ * Real expo-router re-runs the effect whenever the callback identity changes,
+ * which is why callers wrap it in `useCallback` — mirrored here by keying the
+ * effect on the callback.
+ */
+export function useFocusEffect(effect: () => undefined | (() => void)): void {
+  useEffect(() => effect(), [effect]);
 }
 
 export function usePathname(): string {

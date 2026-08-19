@@ -176,7 +176,7 @@ singular display, unchanged):
   by calling `credentialFingerprint` (`open/credential-label.ts`, importable through
   `vendor/neutron`) — never reimplemented from prose, which is how this bullet came to
   describe a sidecar the reader silently rejects. As built:
-  `docs/as-built/2026-08-09-credential-account-label.md`.
+  `docs/AS_BUILT.md` § 2026-08-09 — Naming the account behind a reading.
 - **Tier 2 — the fleet feed.** The rotator already probes every account on its own tick
   to decide rotation; if it also appends
   `{ts, label, session, weekly, session_reset_at, weekly_reset_at}` as JSON lines to

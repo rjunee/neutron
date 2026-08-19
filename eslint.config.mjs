@@ -93,12 +93,16 @@ export default [
     rules: {
       // `ignore` holds the two L5 sweep exceptions that must stay relative
       // (see PR #280 body for the full writeup):
-      //  - `tests/support/test-isolation.ts` is shared test-support code that
-      //    lives at the repo root but is NOT a workspace package (it isn't in
-      //    package.json `workspaces`), so it has no `@neutronai/*` specifier
-      //    to rewrite to — `findNamedPackage` would otherwise misattribute it
-      //    to the root "neutron" meta-package and mint a bogus
-      //    `neutron/tests/support/...` specifier that resolves nowhere.
+      //  - `tests/support/test-isolation.ts` and `tests/support/migrated-db.ts`
+      //    are shared test-support code that lives at the repo root but is NOT
+      //    a workspace package (`tests` isn't in package.json `workspaces`), so
+      //    they have no `@neutronai/*` specifier to rewrite to —
+      //    `findNamedPackage` would otherwise misattribute them to the root
+      //    "neutron" meta-package and mint a bogus `neutron/tests/support/...`
+      //    specifier that resolves nowhere. Keeping the migration-seeding helper
+      //    OUT of a workspace package is the point: no production package can
+      //    import what isn't on the package graph, so the fast seed path is
+      //    structurally unreachable from anything that boots.
       //  - `connect/__tests__/trusted-accept-handler.test.ts`'s import of
       //    `onboarding/api/invite-link-generate.ts`: `onboarding` already
       //    depends on `@neutronai/connect`, so declaring the reverse
@@ -107,7 +111,11 @@ export default [
       'import/no-relative-packages': [
         'error',
         {
-          ignore: ['tests/support/test-isolation\\.ts$', '^\\.\\./\\.\\./onboarding/api/invite-link-generate\\.ts$'],
+          ignore: [
+            'tests/support/test-isolation\\.ts$',
+            'tests/support/migrated-db\\.ts$',
+            '^\\.\\./\\.\\./onboarding/api/invite-link-generate\\.ts$',
+          ],
         },
       ],
     },

@@ -1,0 +1,37 @@
+-- 0123_code_trident_runs_crash_recoveries.sql
+--
+-- THE DURABLE CRASH-RECOVERY BUDGET — "a gateway restart must not kill a build".
+--
+-- The inner Forge→Argus loop runs DETACHED inside a warm `cc-trident-fire-*` REPL
+-- whose child dies with the gateway process. `onChildCrash`
+-- (`open/wiring/substrates.ts`) then latches every run that launcher owned
+-- `subagent_status='crashed'`, and `trident/orchestrator.ts step()` §1a used to
+-- reap such a run straight to `failed` ("a crashed launcher is a DEAD RUN").
+--
+-- MEASURED on 2026-08-14: three gateway boots (06:19:56, 06:26:51, 07:13:00 — a
+-- deploy loop, three restarts inside 53 minutes) each killed a HEALTHY build about
+-- 90 s later (one 15 s watchdog tick). Run `8ddca917` had already pushed branch
+-- `trident/the-build-brief-must-not-be-retyped` and opened PR #261 — 2 commits,
+-- 7 files, +434/−17, last push 07:04:23, NINE MINUTES before its launcher died.
+-- Nothing was wrong with the build except where its supervisor lived.
+--
+-- The continuation state (`branch`, `pr`, `inner_checkpoint`, `round`,
+-- `ralph_round`) is already on the row and already folded into `launch()`, so a
+-- crashed launcher is now RELAUNCHED as a continuation instead of reaped. That
+-- relaunch must be BOUNDED — the live cause is a deploy loop, which must not spin
+-- builds forever — and the bound must be DURABLE: an in-memory counter is reset by
+-- the very event it is meant to count (each gateway boot starts a fresh process),
+-- so it could never cap a restart loop. Hence a column.
+--
+-- SEPARATE from `round`/`ralph_round` on purpose: a launcher crash is not the
+-- agent's failure and must not consume its fix rounds. Written by exactly ONE
+-- writer, `TridentRunStore.beginCrashRecovery` (the atomic recovery claim) — never
+-- by `update`/`save`/`saveIfActive` — the same single-writer discipline
+-- `inner_result` and `harvested_at` have.
+--
+-- STRICT-table-safe: a single nullable ADD COLUMN (no literal default needed);
+-- readers coalesce NULL → 0 for legacy rows. Forward-only; no down-migration
+-- (Neutron OSS contract).
+
+ALTER TABLE code_trident_runs
+    ADD COLUMN crash_recoveries INTEGER;

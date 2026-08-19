@@ -58,6 +58,25 @@ export interface WorkBoardLiveOptions {
   /** Called with the full parsed board on every `work_board_changed` frame. */
   onSnapshot: (items: WorkBoardItem[]) => void;
   /**
+   * Called on every (RE)CONNECT of the socket, including the first. The caller
+   * MUST use this to re-fetch the board over HTTP.
+   *
+   * THIS IS THE FIX FOR AN EMPTY BOARD THAT NEVER SELF-HEALS, and the reason it
+   * is a required-in-practice callback rather than a nicety. A push-only board
+   * loses any item written while the socket was down, permanently — the client
+   * never learns, because nothing re-asks. Observed 2026-08-11: the owner's app
+   * closed every project session at 19:36:43, the first of five board items was
+   * written at 19:36:47 — four seconds later — and his board stayed empty until
+   * he manually reloaded the page.
+   *
+   * This module's header has ALWAYS said the caller "should also re-fetch on
+   * every (re)connect", and it was not possible to comply: `connect()` never
+   * assigned `s.onopen`, so no connect notification existed to hang a re-fetch
+   * on. The doc described a mode the code could not enter, and the screen's
+   * mount-time fetch was mistaken for satisfying it — mount is not reconnect.
+   */
+  onConnect?: () => void;
+  /**
    * Called with each `activity_event` row for THIS scope — the signal behind the
    * Work surface's live status strip (`work-board-activity.ts`).
    *
@@ -155,6 +174,14 @@ export function startWorkBoardLive(opts: WorkBoardLiveOptions): { stop: () => vo
       return;
     }
     socket = s;
+    // FIRES ON EVERY CONNECT, including reconnects — this is what lets the
+    // caller close the gap between "socket was down" and "an item was written".
+    // Guarded on `socket === s` so a stale socket that opens after we have moved
+    // on cannot trigger a re-fetch attributed to the current connection.
+    s.onopen = () => {
+      if (socket !== s) return;
+      opts.onConnect?.();
+    };
     s.onmessage = (ev) => {
       const items = decodeWorkBoardFrame(ev.data, opts.project_id);
       if (items !== null) {

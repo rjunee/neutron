@@ -8,8 +8,9 @@
  * tool).
  *
  * Tools: `work_board_list`, `work_board_add`, `work_board_update`,
- * `work_board_complete`, `work_board_reorder`. All `approval_policy:'auto'`
- * with a `read:project_data` / `write:project_data` capability (mirrors
+ * `work_board_complete`, `work_board_reorder`, and — when a removal chokepoint
+ * is wired — `work_board_remove`. All `approval_policy:'auto'` with a
+ * `read:project_data` / `write:project_data` capability (mirrors
  * `memory_search`).
  *
  * SECURITY + SCOPE: the storage scope is NEVER an agent-supplied argument. It is
@@ -35,23 +36,36 @@ import {
   type WorkBoardItem,
   type WorkBoardItemUpdate,
   type WorkBoardStatus,
-  type WorkBoardStore,
-} from './store.ts'
+  type WorkBoardStore, WorkBoardRunStillLiveError } from './store.ts'
 import type { WorkBoardSpecDocService } from './spec-doc-service.ts'
 import type { WorkBoardChatAck } from './chat-ack.ts'
+import {
+  WORK_BOARD_REMOVAL_REASONS,
+  type WorkBoardRemovalReason,
+  type WorkBoardRemovalService,
+} from './removal.ts'
 
 export const WORK_BOARD_LIST_TOOL = 'work_board_list'
 export const WORK_BOARD_ADD_TOOL = 'work_board_add'
 export const WORK_BOARD_UPDATE_TOOL = 'work_board_update'
 export const WORK_BOARD_COMPLETE_TOOL = 'work_board_complete'
 export const WORK_BOARD_REORDER_TOOL = 'work_board_reorder'
+export const WORK_BOARD_REMOVE_TOOL = 'work_board_remove'
 
-const STATUS_VALUES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done']
+// 'failed' is deliberately ABSENT: it is run-driven (only the terminal reconcile
+// writes it), so it is not client-writable. 'archived' IS here — it is the
+// deprioritise lever.
+const STATUS_VALUES: WorkBoardStatus[] = ['upcoming', 'in_progress', 'done', 'archived']
 
 const statusProp = {
   type: 'string',
   enum: STATUS_VALUES,
-  description: "Lane: 'upcoming' (backlog) | 'in_progress' (active) | 'done' (completed).",
+  description:
+    "Lane: 'upcoming' (backlog) | 'in_progress' (active) | 'done' (SHIPPED — it happened) | " +
+    "'archived' (SHELVED — deprioritised and taken off the active board WITHOUT shipping). " +
+    "'archived' is not a quieter 'done': use it, never 'done'/work_board_complete, for anything " +
+    'dropped, parked, or superseded, so the board never reports unshipped work as completed. ' +
+    'A shelved card keeps its history and can be un-shelved back to upcoming.',
 }
 
 const designDocRefProp = {
@@ -115,6 +129,11 @@ interface ReorderArgs {
   before?: unknown
   after?: unknown
 }
+interface RemoveArgs {
+  id?: unknown
+  reason?: unknown
+  delete_plan_doc?: unknown
+}
 
 function asString(v: unknown): string | undefined {
   return typeof v === 'string' ? v : undefined
@@ -161,10 +180,33 @@ export function registerWorkBoardToolSurface(
      * seam. Absent → byte-identical to the pre-task-4 behaviour (no post).
      */
     chatAck?: WorkBoardChatAck
+    /**
+     * Derived inline activity — when wired, `work_board_list` returns the
+     * EVIDENCE-derived `inline_active` (inspector clocks) instead of the stored
+     * hint, mirroring the HTTP surface's dep shape
+     * (`gateway/http/work-board-surface.ts`). BATCH on purpose: ONE O(1)
+     * evidence read per list call, never one per row, never a shell-out.
+     * Display-only — it never gates, denies or delays a tool call, and it never
+     * writes to the store. Absent (legacy / LLM-less boxes) ⇒ byte-identical
+     * raw stored-flag passthrough.
+     */
+    deriveInlineActive?: (items: WorkBoardItem[], project_id: string) => WorkBoardItem[]
+    /**
+     * The ONE card-removal chokepoint (`work-board/removal.ts`) — the SAME
+     * composer-built instance the HTTP DELETE behind the UI's X runs: cancel a
+     * live bound run FIRST, then dispose the card's own `plans/` doc by the
+     * removal reason, then hard-delete the row. When wired, `work_board_remove`
+     * is registered so the agent removes cards through the human's path instead
+     * of misreporting deprioritised work as `done`. Absent (legacy / removal-less
+     * boots) → the tool is NOT registered and the other five register unchanged.
+     */
+    removal?: WorkBoardRemovalService
   },
 ): string[] {
   const specDoc = opts?.specDoc
   const chatAck = opts?.chatAck
+  const deriveInlineActive = opts?.deriveInlineActive
+  const removal = opts?.removal
   registry.register({
     name: WORK_BOARD_LIST_TOOL,
     description:
@@ -176,7 +218,18 @@ export function registerWorkBoardToolSurface(
     capability_required: 'read:project_data',
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
-      return { items: store.list(workBoardScopeKey(ctx.project_slug, ctx.project_id)) }
+      const items = store.list(workBoardScopeKey(ctx.project_slug, ctx.project_id))
+      // DELIBERATE SCOPE: only the READ surfaces (this list + the per-turn
+      // `<work_board>` fragment) map through the derivation. The mutation echoes
+      // below (add/update/complete/reorder) keep the raw stored hint on purpose —
+      // they are transactional acks of the write just performed, and the agent's
+      // own tool call is itself fresh evidence.
+      return {
+        items:
+          deriveInlineActive !== undefined
+            ? deriveInlineActive(items, ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID)
+            : items,
+      }
     },
   })
 
@@ -263,11 +316,16 @@ export function registerWorkBoardToolSurface(
   registry.register({
     name: WORK_BOARD_UPDATE_TOOL,
     description:
-      'Update a Work Board item by id: change its title, move its status (upcoming/in_progress/done), ' +
-      'set/replace its design_doc_ref, or flag inline_active when YOU are working the item INLINE in ' +
-      'this topic (shows a caret › on the board; a bound sub-agent shows a fork ⑂ instead — that is ' +
-      'set automatically when a build is dispatched). Clear inline_active when you stop. Re-opening ' +
-      'off done clears the completion datestamp.',
+      'Update a Work Board item by id: change its title, move its status ' +
+      '(upcoming/in_progress/done/archived), set/replace its design_doc_ref, or flag inline_active ' +
+      'when YOU are working the item INLINE in this topic (shows a caret › on the board; a bound ' +
+      'sub-agent shows a fork ⑂ instead — that is set automatically when a build is dispatched). ' +
+      'Clear inline_active when you stop, though the board no longer depends on you remembering: ' +
+      'what it displays is DERIVED from recent WRITES in the project, so a flag you forget expires ' +
+      'on its own and a card you are visibly editing shows as worked even if you never set the flag. ' +
+      'Read-only work (research, a long test run) is carried by the status, not the flag. ' +
+      "To DEPRIORITISE a card, set status:'archived' (shelved) — never 'done', which claims it shipped. " +
+      'Re-opening off done clears the completion datestamp.',
     input_schema: {
       type: 'object',
       properties: {
@@ -325,6 +383,13 @@ export function registerWorkBoardToolSurface(
         }
         return ok(item)
       } catch (err) {
+        // A refusal is an ANSWER, not a crash: the store throws when a card is
+        // SHELVED (status:'archived') while its build is still live (see
+        // WorkBoardRunStillLiveError). Surface its message so the agent learns
+        // why and stops, rather than seeing a tool error and retrying.
+        if (err instanceof WorkBoardRunStillLiveError) {
+          return { ok: false, error: err.message }
+        }
         return asErrorResult(err)
       }
     },
@@ -346,7 +411,18 @@ export function registerWorkBoardToolSurface(
       const a = (args ?? {}) as IdArg
       const id = asString(a.id)
       if (id === undefined) return { ok: false, error: 'id is required' }
-      return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
+      // A refusal is an ANSWER, not a crash: the store throws when the item's
+      // build is still live (see WorkBoardRunStillLiveError). Surface its message
+      // so the agent learns why and stops, rather than seeing a tool error and
+      // retrying. Completion is reconciled from the run going terminal.
+      try {
+        return ok(await store.complete(workBoardScopeKey(ctx.project_slug, ctx.project_id), id))
+      } catch (err) {
+        if (err instanceof WorkBoardRunStillLiveError) {
+          return { ok: false, error: err.message }
+        }
+        throw err
+      }
     },
   })
 
@@ -382,11 +458,93 @@ export function registerWorkBoardToolSurface(
     },
   })
 
+  if (removal !== undefined) {
+    registry.register({
+      name: WORK_BOARD_REMOVE_TOOL,
+      description:
+        'Remove a card from the Work Board entirely. This is NOT the same as completing it — never ' +
+        'mark unshipped work `done` just to clear it off the board; use THIS instead. Cancels any ' +
+        "in-flight build/research run bound to the card first. The card's plans/ doc is MOVED to " +
+        '`plans/<reason>/` (still readable in Documents), never deleted unless `delete_plan_doc` is ' +
+        'explicitly true.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'The item id (from work_board_list).' },
+          reason: {
+            type: 'string',
+            enum: WORK_BOARD_REMOVAL_REASONS,
+            description:
+              "Why the card is leaving the board — drives where its plan doc is filed: 'shipped' " +
+              "(done elsewhere/already delivered), 'cancelled' (deprioritised/scrapped), 'moved' " +
+              '(tracked somewhere else now).',
+          },
+          delete_plan_doc: {
+            type: 'boolean',
+            description:
+              'DESTROY the plan doc instead of filing it. Deliberate deletes only; default false ' +
+              'files it under plans/<reason>/.',
+          },
+        },
+        required: ['id', 'reason'],
+        additionalProperties: false,
+      },
+      output_schema: {
+        type: 'object',
+        properties: {
+          ok: { type: 'boolean' },
+          cancelled_run: { type: 'string' },
+          plan_doc: {
+            type: 'object',
+            properties: {
+              path: { type: 'string' },
+              disposition: { type: 'string', enum: ['moved', 'deleted', 'left_in_place'] },
+              to: { type: 'string' },
+            },
+            required: ['path', 'disposition'],
+          },
+          error: { type: 'string' },
+        },
+        required: ['ok'],
+      },
+      capability_required: 'write:project_data',
+      approval_policy: 'auto',
+      handler: async (args, ctx) => {
+        const a = (args ?? {}) as RemoveArgs
+        const id = asString(a.id)
+        if (id === undefined) return { ok: false, error: 'id is required' }
+        const reason =
+          typeof a.reason === 'string' && (WORK_BOARD_REMOVAL_REASONS as string[]).includes(a.reason)
+            ? (a.reason as WorkBoardRemovalReason)
+            : undefined
+        if (reason === undefined) {
+          return { ok: false, error: "reason is required: 'shipped' | 'cancelled' | 'moved'" }
+        }
+        const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+        // The BOARD gets the scope key; the DOCS get the project id — the same
+        // conflation hazard documented in `spec-doc-service.ts` (collapsing the
+        // two wrote General's plans into a phantom project directory). A General
+        // turn uses GENERAL_WORK_BOARD_PROJECT_ID, exactly as `work_board_add` does.
+        const res = await removal.remove(scope, ctx.project_id ?? GENERAL_WORK_BOARD_PROJECT_ID, id, {
+          reason,
+          ...(a.delete_plan_doc === true ? { plan_doc: 'delete' as const } : {}),
+        })
+        if (!res.removed) return { ok: false, error: `no such item: ${id}` }
+        return {
+          ok: true,
+          ...(res.cancelled_run !== undefined ? { cancelled_run: res.cancelled_run } : {}),
+          ...(res.plan_doc !== undefined ? { plan_doc: res.plan_doc } : {}),
+        }
+      },
+    })
+  }
+
   return [
     WORK_BOARD_LIST_TOOL,
     WORK_BOARD_ADD_TOOL,
     WORK_BOARD_UPDATE_TOOL,
     WORK_BOARD_COMPLETE_TOOL,
     WORK_BOARD_REORDER_TOOL,
+    ...(removal !== undefined ? [WORK_BOARD_REMOVE_TOOL] : []),
   ]
 }

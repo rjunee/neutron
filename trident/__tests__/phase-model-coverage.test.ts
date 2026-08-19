@@ -40,6 +40,7 @@ import {
   phaseForLabel,
   phaseModelDefaults,
 } from '../phase-models.ts'
+import { TIER_GROUPS } from '../model-tiers.ts'
 
 const WORKFLOW_SRC = await Bun.file(new URL('../inner-workflow.mjs', import.meta.url)).text()
 
@@ -113,6 +114,22 @@ describe('coverage — no label falls through silently', () => {
     expect({ uncovered }).toEqual({ uncovered: [] })
   })
 
+  it('the cross-model lanes are ROUTED now, retries included', () => {
+    // They used to be listed as deliberately unconfigurable ("the reviewing model is
+    // the CLI's own configuration"), which held only while nothing threaded a model
+    // IN. Both wrappers read an env knob, so the exclusion was retired — and the
+    // RETRY lanes matter as much as the first attempt: an owner's choice that applied
+    // to one and not the other would be a review served by two different models.
+    for (const label of ['argus:codex', 'argus:codex-retry']) {
+      expect(phaseForLabel(label)?.key).toBe('review_codex')
+      expect(isUnroutedLabel(label)).toBe(false)
+    }
+    for (const label of ['argus:kimi', 'argus:kimi-retry']) {
+      expect(phaseForLabel(label)?.key).toBe('review_kimi')
+      expect(isUnroutedLabel(label)).toBe(false)
+    }
+  })
+
   it('head-probe specifically is routed — the regression this test was written for', () => {
     const phase = phaseForLabel('head-probe-round-4')
     expect(phase).not.toBeNull()
@@ -180,6 +197,62 @@ describe('the workflow reads the argument this module produces', () => {
       expect(WORKFLOW_SRC.includes(`phaseKey: '${phase.key}'`)).toBe(true)
     }
   })
+
+  it('implements every `follows` the table declares, and no other', () => {
+    // THE DRIFT GUARD FOR THE ONE RULE THAT LIVES IN TWO PLACES. `follows` decides two
+    // things that must agree: the surface hides the row, and the workflow's
+    // `phaseOverrideFor` hands it the followed phase's override. The `.mjs` cannot
+    // import this module (the workflow script has no module resolution), so the rule
+    // is necessarily restated there — and a restatement nobody checks is how the pane
+    // and the run start disagreeing.
+    const declared = TRIDENT_PHASES.filter((p) => p.follows !== undefined)
+    // The table must actually declare one, or every assertion below is vacuous.
+    expect(declared.map((p) => `${p.key}<-${p.follows}`)).toEqual(['build_mechanical<-build'])
+    for (const phase of declared) {
+      // MATCHED AS A PATTERN, not as a literal block of source. The previous version
+      // pinned a multi-line substring including its indentation, so a reformat broke
+      // the guard with no behaviour change — and a guard that cries wolf gets deleted.
+      expect(
+        new RegExp(
+          `phaseKey === '${phase.key}'\\s*\\?\\s*threadedPhaseModels\\['${phase.follows!}'\\]`,
+        ).test(WORKFLOW_SRC),
+      ).toBe(true)
+      // AND THE MIRROR IS UNCONDITIONAL. A read of the follower's OWN key would give a
+      // stored-but-unrenderable entry precedence over the row the owner can actually
+      // see — the setting would be pinned somewhere they cannot reach it.
+      expect(WORKFLOW_SRC.includes(`threadedPhaseModels['${phase.key}']`)).toBe(false)
+    }
+    // And a phase with NO `follows` must not be quietly inheriting anyway.
+    for (const phase of TRIDENT_PHASES) {
+      if (phase.follows !== undefined) continue
+      expect(new RegExp(`phaseKey === '${phase.key}'\\s*(\\?|&&)`).test(WORKFLOW_SRC)).toBe(false)
+    }
+  })
+
+  it('offers exactly every dispatch group the workflow accepts, for every phase', () => {
+    // THE SECOND RULE THAT LIVES IN TWO PLACES, and it had no guard while the module
+    // header claimed one. `alsoRunsOn` is what makes a tier from another executor
+    // SELECTABLE for a phase; the workflow's route for that phase has to carry the
+    // same list, or `applyPhaseOverride` logs IGNORED and the owner's pick dispatches
+    // nowhere — a settable option that does nothing, which is worse than a greyed one.
+    for (const phase of TRIDENT_PHASES) {
+      const route = new RegExp(
+        `phaseKey: '${phase.key}'[^\\n]*dispatchGroups: \\[([^\\]]*)\\]`,
+      ).exec(WORKFLOW_SRC)
+      expect({ key: phase.key, routed: route !== null }).toEqual({ key: phase.key, routed: true })
+      const groups = route![1]!
+        .split(',')
+        .map((g) => g.trim().replace(/^'|'$/g, ''))
+        .filter((g) => g.length > 0)
+      expect({ key: phase.key, groups }).toEqual({ key: phase.key, groups: [...phase.dispatchGroups] })
+      // …and every group named is one the workflow can actually DISPATCH: it needs a
+      // route of its own carrying that group, or the move lands on nothing.
+      for (const group of phase.dispatchGroups) {
+        expect(TIER_GROUPS).toContain(group)
+        if (group !== 'none') expect(new RegExp(`group: '${group}'`).test(WORKFLOW_SRC)).toBe(true)
+      }
+    }
+  })
 })
 
 describe('validation rejects loudly rather than dropping quietly', () => {
@@ -235,13 +308,197 @@ describe('validation rejects loudly rather than dropping quietly', () => {
     expect(parsePhaseModelConfig({ build: { model: 'x'.repeat(200) } }).errors).toHaveLength(1)
   })
 
-  it('accepts a LITERAL model id, not just a tier name', () => {
-    // The escape hatch: pinning an exact vendor id is sometimes the whole point, and
-    // a regex over vendor naming would reject valid future ids.
-    const { config, errors } = parsePhaseModelConfig({ build: { model: 'gpt-5.6-sol' } })
-    expect(errors).toEqual([])
-    expect(config['build']).toEqual({ model: 'gpt-5.6-sol' })
+  it('REJECTS a literal vendor id — a tier or nothing', () => {
+    // The old escape hatch, closed deliberately. A bare id carries no TRANSPORT, so
+    // `gpt-5.6-sol` in the build phase looked like a pin and was really a
+    // Claude-endpoint lookup for a model only reachable as a subprocess: a build that
+    // quietly runs on the wrong model. The message has to name the vocabulary,
+    // because "invalid" alone sends the owner to the source.
+    const { config, errors, rejected } = parsePhaseModelConfig({ build: { model: 'gpt-5.6-sol' } })
+    expect(config).toEqual({})
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('gpt-5.6-sol')
+    expect(errors[0]).toContain('sonnet')
     expect(isModelTier('gpt-5.6-sol')).toBe(false)
+    // KEPT, not just dropped: the pane renders this struck through and names the
+    // default it fell back to, so a choice that stopped working is visible rather
+    // than silently reverted.
+    expect(rejected['build']).toEqual({ model: 'gpt-5.6-sol' })
+  })
+
+  it('REJECTS a tier the phase cannot dispatch, and says which executor each is', () => {
+    // The executor is a capability, not a preference. `sol` runs as a codex
+    // subprocess and the rubric reviewer has only `agent({model})`, which resolves
+    // against Claude Code's endpoint — so it is refused.
+    const { config, errors, rejected } = parsePhaseModelConfig({ review_rubric: { model: 'sol' } })
+    expect(config).toEqual({})
+    expect(errors[0]).toContain('sol')
+    expect(errors[0]).toContain('codex executor')
+    // The message names the executor this step DOES dispatch on, so the owner can
+    // tell "wrong family" from "not wired yet".
+    expect(errors[0]).toContain('claude')
+    // AND IT NEVER NAMES A SCRIPT. A tier's registered `wrapper` is the CROSS-MODEL
+    // REVIEW wrapper; the build reaches the same codex tiers through
+    // `trident/codex-build.sh`. Interpolating it told a BUILD-row owner their tier
+    // "runs as a trident/codex-review.sh subprocess" — a true sentence about a phase
+    // they were not configuring.
+    for (const message of errors) {
+      expect(message).not.toContain('codex-review.sh')
+      expect(message).not.toContain('.sh')
+    }
+    // KEPT, not just dropped, so the pane can show it struck through.
+    expect(rejected['review_rubric']).toEqual({ model: 'sol' })
+    // Generic review seats can be pointed at Claude explicitly. This is an owner
+    // choice, not a CLI failure silently falling back to another family.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'opus' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_codex: { model: 'opus', effort: 'max' } })).toMatchObject({
+      config: { review_codex: { model: 'opus', effort: 'max' } },
+      errors: [],
+    })
+    // Within one executor it is allowed — that is the whole feature.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'terra' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_kimi: { model: 'k3' } }).errors).toEqual([])
+    // …but not ACROSS two CLI wrappers: `CODEX_REVIEW_MODEL=kimi-k3` is nonsense.
+    expect(parsePhaseModelConfig({ review_codex: { model: 'k3' } }).errors).toEqual([])
+    // …and the build's SECOND executor is codex, not "any CLI": a Kimi tier on the
+    // build row is still refused, because nothing dispatches it there.
+    expect(parsePhaseModelConfig({ build: { model: 'k3' } }).errors).toHaveLength(1)
+  })
+
+  it('ACCEPTS a codex tier on the build row — the executor it is now wired to', () => {
+    // The counterpart of the refusal above, and the reason this module grew
+    // `alsoRunsOn`: the build dispatches to `trident/codex-build.sh` as well as to
+    // `agent()`, so a GPT tier on that row is a choice the run can honour.
+    for (const tier of ['sol', 'terra', 'luna']) {
+      const { config, errors } = parsePhaseModelConfig({ build: { model: tier } })
+      expect({ tier, errors }).toEqual({ tier, errors: [] })
+      expect(config).toEqual({ build: { model: tier } })
+    }
+    // The Claude tiers still work on the same row — a second executor ADDS a choice,
+    // it does not replace the default one.
+    expect(parsePhaseModelConfig({ build: { model: 'sonnet' } }).errors).toEqual([])
+  })
+
+  it('ACCEPTS a codex tier on adversarial review but keeps rubric review on Claude', () => {
+    expect(parsePhaseModelConfig({ review_adversarial: { model: 'terra' } }).errors).toEqual([])
+    expect(parsePhaseModelConfig({ review_rubric: { model: 'terra' } }).errors).toHaveLength(1)
+    expect(
+      parsePhaseModelConfig({ review_adversarial: { model: 'terra', effort: 'max' } }).config,
+    ).toEqual({ review_adversarial: { model: 'terra' } })
+  })
+
+  it('offers NONE on every review row and every tier on either generic slot', () => {
+    const reviewRows = TRIDENT_PHASES.filter((phase) => phase.key.startsWith('review_'))
+    expect(reviewRows).toHaveLength(4)
+    for (const phase of reviewRows) {
+      expect(phase.dispatchGroups).toContain('none')
+      expect(parsePhaseModelConfig({ [phase.key]: { model: 'none' } }).errors).toEqual([])
+    }
+    for (const key of ['review_codex', 'review_kimi']) {
+      for (const tier of MODEL_TIERS) {
+        expect(parsePhaseModelConfig({ [key]: { model: tier } }).errors).toEqual([])
+      }
+    }
+  })
+
+  it('records an actionable reason on every phase that remains Claude-only', () => {
+    for (const phase of TRIDENT_PHASES.filter((item) => item.dispatchGroups.length === 1)) {
+      expect(phase.dispatchGroups).toEqual(['claude'])
+      expect(phase.dispatchConstraint).toMatch(/until .*(wrapper|executor)/i)
+    }
+  })
+
+  it('REFUSES a follower phase outright, and DROPS one that was already stored', () => {
+    // `build_mechanical` has no row, so a value stored against it can never be seen or
+    // cleared — and the workflow would have kept the `[mechanical]` build on whatever
+    // it named while the pane showed the owner's codex tier on the only Build row
+    // there is. Refused on the WRITE (an error names the key)…
+    for (const entry of [{ model: 'sonnet' }, { model: 'terra' }, { effort: 'low' }, {}]) {
+      const { config, errors } = parsePhaseModelConfig({ build_mechanical: entry })
+      expect(config).toEqual({})
+      expect(errors).toHaveLength(1)
+      expect(errors[0]).toContain("phase 'build_mechanical' is not settable")
+      expect(errors[0]).toContain('build')
+    }
+    // …and DROPPED on the read, which is the migration: a blob persisted before this
+    // rule loses the follower entry and keeps everything else. The read path is the
+    // one that ignores `errors` and uses `config`.
+    const stored = parsePhaseModelConfig({
+      build: { model: 'terra' },
+      build_mechanical: { model: 'sonnet', effort: 'low' },
+    })
+    expect(stored.config).toEqual({ build: { model: 'terra' } })
+    // Never silently: the key is named, so the drop is visible to anything that reads
+    // errors (the settings PUT 400s with exactly this text).
+    expect(stored.errors).toHaveLength(1)
+    // The rule is the DECLARATION, not a hard-coded key.
+    for (const phase of TRIDENT_PHASES) {
+      const { errors } = parsePhaseModelConfig({ [phase.key]: { model: 'opus' } })
+      const settable = errors.every((e) => !e.includes('is not settable — it is the'))
+      expect({ key: phase.key, settable }).toEqual({
+        key: phase.key,
+        settable: phase.follows === undefined,
+      })
+    }
+  })
+
+  it('REJECTS an effort on a phase whose executor has no effort control', () => {
+    // A stored setting that no dispatch reads is the exact defect this module exists
+    // to prevent — the owner sets it, nothing changes, the feature looks broken.
+    const { config, errors } = parsePhaseModelConfig({ review_codex: { effort: 'max' } })
+    expect(config).toEqual({})
+    expect(errors).toHaveLength(1)
+    expect(errors[0]).toContain('not settable')
+  })
+
+  it('DROPS — never rejects — an effort paired with a codex model on the build row', () => {
+    // `build` HAS an effort control, because its default executor reads one. Move the
+    // row to the codex executor and that stops being true: a CLI picks its own
+    // reasoning effort. The effort is a LEFTOVER from the executor the owner just
+    // left, not a bad value, so it is dropped into `rejected` and the write SUCCEEDS.
+    //
+    // THE SAVE MUST NOT FAIL. An error here is a 400 on the whole PUT, which discards
+    // every other row's pending edit and — for any owner who had ever touched the
+    // build's effort — makes the codex tiers a selectable option that cannot be
+    // selected. That is strictly worse than the greyed control this route removed.
+    const { config, errors, rejected } = parsePhaseModelConfig({
+      build: { model: 'sol', effort: 'max' },
+    })
+    expect(errors).toEqual([])
+    expect(config).toEqual({ build: { model: 'sol' } })
+    expect(rejected['build']).toEqual({ effort: 'max' })
+    // Field ORDER must not change the answer: the model decides, and JSON has no
+    // guaranteed order. Checked because the rule reads the two fields together.
+    const reversed = parsePhaseModelConfig({ build: { effort: 'max', model: 'sol' } })
+    expect(reversed.errors).toEqual([])
+    expect(reversed.config).toEqual({ build: { model: 'sol' } })
+    // …and the same effort with a Claude model is still perfectly fine.
+    expect(parsePhaseModelConfig({ build: { model: 'sonnet', effort: 'max' } })).toEqual({
+      config: { build: { model: 'sonnet', effort: 'max' } },
+      errors: [],
+      rejected: {},
+    })
+    // The drop is scoped to the pair. A phase that never had an effort control still
+    // gets a loud error, because there the owner cannot even see a cell to explain it.
+    expect(parsePhaseModelConfig({ review_codex: { effort: 'max' } }).errors).toHaveLength(1)
+  })
+
+  it('a codex build alongside other rows saves ALL of them, not none', () => {
+    // The end-to-end shape of the bug: one settings save carries every row. When the
+    // codex+effort pair was an error, moving the build to codex threw away the
+    // synthesis change made in the same pass — and the owner was told only that the
+    // build was wrong.
+    const { config, errors } = parsePhaseModelConfig({
+      build: { model: 'sol', effort: 'max' },
+      synthesis: { effort: 'max' },
+      review_rubric: { model: 'sonnet' },
+    })
+    expect(errors).toEqual([])
+    expect(config).toEqual({
+      build: { model: 'sol' },
+      synthesis: { effort: 'max' },
+      review_rubric: { model: 'sonnet' },
+    })
   })
 
   it('drops an entry that sets nothing, so {} never persists as configuration', () => {
@@ -251,8 +508,8 @@ describe('validation rejects loudly rather than dropping quietly', () => {
   })
 
   it('treats null/undefined as "no configuration", not as an error', () => {
-    expect(parsePhaseModelConfig(null)).toEqual({ config: {}, errors: [] })
-    expect(parsePhaseModelConfig(undefined)).toEqual({ config: {}, errors: [] })
+    expect(parsePhaseModelConfig(null)).toEqual({ config: {}, errors: [], rejected: {} })
+    expect(parsePhaseModelConfig(undefined)).toEqual({ config: {}, errors: [], rejected: {} })
   })
 
   it('rejects a non-object at the top level, including an array', () => {
@@ -275,8 +532,17 @@ describe('validation rejects loudly rather than dropping quietly', () => {
 describe('the vocabulary a settings pane will render', () => {
   it('exposes defaults derived from the phase table, never restated', () => {
     const defaults = phaseModelDefaults()
-    expect(Object.keys(defaults).sort()).toEqual(TRIDENT_PHASES.map((p) => p.key).sort())
+    // ONE KEY PER ROW, and a follower is not a row: `build_mechanical` dispatches
+    // whatever `build` was set to, so shipping its own `sonnet` default would hand
+    // every client a key it cannot render and a value the run contradicts.
+    expect(Object.keys(defaults).sort()).toEqual(
+      TRIDENT_PHASES.filter((p) => p.follows === undefined)
+        .map((p) => p.key)
+        .sort(),
+    )
+    expect(defaults['build_mechanical']).toBeUndefined()
     for (const phase of TRIDENT_PHASES) {
+      if (phase.follows !== undefined) continue
       expect(defaults[phase.key]).toEqual({
         model: phase.default.tier,
         effort: phase.default.effort,
@@ -378,10 +644,49 @@ describe('the args actually carry it (the TS half, end to end)', () => {
     const args = await makeInput({ build: { model: 'opus' } })
     const models = args['models'] as Record<string, string>
     // A regression here would mean the phase override resolves a tier name against
-    // nothing, silently producing the literal string 'opus' as a model id.
-    for (const tier of MODEL_TIERS) {
+    // nothing, silently producing the literal string 'opus' as a model id. Only the
+    // AGENT-transport tiers live in this map: it is the workflow's per-role Claude
+    // routing table, and a GPT id in it would be one `agent({model})` can't reach.
+    for (const tier of ['fable', 'opus', 'sonnet', 'fast']) {
       expect(typeof models[tier]).toBe('string')
       expect(models[tier]!.length).toBeGreaterThan(0)
     }
+  })
+
+  it('threads the whole TIER REGISTRY, resolved, so a cross-model choice can land', async () => {
+    const args = await makeInput(null)
+    const tiers = args['modelTiers'] as Record<
+      string,
+      { model_id: string; transport: string; env_var: string | null; group: string }
+    >
+    // EVERY tier, or a tier the pane offers is one the dispatch cannot resolve.
+    for (const tier of MODEL_TIERS) {
+      expect(typeof tiers[tier]?.model_id).toBe('string')
+      expect(tiers[tier]!.model_id.length).toBeGreaterThan(0)
+      // The EXECUTOR travels too. Without it the workflow has to infer "can this
+      // step take that tier" from transport+env_var matching, which is a proxy that
+      // holds only while every phase has exactly one executor.
+      expect([...TIER_GROUPS] as string[]).toContain(tiers[tier]!.group)
+    }
+    // And the transport travels with it — the difference between a model the
+    // workflow can call and one it must shell out to.
+    expect(tiers['opus']).toEqual({
+      model_id: tiers['opus']!.model_id,
+      transport: 'agent',
+      env_var: null,
+      group: 'claude',
+    })
+    expect(tiers['sol']).toEqual({
+      model_id: 'gpt-5.6-sol',
+      transport: 'cli',
+      env_var: 'CODEX_REVIEW_MODEL',
+      group: 'codex',
+    })
+    expect(tiers['k3']).toEqual({
+      model_id: 'kimi-k3',
+      transport: 'cli',
+      env_var: 'KIMI_MODEL',
+      group: 'kimi',
+    })
   })
 })

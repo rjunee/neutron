@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildButtonPrompt,
@@ -18,8 +18,8 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-bs-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })
@@ -525,8 +525,8 @@ describe('ButtonStore.latestTurnByTopic — insertion-order recency (same-ms tie
       rmSync(tmp, { recursive: true, force: true })
       tmp = mkdtempSync(join(tmpdir(), 'neutron-bs-recency-'))
       db.close()
+      seedMigratedDb(join(tmp, 'project.db'))
       db = ProjectDb.open(join(tmp, 'project.db'))
-      applyMigrations(db.raw())
       now = 1_000_000
       store = new ButtonStore({ db, now: () => now })
 

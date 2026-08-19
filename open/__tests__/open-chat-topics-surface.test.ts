@@ -23,7 +23,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   createOpenChatTopicsSurface,
@@ -63,8 +63,8 @@ const okClaim = async (): Promise<OpenUserClaim> => ({ project_slug: SLUG, user_
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'open-chat-topics-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

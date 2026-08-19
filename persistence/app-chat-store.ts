@@ -105,11 +105,31 @@ export interface AppChatMessageLog {
    */
   append(input: AppChatAppendInput): Promise<AppChatAppendResult>
   /**
-   * Replay every message after `after_seq` for a topic, ascending by seq.
-   * `after_seq <= 0` (or a cold client) returns the whole transcript up to
-   * `limit`.
+   * Replay messages in the half-open seq range `(after_seq, before_seq)` for a
+   * topic, ascending by seq: the NEWEST `limit` rows in that range (default
+   * {@link DEFAULT_REPLAY_LIMIT}), which for a cold client (`after_seq <= 0`, no
+   * `before_seq`) is the whole transcript when it fits within `limit` and its
+   * NEWEST `limit` messages when it does not.
+   *
+   * NEWEST, not oldest: a resume cursor moves forward, so a bounded window has to
+   * be the end of the transcript the client is actually looking at.
+   *
+   * `before_seq` (EXCLUSIVE, optional) is how the remainder is reached. A client
+   * handed a FULL page knows older rows may remain and asks again with
+   * `before_seq` = that page's lowest seq; pages are contiguous, the bound
+   * strictly descends, and the walk ends at the first page that is not full.
+   * Omitting it is byte-identical to the unbounded query, which is what keeps
+   * every forward resume unchanged. The full argument, the cost of draining
+   * inside one call instead, and the SQL live on
+   * `AppChatEventLogCore.rowsAfter`; the wire signal that drives the walk is
+   * `history_gap` (`AppWsAdapter.replayAfter`).
    */
-  replayAfter(topic_id: string, after_seq: number, limit?: number): Promise<AppChatRow[]>
+  replayAfter(
+    topic_id: string,
+    after_seq: number,
+    limit?: number,
+    before_seq?: number,
+  ): Promise<AppChatRow[]>
   /** Highest seq persisted for a topic, or 0 when the topic has no messages. */
   maxSeq(topic_id: string): Promise<number>
   /**
@@ -141,9 +161,40 @@ export interface AppChatMessageLog {
   }): Promise<AppChatPromptChoiceResult | null>
 }
 
-/** Default replay page size — bounds a single resume so a long-offline
- *  client can't pull an unbounded transcript in one frame burst. The
- *  client re-issues resume from the new high-water mark to page the rest. */
+/**
+ * Default replay window — the maximum number of messages ONE replay call
+ * delivers. It is a PAGE SIZE, and the paging is real: a full page tells the
+ * server to send a `history_gap` and the client answers it with another `resume`
+ * carrying `before_seq`, walking backwards a page at a time until a page comes
+ * back short (`AppWsAdapter.replayAfter`, `SyncEngine.backfillRequest`). Raising
+ * it makes each page bigger, not the coverage wider.
+ *
+ * WHAT THIS COMMENT CLAIMED BEFORE, TWICE, AND WHY BOTH WERE WRONG — because
+ * every version of it has been an argument about who re-requests, and getting
+ * that wrong is what lost messages:
+ *
+ *  1. "the client re-issues resume from the new high-water mark to page the
+ *     rest" — no code did that; the ascending window silently dropped the tail.
+ *  2. "it does NOT re-issue WITHIN an open — resume fires exactly once per socket
+ *     (`SyncEngine`'s per-open guard)" — `SyncEngine` has no such guard (grep it:
+ *     the only per-open guard is `resumedThisOpen`, and it lives in
+ *     `chat-core/web-session.ts`), and the MOBILE session has none at all:
+ *     `MobileChatSession.catchUp` calls `resumeAndFlush` directly on an
+ *     already-open socket, and the RN hook calls `catchUp` on every foreground
+ *     and every foregrounded push (`app/lib/chat-core/use-mobile-chat.ts`). So
+ *     resume fires MANY times per open, which is precisely why the newest window
+ *     needed a backwards bound before it was safe: repeated forward resumes off
+ *     an ascending window eventually covered a long transcript, whereas a capped
+ *     newest window advanced the cursor past the skipped range and no forward
+ *     resume could ever ask for it again.
+ *
+ * The cursor a client sends is still its MAX applied seq (`SyncEngine.resumeRequest`
+ * reads `store.lastSeenSeq(topic)` — `chat-core/store.ts`), and both sessions still
+ * send it on every open. What is new is that they also send a BACKWARDS request
+ * when their own oldest applied seq shows history below it
+ * (`SyncEngine.earliestSeenSeq`), which is what makes a long transcript converge
+ * instead of keeping a permanent hole.
+ */
 export const DEFAULT_REPLAY_LIMIT = 500
 
 interface MessageRow {
@@ -249,8 +300,9 @@ export class AppChatStore implements AppChatMessageLog {
     topic_id: string,
     after_seq: number,
     limit: number = DEFAULT_REPLAY_LIMIT,
+    before_seq?: number,
   ): Promise<AppChatRow[]> {
-    return this.core.aggregatesAfter(topic_id, after_seq, limit)
+    return this.core.aggregatesAfter(topic_id, after_seq, limit, undefined, before_seq)
   }
 
   async maxSeq(topic_id: string): Promise<number> {

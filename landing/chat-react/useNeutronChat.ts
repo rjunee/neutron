@@ -74,6 +74,13 @@ export function useNeutronChatVm(controller: NeutronChatController): ChatViewMod
     }
     document.addEventListener('visibilitychange', onVisibility)
     window.addEventListener('online', onOnline)
+    // Web presence (2026-08-15) — `visibilitychange` is an EDGE, so a tab that
+    // was already hidden when this mounted (restored session, background load,
+    // a link opened in a new background tab) would never announce itself and the
+    // session's `active` would stay at its optimistic `true`. State the level
+    // once. Cheap and idempotent — the session re-declares on every open anyway,
+    // and this only matters for the case where the optimistic default is wrong.
+    onVisibility()
     return () => {
       document.removeEventListener('visibilitychange', onVisibility)
       window.removeEventListener('online', onOnline)

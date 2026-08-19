@@ -18,7 +18,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -159,6 +159,21 @@ function runGuard(repo: string): { code: number; out: string } {
   }
 }
 
+/** `runGuard`, but against a caller-chosen main ref (used for the shallow case). */
+function runGuardWithRef(repo: string, ref: string): { code: number; out: string } {
+  try {
+    const out = execFileSync('bash', [GUARD_SH], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env, DEPCRUISE_RATCHET_ROOT: repo, DEPCRUISE_RATCHET_MAIN_REF: ref },
+    })
+    return { code: 0, out }
+  } catch (e: unknown) {
+    const err = e as { status?: number; stdout?: string; stderr?: string }
+    return { code: err.status ?? -1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` }
+  }
+}
+
 const BASELINE_NAME = '.dependency-cruiser-known-violations.json'
 
 /** A throwaway git repo whose `main` branch commits a 2-entry baseline. */
@@ -264,4 +279,31 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
       rmSync(repo, { recursive: true, force: true })
     }
   })
+})
+
+/**
+ * T4 (card 01M0CJ0TT0RA7YZ2ZJ0DQK2CDF) — THE SHALLOW CASE IS THE DEFECT, so it is
+ * asserted directly. A test on a full clone proves nothing: that is the state in
+ * which the bug cannot occur.
+ *
+ * Two things are pinned. First, the guard must not SHALLOW a full clone — the
+ * unconditional `git fetch --depth=1` this branch removed truncated the shared
+ * checkout and produced three unrelated-looking failures in one night. Second, on
+ * a checkout that IS shallow, the guard must NAME that rather than reporting an
+ * unreachable ref; all three of those failures were true statements that pointed
+ * nowhere.
+ */
+describe('G8 depcruise ratchet guard — shallow checkouts', () => {
+  test('a FULL clone stays full after the guard runs (it used to be truncated)', () => {
+    const repo = repoOnMainWithBaseline()
+    try {
+      expect(existsSync(join(repo, '.git', 'shallow'))).toBe(false)
+      runGuard(repo)
+      // The regression: --depth=1 against a full clone writes .git/shallow.
+      expect(existsSync(join(repo, '.git', 'shallow'))).toBe(false)
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
 })

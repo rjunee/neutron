@@ -61,6 +61,95 @@ test('loadMigrations returns versions in lexicographic (numeric) order', () => {
   }
 })
 
+test('repairs loader refuses reapply when file_name differs from recorded_name', () => {
+  const dir = join(tmp, 'bad-reapply-name')
+  mkdirSync(dir)
+  writeFileSync(
+    join(dir, 'repairs.json'),
+    JSON.stringify([
+      {
+        version: 122,
+        recorded_name: 'work_board_items_pr',
+        file_name: 'another_migration',
+        reapply: true,
+        note: 'test',
+        date: '2026-08-18',
+      },
+    ]),
+  )
+
+  expect(() => applyMigrations(new Database(':memory:'), dir)).toThrow(
+    /entry 1 \(work_board_items_pr\): reapply requires file_name to equal recorded_name/,
+  )
+})
+
+test.each([false, 'true', 1, null])(
+  'repairs loader refuses non-true reapply value %p',
+  (reapply) => {
+    const dir = join(tmp, `bad-reapply-value-${String(reapply)}`)
+    mkdirSync(dir)
+    writeFileSync(
+      join(dir, 'repairs.json'),
+      JSON.stringify([
+        {
+          version: 122,
+          recorded_name: 'work_board_items_pr',
+          file_name: 'work_board_items_pr',
+          reapply,
+          note: 'test',
+          date: '2026-08-18',
+        },
+      ]),
+    )
+
+    expect(() => applyMigrations(new Database(':memory:'), dir)).toThrow(
+      /entry 1 \(work_board_items_pr\): reapply must be the boolean true when present/,
+    )
+  },
+)
+
+test('repairs without reapply retain suppress-and-acknowledge behavior', () => {
+  const db = new Database(':memory:')
+  const seed = join(tmp, 'suppress-seed')
+  mkdirSync(seed)
+  writeFileSync(join(seed, '0001_incident.sql'), 'CREATE TABLE incident (id INTEGER);')
+  expect(applyMigrations(db, seed).applied).toEqual([1])
+
+  const dir = join(tmp, 'suppress-active')
+  mkdirSync(dir)
+  writeFileSync(join(dir, '0002_real.sql'), 'CREATE TABLE must_not_run (id INTEGER);')
+  writeFileSync(
+    join(dir, 'repairs.json'),
+    JSON.stringify([
+      {
+        version: 1,
+        recorded_name: 'incident',
+        file_name: 'real',
+        note: 'hand verified',
+        date: '2026-08-18',
+      },
+    ]),
+  )
+
+  expect(applyMigrations(db, dir)).toEqual({ applied: [], skipped: [2] })
+  expect(
+    db
+      .query<{ count: number }, []>(
+        "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'must_not_run'",
+      )
+      .get(),
+  ).toEqual({ count: 0 })
+  expect(
+    db
+      .query<
+        { recorded_name: string; file_name: string },
+        []
+      >('SELECT recorded_name, file_name FROM _migration_repairs')
+      .get(),
+  ).toEqual({ recorded_name: 'incident', file_name: 'real' })
+  db.close()
+})
+
 test('first apply runs all migrations in order and records them in _migrations', () => {
   const db = new Database(join(tmp, 'project.db'), { create: true })
   const result = applyMigrations(db)
@@ -80,6 +169,25 @@ test('first apply runs all migrations in order and records them in _migrations',
     51, 52, 53, 54, 55, 56, 57, 58, 60, 61, 62, 63, 69, 70, 71, 72, 73, 74, 75, 76, 77, 78, 79, 80,
     81, 82, 83, 84, 85, 86, 87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99, 100, 101, 102, 103,
     104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119,
+    120,
+    121,
+    122,
+    123,
+    124,
+    125,
+    126,
+    127,
+    130,
+    131,
+    132,
+    // 133 is RESERVED for the open #269 (work_board_items_pr) and is absent
+    // from this branch on purpose: this card's stage-events migration moved to
+    // 0135 so the two cannot collide on one ordinal. Like 59 and 64-68 above,
+    // the gap is deliberate — the runner has no contiguity requirement.
+    134,
+    135,
+    136,
+    137,
   ])
   expect(result.skipped).toEqual([])
 

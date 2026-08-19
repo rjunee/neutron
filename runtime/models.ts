@@ -71,22 +71,33 @@ export const FABLE_MODEL: string =
   process.env['NEUTRON_FABLE_MODEL'] ?? 'claude-fable-5'
 
 /**
- * P2-v2 S21 (2026-05-17) — Pass-2 Sonnet fallback model.
+ * The mid-tier model. Override via `NEUTRON_SONNET_MODEL`. Defaults to Claude
+ * Sonnet 5.
  *
- * Drawn from a separate Anthropic rate-limit bucket from `BEST_MODEL`
- * (Opus 4.7). Live walkthrough failures during P2 v2 development showed
- * Pass-2 cumulatively exhausting Opus 4.7 429s even after S13's
- * `[0, 5s, 15s, 45s]` retry-on-429 schedule was applied — backoff
- * smooths transient bursts but does not solve sustained quota
- * exhaustion on the Max subscription. Sonnet 4.6 keeps Pass-2
- * synthesis quality (same prompt body, same JSON schema, same
- * defensive parser) and trades a stylistically-different result for a
- * successful one.
+ * WHY THE TIER EXISTS (P2-v2 S21, 2026-05-17): it draws on a different
+ * Anthropic rate-limit bucket from `BEST_MODEL`, and Pass-2 synthesis was
+ * cumulatively exhausting the top tier's 429s even behind the retry schedule —
+ * backoff smooths a transient burst, it does not solve sustained quota
+ * exhaustion on a subscription. Sonnet keeps the same prompt body, schema and
+ * parser, and trades a stylistically-different result for one that arrives.
  *
- * Override via `NEUTRON_SONNET_MODEL`. Defaults to Claude Sonnet 4.6.
+ * WHY IT IS PINNED TO A GENERATION AND NOT AN ALIAS. There is no floating
+ * `claude-sonnet-latest`; every tier here names an exact id, so a generation
+ * bump is a code change by construction. That is deliberate — an id that moved
+ * on its own would move billing with it — but it means this line is the one
+ * that ROTS, and it did: it sat on 4.6 while `BEST_MODEL` and `FABLE_MODEL`
+ * both moved to 5, which is what the owner saw in the model-selector pane
+ * (ISSUES #564).
+ *
+ * WHAT MUST HAPPEN ALONGSIDE ANY FUTURE BUMP: add the new id to
+ * `runtime/model-pricing.ts` FIRST. `resolveModelPricing` throws on an
+ * unregistered id, by design, and it is called at composer construction — so a
+ * bump here without a row there does not mis-bill quietly, it fails the boot.
+ * `pricing-covers-defaults.test.ts` pins that pairing so the next bump cannot
+ * ship half of itself.
  */
 export const SONNET_MODEL: string =
-  process.env['NEUTRON_SONNET_MODEL'] ?? 'claude-sonnet-4-6'
+  process.env['NEUTRON_SONNET_MODEL'] ?? 'claude-sonnet-5'
 
 /**
  * The fast/cheap model. Override via `NEUTRON_FAST_MODEL`. Defaults to

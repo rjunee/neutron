@@ -588,11 +588,16 @@ export class NexusStore {
    *      on the new connection, so a sibling's in-flight open/write
    *      makes it throw (PersistenceError with SQLITE_BUSY as cause).
    *   2. SQLITE_BUSY out of the migration transaction itself.
-   *   3. `UNIQUE constraint failed: _migrations.version` — two
+   *   3. `UNIQUE constraint failed: _migrations.name` — two
    *      connections both read an empty `_migrations` snapshot, the
    *      competitor commits first, and the loser's bookkeeping INSERT
-   *      collides (migrations/runner.ts records versions AFTER the
-   *      stale `seen` read).
+   *      collides (migrations/runner.ts records migrations AFTER the
+   *      stale ledger read). The column named in that message is the
+   *      ledger's PRIMARY KEY, which is `name` on a ledger the runner
+   *      created or rekeyed and `version` on one still carrying its
+   *      original shape — so `isInitRaceError` matches either, and a
+   *      sidecar mid-upgrade is classified the same as one already
+   *      converted.
    *
    * All three self-heal on re-run: the pragma set is idempotent, and
    * the runner re-reads `_migrations` and skips the competitor's
@@ -710,7 +715,7 @@ function isInitRaceError(err: unknown): boolean {
     if (isBusyError(err)) return true
     if (
       err instanceof Error &&
-      /UNIQUE constraint failed: _migrations\.version/i.test(err.message)
+      /UNIQUE constraint failed: _migrations\.(?:name|version)/i.test(err.message)
     ) {
       return true
     }

@@ -128,6 +128,24 @@ NEUTRON_TEST_JOBS=4 NEUTRON_TEST_CHUNK_SIZE=100 bash scripts/run-tests.sh
 Runs 4 chunks at once — roughly Nx faster, but holds ~4 chunks' RSS concurrently.
 Only do this with headroom; drop `JOBS` first if the box starts swapping.
 
+> **Trident builds now set `JOBS` and `CONCURRENCY` for themselves.** The build prompts
+> derive them from a shared-box budget:
+> `jobs = min(cores ÷ max(FANOUT, live building runs), mem_available × 0.8 ÷ (CHUNK_SIZE
+> × 24 MiB))`, floor 1, and `concurrency = cores ÷ jobs` — so the divisor is a CONSTANT
+> (`DEFAULT_BUILD_FANOUT = 4`), not a launch-time snapshot that goes stale the moment the
+> next build starts, and `jobs × concurrency` is one box's worth of work per build rather
+> than `cores²`. On this 8-core box that ships `JOBS=2 CONCURRENCY=4` per build, and four
+> concurrent builds total 8 chunk processes. `jobs × concurrency` is one box's worth of
+> work PER BUILD, which is also exactly what this runner's own defaults produce per build
+> (`JOBS=1 CONCURRENCY=cores`): the budget re-splits that load across processes rather
+> than adding to it, and it never puts more test files in flight than an untouched
+> invocation would. See `trident/test-strategy.ts`. Measured
+> 2026-08-15 on the real box: 22.0 min sequential → 11.2 min at `JOBS=8` (an idle-box
+> ceiling) → see `docs/AS_BUILT.md` for the shipped `JOBS=2` figure; the
+> `files executed: 1273` audit is unchanged and the PGLite/device lanes stay serial in
+> every case. A project whose runner exposes no such knobs is run unchanged. Manual
+> invocations of this script are unaffected and still default to `JOBS=1` (sequential).
+
 ### A single chunk still spikes RSS
 ```bash
 NEUTRON_TEST_CONCURRENCY=2 bash scripts/run-tests.sh

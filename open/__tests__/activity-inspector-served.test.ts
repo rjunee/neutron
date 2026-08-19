@@ -23,7 +23,7 @@ import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
@@ -121,8 +121,8 @@ async function withComposition(
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start: () => cannedHandle(opts.substrate_instance_id),
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   const composition = await composer({ db, project_slug: 'owner' })
   try {

@@ -28,6 +28,7 @@ import { join } from 'node:path'
 import {
   buildAnthropicLlmCall,
   buildPhaseSpecResolver,
+  resolveSkillsDir,
 } from '../build-phase-spec-resolver.ts'
 import { PersonaPromptLoader } from '../persona-loader.ts'
 import { CommentStore } from '../../comments/comment-store.ts'
@@ -959,5 +960,62 @@ describe('escalation-loader composition (P7.2 S3 — production wire-through)', 
     expect(capturedSpecs[3]!.prompt).not.toContain('<escalated_comment_threads>')
 
     commentStore.closeAll()
+  })
+})
+
+describe('resolveSkillsDir treats a blank home as unset', () => {
+  // PINNED HERE BECAUSE A DOCBLOCK IS NOT A GUARD. Both predicates in this
+  // function were brought onto the "blank is unset" rule by a change whose only
+  // evidence was a comment — reverting either trim left every suite green, which
+  // is the same defect (a claim wider than its proof) that the change was fixing.
+  //
+  // Each arm carries a REAL-PATH CONTROL, so a failure means "a blank was
+  // honoured" rather than "the slot stopped being read at all".
+
+  test('a blank owner_data_dir falls through to the NEUTRON_HOME branch', () => {
+    // `length > 0` accepted `'   '`, which produced the nonsense
+    // `'   /skills'` — a relative directory named three spaces, under whatever
+    // CWD the process started in.
+    for (const blank of ['', '   ', '\t\n']) {
+      expect(
+        resolveSkillsDir({ owner_data_dir: blank, owner_handle: 'ada', env: { NEUTRON_HOME: '/srv/n' } }),
+      ).toBe('/srv/n/owners/ada/skills')
+    }
+
+    // CONTROL — a real data dir still wins over the env, verbatim.
+    expect(
+      resolveSkillsDir({ owner_data_dir: '/srv/owner', owner_handle: 'ada', env: { NEUTRON_HOME: '/srv/n' } }),
+    ).toBe('/srv/owner/skills')
+  })
+
+  test('a blank NEUTRON_HOME falls through to the documented /srv/neutron default', () => {
+    // THE FILESYSTEM-ROOT CASE. The old expression was `env['NEUTRON_HOME'] ??
+    // '/srv/neutron'`, and `??` falls through on `undefined` but NOT on `''` —
+    // so a blank resolved the skills dir to `/owners/<handle>/skills`, at the
+    // ROOT of the filesystem rather than inside the install.
+    for (const blank of ['', '   ', '\t\n']) {
+      expect(
+        resolveSkillsDir({ owner_data_dir: undefined, owner_handle: 'ada', env: { NEUTRON_HOME: blank } }),
+      ).toBe('/srv/neutron/owners/ada/skills')
+    }
+    expect(resolveSkillsDir({ owner_data_dir: undefined, owner_handle: 'ada', env: {} })).toBe(
+      '/srv/neutron/owners/ada/skills',
+    )
+
+    // CONTROL — a real NEUTRON_HOME is still honoured, so the assertions above
+    // fail for "a blank was honoured" and not for "the env stopped being read".
+    expect(
+      resolveSkillsDir({ owner_data_dir: undefined, owner_handle: 'ada', env: { NEUTRON_HOME: '/srv/n' } }),
+    ).toBe('/srv/n/owners/ada/skills')
+  })
+
+  test('a REAL path whose blankness is only leading/trailing keeps its bytes', () => {
+    // The predicate trims to DECIDE; the value is not rewritten. Leading and
+    // trailing spaces are legal in a POSIX path, so trimming the return would
+    // silently relocate a real directory — the opposite direction of the same
+    // seam, and a live regression this branch fixes in `resolveStatePath`.
+    expect(
+      resolveSkillsDir({ owner_data_dir: ' /real/dir ', owner_handle: 'ada', env: {} }),
+    ).toBe(' /real/dir /skills')
   })
 })

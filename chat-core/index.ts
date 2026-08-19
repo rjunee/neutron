@@ -20,6 +20,7 @@ export {
   normalizePromptResolved,
   spentChoiceValue,
   parseSessionReadyMaxSeq,
+  parseHistoryGap,
   parseReactions,
   parseOptions,
   parseUploadAffordance,
@@ -81,7 +82,7 @@ export {
   type MessageSearchOptions,
 } from './search.ts'
 
-export { SyncEngine, type ApplyResult } from './sync-engine.ts'
+export { SyncEngine, MAX_HISTORY_BACKFILL_ROUNDS, type ApplyResult } from './sync-engine.ts'
 
 // THE id generator for every client surface. `crypto` is absent on the mobile
 // runtime — see `ids.ts` for the incident this file exists to prevent.
@@ -111,3 +112,10 @@ export {
   DEFAULT_RESUME_FALLBACK_MS,
   type WebChatSessionOptions,
 } from './web-session.ts'
+
+export {
+  WarmSessionCache,
+  MAX_WARM_SESSIONS,
+  SESSION_BUILD_TIMEOUT_MS,
+  type CacheableChatSession,
+} from './session-cache.ts'

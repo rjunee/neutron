@@ -17,7 +17,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 import type { OnboardingStateStore } from '@neutronai/onboarding/interview/state-store.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
@@ -35,8 +35,8 @@ const TOPIC_ID = 'topic-general'
 
 function makeDb(): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'finalize-'))
+  seedMigratedDb(join(dir, 'project.db'))
   const db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
   return db
 }
 

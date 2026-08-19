@@ -1,14 +1,23 @@
 /**
- * @neutronai/app — MODEL USAGE: how much quota is left, and whether it will hold.
+ * @neutronai/app — MODEL USAGE: every connected account, on one screen.
  *
  * Reached as: chat header ☰ → Settings → Model usage. A registered route nothing
  * pushes is the ISSUES #385 defect, so the nav row in `settings.tsx` is part of this
  * feature, not decoration.
  *
- * ── It reports PACE, not fullness ───────────────────────────────────────────
- * The hairline meter under the tab bar already says how full each window is. "72%" is
- * not a decision until you know whether it is climbing, which is what pace answers:
- * consumed ÷ elapsed, over the window. Above 1 means outrunning the refill.
+ * ── It answers two opposite questions ───────────────────────────────────────
+ * The hairline meter under the tab bar already says how full each window is. "72%"
+ * is not a decision until you know two more things:
+ *
+ *   - PACE — consumed ÷ elapsed, over the window. Above 1 means outrunning the
+ *     refill, and the projection off it says when the wall arrives.
+ *   - THE COUNTDOWN — when capacity comes BACK. That is the input to the
+ *     throughput decision (how hard to push concurrency), and it is paired with
+ *     the utilisation of the window it belongs to, always: a 5-hour window
+ *     resetting in 17 minutes buys nothing while the 7-day window is spent.
+ *
+ * The pool line at the top of each card is the one-glance answer: how many
+ * accounts have room right now, or when the first one gets some.
  *
  * ── What it refuses to say is the design ────────────────────────────────────
  * Every branch below that renders NOTHING is deliberate, and each is a place where
@@ -19,13 +28,30 @@
  *     of "the server declined to answer".
  *   - `exhausts_at: null` → the row is OMITTED, because null is the common GOOD case
  *     and a permanent "—" trains the eye to hunt for an absent warning.
+ *   - an absent reset instant → "unknown", NEVER "now" and never omitted. That one
+ *     is the difference between "wait" and "push", and getting it wrong sends the
+ *     owner into a wall.
  *   - `account_label: null` → "active credential", never a guessed account name.
  *
- * The server does every calculation; this screen formats and nothing else.
+ * The server sends only facts that DO NOT AGE — the instant each reading was taken,
+ * each window's length and reset instant, the pace and the projection anchored at
+ * the measurement, and a staleness THRESHOLD. Every delta — the age chip, the "≥"
+ * floors, each account's standing and every countdown — is computed HERE against
+ * this device's clock, on every paint (`projectPool`). A duration is wrong the
+ * moment it is stored: a server-computed age would read "just now" for as long as
+ * the screen stayed open, with a live countdown ticking beside it.
+ *
+ * AND THE PAYLOAD ITSELF IS REPOLLED on that same tick (`USAGE_POLL_MS`), which is
+ * the other half of the same rule. Ageing a held payload is right across a dead
+ * poller and wrong across a live one: the Anthropic pool goes stale at two and a
+ * half minutes (`60_000 × 2 + 30_000`), so a screen that only advanced its clock
+ * would paint a perfectly healthy install as stale that soon after it opened, and
+ * stay that way. The poll is
+ * pinned below that deadline so staleness on this screen only ever means staleness.
  */
 
 import { useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Pressable,
@@ -42,14 +68,26 @@ import { THEME } from '../lib/theme';
 import { clampFraction, usageBand } from '@neutronai/contracts/credential-usage.ts';
 
 import {
+  USAGE_POLL_MS,
   UsageDashboardClient,
+  accountCapacityNote,
   accountName,
-  formatDuration,
+  capacityLine,
+  connectionNote,
+  formatAge,
+  formatCountdown,
+  formatProjection,
   formatPace,
-  formatPercent,
+  formatWindowFraction,
+  nextAccountNote,
   paceNote,
+  poolTitle,
+  projectPool,
+  windowName,
+  type ProjectedAccount,
+  type ProjectedWindow,
   type UsageDashboard,
-  type UsageWindow,
+  type UsagePool,
 } from '../lib/usage-dashboard-client';
 
 const BAND_COLOUR: Record<string, string> = {
@@ -58,16 +96,22 @@ const BAND_COLOUR: Record<string, string> = {
   critical: THEME.usage_critical,
 };
 
-/** One window: a bar, the percent, when it resets, and the pace. */
+/** One window: a bar, the percent, when capacity comes back, and the pace. */
 function WindowRow({
-  label,
+  windowKey,
   testID,
   win,
+  now,
 }: {
-  label: string;
+  windowKey: 'session' | 'weekly';
   testID: string;
-  win: UsageWindow | null;
+  win: ProjectedWindow | null;
+  now: number;
 }) {
+  // From the LENGTH the provider reported, never a hardcoded "5-hour window":
+  // lengths differ per provider and one has already changed regime, so a fixed
+  // label eventually names the wrong thing with complete confidence.
+  const label = windowName(windowKey, win?.window_ms ?? null);
   if (win === null) {
     // No track at all. An empty coloured track is the specific claim "0% used",
     // which nothing measured.
@@ -87,8 +131,11 @@ function WindowRow({
     <View style={styles.row} testID={testID}>
       <View style={styles.rowHead}>
         <Text style={styles.rowLabel}>{label}</Text>
+        {/* Floored with a "≥" when the reading is stale and its window is still
+            running: the last known value marked as a lower bound, rather than a
+            blank or a fresh-looking number. */}
         <Text style={styles.rowPct} testID={`${testID}-pct`}>
-          {formatPercent(win.fraction)}
+          {formatWindowFraction(win)}
         </Text>
       </View>
       <View
@@ -113,9 +160,12 @@ function WindowRow({
       </View>
       <View style={styles.facts}>
         <View style={styles.fact}>
+          {/* THE COUNTDOWN, computed HERE from the absolute instant the server
+              sent. "unknown" and "available now" are different answers and
+              neither may collapse into the other. */}
           <Text style={styles.factLabel}>Resets in</Text>
           <Text style={styles.factValue} testID={`${testID}-resets`}>
-            {formatDuration(win.resets_in_ms)}
+            {formatCountdown(win.reset_at === null ? null : win.reset_at - now)}
           </Text>
         </View>
         <View style={styles.fact}>
@@ -126,15 +176,118 @@ function WindowRow({
           {note !== null ? <Text style={styles.factNote}>{note}</Text> : null}
         </View>
         {/* ONLY when there is a projection. Null is the common, good case. */}
-        {win.exhausts_at !== null ? (
+        {formatProjection(win.exhausts_at, now) !== null ? (
           <View style={styles.fact}>
             <Text style={styles.factLabel}>Caps out in</Text>
             <Text style={styles.factValue} testID={`${testID}-exhausts`}>
-              {formatDuration(win.exhausts_at - Date.now())}
+              {formatProjection(win.exhausts_at, now)}
             </Text>
           </View>
         ) : null}
       </View>
+    </View>
+  );
+}
+
+/**
+ * One provider's card: the capacity line first, then a chip per account.
+ *
+ * PER PROVIDER, IN ITS OWN UNITS, NEVER SUMMED. Anthropic, Codex and Kimi meter
+ * different things, so a combined headline would be a number about nothing. The
+ * cards sit adjacently and each answers for itself.
+ */
+function PoolCard({ pool, now }: { pool: UsagePool; now: number }) {
+  // EVERY DELTA ON THIS CARD IS COMPUTED HERE, from the render clock, on every
+  // paint — the age, the staleness, the "≥" floors and each account's standing.
+  // The payload carries instants and a threshold and nothing else, so a card left
+  // open across a dead poller ages in front of the owner rather than insisting on
+  // the freshness it had when the response was built.
+  const view = projectPool(pool, now);
+  const note = connectionNote(view);
+  const line = capacityLine(view);
+  const nextUp = nextAccountNote(view);
+  return (
+    <View style={styles.pool} testID={`usage-${view.pool}`}>
+      <View style={styles.poolHead}>
+        <Text style={styles.poolTitle} testID={`usage-${view.pool}-title`}>
+          {poolTitle(view.pool)}
+        </Text>
+        {/* The age rides on every card, not only the stale ones — an age that
+            shows up only when something is wrong is one nobody learns to read. */}
+        <Text style={styles.age} testID={`usage-${view.pool}-age`}>
+          {formatAge(view.age_ms)}
+        </Text>
+      </View>
+      {/* THE LINE THE OWNER ASKED FOR: how hard can I push this provider right
+          now. It names the BINDING window, because a countdown to a 5-hour reset
+          says nothing about capacity while the 7-day window is spent. */}
+      {line !== null ? (
+        <Text style={styles.capacity} testID={`usage-${view.pool}-capacity`}>
+          {line}
+        </Text>
+      ) : null}
+      {/* WHICH account the line above is about. The headline says WHEN; on a pool
+          with more than one account the owner still has to know WHOSE, because
+          that is the account he routes the next build to. */}
+      {nextUp !== null ? (
+        <Text style={styles.muted} testID={`usage-${view.pool}-nextup`}>
+          {nextUp}
+        </Text>
+      ) : null}
+      {/* WHY THE CARD HAS NOTHING TO SAY, OR WHY NOTHING NEWER IS COMING.
+          Four different fixes hide behind an empty card — connect an account, wait
+          for a reading, fix a refused gauge, or nothing at all — so it says which,
+          instead of drawing zeros.
+
+          A BANNER, NOT AN ALTERNATIVE TO THE ROWS. It used to replace them, which
+          meant a pool that read for a week and was then refused could not show both
+          facts at once: either its last figures or the sentence saying nothing will
+          replace them. Samples are kept thirty days, so that is the refusal that
+          actually happens, and hiding the readings behind the note is the same
+          blanking the staleness rule forbids. */}
+      {note !== null ? (
+        <Text style={styles.muted} testID={`usage-${view.pool}-empty`}>
+          {note}
+        </Text>
+      ) : null}
+      {view.accounts.map((account, i) => (
+        <AccountCard
+          key={account.account_label ?? `unlabelled-${i}`}
+          account={account}
+          testID={`usage-${view.pool}-acct-${i}`}
+          now={now}
+        />
+      ))}
+    </View>
+  );
+}
+
+/** One account inside a card: its name, its standing, its age, and both windows. */
+function AccountCard({
+  account,
+  testID,
+  now,
+}: {
+  account: ProjectedAccount;
+  testID: string;
+  now: number;
+}) {
+  return (
+    <View style={styles.account} testID={testID}>
+      <View style={styles.accountHead}>
+        {/* NEVER a guessed account name. */}
+        <Text style={styles.accountName} testID={`${testID}-name`}>
+          {accountName(account.account_label)}
+        </Text>
+        <Text style={styles.chip} testID={`${testID}-capacity`}>
+          {accountCapacityNote(account)}
+        </Text>
+        <Text style={styles.age} testID={`${testID}-age`}>
+          {formatAge(account.age_ms)}
+        </Text>
+      </View>
+      <WindowRow windowKey="session" testID={`${testID}-session`} win={account.session} now={now} />
+      <WindowRow windowKey="weekly" testID={`${testID}-weekly`} win={account.weekly} now={now} />
     </View>
   );
 }
@@ -155,16 +308,84 @@ export default function ModelUsageScreen() {
   const [usage, setUsage] = useState<UsageDashboard | null>(null);
   const [refreshing, setRefreshing] = useState(false);
 
-  const load = useCallback(async () => {
-    if (client === null) return;
-    setRefreshing(true);
-    const next = await client.load();
-    setUsage(next);
-    setRefreshing(false);
-  }, [client]);
+  // THE RENDER CLOCK for every countdown on this screen. The payload carries reset
+  // INSTANTS and the delta is computed at paint, so this has to advance on its own
+  // — a screen left open would otherwise keep insisting capacity returns in the
+  // same 17 minutes it did an hour ago. It is advanced by the poll effect below, on
+  // a tick finer than the whole minutes the countdowns render in, so nothing is
+  // ever visibly wrong.
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
+
+  // A poll in flight when the screen unmounts must not land. The interval is
+  // cleared on teardown, but the `await` already outstanding when that happens is
+  // not — and its `setUsage` would then write to an unmounted tree. The web twin
+  // guards the same await for the same reason (`landing/chat-react/SettingsTab.tsx`);
+  // this is the pair of files the parity test keeps line-for-line, so the guard is
+  // on both or it is documentation.
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // WHICH LOAD IS THE LATEST ONE ASKED FOR. Polls overlap: the interval fires every
+  // `USAGE_POLL_MS` and does not wait for the previous response, so a slow request
+  // and the fresh one behind it are in flight together and can settle in either
+  // order. Without a sequence the older answer wins simply by landing last, and the
+  // screen rolls BACKWARDS onto a stale sample — countdowns jumping back up,
+  // capacity re-appearing after it was spent. That is a fabricated-freshness bug
+  // wearing the age chip of the newer reading, which is the one class this screen
+  // exists to make impossible.
+  //
+  // A counter rather than an AbortController: a superseded response is still a
+  // perfectly good reading and the next tick is seconds away, so there is nothing to
+  // gain by cancelling it — only a discarded one to avoid rendering.
+  const loadSeqRef = useRef(0);
+
+  const load = useCallback(
+    async (visible: boolean) => {
+      if (client === null) return;
+      // The button only says "Refreshing…" for a refresh the OWNER asked for. A
+      // background poll that flipped it would make the screen look busy every
+      // thirty seconds forever, and would disable the control he came to press.
+      if (visible) setRefreshing(true);
+      const seq = (loadSeqRef.current += 1);
+      const next = await client.load();
+      if (!mountedRef.current) return;
+      // A response from a load that has already been superseded is DROPPED, never
+      // rendered. The spinner still clears: the owner pressed the button and it has
+      // to stop saying "Refreshing…", and the newer load will paint what he asked for.
+      if (seq === loadSeqRef.current) setUsage(next);
+      if (visible) setRefreshing(false);
+    },
+    [client],
+  );
 
   useEffect(() => {
-    void load();
+    void load(true);
+  }, [load]);
+
+  // ONE TICK ADVANCES THE CLOCK **AND** REFETCHES, and the pairing is the fix.
+  //
+  // Advancing the clock alone is what ages a card honestly across a DEAD poller —
+  // but run against a LIVE one it is a slow lie in the other direction. The
+  // Anthropic pool goes stale at two and a half minutes, so a screen left open would
+  // floor its gauges to "≥" and drop capacity to "unknown" that soon in, while a
+  // healthy poller wrote a fresh row every 60 seconds behind it. A screen
+  // that paints a working install as broken is the same defect as one that paints a
+  // broken install as working; both are the card disagreeing with the truth.
+  //
+  // So the payload is refetched on the SAME interval. One timer, so the data and
+  // the clock it is measured against can never drift apart, and `USAGE_POLL_MS`
+  // stays below the tightest staleness deadline the store ships (pinned by a test).
+  useEffect(() => {
+    const handle = setInterval(() => {
+      setNowMs(Date.now());
+      void load(false);
+    }, USAGE_POLL_MS);
+    return () => clearInterval(handle);
   }, [load]);
 
   if (user === null) {
@@ -195,8 +416,9 @@ export default function ModelUsageScreen() {
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.muted}>
-          How much of each window this instance has consumed, and whether it is on track to
-          run out before the window resets. Measured once a minute and kept for 30 days.
+          Every connected account, in its own units — never added together. Each card says
+          how much of each window is used, whether it is on track to run out, and when
+          capacity comes back. Readings are kept for 30 days and always shown with their age.
         </Text>
 
         {usage === null ? (
@@ -211,27 +433,7 @@ export default function ModelUsageScreen() {
           </Text>
         ) : (
           usage.pools.map((pool) => (
-            <View key={pool.pool} style={styles.pool} testID={`usage-${pool.pool}`}>
-              <Text style={styles.poolTitle} testID={`usage-${pool.pool}-account`}>
-                {accountName(pool.account_label)}
-              </Text>
-              {pool.measured_at === null ? (
-                <Text style={styles.muted}>No readings yet.</Text>
-              ) : (
-                <>
-                  <WindowRow
-                    label="5-hour window"
-                    testID={`usage-${pool.pool}-session`}
-                    win={pool.session}
-                  />
-                  <WindowRow
-                    label="7-day window"
-                    testID={`usage-${pool.pool}-weekly`}
-                    win={pool.weekly}
-                  />
-                </>
-              )}
-            </View>
+            <PoolCard key={pool.pool} pool={pool} now={nowMs} />
           ))
         )}
 
@@ -240,7 +442,7 @@ export default function ModelUsageScreen() {
           accessibilityLabel="Refresh usage"
           testID="usage-refresh"
           disabled={refreshing}
-          onPress={() => void load()}
+          onPress={() => void load(true)}
           style={({ pressed }) => [
             styles.secondaryBtn,
             refreshing && styles.btnDisabled,
@@ -287,12 +489,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: THEME.hairline,
   },
+  poolHead: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
   poolTitle: {
     color: THEME.text_secondary,
     fontSize: 11,
     fontWeight: '700',
     textTransform: 'uppercase',
   },
+  age: { color: THEME.text_muted, fontSize: 11, marginLeft: 'auto' },
+  capacity: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },
+  account: { gap: 10 },
+  accountHead: { flexDirection: 'row', alignItems: 'baseline', gap: 8 },
+  accountName: { color: THEME.text_primary, fontSize: 13, fontWeight: '600' },
+  chip: { color: THEME.text_muted, fontSize: 11 },
   row: { gap: 6 },
   rowHead: { flexDirection: 'row', alignItems: 'center' },
   rowLabel: { color: THEME.text_primary, fontSize: 14, fontWeight: '600' },

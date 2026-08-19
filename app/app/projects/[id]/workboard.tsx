@@ -1,8 +1,10 @@
 /**
  * @neutronai/app — project-scoped WORK BOARD tab (Work Board Phase 1b).
  *
- * The live work-tracker tab: active+next at the top as flat one-line rows, the
- * completed history collapsed at the bottom. The owner can add / edit / advance
+ * The live work-tracker tab: active+next at the top as flat one-line rows, then
+ * two collapsed sections at the bottom — Shelved (`status='archived'`: parked,
+ * NOT shipped, and counted as progress nowhere) and the Done history. The owner
+ * can add / edit / advance
  * status / reorder / delete — every action hits the SAME canonical
  * `WorkBoardStore` the agent's `work_board_*` tools use (Phase 1a), so a human
  * write fires the same live push the agent's does.
@@ -137,6 +139,8 @@ function WorkBoardBody({
   const [listError, setListError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [completedOpen, setCompletedOpen] = useState(false);
+  // Separate open-state: Shelved and Done are two independent collapsed sections.
+  const [archivedOpen, setArchivedOpen] = useState(false);
   const [newTitle, setNewTitle] = useState('');
   const [adding, setAdding] = useState(false);
   const [busyId, setBusyId] = useState<string | null>(null);
@@ -152,10 +156,17 @@ function WorkBoardBody({
   // Monotonic guard so a slow fetch can't land after a fresher live snapshot.
   const seq = useRef(0);
 
-  const refresh = useCallback((): void => {
+  // `quiet` (a BACKGROUND refetch) skips the loading flip and swallows the error
+  // path, because this screen renders `loading` as a FULL-SCREEN spinner that
+  // replaces the whole board — a periodic poll on the loud path would blank the
+  // board every interval, and a single flaky poll would empty it. Mirrors
+  // `refresh(quiet)` in landing/chat-react/WorkBoardTab.tsx.
+  const refresh = useCallback((quiet = false): void => {
     const mine = (seq.current += 1);
-    setLoading(true);
-    setListError(null);
+    if (!quiet) {
+      setLoading(true);
+      setListError(null);
+    }
     client
       .list(projectId)
       .then((rows) => {
@@ -165,8 +176,9 @@ function WorkBoardBody({
       })
       .catch((err: unknown) => {
         if (mine !== seq.current) return;
-        setItems([]);
         setLoading(false);
+        if (quiet) return;
+        setItems([]);
         // NEVER `err.message`. This screen used to paint the raw throw, which is
         // how a gateway validator string became the entire General pane.
         setListError(boardErrorCopy(err, 'load'));
@@ -199,9 +211,19 @@ function WorkBoardBody({
       onActivity: (row) => {
         setActivityRows((prev) => mergeActivityRow(prev, row, ACTIVITY_ROW_CAP));
       },
+      // RE-FETCH ON EVERY (RE)CONNECT — not only on mount. A push-only board
+      // permanently loses any item written while the socket was down: nothing
+      // re-asks, so the pane stays empty until the owner reloads by hand. That
+      // is not hypothetical — on 2026-08-11 his sessions all closed at 19:36:43
+      // and the first of five items was written at 19:36:47, and the board sat
+      // empty until he reloaded. The mount fetch cannot cover this, because a
+      // reconnect is not a mount.
+      onConnect: () => {
+        refresh();
+      },
     });
     return () => live.stop();
-  }, [config.base_url, token, projectId, deviceId]);
+  }, [config.base_url, token, projectId, deviceId, refresh]);
 
   // The AUTHORITATIVE half of the liveness signal: only the server knows
   // `turns_in_flight`, and only a re-fetch can retire a turn whose `completion`
@@ -228,6 +250,22 @@ function WorkBoardBody({
       clearInterval(t);
     };
   }, [activityClient, projectId]);
+
+  // The board's own slow poll, for the same reason and only while it is needed:
+  // `inline_active` arrives DERIVED from a 90 s evidence window, so it expires by
+  // the clock with no write to push a fresh snapshot. Without this the pane would
+  // hold the last frame it was sent — a card pulsing with ▶ suppressed on a board
+  // where nothing is happening. Gated on a card actually reading inline-active,
+  // so a quiet board never polls — and QUIET (`refresh(true)`), because the loud
+  // path replaces the entire board with a spinner and this fires every 15 s.
+  const hasInlineActive = items.some((it) => it.inline_active);
+  useEffect(() => {
+    if (!hasInlineActive) return;
+    const t = setInterval(() => {
+      refresh(true);
+    }, ACTIVITY_POLL_MS);
+    return () => clearInterval(t);
+  }, [hasInlineActive, refresh]);
 
   const activityState: ActivityState = workActivityState({
     snapshot: activitySnapshot,
@@ -306,7 +344,11 @@ function WorkBoardBody({
     [router, railId],
   );
 
-  const { active, completed } = splitBoard(items);
+  // Three-way: `archived` (SHELVED) is its own bucket — it is neither active
+  // (the server already excluded it from the active lane, and re-adding it here
+  // would make it drag-reorderable again) nor completed (it never counts as
+  // progress).
+  const { active, archived, completed } = splitBoard(items);
   const indicator = workActivityIndicator(activityState);
 
   return (
@@ -331,14 +373,19 @@ function WorkBoardBody({
           <Pressable
             accessibilityRole="button"
             accessibilityLabel="Retry loading the work board"
-            onPress={refresh}
+            // Wrapped, NOT passed by reference: `refresh` now takes `quiet` and a
+            // Pressable hands its press event to the first argument, which would
+            // make the owner's explicit Retry the silent one.
+            onPress={() => {
+              refresh();
+            }}
             style={({ pressed }) => [styles.retryBtn, pressed && styles.pressed]}
             testID="workboard-retry"
           >
             <Text style={styles.retryBtnText}>Retry</Text>
           </Pressable>
         </View>
-      ) : active.length === 0 && completed.length === 0 ? (
+      ) : active.length === 0 && archived.length === 0 && completed.length === 0 ? (
         <View style={[styles.centered, styles.grow]} testID="workboard-empty">
           <Text style={styles.empty}>
             No work tracked yet. Ask Neutron to start something, or add an item.
@@ -380,6 +427,38 @@ function WorkBoardBody({
               onOpenDoc={openDoc(it.design_doc_ref)}
             />
           ))}
+
+          {archived.length > 0 ? (
+            <View style={styles.completed}>
+              <Pressable
+                accessibilityRole="button"
+                accessibilityState={{ expanded: archivedOpen }}
+                accessibilityLabel={`Shelved, ${archived.length} items`}
+                onPress={() => setArchivedOpen((v) => !v)}
+                style={styles.completedToggle}
+                testID="workboard-archived-toggle"
+              >
+                <Text style={styles.completedToggleText}>
+                  {archivedOpen ? '▾' : '▸'}  Shelved · {archived.length}
+                </Text>
+              </Pressable>
+              {archivedOpen ? (
+                <View style={styles.completedList}>
+                  {archived.map((it) => (
+                    <WorkBoardCompletedRow
+                      key={it.id}
+                      item={it}
+                      variant="archived"
+                      busy={busyId === it.id}
+                      onDelete={() =>
+                        runMutation(it.id, client.delete(projectId, it.id))
+                      }
+                    />
+                  ))}
+                </View>
+              ) : null}
+            </View>
+          ) : null}
 
           {completed.length > 0 ? (
             <View style={styles.completed}>

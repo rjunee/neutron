@@ -37,6 +37,7 @@
  */
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
+import { deriveInfraBlock } from './infra-block.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -88,6 +89,13 @@ export type FailureClass =
   | 'review-unresolved'
   | 'hang'
   | 'infra'
+  /**
+   * THE BUILD WAS DEFERRED, NOT REJECTED — a required check never ran, the PR is
+   * conflicting with base, a credential blinked. No reviewer read the code. The ONLY
+   * class derived from the STRUCTURED harvested result (`deriveInfraBlock`) rather than
+   * from the `failure_reason` string, and the only one composed with 🚧 instead of ❌.
+   */
+  | 'infra-blocked'
   | 'underspecified'
   | 'unknown'
 
@@ -144,12 +152,48 @@ function isToolsNotEnabled(reasonLower: string): boolean {
  * Forge conflict-resolver, so a run that reaches HERE is genuinely unrecoverable and
  * needs a human. Raw git stderr (a `TridentMergeError`-wrapped `merge failed: git …`
  * message) is DISCARDED — the operator sees only what happened + what to do.
+ *
+ * ONE CLASS IS NOT READ FROM THE REASON STRING. `'infra-blocked'` is derived from the
+ * STRUCTURED harvested result (`deriveInfraBlock` → the workflow's own
+ * `blockKind: 'infra-only'`), because a keyword classifier cannot safely be handed the
+ * MEASURED cause: that text is model/CI prose. Measured on this repo — a cause reading
+ * "PR is conflicting with base" hits `isAuthoredConflictQuestion`'s bare `conflict` token
+ * and produces the FALSE sentence "two changes edited the same code in ways I could not
+ * reconcile automatically", about a build whose code nobody read. So the structured check
+ * runs FIRST, ahead of every string branch including `isToolsNotEnabled`: a fact beats a
+ * keyword, and a deferral must never be told as a rejection.
  */
 export function interpretFailure(run: TridentRun): FailureInterpretation {
   const reason = (run.failure_reason ?? '').trim()
   const r = reason.toLowerCase()
   const retry = 'Reply to retry the build, or take it from here manually.'
   const saved = 'Your progress is saved.'
+
+  // THE MACHINE WAS BROKEN, NOT THE CODE. Checked FIRST — see the docblock: this is the
+  // one MEASURED class, and the measured cause is prose that a keyword branch below
+  // would misroute (a "conflicting with base" cause → the merge-conflict class).
+  const infra = deriveInfraBlock(run)
+  if (infra !== null) {
+    const cause = infra.cause
+    const notRejected = 'Nothing about the code was rejected — it was never reviewed.'
+    // A small BOUNDED mapping over the measured cause — deterministic and unit-testable
+    // like the rest of this function, and it only ever changes the ADVICE, never the
+    // class. An unrecognised cause gets the honest generic retry line.
+    const c = (cause ?? '').toLowerCase()
+    const input_needed = c.includes('conflicting with base')
+      ? `Rebase or merge the base branch into the PR branch, then retry. ${notRejected}`
+      : /required check .* has not run/.test(c)
+        ? `Trigger the required check (or re-run CI on the PR), then retry. ${notRejected}`
+        : `Retry the build once the infrastructure is healthy. ${notRejected} ${saved}`
+    return {
+      klass: 'infra-blocked',
+      summary:
+        cause !== null
+          ? `The build was blocked by infrastructure before any reviewer judged the code: ${cause}.`
+          : 'The build was blocked by infrastructure before any reviewer judged the code.',
+      input_needed,
+    }
+  }
 
   // #361 — a toolless CC subprocess (empty `--tools` grant) is a PURELY INTERNAL
   // misconfiguration; classify it clearly-internal and NEVER leak the raw
@@ -164,12 +208,56 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE SUPERVISOR DIED REPEATEDLY AND THE RECOVERY BUDGET RAN OUT.
+  // Checked EARLY and by its own token, because this reason deliberately EMBEDS the
+  // latched launcher-crash text — whatever the substrate said — and that text is not
+  // ours to keyword-proof. Left further down it would be captured by the branches
+  // below on a stray 'stalled'/'exhausted'/'git ' token and reported as a review or a
+  // hang outcome, which is the #240 failure shape: a confident sentence about a cause
+  // nobody measured. `infra` is the honest class — nothing about the BUILD failed.
+  if (r.includes('crash-recovery budget')) {
+    return {
+      klass: 'infra',
+      summary:
+        'The build supervisor died repeatedly, and I stopped relaunching after ' +
+        'the recovery budget ran out. The work so far is saved on its branch.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   // Suspected agent hang / stalled inner workflow — already a plain reason.
   if (r.includes('suspected agent hang') || r.includes('no progress for') || r.includes('stalled')) {
     return {
       klass: 'hang',
       summary: 'The build stopped making progress and I stopped it before it could hang indefinitely.',
       input_needed: `${retry} ${saved}`,
+    }
+  }
+
+  // ENDED WITHOUT AN APPROVED REVIEW, CAUSE UNKNOWN — checked BEFORE the review branch
+  // below, which shares the "without argus approve" token and would otherwise swallow it.
+  //
+  // WHY THE ORDER MATTERS. The review summary below says the reviewer "had blocking
+  // findings". For a run that stopped at round 1 with no reviewer having run, that is FALSE
+  // — and confidently so: it sends the reader to look at review quality when the build never
+  // started. That happened three times on 2026-08-13 (an unresolved CODEX_HOME, a truncated
+  // build brief, an unauthenticated push).
+  //
+  // WHY THIS SUMMARY CLAIMS SO LITTLE. Codex review round 2 killed a stronger one. It read
+  // "the build stopped before the review could finish… a problem with the build pipeline",
+  // which is false for the below-ceiling exits that DID review: a round-2 lost fix has round
+  // 1's blocking findings behind it. This branch covers exits whose causes genuinely differ
+  // (early crash, lost fix, no-diff fix, infra-only synthesis stop) and the workflow emits no
+  // terminal cause to tell them apart, so the ONE thing true of all of them is all it says.
+  // `klass: 'unknown'` is the honest class — not a hedge, a measurement of what we know.
+  //
+  // THE TWO HALVES MUST MOVE TOGETHER — a reason that stops matching this string silently
+  // reverts the operator to the old, wrong story.
+  if (r.includes('inner workflow ended at round')) {
+    return {
+      klass: 'unknown',
+      summary: 'The build ended without an approved review, so I did not merge it.',
+      input_needed: `${saved} ${retry}`,
     }
   }
 
@@ -287,7 +375,8 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
 
   switch (run.phase) {
     case 'done': {
-      const prRef = run.merge_mode === 'pr' && run.pr !== null ? ` (PR #${run.pr})` : ''
+      // pr === 0 is the no-PR sentinel — never render "PR #0" (card 01M01HGAWHA1KBK7CXXHC4R6RH; fixed here first, do not re-fix there).
+      const prRef = run.merge_mode === 'pr' && run.pr !== null && run.pr > 0 ? ` (PR #${run.pr})` : ''
       return { text: `✅ ${title} — merged and deployed.${prRef}` }
     }
     case 'failed': {
@@ -297,9 +386,17 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // resolver), so a run reaching here is genuinely unrecoverable.
       const interp = interpretFailure(run)
       const trail =
-        run.merge_mode === 'pr' && run.pr !== null
+        run.merge_mode === 'pr' && run.pr !== null && run.pr > 0
           ? `\nPR #${run.pr} left open for review.`
           : ''
+      // A DEFERRAL IS NOT A REJECTION. An infra-only block never reached a reviewer, so
+      // it must not wear ❌ + rejection language: it leads with 🚧 and says "deferred".
+      // Every other class keeps the ❌ line byte-identical.
+      if (interp.klass === 'infra-blocked') {
+        return {
+          text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}\n${interp.input_needed}${trail}`,
+        }
+      }
       return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }
     }
     case 'stopped':

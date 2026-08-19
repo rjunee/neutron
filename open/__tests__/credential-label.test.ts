@@ -151,7 +151,7 @@ describe('the real path, on a real filesystem — no injected reader', () => {
         { mode: 0o600 },
       )
       // 0600, because that is what the sidecar contract requires of a writer — see
-      // `docs/as-built/2026-08-09-credential-account-label.md` § The sidecar. The
+      // `docs/AS_BUILT.md` § 2026-08-09 — Naming the account behind a reading § The sidecar. The
       // reader does not enforce it (a silent label drop is the one failure mode this
       // feature works hardest to avoid), so the fixture models the contract instead.
       writeFileSync(join(dir, '.credentials.meta.json'), JSON.stringify(body), { mode: 0o600 })
@@ -268,9 +268,17 @@ describe('the label is resolved WITH the credential, never separately', () => {
       return doc.slice(at, end)
     }
 
-    const asBuilt = readFileSync(
-      new URL('../../docs/as-built/2026-08-09-credential-account-label.md', import.meta.url),
-      'utf8',
+    // The contract used to live in its own file, `docs/as-built/2026-08-09-credential-
+    // account-label.md`, and this test read it whole. That directory is gone — every
+    // entry folded back into the one canonical `docs/AS_BUILT.md` — so the read has to
+    // be SCOPED to the entry before any of the anchors below mean anything: run
+    // `contract` against the whole log and the "fenced JSON block that shows a writer
+    // what to write" is whichever block happens to appear first in 300 entries, which
+    // is a guard that passes while reading someone else's document.
+    const asBuilt = contract(
+      readFileSync(new URL('../../docs/AS_BUILT.md', import.meta.url), 'utf8'),
+      '## 2026-08-09 — Naming the account behind a reading',
+      '\n## 2026-08-09 — A fix round that never reached the branch',
     )
     // The fenced JSON block that shows a writer what to write.
     const block = contract(asBuilt, '```json', '```\n')
@@ -285,7 +293,7 @@ describe('the label is resolved WITH the credential, never separately', () => {
     // exists if the writer-facing contract states it, which for a while it did not: the
     // permission was asserted as an observed fact in the security note and required of
     // nobody.
-    expect(contract(asBuilt, '## The sidecar', '## ⚠️')).toContain('0600')
+    expect(contract(asBuilt, '### The sidecar', '### ⚠️')).toContain('0600')
 
     const plan = readFileSync(
       new URL('../../docs/plans/2026-08-09-model-usage-dashboard.md', import.meta.url),

@@ -67,9 +67,41 @@ function extractMaybeAsync(name: string): string {
   return SRC.includes(`async function ${name}(`) ? `async ${body}` : body
 }
 
+/**
+ * Lift a top-level `const NAME = …` one-liner out of the source.
+ *
+ * `classifyBlock` closes over `LANE_FINDING_KIND` — the field name the gate STAMPS on a
+ * lane blocker and the classifier READS. Re-declaring 'lane' here instead would let the
+ * two drift apart with this file still green, which is the exact cannot-fail shape the
+ * header above is about.
+ */
+function extractConst(name: string): string {
+  const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
+  if (line === undefined) throw new Error(`const ${name} not found in inner-workflow.mjs`)
+  return line
+}
+
+// `classifyBlock` closes over the severity set as well: a lane blocker plus a NIT is
+// still infra-only, because a nit may not cost a round (and a round run with the panel
+// still down a seat cannot converge anyway). Lifted from the source for the same
+// reason as LANE_FINDING_KIND — re-declaring {minor,nit} here would let the classifier
+// and `enforceSeverityGate` drift apart with this file still green.
+// `usableStatus` comes along too: it is the shared "did this field actually answer"
+// predicate, and `retryDeferredPeers` closes over it. Restating it here would let the
+// retry and the completeness gate drift apart with this file still green — the very
+// divergence the const exists to close.
+const PRELUDE = [
+  extractConst('LANE_FINDING_KIND'),
+  extractConst('NON_BLOCKING_SEVERITIES'),
+  extractConst('usableStatus'),
+  extractConst('CORE_SEAT_STATUS_KEY'),
+].join('\n')
+
 const load = <T>(name: string, isAsync = false): T =>
   // eslint-disable-next-line @typescript-eslint/no-implied-eval, no-new-func
-  new Function(`${isAsync ? extractMaybeAsync(name) : extractFn(name)}; return ${name}`)() as T
+  new Function(
+    `${PRELUDE}\n${isAsync ? extractMaybeAsync(name) : extractFn(name)}; return ${name}`,
+  )() as T
 
 type Verdict = Record<string, unknown>
 type RetryFn = (input: {
@@ -80,12 +112,20 @@ type RetryFn = (input: {
   log?: (m: string) => void
 }) => Promise<Verdict[]>
 type ClassifyFn = (
-  synthesis: { findings?: Array<{ title?: string }> } | null,
+  synthesis: { findings?: Array<{ title?: string; kind?: string; severity?: string } | null> } | null,
   deferred: Array<{ name: string }>,
 ) => string
+type GateFn = (
+  synthesis: unknown,
+  peers: Array<{ name: string; title: string; evidence: string }>,
+) => { verdict: string; findings: Array<{ kind?: string; title?: string }> } | null
 
 const retryDeferredPeers = load<RetryFn>('retryDeferredPeers', true)
 const classifyBlock = load<ClassifyFn>('classifyBlock')
+const enforceCrossModelGate = load<GateFn>('enforceCrossModelGate')
+// The gate's half of the shared "did this seat answer" predicate, loaded from the same
+// source as the retry so the two can be asserted to AGREE rather than assumed to.
+const hasUsableVerdict = load<(v: unknown) => boolean>('hasUsableVerdict')
 
 const SLOTS = [
   { name: 'codex', slot: 0, statusKey: 'codexStatus' },
@@ -205,9 +245,16 @@ describe('retryDeferredPeers — retry the lane, not the round', () => {
 })
 
 describe('classifyBlock — is this about the code, or about a lane that could not run?', () => {
-  const deferral = (name: string) => ({
-    title: `${name} cross-model review DEFERRED — refusing to silently APPROVE`,
-  })
+  // BUILT BY THE REAL GATE, not hand-written. A lane blocker is now identified by the
+  // `kind` FIELD the gate stamps rather than by re-deriving its title template and
+  // string-matching it — two sites agreeing on a message format is a contract nothing
+  // enforces, and a reworded title would have silently reclassified every lane failure
+  // as a code finding. Constructing the fixture with `enforceCrossModelGate` means this
+  // suite fails the moment the producer and the reader disagree.
+  const deferral = (name: string) =>
+    enforceCrossModelGate({ verdict: 'APPROVE', findings: [] }, [
+      { name, title: `${name} cross-model review DEFERRED — refusing to silently APPROVE`, evidence: 'x' },
+    ])!.findings[0]!
 
   test('deferral findings ONLY ⇒ infra-only', () => {
     expect(
@@ -244,6 +291,39 @@ describe('classifyBlock — is this about the code, or about a lane that could n
     expect(classifyBlock(null, [{ name: 'Codex' }])).toBe('infra-only')
     expect(classifyBlock({}, [{ name: 'Codex' }])).toBe('infra-only')
   })
+
+  // A NIT MAY NOT COST A ROUND HERE EITHER. The filter read `kind` and nothing else,
+  // so a dead seat plus one `nit` classified as 'code' and re-Forged a full round —
+  // four fresh reviews over a finding the severity gate exists to call non-blocking,
+  // with the panel STILL down a seat, so the round could not converge.
+  test('a deferral plus ONLY nit/minor findings ⇒ infra-only, not a wasted round', () => {
+    const peers = [{ name: 'Argus rubric (core reviewer)' }]
+    expect(
+      classifyBlock(
+        { findings: [deferral('Argus rubric (core reviewer)'), { severity: 'nit', title: 'rename this local' }] },
+        peers,
+      ),
+    ).toBe('infra-only')
+    expect(
+      classifyBlock({ findings: [deferral('Codex'), { severity: 'minor', title: 'add a comment' }] }, [
+        { name: 'Codex' },
+      ]),
+    ).toBe('infra-only')
+  })
+
+  test('the severity skip is a CLOSED list — an unknown/absent severity is still code', () => {
+    // Same direction-of-failure as enforceSeverityGate: only the two LISTED severities
+    // are non-blocking, so a typo'd 'nits', a missing field or a malformed finding all
+    // still cost a round rather than silently skipping the fix.
+    for (const f of [
+      { severity: 'nits', title: 'typo severity' },
+      { severity: 'major', title: 'real' },
+      { title: 'no severity at all' },
+      null,
+    ]) {
+      expect(classifyBlock({ findings: [deferral('Codex'), f] }, [{ name: 'Codex' }])).toBe('code')
+    }
+  })
 })
 
 describe('the fix loop honours the classification', () => {
@@ -260,9 +340,236 @@ describe('the fix loop honours the classification', () => {
   })
 
   test('the retry runs BEFORE the verdicts are read', () => {
+    // Anchored on the FIRST read of the verdict array in the completeness derivation.
+    // It used to anchor on `const claudeVerdicts =`, which was a DEAD binding — declared
+    // and never used — so this assertion was pinned to a line that could be deleted
+    // without changing any behaviour.
     const retryAt = SRC.indexOf('retryDeferredPeers({')
-    const readAt = SRC.indexOf('const claudeVerdicts =')
+    const readAt = SRC.indexOf('const missingCore = missingCoreReviewers(')
     expect(retryAt).toBeGreaterThan(-1)
     expect(readAt).toBeGreaterThan(retryAt)
+  })
+})
+
+/**
+ * A CONFIGURED SEAT THAT PRODUCED NOTHING IS A DEFERRED LANE — so it is RETRYABLE.
+ *
+ * The loop used to `break` on `!current`, so a peer whose agent DIED (slot assigned,
+ * `verdicts[slot]` null) was neither retried nor gated: the caller then read the same
+ * null as 'not_connected' and the panel could APPROVE with an empty seat. Retrying is
+ * the cheapest possible remedy — one call, versus a whole round of four reviewers.
+ *
+ * The `slot === null` skip above is what keeps the ABSENT case free: a peer with no
+ * credential never enters `slots`, so nothing here can spend a call on it.
+ */
+describe('retryDeferredPeers — a DEAD lane (null verdict on a configured slot) is retryable', () => {
+  test('a null verdict on a configured slot IS retried, and a good retry replaces it', async () => {
+    const calls: string[] = []
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict, { kimiStatus: 'connected' }],
+      slots: SLOTS,
+      invoke: async (n) => {
+        calls.push(n)
+        return { codexStatus: 'connected', verdict: 'APPROVE' }
+      },
+    })
+    expect(calls).toEqual(['codex'])
+    expect(out[0]?.['codexStatus']).toBe('connected')
+  })
+
+  test('an UNDEFINED verdict (the slot never got written) is retried too', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ codexStatus: 'connected' }],
+      slots: SLOTS,
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual(['kimi'])
+  })
+
+  test('a verdict object MISSING its status field is retried — a malformed reply is not an answer', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ verdict: 'APPROVE', findings: [] }, { kimiStatus: 'connected' }],
+      slots: SLOTS,
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual(['codex'])
+  })
+
+  test('a dead lane whose retry ALSO dies stays dead — the round is not silently healed', async () => {
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict],
+      slots: [SLOTS[0]!],
+      attempts: 2,
+      invoke: async () => null,
+    })
+    // Still nothing at the slot, so `crossModelPeerStatus` reports 'deferred' and the
+    // gate blocks. The remedy for an unrecoverable lane is a block, never a default.
+    expect(out[0]).toBeNull()
+  })
+
+  test('a dead lane is retried at most `attempts` times', async () => {
+    let n = 0
+    await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict],
+      slots: [SLOTS[0]!],
+      attempts: 3,
+      invoke: async () => {
+        n += 1
+        return null
+      },
+    })
+    expect(n).toBe(3)
+  })
+
+  test('an ABSENT peer (no slot) is still never retried — the reduced panel costs nothing', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ codexStatus: 'connected' }],
+      slots: [{ name: 'kimi', slot: null, statusKey: 'kimiStatus' }],
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual([])
+  })
+})
+
+/**
+ * THE CORE SEATS ARE LANES TOO.
+ *
+ * The `slots` list held codex and kimi only, so the retry rationale this whole file
+ * exists for — "an infra failure should not trigger four fresh LLM reviews" — applied
+ * to the two OPTIONAL peers and not to the two that ALWAYS run. One transient
+ * argus:claude crash therefore produced an infra-only block, which exits the fix loop
+ * on round 1 and throws away the entire Forge build: the most expensive possible
+ * response to the cheapest possible failure, and the retry was one call away.
+ *
+ * A core seat has no `xStatus` field, so its statusKey is `verdict` ITSELF — the field
+ * whose presence proves the seat answered. That is what makes it retryable by this same
+ * helper rather than a second near-identical one (the shape this file already refused
+ * once for kimi).
+ */
+describe('retryDeferredPeers — a dead CORE seat is retried, not written off', () => {
+  const CORE = [
+    { name: 'Argus rubric (core reviewer)', slot: 0, statusKey: 'verdict' },
+    { name: 'Argus adversarial (core reviewer)', slot: 1, statusKey: 'verdict' },
+  ]
+
+  test('a null core verdict is retried and a good retry replaces it', async () => {
+    const calls: string[] = []
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict, { verdict: 'APPROVE' }],
+      slots: CORE,
+      invoke: async (n) => {
+        calls.push(n)
+        return { verdict: 'REQUEST_CHANGES', findings: [] }
+      },
+    })
+    expect(calls).toEqual(['Argus rubric (core reviewer)'])
+    expect(out[0]?.['verdict']).toBe('REQUEST_CHANGES')
+    // The healthy seat is never re-run: a real verdict is an answer, not a deferral.
+    expect(out[1]?.['verdict']).toBe('APPROVE')
+  })
+
+  test('a REAL verdict is NEVER retried — APPROVE and REQUEST_CHANGES are both answers', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ verdict: 'APPROVE' }, { verdict: 'REQUEST_CHANGES' }],
+      slots: CORE,
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual([])
+  })
+
+  test('a MALFORMED core verdict (no verdict field) is retried — it is not a review', async () => {
+    const calls: string[] = []
+    await retryDeferredPeers({
+      verdicts: [{ findings: [] }, { verdict: 'APPROVE' }],
+      slots: CORE,
+      invoke: async (n) => {
+        calls.push(n)
+        return null
+      },
+    })
+    expect(calls).toEqual(['Argus rubric (core reviewer)'])
+  })
+
+  test('a core seat whose retry ALSO dies stays dead, so the completeness gate still blocks', async () => {
+    // Retrying must never become a way to launder an empty seat into a pass: the
+    // remedy for an unrecoverable seat is the block, never a default verdict.
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict, { verdict: 'APPROVE' }],
+      slots: CORE,
+      attempts: 2,
+      invoke: async () => null,
+    })
+    expect(out[0]).toBeNull()
+  })
+
+  // THE RETRY AND THE GATE MUST AGREE ON WHAT "ANSWERED" MEANS. Codex [P1] on the
+  // round-3 diff: the retry tested `current[statusKey]` for TRUTHINESS while
+  // `hasUsableVerdict` required a non-empty STRING, so `{ verdict: 42 }` — a
+  // schema-violating / half-serialised agent reply — looked like a completed review to
+  // the retry (skipped) and like an empty seat to the gate (blocked). The seat was
+  // BLOCKED BUT NEVER RETRIED: the run ended infra-only on round 1 and threw the whole
+  // Forge build away, which is precisely the cost retrying core seats exists to remove.
+  // Asserted on BEHAVIOUR at both ends — the recovery was attempted, and the recovered
+  // verdict is the one the panel goes on to read.
+  test('a TRUTHY-but-not-a-string core verdict is retried, not mistaken for a review', async () => {
+    const calls: string[] = []
+    const out = await retryDeferredPeers({
+      verdicts: [{ verdict: 42 }, { verdict: 'APPROVE' }],
+      slots: CORE,
+      invoke: async (n) => {
+        calls.push(n)
+        return { verdict: 'REQUEST_CHANGES', findings: [] }
+      },
+    })
+    expect(calls).toEqual(['Argus rubric (core reviewer)'])
+    expect(out[0]?.['verdict']).toBe('REQUEST_CHANGES')
+    // …and the two readers now agree, which is the property that was actually broken.
+    expect(hasUsableVerdict({ verdict: 42 })).toBe(false)
+    expect(hasUsableVerdict(out[0])).toBe(true)
+  })
+
+  test('a retry that returns a truthy NON-string verdict is refused, so the gate still blocks', async () => {
+    // The same predicate on the write side: a malformed retry result must not be
+    // installed over the dead seat, or the gate reads a "verdict" that never was one.
+    const out = await retryDeferredPeers({
+      verdicts: [null as unknown as Verdict, { verdict: 'APPROVE' }],
+      slots: CORE,
+      invoke: async () => ({ verdict: 42 }),
+    })
+    expect(out[0]).toBeNull()
+    expect(hasUsableVerdict(out[0])).toBe(false)
+  })
+
+  test('the wiring passes the derived core seats to the retry, ahead of the peers', () => {
+    // Source check (the call site lives in the script's body): the SAME `coreSeats`
+    // the completeness gate reads is spread into the retry's slots, so a seat cannot
+    // be gated but un-retried — or added to the panel and silently left out of both.
+    // Anchored on the CALL, not the definition — `SRC.indexOf('retryDeferredPeers({')`
+    // finds `async function retryDeferredPeers({` first and would read the body.
+    const at = SRC.indexOf('await retryDeferredPeers({')
+    expect(at).toBeGreaterThan(-1)
+    const slots = SRC.slice(at, at + 400)
+    expect(slots).toContain('...coreSeats,')
+    // The status key is derived from the slot's ROUTE now that either slot can hold either
+    // provider, so the old hardcoded spelling no longer appears. The property this protects
+    // is that the retry is told WHICH peer it is retrying — assert that, not the literal.
+    expect(slots).toContain("{ name: 'argus:codex', slot: codexSlot, statusKey:")
+    expect(slots).toContain("slotOneRoute.group === 'kimi' ? 'kimiStatus' : 'codexStatus'")
   })
 })

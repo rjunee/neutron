@@ -121,8 +121,14 @@ describe('Sam 4-point draft policy (load-bearing)', () => {
       async ensureProjectLabel() {
         return { label_id: 'Label_x', label_name: 'Neutron/x', created: false }
       },
+      async ensureLabel(input) {
+        return { label_id: 'Label_x', label_name: input.name, created: false }
+      },
       async modifyThread() {
         return { thread_id: 'thread-stub', label_ids: [] }
+      },
+      async modifyMessage() {
+        return { message_id: 'msg-stub', label_ids: [] }
       },
     }
     const draft: GmailDraftInput = {
@@ -171,8 +177,14 @@ describe('Sam 4-point draft policy (load-bearing)', () => {
       async ensureProjectLabel() {
         return { label_id: 'Label_x', label_name: 'Neutron/x', created: false }
       },
+      async ensureLabel(input) {
+        return { label_id: 'Label_x', label_name: input.name, created: false }
+      },
       async modifyThread() {
         return { thread_id: '', label_ids: [] }
+      },
+      async modifyMessage() {
+        return { message_id: '', label_ids: [] }
       },
     }
     const draft: GmailDraftInput = {

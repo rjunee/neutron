@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -22,6 +22,7 @@ import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 
 import { LIVE_AGENT_TOOL_NAMES } from '../build-live-agent-turn.ts'
 import { buildLiveAgentTurn, RETRY_TURN_VALUE } from '../build-live-agent-turn.ts'
+import { MISSING_CREDENTIAL_DOCTRINE } from '../operating-doctrine.ts'
 import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
 let tmp: string
@@ -31,8 +32,8 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-lat-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })
@@ -443,6 +444,24 @@ describe('build-live-agent-turn — operating-doctrine layer (gap-audit item 10)
     // Same core principles, regardless of surface.
     expect(prompt.toLowerCase()).toContain('truth first')
     expect(prompt.toLowerCase()).toContain('no sycophancy')
+  })
+
+  test('the missing-credential remedy (#552) reaches the COMPOSED prompt, not just the module', async () => {
+    // The point of asserting HERE rather than only in the doctrine unit test: a
+    // module that exports a rule nothing splices in is the same defect one layer
+    // up from the one #551 fixed — real, tested, and never reaching the owner.
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner({ substrate: makeStubSubstrate({ specs }) })
+    await run(makeTurn({ sent }))
+    const prompt = specs[0]!.prompt
+    expect(prompt).toContain(MISSING_CREDENTIAL_DOCTRINE)
+    // Named concretely enough to act on, and pinned to the failure the owner hit.
+    // The control is named by its ROW, not by one surface's button text: the web
+    // button reads "Connect GitHub", the phone's reads "Connect".
+    expect(prompt).toContain('Connect control in the GitHub row')
+    expect(prompt).toContain('Integrations')
+    expect(prompt.toLowerCase()).toContain('git push')
   })
 
   test('the doctrine is FIRST-turn-only (warm later turns send only user text)', async () => {

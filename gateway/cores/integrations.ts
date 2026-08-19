@@ -23,14 +23,40 @@
  * registry. The set of integrations is DERIVED from the bundled Cores'
  * own manifest secret declarations — per-Core ownership stays intact.
  *
+ * A MISS IS DISTINGUISHABLE (card 2026-08-14). Credential rows carry the FROZEN
+ * owner handle, so rows written under a PREVIOUS handle (`dev` on a box that
+ * later boots as `juno`) are invisible to every read here. Presence-only status
+ * printed that as `connected: false` — the same sentence as "you never
+ * connected this", which is what turned a night of failed publishes into a
+ * hunt for a blinking token. When `db` is supplied this surface now also reports
+ * an `orphaned_credentials` summary and per-slot `orphaned: true`, naming the
+ * migrate action. Read-only: nothing here writes or decrypts a credential.
+ *
  * Cross-ref: gateway/http/cores-oauth-surface.ts (HTTP surface),
  * gateway/composition/wire-cores-surfaces.ts (tool registration),
  * gateway/cores/oauth-token-manager.ts, auth/secrets-store.ts.
  */
 
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import { asOwnerHandle, type ProjectDb } from '@neutronai/persistence/index.ts'
+import {
+  asOwnerHandle,
+  emitSystemEventSafe,
+  resolveSystemEventSink,
+  type ProjectDb,
+  type SystemEventSink,
+} from '@neutronai/persistence/index.ts'
 import { ApiKeyStore, ApiKeyStoreError, type ApiKeyProvider } from '@neutronai/auth/api-key-store.ts'
+import {
+  censusCredentialScope,
+  listOrphanedSecretSlots,
+  migrateOrphanedCredentialScope,
+  type CredentialScopeMove,
+  type CredentialScopeOrphanCount,
+} from '@neutronai/auth/credential-scope-reconcile.ts'
+import {
+  planCredentialRefusalRows,
+  readOwnerReadableScopes,
+} from '../scope-refusal-journal.ts'
 import { metaLabel, parseGrantLabel, refreshLabel } from './oauth-token-manager.ts'
 import type {
   OAuthTokenManager,
@@ -61,6 +87,41 @@ export interface IntegrationsRegistryView {
   }>
 }
 
+/**
+ * The agent tool + HTTP action that moves credential rows scoped to a previous
+ * owner handle onto the boot handle. Named HERE (rather than in the tool module)
+ * so the status surface can point at it: a summary that says "orphaned" without
+ * naming the way out has fixed the cheap half of the card.
+ *
+ * A REAL action, not a promissory note: this const IS the registered tool name
+ * (`integrations-tools.ts` builds its registration from this very binding, so
+ * the two can never drift), and the same brain — {@link migrateOrphanedCredentials}
+ * — backs `POST /api/cores/integrations/migrate-orphaned`.
+ */
+export const MIGRATE_ORPHANED_ACTION = 'integrations_migrate_orphaned'
+
+/**
+ * Credential rows that exist but are scoped to a PREVIOUS owner handle — the
+ * difference between "not connected" and "connected, but this process cannot
+ * see it". Counts and handles only; never a secret value.
+ */
+export interface OrphanedCredentialsSummary {
+  /** Rows under a non-boot handle, summed across every swept credential table. */
+  total_rows: number
+  /** The distinct non-boot handles those rows sit under, sorted. */
+  stale_handles: string[]
+  /** Per-(table, handle) breakdown — `project_credentials` orphans show here too. */
+  tables: CredentialScopeOrphanCount[]
+  /**
+   * The action that repairs it (see {@link MIGRATE_ORPHANED_ACTION}), or `null`
+   * when there is no safe action to offer — a fallback boot must not be invited
+   * to claim rows it cannot prove are its own.
+   */
+  migrate_action: string | null
+  /** One human/agent-readable sentence, safe to print verbatim. */
+  message: string
+}
+
 /** A per-Core Google OAuth account slot + its live connection status. */
 export interface OAuthAccountIntegration extends OAuthTokenStatus {
   kind: 'oauth'
@@ -68,6 +129,13 @@ export interface OAuthAccountIntegration extends OAuthTokenStatus {
   scope: string
   /** Every bundled Core slug that declares this label. */
   core_slugs: string[]
+  /**
+   * `true` when this slot reads disconnected but a credential row for it exists
+   * under a previous owner handle — "scoped to a previous handle", not
+   * "not connected". A CONNECTED slot is never `orphaned` (a fresh boot-handle
+   * credential wins the slot; its stale twin is still counted in the summary).
+   */
+  orphaned: boolean
 }
 
 /** A standalone API-key slot + whether a key is currently stored. */
@@ -85,11 +153,19 @@ export interface ApiKeyIntegration {
   install_prompt: string
   /** `true` when a secret is currently stored for this label. */
   connected: boolean
+  /** See {@link OAuthAccountIntegration.orphaned}. */
+  orphaned: boolean
 }
 
 export interface IntegrationsStatus {
   oauth: OAuthAccountIntegration[]
   api_keys: ApiKeyIntegration[]
+  /**
+   * Non-null when credential rows are scoped to a previous owner handle. `null`
+   * means every credential row this instance can see is on the boot handle — so
+   * a `connected: false` slot really is "never connected".
+   */
+  orphaned_credentials: OrphanedCredentialsSummary | null
 }
 
 /** Stable error for known-label / value validation failures. */
@@ -248,22 +324,108 @@ export function collectApiKeySlots(
 }
 
 export interface BuildIntegrationsStatusInput {
+  /**
+   * True when `project_slug` is the bare FALLBACK rather than a configured
+   * handle. The status surface uses it to withhold a repair action the brain
+   * would refuse (see `buildOrphanAnnotation`).
+   */
+  slug_is_fallback: boolean
   registry: IntegrationsRegistryView
   tokens: OAuthTokenManager
   secretsStore: SecretsStore
   project_slug: string
+  /**
+   * Project DB — enables the `orphaned_credentials` summary + per-slot
+   * `orphaned` annotation (read-only census of the credential tables' scope
+   * columns). Optional so older callers keep compiling; both real call sites
+   * (the HTTP surface + the agent-native tools) supply it. Without it the
+   * status degrades to presence-only: `orphaned_credentials: null` and every
+   * slot `orphaned: false`.
+   */
+  db?: ProjectDb
+}
+
+/** The orphan census + the slot lookups derived from it, for one status build. */
+interface OrphanAnnotation {
+  summary: OrphanedCredentialsSummary | null
+  /** Services with an orphaned `oauth_token` grant row (meta/refresh rows excluded). */
+  services: Set<string>
+  /** Raw `byo_api_key` labels with an orphaned `secrets` row. */
+  apiKeyLabels: Set<string>
+}
+
+const NO_ORPHANS: OrphanAnnotation = {
+  summary: null,
+  services: new Set<string>(),
+  apiKeyLabels: new Set<string>(),
+}
+
+/**
+ * Census the credential tables against the boot handle and derive the per-slot
+ * lookups. Read-only: no writes, no decrypt, and the only `secrets` columns read
+ * are `kind`/`label` (slot identifiers this surface already renders).
+ */
+function buildOrphanAnnotation(
+  db: ProjectDb,
+  boot_handle: string,
+  slug_is_fallback: boolean,
+): OrphanAnnotation {
+  const { stale_handles, orphan_counts } = censusCredentialScope(db, boot_handle)
+  if (stale_handles.length === 0) return NO_ORPHANS
+
+  const total_rows = orphan_counts.reduce((sum, c) => sum + c.rows, 0)
+  const summary: OrphanedCredentialsSummary = {
+    total_rows,
+    stale_handles,
+    tables: orphan_counts,
+    // A surface must not offer an action the brain will refuse. On a fallback
+    // boot the migration is the WRONG repair — it would move someone else's
+    // rows onto an anonymous handle — so the slot advertises nothing and the
+    // sentence names the actual fix instead.
+    migrate_action: slug_is_fallback ? null : MIGRATE_ORPHANED_ACTION,
+    message: slug_is_fallback
+      ? `${total_rows} credential row(s) belong to ${stale_handles.join(', ')}, and this ` +
+        `process booted on the fallback owner handle '${boot_handle}'. Set the instance ` +
+        `handle and restart — migrating them here would attach them to an unnamed process.`
+      : `${total_rows} credential row(s) are scoped to a previous owner handle ` +
+        `(${stale_handles.join(', ')}), not missing — run the ${MIGRATE_ORPHANED_ACTION} ` +
+        `action to move them to '${boot_handle}'.`,
+  }
+
+  const services = new Set<string>()
+  const apiKeyLabels = new Set<string>()
+  for (const { kind, label } of listOrphanedSecretSlots(db, boot_handle)) {
+    if (kind === 'oauth_token') {
+      // The refresh/meta companions share the grant's label with a suffix; only
+      // the ACCESS row names the slot the panel renders.
+      if (label.endsWith(refreshLabel('')) || label.endsWith(metaLabel(''))) continue
+      services.add(parseGrantLabel(label).service)
+    } else if (kind === 'byo_api_key') {
+      apiKeyLabels.add(label)
+    }
+  }
+  return { summary, services, apiKeyLabels }
 }
 
 /**
  * Build the unified status. OAuth status comes from `OAuthTokenManager`
  * (live access/refresh/meta read); API-key `connected` is a presence check
  * against the `byo_api_key` rows — NO plaintext ever leaves this function.
+ *
+ * With `input.db` supplied, a slot that reads disconnected but has a credential
+ * row under a PREVIOUS owner handle is annotated `orphaned: true` and the status
+ * carries an `orphaned_credentials` summary naming the migrate action, so the
+ * surface never calls a wrong-scope miss "not connected" (acceptance (b)).
  */
 export async function buildIntegrationsStatus(
   input: BuildIntegrationsStatusInput,
 ): Promise<IntegrationsStatus> {
   const oauthSlots = collectOAuthSlots(input.registry)
   const apiKeySlots = collectAllApiKeySlots(input.registry)
+  const orphans =
+    input.db !== undefined
+      ? buildOrphanAnnotation(input.db, input.project_slug, input.slug_is_fallback)
+      : NO_ORPHANS
 
   // One row per CONNECTED ACCOUNT. A service the owner has connected three
   // accounts to shows three rows, each independently disconnectable; a service
@@ -279,6 +441,9 @@ export async function buildIntegrationsStatus(
         ...status,
         scope: slot.scope,
         core_slugs: slot.core_slugs,
+        // A connected slot is never orphaned: a fresh boot-handle credential
+        // wins the slot, and the stale twin stays visible in the summary.
+        orphaned: !status.connected && orphans.services.has(status.service),
       })
     }
   }
@@ -292,6 +457,11 @@ export async function buildIntegrationsStatus(
 
   const api_keys: ApiKeyIntegration[] = []
   for (const [id, slot] of apiKeySlots) {
+    const storageLabel = slotSecretsLabel(id, slot)
+    // Presence is checked against the SECRETS label (which may differ from
+    // the public id for system slots), so an onboarding-set OpenAI key shows
+    // as connected here too.
+    const connected = present.has(storageLabel)
     api_keys.push({
       kind: 'api_key',
       label: id,
@@ -299,17 +469,205 @@ export async function buildIntegrationsStatus(
       core_slugs: slot.core_slugs,
       required: slot.required,
       install_prompt: slot.install_prompt,
-      // Presence is checked against the SECRETS label (which may differ from
-      // the public id for system slots), so an onboarding-set OpenAI key shows
-      // as connected here too.
-      connected: present.has(slotSecretsLabel(id, slot)),
+      connected,
+      orphaned: !connected && orphans.apiKeyLabels.has(storageLabel),
     })
   }
 
   // Deterministic ordering so UI + tests are stable.
   oauth.sort((a, b) => a.label.localeCompare(b.label))
   api_keys.sort((a, b) => a.label.localeCompare(b.label))
-  return { oauth, api_keys }
+  return { oauth, api_keys, orphaned_credentials: orphans.summary }
+}
+
+/** Outcome of one explicit migrate action. Counts and handles only. */
+export interface MigrateOrphanedCredentialsResult {
+  ok: true
+  /**
+   * Present ONLY when the direction guard refused: this process booted on the
+   * bare fallback handle, so nothing moved and every orphan is reported as
+   * skipped. Mirrors `CredentialScopeMigrateResult.refused_direction`
+   * (`auth/credential-scope-reconcile.ts`) and the boot path's structured
+   * `reason: 'fallback_boot_handle_refused_direction'` (`gateway/index.ts`).
+   *
+   * IT EXISTS BECAUSE THE REFUSAL WAS NOT DATA. A refusal used to return
+   * `{ok:true, total_moved:0}` — byte-identical to a collision-skip and to a
+   * clean no-op — so the ONLY thing any caller or test could key on was the
+   * English in {@link MigrateOrphanedCredentialsResult.message}. Editing that
+   * sentence disarmed every assertion guarding a security-relevant refusal
+   * while leaving the guard itself untested. `ok` stays `true`: the request
+   * succeeded and its outcome is fully reported — this field is what says WHICH
+   * outcome, and `POST /api/cores/integrations/migrate-orphaned` returns it
+   * verbatim.
+   */
+  refused_direction?: true
+  boot_handle: string
+  stale_handles: string[]
+  moved: CredentialScopeMove[]
+  skipped: CredentialScopeOrphanCount[]
+  total_moved: number
+  total_skipped: number
+  /** One sentence, safe to print verbatim — never a secret value. */
+  message: string
+}
+
+export interface MigrateOrphanedCredentialsInput {
+  db: ProjectDb
+  /** The frozen boot owner handle rows are moved ONTO. */
+  project_slug: string
+  /**
+   * True when {@link project_slug} is the bare FALLBACK rather than a
+   * configured handle. Required, not optional: an explicit action by an
+   * anonymous process is still an anonymous process, and a surface that forgot
+   * to say would otherwise compile and quietly migrate.
+   */
+  slug_is_fallback: boolean
+  /**
+   * System-events sink. Omitted ⇒ the ambient sink (`resolveSystemEventSink`),
+   * which the gateway registers once at boot. Pass `null` to journal nothing;
+   * tests pass a fake to assert exactly one row landed.
+   */
+  sink?: SystemEventSink | null
+}
+
+/**
+ * SHARED migrate brain — the ONE path behind the `integrations_migrate_orphaned`
+ * chat tool AND `POST /api/cores/integrations/migrate-orphaned`, so the two
+ * surfaces cannot diverge (same pattern as `disconnectOAuth`).
+ *
+ * Boot auto-migrates only the UNAMBIGUOUS case; this is the owner-driven way out
+ * of the ambiguous leftovers. It is still collision-guarded: a row whose slot is
+ * already occupied under the boot handle is SKIPPED and reported rather than
+ * overwriting a freshly-connected credential (the rotation hazard — an explicit
+ * request does not make silent data loss acceptable).
+ *
+ * The audit row carries handles, table names and counts ONLY, matching the boot
+ * path's payload discipline (acceptance (d)); `emitSystemEventSafe` never throws,
+ * so awaiting it cannot turn a completed migration into a failed call.
+ */
+export async function migrateOrphanedCredentials(
+  input: MigrateOrphanedCredentialsInput,
+): Promise<MigrateOrphanedCredentialsResult> {
+  const r = await migrateOrphanedCredentialScope(input.db, input.project_slug, {
+    slug_is_fallback: input.slug_is_fallback,
+  })
+  const total_moved = r.moved.reduce((sum, m) => sum + m.rows, 0)
+  const total_skipped = r.skipped.reduce((sum, s) => sum + s.rows, 0)
+
+  if (total_moved > 0) {
+    await emitSystemEventSafe(
+      input.sink !== undefined ? input.sink : resolveSystemEventSink(),
+      {
+        event: 'credential_scope_migrated',
+        module: 'gateway',
+        level: 'warn',
+        project_slug: input.project_slug,
+        payload: { from: r.stale_handles, tables: r.moved, skipped: r.skipped },
+      },
+    )
+  }
+
+  let message: string
+  if (r.refused_direction === true) {
+    // THE REFUSAL LEAVES AN AUDIT ROW, exactly as the automatic path does.
+    // Boot journals a refused direction as `credential_scope_orphaned` with
+    // `reason: 'fallback_boot_handle_refused_direction'` (gateway/index.ts).
+    // The explicit path — reachable from HTTP and from an agent tool — left no
+    // record at all, because the emit above is gated on `total_moved > 0` and a
+    // refusal moves nothing. A security-relevant refusal was the one event with
+    // no trace.
+    //
+    // SAME event + SAME reason as boot, so one journal query finds both; the
+    // extra `surface` key says which one refused. That asymmetry follows the
+    // precedent already set by `credential_scope_migrated`, where this path
+    // carries a `skipped` key boot's payload does not have. Handles, table
+    // names and counts only (acceptance (d)).
+    //
+    // ONE ROW PER CALL, ON PURPOSE — NOT the once-per-boot shape boot uses.
+    // Review asked whether the missing dedupe is a decision or an accident; it
+    // is a decision. Boot's refusal is a property of the PROCESS, so a second
+    // row would say nothing new. This one records an owner-initiated ATTEMPT to
+    // move credential rows, and "the owner tried this eleven times" is the fact
+    // an audit trail exists to preserve — collapsing repeats would erase the
+    // only signal that someone is retrying a refusal they do not understand.
+    // The reachable surfaces are owner-authenticated
+    // (`gateway/http/cores-integrations-surface.ts`) and the agent tool, so the
+    // row count is bounded by owner actions, not by traffic.
+    //
+    // AND IT IS SCOPED THE SAME WAY BOOT'S REFUSAL IS (Argus r1 blocker on
+    // PR #322, 2026-08-16 — INVARIANTS #116(b)). This row used to be written
+    // under `input.project_slug`, and on THIS branch of the function that value
+    // is by construction the anonymous FALLBACK handle: the guard only refuses
+    // when `slug_is_fallback` is true. So the audit row for the one
+    // security-relevant outcome landed under the one handle no owner ever opens
+    // a diagnostics page under — the identical invisibility this card exists to
+    // remove, on the surface the invariant already claimed to cover ("on ANY
+    // surface"). An invariant that overstates its coverage is worse than none,
+    // so the code moved to meet it rather than the sentence being softened.
+    // Same resolution, same narrowing and the same documented FLOOR as boot,
+    // reusing boot's own planner so the two cannot drift:
+    // `readOwnerReadableScopes` is best-effort (a thrown SELECT degrades to the
+    // attempting handle, never to a throw out of an owner-facing action), and
+    // `planCredentialRefusalRows` reduces every foreign handle to a COUNT — the
+    // owner is told the volume here, and the live integrations surface, which is
+    // already scoped to him and is where the repair is offered, names them.
+    // `reason` + `surface` ride on top so one journal query still finds boot's
+    // row and this one, and can still tell them apart.
+    const refusalSink = input.sink !== undefined ? input.sink : resolveSystemEventSink()
+    for (const row of planCredentialRefusalRows({
+      owner_scopes: readOwnerReadableScopes(input.db),
+      orphan_counts: r.skipped,
+      attempted_by_slug: input.project_slug,
+    })) {
+      await emitSystemEventSafe(refusalSink, {
+        event: 'credential_scope_orphaned',
+        module: 'gateway',
+        level: 'warn',
+        project_slug: row.scope,
+        payload: {
+          ...row.payload,
+          reason: 'fallback_boot_handle_refused_direction',
+          surface: 'explicit_migrate',
+        },
+      })
+    }
+    // Deliberately NOT phrased as a failure: nothing is broken, the process
+    // simply has no name, and the repair is to give it one. Pointing the owner
+    // at the migration again would be pointing at the thing that just refused.
+    message =
+      `Refused: this process booted on the fallback owner handle ` +
+      `'${r.boot_handle}', so it cannot claim ${r.skipped.reduce((s, x) => s + x.rows, 0)} ` +
+      `credential row(s) belonging to ${r.stale_handles.join(', ')}. ` +
+      `Set the instance handle and restart, then run this again.`
+  } else if (r.stale_handles.length === 0) {
+    message = 'No credential rows are scoped to a previous owner handle.'
+  } else {
+    message =
+      `Moved ${total_moved} credential row(s) from ${r.stale_handles.join(', ')} ` +
+      `to '${r.boot_handle}'.`
+    if (total_skipped > 0) {
+      message +=
+        ` Skipped ${total_skipped} row(s) that would collide with an existing ` +
+        `credential under '${r.boot_handle}' — reconnect or disconnect those ` +
+        `slots instead of migrating.`
+    }
+  }
+
+  return {
+    ok: true,
+    // Structural, so a caller (and a test) can tell a refusal from a collision
+    // skip without parsing `message`. Spread rather than `refused_direction:
+    // undefined` so a clean result has no such key at all — the shape the
+    // reconciler's own result uses.
+    ...(r.refused_direction === true ? { refused_direction: true as const } : {}),
+    boot_handle: r.boot_handle,
+    stale_handles: r.stale_handles,
+    moved: r.moved,
+    skipped: r.skipped,
+    total_moved,
+    total_skipped,
+    message,
+  }
 }
 
 export interface SetApiKeyInput {
@@ -518,3 +876,6 @@ export async function disconnectOAuth(
 // Re-export the suffix helpers so callers constructing oauth row shapes
 // (tests, surfaces) don't have to import from oauth-token-manager too.
 export { metaLabel, refreshLabel }
+// Re-exported so consumers of `orphaned_credentials.tables` / the migrate
+// result can type them without reaching into the auth package.
+export type { CredentialScopeMove, CredentialScopeOrphanCount }

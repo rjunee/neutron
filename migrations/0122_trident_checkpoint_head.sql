@@ -1,0 +1,45 @@
+-- 0122_trident_checkpoint_head.sql
+--
+-- A CHECKPOINT LEARNS WHICH COMMIT IT APPLIED TO.
+--
+-- BACKGROUND. `code_trident_runs.inner_checkpoint` (migration 0089) records the
+-- NAME of the last inner-loop phase a run finished — `forge-done`,
+-- `argus-request-changes`, `fix-round-7`. When a lane's host process dies
+-- mid-loop (the common case is the shared account's session limit returning a
+-- 429 and ending the session), the branch and its pushed commits survive, so the
+-- code is not lost — but the relaunched run rebuilds and re-reviews from zero,
+-- re-paying for every review round it already bought. Fifteen lanes died that
+-- way in three waves on 2026-08-12; several had finished round-1 review and one
+-- was at fix round 7.
+--
+-- WHY THE NAME ALONE COULD NOT BE TRUSTED, and why that was CORRECT. A verdict
+-- is about a COMMIT, not about a branch: reviewers approved commit A, and if
+-- anything pushes B into the crash window then "the last checkpoint said
+-- approved" is a statement about code nobody reviewed. With no OID on the row a
+-- resumed run genuinely cannot tell A from B, so the only safe move was to
+-- distrust the checkpoint and rebuild (and, for `argus-approved`, to record NO
+-- reviewed head so the outer merge FAILS CLOSED — #545).
+--
+-- `inner_checkpoint_head` closes exactly that gap: the inner workflow writes the
+-- branch head OID **in the same UPDATE as the checkpoint name** (trident/
+-- checkpoint.sh), so the pair is atomic and a resume can compare the recorded OID
+-- against the live branch head. EQUAL → the prior verdict is about exactly this
+-- code and may be trusted (skip forward). DIFFERENT, unreadable, or NULL (a row
+-- written before this migration) → re-review. Old data cannot unlock the fast
+-- path.
+--
+-- `inner_checkpoint_findings` is the compact JSON array of the synthesised
+-- findings the `argus-request-changes` checkpoint was recorded with. Without it a
+-- resume that skips forward to the fix round would send Forge in with nothing to
+-- fix; with it, the fix round starts from the exact findings that were paid for.
+-- NULL/absent → the resume re-reviews instead of guessing.
+--
+-- NOT AUTHORITATIVE ON READ. A recorded head only ever unlocks a fast path when
+-- it is a full 40-hex OID that EQUALS the live branch head; anything else falls
+-- back to a full rebuild. Both columns are WORKFLOW-OWNED (written only by
+-- trident/checkpoint.sh, like `inner_result`) and are excluded from the
+-- orchestrator's full-snapshot `save()` so an outer-loop write can never pair a
+-- fresh checkpoint name with a stale OID.
+
+ALTER TABLE code_trident_runs ADD COLUMN inner_checkpoint_head TEXT;
+ALTER TABLE code_trident_runs ADD COLUMN inner_checkpoint_findings TEXT;
