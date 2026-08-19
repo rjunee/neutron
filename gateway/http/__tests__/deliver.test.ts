@@ -15,12 +15,18 @@
  *     and CONTINUES the fan-out; the web registry propagates (deliver swallows).
  */
 
-import { describe, expect, it } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
-import type { ButtonStore } from '@neutronai/channels/button-store.ts'
+import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
+import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ChatMessagePushSink } from '../../push/chat-message-push.ts'
 import { InMemoryWebChatSenderRegistry } from '../chat-sender-registry.ts'
 import { createDeliver, type DeliverPushTargets } from '../deliver.ts'
 
@@ -30,13 +36,15 @@ interface Trace {
   order: string[]
   emits: Array<{ topic_id: string; body: string }>
   inerts: Array<{ topic_id: string; body: string }>
+  /** `prompt_id`s handed to `ButtonStore.markDelivered` by the delivered-stamp. */
+  marked: string[]
 }
 
 function fakeButtonStore(over: { throwOn?: 'emit' | 'inert' } = {}): {
   store: ButtonStore
   trace: Trace
 } {
-  const trace: Trace = { order: [], emits: [], inerts: [] }
+  const trace: Trace = { order: [], emits: [], inerts: [], marked: [] }
   const store = {
     async emit(prompt: { body: string }, opts: { topic_id: string }) {
       if (over.throwOn === 'emit') throw new Error('db locked')
@@ -49,6 +57,12 @@ function fakeButtonStore(over: { throwOn?: 'emit' | 'inert' } = {}): {
       trace.order.push('persist')
       trace.inerts.push({ topic_id: input.topic_id, body: input.body })
       return { prompt_id: 'inert-1' }
+    },
+    // Present so the delivered-stamp is EXERCISED rather than absorbed by
+    // `stampDelivered`'s catch. A fake without it made the call a silent TypeError,
+    // which is how a stamp that never happened could look like one that did.
+    async markDelivered(prompt_id: string) {
+      trace.marked.push(prompt_id)
     },
   } as unknown as ButtonStore
   return { store, trace }
@@ -310,6 +324,11 @@ describe("createDeliver — envelope options (task 8, 'reply' only)", () => {
       async persistInertAgentTurn() {
         return { prompt_id: 'inert-1' }
       },
+      async markDelivered() {
+        // Present so the delivered-stamp is a real call rather than a TypeError
+        // absorbed by `stampDelivered`'s catch. The real-ButtonStore suite below is
+        // what actually asserts the stamp.
+      },
     } as unknown as ButtonStore
     return { store, prompts }
   }
@@ -372,5 +391,517 @@ describe("createDeliver — envelope options (task 8, 'reply' only)", () => {
     })
     expect(r.persisted).toBe(true)
     expect(bs.prompts).toHaveLength(0) // inert path does not call emit()
+  })
+})
+
+/**
+ * THE NATIVE NOTIFICATION, owned by deliver (2026-08-09).
+ *
+ * The owner's report was `ritual:kaizen` on his lock screen. The first fix
+ * composed the notification in the reminder OUTBOUND — which cured the reported
+ * message and left the morning brief, the idle nudge and the overnight report
+ * silent, because those post through this seam on a different sink. So the
+ * notification lives here, and these are the properties that make "a ritual
+ * posting is just a chat message" true of every producer rather than one:
+ *
+ *   - a durable post notifies, whatever wrote it;
+ *   - a transient pill does not (no row, so a tap has nowhere to land);
+ *   - the notification carries the POSTED body and the DURABLE row id;
+ *   - a notification failure can never cost the delivery, because `persisted` is
+ *     what the reminder tick reads to decide whether to fire the row AGAIN.
+ */
+describe('deliver notifies the owner devices for a durable post', () => {
+  interface Notice {
+    project_id: string | null
+    message_id: string
+    body: string
+  }
+
+  function recordingNotify(): { notify: (n: Notice) => Promise<boolean>; sent: Notice[] } {
+    const sent: Notice[] = []
+    return {
+      // `true` = the transport accepted it, which is what `deliver` reads to decide
+      // whether to stamp the row delivered. See `ChatMessagePushSink`.
+      notify: async (n): Promise<boolean> => {
+        sent.push(n)
+        return true
+      },
+      sent,
+    }
+  }
+
+  it("a 'reply' post (a fired reminder / ritual) notifies with the posted body + row id", async () => {
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+
+    await deliver('app:owner', {
+      body: 'Kaizen review: two things landed, one is blocked on the importer.',
+      durability: 'reply',
+    })
+
+    expect(n.sent).toHaveLength(1)
+    expect(n.sent[0]!.body).toBe(
+      'Kaizen review: two things landed, one is blocked on the importer.',
+    )
+    // `reply-1` is what the fake store returns as the durable id. The tap anchors
+    // the transcript on it, so a notification carrying anything else would open
+    // the right chat and land in the wrong place.
+    expect(n.sent[0]!.message_id).toBe('reply-1')
+    // MUTATION-SENSITIVE, and the whole point: the reminder row's dispatch token
+    // must not be able to reach the owner. deliver is only ever handed the body
+    // that was posted, so there is no path by which it could.
+    expect(n.sent[0]!.body).not.toContain('ritual:')
+  })
+
+  it("an 'inert' post (the brief / the nudge / the overnight report) notifies too", async () => {
+    // THE BLOCKER THIS FIXES. Those producers post through
+    // `buildButtonStoreProactiveSink`, never through the reminder outbound, so a
+    // notification wired to the reminder path left every one of them silent.
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+
+    await deliver('app:owner', {
+      body: 'Morning brief: three things today.',
+      durability: 'inert',
+    })
+
+    expect(n.sent).toHaveLength(1)
+    expect(n.sent[0]!.body).toBe('Morning brief: three things today.')
+    expect(n.sent[0]!.message_id).toBe('inert-1')
+  })
+
+  it("a transient 'none' pill notifies NOBODY — there is no row to tap", async () => {
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+    await deliver('app:owner', { body: 'reconnecting…', durability: 'none' })
+    expect(n.sent).toEqual([])
+  })
+
+  it('a failed durable persist notifies nobody — the notification would point at no row', async () => {
+    const { store } = fakeButtonStore({ throwOn: 'emit' })
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+    const r = await deliver('app:owner', { body: 'take a break', durability: 'reply' })
+    expect(r.persisted).toBe(false)
+    expect(n.sent).toEqual([])
+  })
+
+  it('the bare owner topic is the General scope; a suffixed one names its project', async () => {
+    const { store } = fakeButtonStore()
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+    await deliver('app:owner', { body: 'a', durability: 'reply' })
+    await deliver('app:owner:beacon', { body: 'b', durability: 'reply' })
+    expect(n.sent.map((s) => s.project_id)).toEqual([null, 'beacon'])
+  })
+
+  it('A THROWING notify cannot cost the delivery — otherwise the reminder double-posts', async () => {
+    // `persisted` is the reminder tick's signal to KEEP its claim on the row
+    // (#319). If an Expo outage escaped as a throw here, the claim would revert
+    // and the same message would be posted again on the next tick, forever.
+    const { store } = fakeButtonStore()
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async (): Promise<boolean> => {
+        throw new Error('expo unreachable')
+      },
+    })
+    const r = await deliver('app:owner', { body: 'take a break', durability: 'reply' })
+    expect(r.persisted).toBe(true)
+    expect(r.prompt_id).toBe('reply-1')
+  })
+
+  it('an IDEMPOTENT RE-EMIT of a message he already has does not buzz again', async () => {
+    // `(topic_id, idempotency_key)` is unique, so a re-emit — a reconnect
+    // re-render, a retried approval prompt — collapses onto the existing row.
+    // Notifying again would buzz him about a message already in his chat.
+    const sent: string[] = []
+    const store = {
+      async emit() {
+        return { prompt_id: 'reply-1', was_new: false, was_delivered: true }
+      },
+      async persistInertAgentTurn() {
+        return { prompt_id: 'inert-1' }
+      },
+    } as unknown as ButtonStore
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async (n): Promise<boolean> => {
+        sent.push(n.message_id)
+        return true
+      },
+    })
+    const r = await deliver('app:owner', {
+      body: 'approve the kaizen ritual?',
+      durability: 'reply',
+      idempotency_key: 'ritual-approval-kaizen',
+    })
+    // The DELIVERY still succeeded — only the notification is suppressed.
+    expect(r.persisted).toBe(true)
+    expect(r.prompt_id).toBe('reply-1')
+    expect(sent).toEqual([])
+  })
+
+  it('a re-emit he NEVER SAW still buzzes — the ButtonStore contract exception', async () => {
+    // `was_new: false` with `was_delivered: false` means the row landed in the DB
+    // but never reached him (a transient send failure on the prior call). The
+    // channel adapters re-render in that case; the notification must fire for the
+    // same reason, or a prompt he has never seen stays silent forever.
+    const sent: string[] = []
+    const store = {
+      async emit() {
+        return { prompt_id: 'reply-1', was_new: false, was_delivered: false }
+      },
+      async persistInertAgentTurn() {
+        return { prompt_id: 'inert-1' }
+      },
+      async markDelivered() {
+        // See `fakeButtonStore` — a fake without this turns the stamp into a
+        // TypeError that `stampDelivered` swallows.
+      },
+    } as unknown as ButtonStore
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async (n): Promise<boolean> => {
+        sent.push(n.message_id)
+        return true
+      },
+    })
+    await deliver('app:owner', {
+      body: 'approve the kaizen ritual?',
+      durability: 'reply',
+      idempotency_key: 'ritual-approval-kaizen',
+    })
+    expect(sent).toEqual(['reply-1'])
+  })
+
+  it('no notify wired → delivery behaves exactly as it did before push existed', async () => {
+    const { store, trace } = fakeButtonStore()
+    const deliver = createDeliver({ buttonStore: store, push: {} })
+    const r = await deliver('app:owner', { body: 'take a break', durability: 'reply' })
+    expect(r).toEqual({ prompt_id: 'reply-1', persisted: true, delivered_live: false })
+    expect(trace.emits).toEqual([{ topic_id: 'app:owner', body: 'take a break' }])
+  })
+})
+
+// ── the re-emit suppression, against the REAL ButtonStore ────────────────────
+/**
+ * WHY THIS SUITE EXISTS AND THE ONE ABOVE WAS NOT ENOUGH.
+ *
+ * The suppression is a two-link chain: `deliver` must ASK whether the owner has
+ * already been shown the row, and something must have WRITTEN the answer. The fake
+ * store above answers `was_delivered` from a literal, so it proves the first link
+ * and silently assumes the second. The second did not hold — `markDelivered`'s only
+ * callers were the onboarding engines, so `delivered_at` was never written for a row
+ * `deliver` created, `was_delivered` was structurally false, and the guard could not
+ * fire once. Every test in the suite above passed the whole time.
+ *
+ * So these drive the REAL `ButtonStore` against a real migrated DB, which is the
+ * only harness where "the answer was written" is a fact rather than a fixture.
+ */
+describe('an idempotent re-emit does not buzz twice — real ButtonStore', () => {
+  let tmp: string
+  let db: ProjectDb
+  let store: ButtonStore
+
+  beforeEach(() => {
+    tmp = mkdtempSync(join(tmpdir(), 'neutron-deliver-'))
+    seedMigratedDb(join(tmp, 'project.db'))
+    db = ProjectDb.open(join(tmp, 'project.db'))
+    store = new ButtonStore({ db })
+  })
+
+  afterEach(() => {
+    db.close()
+    rmSync(tmp, { recursive: true, force: true })
+  })
+
+  /** Records what the sink was asked to send, and reports the transport's verdict. */
+  function sink(accepts = true): { notify: ChatMessagePushSink; sent: string[] } {
+    const sent: string[] = []
+    return {
+      notify: async (n): Promise<boolean> => {
+        sent.push(n.body)
+        return accepts
+      },
+      sent,
+    }
+  }
+
+  const approval = {
+    body: 'approve the kaizen ritual?',
+    durability: 'reply' as const,
+    idempotency_key: 'ritual-approval:abc',
+  }
+
+  it('THE BLOCKER: the same approval key delivered twice notifies ONCE', async () => {
+    const s = sink()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: s.notify })
+
+    const first = await deliver('app:acct-2', approval)
+    const second = await deliver('app:acct-2', approval)
+
+    // The SAME row both times — which is what makes the second call a re-emit rather
+    // than a new message.
+    expect(second.prompt_id).toBe(first.prompt_id)
+    expect(second.persisted).toBe(true)
+    // One buzz. MUTATION-SENSITIVE: remove the `stampDelivered` call in `deliver.ts`
+    // and this reds with two — the behaviour that actually shipped.
+    expect(s.sent).toEqual(['approve the kaizen ritual?'])
+  })
+
+  it('the STAMP is what does it — `delivered_at` is written on the row deliver created', async () => {
+    // Asserted on the row directly, not only through the observable buzz count: a
+    // suppression can also be produced by accident, and then the next change to the
+    // emit path silently removes it again.
+    const s = sink()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: s.notify })
+    const r = await deliver('app:acct-2', approval)
+    expect(r.prompt_id).not.toBeNull()
+    expect(await store.deliveredAt(r.prompt_id!)).not.toBeNull()
+  })
+
+  it('a re-emit he NEVER got still buzzes — an outage must not silence it forever', async () => {
+    // The ButtonStore contract's exception, end to end. The first attempt persists
+    // but the transport refuses it, so nothing may be recorded as delivered, and the
+    // retry has to reach him. Stamping unconditionally would make the first failed
+    // buzz the last one.
+    const failing = sink(false)
+    const failingDeliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: failing.notify,
+    })
+    const first = await failingDeliver('app:acct-2', approval)
+    expect(await store.deliveredAt(first.prompt_id!)).toBeNull()
+
+    const recovered = sink(true)
+    const recoveredDeliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: recovered.notify,
+    })
+    await recoveredDeliver('app:acct-2', approval)
+    expect(recovered.sent).toEqual(['approve the kaizen ritual?'])
+  })
+
+  it('a LIVE socket alone counts as reached, with no device notification wired', async () => {
+    // A box with no registered device can still have a bound app-ws socket. The
+    // message reached him there, so a re-emit has nothing left to announce.
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: { app: (): boolean => true },
+    })
+    const r = await deliver('app:acct-2', approval)
+    expect(r.delivered_live).toBe(true)
+    expect(await store.deliveredAt(r.prompt_id!)).not.toBeNull()
+  })
+
+  it('a DIFFERENT message on the same topic still buzzes — the guard is per row', async () => {
+    const s = sink()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: s.notify })
+    await deliver('app:acct-2', approval)
+    await deliver('app:acct-2', {
+      body: 'approve the egress?',
+      durability: 'reply',
+      idempotency_key: 'ritual-egress-approval:def',
+    })
+    expect(s.sent).toEqual(['approve the kaizen ritual?', 'approve the egress?'])
+  })
+
+  it('a post with NO idempotency key is a new message every time, and buzzes every time', async () => {
+    // A fired reminder carries no key. Two fires are two messages, and suppressing
+    // the second would be the opposite defect.
+    const s = sink()
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: s.notify })
+    await deliver('app:acct-2', { body: 'stand up', durability: 'reply' })
+    await deliver('app:acct-2', { body: 'stand up', durability: 'reply' })
+    expect(s.sent).toEqual(['stand up', 'stand up'])
+  })
+})
+
+// ── the notification can never hold the delivery open ────────────────────────
+describe('a stalled notification transport cannot hold a delivery open', () => {
+  it('abandons the notify at its budget and still answers', async () => {
+    // `POST /api/app/system-notice` AWAITS deliver in order to answer its caller
+    // (`gateway/http/system-notice-surface.ts`), and the only bound underneath the
+    // notification is the Expo client's 10 s PER BATCH. A stalled `exp.host` would
+    // hold an HTTP response for tens of seconds over a best-effort buzz.
+    //
+    // Asserted as an ORDERING, not as elapsed wall-clock time (ISSUES #438): the
+    // delivery has to resolve while the notification is STILL OUTSTANDING. That is
+    // the actual contract, and it reds deterministically on a loaded runner — where
+    // a "took less than N ms" assertion would red for the wrong reason. Remove the
+    // bound in `deliver.ts` and this does not merely slow down, it hangs until bun's
+    // own per-test timeout kills it.
+    const { store, trace } = fakeButtonStore()
+    const order: string[] = []
+    let settleNotify: (accepted: boolean) => void = () => undefined
+    const stalled = new Promise<boolean>((resolve) => {
+      settleNotify = resolve
+    })
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: () => {
+        order.push('notify-started')
+        return stalled
+      },
+      notify_timeout_ms: 20,
+    })
+
+    const r = await deliver('app:acct-2', { body: 'reconnected', durability: 'reply' })
+    order.push('delivery-resolved')
+    expect(r.persisted).toBe(true)
+    // The transport had not answered when the delivery did.
+    expect(order).toEqual(['notify-started', 'delivery-resolved'])
+
+    // NOT stamped: a notification we abandoned is not one he received, so the next
+    // re-emit has to try again.
+    expect(trace.marked).toEqual([])
+
+    // Let the abandoned promise settle so it cannot leak into another test. It must
+    // not retroactively stamp the row either — the delivery is already over.
+    settleNotify(true)
+    await stalled
+    expect(trace.marked).toEqual([])
+  })
+
+  it('rejects a non-positive notify budget at construction, not at fire time', () => {
+    // `??` defaults `undefined` ONLY, so a literal `0` or a `NaN` from a parsed
+    // setting reaches `withTimeout` intact — and `setTimeout(0)` (Node clamps NaN to
+    // 0 as well) settles the bound on the next macrotask, before the notification can
+    // possibly answer. Every notification would then report not-sent, no row would
+    // ever be stamped, and the re-emit suppression would be silently OFF while every
+    // other test in this file still passed. That is the failure worth a construction
+    // guard: it is invisible at runtime.
+    const { store } = fakeButtonStore()
+    const withBudget = (notify_timeout_ms: number): (() => unknown) => (): unknown =>
+      createDeliver({ buttonStore: store, push: {}, notify_timeout_ms })
+
+    expect(withBudget(0)).toThrow(/notify_timeout_ms/)
+    expect(withBudget(Number.NaN)).toThrow(/notify_timeout_ms/)
+    expect(withBudget(-1)).toThrow(/notify_timeout_ms/)
+    expect(withBudget(Number.POSITIVE_INFINITY)).toThrow(/notify_timeout_ms/)
+
+    // POSITIVE CONTROLS: the guard must not have been bought by rejecting
+    // everything. A real budget builds, and so does omitting the field — which is
+    // what the sole live call site does (`open/composer.ts`), so a guard that broke
+    // the default would break every delivery.
+    expect(withBudget(20)).not.toThrow()
+    expect(() => createDeliver({ buttonStore: store, push: {} })).not.toThrow()
+  })
+})
+
+// ── a foregrounded owner still gets a banner, deliberately ───────────────────
+describe('a durable post notifies even when a live socket took it', () => {
+  it('does not gate the notification on delivered_live', async () => {
+    // DELIBERATE, and pinned because it reads like a bug whose "fix" would be the
+    // regression. Android keeps the app-ws socket OPEN while the app sits in the
+    // background, so `delivered_live` is not evidence the owner is looking at
+    // anything — gating on it would silence exactly the case a notification exists
+    // for. The socket is a render, not a read receipt.
+    const { store } = fakeButtonStore()
+    const sent: string[] = []
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: { app: (): boolean => true },
+      notify: async (n): Promise<boolean> => {
+        sent.push(n.body)
+        return true
+      },
+    })
+    const r = await deliver('app:acct-2', { body: 'morning brief', durability: 'inert' })
+    expect(r.delivered_live).toBe(true)
+    expect(sent).toEqual(['morning brief'])
+  })
+
+  it("an 'inert' row is stamped by its own INSERT, so deliver does not re-stamp it", async () => {
+    // `persistInertAgentTurn` writes `delivered_at` in the insert itself. A second
+    // write here would be a redundant UPDATE on every brief and every nudge.
+    const { store, trace } = fakeButtonStore()
+    const deliver = createDeliver({
+      buttonStore: store,
+      push: {},
+      notify: async (): Promise<boolean> => true,
+    })
+    await deliver('app:acct-2', { body: 'morning brief', durability: 'inert' })
+    expect(trace.marked).toEqual([])
+  })
+})
+
+// ── notify: 'suppress' — the explicit quiet lane for high-frequency producers ─
+//
+// The work-wakeup loop posts a progress report every ~5 minutes all night. The
+// durable row + live push ARE the product; a device buzz per tick (~96 banners
+// a night) is a product bug. `notify: 'suppress'` is the envelope's explicit
+// opt-out: it silences ONLY the buzz. The controls below are the mutation
+// tests: the same posts without the field must still buzz, or the seam's
+// standing rule ("a durable post notifies") has been broken rather than
+// narrowly excepted.
+describe("deliver notify: 'suppress' — quiet posts keep their row and their push", () => {
+  function recordingNotify(): { notify: () => Promise<boolean>; count: () => number } {
+    let n = 0
+    return {
+      notify: async (): Promise<boolean> => {
+        n += 1
+        return true
+      },
+      count: () => n,
+    }
+  }
+
+  it("a suppressed 'inert' post persists + live-pushes but NEVER buzzes", async () => {
+    const { store, trace } = fakeButtonStore()
+    const p = recordingPush(trace)
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: p.push, notify: n.notify })
+
+    const r = await deliver('app:owner:acme', {
+      body: 'Wakeup: pushed the fix branch; next, CI.',
+      durability: 'inert',
+      notify: 'suppress',
+    })
+
+    expect(r.persisted).toBe(true)
+    expect(trace.inerts).toHaveLength(1) // durable history row written
+    expect(p.app).toHaveLength(1) // live socket push still happened
+    expect(n.count()).toBe(0) // and the buzz did not
+  })
+
+  it("CONTROL — the identical 'inert' post WITHOUT the field still buzzes (the exception is opt-in, not a new default)", async () => {
+    const { store, trace } = fakeButtonStore()
+    const p = recordingPush(trace)
+    const n = recordingNotify()
+    const deliver = createDeliver({ buttonStore: store, push: p.push, notify: n.notify })
+
+    await deliver('app:owner:acme', {
+      body: 'Wakeup: pushed the fix branch; next, CI.',
+      durability: 'inert',
+    })
+
+    expect(n.count()).toBe(1)
+  })
+
+  it("a suppressed 'reply' post cannot stamp delivered_at on the strength of a buzz that never happened", async () => {
+    const { store, trace } = fakeButtonStore()
+    const n = recordingNotify()
+    // No push targets: nothing live-delivers, nothing notifies ⇒ nothing stamps.
+    const deliver = createDeliver({ buttonStore: store, push: {}, notify: n.notify })
+
+    await deliver('app:owner', { body: 'quiet reply', durability: 'reply', notify: 'suppress' })
+    expect(n.count()).toBe(0)
+    expect(trace.marked).toEqual([])
+
+    // CONTROL — the same post un-suppressed notifies AND stamps.
+    await deliver('app:owner', { body: 'loud reply', durability: 'reply' })
+    expect(n.count()).toBe(1)
+    expect(trace.marked).toEqual(['reply-1'])
   })
 })

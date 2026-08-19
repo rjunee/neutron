@@ -107,15 +107,57 @@ export function emptyStreamState(): StreamState {
  * state (or the same reference when the frame is irrelevant, so callers can
  * skip a re-render).
  *
+ *   - `agent_typing` (start/end) → the TURN-ACTIVITY signal; typing on/off.
  *   - `agent_message_partial` → append `body_delta` to the buffer, typing on.
  *   - `agent_message` (final)  → clear that buffer (the durable message now
  *     owns the row); typing off when no other stream remains.
  *   - anything else            → unchanged.
+ *
+ * WHY `agent_typing` IS HANDLED FIRST, AND WHY IT WAS MISSING FOR SO LONG.
+ * The owner reported twice that a live turn shows no typing indicator on mobile
+ * ("if the chat turn is active, why am I not seeing a typing indicator? This is
+ * the most urgent problem"). The server was never the problem: `emitAppWsTyping`
+ * in `open/wiring/app-ws.ts` brackets every live-agent turn with
+ * `agent_typing` start/end at six call sites, and the web client consumes it
+ * (`landing/chat-react/controller.ts`). Mobile received the frame — its own
+ * rail and work-board tests deliver it — and never fed it into THIS reducer,
+ * so the dots were driven solely by `agent_message_partial`. A turn that spends
+ * thirty minutes in tool calls streams no text, so it looked identical to a dead
+ * one.
+ *
+ * And there was a second, quieter reason a handler added naively would still
+ * have failed: the `message_id` guard below rejects any frame without one, and
+ * an `agent_typing` envelope has NO `message_id` (it is
+ * `{v, type, state, ts, project_id?}`). So the branch MUST sit above that
+ * guard — which is exactly the kind of detail that makes "the frame arrives and
+ * is parsed elsewhere" not the same thing as "the feature works".
+ *
+ * SCOPE FILTERING IS THE CALLER'S JOB, deliberately. This fold is pure and sees
+ * whatever it is handed; the web controller guards separately against a stray
+ * typing frame flipping the wrong project's indicator. Feeding this reducer
+ * another project's frames would light the wrong dots, so the caller must filter
+ * before calling — the same contract the partial/final frames already rely on.
  */
 export function foldStreamFrame(state: StreamState, frame: unknown): StreamState {
   if (typeof frame !== 'object' || frame === null) return state;
   const f = frame as Record<string, unknown>;
   const type = f['type'];
+
+  // ABOVE the message_id guard: an `agent_typing` envelope carries no
+  // message_id, so anything below this point cannot see it.
+  if (type === 'agent_typing') {
+    const turnState = f['state'];
+    if (turnState === 'start') return state.typing ? state : { ...state, typing: true };
+    if (turnState === 'end') {
+      // An explicit end clears the dots UNLESS a stream is still buffered — a
+      // partial that outlives its turn-end must keep them lit rather than
+      // stranding a half-rendered bubble with no indicator.
+      const stillStreaming = Object.keys(state.buffers).length > 0;
+      return state.typing === stillStreaming ? state : { ...state, typing: stillStreaming };
+    }
+    return state;
+  }
+
   const message_id = typeof f['message_id'] === 'string' ? f['message_id'] : null;
   if (message_id === null || message_id.length === 0) return state;
 

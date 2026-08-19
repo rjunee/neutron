@@ -144,14 +144,50 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
     // NAME rather than the assertion being relaxed for everyone, so a SECOND
     // profile that starts wiring a field still fails this test — which is the
     // whole reason the test exists.
+    // The GitHub grant is part of the frozen shape ON PURPOSE: flipping a
+    // profile from `false` to `true` hands every substrate on it push access to
+    // the owner's repos, so it must fail here until the change is stated.
+    const GRANTS: Record<string, boolean> = {
+      PROFILE_TOOLLESS_UTILITY: false,
+      PROFILE_WARM_CHAT: true,
+      PROFILE_PHASE_SPEC: false,
+      PROFILE_ISOLATED_COMPOSE: false,
+      PROFILE_UNTRUSTED_IMPORT: false,
+      PROFILE_EPHEMERAL: true,
+      PROFILE_WARM_FIRE: true,
+    }
+    // The frontier-model FLOOR is frozen for the same reason the GitHub grant is,
+    // pointing the other way: flipping a profile from `true` to `false` is what
+    // put the owner's project chat on Haiku for a day, and flipping one from
+    // `false` to `true` would silently overrule a caller that picked FAST_MODEL
+    // on purpose. Either direction must fail here until it is stated.
+    const MODEL_FLOORS: Record<string, boolean> = {
+      PROFILE_TOOLLESS_UTILITY: false,
+      PROFILE_WARM_CHAT: true,
+      PROFILE_PHASE_SPEC: false,
+      PROFILE_ISOLATED_COMPOSE: false,
+      PROFILE_UNTRUSTED_IMPORT: false,
+      PROFILE_EPHEMERAL: false,
+      PROFILE_WARM_FIRE: false,
+    }
+    const github_credential = GRANTS[name]
+    expect(github_credential, `${name} has no recorded GitHub grant`).toBeDefined()
+    const frontier_model_floor = MODEL_FLOORS[name]
+    expect(frontier_model_floor, `${name} has no recorded model floor`).toBeDefined()
     if (name === 'PROFILE_WARM_FIRE') {
       expect({ ...profile }, name).toEqual({
         skip_permissions: true,
+        github_credential: true,
+        frontier_model_floor: false,
         turn_inactivity_ms: 30 * 60_000,
       })
       continue
     }
-    expect({ ...profile }, name).toEqual({ skip_permissions: true })
+    expect({ ...profile }, name).toEqual({
+      skip_permissions: true,
+      github_credential: github_credential!,
+      frontier_model_floor: frontier_model_floor!,
+    })
   }
 })
 
@@ -234,18 +270,26 @@ for (const { site, profile, extra } of SITES) {
     // ...and the WHOLE resolved option bag is identical (env holds the scrubbed
     // credential, identical for both since the same pool/cred is selected).
     //
-    // THE FIRE SITE IS THE ONE DELIBERATE DIVERGENCE, and it is asserted as a
-    // difference of EXACTLY ONE NAMED KEY rather than by loosening the equality.
-    // A second unintended field on that profile still fails here.
+    // TWO SITES DELIBERATELY DIVERGE, and each is asserted as a difference of
+    // EXACTLY ONE NAMED KEY rather than by loosening the equality. A second
+    // unintended field on either profile still fails here.
     if (profile === PROFILE_WARM_FIRE) {
       expect(viaProfile.turn_inactivity_ms).toBe(30 * 60_000)
       expect(viaInline.turn_inactivity_ms).toBeUndefined()
       const { turn_inactivity_ms, ...rest } = viaProfile
       expect(rest).toEqual(viaInline)
+    } else if (profile === PROFILE_WARM_CHAT) {
+      // The owner's chat is the ONLY site that carries the frontier-model floor.
+      // If this key ever stops appearing here, the Haiku regression is back.
+      expect(viaProfile.frontier_model_floor).toBe(true)
+      expect(viaInline.frontier_model_floor).toBeUndefined()
+      const { frontier_model_floor, ...rest } = viaProfile
+      expect(rest).toEqual(viaInline)
     } else {
       expect(viaProfile).toEqual(viaInline)
-      // Every OTHER site must be untouched by the new field.
+      // Every OTHER site must be untouched by both applied fields.
       expect(viaProfile.turn_inactivity_ms).toBeUndefined()
+      expect(viaProfile.frontier_model_floor).toBeUndefined()
     }
     // Explicit: the reserved fields never leaked onto the resolved options.
     expect('permission_mode' in viaProfile).toBe(false)
@@ -270,7 +314,7 @@ test('a profile skip_permissions value WINS over the legacy inline field', async
     substrate_instance_id: 'prec',
     cwd: '/w',
     skip_permissions: false,
-    profile: { skip_permissions: true },
+    profile: { skip_permissions: true, github_credential: false, frontier_model_floor: false },
   })
   expect(opts.skip_permissions).toBe(true)
 })

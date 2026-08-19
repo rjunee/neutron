@@ -106,6 +106,26 @@ export interface OpenWiringContext {
    */
   liveAgentNoticeSinks?: SubstrateNoticeSinks
   /**
+   * The JOURNAL-ONLY notice sinks for the timer-driven nudge substrate
+   * (`cc-nudge-*`), built over the same `system_events` journal but with NO chat
+   * delivery seam — so a notice from that lane is journalled and never becomes a
+   * bubble in the owner's chat. Journalling is BEST-EFFORT, like every other caller
+   * of this sink: an unregistered ambient sink is a no-op and a write failure is
+   * swallowed, so this buys an attempt at a queryable row, not a guarantee of one.
+   * That is still the difference between a clamp being findable and it existing
+   * only on a stderr stream nobody reads.
+   *
+   * WHY A SECOND SET RATHER THAN REUSING `liveAgentNoticeSinks`. The nudge lane
+   * shares `PROFILE_WARM_CHAT`, so it carries `frontier_model_floor` and CAN be
+   * clamped — which made its clamp stderr-only, the exact silent degradation the
+   * floor notice exists to end. Handing it the live sinks would fix the silence by
+   * letting a background timer push a chat bubble, which is the one thing this lane
+   * is built not to do. Splitting the two surfaces keeps both promises: the clamp is
+   * recorded, the owner is not interrupted. Only `onModelFloorApplied` is consumed
+   * today (see `substrates.ts`).
+   */
+  backgroundNoticeSinks?: SubstrateNoticeSinks
+  /**
    * O6 / #106 — the recovered-reply sink (deliver-or-persist into the
    * `RecoveredReplyStore`) the composer builds over the same push registry. Wired
    * ONLY onto `cc-agent-*`; the substrate calls it when its replay-after-resume

@@ -9,7 +9,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -23,7 +22,7 @@ import {
   type ProjectSettingsStore,
 } from '../http/app-projects-surface.ts'
 import { canInviteRole } from '../http/app-project-invite.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ConnectGuestInviteStore, hashInviteToken } from '@neutronai/connect/guest-invite-store.ts'
 
@@ -63,9 +62,7 @@ async function start(): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-ph5-issue-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const db = ProjectDb.open(dbPath)
 
   // Explicit membership fixture — R6 removed the KNOWN_PROJECTS demo seed that

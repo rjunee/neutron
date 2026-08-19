@@ -25,6 +25,7 @@ import {
   TYPING_FAILSAFE_MS,
   type TypingScheduler,
 } from '../wiring/typing-refcount.ts'
+import { sendTurnStateSnapshot, turnIsActive } from '../wiring/typing-catchup.ts'
 
 /** A scheduler that records instead of waiting, so a test can fire the timer. */
 function fakeScheduler(): TypingScheduler & {
@@ -66,6 +67,51 @@ function make(onExpire: (key: string) => void = () => {}) {
 }
 
 describe('the suppression guard — one visible typing lifetime per topic', () => {
+  test('connect catch-up neither changes depth nor re-arms the fail-safe', () => {
+    const { rc, scheduler } = make()
+    rc.transition(KEY, 'start')
+    const scheduledMs = scheduler.lastMs
+    const pending = scheduler.pending()
+    const sent: unknown[] = []
+    expect(sendTurnStateSnapshot({ active: new Set(['proj']), key: 'proj', now: () => 7, send: (f) => sent.push(f) })).toBe(true)
+    expect(sent).toHaveLength(1)
+    expect(rc.depthOf(KEY)).toBe(1)
+    expect(scheduler.pending()).toBe(pending)
+    expect(scheduler.lastMs).toBe(scheduledMs)
+    rc.transition(KEY, 'end')
+    expect(rc.transition(KEY, 'start').emit).toBe(true)
+  })
+
+  test('HEADLINE: a turn killed while disconnected reconnects to an explicit idle snapshot', () => {
+    const sent: unknown[] = []
+    expect(sendTurnStateSnapshot({ active: new Set(), key: 'proj', now: () => 7, send: (f) => sent.push(f) })).toBe(false)
+    expect(sent).toEqual([{ v: 1, type: 'agent_typing', state: 'end', ts: 7 }])
+  })
+
+  test('a reconnect during a live turn receives an explicit running snapshot', () => {
+    const active = new Set(['proj'])
+    const sent: unknown[] = []
+    expect(sendTurnStateSnapshot({ active, key: 'proj', project_id: 'proj', now: () => 8, send: (f) => sent.push(f) })).toBe(true)
+    expect(sent).toEqual([{ v: 1, type: 'agent_typing', state: 'start', project_id: 'proj', ts: 8 }])
+  })
+
+  test('the reconnect snapshot and rail working signal read the same live-turn set', () => {
+    const active = new Set(['proj'])
+    expect(turnIsActive(active, 'proj')).toBe(true)
+    active.delete('proj')
+    expect(turnIsActive(active, 'proj')).toBe(false)
+  })
+
+  test('production reconnect and rail wiring both use the shared live-turn reader', async () => {
+    const [snapshotSource, composerSource] = await Promise.all([
+      Bun.file(new URL('../wiring/typing-catchup.ts', import.meta.url)).text(),
+      Bun.file(new URL('../composer.ts', import.meta.url)).text(),
+    ])
+    expect(snapshotSource).toContain('turnIsActive(input.active, input.key)')
+    expect(composerSource).toContain(
+      'chatTurnInProgress: turnIsActive(activeChatProjects, railChatKey(project_id))',
+    )
+  })
   test('the first start emits; a nested start does NOT', () => {
     const { rc } = make()
     expect(rc.transition(KEY, 'start').emit).toBe(true)

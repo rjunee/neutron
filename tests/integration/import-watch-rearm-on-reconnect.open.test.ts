@@ -32,7 +32,7 @@ import { dirname, join } from 'node:path'
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
@@ -200,8 +200,8 @@ async function startHarness({
   seedBeforeCompose = true,
   seedFn = seedStrandedImportRow,
 }: { seedBeforeCompose?: boolean; seedFn?: (db: ProjectDb) => Promise<void> } = {}): Promise<Harness> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
 
   if (seedBeforeCompose) await seedFn(db)
 

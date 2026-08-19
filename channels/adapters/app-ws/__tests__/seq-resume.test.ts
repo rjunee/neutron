@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../../tests/support/migrated-db.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
 import type { OutgoingMessage, Topic } from '../../../types.ts'
 import { AppWsAdapter } from '../adapter.ts'
@@ -39,8 +39,8 @@ function setup() {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-ws-seq-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {
@@ -86,13 +86,13 @@ describe('AppWsAdapter — resume replay reconstructs envelopes', () => {
     await adapter.ingestUserMessage({ channel_topic_id: CHANNEL_TOPIC, user_id: 'sam', body: 'q', client_msg_id: 'c1' })
     await adapter.send({ topic, text: 'a' })
 
-    const full = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const full = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
     expect(full.length).toBe(2)
     expect(full[0]).toMatchObject({ type: 'user_message', body: 'q', seq: 1, client_msg_id: 'c1' })
     expect(full[1]).toMatchObject({ type: 'agent_message', body: 'a', seq: 2 })
 
     // From a cursor mid-stream — only the tail.
-    const tail = await adapter.replayAfter(CHANNEL_TOPIC, 1)
+    const tail = (await adapter.replayAfter(CHANNEL_TOPIC, 1)).envelopes
     expect(tail.length).toBe(1)
     expect(tail[0]).toMatchObject({ type: 'agent_message', seq: 2 })
   })
@@ -128,7 +128,7 @@ describe('AppWsAdapter — W3a resume re-hydrates structured agent metadata', ()
 
     // A resume replay reconstructs the SAME structured envelope from the
     // durable meta_json column — not a plain text bubble.
-    const [replayed] = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const [replayed] = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
     const env = replayed as unknown as Record<string, unknown>
     expect(env['type']).toBe('agent_message')
     expect(env['body']).toBe('Here are your options.')
@@ -145,7 +145,7 @@ describe('AppWsAdapter — W3a resume re-hydrates structured agent metadata', ()
   it('replays a plain agent message with no structured fields (meta stays absent)', async () => {
     const { adapter } = setup()
     await adapter.send({ topic, text: 'just text' })
-    const [replayed] = await adapter.replayAfter(CHANNEL_TOPIC, 0)
+    const [replayed] = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
     const env = replayed as unknown as Record<string, unknown>
     expect(env['type']).toBe('agent_message')
     expect(env['body']).toBe('just text')
@@ -166,7 +166,7 @@ describe('AppWsAdapter — no durable log (legacy)', () => {
     const ingest = await adapter.ingestUserMessage({ channel_topic_id: CHANNEL_TOPIC, user_id: 'sam', body: 'hi' })
     expect(ingest.seq).toBeNull()
     expect((captured.at(-1) as { seq?: number }).seq).toBeUndefined()
-    expect(await adapter.replayAfter(CHANNEL_TOPIC, 0)).toEqual([])
+    expect(await adapter.replayAfter(CHANNEL_TOPIC, 0)).toEqual({ envelopes: [], older_than: null })
     expect(await adapter.currentMaxSeq(CHANNEL_TOPIC)).toBe(0)
   })
 })

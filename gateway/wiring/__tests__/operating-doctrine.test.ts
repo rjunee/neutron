@@ -9,7 +9,9 @@ import { describe, expect, test } from 'bun:test'
 import {
   BUILD_ROUTING_DOCTRINE,
   DOCTRINE_PRINCIPLES,
+  MISSING_CREDENTIAL_DOCTRINE,
   buildOperatingDoctrineFragment,
+  type OperatingDoctrineInput,
 } from '../operating-doctrine.ts'
 
 describe('operating-doctrine — principle set', () => {
@@ -44,9 +46,21 @@ describe('operating-doctrine — principle set', () => {
       // It names the trident dispatch tool + tells the agent to self-route.
       expect(frag).toContain('work_board_dispatch_build')
       expect(frag.toLowerCase()).toContain('build routing')
-      // SIMPLE → inline; COMPLEX → trident + tell the owner why.
+      // SIMPLE → inline; COMPLEX → trident + tell the owner why. The permission
+      // itself is deliberately kept: banning inline outright would push a one-line
+      // fix through a full review loop.
       expect(frag).toContain('INLINE')
       expect(frag.toLowerCase()).toContain('complex')
+      // THE ESCALATION TRIPWIRE is the part that was missing, and it is what this
+      // assertion exists for. An agent judged the Email Core simple, built it
+      // inline, and held one chat turn for 22 hours across 17 self-review rounds.
+      // The initial call was defensible; nothing re-examined it once the work had
+      // disproved it. So assert the MID-BUILD REVISION, not merely that the routing
+      // rule mentions complexity — the old permissive text did that too and would
+      // have satisfied a weaker assertion while permitting the 22-hour turn.
+      expect(frag).toContain('MUST REVISE IT WHEN THE WORK PROVES YOU WRONG')
+      expect(frag.toLowerCase()).toContain('more than twice')
+      expect(frag.toLowerCase()).toContain('is not a reason to push on')
       expect(frag.toLowerCase()).toContain('tell the owner')
       // #334 — EVERY build (inline or trident, any project) must leave a card.
       expect(frag).toContain('MUST leave a trackable card')
@@ -97,6 +111,66 @@ describe('operating-doctrine — principle set', () => {
         scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
       )
       expect(frag).toContain('a short automatic confirmation is posted to the chat for you')
+    }
+  })
+
+  test('missing-credential remedy (#552) — names a surface the owner can reach, never a shell', () => {
+    for (const scope of ['general', 'project'] as const) {
+      const frag = buildOperatingDoctrineFragment(
+        scope === 'project' ? { scope, project_id: 'gondor' } : { scope },
+      )
+      expect(frag).toContain(MISSING_CREDENTIAL_DOCTRINE)
+      // The remedy is a PLACE the owner can get to, named concretely enough to
+      // act on — not "connect your account somewhere".
+      expect(frag).toContain('Integrations')
+      // Named as a control IN A ROW, not by one surface's button text: the web
+      // button reads "Connect GitHub" and the phone's reads "Connect", so
+      // quoting either as THE label sends half the owners looking for words that
+      // are not on the screen in front of them.
+      expect(frag).toContain('Connect control in the GitHub row')
+      // And the specific failure the owner hit: a push / PR with no token.
+      expect(frag.toLowerCase()).toContain('git push')
+      expect(frag.toLowerCase()).toContain('pull request')
+      // The prohibition is explicit, because the shell is what the agent can see
+      // at the moment it fails and it will reach for it unless told not to.
+      expect(frag).toContain('NEVER offer a terminal command as the remedy')
+    }
+  })
+
+  test('the remedy rule is the SAME STRING for every input, and carries no deployment vocabulary', () => {
+    // Named for what it actually checks. The old name promised an unconditional
+    // RULE while the body only searched for four words, so a rule that really did
+    // branch — in neutral wording, or on any input other than the one scope this
+    // built — stayed green. Both halves are now here.
+    //
+    // STRUCTURAL half: the remedy is emitted as a WHOLE PARAGRAPH equal to the
+    // exported constant, for every input shape the builder accepts.
+    //
+    // Equality, not `toContain`. `toContain` is superset-tolerant: a branch that
+    // APPENDS to the rule on one scope ("…, or, if you are running it yourself,
+    // export the token") still contains the constant, so the search passes on the
+    // exact input that was supposed to red. The fragment separates blocks with a
+    // blank line and the constant is one unbroken line, so it must appear as its
+    // own element of the split — nothing added, nothing branched.
+    const inputs: OperatingDoctrineInput[] = [
+      { scope: 'general' },
+      { scope: 'project' },
+      { scope: 'project', project_id: 'gondor' },
+      { scope: 'project', project_id: 'minas-tirith' },
+    ]
+    // VOCABULARY half: naming the in-product surface is the right answer in EVERY
+    // deployment, so a branch would be longer AND wrong somewhere. The literals
+    // below are the words this repo does not carry, in prose or in code; this
+    // array is the one place they are permitted to appear, because guarding
+    // against them requires naming them exactly once. Checked per input, not on
+    // one scope: `weightingTail` branches on `scope`, so a scope-conditional
+    // remedy is exactly the shape a single-scope sweep cannot see.
+    for (const input of inputs) {
+      const frag = buildOperatingDoctrineFragment(input)
+      expect(frag.split('\n\n')).toContain(MISSING_CREDENTIAL_DOCTRINE)
+      for (const banned of ['self-host', 'hosted', 'tenan', 'instances', 'depending on']) {
+        expect(frag.toLowerCase()).not.toContain(banned)
+      }
     }
   })
 

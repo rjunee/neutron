@@ -47,6 +47,7 @@ const {
 const { setRuntimeServerConfig, __resetServerConfigForTests } = await import('../lib/config');
 const { AuthSessionProvider } = await import('../lib/session');
 const { ChatSyncSurface } = await import('../components/ChatSyncSurface');
+const { ActivityInspectorOpenProvider } = await import('../lib/activity-inspector-opener');
 const { __resetSharedMobileStoreForTests } = await import(
   '../lib/chat-core/op-sqlite-store'
 );
@@ -103,12 +104,16 @@ type Screen = Awaited<ReturnType<typeof mountScreen>>;
 
 async function mountChat(
   projectId: string = PROJECT,
+  onOpenInspector?: (scope: string | null) => void,
 ): Promise<{ screen: Screen; socket: InstanceType<typeof FakeChatSocket> }> {
+  const surface = createElement(ChatSyncSurface, { projectId });
   const screen = await mountScreen(
     createElement(
       AuthSessionProvider,
       { initialUser: OWNER },
-      createElement(ChatSyncSurface, { projectId }),
+      onOpenInspector === undefined
+        ? surface
+        : createElement(ActivityInspectorOpenProvider, { onOpen: onOpenInspector }, surface),
     ),
   );
   const socket = FakeChatSocket.current();
@@ -117,6 +122,28 @@ async function mountChat(
   await screen.settle();
   return { screen, socket };
 }
+
+describe('mobile typing activity', () => {
+  it('renders status detail beside the dots and opens this scope inspector on tap', async () => {
+    const opened: Array<string | null> = [];
+    const { screen, socket } = await mountChat(PROJECT, (scope) => opened.push(scope));
+    await deliver(screen, socket, { v: 1, type: 'agent_typing', state: 'start', project_id: PROJECT });
+    await deliver(screen, socket, {
+      v: 1,
+      type: 'activity_event',
+      scope_key: PROJECT,
+      event: { seq: 1, at: Date.now(), kind: 'status', label: 'status', detail: 'running checks' },
+    });
+    const indicator = screen.byTestId('chat-typing-indicator');
+    expect(indicator).not.toBeNull();
+    expect(indicator!.textContent).toContain('running checks');
+    expect(indicator!.textContent).not.toContain('status');
+    indicator!.click();
+    await screen.settle();
+    expect(opened).toEqual([PROJECT]);
+    screen.unmount();
+  });
+});
 
 /** Push a server frame down the socket exactly as the transport receives it. */
 async function deliver(

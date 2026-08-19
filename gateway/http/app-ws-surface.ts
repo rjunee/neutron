@@ -34,6 +34,7 @@ import { AppChatEditNotAuthorizedError } from '@neutronai/persistence/index.ts'
 import {
   decodeAppWsInbound,
   decodeAppWsButtonChoice,
+  decodeAppWsPresence,
   decodeAppWsEdit,
   decodeAppWsReaction,
   decodeAppWsReceipt,
@@ -65,6 +66,7 @@ import type {
 import { constantTimeEqual } from '@neutronai/runtime/constant-time-equal.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { createLogger } from '@neutronai/logger'
+import type { WebPresenceReporter } from '../push/web-presence.ts'
 
 const moduleLog = createLogger('app-ws')
 export type { ChatCommandFilter, ChatCommandFilterResult }
@@ -327,6 +329,23 @@ export interface AppWsSocketData {
    */
   channel_topic_id: string
   /**
+   * Web presence (2026-08-15) — an id for THIS SOCKET, minted at upgrade.
+   *
+   * Deliberately not `device_id`. That one is CLIENT-SUPPLIED and treated as
+   * stable across reconnects, so two clients may legitimately present the same
+   * value — and presence is per-SCREEN: the first of them to close must not evict
+   * the other's record and start buzzing the owner's phone while he reads. A
+   * fresh id per connection is the only key for which "the socket closed" and
+   * "that screen is gone" are the same statement.
+   *
+   * (Today's web client mints a per-page-load id — `landing/chat-react/config.ts`
+   * `makeDeviceId` — so two tabs happen to differ anyway. That is a property of
+   * one client, not of the field, and it is not what this key relies on;
+   * `gateway/__tests__/app-ws-web-presence.test.ts` drives the shared-id case
+   * directly rather than trusting it.)
+   */
+  conn_id: string
+  /**
    * P5.2 — project_id captured at upgrade time from the query string.
    * Stashed here so subsequent outbound envelopes can echo it back
    * without the client having to re-send on every message, and so the
@@ -441,6 +460,8 @@ export interface CreateAppWsSurfaceOptions {
     project_slug: string
     channel_topic_id: string
     project_id?: string
+    /** Direct sender for the socket that just opened. */
+    send: (env: AppWsOutbound) => void
   }) => Promise<void>
   /**
    * Onboarding consolidation (2026-06-26) — fired when the client taps an
@@ -514,6 +535,24 @@ export interface CreateAppWsSurfaceOptions {
     project_slug: string
     tz: string
   }) => void | Promise<void>
+  /**
+   * Web presence (2026-08-15) — where a WEB client's foreground/background
+   * declarations are recorded, so the push path can decline to buzz the owner's
+   * phone about a message he is already reading in the browser
+   * (`gateway/push/web-presence.ts`).
+   *
+   * OPTIONAL, AND ITS ABSENCE MEANS "NOTIFY". A composition that doesn't wire one
+   * simply never suppresses anything, which is the pre-2026-08-15 behaviour and
+   * the safe direction for every gateway-level test and non-Open consumer.
+   *
+   * ONLY `platform: 'web'` SOCKETS ARE REPORTED, enforced at the call site rather
+   * than here. A native client's foreground is a DIFFERENT question, already
+   * answered on the device by `app/lib/push-foreground-policy.ts`, and recording
+   * it here would suppress the push for a phone that is merely holding a socket
+   * open in the background — the exact inference `gateway/http/deliver.ts:429`
+   * rejects.
+   */
+  web_presence?: WebPresenceReporter
 }
 
 export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurface {
@@ -530,6 +569,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
   const on_button_choice = opts.on_button_choice
   const claim_button_prompt = opts.claim_button_prompt
   const on_client_timezone = opts.on_client_timezone
+  const web_presence = opts.web_presence
 
   return {
     adapter,
@@ -625,6 +665,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           project_slug: resolved.project_slug,
           channel_topic_id,
           device_id,
+          conn_id: `ws-${crypto.randomUUID()}`,
         }
         if (project_id !== null) data.project_id = project_id
         if (platform !== null) data.platform = platform
@@ -761,6 +802,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
               project_slug: data.project_slug,
               channel_topic_id: data.channel_topic_id,
               ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
+              send,
             })
           } catch (err) {
             moduleLog.warn('on_session_open_failed', {
@@ -805,18 +847,59 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           ws.send(JSON.stringify({ v: 1, type: 'pong', ts: Date.now() }))
           return
         }
-        // Chat-sync foundation — gap-fill request. Replay everything after
-        // the client's cursor to THIS socket only (the requesting device),
-        // so a reconnect / cold-open fills its gap without re-broadcasting
-        // to other live devices. No-op (replayAfter returns []) when no
-        // durable log is wired. Checked BEFORE the message decoder so the
-        // user_message path keeps its narrow type.
+        // Web presence (2026-08-15) — the client declares whether the owner is
+        // LOOKING at it. Recorded for `gateway/push/web-presence.ts`, which uses
+        // it to skip the phone push for a message already on his screen.
+        //
+        // A CONTROL FRAME, like `ping`: it short-circuits before every decoder,
+        // so it never persists, never takes a seq, and never runs an agent turn.
+        //
+        // GATED ON `platform === 'web'`, and that gate is the whole safety
+        // argument. A NATIVE client also foregrounds and backgrounds, but its
+        // answer belongs to `app/lib/push-foreground-policy.ts` on the device —
+        // honouring it here would suppress the push for a phone that is merely
+        // holding its socket open, which is precisely the inference the notify
+        // comment in `gateway/http/deliver.ts` refuses to make. Native clients do
+        // not send this frame today (only `chat-core/web-session.ts` reports
+        // presence); the gate is here so that a client which someday does cannot
+        // silence the owner by accident.
+        const presence = decodeAppWsPresence(parsed)
+        if (presence !== null) {
+          if (web_presence !== undefined && data.platform === 'web') {
+            if (presence.state === 'foreground') {
+              web_presence.foreground(data.user_id, data.conn_id)
+            } else {
+              web_presence.background(data.conn_id)
+            }
+          }
+          return
+        }
+        // Chat-sync foundation — gap-fill request. Replay ONE BOUNDED PAGE of the
+        // range the client asked for, to THIS socket only (the requesting device),
+        // so a reconnect / cold-open fills its gap without re-broadcasting to other
+        // live devices. Bounded means bounded: the adapter answers with at most
+        // `DEFAULT_REPLAY_LIMIT` messages — the NEWEST ones in the range — and
+        // nothing here pages for the rest on its own initiative. Do not read the
+        // page as "everything after the cursor"; a previous version of this comment
+        // said that and it was the shape of the bug.
+        //
+        // WHAT IS NEW: a full page is now REPORTED. `older_than` comes back non-null
+        // when rows below the page were left behind, and the `history_gap` frame
+        // below hands the client the seq to ask from — so a transcript longer than
+        // one page converges instead of keeping a permanent hole (the whole reason
+        // `resume` grew a `before_seq`). No-op (an empty page) when no durable log is
+        // wired. Checked BEFORE the message decoder so the user_message path keeps
+        // its narrow type.
         const resume = decodeAppWsResume(parsed)
         if (resume !== null) {
           try {
-            const replay = await adapter.replayAfter(data.channel_topic_id, resume.after_seq)
+            const page = await adapter.replayAfter(
+              data.channel_topic_id,
+              resume.after_seq,
+              resume.before_seq,
+            )
             const send = data.send
-            for (const env of replay) {
+            for (const env of page.envelopes) {
               if (send !== undefined) send(env)
               else ws.send(JSON.stringify(env))
             }
@@ -828,6 +911,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const receipts = await adapter.replayReceiptsAfter(
               data.channel_topic_id,
               resume.after_seq,
+              resume.before_seq,
             )
             for (const env of receipts) {
               if (send !== undefined) send(env)
@@ -839,6 +923,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const reactions = await adapter.replayReactionsAfter(
               data.channel_topic_id,
               resume.after_seq,
+              resume.before_seq,
             )
             for (const env of reactions) {
               if (send !== undefined) send(env)
@@ -850,10 +935,26 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             const edits = await adapter.replayEditsAfter(
               data.channel_topic_id,
               resume.after_seq,
+              resume.before_seq,
             )
             for (const env of edits) {
               if (send !== undefined) send(env)
               else ws.send(JSON.stringify(env))
+            }
+            // The truncation signal, LAST — after every frame the page consists of,
+            // so a client that reacts to it by requesting the next page cannot
+            // interleave two pages' messages. Sent only when rows were actually left
+            // behind; an unbounded-above forward resume that fit in one page says
+            // nothing, which is why a short transcript's wire trace is unchanged.
+            if (page.older_than !== null) {
+              const gap: AppWsOutbound = {
+                v: 1,
+                type: 'history_gap',
+                older_than: page.older_than,
+                ts: Date.now(),
+              }
+              if (send !== undefined) send(gap)
+              else ws.send(JSON.stringify(gap))
             }
           } catch (err) {
             const reason = err instanceof Error ? err.message : 'resume error'
@@ -1135,6 +1236,12 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         if (send !== undefined) {
           registry.unregister(data.channel_topic_id, send)
         }
+        // Web presence — this screen is gone. Unconditional (no `platform`
+        // check): forgetting a connection that was never recorded is a no-op, and
+        // a `drop` that failed to run because the platform read differently here
+        // than it did on the report would strand the owner "present" until the
+        // TTL, which is the failure direction that produces silence.
+        web_presence?.drop(data.conn_id)
         moduleLog.info('session_close', {
           instance: data.project_slug,
           user: data.user_id,

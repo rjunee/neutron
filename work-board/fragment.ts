@@ -47,10 +47,14 @@ export function formatWorkBoardFragment(activeItems: ReadonlyArray<WorkBoardItem
     lines.push('Active + upcoming items, in order (id in parens — use it to dispatch a build):')
     for (const item of activeItems.slice(0, MAX_ITEMS_INJECTED)) {
       const title = escapeData(item.title).slice(0, MAX_TITLE_CHARS)
-      // A bound sub-agent/trident run (·building, fork ⑂) supersedes the inline
-      // marker; activity is DERIVED from linked_run_id, not a manual field.
+      // Activity marker: a LIVE bound run shows ·building; a FAILED item with a
+      // kept binding (detachRun #340 preserves linked_run_id and sets
+      // status='failed') must NOT show ·building — status='failed' is the
+      // durable signal and the agent needs to see it, not an incorrect ·building.
       const activity =
-        item.linked_run_id !== null && item.linked_run_id.length > 0
+        item.linked_run_id !== null &&
+        item.linked_run_id.length > 0 &&
+        item.status !== 'failed'
           ? ' ·building'
           : item.inline_active
             ? ' ·inline'

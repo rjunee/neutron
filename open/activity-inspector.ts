@@ -122,6 +122,18 @@ interface ScopeBuffer {
   last_event_at: number
   /** 0 ⇒ no non-synthetic event ever recorded for this scope. */
   last_real_activity_at: number
+  /**
+   * THE THIRD CLOCK. 0 ⇒ no WRITE-CLASS tool call ever recorded for this scope.
+   *
+   * `last_real_activity_at` answers "is this session doing anything at all" — it
+   * is advanced by `turn_start`, by the agent's own reply, by every status
+   * notice. That is exactly right for the wedge verdict and exactly WRONG for the
+   * work board: asking the agent a question would otherwise mark every runless
+   * in-progress card as being worked on. The board's question is narrower — "is
+   * something being REWRITTEN right now" — so it gets a clock advanced only by
+   * rows a mapper classified as write-class ({@link isWriteClassTool}).
+   */
+  last_write_activity_at: number
   /** Depth of nested in-flight turns; >0 ⇒ a turn is running. */
   turns_in_flight: number
 }
@@ -251,6 +263,7 @@ export class ActivityInspector {
         seq: 0,
         last_event_at: 0,
         last_real_activity_at: 0,
+        last_write_activity_at: 0,
         turns_in_flight: 0,
       }
       this.scopes.set(scope, b)
@@ -311,6 +324,10 @@ export class ActivityInspector {
     // liveness clock. If this line ever becomes unconditional, the panel starts
     // reporting wedged sessions as working — i.e. it reintroduces ISSUES #386.
     if (row.synthetic !== true) b.last_real_activity_at = at
+    // THE THIRD CLOCK (see ScopeBuffer). Only a mapper-classified write-class tool
+    // call advances it, so a pure conversation turn — turn_start, thinking, the
+    // reply itself — leaves it untouched and the board stays quiet.
+    if (row.write_class === true) b.last_write_activity_at = at
     this.onRecord?.(scope, ev)
     return ev
   }
@@ -333,6 +350,22 @@ export class ActivityInspector {
   turnFinished(scope: InspectorScopeKey): void {
     const b = this.buffer(scope)
     if (b.turns_in_flight > 0) b.turns_in_flight -= 1
+  }
+
+  /**
+   * O(1) evidence read for the board's derived inline activity
+   * (`work-board/inline-activity.ts`). Deliberately NOT `snapshot()`: that copies
+   * the whole event ring (~200 rows) and this runs on the rail/board read path per
+   * project per refresh.
+   *
+   * Deliberately the WRITE clock, not `last_real_activity_at`: the board claims a
+   * card is being worked, and only a write-class tool call is evidence of that.
+   * Returns 0 when the scope has never recorded one (including after a restart —
+   * the buffer is live-only, which is exactly the crashed-session semantics the
+   * board needs: a stale stored flag reads not-active).
+   */
+  lastWriteActivityAt(scope: InspectorScopeKey): number {
+    return this.scopes.get(scope)?.last_write_activity_at ?? 0
   }
 
   /** Point-in-time view for the HTTP snapshot the panel fetches on open. This is
@@ -380,6 +413,13 @@ export interface ActivityRowInput {
   body?: string
   source?: string
   synthetic?: boolean
+  /**
+   * TRUE for a tool call that MUTATES something (a file write/edit, a mutating
+   * shell command). Set by the mappers, never on the wire: it advances the
+   * board's write clock only ({@link ScopeBuffer.last_write_activity_at}) and
+   * changes nothing about how the row renders.
+   */
+  write_class?: boolean
 }
 
 /**
@@ -419,7 +459,14 @@ export function activityRowFromSubstrateEvent(ev: {
       return withBody({ kind: 'thinking', label: 'thinking' }, ev.text ?? '')
     case 'tool_call': {
       const named = humanizeToolName(ev.tool_name ?? 'tool')
-      return { kind: 'tool_start', label: named.label, ...sourceOf(named) }
+      // No arguments on this tap, so a shell call cannot be classified here and
+      // is left non-write (fails closed); a named write tool still counts.
+      return {
+        kind: 'tool_start',
+        label: named.label,
+        ...sourceOf(named),
+        ...(isWriteClassTool(ev.tool_name ?? '') ? { write_class: true } : {}),
+      }
     }
     case 'tool_result_ack':
       return { kind: 'tool_end', label: 'tool result' }
@@ -593,13 +640,223 @@ export function activityRowFromToolTap(input: {
   const content = isPre ? (input.args ?? '') : (input.result ?? input.args ?? '')
   const detail = summarize(input.detail !== '' ? input.detail : content)
   const body = clipBody(content)
+  const shellLabel = isPre ? commandLabelForShellTool(named.label, input.args) : null
   return {
     kind: isPre ? 'tool_start' : 'tool_end',
-    label: named.label,
+    label: shellLabel ?? named.label,
     ...sourceOf(named),
+    // The board's write clock. Classified from the RAW tool name + arguments,
+    // which only this mapper has — by the time a row reaches the ring, a Bash
+    // call has been relabelled to its command and the arguments are display text.
+    ...(isWriteClassTool(input.tool_name, input.args ?? input.detail) ? { write_class: true } : {}),
     ...(detail !== '' ? { detail } : {}),
     ...(body !== '' && body !== detail ? { body } : {}),
   }
+}
+
+const SHELL_TOOLS = new Set(['bash', 'shell', 'sh', 'zsh'])
+const MULTIPLEXERS = new Set(['bun', 'git', 'npm', 'pnpm', 'yarn', 'gh', 'docker'])
+const INTERPRETERS = new Set(['bash', 'sh', 'zsh', 'node', 'python', 'python3', 'ruby'])
+
+/** Tools whose whole purpose is to modify a file. Matched on the HUMANISED name
+ *  (lower-cased), so an MCP-namespaced `mcp__x__edit_file` classifies too. */
+const WRITE_CLASS_TOOLS = new Set([
+  'write',
+  'edit',
+  'multiedit',
+  'edit_file',
+  'write_file',
+  'create_file',
+  'notebookedit',
+  'notebook_edit',
+  'apply_patch',
+  'str_replace_editor',
+  'str_replace_based_edit_tool',
+])
+
+/** Leading shell words that only ever mutate the filesystem. */
+const WRITE_SHELL_COMMANDS = new Set([
+  'rm',
+  'rmdir',
+  'mv',
+  'cp',
+  'mkdir',
+  'touch',
+  'ln',
+  'chmod',
+  'chown',
+  'truncate',
+  'tee',
+  'patch',
+  'dd',
+])
+
+/** `git <sub>` forms that write the worktree, the index or a ref. */
+const WRITE_GIT_SUBCOMMANDS = new Set([
+  'add',
+  'am',
+  'apply',
+  'checkout',
+  'cherry-pick',
+  'clean',
+  'commit',
+  'init',
+  'merge',
+  'mv',
+  'push',
+  'rebase',
+  'reset',
+  'restore',
+  'revert',
+  'rm',
+  'stash',
+  'switch',
+  'tag',
+  'worktree',
+])
+
+/**
+ * Best-effort: pull the shell line out of a tap's rendered arguments. The hook
+ * renders a single-key argument object as the bare string but a multi-key one
+ * (Bash carries `command` + `description`) as pretty JSON, so both shapes arrive.
+ */
+function shellCommandFromArgs(args: string): string {
+  const t = args.trim()
+  if (t.startsWith('{')) {
+    try {
+      const parsed: unknown = JSON.parse(t)
+      if (parsed !== null && typeof parsed === 'object') {
+        const cmd = (parsed as { command?: unknown }).command
+        if (typeof cmd === 'string') return cmd
+      }
+    } catch {
+      // Fall through to the textual recovery below.
+    }
+    // CLIPPED JSON. The hook caps its rendered argument body (2000 chars), so a
+    // long multi-key Bash call — `git commit -m "<a very long message>"` — arrives
+    // truncated mid-string and never parses. Raw text would then be classified as
+    // `{`, i.e. not write-class: the tap would silently miss the single most
+    // common write there is. Recover the `command` value textually instead.
+    const at = /"command"\s*:\s*"/.exec(t)
+    if (at !== null) {
+      return t
+        .slice(at.index + at[0].length)
+        .replace(/\\n/g, '\n')
+        .replace(/\\t/g, ' ')
+        .replace(/\\(["'\\])/g, '$1')
+    }
+  }
+  return t
+}
+
+/** Quoted spans blanked out, so a `>` that is part of an ARGUMENT — `grep "a > b"`,
+ *  `awk '{if (a > b) print}'` — cannot be misread as the shell's own redirect. */
+function withoutQuotedSpans(segment: string): string {
+  return segment.replace(/'[^']*'|"(?:[^"\\]|\\.)*"/g, '""')
+}
+
+/** Redirect targets that write nothing worth reporting: the bit bucket, an fd dup
+ *  (`2>&1`), and scratch space. A build or test run told to drop its output in
+ *  `/tmp` is READ-ONLY work as far as the board is concerned — and it is exactly
+ *  what the agent is instructed to do with verbose commands, so counting it would
+ *  make "quiet means quiet" fail on every test run. */
+function isDiscardRedirectTarget(target: string): boolean {
+  if (target.startsWith('&')) return true
+  if (target.startsWith('/dev/')) return true
+  return target.startsWith('/tmp/') || target.startsWith('/var/tmp/')
+}
+
+/**
+ * Does this shell line mutate anything? Segment-wise so `git log | grep rm` is not
+ * mistaken for `rm`: each `;`/`|`/`&`-separated segment is judged on its LEADING
+ * word (after env assignments and a leading paren), plus two forms that hide the
+ * write in the arguments — an output redirect and `sed -i`.
+ *
+ * FAILS CLOSED BY DESIGN. Anything unrecognised is NOT write-class, so an exotic
+ * write goes unnoticed (the board simply keeps saying quiet) rather than a read
+ * being reported as work. Acceptance (c) — quiet means quiet — is the property
+ * worth protecting; a missed row costs at most a late ▶ suppression.
+ */
+export function isWriteClassShellCommand(command: string): boolean {
+  for (const raw of command.split(/[;|&\n]+/)) {
+    const segment = raw
+      .trim()
+      .replace(/^\(+\s*/, '')
+      .replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)+/, '')
+    if (segment === '') continue
+    // `> file` / `>> file` — the shell's own write verb, but ONLY once the quoted
+    // spans are gone and the target is a real file (see the two helpers above).
+    const bare = withoutQuotedSpans(segment)
+    for (const m of bare.matchAll(/(?:^|\s)\d?>>?\s*(&\d+|\S+)/g)) {
+      if (!isDiscardRedirectTarget(m[1] ?? '')) return true
+    }
+    const tokens = segment.split(/\s+/)
+    const head = (tokens[0] ?? '').toLowerCase().replace(/^.*\//, '')
+    if (WRITE_SHELL_COMMANDS.has(head)) return true
+    if (head === 'git' && WRITE_GIT_SUBCOMMANDS.has((tokens[1] ?? '').toLowerCase())) return true
+    if (head === 'sed' && tokens.slice(1).some((t) => /^-[a-z]*i$/.test(t) || t === '--in-place')) {
+      return true
+    }
+  }
+  return false
+}
+
+/**
+ * Is this tool call EVIDENCE OF A WRITE — the only thing the work board treats as
+ * proof that a card is being worked (`work-board/inline-activity.ts`)?
+ *
+ * The bar is deliberately higher than "the session did something". A question
+ * answered, a file read, a search — those advance `last_real_activity_at` and
+ * belong in the panel, but they are not somebody rewriting the repo, and letting
+ * them light the board up is the flag's original lie wearing a new hat.
+ */
+export function isWriteClassTool(tool_name: string, args?: string): boolean {
+  const label = humanizeToolName(tool_name).label.toLowerCase()
+  if (WRITE_CLASS_TOOLS.has(label)) return true
+  if (SHELL_TOOLS.has(label)) {
+    return args !== undefined && args !== '' && isWriteClassShellCommand(shellCommandFromArgs(args))
+  }
+  return false
+}
+
+/** Best-effort inline label for a shell call. Ambiguous control flow stays generic. */
+export function commandLabelForShellTool(tool: string, command: string | undefined): string | null {
+  if (!SHELL_TOOLS.has(tool.toLowerCase()) || command === undefined) return null
+  let s = command.trim()
+  if (s === '' || /^(case|function|select)\b/.test(s)) return null
+  s = s.replace(/^\(+\s*/, '')
+  s = s.replace(/^(?:[A-Za-z_][A-Za-z0-9_]*=(?:'[^']*'|"[^"]*"|\S+)\s+)+/, '')
+  s = s.replace(/^cd\s+(?:'[^']*'|"[^"]*"|\S+)\s*&&\s*/, '')
+  s = s.replace(/^set\s+(?:-[A-Za-z]+|-[A-Za-z]+\s+\S+|\+\S+)(?:\s+\S+)*?\s*;\s*/, '')
+  if (/^(for|while)\b/.test(s)) {
+    const match = s.match(/\bdo\s+([^;|&]+)/)
+    if (match === null) return null
+    s = match[1]!.trim()
+  } else if (/^if\b/.test(s)) {
+    const match = s.match(/^if\s+([^;]+)(?:;\s*then\b)?/)
+    if (match === null) return null
+    s = match[1]!.trim()
+  }
+  const segment = s.split('|', 1)[0]!.replace(/^\(+\s*/, '').trim()
+  const tokens = segment.match(/(?:"[^"]*"|'[^']*'|[^\s;&]+)/g)?.map((t) => t.replace(/^['"]|['"]$/g, '')) ?? []
+  while (tokens[0]?.startsWith('-')) tokens.shift()
+  if (tokens.length === 0) return null
+  let first = tokens.shift()!
+  first = first.split('/').pop() ?? first
+  if (INTERPRETERS.has(first) && tokens[0] !== undefined && !tokens[0].startsWith('-')) {
+    const script = tokens[0].split('/').pop()!
+    if (/\.[A-Za-z0-9]+$/.test(script)) return script
+  }
+  if (MULTIPLEXERS.has(first)) {
+    const meaningful = tokens.filter((t) => !t.startsWith('-'))
+    let sub = meaningful[0]
+    if (first === 'npm' && sub === 'run') sub = meaningful[1] === undefined ? 'run' : `run ${meaningful[1]}`
+    if (first === 'docker' && sub === 'compose') sub = 'compose'
+    if (sub === undefined) return null
+    const label = `${first} ${sub}`
+    return label.split(/\s+/).slice(0, 3).join(' ')
+  }
+  return first.length > 0 && !/[$`{}]/.test(first) ? first : null
 }
 
 /** The label every assistant-message row carries, from either source. Shared so the

@@ -39,6 +39,8 @@ export const GLOBAL_PROJECT_ID = ''
 const MAX_SERVICE_LEN = 128
 const MAX_LABEL_LEN = 256
 const MAX_TOKEN_LEN = 8192
+/** Matches the shortest value the diagnostic scrubbers treat as a secret. */
+export const PROJECT_CREDENTIAL_MIN_SECRET_CHARS = 16
 
 export type CredentialScope = 'project' | 'global'
 

@@ -21,10 +21,15 @@
 #                          be PERFORMED: `codex login status` failed after retries
 #                          (auth expired/unreachable), or there was NOTHING to
 #                          review (empty diff — see CODEX_REVIEW_EMPTY_DIFF below).
-#   exit 5   DEFERRED    — configured + authed, but the review call itself failed.
+#   exit 5   DEFERRED    — configured + authed, but the review call itself failed,
+#                          or codex exited 0 but produced an EMPTY final message —
+#                          including a content-policy REFUSAL (CODEX_REVIEW_REFUSED),
+#                          which `codex exec` reports as exit 0 + empty stdout + the
+#                          refusal on stderr.
 #
 # DEFERRED (3/5) means "configured, but NO REVIEW HAPPENED" — the call failed, or
-# there was nothing to review (empty diff) → the synthesis must
+# codex returned no review text (including a refusal), or there was nothing to
+# review (empty diff) → the synthesis must
 # NEVER silently APPROVE (mirror the legacy harness CODEX_REVIEW_PRECHECK_FAILED /
 # CODEX_REVIEW_TIMEOUT never-silent-downgrade). NOT_CONNECTED (10/11) is the
 # benign never-set-up path and degrades to Claude-only.
@@ -164,8 +169,10 @@ SCOPE YOUR VERDICT TO WHAT YOU ACTUALLY READ: say in your findings that you ${SC
 "
 fi
 
-PROMPT="You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
-Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.
+REVIEW_RUBRIC="${NEUTRON_CODEX_REVIEW_RUBRIC:-You are a CROSS-MODEL code reviewer (GPT-5 via the Codex CLI), giving an INDEPENDENT second opinion alongside Claude/Argus on a trident build.
+Review the git diff below for correctness, security, spec/as-built drift, and TEST-QUALITY (reject assertion-free / call-count-only tests; demand boundary coverage). Every finding needs EVIDENCE (file:line or a concrete repro) — verify before you assert.}"
+
+PROMPT="${REVIEW_RUBRIC}
 Respond with your findings, then END with a SINGLE final line, exactly one of:
   VERDICT: APPROVE
   VERDICT: REQUEST_CHANGES
@@ -177,35 +184,61 @@ ${DIFF}"
 # ── Run the review SYNCHRONOUSLY (never backgrounded) ─────────────────────────
 # `codex exec` is the CLI's non-interactive one-shot form. A test seam
 # (NEUTRON_CODEX_EXEC_CMD) replaces the real invocation so tests never call OpenAI.
+CODEX_STDERR_FILE=$(mktemp "${TMPDIR:-/tmp}/trident-codex-review-stderr.XXXXXX") || CODEX_STDERR_FILE=/dev/null
+# With the /dev/null fallback the refusal DIAGNOSIS degrades to the generic
+# empty-output message, but the fail-closed gate itself never degrades.
 if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
-  if printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD"; then
-    exit 0
+  REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD" 2>"$CODEX_STDERR_FILE")
+  CALL_EXIT=$?
+else
+  # Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
+  # diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
+  # ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
+  # PIN THE REVIEW MODEL. Unpinned, `codex exec` takes the CLI's default, and OpenAI
+  # moved auto-review to the cheapest 5.6 tier — so the "independent GPT-5 second
+  # opinion" this panelist exists to provide was quietly being served by the weakest
+  # available model. gpt-5.6-sol is the flagship tier with the strongest capability
+  # for this kind of judgement work.
+  #
+  # Overridable via CODEX_REVIEW_MODEL for a deployment that wants a different tier;
+  # set it to the EMPTY string to fall back to the CLI default (the `-` in `${VAR-x}`
+  # is deliberate — it substitutes only when UNSET, so an explicit empty value is
+  # respected rather than replaced).
+  REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
+  if [ -n "$REVIEW_MODEL" ]; then
+    set -- --model "$REVIEW_MODEL"
+  else
+    set --
   fi
-  echo "CODEX_REVIEW_CALL_FAILED: the codex review call failed. DEFERRED — do NOT treat as an approval." >&2
+  REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>"$CODEX_STDERR_FILE")
+  CALL_EXIT=$?
+fi
+
+# Replay the tool's own stderr so the operator/bridge errFile still sees it
+# (refusal text included).
+if [ "$CODEX_STDERR_FILE" != /dev/null ]; then cat "$CODEX_STDERR_FILE" >&2; fi
+if [ "$CALL_EXIT" -ne 0 ]; then
+  [ -n "$REVIEW_OUTPUT" ] && printf '%s\n' "$REVIEW_OUTPUT"
+  [ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
+  echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero (exit $CALL_EXIT). DEFERRED — do NOT treat as an approval." >&2
   exit 5
 fi
 
-# Pipe the prompt via STDIN (`codex exec -`), NOT as an argv entry: a near-cap
-# diff (up to DIFF_LINE_LIMIT lines) in a single argument can exceed the OS
-# ARG_MAX and fail before codex runs → a false DEFERRED (Codex review [P2]).
-# PIN THE REVIEW MODEL. Unpinned, `codex exec` takes the CLI's default, and OpenAI
-# moved auto-review to the cheapest 5.6 tier — so the "independent GPT-5 second
-# opinion" this panelist exists to provide was quietly being served by the weakest
-# available model. gpt-5.6-sol is the flagship tier with the strongest capability
-# for this kind of judgement work.
-#
-# Overridable via CODEX_REVIEW_MODEL for a deployment that wants a different tier;
-# set it to the EMPTY string to fall back to the CLI default (the `-` in `${VAR-x}`
-# is deliberate — it substitutes only when UNSET, so an explicit empty value is
-# respected rather than replaced).
-REVIEW_MODEL="${CODEX_REVIEW_MODEL-gpt-5.6-sol}"
-if [ -n "$REVIEW_MODEL" ]; then
-  set -- --model "$REVIEW_MODEL"
+# THE NEW GATE — exit 0 alone is NOT an approval. A content-policy refusal arrives as exit 0 +
+# EMPTY final message + the refusal on stderr, indistinguishable by exit code from
+# a clean review. An empty answer is a review that DID NOT HAPPEN. Same O(n)
+# whitespace case-pattern as the empty-diff guard (never ${VAR//...} — quadratic).
+case "$REVIEW_OUTPUT" in
+  *[![:space:]]*)
+    [ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
+    printf '%s\n' "$REVIEW_OUTPUT"
+    exit 0
+    ;;
+esac
+if grep -qi 'flagged for possible cybersecurity risk' "$CODEX_STDERR_FILE" 2>/dev/null; then
+  echo "CODEX_REVIEW_REFUSED: 'codex exec' exited 0 with an EMPTY final message and its stderr carries a content-policy refusal ('flagged for possible cybersecurity risk'). The reviewer was REFUSED — it did not review this diff, and 'no findings' would be false. DEFERRED — do NOT treat as an approval, and do NOT reword/retry the review to dodge the refusal: the operator must learn the review did not run." >&2
 else
-  set --
+  echo "CODEX_REVIEW_EMPTY_OUTPUT: 'codex exec' exited 0 but produced an EMPTY final message — no review text to parse, and no cause was measured on stderr. DEFERRED — do NOT treat as an approval." >&2
 fi
-if printf '%s' "$PROMPT" | codex exec "$@" -; then
-  exit 0
-fi
-echo "CODEX_REVIEW_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — do NOT treat as an approval." >&2
+[ "$CODEX_STDERR_FILE" != /dev/null ] && rm -f "$CODEX_STDERR_FILE"
 exit 5

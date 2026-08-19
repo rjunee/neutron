@@ -5,7 +5,7 @@
  * ◆ ADAPTED-AT-BOUNDARY). Every flag is kept verbatim INCLUDING the hidden
  * experimental `--dangerously-load-development-channels` (the dev-channel
  * injection seam) plus `--mcp-config`, `--settings`,
- * `--append-system-prompt-file`, `--add-dir`, `--model`. There is NO `-p` /
+ * `--append-system-prompt-file`, `--add-dir`, `--effort`, `--model`. There is NO `-p` /
  * `--print` — this is an interactive session, which is the whole point (the
  * June-15 billing cap exempts interactive Max sessions; see brief § 7).
  *
@@ -17,6 +17,41 @@
  * session UUID up-front via `--session-id <id>` (Neutron's deterministic
  * convention) instead of Nova's legacy `-n`.
  */
+
+/**
+ * Probed live against claude 2.1.198's own parser warning. An out-of-set value
+ * is silently ignored by the CLI, so tests pin membership.
+ */
+export const CLAUDE_EFFORT_VALUES = ['low', 'medium', 'high', 'xhigh', 'max'] as const
+
+// REASONING-EFFORT PIN — #345's twin, Claude side. Unpinned, the REPL runs at
+// whatever effort the harness default resolves to — a value no operator chose
+// and nothing echoes; an unset value that nothing reports is indistinguishable
+// from a wrong one. So it is pinned here, in the same module that pins `--model`.
+// Why 'high' and not the top tier: this ONE launcher spawns EVERY persistent
+// REPL — the orchestrator doing multi-hour recovery reasoning over git state
+// (not a cheap lane, which is why an explicit pin exists at all) AND the owner's
+// warm conversational chat, where a `max`/`xhigh` pin would tax every chat turn's
+// latency and budget. A heavy lane raises it per-substrate via `options.effort`,
+// or an operator via NEUTRON_REPL_EFFORT, without a code change. CAUTION (the
+// #345 value-not-key trap): claude 2.1.198 treats an unknown --effort value as a
+// WARNING and silently falls back to the default — the exact silent revert this
+// pin exists to prevent — so this literal must stay inside CLAUDE_EFFORT_VALUES
+// and the test pins set-membership. An explicitly EMPTY effort ('' via
+// options.effort or NEUTRON_REPL_EFFORT='') is a deliberate 'let the CLI choose'
+// → the flag is omitted (same contract as CODEX_BUILD_EFFORT='').
+export const DEFAULT_REPL_EFFORT = 'high'
+
+/**
+ * The ONE binding that feeds the argv now and the T2 launch record/registry
+ * stamp next (the same single-binding pattern as the model-floor `model` in
+ * spawn.ts), so the recorded value can never diverge from the spawned one.
+ */
+export function resolveReplEffort(requested?: string): string {
+  if (requested !== undefined) return requested
+  const fromEnv = process.env['NEUTRON_REPL_EFFORT']
+  return fromEnv !== undefined ? fromEnv : DEFAULT_REPL_EFFORT
+}
 
 export interface BuildReplArgvInput {
   /** Binary path. Default `process.env.CLAUDE_BIN ?? 'claude'`. */
@@ -39,6 +74,11 @@ export interface BuildReplArgvInput {
   appendSystemPromptFile: string
   /** Model id → `--model`. Emitted LAST so nothing shadows it. */
   model: string
+  /**
+   * Resolved effort level. `undefined` → DEFAULT_REPL_EFFORT so a caller that
+   * forgets still gets the pin; `''` → deliberately unpinned, flag omitted.
+   */
+  effort?: string
   /** Optional extra allowed dir → `--add-dir`. Typically the instance home. */
   addDir?: string
   /**
@@ -72,6 +112,8 @@ export interface BuildReplArgvInput {
    * `reply` tool is a development-channel tool, exempt from the permission gate).
    */
   allowedMcpTools?: ReadonlyArray<string>
+  /** Token budget to pass when the installed CLI advertises `--autocompact`. */
+  autocompactTokens?: number
 }
 
 /** Build the interactive `claude` argv as a plain string array (no shell, no
@@ -110,6 +152,11 @@ export function buildReplArgv(input: BuildReplArgvInput): string[] {
   if (input.addDir !== undefined) {
     argv.push('--add-dir', input.addDir)
   }
+  if (input.autocompactTokens !== undefined) {
+    argv.push('--autocompact', String(input.autocompactTokens))
+  }
+  const effort = input.effort ?? DEFAULT_REPL_EFFORT
+  if (effort !== '') argv.push('--effort', effort)
   // Model LAST so nothing shadows it (Nova invariant).
   argv.push('--model', input.model)
   return argv

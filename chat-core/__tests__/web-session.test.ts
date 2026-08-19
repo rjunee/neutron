@@ -34,7 +34,22 @@ class FakeSocket implements SocketLike {
   sentUserMessages(): Array<Record<string, unknown>> {
     return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>).filter((e) => e['type'] === 'user_message')
   }
+  /**
+   * FORWARD resume frames — `after_seq` with no `before_seq`. Deliberately NOT
+   * every `resume`: the frame now has a second form that asks BACKWARDS for
+   * history below a seq, and a session whose oldest applied seq is above 1 sends
+   * one of those per catch-up. Every assertion in this file is about the forward
+   * cursor, so this helper is the forward cursor; use {@link backwardsResumes} to
+   * assert on the history walk.
+   */
   resumeFrames(): Array<Record<string, unknown>> {
+    return this.allResumeFrames().filter((e) => e['before_seq'] === undefined)
+  }
+  /** BACKWARDS resume frames — the history walk (`before_seq` present). */
+  backwardsResumes(): Array<Record<string, unknown>> {
+    return this.allResumeFrames().filter((e) => e['before_seq'] !== undefined)
+  }
+  private allResumeFrames(): Array<Record<string, unknown>> {
     return this.sent.map((s) => JSON.parse(s) as Record<string, unknown>).filter((e) => e['type'] === 'resume')
   }
 }

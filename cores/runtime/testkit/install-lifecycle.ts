@@ -18,10 +18,8 @@ import { cpSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 
-import { Database } from 'bun:sqlite'
-
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { CoreInstallationsStore } from '../installations-store.ts'
@@ -72,9 +70,7 @@ export function createInstallLifecycleEnv(prefix: string): InstallLifecycleEnv {
   const dataDir = join(tmp, 'data')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(dataDir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const projectDb = ProjectDb.open(dbPath)
   const secretsStore = new SecretsStore({ data_dir: dataDir, db: projectDb })
   const audit = new SecretAuditLog({ db: projectDb })

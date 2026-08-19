@@ -27,7 +27,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import {
@@ -75,8 +75,8 @@ async function startGateway(opts: {
   adapter?: ConvertReminderToTaskAdapter | null
 }): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-reminders-convert-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = new ReminderStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
   const adapterCalls: ConvertReminderToTaskInput[] = []

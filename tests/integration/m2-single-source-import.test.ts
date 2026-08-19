@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import {
@@ -52,8 +52,8 @@ interface TestEnv {
 
 function buildEnv(): TestEnv {
   const tmp = mkdtempSync(join(tmpdir(), 'm2-single-source-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const buttonStore = new ButtonStore({ db })
   const stateStore = new InMemoryOnboardingStateStore()
   const transcript = new TranscriptWriter({

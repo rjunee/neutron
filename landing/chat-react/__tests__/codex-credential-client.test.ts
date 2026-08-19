@@ -100,11 +100,37 @@ describe('WebCodexCredentialClient', () => {
     expect((cap.calls[0]?.body as { auth: string }).auth).toContain('refresh_token')
   })
 
-  it('disconnectGlobal → DELETE /api/app/codex-auth', async () => {
+  it('disconnectAllSeats → the UNQUALIFIED DELETE, which now removes every seat', async () => {
+    // Renamed from `disconnectGlobal`. The route did not change; what the server
+    // does with it did — a bare DELETE maps to `disconnectAllAccounts`. A name
+    // that says "global" reads as "the global one" rather than "all of them",
+    // which is exactly how an unchanged button became destructive.
     const cap = capture(jsonRes({ ok: true, disconnected: true }))
     const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
-    await client.disconnectGlobal()
+    await client.disconnectAllSeats()
     expect(cap.calls[0]?.method).toBe('DELETE')
     expect(cap.calls[0]?.url).toBe(`${BASE}/api/app/codex-auth`)
+  })
+
+  it('disconnectSeat → DELETE scoped to ONE seat', async () => {
+    const cap = capture(jsonRes({ ok: true, disconnected: true }))
+    const client = new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: cap.fetchImpl })
+    await client.disconnectSeat('work')
+    expect(cap.calls[0]?.method).toBe('DELETE')
+    expect(cap.calls[0]?.url).toBe(`${BASE}/api/app/codex-auth?account=work`)
+  })
+
+  it('connectGlobal sends the seat name when given, and omits it when not', async () => {
+    // Omitting `account` is not neutral: the server resolves it to DEFAULT_SLOT
+    // and overwrites the first seat. Both shapes are pinned so neither drifts.
+    const named = capture(jsonRes({ ok: true, status: 'connected' }))
+    await new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: named.fetchImpl })
+      .connectGlobal('{"tokens":{}}', 'work')
+    expect((named.calls[0]?.body as { account?: string }).account).toBe('work')
+
+    const bare = capture(jsonRes({ ok: true, status: 'connected' }))
+    await new WebCodexCredentialClient({ base_url: BASE, token: TOKEN, fetchImpl: bare.fetchImpl })
+      .connectGlobal('{"tokens":{}}')
+    expect((bare.calls[0]?.body as { account?: string }).account).toBeUndefined()
   })
 })

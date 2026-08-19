@@ -32,7 +32,9 @@ import {
   httpProjectSegmentEncoded,
 } from './general-scope';
 
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed';
+/** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
+ *  and NEVER counted as completed — it is not a quieter `done`. */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived';
 
 export interface WorkBoardItem {
   id: string;
@@ -89,6 +91,8 @@ export interface RunProgress {
   pr: number | null;
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null;
   failure_reason: string | null;
+  /** Added after the base progress shape; optional for rolling-deploy frames. */
+  brief_alert?: string | null;
 }
 
 export interface CreateWorkBoardItemInput {
@@ -380,5 +384,6 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
     verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
+    brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,
   };
 }

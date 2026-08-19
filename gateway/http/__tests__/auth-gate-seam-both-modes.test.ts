@@ -44,7 +44,7 @@ import { join } from 'node:path'
 import type { Server, WebSocketHandler } from 'bun'
 import { exportJWK, generateKeyPair, importJWK, type KeyLike } from 'jose'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
@@ -393,8 +393,8 @@ let openDb: ProjectDb
 
 beforeEach(() => {
   openTmpDir = mkdtempSync(join(tmpdir(), 'neutron-c5b-seam-'))
+  seedMigratedDb(join(openTmpDir, 'project.db'))
   openDb = ProjectDb.open(join(openTmpDir, 'project.db'))
-  applyMigrations(openDb.raw())
 })
 
 afterEach(() => {

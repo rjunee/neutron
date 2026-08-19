@@ -35,6 +35,7 @@ import { registerWorkBoardToolSurface } from '@neutronai/work-board/agent-tool.t
 import { registerTridentBuildToolSurface } from '@neutronai/trident/work-board-build-tool.ts'
 import { registerCodexCredentialToolSurface } from '@neutronai/trident/codex-credential-tool.ts'
 import { registerCreateProjectToolSurface } from '../wiring/create-project-tool.ts'
+import { registerHostDeployToolSurface } from '../wiring/host-deploy-tool.ts'
 import { registerMessageSearchToolSurface } from '@neutronai/message-search/tool.ts'
 import { registerDispatchToolSurface } from '@neutronai/agent-dispatch/tool.ts'
 import { registerSkillForgeToolSurface } from '@neutronai/skill-forge/tool.ts'
@@ -61,14 +62,22 @@ import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
-import { TridentTickLoop, type TridentTerminalHook, type TridentTransitionHook } from '@neutronai/trident/tick.ts'
+import {
+  TridentTickLoop,
+  type TridentDeadLauncherLatch,
+  type TridentLivenessProbe,
+  type TridentTerminalHook,
+  type TridentTransitionHook,
+} from '@neutronai/trident/tick.ts'
 import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
 import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
 import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.ts'
+import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
+import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   buildFocusScoreRecomputeHandler,
@@ -88,6 +97,10 @@ import {
   buildIdleNudgeSweepHandler,
   registerIdleNudgeSweepCron,
 } from '../proactive/cron.ts'
+import {
+  buildEmailPipelinePollHandler,
+  registerEmailPipelineCron,
+} from '../cores/email-pipeline-wiring.ts'
 import type {
   IdleNudgeSweepDeps,
   ProactiveTopicCandidate,
@@ -119,6 +132,7 @@ import { WatchdogSupervisor } from '@neutronai/watchdog/supervisor.ts'
 import { type GatewayModule } from '../module-graph.ts'
 import type { CompositionInput } from './input/composition-input.ts'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const moduleLog = createLogger('core-modules')
 // Distinct subsystem tag for the tasks-composer wiring warnings (a boot-time
@@ -224,6 +238,15 @@ export function buildCoreModules(
           // #429 task 4 — thread the deterministic chat ack (composer-built,
           // durable+live app-ws seam). Absent → no post (unchanged behaviour).
           ...(input.work_board.chat_ack !== undefined ? { chatAck: input.work_board.chat_ack } : {}),
+          // T4 — thread the derived-inline-activity dep so `work_board_list`
+          // serves evidence truth (same closure the HTTP surface gets). Absent →
+          // raw stored-flag passthrough. Display-only; it gates nothing.
+          ...(input.work_board.derive_inline_active !== undefined
+            ? { deriveInlineActive: input.work_board.derive_inline_active }
+            : {}),
+          // The composer-built removal chokepoint — the SAME one the UI's X
+          // runs. Present → `work_board_remove` registers; absent → it does not.
+          ...(input.work_board.removal !== undefined ? { removal: input.work_board.removal } : {}),
         })
       }
       // Work Board Phase 2b — register the agent-native board-bound build
@@ -249,6 +272,16 @@ export function buildCoreModules(
       // `mcp__neutron__create_project`.
       if (input.create_project !== undefined) {
         registerCreateProjectToolSurface(reg, input.create_project.service)
+      }
+      // Owner-approved host deploy — register `host_deploy_request` +
+      // `host_deploy_status` so the agent can ASK for a deploy of the host this
+      // instance runs on. Registered unconditionally of any control-plane
+      // configuration: with no endpoint the tools answer `enabled:false` WITH
+      // the reason, because an option that silently disappears is how a missing
+      // capability stays invisible for weeks. The service getter is late-bound
+      // (see `install` below) — the graph's ApprovalManager does not exist yet.
+      if (input.host_deploy !== undefined) {
+        registerHostDeployToolSurface(reg, input.host_deploy.service)
       }
       return reg
     },
@@ -279,7 +312,15 @@ export function buildCoreModules(
   const approvalModule: GatewayModule<ApprovalManager> = {
     name: 'approval',
     deps: ['tools'],
-    init: () => new ApprovalManager(input.db, input.approval_notifier),
+    init: () => {
+      const manager = new ApprovalManager(input.db, input.approval_notifier)
+      // Host deploy — hand the service THIS manager instance (the one whose
+      // `tool_approvals` rows the owner's in-chat tap resolves). Installed here
+      // rather than passed as a value because the `tools` module, which
+      // registers the agent tools, initializes first.
+      input.host_deploy?.install({ approvals: manager })
+      return manager
+    },
   }
 
   const channelsModule: GatewayModule<ChannelRouter> = {
@@ -359,11 +400,11 @@ export function buildCoreModules(
     deps: ['approval'],
     init: (ctx) => {
       const store = new ReminderStore(input.db)
-      // P5.6 — when a push dispatcher is wired, attach it as the
-      // tick loop's `on_fired` hook so every fired reminder also
-      // emits a native push to every registered Expo device for the
-      // instance. The hook is failure-safe inside the tick loop, so a
-      // push outage cannot stop reminders from being marked fired.
+      // (The P5.6 note that used to sit here described attaching the push
+      // dispatcher as the tick's `on_fired` hook. That wiring is GONE — see the
+      // "what is NOT here any more" note below, which is now the only account of
+      // it. Leaving both left one file describing the wiring and contradicting
+      // itself twenty-five lines later.)
       const loopOpts: ConstructorParameters<typeof ReminderTickLoop>[0] = {
         store,
         dispatcher: input.reminder_dispatcher,
@@ -386,16 +427,32 @@ export function buildCoreModules(
           return tz !== null && isValidIanaTimezone(tz) ? tz : null
         },
       }
-      if (input.push_dispatcher !== undefined) {
-        loopOpts.on_fired = input.push_dispatcher
-      }
+      // NOTE what is NOT here any more: a reminder-fired PUSH hook. Until
+      // 2026-08-09 the composition's `push_dispatcher` was attached to the tick's
+      // `on_fired` and composed a notification from the reminder ROW — which for a
+      // ritual is the dispatch token `ritual:<id>`, so the owner's lock screen read
+      // `ritual:kaizen`. The tick cannot see the message the fire posted, so it was
+      // never a place a truthful chat notification could be built. It is composed
+      // by the ONE out-of-turn delivery seam instead (`gateway/http/deliver.ts` →
+      // its `notify` sink), which knows the posted text and the durable row id AND
+      // is shared by every producer, so a brief and a nudge notify the same way a
+      // fired reminder does.
       // Rituals (ISSUES #504) — install the ritual fire PLANNER now that the
       // graph's ApprovalManager exists. NOTE what is NOT here: the tick loop gets
       // no ritual option, because a ritual is not a special kind of fire. The
       // planner installs into the ONE `reminder_dispatcher` the composer already
       // built, which composes a ritual and a nudge through the same substrate call
-      // and posts both through the same delivery seam. Absent (LLM-less box) →
-      // every row composes as an ordinary nudge, which is fail-closed.
+      // and posts both through the same delivery seam.
+      //
+      // Absent (LLM-less box) → a row with NO `ritual_id` composes as an ordinary
+      // nudge; a RITUAL row is refused outright — it composes nothing, logs at error
+      // level and posts one plain-language notice (`reminders/dispatcher.ts:508`).
+      // This sentence used to read "every row composes as an ordinary nudge, which is
+      // fail-closed", which was true of the approved PROMPT and false of the
+      // NOTIFICATION: a ritual row's stored `message` IS the dispatch token
+      // `ritual:<id>`, so nudging it is how `ritual:kaizen` reached the owner's lock
+      // screen. Corrected in `dispatcher.ts` and `open/composer.ts` first; this was
+      // the third copy of the same claim and it was missed.
       if (input.init_ritual_planner !== undefined) {
         input.init_ritual_planner({
           approvals: ctx.graph.get<ApprovalManager>('approval'),
@@ -468,14 +525,15 @@ export function buildCoreModules(
       // a delivery error is still re-thrown so the loop's try/catch logs it.
       const runTerminalObserver = tridentWiring?.on_run_terminal
       // Work Board Phase 2b — RECONCILE the bound board item on a terminal run:
-      // clear its run binding (fork `⑂` goes dark) and set the lane from the
-      // outcome (done → completed history; failed/stopped → back to upcoming).
+      // keep its terminal evidence binding and set the lane from the outcome
+      // (done → completed history; failed/stopped → failed + retryable).
       // Keyed off `linked_run_id` via `detachRun` (idempotent + a no-op for an
       // unbound run). Best-effort observer — a board write outage must never
       // skip delivery nor un-terminate the run (the loop already transitioned
       // it). Composed with any skill-forge observer into one observer fn.
       const boardReconcile = buildBoardReconcileObserver(input.work_board?.store) ?? undefined
-      const observers = [boardReconcile, runTerminalObserver].filter(
+      // #335 — register the same terminal-build wake observer in the tick-loop chain.
+      const observers = [boardReconcile, runTerminalObserver, tridentWiring?.on_terminal_wake].filter(
         (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
       )
       // §F6a — the SAME assembly the out-of-band `terminate()` chokepoint uses,
@@ -491,6 +549,27 @@ export function buildCoreModules(
         runTransitionObserver === undefined
           ? {}
           : { on_transition: { onTransition: (run) => runTransitionObserver(run) } }
+      // The wake-on-change watcher's cadence, when the composition set one. Spread
+      // conditionally for the same reason as `on_transition`: absent means "the 2 s
+      // default", not "0". This is what makes the cadence CONFIGURABLE in production
+      // rather than only on the options type (Argus r3).
+      const watchOpt: { watch_interval_ms?: number } =
+        tridentWiring?.watch_interval_ms === undefined
+          ? {}
+          : { watch_interval_ms: tridentWiring.watch_interval_ms }
+      // The external signal observes the warm launcher, not the detached build.
+      // Route it through #267's durable crash latch so harvest-first continuation
+      // remains authoritative across gateway restarts.
+      const livenessOpt: {
+        probe_launcher_alive?: TridentLivenessProbe
+        latch_launcher_dead?: TridentDeadLauncherLatch
+      } =
+        tridentWiring?.probe_launcher_alive === undefined
+          ? {}
+          : {
+              probe_launcher_alive: tridentWiring.probe_launcher_alive,
+              latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
+            }
       let loop: TridentTickLoop
       // §F1 — the orchestrator's `drain()` (previously destructured away and
       // never called) settles every in-flight FIRE turn on shutdown. Captured
@@ -510,6 +589,12 @@ export function buildCoreModules(
           fire_workflow,
           db_path: input.db.path,
           run_host: tridentWiring.run_host ?? spawnCapture,
+          // The hang watchdog's positive-liveness reader (see `latest_stage_event_at`
+          // in orchestrator.ts). UNCONDITIONAL, and deliberately not behind a
+          // `tridentWiring` flag: the orchestrator already treats a null answer as
+          // "no evidence" and reaps exactly as before, so gating the wire-up would
+          // be how this fix ships green, tested, and inert in production.
+          latest_stage_event_at: (run_id) => store.latestStageEventAt(run_id),
         }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
@@ -531,6 +616,17 @@ export function buildCoreModules(
         if (tridentWiring.resolve_codex_home !== undefined) {
           orchestratorOpts.resolve_codex_home = tridentWiring.resolve_codex_home
         }
+        // The inner loop's GitHub READS: the store coordinates its per-command
+        // `gh` runner resolves the instance token from. Without these the probes
+        // fall back to bare `gh` — which on an unauthenticated box is exactly the
+        // 2026-08-14 failure (every readiness probe unreadable, every review
+        // deferred). Paths/handles only; the token is never wired through here.
+        if (tridentWiring.gh_data_dir !== undefined) {
+          orchestratorOpts.gh_data_dir = tridentWiring.gh_data_dir
+        }
+        if (tridentWiring.gh_owner_handle !== undefined) {
+          orchestratorOpts.gh_owner_handle = tridentWiring.gh_owner_handle
+        }
         // The KIMI K3 cross-model panelist. Absent → never runs (graceful).
         if (tridentWiring.resolve_kimi_configured !== undefined) {
           orchestratorOpts.resolve_kimi_configured = tridentWiring.resolve_kimi_configured
@@ -547,6 +643,23 @@ export function buildCoreModules(
         if (tridentWiring.resolve_reflection_context !== undefined) {
           orchestratorOpts.resolve_reflection_context = tridentWiring.resolve_reflection_context
         }
+        // THE LIVE FAN-OUT the TEST EXECUTION budget divides the box by, when it
+        // exceeds the planned fan-out (`DEFAULT_BUILD_FANOUT`, which is the constant
+        // that carries the guarantee — see `computeTestJobs`). Counts the launching
+        // run's OWN row too, so the divisor is the true number of builds sharing these
+        // cores. Without this line the whole chain is inert (the `resolve_phase_models`
+        // lesson — an unwired producer ships a feature whose every part works and which
+        // as a whole does nothing).
+        //
+        // ONLY THE BUILD PHASES COUNT — see `countActiveBuildRuns`, which is where the
+        // rule and its known over-count live, and which is unit-tested behaviourally.
+        orchestratorOpts.resolve_active_runs = () => countActiveBuildRuns(store)
+        orchestratorOpts.record_stage = (id, stage, meta) => {
+          // The stamp is telemetry: a ledger failure must never hold up or fail
+          // the fire it is describing, so swallow — but through the sanctioned
+          // wrapper, which counts the rejection instead of dropping it silently.
+          fireAndForget('trident_record_stage', store.recordStageEvent(id, stage, meta ?? null))
+        }
         const codexHome = tridentWiring.codex_home ?? process.env['NEUTRON_CODEX_HOME']
         if (codexHome !== undefined && codexHome.length > 0) {
           orchestratorOpts.codex_home = codexHome
@@ -559,14 +672,41 @@ export function buildCoreModules(
         // Ralph build re-fires a fresh inner iteration per remaining task.
         orchestratorOpts.persist_refire_reset = (id, patch) =>
           store.update(id, patch).then(() => {})
+        // "A gateway restart must not kill an in-flight build" — the crash-recovery
+        // claim. A gateway restart kills the warm `cc-trident-fire-*` REPL supervising
+        // a DETACHED build; without this seam the tick reaps the run to `failed` (it
+        // did exactly that to three healthy builds on 2026-08-14). Wired here, a
+        // crashed launcher is instead relaunched as a continuation from its pushed
+        // branch/PR/checkpoint, bounded by the durable `crash_recoveries` budget.
+        orchestratorOpts.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
+        // "An infrastructure failure must retry itself" — atomically spend the
+        // durable executor/transport retry budget and release the run slot.
+        orchestratorOpts.begin_infra_retry = (id) => store.beginInfraRetry(id)
         const orchestrator = buildTridentOrchestrator(orchestratorOpts)
-        loop = new TridentTickLoop({ store, step: orchestrator.step, on_terminal, ...transitionOpt })
+        loop = new TridentTickLoop({
+          store,
+          step: orchestrator.step,
+          on_terminal,
+          ...transitionOpt,
+          ...watchOpt,
+          ...livenessOpt,
+        })
         drain = orchestrator.drain
       } else {
-        loop = new TridentTickLoop({ store, deps: stubAdvanceDeps(), on_terminal, ...transitionOpt })
+        loop = new TridentTickLoop({
+          store,
+          deps: stubAdvanceDeps(),
+          on_terminal,
+          ...transitionOpt,
+          ...watchOpt,
+          ...livenessOpt,
+        })
       }
       // §F2 — REGISTER BEFORE START (failure-atomic; see reminders module).
-      loopRegistry.register(loop.describe())
+      // `describeAll`, not `describe`: trident owns up to THREE timers — the 90 s sweep,
+      // the 2 s wake-on-change watcher, and the 15 s liveness probe — and an
+      // unregistered timer is one the inventory reports as healthy by never mentioning it.
+      for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       loop.start()
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
@@ -795,6 +935,16 @@ export function buildCoreModules(
         const overnightCfg = input.onboarding_overnight_cron
         const handler = buildOvernightEngineHandler({
           db: input.db,
+          // Merge-mode detection needs the PUBLISHER'S credential, not the
+          // gateway's ambient `gh` state (which is empty by design — the token
+          // is injected per spawn). A composer that supplied no overnight config
+          // gets the honest "nothing wired" source, which refuses a GitHub-backed
+          // overnight build by NAME instead of asking a bare `gh` and getting a
+          // truthful answer about the wrong process. It is given no handle
+          // deliberately: the project slug is not an owner handle, and passing it
+          // here made the refusal name an identity that was never looked up.
+          publisher_credential:
+            overnightCfg?.publisher_credential ?? unwiredPublisherCredential(),
           ...(overnightCfg?.deliver !== undefined ? { deliver: overnightCfg.deliver } : {}),
           // The composer's topic beats the onboarding-row read (ISSUES #443 —
           // on Open that row never carries one, so the brief was skipped).
@@ -1124,6 +1274,24 @@ export function buildCoreModules(
           }
           registerIdleNudgeSweepCron(sweepRegister)
         }
+      }
+
+      // Email Core consolidation P1 — the `email-pipeline-poll` cron. Gated on
+      // the composition root supplying the bundle (`open/composer.ts`): the
+      // tick needs a Gmail client, the `deliver` seam, the owner's app topic
+      // and (optionally) the substrate LLM, none of which this module can
+      // reach. Absent ⇒ nothing registers, exactly like the proactive block
+      // above. Registration shape is the idle-nudge precedent.
+      if (input.email_pipeline !== undefined) {
+        const emailPipelineHandler = buildEmailPipelinePollHandler(input.email_pipeline)
+        registerEmailPipelineCron({
+          jobs: cronDeps.jobs,
+          handlers: cronDeps.handlers,
+          handler: emailPipelineHandler,
+          ...(input.email_pipeline.interval_ms !== undefined
+            ? { interval_ms: input.email_pipeline.interval_ms }
+            : {}),
+        })
       }
 
       let projection: ProjectionWriter | null = null

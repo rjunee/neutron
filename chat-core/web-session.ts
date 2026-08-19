@@ -24,7 +24,7 @@
 import { prefixedRandomId } from './ids.ts'
 import { SendQueue } from './send-queue.ts'
 import { InMemoryStore, type Store } from './store.ts'
-import { SyncEngine } from './sync-engine.ts'
+import { MAX_HISTORY_BACKFILL_ROUNDS, SyncEngine } from './sync-engine.ts'
 import {
   isTransientSystemNotice,
   normalizeEditUpdate,
@@ -32,6 +32,7 @@ import {
   normalizePromptResolved,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
+  parseHistoryGap,
   parseSessionReadyMaxSeq,
   type ChatMessage,
   type OutboundButtonChoice,
@@ -41,6 +42,10 @@ import {
   type ReactionAction,
 } from './types.ts'
 import { ChatWsClient, type ConnStatus, type SocketLike } from './ws-client.ts'
+// TYPE-ONLY, and that is a hard constraint on this file rather than a style
+// choice — see {@link DEFAULT_PRESENCE_REFRESH_MS}. A type import is erased, so
+// it adds no edge to the browser bundle's module graph.
+import type { AppWsInboundPresence } from '@neutronai/wire-types'
 
 /**
  * GAP-4 — default ack-timeout (ms). A `sent` message whose server echo hasn't
@@ -63,6 +68,46 @@ export const DEFAULT_ACK_TIMEOUT_MS = 15_000
  * double-resumes.
  */
 export const DEFAULT_RESUME_FALLBACK_MS = 2_000
+
+/**
+ * Web presence (2026-08-15) — how often a FOREGROUNDED web session re-declares
+ * itself, in ms. Must equal `WEB_PRESENCE_REFRESH_MS`
+ * (`@neutronai/wire-types/web-presence.ts`), from which the server derives the
+ * window it believes a `foreground` claim for.
+ *
+ * SO WHY IS IT A SECOND LITERAL RATHER THAN AN IMPORT? Because `chat-core` must
+ * not take a RUNTIME dependency on `@neutronai/wire-types`, and that is a
+ * measured constraint, not a preference. It had only ever imported that package
+ * as a TYPE (erased at build time); making the import a VALUE one put the leaf
+ * into the browser bundle's graph through `chat-core`'s own
+ * `node_modules/@neutronai/wire-types` link, and `Bun.build` then intermittently
+ * failed the whole `/chat-react.js` bundle with `No matching export in
+ * "wire-types/web-presence.ts"` for exports that are plainly there — but ONLY
+ * inside a loaded 100-file `bun test` process, never in isolation. Measured
+ * both ways on one machine and one commit: with the value import the bundle
+ * fails; with it removed, and with the SAME leaf imported as a value from
+ * `landing/chat-react/config.ts` instead, it succeeds. The web chat client
+ * 404s when that build fails, so this is not a test-only concern.
+ *
+ * THE DUPLICATION IS THEREFORE DELIBERATE AND MECHANICALLY GUARDED: the two
+ * numbers must agree or the client stops refreshing before the server expires
+ * it, so `chat-core/__tests__/web-presence-reporting.test.ts` asserts equality.
+ * A test can import both freely — a test is not bundled for the browser. Do not
+ * "fix" this by importing the constant here.
+ */
+export const DEFAULT_PRESENCE_REFRESH_MS = 20_000
+
+/**
+ * Build the presence control frame.
+ *
+ * Typed as {@link AppWsInboundPresence} — a TYPE-ONLY import, so the wire shape
+ * is enforced by the compiler with no runtime edge to `@neutronai/wire-types`.
+ * Drift the literal and the build reds; import the package's runtime builder and
+ * the browser bundle breaks (see {@link DEFAULT_PRESENCE_REFRESH_MS}).
+ */
+function presenceFrame(state: 'foreground' | 'background'): AppWsInboundPresence {
+  return { v: 1, type: 'presence', state }
+}
 
 /** Default single-shot timer that never keeps the host process alive (Node/Bun
  *  `unref`), so a pending ack/resume timer can't block a test run or a clean
@@ -114,6 +159,21 @@ export interface WebChatSessionOptions {
   /** GAP-5 — resume-fallback window (ms). Default {@link DEFAULT_RESUME_FALLBACK_MS};
    *  0 disables the fallback (session_ready remains the sole resume trigger). */
   resumeFallbackMs?: number
+  /**
+   * Web presence (2026-08-15) — how often a FOREGROUNDED session re-declares
+   * itself to the server (ms). Default {@link DEFAULT_PRESENCE_REFRESH_MS}; 0
+   * disables the repeat, which makes the server forget this client one
+   * `WEB_PRESENCE_TTL_MS` later and start notifying the owner's phone again.
+   *
+   * THAT DEGRADATION IS THE DESIGN, and it is why the repeat is a timer rather
+   * than a one-shot on the visibility edge. The server does not trust a
+   * `foreground` claim indefinitely — a browser killed without a close frame must
+   * not be able to silence the owner's phone forever — so a live client has to
+   * keep saying so. Stop saying it, for any reason, and the notifications come
+   * back. Every failure of this mechanism ends in a redundant buzz, never in
+   * silence.
+   */
+  presenceRefreshMs?: number
   /** Injectable single-shot timer (tests). Default: unref'd `setTimeout`. */
   setTimeoutFn?: (fn: () => void, ms: number) => unknown
   clearTimeoutFn?: (handle: unknown) => void
@@ -141,12 +201,33 @@ export class WebChatSession {
   private resumeFallbackHandle: unknown = null
   /** GAP-5 — whether resume+drain has already run for the CURRENT open. Reset to
    *  false on every (re)open; set true whenever `resumeAndFlush` runs (fallback OR
-   *  session_ready). Guarantees exactly one resume per open — a late session_ready
-   *  arriving AFTER the fallback fired does NOT resume/resend a second time,
-   *  UNLESS its stale-store reconcile actually reset the store (which needs a
-   *  fresh resume-from-0). */
+   *  session_ready). Guarantees exactly one FORWARD resume per open — a late
+   *  session_ready arriving AFTER the fallback fired does NOT resume/resend a
+   *  second time, UNLESS its stale-store reconcile actually reset the store (which
+   *  needs a fresh resume-from-0). It does NOT bound `resume` frames in general:
+   *  the BACKWARDS history walk sends more of them within the same open, capped
+   *  separately by {@link MAX_HISTORY_BACKFILL_ROUNDS}. Do not read this guard as
+   *  "one resume per socket" — that reading, applied to the mobile session which
+   *  has no guard at all, is what justified a lossy replay window. */
   private resumedThisOpen = false
+  /** Backwards-walk state, reset by every forward resume: how many pages of older
+   *  history this catch-up has asked for, and the lowest `before_seq` it asked
+   *  from. The count is the ceiling ({@link MAX_HISTORY_BACKFILL_ROUNDS}); the
+   *  floor is the liveness guard — a `history_gap` that does not STRICTLY descend
+   *  is ignored, so a server that repeated itself could not spin this client. */
+  private backfillRounds = 0
+  private backfillFloor: number | null = null
   private readonly resumeFallbackMs: number
+  /** Web presence — the owner's last reported visibility for THIS session.
+   *  Starts `true` because a session is constructed by a surface that is being
+   *  rendered; the surface corrects it on the first `visibilitychange`, and
+   *  `landing/chat-react/useNeutronChat.ts` also states it once on mount so a tab
+   *  opened in the background never reports a foreground it doesn't have. */
+  private active = true
+  /** Web presence — the pending re-declare timer (null while backgrounded, while
+   *  the socket is down, or when the refresh is disabled). */
+  private presenceHandle: unknown = null
+  private readonly presenceRefreshMs: number
   private readonly setTimeoutFn: (fn: () => void, ms: number) => unknown
   private readonly clearTimeoutFn: (handle: unknown) => void
 
@@ -163,6 +244,7 @@ export class WebChatSession {
     this.onFrame = opts.onFrame
     this.ackTimeoutMs = opts.ackTimeoutMs ?? DEFAULT_ACK_TIMEOUT_MS
     this.resumeFallbackMs = opts.resumeFallbackMs ?? DEFAULT_RESUME_FALLBACK_MS
+    this.presenceRefreshMs = opts.presenceRefreshMs ?? DEFAULT_PRESENCE_REFRESH_MS
     this.setTimeoutFn = opts.setTimeoutFn ?? defaultSetTimeout
     this.clearTimeoutFn = opts.clearTimeoutFn ?? ((h) => clearTimeout(h as never))
 
@@ -171,18 +253,29 @@ export class WebChatSession {
       createSocket:
         opts.createSocket ??
         ((url: string) => new WebSocket(url) as unknown as SocketLike),
-      // GAP-5 — on EVERY (re)open, guarantee resume + queue-drain runs EXACTLY
-      // once. Reset the per-open guard, then arm a fallback that fires resume+drain
-      // if the server's session_ready (the fast path, in handleInbound) never lands.
+      // GAP-5 — on EVERY (re)open, guarantee the FORWARD resume + queue-drain runs
+      // EXACTLY once. Reset the per-open guard, then arm a fallback that fires
+      // resume+drain if the server's session_ready (the fast path, in
+      // handleInbound) never lands. (The backwards history walk is bounded by its
+      // own round budget, not by this guard.)
       onOpen: () => {
         this.resumedThisOpen = false
         this.armResumeFallback()
+        // Web presence — a fresh connection carries NO server-side presence
+        // state (it is keyed per connection, and this one is new), so the
+        // declaration has to be re-made on every open, not only on a visibility
+        // EDGE. Without this a reconnect after a network flap would leave a
+        // foregrounded tab looking absent for the rest of its life.
+        this.reportPresence()
       },
       // GAP-5 / FIX 2 — the socket is gone: cancel any pending resume fallback so
       // it can't fire resume+drain on a dead socket (a dropped send whose flush
       // callback throws would otherwise become an unhandled rejection).
       onClose: () => {
         this.clearResumeFallback()
+        // Web presence — nothing to re-declare to; the next `onOpen` restates it.
+        // (The server has already forgotten this connection on its own `close`.)
+        this.clearPresenceRefresh()
       },
       onMessage: (data) => {
         void this.handleInbound(data)
@@ -204,9 +297,20 @@ export class WebChatSession {
     this.clearAllTimers()
   }
 
-  /** AppState bridge — call on focus/blur / visibilitychange. */
+  /**
+   * AppState bridge — call on focus/blur / visibilitychange.
+   *
+   * Web presence (2026-08-15) — this is ALSO where the owner's attention is
+   * reported to the server, so it can decline to buzz his phone about a message
+   * he is reading right here. Unconditional: `ChatWsClient.setActive`
+   * short-circuits when the value hasn't changed, but the surface also calls this
+   * on a project switch and after a remount, and a repeated declaration is
+   * exactly the refresh the server's TTL wants.
+   */
   setActive(active: boolean): void {
+    this.active = active
     this.ws.setActive(active)
+    this.reportPresence()
   }
 
   /**
@@ -324,6 +428,14 @@ export class WebChatSession {
       }
       return
     }
+    // The server admitting its replay was TRUNCATED: rows below `older_than` were
+    // not sent. Ask for the page below it — this is the only path by which a
+    // transcript longer than one replay page ever completes.
+    const historyGap = parseHistoryGap(data)
+    if (historyGap !== null) {
+      this.requestHistoryBackfill(historyGap)
+      return
+    }
     // Track B Phase 4 — a receipt_update carries the latest delivered/read
     // aggregate for an already-applied message. Merge it (set-union) onto the
     // stored row so the bubble's tick advances. No-op if the message isn't
@@ -404,12 +516,33 @@ export class WebChatSession {
    * after reconnect re-reports it because the id only enters {@link readSent}
    * once a frame is actually accepted.
    */
-  markRead(messageIds: readonly string[]): void {
+  /**
+   * Report read messages. Best-effort: an id is recorded ONLY when the socket
+   * accepted the frame, so a send that failed (commonly: the socket is still
+   * connecting right after a project switch) is retried on the next call.
+   *
+   * RETURNS THE IDS ACTUALLY SENT. That retry only works if callers keeping their
+   * own ledger fill it from this RETURN rather than from the argument they passed
+   * — filling it from the argument marks a failed send as done and removes the id
+   * from every later call, so the receipt is never sent again and the unread badge
+   * stalls until a reload. Already-sent ids are included in the return: they are
+   * confirmed sent, which is what a caller's ledger is asking about.
+   */
+  markRead(messageIds: readonly string[]): readonly string[] {
+    const accepted: string[] = []
     for (const message_id of messageIds) {
-      if (message_id.length === 0 || this.readSent.has(message_id)) continue
+      if (message_id.length === 0) continue
+      if (this.readSent.has(message_id)) {
+        accepted.push(message_id)
+        continue
+      }
       const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' }
-      if (this.ws.send(env)) this.readSent.add(message_id)
+      if (this.ws.send(env)) {
+        this.readSent.add(message_id)
+        accepted.push(message_id)
+      }
     }
+    return accepted
   }
 
   /**
@@ -507,6 +640,32 @@ export class WebChatSession {
     }, this.topic_id)
     this.armAckTimersFor(flushed)
     if (flushed.length > 0) this.emitChange()
+    // LAST, behind the queue drain: history is never more urgent than the owner's
+    // undelivered sends. A fresh budget per forward resume, then one backwards
+    // request if this device's own oldest applied seq shows history below it — the
+    // server can only report a gap for a page it just sent, so without this local
+    // test a walk that ran out of budget on one open could never be picked up on
+    // the next.
+    this.backfillRounds = 0
+    this.backfillFloor = null
+    const backfillFrom = await this.engine.backfillFrom(this.topic_id)
+    if (backfillFrom !== null) this.requestHistoryBackfill(backfillFrom)
+  }
+
+  /**
+   * Ask for the page of history below `before_seq` — one round of the backwards
+   * walk. Refuses to run past {@link MAX_HISTORY_BACKFILL_ROUNDS} rounds, and
+   * refuses any bound that does not strictly descend, so the walk always
+   * terminates. A send that fails (socket gone) is not retried here: the next
+   * forward resume restarts the walk from the store.
+   */
+  private requestHistoryBackfill(before_seq: number): void {
+    if (before_seq <= 1) return
+    if (this.backfillRounds >= MAX_HISTORY_BACKFILL_ROUNDS) return
+    if (this.backfillFloor !== null && before_seq >= this.backfillFloor) return
+    this.backfillFloor = before_seq
+    this.backfillRounds += 1
+    this.ws.send(this.engine.backfillRequest(before_seq))
   }
 
   private async flush(): Promise<void> {
@@ -583,8 +742,56 @@ export class WebChatSession {
     this.ackTimers.delete(client_msg_id)
   }
 
+  /**
+   * Web presence — state the current visibility to the server and (re)arm the
+   * repeat while foregrounded.
+   *
+   * A no-op on a socket that isn't open: `ChatWsClient.send` returns false and
+   * the next `onOpen` restates it. Backgrounding sends its frame and stops the
+   * repeat — the server would expire us anyway, but saying so makes the phone
+   * start notifying immediately rather than a TTL later, which is the whole
+   * point of the frame the owner's tab sends as it goes away.
+   */
+  private reportPresence(): void {
+    this.clearPresenceRefresh()
+    this.ws.send(presenceFrame(this.active ? 'foreground' : 'background'))
+    if (this.active) this.armPresenceRefresh()
+  }
+
+  /**
+   * Web presence — re-declare `foreground` every {@link presenceRefreshMs}.
+   *
+   * A CHAINED SINGLE-SHOT, not an interval, so it shares the injectable-timer
+   * testability of the resume fallback above. It does NOT re-arm across a closed
+   * socket: a dead connection's presence is the server's to forget, and the
+   * reconnect's `onOpen` is what restates it.
+   *
+   * DELIBERATELY NOT THE TRANSPORT HEARTBEAT. That ping is idle-driven — any
+   * inbound frame reschedules it — so it falls silent on a socket carrying a
+   * streaming reply, i.e. exactly while the owner sits watching the answer he is
+   * about to be pointlessly notified about.
+   */
+  private armPresenceRefresh(): void {
+    if (this.presenceRefreshMs <= 0) return
+    this.presenceHandle = this.setTimeoutFn(() => {
+      this.presenceHandle = null
+      if (!this.active) return
+      if (this.ws.getStatus() !== 'open') return
+      this.ws.send(presenceFrame('foreground'))
+      this.armPresenceRefresh()
+    }, this.presenceRefreshMs)
+  }
+
+  private clearPresenceRefresh(): void {
+    if (this.presenceHandle !== null) {
+      this.clearTimeoutFn(this.presenceHandle)
+      this.presenceHandle = null
+    }
+  }
+
   private clearAllTimers(): void {
     this.clearResumeFallback()
+    this.clearPresenceRefresh()
     for (const handle of this.ackTimers.values()) this.clearTimeoutFn(handle)
     this.ackTimers.clear()
   }

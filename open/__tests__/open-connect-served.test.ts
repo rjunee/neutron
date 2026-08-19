@@ -41,9 +41,10 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { resolveBootConfig } from '@neutronai/config/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
@@ -59,6 +60,7 @@ const SAVED_ENV_KEYS = [
   'NEUTRON_LANDING_STATIC_DIR',
   'NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET',
   'NEUTRON_CONNECT_PUBLIC_BASE_URL',
+  'NEUTRON_PORT',
   'ANTHROPIC_API_KEY',
   'CLAUDE_CODE_OAUTH_TOKEN',
   'NOTIFY_SOCKET',
@@ -103,16 +105,27 @@ afterEach(async () => {
   rmSync(tmpDir, { recursive: true, force: true })
 })
 
-async function startHarness(): Promise<Harness> {
+/**
+ * Compose Open the way the boot shell does, optionally passing the FROZEN CONFIG.
+ *
+ * `open/server.ts` always passes one (`buildOpenGraphComposer({ env, config, … })`),
+ * so a harness that omits it is testing a shape production never runs. Most tests
+ * here do not care; the invite-origin test does, because the port reaches the
+ * composer THROUGH that config and nowhere else.
+ */
+async function startHarness(opts: { withConfig?: boolean } = {}): Promise<Harness> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const nowIso = new Date().toISOString()
   await db.run(
     `INSERT INTO projects (id, name, description, persona, privacy_mode, billing_mode, created_at, updated_at)
      VALUES (?, 'Connect Test', NULL, NULL, 'private', 'personal', ?, ?)`,
     [PROJECT_ID, nowIso, nowIso],
   )
-  const composer = buildOpenGraphComposer({ env: process.env })
+  const composer =
+    opts.withConfig === true
+      ? buildOpenGraphComposer({ env: process.env, config: resolveBootConfig(process.env) })
+      : buildOpenGraphComposer({ env: process.env })
   const composition = await composer({ db, project_slug: OWNER })
   const graph = await composeProductionGraph(composition)
   if (graph.fetch === undefined || graph.websocket === undefined) {
@@ -204,6 +217,96 @@ describe('ISSUES #421 — a self-hosted Open install SERVES Connect, gated on it
     const body = (await health.json()) as { status?: string; receiving_instance_slug?: string }
     expect(body.status).toBe('ok')
     expect(body.receiving_instance_slug).toBe(OWNER)
+  })
+
+  // THE FALLBACK ORIGIN — the case every other test in this file skips past by
+  // declaring a public base URL. It is also the ONLY origin a LAN collaborator
+  // gets, so the port in it has to be the port this process actually bound.
+  //
+  // The composer used to build it from `options.config?.port ?? Number(env
+  // ['NEUTRON_PORT'] ?? 8787)`. Two defects in one expression, and the harness
+  // here reaches both because it passes no `config`: (a) `??` does not fall
+  // through on `''`, so a BLANK `NEUTRON_PORT` reached `Number('')`, which is 0
+  // rather than NaN, and the invite advertised `:0` — a port nothing serves —
+  // while the listener bound 7800; (b) with `NEUTRON_PORT` absent it advertised
+  // 8787, which nothing in this tree ever listens on either.
+  //
+  // Asserted on the ACCEPT URL the owner actually hands out, not on the resolver,
+  // because the resolver was never the broken part — the LINE THAT CALLS IT was,
+  // and a unit test over the resolver is exactly the proof that passed while this
+  // was wrong.
+  // THE FALLBACK ORIGIN — the case every other test in this file skips past by
+  // declaring a public base URL. It is also the ONLY origin a LAN collaborator
+  // gets, so the port in it has to be the port this process actually bound.
+  //
+  // The composer built it from `options.config?.port ?? Number(env['NEUTRON_PORT']
+  // ?? 8787)`. Two defects in one expression, and this harness reaches both:
+  //   (a) `??` does not fall through on `''`, so a BLANK `NEUTRON_PORT` reached
+  //       `Number('')` — which is 0, not NaN — and the invite advertised `:0`, a
+  //       port nothing serves, while the listener bound 7800;
+  //   (b) with `NEUTRON_PORT` ABSENT it advertised 8787, a port nothing in this
+  //       tree ever listens on.
+  //
+  // Asserted on the ACCEPT URL the owner actually hands out rather than on
+  // `resolveConnectBaseUrlWithSource`, because the resolver was never the broken
+  // part — the LINE THAT CALLS IT was, and a unit test over the resolver is
+  // exactly the proof that stayed green while this was wrong. Composed WITH the
+  // frozen config because `open/server.ts` always passes one, so the port travels
+  // its real route: `resolveBootConfig` -> `config.port` -> this fallback.
+  //
+  // ONE HARNESS PER TEST, deliberately: `beforeEach` mints one temp dir and one
+  // database, and `startHarness` inserts a fixed project id, so a loop that
+  // composes twice inside one test dies on `UNIQUE constraint failed: projects.id`
+  // (hit while writing this). Split cases also name which input regressed.
+  test('fallback origin: an ABSENT NEUTRON_PORT advertises the bound default, not the phantom 8787', async () => {
+    delete process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL']
+    delete process.env['NEUTRON_PORT']
+    harness = await startHarness({ withConfig: true })
+    const { acceptUrl } = await issueInvite(harness)
+    expect(new URL(acceptUrl).origin).toBe('http://127.0.0.1:7800')
+    expect(acceptUrl).not.toContain('8787')
+  })
+
+  test('fallback origin: an EMPTY NEUTRON_PORT does not coerce to :0 — the pre-existing live defect', async () => {
+    delete process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL']
+    process.env['NEUTRON_PORT'] = ''
+    harness = await startHarness({ withConfig: true })
+    const { acceptUrl } = await issueInvite(harness)
+    expect(new URL(acceptUrl).origin).toBe('http://127.0.0.1:7800')
+    // Named rather than left to the equality above: `:0` is the specific wrong
+    // value, and it is wrong in a way the owner cannot see from this box — the
+    // server is up and only the link they handed out is dead.
+    expect(acceptUrl).not.toContain('127.0.0.1:0')
+  })
+
+  test('fallback origin: a WHITESPACE-ONLY NEUTRON_PORT reaches the same answer, and does not brick the boot', async () => {
+    delete process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL']
+    process.env['NEUTRON_PORT'] = '   '
+    // This composes at all only because `optionalIntKnob` now reads a blank as
+    // unset; before that `resolveBootConfig` threw here. So this case pins BOTH
+    // halves — the parse and the origin it feeds.
+    harness = await startHarness({ withConfig: true })
+    const { acceptUrl } = await issueInvite(harness)
+    expect(new URL(acceptUrl).origin).toBe('http://127.0.0.1:7800')
+    expect(acceptUrl).not.toContain('127.0.0.1:0')
+  })
+
+  test('fallback origin CONTROL: a REAL NEUTRON_PORT still reaches the invite', async () => {
+    // Without this, every assertion above would also pass for a composer that
+    // hardcoded 7800 and ignored the environment entirely.
+    delete process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL']
+    process.env['NEUTRON_PORT'] = '9123'
+    harness = await startHarness({ withConfig: true })
+    expect(new URL((await issueInvite(harness)).acceptUrl).origin).toBe('http://127.0.0.1:9123')
+  })
+
+  test('fallback origin CONTROL: a DECLARED public base URL still wins over the derived one', async () => {
+    process.env['NEUTRON_CONNECT_PUBLIC_BASE_URL'] = 'https://connect.example.com'
+    process.env['NEUTRON_PORT'] = '9123'
+    harness = await startHarness({ withConfig: true })
+    expect(new URL((await issueInvite(harness)).acceptUrl).origin).toBe(
+      'https://connect.example.com',
+    )
   })
 
   test('END TO END: a guest redeems the invite and posts a turn that is accepted', async () => {

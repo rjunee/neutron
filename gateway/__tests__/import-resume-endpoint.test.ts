@@ -19,7 +19,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   buildImportResumeHandler,
@@ -96,8 +96,8 @@ function makeHandler(opts: { auth?: (req: Request) => boolean } = {}) {
 
 beforeEach(async () => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-resume-endpoint-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   stateStore = new SqliteOnboardingStateStore({ db })
   runnerStartCalls = 0
   payloadResolveCalls = 0

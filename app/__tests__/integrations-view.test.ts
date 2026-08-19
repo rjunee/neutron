@@ -16,6 +16,10 @@ import {
 
 const RESPONSE: IntegrationsResponse = {
   ok: true,
+  scope: {
+    kind: 'cores',
+    description: 'This list covers bundled Core credential slots only.',
+  },
   oauth: [
     {
       kind: 'oauth',

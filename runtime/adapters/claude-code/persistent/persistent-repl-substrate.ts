@@ -74,6 +74,7 @@ export {
   startModelUpdateWatchdogForInstance,
   peekModelUpdateWatchdogForTest,
   getReplRegistrySnapshot,
+  probeLauncherGenerationAlive,
   poolHasSessionForTest,
   requestSessionCompact,
   peekSizeWatchdogForTest,

@@ -35,7 +35,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
@@ -141,8 +141,8 @@ beforeEach(async () => {
   priorCookieSecret = process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET']
   process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'open-test-secret-0123456789'
   home = createIsolatedHome({ slug: 'owner' })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   // The owner has FINISHED onboarding — the state the loop occurred in.
   db.raw().run(
     `INSERT INTO onboarding_state (project_slug, user_id, phase, phase_state_json,

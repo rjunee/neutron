@@ -221,3 +221,79 @@ describe('groupReactions (Track B Phase 4)', () => {
     expect(groupReactions(agentMsg({ message_id: 'a1' }))).toEqual([]);
   });
 });
+
+describe('agent_typing — the TURN-ACTIVITY signal, not the text-stream signal', () => {
+  // The owner reported twice that a live turn showed no dots on mobile. The
+  // server had been emitting `agent_typing` start/end around every live turn all
+  // along and this reducer ignored it, so the indicator was driven only by
+  // streamed text — and a turn spending thirty minutes in tool calls streams
+  // none. These tests pin the frame that fixes that.
+  it('start turns typing ON with no message_id present at all', () => {
+    const next = foldStreamFrame(emptyStreamState(), { type: 'agent_typing', state: 'start' });
+    expect(next.typing).toBe(true);
+    // The whole bug in one assertion: this frame has no message_id, and the
+    // reducer's guard rejects anything without one. A handler placed below that
+    // guard would leave this false.
+    expect(Object.keys(next.buffers)).toHaveLength(0);
+  });
+
+  it('a five-minute tool-only turn stays visible without a single text partial', () => {
+    const started = foldStreamFrame(emptyStreamState(), {
+      type: 'agent_typing', state: 'start', ts: 1,
+    });
+    const afterFiveMinutes = foldStreamFrame(started, {
+      type: 'activity_event', kind: 'tool', ts: 5 * 60_000 + 1,
+    });
+    expect(afterFiveMinutes.typing).toBe(true);
+    expect(Object.keys(afterFiveMinutes.buffers)).toHaveLength(0);
+  });
+
+  it('end turns typing OFF when nothing is streaming', () => {
+    const started = foldStreamFrame(emptyStreamState(), { type: 'agent_typing', state: 'start' });
+    // Assert the PRECONDITION, not just the result. Without this line the test
+    // passes vacuously whenever `start` is broken — false stays false — which a
+    // mutation run proved: moving the branch below the message_id guard killed
+    // only the start test and left this one green.
+    expect(started.typing).toBe(true);
+    const ended = foldStreamFrame(started, { type: 'agent_typing', state: 'end' });
+    expect(ended.typing).toBe(false);
+  });
+
+  it('end does NOT clear the dots while a partial is still buffered', () => {
+    const started = foldStreamFrame(emptyStreamState(), { type: 'agent_typing', state: 'start' });
+    const streaming = foldStreamFrame(started, {
+      type: 'agent_message_partial',
+      message_id: 'm1',
+      body_delta: 'half a sen',
+      ts: 1,
+    });
+    const ended = foldStreamFrame(streaming, { type: 'agent_typing', state: 'end' });
+    // A turn-end that outruns its own stream must not strand a half-rendered
+    // bubble with no indicator above it.
+    expect(ended.typing).toBe(true);
+    expect(ended.buffers['m1']?.body).toBe('half a sen');
+  });
+
+  it('an unknown state is ignored rather than guessed', () => {
+    const base = foldStreamFrame(emptyStreamState(), { type: 'agent_typing', state: 'start' });
+    const weird = foldStreamFrame(base, { type: 'agent_typing', state: 'sideways' });
+    expect(weird).toBe(base);
+  });
+
+  it('returns the SAME reference when nothing changes, so callers can skip a re-render', () => {
+    const started = foldStreamFrame(emptyStreamState(), { type: 'agent_typing', state: 'start' });
+    expect(foldStreamFrame(started, { type: 'agent_typing', state: 'start' })).toBe(started);
+  });
+
+  it('positive control — a partial still drives typing on its own', () => {
+    // If this ever fails, the suite above proves nothing: it would mean the
+    // reducer had stopped reacting to the frame it always handled.
+    const next = foldStreamFrame(emptyStreamState(), {
+      type: 'agent_message_partial',
+      message_id: 'm9',
+      body_delta: 'x',
+      ts: 1,
+    });
+    expect(next.typing).toBe(true);
+  });
+});

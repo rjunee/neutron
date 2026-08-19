@@ -2,7 +2,6 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
 import {
   CapabilityDeniedError,
@@ -11,7 +10,7 @@ import {
 } from '@neutronai/cores-runtime'
 import type { NeutronManifest } from '@neutronai/cores-sdk'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
 
@@ -31,9 +30,7 @@ const OWNER = 't1'
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'email-managed-core-tools-'))
   const dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   projectDb = ProjectDb.open(dbPath)
   audit = new SecretAuditLog({ db: projectDb })
 })

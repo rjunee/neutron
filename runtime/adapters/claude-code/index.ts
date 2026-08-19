@@ -25,6 +25,8 @@
 import { mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
+import { createLogger } from '@neutronai/logger'
+
 import type { Substrate } from '../../substrate.ts'
 import {
   createPersistentReplSubstrate,
@@ -36,6 +38,7 @@ import {
   type RecoveredReply,
 } from './persistent/persistent-repl-substrate.ts'
 import type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+import type { ModelFloorNotice } from './persistent/model-floor.ts'
 import type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 import type { SettingsPermissions } from './persistent/build-settings.ts'
 
@@ -46,11 +49,14 @@ export { injectPersistentReplActiveTurn } from './persistent/persistent-repl-sub
 // the `onDeadTurnNotice` / `onSizeAlert` sinks imports them from THIS adapter
 // boundary (never a deep `persistent/*` path).
 export type { DeadTurnNotice } from './persistent/api5xx-dead-turn-watcher.ts'
+export type { ModelFloorNotice } from './persistent/model-floor.ts'
 export type { SizeSeverity } from './persistent/session-size-watchdog.ts'
 // Task 6 (T5 write-containment) — surface the per-session `permissions` shape at
 // the adapter boundary so a gateway caller wiring a ritual write-containment
 // substrate imports it from HERE, never a deep `persistent/*` path.
 export type { SettingsPermissions } from './persistent/build-settings.ts'
+
+const log = createLogger('claude-code-substrate')
 
 export interface ClaudeCodeSubstrateOptions {
   /**
@@ -123,6 +129,25 @@ export interface ClaudeCodeSubstrateOptions {
    * this can slow a kill but never prevent one.
    */
   turn_inactivity_ms?: number
+  /**
+   * FRONTIER-MODEL FLOOR → `PersistentReplSubstrateOptions.frontierModelFloor`.
+   * Set from `SubstrateProfile.frontier_model_floor`; absent ⇒ off, so every
+   * deliberate `FAST_MODEL` utility caller is byte-for-byte unchanged. Marks a
+   * substrate as owner-facing conversational: its spawns are clamped up to the
+   * frontier model when the resolved id names a known lower tier, whatever the
+   * REPL registry row said. See the field's docblock in `persistent/types.ts`
+   * and the mechanism in `persistent/model-floor.ts`.
+   */
+  frontier_model_floor?: boolean
+  /**
+   * FLOOR-CLAMP NOTICE → `PersistentReplSubstrateOptions.onModelFloorApplied`.
+   * Fired when the floor above actually refused a lower-tier model. Forwarded
+   * here for the same reason as the other notice seams: a caller built through
+   * `createClaudeCodeSubstrateAuto` could otherwise not deliver it, and the clamp
+   * would degrade to a stderr line the owner never sees — which is exactly how
+   * the original degradation stayed invisible.
+   */
+  onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /**
    * S3 §2 — conversational warm-pool namespace. The persistent substrate folds
    * these into its pool key so distinct (user, project) sessions never collapse
@@ -250,6 +275,97 @@ export function deriveReplSupervisionPaths(home: string): ReplSupervisionPaths {
 }
 
 /**
+ * Normalize the substrate's two home-shaped inputs ONCE, so the child's working
+ * directory and the supervision home cannot disagree about the same value.
+ *
+ * BLANK IS UNSET on both slots — the rule `effectiveOwnerHome`
+ * (`config/index.ts`) documents for this family of home values. `??` falls
+ * through on `undefined` but not on `''` / `'   '`, so before this each slot
+ * mishandled a blank in its OWN way:
+ *
+ *   - `cwd` was forwarded verbatim. `persistent/pool.ts` records
+ *     `options.cwd ?? process.cwd()`, so the blank survived into the session
+ *     record, and `persistent/supervision.ts` refuses a respawn whose
+ *     `existsSync(record.cwd)` is false — every crash recovery declined with
+ *     `invalid-cwd`, silently, for the life of the process.
+ *   - the supervision home derived the REPL registry + state dir relative to
+ *     the process CWD, splitting supervision off the instance it supervises.
+ *
+ * A blank `cwd` therefore resolves to UNSET rather than to a substitute: the
+ * caller said nothing, so the pool's own documented default (`process.cwd()`)
+ * applies, which is a directory that exists. The supervision home keeps its own
+ * documented fallback chain (`cwd`, then `NEUTRON_HOME`).
+ *
+ * WHEN BOTH ARE BLANK, SUPERVISION IS OFF, DELIBERATELY. `home: undefined`
+ * skips the whole supervision block — registry, respawns, watchdog, heartbeat —
+ * because there is nowhere to put a per-instance registry, and inventing one
+ * under whatever CWD systemd chose is how two instances end up sharing a
+ * registry that names neither. The REPL still runs; only recovery is absent.
+ * That direction is pinned in
+ * `runtime/adapters/claude-code/__tests__/repl-home-normalization.test.ts`, at
+ * the SEAM (whether the supervision block arms) and not only as a returned
+ * value, so it is a decision rather than an accident.
+ *
+ * Exported for that test. WHAT REACHES `cwd` IN PRODUCTION — stated as a
+ * STRUCTURE rather than a list, because two successive revisions of this
+ * paragraph tried to enumerate the callers and BOTH miscounted, each time in the
+ * direction of believing the blank arms could not be reached and so need not be
+ * pinned. A cross-model review falsified the first count, then the second.
+ *
+ * The structure does not depend on getting a count right. EVERY production route
+ * into this function goes through `buildLlmCallSubstrate`, which copies its
+ * `cwd` onto the options bag WITHOUT EXAMINING IT
+ * (`gateway/wiring/build-llm-call-substrate.ts:778`) and then calls this factory
+ * (`:868`). So the only question that matters is what those callers pass, and
+ * they divide into exactly two kinds:
+ *
+ *   A. A HOME, resolved through `resolveNeutronHome`, which cannot return blank.
+ *      This is most of them — `open/wiring/substrates.ts:189`, `:244`, `:329`
+ *      (phase-spec, the owner's warm conversational REPL, compose),
+ *      `open/wiring/memory.ts` (scribe/reflection), and `open/composer.ts:1296`
+ *      (the dedicated history-import/synthesis REPL, NOT the conversational one
+ *      — the previous revision mislabelled it). None of these can carry a blank.
+ *   B. A CALLER-SUPPLIED PER-RUN PATH, which can. Two independent producers:
+ *      `open/wiring/substrates.ts:364` (`makeEphemeralSubstrate`), fed by
+ *      `agent-dispatch/service.ts:487` — `req.repo_path ?? this.deps.repo_path`,
+ *      where `??` KEEPS a blank; and `open/wiring/substrates.ts:413`
+ *      (`makeWarmFireSubstrate`), which is NOT fed by that one, taking its cwd
+ *      from `trident/inner-loop.ts:702` (`run.worktree ?? run.repo_path`) and
+ *      MEMOIZING per cwd, so a blank would be cached under the blank key and
+ *      reused.
+ *
+ * WHY KIND B IS UNREACHED TODAY, which is narrower than it sounds. Its callers
+ * simply never populate the field: `agent-dispatch/tool.ts`, `command.ts` and
+ * `board-research-start.ts` contain no occurrence of `repo_path` at all, so the
+ * `??` falls through to `this.deps.repo_path`, bound to `owner_home` at
+ * `open/composer.ts:1122`. (A separate core rejects a blank `repo_path` at its
+ * own input boundary — `cores/free/code-gen/src/backend.ts:274` — but that
+ * guards ITS leg, not this one; citing it as protection here was part of the
+ * earlier miscount.) So the arms are unreached BY CONSTRUCTION AT THE CALLERS,
+ * not by any check on the path, and one caller electing to pass a computed
+ * `repo_path` reopens them. That is a weaker claim than "unreachable" on
+ * purpose: the stronger sentence is exactly what tells the next reader not to
+ * bother pinning the seam.
+ */
+export function resolveReplCwdAndHome(input: {
+  cwd?: string | undefined
+  env: NodeJS.ProcessEnv
+}): { cwd?: string; home?: string } {
+  const blankIsUnset = (v: string | undefined): string | undefined =>
+    typeof v === 'string' && v.trim().length > 0 ? v : undefined
+  const cwd = blankIsUnset(input.cwd)
+  const home = cwd ?? blankIsUnset(input.env['NEUTRON_HOME'])
+  const out: { cwd?: string; home?: string } = {}
+  // The RETURN is verbatim on both — a path whose blankness is only
+  // leading/trailing is a REAL path (legal in POSIX) and is passed through
+  // byte-for-byte, the same predicate-trims/return-verbatim split every sibling
+  // in this family documents.
+  if (cwd !== undefined) out.cwd = cwd
+  if (home !== undefined) out.home = home
+  return out
+}
+
+/**
  * Construct the Claude Code substrate. UNCONDITIONALLY builds the persistent
  * interactive-REPL substrate — there is no env toggle and no fallback (the
  * `NEUTRON_PERSISTENT_REPL` flag + the legacy per-turn `claude -p` path were
@@ -263,7 +379,45 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   const p: PersistentReplSubstrateOptions = {
     substrate_instance_id: options.substrate_instance_id,
   }
-  if (options.cwd !== undefined) p.cwd = options.cwd
+  // NORMALIZED ONCE, USED FOR BOTH SLOTS — see {@link resolveReplCwdAndHome}.
+  // An earlier revision of this change trimmed only the supervision home and
+  // still forwarded `options.cwd` raw, which is the worse half of the pair:
+  // `persistent/pool.ts` records `options.cwd ?? process.cwd()` (a blank is not
+  // `undefined`, so `??` keeps it) and `persistent/supervision.ts` then refuses
+  // every respawn with `invalid-cwd` because `existsSync('   ')` is false.
+  // Crash recovery would fail CLOSED and silently, on exactly the malformed
+  // input class this change exists to neutralise.
+  // THE INPUTS ARE SNAPSHOT BY VALUE, ONCE, AND BOTH THE DECISION AND THE REPORT
+  // READ ONLY THE SNAPSHOT. Argus r2 raised this as a nit — the supervision-off
+  // branch below has to say WHICH slot was blank, and it was doing its own second
+  // `process.env['NEUTRON_HOME']` lookup rather than reporting what the decision
+  // measured.
+  //
+  // AN EARLIER PASS AT THIS FIX SHARED THE CONTAINER AND CLAIMED THAT WAS ENOUGH
+  // ("`const env = process.env`, so the report is structurally unable to
+  // disagree"). A cross-model reviewer falsified it and the counterexample
+  // reproduces as a test: `process.env` is a LIVE object, so sharing the
+  // reference shares no OBSERVATION — two reads of the same proxy at two instants
+  // are still two observations. The window between them is reachable from
+  // ordinary inputs, because the option bag arrives from a caller and this
+  // function reads `options.claude_bin` a few lines below the resolve: a getter
+  // there runs between the decision and the report. Measured pre-fix — the
+  // decision saw `NEUTRON_HOME` unset and the report announced `blank`.
+  //
+  // So the fix is a snapshot of the two VALUES, which is the only form that makes
+  // the claim true: there is exactly one read of each input, and the report is
+  // arithmetic over the same two constants the decision consumed. Note this is
+  // deliberately NOT behaviour-preserving in that mid-construction case — the old
+  // code reported the later value, and reporting the later value is the defect.
+  //
+  // Pinned by 'the report describes the values the DECISION read, not a later
+  // re-read of a live object', which fails closed if that read order ever moves.
+  const rawCwd = options.cwd
+  const rawHome = process.env['NEUTRON_HOME']
+  const envSnapshot: NodeJS.ProcessEnv = {}
+  if (rawHome !== undefined) envSnapshot['NEUTRON_HOME'] = rawHome
+  const resolved = resolveReplCwdAndHome({ cwd: rawCwd, env: envSnapshot })
+  if (resolved.cwd !== undefined) p.cwd = resolved.cwd
   if (options.claude_bin !== undefined) p.claude_bin = options.claude_bin
   if (options.skip_permissions !== undefined) p.skip_permissions = options.skip_permissions
   if (options.env !== undefined) p.env = options.env
@@ -271,6 +425,18 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // self-refresh its own OAuth token from its `.credentials.json` (Codex r2 P1).
   if (options.claude_config_dir !== undefined) p.claudeConfigDir = options.claude_config_dir
   if (options.turn_inactivity_ms !== undefined) p.turnTimeoutMs = options.turn_inactivity_ms
+  // Frontier-model floor — owner-facing conversational substrates only. Dropped
+  // here would be the same silent seam that lost `appendSystemPromptFile`
+  // (`append-system-prompt-wiring.test.ts`): the profile would look correct and
+  // the spawn would still come up on Haiku, so the forward is tested end-to-end.
+  if (options.frontier_model_floor !== undefined) {
+    p.frontierModelFloor = options.frontier_model_floor
+  }
+  // …and the clamp NOTICE alongside it, for the same reason the floor itself is
+  // forwarded here: a dropped seam looks correct and delivers nothing.
+  if (options.onModelFloorApplied !== undefined) {
+    p.onModelFloorApplied = options.onModelFloorApplied
+  }
   // S3 §2 — thread the conversational identity + selected credential into the
   // pool key (closes #104; makes the substrate instance-isolation-SAFE).
   if (options.user_id !== undefined) p.user_id = options.user_id
@@ -315,7 +481,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // Sprint-2 supervision: derive a per-instance persisted REPL registry + state dir
   // under the instance home and ensure the live watchdog (wedge/crash detect →
   // `--resume` respawn) + heartbeat run once per registry.
-  const home = options.cwd ?? process.env['NEUTRON_HOME']
+  const home = resolved.home
   if (home !== undefined) {
     const paths = deriveReplSupervisionPaths(home)
     // Create the state dir up-front: registry-lock opens `<dir>/.registry.lock`
@@ -342,6 +508,85 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
     // upgrade. Idempotent per model-update state path; the notice routes through
     // `onModelUpdate` (else stderr).
     startModelUpdateWatchdogForInstance(p)
+    // RISING EDGE — clear the supervision-off latch for this instance id, so a
+    // LATER unsupervised construction of the same id reports again.
+    //
+    // Without this the `log.once` below is a one-way switch per instance for the
+    // life of the process, and a cross-model reviewer showed what that costs:
+    // construct `x` with no home (reports), construct `x` with a real cwd
+    // (supervised), construct `x` with no home again — SILENT, because the latch
+    // is still burnt from the first one. The env and the per-construction `cwd`
+    // are both mutable at runtime, so "the condition cannot change mid-process"
+    // was simply false, and the failure mode it produced is the exact one this
+    // report exists to end: unsupervised and quiet. `clearOnce` on an unburnt
+    // key is a no-op (`logger/index.ts` — `onceFired.get(subsystem)?.delete`),
+    // so this costs nothing on the overwhelmingly common armed path.
+    log.clearOnce(`supervision-off:${options.substrate_instance_id}`)
+  } else {
+    // SUPERVISION IS OFF, AND IT SAYS SO. Reaching here means neither a `cwd`
+    // nor `NEUTRON_HOME` carried a non-blank value, so there is nowhere to put
+    // a per-instance registry and the whole block above is skipped: no
+    // watchdog, no crash respawn, no heartbeat, no model-update probe.
+    //
+    // WHAT IS TRUE AT THIS EXACT MOMENT, since an earlier version of this
+    // comment overstated it: no REPL child exists yet. This is the FACTORY —
+    // `createPersistentReplSubstrate` spawns nothing until `.start()`. So the
+    // report is about a CONFIGURATION, and what it predicts is that any session
+    // this substrate goes on to start will run unrecovered. A cross-model
+    // reviewer refused the sentence "the REPL still runs and still answers"
+    // here, correctly: it describes the consequence, not the instant.
+    //
+    // It is still emitted HERE rather than at `.start()`, because this is where
+    // the decision is taken and the inputs that caused it are in scope — and a
+    // substrate constructed unsupervised and never started is a
+    // misconfiguration worth naming either way. The cost of that choice is one
+    // line for a substrate that never runs; the cost of the alternative is
+    // silence for the one that does.
+    //
+    // Turning supervision off silently is strictly worse than putting the
+    // registry in the wrong place, because a misplaced registry leaves a trace
+    // an operator can find and an absent one leaves nothing at all. The
+    // DECISION to skip is deliberate (see {@link resolveReplCwdAndHome}); the
+    // SILENCE was not, and this is the line that ends it.
+    //
+    // ONCE PER INSTANCE, because this is a per-CONSTRUCTION path, not a
+    // per-boot one: the warm pool builds a substrate per (instance, role), and
+    // a dispatch-heavy process would otherwise repeat an unchanging line until
+    // it drowns the signal it exists to raise. The key is the instance id, so
+    // two differently-misconfigured instances still each get their own line.
+    // `once` is per-process module state keyed by subsystem × key (see
+    // `logger/index.ts`). It is a RISING-EDGE latch, not a permanent one — the
+    // armed branch above clears the key, so an instance that becomes
+    // unsupervised again after being supervised reports again. That correction
+    // came from a reviewer who pointed out the condition IS mutable: both
+    // `process.env` and the per-construction `cwd` can change.
+    //
+    // AT `error` LEVEL, NOT `warn`, AND THAT IS THE WHOLE POINT OF THE LINE.
+    // `logger/index.ts:263` drops any emission whose rank exceeds the resolved
+    // `NEUTRON_LOG_LEVEL`, and `error` is the QUIETEST level the logger has —
+    // so a `warn` here is silenced by the single most common production setting
+    // (`NEUTRON_LOG_LEVEL=error`), for exactly the unattended deployments that
+    // most need crash recovery. A report that any ordinary log-level choice can
+    // switch off is the silence this branch exists to end, wearing a log call.
+    // `error` is the only rank nothing suppresses — checked across unset,
+    // `error`, `warn`, `info`, `debug`, mixed case, blank and unrecognised
+    // values. The classification is a judgement call and worth naming as one: a
+    // reviewer argued this is a degradation rather than an error at the instant
+    // it is emitted, which is fair. It stays at `error` because every quieter
+    // rank is switchable off by ordinary operator configuration, and a report
+    // that can be switched off is the defect, not the fix.
+    log.once(`supervision-off:${options.substrate_instance_id}`).error('repl_supervision_disabled_no_home', {
+      substrate_instance_id: options.substrate_instance_id,
+      // Which slot was blank, so the operator knows which one to set. Reported
+      // as a shape, never as the value — these resolve to owner data paths.
+      // BOTH FIELDS COME FROM THE SNAPSHOT, never from a fresh read of
+      // `options` or `process.env` — see the note above `rawCwd`. `options` is a
+      // caller-supplied bag and `process.env` is live, so a second read of
+      // either is a second observation, and a report sourced from one of those
+      // can announce a condition the decision never acted on.
+      cwd: rawCwd === undefined ? 'unset' : 'blank',
+      neutron_home: rawHome === undefined ? 'unset' : 'blank',
+    })
   }
   return createPersistentReplSubstrate(p)
 }

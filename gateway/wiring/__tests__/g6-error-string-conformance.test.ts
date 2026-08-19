@@ -8,6 +8,7 @@
  *   - detectBinaryNotFound         (build-llm-call-substrate.ts)
  *   - detectChannelWedged          (build-llm-call-substrate.ts)
  *   - detectTurnTimeout            (build-llm-call-substrate.ts)
+ *   - detectReplProcessExited      (build-llm-call-substrate.ts)
  *   - isFreezeTimeout              (build-live-agent-turn.ts)
  *   - is429ErrorMessage            (onboarding/history-import/rate-limit.ts)
  *
@@ -47,6 +48,7 @@ import {
   detectBinaryNotFound,
   detectChannelWedged,
   detectTurnTimeout,
+  detectReplProcessExited,
   parseHttpStatusFromMessage,
   BINARY_NOT_FOUND_MESSAGE,
   CHANNEL_WEDGED_MESSAGE,
@@ -336,6 +338,48 @@ test('G6 · detectTurnTimeout pins the REAL `persistent-repl: turn timeout` prod
   expect(parseHttpStatusFromMessage(producedLiteral)).toBeNull()
   expect(detectChannelWedged(producedLiteral)).toBe(false)
   expect(is429ErrorMessage(producedLiteral)).toBe(false)
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// detectReplProcessExited  ←  ReplSession.onDeath `persistent-repl: REPL process exited`
+// ───────────────────────────────────────────────────────────────────────────
+
+test('G6 · detectReplProcessExited pins the REAL `REPL process exited` producer literal (extracted from substrate source)', () => {
+  // Producer: `repl-session.ts` `onDeath()` —
+  //   t.channel.push({ kind: 'error', message: 'persistent-repl: REPL process exited', retryable: true })
+  // A bare literal that cannot be invoked without a real dying child, so we
+  // extract it from the producer source and assert the classifier against it.
+  //
+  // WHY THIS PIN EARNS ITS KEEP. The detector is the only thing standing between a
+  // dead REPL child and an hour-long credential park (the 2026-08-17 chat lockout).
+  // It is a REGEX over prose emitted in a different module — reword the producer and
+  // the classifier silently stops matching, the message falls through to
+  // `mapStatusForPoolCooldown(null, true)` → 429, and the outage comes back with no
+  // test failing anywhere near the edit. This pin makes that reword loud.
+  const producedLiteral = extractFromText(
+    SUBSTRATE_SRC,
+    /message: '(persistent-repl: REPL process exited)', retryable: true/,
+    'the `persistent-repl: REPL process exited` producer literal',
+    'the substrate module cluster',
+  )
+  expect(detectReplProcessExited(producedLiteral)).toBe(true)
+  // A dead child is retryable on the SAME credential — it must not read as an
+  // HTTP/429/auth cooldown, nor be confused with the sibling substrate classes.
+  expect(parseHttpStatusFromMessage(producedLiteral)).toBeNull()
+  expect(detectChannelWedged(producedLiteral)).toBe(false)
+  expect(detectTurnTimeout(producedLiteral)).toBe(false)
+  expect(detectBinaryNotFound(producedLiteral)).toBe(false)
+  expect(is429ErrorMessage(producedLiteral)).toBe(false)
+})
+
+test('G6 · detectReplProcessExited does NOT swallow neighbouring failure prose', () => {
+  // The exemption must stay narrow: it is a classification of ONE producer, not an
+  // amnesty for anything mentioning a REPL. If these start matching, every unstamped
+  // retryable failure stops cooling and the pool loses its broken-credential detector.
+  expect(detectReplProcessExited('persistent-repl: turn timeout')).toBe(false)
+  expect(detectReplProcessExited('persistent-repl: spawn failed (dead-child; …)')).toBe(false)
+  expect(detectReplProcessExited('cc-llm-call: aborted')).toBe(false)
+  expect(detectReplProcessExited('HTTP 429: too many requests')).toBe(false)
 })
 
 // ───────────────────────────────────────────────────────────────────────────

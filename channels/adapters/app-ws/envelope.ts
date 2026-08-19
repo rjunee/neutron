@@ -27,6 +27,7 @@ import type {
   AppWsInboundReaction,
   AppWsInboundEdit,
   AppWsInboundButtonChoice,
+  AppWsInboundPresence,
 } from '@neutronai/wire-types'
 
 // L6 — re-export the full envelope wire-type union (owned by
@@ -39,8 +40,10 @@ export type {
   AppWsInboundReaction,
   AppWsInboundEdit,
   AppWsInboundButtonChoice,
+  AppWsInboundPresence,
   AppWsOutbound,
   AppWsOutboundSessionReady,
+  AppWsOutboundHistoryGap,
   AppWsOutboundUserMessageEcho,
   AppWsOutboundAgentMessageOption,
   AppWsOutboundAgentMessageDocRef,
@@ -124,7 +127,16 @@ export function decodeAppWsResume(raw: unknown): AppWsInboundResume | null {
   if (e['type'] !== 'resume') return null
   const raw_after = e['after_seq']
   if (typeof raw_after !== 'number' || !Number.isFinite(raw_after)) return null
-  return { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
+  const out: AppWsInboundResume = { v: 1, type: 'resume', after_seq: Math.max(0, Math.trunc(raw_after)) }
+  // The BACKWARDS bound (see `AppWsInboundResume.before_seq`). Clamped the same
+  // way as the cursor so a malformed value can't drive a negative/fractional
+  // query; a non-number is simply DROPPED rather than rejecting the frame, so an
+  // older client's plain forward resume keeps working byte for byte.
+  const raw_before = e['before_seq']
+  if (typeof raw_before === 'number' && Number.isFinite(raw_before)) {
+    out.before_seq = Math.max(0, Math.trunc(raw_before))
+  }
+  return out
 }
 
 /**
@@ -272,6 +284,28 @@ export function decodeAppWsButtonChoice(raw: unknown): AppWsInboundButtonChoice 
     out.freeform_text = freeform_text
   }
   return out
+}
+
+/**
+ * Web presence (2026-08-15) — decode a `{ v:1, type:'presence', state }` frame.
+ * SEPARATE from the message / resume / receipt / reaction / edit / button
+ * decoders so each path keeps its narrow type. Returns `null` for anything
+ * malformed, INCLUDING an unrecognised `state`.
+ *
+ * REJECTING AN UNKNOWN `state` IS THE POINT, not pedantry. This decoder's only
+ * consumer suppresses a notification when it reads `foreground`, so a permissive
+ * default (`anything that isn't 'background' means present`) would let a typo or a
+ * future third state silence the owner's phone. The suppressing value has to be
+ * spelled exactly; everything else falls through to the surface's
+ * `malformed_envelope` reply, which is loud.
+ */
+export function decodeAppWsPresence(raw: unknown): AppWsInboundPresence | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['v'] !== 1) return null
+  if (e['type'] !== 'presence') return null
+  if (e['state'] !== 'foreground' && e['state'] !== 'background') return null
+  return { v: 1, type: 'presence', state: e['state'] }
 }
 
 /**

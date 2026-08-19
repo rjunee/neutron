@@ -19,6 +19,7 @@ import {
   ActivityInspector,
   activityRowFromSubstrateEvent,
   activityRowFromToolTap,
+  commandLabelForShellTool,
   BODY_MAX,
   humanizeToolName,
   DEAD_AFTER_MS,
@@ -26,8 +27,11 @@ import {
   GENERAL_SCOPE,
   INSPECTOR_BUFFER_CAP,
   inspectorScopeKey,
+  isWriteClassShellCommand,
+  isWriteClassTool,
   WEDGE_AFTER_MS,
 } from './activity-inspector.ts'
+import { INLINE_EVIDENCE_WINDOW_MS } from '@neutronai/work-board/inline-activity.ts'
 
 describe('deriveInspectorState — the honest hung-or-working verdict', () => {
   const base = {
@@ -269,6 +273,175 @@ describe('ActivityInspector — the two clocks', () => {
   })
 })
 
+describe('lastWriteActivityAt — the board clock, not the wedge clock', () => {
+  it('returns 0 for an unknown scope', () => {
+    expect(new ActivityInspector().lastWriteActivityAt('unknown')).toBe(0)
+  })
+
+  it('tracks the latest WRITE-CLASS row using the injected clock', () => {
+    const t = { v: 1_000 }
+    const inspector = new ActivityInspector({ now: () => t.v })
+    inspector.record('p1', { kind: 'tool_start', label: 'Edit', write_class: true })
+    expect(inspector.lastWriteActivityAt('p1')).toBe(1_000)
+    t.v = 2_000
+    inspector.record('p1', { kind: 'tool_end', label: 'Edit', write_class: true })
+    expect(inspector.lastWriteActivityAt('p1')).toBe(2_000)
+  })
+
+  it('a whole conversation turn with no write leaves the board clock at 0', () => {
+    // THE BUG THIS CLOCK EXISTS FOR: wiring the board to `last_real_activity_at`
+    // meant one unrelated question marked every runless in-progress card active.
+    const t = { v: 1_000 }
+    const inspector = new ActivityInspector({ now: () => t.v })
+    inspector.turnStarted('p1')
+    inspector.record('p1', { kind: 'thinking', label: 'thinking' })
+    inspector.record('p1', { kind: 'tool_start', label: 'Read', detail: 'src/x.ts' })
+    inspector.record('p1', { kind: 'token', label: 'assistant', body: 'here you go' })
+    inspector.turnFinished('p1')
+    inspector.record('p1', { kind: 'completion', label: 'turn complete' })
+    // The wedge clock DID advance — the session was plainly alive and working…
+    t.v = 5_000
+    expect(inspector.snapshot('p1').last_real_activity_age_ms).toBe(4_000)
+    // …but nothing was rewritten, so the board stays quiet.
+    expect(inspector.lastWriteActivityAt('p1')).toBe(0)
+  })
+
+  it('synthetic keepalives never create or advance write evidence', () => {
+    // KEEPALIVE MUTANT (#386): an unconditional clock advance latches cards active.
+    const t = { v: 1_000 }
+    const inspector = new ActivityInspector({ now: () => t.v })
+    inspector.record('fresh', { kind: 'keepalive', label: 'alive', synthetic: true })
+    expect(inspector.lastWriteActivityAt('fresh')).toBe(0)
+
+    inspector.record('existing', { kind: 'tool_start', label: 'Edit', write_class: true })
+    t.v = 2_000
+    inspector.record('existing', { kind: 'keepalive', label: 'alive', synthetic: true })
+    expect(inspector.lastWriteActivityAt('existing')).toBe(1_000)
+  })
+
+  it('keeps scope evidence isolated', () => {
+    const inspector = new ActivityInspector({ now: () => 1_000 })
+    inspector.record('scope-a', { kind: 'tool_start', label: 'Write', write_class: true })
+    expect(inspector.lastWriteActivityAt('scope-a')).toBe(1_000)
+    expect(inspector.lastWriteActivityAt('scope-b')).toBe(0)
+  })
+
+  it('pins the board freshness window equal to the wedge window', () => {
+    // The two are linked by design (`work-board/inline-activity.ts` header) and
+    // that module is a dependency-free leaf, so only a test can hold them equal.
+    expect(INLINE_EVIDENCE_WINDOW_MS).toBe(WEDGE_AFTER_MS)
+  })
+})
+
+describe('isWriteClassTool — what counts as evidence a repo is being rewritten', () => {
+  it('classifies the file-mutating tools, whatever their casing or MCP namespace', () => {
+    for (const name of ['Write', 'Edit', 'MultiEdit', 'NotebookEdit', 'mcp__fs__edit_file']) {
+      expect(isWriteClassTool(name)).toBe(true)
+    }
+  })
+
+  it('does NOT classify reads, searches or the reply tool', () => {
+    // (c) quiet means quiet: answering a question is not working a card.
+    for (const name of ['Read', 'Glob', 'Grep', 'WebFetch', 'mcp__neutron-abc__reply']) {
+      expect(isWriteClassTool(name, 'anything')).toBe(false)
+    }
+  })
+
+  it('classifies a shell call by its command, and a bare shell tool is not a write', () => {
+    expect(isWriteClassTool('Bash', 'git commit -m "x"')).toBe(true)
+    expect(isWriteClassTool('Bash', 'git status')).toBe(false)
+    expect(isWriteClassTool('Bash')).toBe(false)
+  })
+
+  it('reads the command out of the hook’s JSON argument rendering', () => {
+    const args = JSON.stringify({ command: 'rm -rf build', description: 'clean' }, null, 2)
+    expect(isWriteClassTool('Bash', args)).toBe(true)
+    const readArgs = JSON.stringify({ command: 'ls -la', description: 'look' }, null, 2)
+    expect(isWriteClassTool('Bash', readArgs)).toBe(false)
+  })
+
+  it('recovers the command from JSON the hook CLIPPED mid-string', () => {
+    // The tap caps its rendered argument body (2000 chars), so the single most
+    // common write there is — a long commit message — arrives as unparseable
+    // JSON. Classifying the raw text then sees `{`, i.e. nothing.
+    const long = JSON.stringify(
+      { command: `git commit -m "${'x'.repeat(2_200)}"`, description: 'commit' },
+      null,
+      2,
+    ).slice(0, 2_000)
+    expect(() => JSON.parse(long)).toThrow()
+    expect(isWriteClassTool('Bash', long)).toBe(true)
+    // The recovery must not invent writes either: a clipped READ stays quiet.
+    const longRead = JSON.stringify(
+      { command: `grep -rn "${'y'.repeat(2_200)}" src`, description: 'search' },
+      null,
+      2,
+    ).slice(0, 2_000)
+    expect(isWriteClassTool('Bash', longRead)).toBe(false)
+  })
+})
+
+describe('isWriteClassShellCommand', () => {
+  it('accepts the mutating forms', () => {
+    for (const cmd of [
+      'rm -rf dist',
+      'mv a b',
+      'mkdir -p x/y',
+      '/bin/cp a b',
+      'echo hi > notes.txt',
+      'cat a >> b',
+      "sed -i 's/a/b/' x.ts",
+      'git add -A',
+      'git rebase --continue',
+      'bun run build && touch .stamp',
+      'FOO=1 git commit -m x',
+    ]) {
+      expect(isWriteClassShellCommand(cmd)).toBe(true)
+    }
+  })
+
+  it('rejects reads, and does not mistake an argument for a command', () => {
+    for (const cmd of [
+      'ls -la',
+      'git status',
+      'git log --oneline -5',
+      'bun test',
+      'grep -rn "rm -rf" src',
+      'cat package.json',
+      '',
+    ]) {
+      expect(isWriteClassShellCommand(cmd)).toBe(false)
+    }
+  })
+
+  it('does not read a QUOTED angle bracket as the shell’s redirect', () => {
+    // Acceptance (c): one read-only grep must not light a card for 90 s.
+    for (const cmd of [
+      'grep -rn "a > b" src',
+      "grep -rn 'a >> b' src",
+      'echo "1 > 2"',
+      'awk \'{if (a > b) print}\' f.txt',
+    ]) {
+      expect(isWriteClassShellCommand(cmd)).toBe(false)
+    }
+  })
+
+  it('treats a discard/scratch redirect target as no write at all', () => {
+    for (const cmd of [
+      'grep -rn thing src > /dev/null',
+      'bun test > /dev/null 2>&1',
+      // The agent is INSTRUCTED to send verbose output to a scratch log; doing so
+      // is read-only work, not a repo rewrite.
+      'bun test > /tmp/out.log 2>&1',
+      'bun run build > /var/tmp/build.log',
+    ]) {
+      expect(isWriteClassShellCommand(cmd)).toBe(false)
+    }
+    // …while a redirect at a REAL path is still the shell's own write verb.
+    expect(isWriteClassShellCommand('bun run build > dist/manifest.json')).toBe(true)
+  })
+})
+
 describe('activityRowFromSubstrateEvent — mapping the raw stream', () => {
   it('marks the keepalive status SYNTHETIC and leaves a real status alone', () => {
     expect(activityRowFromSubstrateEvent({ kind: 'status', message: 'working', keepalive: true }))
@@ -384,6 +557,30 @@ describe('humanizeToolName — never render a transport id as the label', () => 
 })
 
 describe('activityRowFromToolTap — the Pre/PostToolUse hook rows', () => {
+  it('names the meaningful shell command, table-driven over real prefixes', () => {
+    const cases: Array<[string, string]> = [
+      ['FOO=bar BAZ=qux grep -R needle .', 'grep'],
+      ['cd /work/tree && bun test --watch=false', 'bun test'],
+      ['set -euo pipefail; git --no-pager rebase main', 'git rebase'],
+      ['grep --color=never needle file | head -20', 'grep'],
+      ['for f in *.ts; do rg --files "$f"; done', 'rg'],
+      ['while true; do npm run build --silent; done', 'npm run build'],
+      ['if bun test --coverage; then echo ok; fi', 'bun test'],
+      ['bash scripts/release/build.sh --fast', 'build.sh'],
+      ['git --no-pager rebase --onto main old', 'git rebase'],
+    ]
+    for (const [command, expected] of cases) {
+      expect(commandLabelForShellTool('Bash', command)).toBe(expected)
+      expect(commandLabelForShellTool('Bash', command)).not.toContain('--')
+    }
+  })
+
+  it('falls back to the shell tool when reduction would be a guess', () => {
+    expect(commandLabelForShellTool('Bash', 'case "$x" in a) run-a ;; b) run-b ;; esac')).toBeNull()
+    expect(
+      activityRowFromToolTap({ phase: 'pre', tool_name: 'Bash', detail: 'conditional', args: 'case "$x" in a) run-a ;; esac' })?.label,
+    ).toBe('Bash')
+  })
   it('maps pre → tool_start and post → tool_end', () => {
     // Both phases matter: a `pre` with no matching `post` for minutes IS the hang
     // signal, and neither the event stream nor a liveness pulse can express it.

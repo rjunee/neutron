@@ -26,7 +26,57 @@ export interface PhaseDescriptor {
   key: string
   label: string
   description: string
+  /**
+   * Which executor runs this step by DEFAULT (`claude`, `codex`, `kimi`).
+   *
+   * Used only to SAY what a greyed option would have to be — "it runs on Claude".
+   * Whether an option is selectable is `groups`, not this.
+   */
+  group: string
+  /**
+   * Every executor this step can dispatch on.
+   *
+   * A row can only take a tier from one of these groups: a step with only a Claude
+   * dispatch cannot run a GPT model (`agent({model})` resolves against Claude Code's
+   * endpoint), and the Codex wrapper cannot be pointed at Kimi. Most steps have one
+   * group; the build step has two, because its forge dispatch reaches the codex
+   * executor as well. The server decides; this file just compares strings.
+   */
+  groups?: string[]
+  dispatch_constraint?: string | null
+  /**
+   * False for a step whose DEFAULT executor is a CLI, whose reasoning effort is its own.
+   *
+   * Not the whole answer for a row: a step with two executors keeps this true while the
+   * owner has it on a tier that cannot use an effort. Ask {@link effortSettable}.
+   *
+   * OPTIONAL FOR THE SAME REASON `groups` IS. It arrived with the CLI executors, and a
+   * gateway predating it sends the field not at all — read as a bare boolean that is
+   * `undefined`, which is falsy, and EVERY effort control on the pane silently
+   * disappears. Absent means "the server has no opinion", which is the old behaviour:
+   * the control stays. Read it through {@link effortSettable}, never directly.
+   */
+  effort_supported?: boolean
   default: { model: string; effort: string }
+}
+
+/** One selectable tier, resolved by the server as of this request. */
+export interface TierOption {
+  tier: string
+  provider: string
+  /** What the tier points at RIGHT NOW — `fast → claude-haiku-4-5-…`. */
+  model_id: string
+  group: string
+  /**
+   * False for a subprocess tier, which chooses its own reasoning effort.
+   *
+   * Optional for the same version-skew reason as the phase-level field: absent is
+   * "no opinion", not `false`. Read it through {@link effortSettable}.
+   */
+  effort_supported?: boolean
+  /** False when this install has no credential for it. Still shown, never hidden. */
+  available: boolean
+  unavailable_reason: string | null
 }
 
 /** An owner's override for one phase. Either field may stand alone. */
@@ -37,10 +87,16 @@ export interface PhaseOverride {
 
 export interface PhaseModelsPayload {
   phases: PhaseDescriptor[]
-  model_tiers: string[]
+  model_tiers: TierOption[]
   efforts: string[]
   defaults: Record<string, { model: string; effort: string }>
   overrides: Record<string, PhaseOverride>
+  /**
+   * Stored values the server REFUSED — a tier since retired, an effort on a CLI step.
+   * The row shows them struck through and names the default it fell back to, because
+   * a control that silently reverts a choice is one the owner stops trusting.
+   */
+  rejected: Record<string, PhaseOverride>
 }
 
 export class PhaseModelsClientError extends Error {
@@ -141,6 +197,142 @@ export function effectiveRow(
   return { model, effort, overridden }
 }
 
+/** `codex` → `Codex`. Executor names are shown to the owner mid-sentence. */
+function capitalize(word: string): string {
+  return word.charAt(0).toUpperCase() + word.slice(1)
+}
+
+/**
+ * Every executor the step can dispatch on, falling back to its default one.
+ *
+ * THE FALLBACK IS FOR AN OLDER SERVER. `groups` arrived with the build's second
+ * executor; a gateway predating it sends `group` alone, and this client ships
+ * separately from it. Reading through here means that payload renders the way it always
+ * did instead of throwing and blanking the whole settings pane.
+ *
+ * MUST MATCH `app/lib/phase-models-client.ts#phaseGroupsOf`.
+ */
+export function phaseGroupsOf(phase: PhaseDescriptor): string[] {
+  return phase.groups ?? [phase.group]
+}
+
+/**
+ * Is the EFFORT control live for this row, given the tier it is set to?
+ *
+ * TWO QUESTIONS, BOTH OF WHICH MUST BE YES: the step has to have an effort control at
+ * all (`phase.effort_supported`), and the chosen TIER has to be one that reads it. The
+ * second is what the build row needs — it keeps its control on `opus` and loses it on
+ * `sol`, because a `codex exec` subprocess picks its own reasoning effort. Asking only
+ * the phase left the cell live on a codex build and posted an effort with the model,
+ * which the server then had to throw away.
+ *
+ * An unknown tier (a saved override the server no longer resolves) keeps the phase's
+ * own answer: the row is already telling the owner that value is dead.
+ *
+ * BOTH READS ARE `!== false`, NOT TRUTHINESS. An older gateway omits these fields
+ * entirely, and `undefined` under a truthiness test means "no effort control anywhere"
+ * — the same version-skew blanking `phaseGroupsOf` above already guards against.
+ * Absent is not the same answer as false.
+ *
+ * MUST MATCH `app/lib/phase-models-client.ts#effortSettable`.
+ */
+export function effortSettable(
+  phase: PhaseDescriptor,
+  tier: string,
+  tiers: TierOption[],
+): boolean {
+  if (phase.effort_supported === false) return false
+  const chosen = tiers.find((t) => t.tier === tier)
+  return chosen === undefined ? true : chosen.effort_supported !== false
+}
+
+/**
+ * The tiers a row may offer, each with whether it can be CHOSEN and why not.
+ *
+ * NOTHING IS FILTERED OUT. A tier from another executor, or one this install has no
+ * credential for, comes back `selectable: false` WITH a reason so the row can render
+ * it greyed and say "needs a Codex connection". Hiding it would leave the owner unable
+ * to account for a missing option — which is exactly how a whole capability stayed
+ * invisible for weeks (ISSUES #551). The reason is the product decision here, so it
+ * lives in the shared helper rather than in either component.
+ *
+ * MUST MATCH `app/lib/phase-models-client.ts#tierChoices`.
+ */
+export function tierChoices(
+  phase: PhaseDescriptor,
+  tiers: TierOption[],
+): Array<{ tier: string; model_id: string; selectable: boolean; reason: string | null }> {
+  const groups = phaseGroupsOf(phase)
+  return tiers.map((t) => {
+    if (!groups.includes(t.group)) {
+      // #565 — SAY WHY, AND WHAT WOULD CHANGE IT. The old reason read `Codex steps
+      // only`, naming a category the reader has never heard of and explaining
+      // nothing; the owner's first words on seeing it were "Wtf does that mean?".
+      // The accurate statement is about WIRING, not existence: a codex substrate
+      // adapter is already built and registered (`runtime/adapters/codex-cli/`,
+      // selected in `runtime/adapters/select-substrate.ts`), and trident's own
+      // review seat already shells into `codex exec` — what is missing is a route
+      // from THAT step to it. Saying "no executor exists" would be a second false
+      // claim in place of the first.
+      //
+      // The test of the sentence is that it stops being shown the moment the route
+      // lands: the build step now dispatches to the codex executor, so `groups`
+      // carries `codex` for that row and the GPT tiers here are selectable rather
+      // than greyed with a reason that has become false.
+      // NAMES EVERY EXECUTOR THE STEP REACHES, not just its default one. On the build
+      // row — the one row this sentence was written for — "it runs on Claude" stopped
+      // being the whole truth the moment the codex route landed, and a Kimi tier greyed
+      // with a half-true reason is the same defect in a smaller size.
+      const optionExecutor = capitalize(t.group)
+      const stepExecutor = groups.map(capitalize).join(' or ')
+      return {
+        tier: t.tier,
+        model_id: t.model_id,
+        selectable: false,
+        reason: phase.dispatch_constraint ?? `${optionExecutor} is not wired for this step yet — it runs on ${stepExecutor}`,
+      }
+    }
+    if (!t.available) {
+      return {
+        tier: t.tier,
+        model_id: t.model_id,
+        selectable: false,
+        reason: t.unavailable_reason ?? 'not available on this install',
+      }
+    }
+    return { tier: t.tier, model_id: t.model_id, selectable: true, reason: null }
+  })
+}
+
+/**
+ * What a tier resolves to right now, or null when the payload has never heard of it.
+ *
+ * Null is the interesting case: it means a saved override names something the server
+ * cannot resolve, which the row must SAY rather than quietly replace.
+ *
+ * MUST MATCH `app/lib/phase-models-client.ts#resolvedModel`.
+ */
+export function resolvedModel(tier: string, tiers: TierOption[]): string | null {
+  return tiers.find((t) => t.tier === tier)?.model_id ?? null
+}
+
+/**
+ * The stored-but-refused model for a row, or null.
+ *
+ * Only the MODEL is surfaced: a refused effort belongs to a CLI row, whose effort cell
+ * is already disabled with the reason, so striking it through as well would explain
+ * the same thing twice.
+ *
+ * MUST MATCH `app/lib/phase-models-client.ts#rejectedModel`.
+ */
+export function rejectedModel(
+  phase: PhaseDescriptor,
+  rejected: Record<string, PhaseOverride>,
+): string | null {
+  const value = rejected[phase.key]?.model
+  return value !== undefined && value.length > 0 ? value : null
+}
+
 /**
  * Apply one row's edit, DROPPING an entry that matches the phase's default.
  *
@@ -149,17 +341,37 @@ export function effectiveRow(
  * it. Choosing the default therefore means "no override" — which is also what makes
  * the reset affordance fall out for free.
  *
+ * IT ALSO DROPS AN EFFORT THE NEW TIER CANNOT USE. Moving the build row from `opus` to
+ * a codex tier leaves any previously-chosen effort sitting in the map. The effort is
+ * not a second choice the owner is making here; it is a leftover from the executor
+ * they just left.
+ *
+ * SENDING THE PAIR WOULD NOT FAIL THE SAVE — the server drops it too
+ * (`trident/phase-models.ts#parsePhaseModelConfig` deletes the effort and records it in
+ * `rejected` WITHOUT pushing an error, so the PUT returns ok). Dropping it here is
+ * therefore about what the owner SEES, not about avoiding a rejection: leaving the
+ * stale effort in the map would render a control the chosen tier does not have, and the
+ * owner would set a value, save successfully, and find it gone on the next read with
+ * nothing having said so.
+ *
  * MUST MATCH `app/lib/phase-models-client.ts#applyRowEdit`.
  */
 export function applyRowEdit(
   overrides: Record<string, PhaseOverride>,
   phase: PhaseDescriptor,
   patch: { model?: string; effort?: string },
+  tiers: TierOption[],
 ): Record<string, PhaseOverride> {
   const current = overrides[phase.key] ?? {}
   const next: PhaseOverride = { ...current, ...patch }
   if (next.model === phase.default.model) delete next.model
   if (next.effort === phase.default.effort) delete next.effort
+  if (
+    next.effort !== undefined &&
+    !effortSettable(phase, next.model ?? phase.default.model, tiers)
+  ) {
+    delete next.effort
+  }
   const out = { ...overrides }
   if (next.model === undefined && next.effort === undefined) {
     delete out[phase.key]

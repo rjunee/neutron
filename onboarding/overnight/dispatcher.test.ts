@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { OvernightQueueStore } from './queue-store.ts'
@@ -34,8 +34,8 @@ let queue: OvernightQueueStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-overnight-disp-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   queue = new OvernightQueueStore(db)
 })
 
@@ -364,7 +364,13 @@ describe('real TridentRunStore seam', () => {
       context_relpath: 'docs/spec.md',
     })
     const tridentStore = new TridentRunStore(db)
-    const seam = buildOvernightTridentSeam(tridentStore)
+    // The overnight seam now takes an explicit probe — no ambient-`gh` default.
+    // This one is a plain local repo, so merge mode is 'local' either way.
+    const seam = buildOvernightTridentSeam(tridentStore, {
+      credential: { owner_handle: 'owner-a', source: 'a fake store', load: async () => ({}) },
+      hasGithubOrigin: async () => false,
+      publisherAvailable: async () => ({ authenticated: true }),
+    })
     const d = makeDispatcher(seam, [p], INSIDE_WINDOW)
 
     await d.runScanTick()

@@ -64,7 +64,7 @@
     --body-line: 1.55;
     /* Transcript leading — see `.car-md p`. Tighter than prose, looser than the
        1.4 the bubbles used to pin. */
-    --chat-line: 1.5;
+    --chat-line: 1.45;
     /* Text/icon drawn ON an accent-filled surface (primary buttons, badges). */
     --on-accent: #04121f;
     /* M1 UX REDESIGN — rail work-activity dot + secondary text ramp (Telegram
@@ -157,7 +157,7 @@
   :root[data-theme="light"] {
     --bg: #ffffff;
     --body-line: 1.5;
-    --chat-line: 1.45;
+    --chat-line: 1.4;
     --surface: #f5f5f7;
     --border: #d1d1d6;
     --fg: #1c1c1e;
@@ -558,7 +558,19 @@
      that sits between the two rather than a straight adoption of body leading,
      and it carries dark's extra step for the same reason `--body-line` does
      (light ink on a dark ground reads lighter and needs more room). */
-  .car-md p { margin: 0 0 8px; line-height: var(--chat-line); }
+  .car-md p { margin: 0 0 5px; line-height: var(--chat-line); }
+  /* TIGHTEN (owner 2026-08-15: "too much white space between paragraphs and in
+     quotes etc … tighten it all up"). Two separate causes, and only the first is
+     the margin value:
+       (a) the inter-paragraph step was 8px against a ~1.45 leading;
+       (b) a block's LAST child still paid its own bottom margin, which STACKED
+           with the container's — so a blockquote ended on 8px (its own p) + 8px
+           (itself), and every bubble carried a dead strip under its last line.
+           Zeroing the last child is what removes the doubling; shrinking the
+           margin alone would have left the stack in place, just smaller. */
+  .car-md > *:last-child { margin-bottom: 0; }
+  .car-md blockquote > *:last-child,
+  .car-md li > *:last-child { margin-bottom: 0; }
   /* User-message bubble body (ChatApp `TextPart`, role=user) is a bare <p
      class="car-text">; without this rule it inherits the UA default
      margin-block:1em, which stacked on the 5px bubble padding rendered a
@@ -573,7 +585,7 @@
      deep heading rendered SMALLER than the body text it introduced and broke the
      bubble's vertical rhythm. Nothing declared them because nothing had looked for
      them: the rule was written from the headings the docs happened to use. */
-  .car-md h1, .car-md h2, .car-md h3, .car-md h4, .car-md h5, .car-md h6 { margin: 14px 0 6px; line-height: 1.25; font-weight: 700; }
+  .car-md h1, .car-md h2, .car-md h3, .car-md h4, .car-md h5, .car-md h6 { margin: 9px 0 4px; line-height: 1.25; font-weight: 700; }
   .car-md h1 { font-size: 1.4em; } .car-md h2 { font-size: 1.25em; } .car-md h3 { font-size: 1.1em; }
   /* h4-h6 stay at body size and separate by WEIGHT and colour rather than by
      shrinking below it — going smaller is the thing that made them unreadable. */
@@ -583,7 +595,7 @@
      else; dimming it is what makes "this was struck out" read as a state rather
      than as damaged text. */
   .car-md del { text-decoration: line-through; color: var(--muted); }
-  .car-md ul, .car-md ol { margin: 0 0 8px; padding-left: 20px; }
+  .car-md ul, .car-md ol { margin: 0 0 5px; padding-left: 20px; }
   /* FIX #358 — list items read as too loose (visible gap per bullet); a list is
      "one paragraph split into lines", so tighten toward that rhythm: no
      inter-item margin (the tight 0 0 8px on the *list itself* already separates
@@ -626,7 +638,7 @@
   .car-md-copy:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   @media (hover: none) { .car-md-copy { opacity: 1; } }
   .car-md blockquote {
-    margin: 0 0 8px; padding: 2px 0 2px 12px; border-left: 3px solid var(--border); color: var(--muted);
+    margin: 0 0 5px; padding: 0 0 0 10px; border-left: 3px solid var(--border); color: var(--muted);
   }
   .car-md table { border-collapse: collapse; margin: 0 0 8px; display: block; overflow-x: auto; }
   .car-md th, .car-md td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
@@ -846,6 +858,8 @@
   .cwb-round { flex: 0 0 auto; font-size: 0.7333rem; color: var(--muted); white-space: nowrap; }
   /* failure-reason one-liner (#340) — muted, single-line, truncates; full text on hover. */
   .cwb-fail-reason { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--phase-failed-fg); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  /* Recovered brief-integrity alert — persistent but de-emphasized; full text on hover. */
+  .cwb-brief-alert { flex: 1 1 auto; min-width: 0; font-size: 0.7333rem; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   /* FIX #341 — drag handle: bare ⠿ grip-dots, NO border/button chrome, so it
      reads as a draggable grip rather than a third action button beside ▶/✕.
      Muted (`--faint`, brightening to `--muted` on hover) with a grab/grabbing
@@ -1220,7 +1234,15 @@
      a 4ch floor so a one-word reply doesn't collapse to a sliver, and snug
      8px/13px padding. */
   .car-bubble {
-    max-width: min(60ch, 80%);
+    /* WIDER + a touch smaller (owner 2026-08-15: "make the fonts very slightly
+       smaller … make the width of the chat bubble a bit wider"). The font step is
+       ONE declaration here rather than a global `html` change, because every size
+       inside the bubble — headings, code, the timestamp — is already expressed in
+       `em`, so they all scale from this and nothing else on the page moves. Note
+       `ch` is font-relative too: at 0.95em a 72ch cap is ~68 old-ch, so the bubble
+       widens without the line length leaving the readable band. */
+    font-size: 0.95em;
+    max-width: min(72ch, 88%);
     min-width: 4ch;
     padding: 5px 13px; border-radius: var(--bubble-radius);
     white-space: pre-wrap; word-wrap: break-word; overflow-wrap: anywhere;
@@ -1251,6 +1273,7 @@
   }
   .car-day-divider span { flex: 0 0 auto; }
   .car-typing { display: inline-flex; gap: 4px; align-items: center; }
+  button.car-typing { border: 0; font: inherit; cursor: pointer; }
 
     /* The live step label beside the typing dots. Uses `faint`, which now clears
        AA on every ground (see the web contrast gate), so it is legible while
@@ -1572,6 +1595,25 @@
   }
   .cint-account .cint-row-main { flex: 1 1 160px; }
   .cint-account .cint-badge { margin-left: auto; }
+  /* The GitHub device-flow block. `.cint-row-sub` ellipsises on one line, which
+     is right for a label and wrong for a sentence, so prose opts out with
+     `.cint-row-wrap`. The CODE is the interaction — read off this screen and
+     typed into another device — so it is set large, monospaced and wide-tracked,
+     and it is user-selectable even though a Copy button sits under it. */
+  .cint-row-wrap { white-space: normal; overflow: visible; line-height: 1.45; }
+  .cint-device {
+    display: flex; flex-direction: column; gap: 8px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 12px; background: var(--surface);
+  }
+  .cint-device-code {
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: 1.6rem; font-weight: 700; letter-spacing: .18em; color: var(--fg);
+    user-select: all; word-break: break-all;
+  }
+  /* `.cdoc-btn` is authored for <button>; the "Open GitHub" affordance is a real
+     link (middle-click, long-press, open-in-new-tab all have to work), so it
+     needs the two inline-element properties a <button> already has. */
+  a.cdoc-btn { display: inline-block; text-decoration: none; }
   .cint-key-actions { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; align-items: center; }
   .cint-key-input {
     flex: 1 1 200px; min-width: 0; background: var(--bg); color: var(--fg);
@@ -1589,11 +1631,40 @@
   .cset-sub { font-size: 0.8667rem; color: var(--muted); margin: 0 0 12px; line-height: 1.4; }
   .cset-error { color: var(--error-fg); font-size: 0.8rem; padding: 6px 0; }
   .cset-empty { color: var(--muted); font-size: 0.8667rem; padding: 16px 0; text-align: center; }
-  /* Code-generation settings: one chip row per phase. Chips rather than a
-     <select> because the whole option set is short and worth seeing at a glance —
-     and because the default is marked inline with a dot, which a collapsed
-     control would hide behind a click. */
+  /* Code-generation settings: a TABLE — one row per step, name · model · effort.
+     Dropdowns rather than the old pill grid: the option set now spans three model
+     families and each option carries the id it resolves to, which is far too much
+     text to wear as a pill. The name column keeps the step's one-line explanation,
+     because that sentence is the only thing telling the owner what the step does. */
   .cset-saved { color: var(--muted); font-size: 0.8rem; padding: 4px 0; }
+  .cset-cg-head, .cset-cg-row {
+    display: grid; grid-template-columns: minmax(0, 1fr) 190px 130px; gap: 10px;
+    align-items: start;
+  }
+  .cset-cg-head {
+    font-size: 0.7333rem; text-transform: uppercase; letter-spacing: .04em;
+    color: var(--muted); padding-bottom: 6px; border-bottom: 1px solid var(--border);
+  }
+  .cset-cg-row { padding: 10px 0; border-bottom: 1px solid var(--border); }
+  .cset-cg-name .cset-sub { margin: 2px 0 0; }
+  .cset-cg-cell { display: block; min-width: 0; }
+  /* The control is labelled for a screen reader without repeating the row's own
+     visible name beside it. */
+  .cset-cg-a11y {
+    position: absolute; width: 1px; height: 1px; overflow: hidden;
+    clip: rect(0 0 0 0); white-space: nowrap;
+  }
+  .cset-cg-select {
+    width: 100%; padding: 4px 6px; font-size: 0.8rem; border-radius: 6px;
+    background: var(--surface); color: var(--fg); border: 1px solid var(--border);
+  }
+  .cset-cg-select option:disabled { color: var(--muted); }
+  .cset-cg-na { font-size: 0.8rem; color: var(--muted); }
+  .cset-cg-stale { font-size: 0.8rem; color: var(--error-fg); margin: 4px 0 0; }
+  @media (max-width: 560px) {
+    .cset-cg-head { display: none; }
+    .cset-cg-row { grid-template-columns: 1fr; }
+  }
   .cset-chiprow { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
   .cset-chiprow .cset-label { margin-right: 4px; }
   .cset-chip {
@@ -1608,7 +1679,30 @@
      the pace beside the bar. The band colours are the SAME three tokens the
      divider uses, so the card and the hairline above it can never disagree about
      where amber starts. */
-  .cset-usage-pool { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+  .cset-usage-pool {
+    display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px;
+    padding: 10px 12px; border-radius: 10px;
+    background: var(--surface); border: 1px solid var(--border);
+  }
+  .cset-usage-poolhead { display: flex; align-items: baseline; gap: 8px; }
+  /* The age rides on every card, not only the stale ones: an age that appears
+     only when something is wrong is an age nobody learns to read. */
+  .cset-usage-age {
+    margin-left: auto; font-size: 0.7333rem; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  /* "How hard can I push this provider" — first line of the card, above every
+     bar, because it is the one line read at a glance. */
+  .cset-usage-capacity {
+    margin: 0; font-size: 0.9333rem; font-weight: 600; color: var(--fg);
+    font-variant-numeric: tabular-nums;
+  }
+  .cset-usage-account { display: flex; flex-direction: column; gap: 8px; }
+  .cset-usage-accounthead { display: flex; align-items: baseline; gap: 8px; }
+  .cset-usage-chip {
+    font-size: 0.7333rem; color: var(--muted); padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--border); white-space: nowrap;
+  }
   .cset-usage-row { display: flex; flex-direction: column; gap: 5px; }
   .cset-usage-head { display: flex; align-items: baseline; gap: 8px; }
   .cset-usage-pct {

@@ -12,7 +12,7 @@
  * CSS framework is bundled.
  */
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
@@ -916,8 +916,10 @@ function buildEditIndex(
 
 function TypingIndicator({
   activity,
+  onOpenActivity,
 }: {
   activity?: { label: string } | null
+  onOpenActivity: () => void
 }): React.JSX.Element {
   // SAY WHAT IT IS DOING, not just that it is doing something. Three dots for
   // four minutes is indistinguishable from a hang — the owner watched exactly
@@ -933,7 +935,12 @@ function TypingIndicator({
       <div className="car-avatar" aria-hidden="true">
         N
       </div>
-      <div className="car-bubble car-bubble-agent car-typing">
+      <button
+        type="button"
+        className="car-bubble car-bubble-agent car-typing"
+        aria-label="Show activity"
+        onClick={onOpenActivity}
+      >
         <span className="car-dot" />
         <span className="car-dot" />
         <span className="car-dot" />
@@ -942,7 +949,7 @@ function TypingIndicator({
           // second line in the transcript on it.
           <span className="car-typing-label">{label}</span>
         ) : null}
-      </div>
+      </button>
     </div>
   )
 }
@@ -1681,6 +1688,7 @@ function ChatSurface({
   paneProjectId,
   paneOnOpenDoc,
   fetchImpl,
+  onOpenActivity,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -1695,6 +1703,8 @@ function ChatSurface({
   /** Open a Work card's spec-doc in the Documents tab; undefined = static label. */
   paneOnOpenDoc?: (projectId: string, path: string) => void
   fetchImpl?: FetchImpl
+  /** Match mobile: tapping the live-turn indicator opens this scope's inspector. */
+  onOpenActivity: () => void
 }): React.JSX.Element {
   const [dragOver, setDragOver] = useState(false)
   const [importState, setImportState] = useState<ImportState>({ status: 'idle' })
@@ -1876,7 +1886,9 @@ function ChatSurface({
               incoming message. Board work has its own progress affordance, and
               conflating them makes the dots lie. `hasActiveWork` stays on the view
               model — the Work-tab dot uses it — it just no longer drives this. */}
-          {vm.awaitingFirstToken ? <TypingIndicator activity={vm.liveActivity} /> : null}
+          {vm.awaitingFirstToken ? (
+            <TypingIndicator activity={vm.liveActivity} onOpenActivity={onOpenActivity} />
+          ) : null}
         </ThreadPrimitive.Viewport>
         <ThreadPrimitive.ScrollToBottom className="car-scroll-bottom" aria-label="Scroll to bottom">
           ↓
@@ -1988,7 +2000,7 @@ const HYDRATION_GRACE_MS = 600
  * surface stay MOUNTED across switches: hidden when inactive, so its scroll
  * position + composer draft survive and switching back is instant.
  */
-function MountedConversation({
+function MountedConversationImpl({
   hostVm,
   active,
   controller,
@@ -1999,6 +2011,7 @@ function MountedConversation({
   showPane,
   paneProjectId,
   paneOnOpenDoc,
+  onOpenActivity,
 }: {
   hostVm: ChatViewModel
   active: boolean
@@ -2010,6 +2023,7 @@ function MountedConversation({
   showPane: boolean
   paneProjectId: string
   paneOnOpenDoc?: (projectId: string, path: string) => void
+  onOpenActivity: (projectId: string | null) => void
 }): React.JSX.Element {
   const messages = hostVm.messages
   // Indexes are pure over `messages`; memoize on the message-list identity so an
@@ -2091,6 +2105,7 @@ function MountedConversation({
           // still shown, mid-flight, when they switch back.
           showPane={showPane}
           paneProjectId={paneProjectId}
+          onOpenActivity={() => onOpenActivity(hostVm.projectId)}
           {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
           {...(fetchImpl !== undefined ? { fetchImpl } : {})}
         />
@@ -2106,6 +2121,34 @@ function MountedConversation({
   )
 }
 
+/**
+ * A surface only re-renders when ITS OWN inputs change (2026-08-17).
+ *
+ * `ChatApp` re-renders on every controller `publish()` — every streaming token,
+ * every ack, every project switch — and it renders EVERY mounted conversation, up
+ * to {@link MAX_MOUNTED_CONVERSATIONS}. Without this memo each of those publishes
+ * re-rendered the full thread machinery of every kept-alive conversation, including
+ * the ones the owner is not looking at, at a cost proportional to THEIR message
+ * counts. Measured on a two-project harness: one switch rendered 4 surfaces before
+ * and renders 2 after, and a switch into an EMPTY conversation rendered 6 — it was
+ * paying for transcripts that were neither on screen nor entered.
+ *
+ * An inactive surface's props are all stable by construction: `hostVm` is its frozen
+ * snapshot, `controller`/`config` live for the app's lifetime, `draft` is memoized,
+ * and every callback is ref-stabilized in {@link ChatApp} below. So the memo holds
+ * and only the two surfaces whose `active` flips actually re-render on a switch.
+ *
+ * ⚠️ The stabilization is load-bearing, not tidiness: ONE unstable prop silently
+ * turns this memo back into a no-op, with no failure anywhere to notice. That is
+ * what `__tests__/switch-render-cost.test.tsx` pins.
+ */
+const MountedConversation = memo(MountedConversationImpl)
+
+/** A stable no-op for an omitted callback. An inline `?? (() => {})` fallback mints
+ *  a new function every render, which alone would defeat {@link MountedConversation}'s
+ *  memo for every surface. */
+const NOOP = (): void => {}
+
 export function ChatApp({
   vm,
   controller,
@@ -2115,6 +2158,7 @@ export function ChatApp({
   onOpenDocLink,
   paneEligible,
   paneOnOpenDoc,
+  onOpenActivity,
 }: {
   vm: ChatViewModel
   controller: NeutronChatController
@@ -2135,6 +2179,8 @@ export function ChatApp({
   /** Open a Work card's spec-doc in the Documents tab; undefined = static label
    *  (e.g. General, which has no Documents tab). */
   paneOnOpenDoc?: (projectId: string, path: string) => void
+  /** Open the Activity Inspector for the tapped conversation scope. */
+  onOpenActivity?: (projectId: string | null) => void
 }): React.JSX.Element {
   // FIX #343 — keep the chat surface MOUNTED across project switches instead of
   // remounting it on every switch (the old `key={convId}` on the sole
@@ -2146,6 +2192,31 @@ export function ChatApp({
   // ever sees ITS conversation's messages — never emptied in place by a foreign
   // switch), keeps per-project scroll + draft, and makes switching back instant.
   const convId = conversationIdOf(vm.projectId)
+
+  // REF-STABILIZED CALLBACKS. Every mounted surface takes these as props, and
+  // `MountedConversation` is memoized — so a caller that passes an inline arrow (as
+  // `ProjectShell` does for `onOpenActivity`) would otherwise hand every surface a
+  // new prop on every render and silently defeat that memo. Stabilizing HERE keeps
+  // the guarantee a property of this component rather than a rule each caller has to
+  // remember, which is the difference between an optimization that holds and one
+  // that decays the next time somebody adds a prop.
+  const cbRef = useRef({ onOpenDocLink, paneOnOpenDoc, onOpenActivity })
+  cbRef.current = { onOpenDocLink, paneOnOpenDoc, onOpenActivity }
+  const stableOpenDocLink = useCallback((projectId: string, path: string): void => {
+    cbRef.current.onOpenDocLink?.(projectId, path)
+  }, [])
+  const stablePaneOpenDoc = useCallback((projectId: string, path: string): void => {
+    cbRef.current.paneOnOpenDoc?.(projectId, path)
+  }, [])
+  const stableOpenActivity = useCallback((projectId: string | null): void => {
+    cbRef.current.onOpenActivity?.(projectId)
+  }, [])
+  // Presence still routes through the caller's own value: a surface renders a doc
+  // link as a plain anchor when no handler was supplied, so the wrapper must not
+  // make an absent handler look present.
+  const openDocLink = onOpenDocLink !== undefined ? stableOpenDocLink : undefined
+  const paneOpenDoc = paneOnOpenDoc !== undefined ? stablePaneOpenDoc : undefined
+  const openActivity = onOpenActivity !== undefined ? stableOpenActivity : NOOP
 
   // Per-conversation frozen-vm cache, keyed by convId. Updated during render for
   // the ACTIVE conversation only, and only when the live vm actually carries this
@@ -2240,7 +2311,7 @@ export function ChatApp({
             config={config}
             draft={draft}
             {...(fetchImpl !== undefined ? { fetchImpl } : {})}
-            {...(onOpenDocLink !== undefined ? { onOpenDocLink } : {})}
+            {...(openDocLink !== undefined ? { onOpenDocLink: openDocLink } : {})}
             showPane={paneEligible === true}
             // Each surface scopes its pane to ITS OWN conversation's project (not
             // the globally-active one), so a kept-alive background surface never
@@ -2250,7 +2321,8 @@ export function ChatApp({
             // (`GENERAL_CONV_ID`) is now collision-proof, but `hostVm.projectId` is
             // still the single source of truth for which board this surface owns.
             paneProjectId={hostVm.projectId ?? ''}
-            {...(paneOnOpenDoc !== undefined ? { paneOnOpenDoc } : {})}
+            onOpenActivity={openActivity}
+            {...(paneOpenDoc !== undefined ? { paneOnOpenDoc: paneOpenDoc } : {})}
           />
         )
       })}

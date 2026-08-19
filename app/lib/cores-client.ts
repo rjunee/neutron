@@ -103,6 +103,10 @@ export interface ApiKeyIntegration {
 
 export interface IntegrationsResponse {
   ok: boolean;
+  scope: {
+    kind: 'cores';
+    description: string;
+  };
   oauth: OAuthAccountIntegration[];
   api_keys: ApiKeyIntegration[];
 }

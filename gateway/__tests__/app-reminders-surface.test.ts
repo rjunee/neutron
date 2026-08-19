@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import {
@@ -53,8 +53,8 @@ const OTHER_PROJECT_ID = 'other-project'
 
 async function startGateway(opts: { now?: () => number } = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-reminders-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = new ReminderStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
   const surface = createAppRemindersSurface({
@@ -637,5 +637,170 @@ describe('app-reminders surface — fall-through behaviour', () => {
       { method: 'DELETE' },
     )
     expect(res.status).toBe(405)
+  })
+})
+
+/**
+ * THE NO-PROJECT SCOPE IS NOT A PROJECT CALLED `general`.
+ *
+ * The rail spells General `~general`, and this surface used to see only whatever
+ * the client collapsed that to — the literal `general`, which is a legal project
+ * id. On an instance that HAS a project of that name the two rail entries
+ * resolved to one `app-project:general` topic, so they shared a pending list AND
+ * its create / snooze / cancel. Reads make that a visibility bug; the writes are
+ * what make it a data bug.
+ *
+ * Driven end-to-end through the composed handler rather than by unit-testing
+ * `resolveScopeSegment`, because the interesting claim is not "the function
+ * returns a different string" — it is "a create in one scope is invisible and
+ * immutable in the other", which only the store can answer.
+ */
+describe('app-reminders surface — the reserved General segment', () => {
+  let harness: Harness
+  beforeEach(async () => {
+    harness = await startGateway({ now: fixedNow })
+  })
+  afterEach(async () => {
+    await harness.close()
+  })
+
+  const GENERAL_SEGMENT = '~general'
+  /** The one id that collides: a real project whose id IS the old General segment. */
+  const COLLIDING_PROJECT_ID = 'general'
+
+  async function create(segment: string, message: string): Promise<Response> {
+    return await authedFetch(harness.base, `/api/app/projects/${segment}/reminders`, {
+      method: 'POST',
+      body: JSON.stringify({ message, fire_at: FIXED_NOW_S + 3600 }),
+    })
+  }
+
+  async function list(segment: string): Promise<Array<{ id: string; message: string }>> {
+    const res = await authedFetch(harness.base, `/api/app/projects/${segment}/reminders`)
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as {
+      reminders: Array<{ id: string; message: string }>
+    }
+    return json.reminders
+  }
+
+  it('accepts the sentinel that sanitizeProjectId rejects, and echoes it back', async () => {
+    // `~` is outside `[A-Za-z0-9_.-]`, so before the reservation this was a 400 —
+    // which is what put an error banner where General's reminders belong.
+    const res = await authedFetch(
+      harness.base,
+      `/api/app/projects/${GENERAL_SEGMENT}/reminders`,
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { ok: boolean; project_id: string }
+    expect(json.ok).toBe(true)
+    expect(json.project_id).toBe(GENERAL_SEGMENT)
+  })
+
+  it('still rejects every OTHER out-of-alphabet segment — the match is exact', async () => {
+    // A prefix or a `startsWith` here would hand `~generalize` the General scope,
+    // and silently: it would 200 rather than 400. Both directions pinned.
+    for (const bad of ['~generalize', '~general-2', '~gen', '~', 'has%20space']) {
+      const res = await authedFetch(harness.base, `/api/app/projects/${bad}/reminders`)
+      expect(res.status).toBe(400)
+      const json = (await res.json()) as { code: string }
+      expect(json.code).toBe('invalid_project_id')
+    }
+  })
+
+  it('lands the General scope on its own topic, which no project id can spell', async () => {
+    await create(GENERAL_SEGMENT, 'general scope row')
+    const rows = harness.store.listPendingByTopic(
+      'demo',
+      appProjectTopicId(GENERAL_SEGMENT),
+    )
+    expect(rows.map((r) => r.message)).toEqual(['general scope row'])
+    // And nothing landed on the topic the collision used to share.
+    expect(
+      harness.store.listPendingByTopic('demo', appProjectTopicId(COLLIDING_PROJECT_ID)),
+    ).toEqual([])
+  })
+
+  it('a create in each scope is invisible in the other — THE COLLISION, closed', async () => {
+    expect((await create(GENERAL_SEGMENT, 'from the General tab')).status).toBe(200)
+    expect((await create(COLLIDING_PROJECT_ID, 'from the general project')).status).toBe(
+      200,
+    )
+    expect((await list(GENERAL_SEGMENT)).map((r) => r.message)).toEqual([
+      'from the General tab',
+    ])
+    expect((await list(COLLIDING_PROJECT_ID)).map((r) => r.message)).toEqual([
+      'from the general project',
+    ])
+  })
+
+  /**
+   * Drive snooze + cancel from `attacker_segment` at a row that belongs to
+   * `victim_segment`, and assert the row survives untouched.
+   *
+   * Parameterised because "neither scope" is a claim about BOTH directions and
+   * the first version of this test only ever created a General row — so it
+   * proved General-attacked-via-the-project and left the mirror image, a General
+   * URL reaching into the real project, entirely unexercised. A one-directional
+   * reservation would have passed it.
+   */
+  async function assertCannotReachAcross(
+    victim_segment: string,
+    attacker_segment: string,
+    message: string,
+  ): Promise<void> {
+    expect((await create(victim_segment, message)).status).toBe(200)
+    const victim_row = (await list(victim_segment))[0]
+    if (victim_row === undefined) throw new Error(`the ${victim_segment} create did not land`)
+
+    // The mutating half of the finding. Pre-fix these were the SAME URL, so a
+    // cancel meant for one scope destroyed a row belonging to the other.
+    for (const action of ['snooze', 'cancel'] as const) {
+      const res = await authedFetch(
+        harness.base,
+        `/api/app/projects/${attacker_segment}/reminders/${victim_row.id}/${action}`,
+        {
+          method: 'POST',
+          body: JSON.stringify({ new_fire_at: FIXED_NOW_S + 7200 }),
+        },
+      )
+      expect(res.status).toBe(404)
+      const json = (await res.json()) as { code: string }
+      expect(json.code).toBe('reminder_not_found')
+    }
+    // Still pending, still the victim's, untouched by either attempt.
+    expect((await list(victim_segment)).map((r) => r.id)).toEqual([victim_row.id])
+  }
+
+  it("the project cannot snooze or cancel the General scope's row", async () => {
+    await assertCannotReachAcross(GENERAL_SEGMENT, COLLIDING_PROJECT_ID, 'from the General tab')
+  })
+
+  it("the General scope cannot snooze or cancel the project's row", async () => {
+    // The direction the original test never built a row for. It is not symmetric
+    // by inspection: General's segment is reserved by an exact-match branch that
+    // runs BEFORE `sanitizeProjectId`, so this path exercises different code than
+    // its mirror and has to be asserted rather than assumed.
+    await assertCannotReachAcross(
+      COLLIDING_PROJECT_ID,
+      GENERAL_SEGMENT,
+      'from the general project',
+    )
+  })
+
+  it("the include_id widening does not leak the other scope's row either", async () => {
+    // `include_id` is caller-controlled and admits a non-pending row, so it is the
+    // one path that could re-open the collision after the topic split. It re-checks
+    // `extra.topic_id === topic_id`, and this is the pin on that.
+    await create(GENERAL_SEGMENT, 'from the General tab')
+    const general_row = (await list(GENERAL_SEGMENT))[0]
+    if (general_row === undefined) throw new Error('the General create did not land')
+    const res = await authedFetch(
+      harness.base,
+      `/api/app/projects/${COLLIDING_PROJECT_ID}/reminders?status=pending&include_id=${general_row.id}`,
+    )
+    expect(res.status).toBe(200)
+    const json = (await res.json()) as { reminders: Array<{ id: string }> }
+    expect(json.reminders).toEqual([])
   })
 })

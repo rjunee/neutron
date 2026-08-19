@@ -28,9 +28,16 @@ export interface NotifierCompositionInput {
    * the same late-binding shape it already uses for the ritual registration
    * service. Returns void: the composer owns the wiring, this only says "now".
    *
-   * Omitted on an LLM-less box → every row composes as an ordinary nudge from its
-   * own stored `message`. That is fail-closed: with no planner installed nothing
-   * reads, validates, or composes a ritual's approved PROMPT.
+   * Omitted on an LLM-less box → a row with NO `ritual_id` composes as an ordinary
+   * nudge from its own stored `message`; a RITUAL row is REFUSED — it composes
+   * nothing and the owner gets one plain-language notice
+   * (`reminders/dispatcher.ts:508`).
+   *
+   * This said "every row composes as an ordinary nudge. That is fail-closed", which
+   * was true of the approved PROMPT and false of the NOTIFICATION — a ritual row's
+   * stored `message` IS the dispatch token `ritual:<id>`, so nudging it put that token
+   * on the owner's lock screen. The prompt is protected either way; the notification
+   * was not.
    */
   init_ritual_planner?: (deps: { approvals: ApprovalManager }) => void
   /** Heartbeat tracker — typically a small in-process pulse counter. */

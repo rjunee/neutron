@@ -61,6 +61,7 @@ import { acquireSession, releaseSession, setCacheActive } from './session-cache'
 // which the project shell mounts for every tab; this hook only owns the
 // foreground CLAIM, because the transcript is the work the claim is about.
 import { setForegroundBusy } from './transcript-warmer';
+import { activityScopeKey, decodeActivityFrame, type ActivityRow } from '../activity-client';
 
 export interface UseMobileChatResult {
   /** The merged render list (durable transcript + live streaming bubbles). */
@@ -69,6 +70,8 @@ export interface UseMobileChatResult {
   status: ConnStatus;
   /** True while the agent is streaming a reply (typing dots). */
   typing: boolean;
+  /** Latest meaningful live activity for the inline typing indicator. */
+  liveActivity: ActivityRow | null;
   /**
    * The TRANSIENT system notice — the cold-start "⏳ Waking up, one moment…"
    * ack — as a quiet centered pill, never a chat bubble. `null` when there is
@@ -203,6 +206,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
   const [sendError, setSendError] = useState<string | null>(null);
   const [hydrated, setHydrated] = useState(false);
   const [selfDeviceId, setSelfDeviceId] = useState('');
+  const [liveActivity, setLiveActivity] = useState<ActivityRow | null>(null);
   // Bumping this RE-RUNS the attach effect. It is the retry: an attach that
   // threw has no other way back onto the wire, and a project that cannot get
   // onto the wire is a project the owner cannot open.
@@ -341,6 +345,10 @@ export function useMobileChat(railId: string): UseMobileChatResult {
           if (!disposed) setStatus(s);
         },
         onFrame: (frame) => {
+          const activity = decodeActivityFrame(frame, activityScopeKey(projectId));
+          if (activity !== null && activityLabel(activity) !== null && !disposed) {
+            setLiveActivity(activity);
+          }
           // The transient system-notice pill is folded BEFORE the project
           // filter, and deliberately so: the gateway emits the cold-start ack
           // with no `project_id` (`build-live-agent-turn.ts` sends only
@@ -449,6 +457,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
       setMessages([]);
       setStream(emptyStreamState());
       setNotice(emptySystemNoticeState());
+      setLiveActivity(null);
     };
   }, [user, projectId, config.base_url, deviceId, attachAttempt]);
 
@@ -581,6 +590,7 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     rows,
     status,
     typing: stream.typing,
+    liveActivity,
     systemNotice: notice.text,
     pendingCount,
     ready,
@@ -595,6 +605,23 @@ export function useMobileChat(railId: string): UseMobileChatResult {
     retry,
     selfDeviceId,
   };
+}
+
+/** Text shown beside mobile's dots. Generic status rows carry meaning in detail. */
+export function activityLabel(row: Pick<ActivityRow, 'kind' | 'label' | 'detail'>): string | null {
+  // KEEPALIVE IS NOT AN ACTIVITY. `activity-inspector.ts` emits
+  // `{ kind: 'keepalive', label: 'alive' }` as the "this session is breathing"
+  // tick — it says the socket is up, not that anything is happening. Rendering
+  // it replaces whatever the agent was ACTUALLY doing with the word "alive",
+  // and because the ticks keep coming it wins every race: the useful label
+  // appears for an instant and is then overwritten by noise.
+  //
+  // Returning null here is what makes the label STICK: the caller only stores a
+  // row when this returns non-null (`use-mobile-chat` onFrame), so a keepalive
+  // now leaves the last real activity in place instead of clobbering it.
+  if (row.kind === 'keepalive') return null;
+  const text = row.label === row.kind && row.detail !== undefined ? row.detail : row.label;
+  return text.trim().length > 0 ? text : null;
 }
 
 /** A message belongs to this project view when its project_id matches, or

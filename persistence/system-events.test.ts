@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from './db.ts'
 import {
   SystemEventsStore,
@@ -20,8 +20,8 @@ let store: SystemEventsStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'system-events-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   store = new SystemEventsStore({ db })
 })
 
@@ -124,6 +124,79 @@ describe('SystemEventsStore.listRecentForScope — scope + limit boundaries (O5)
   })
 })
 
+describe('SystemEventsStore.listVisibleForScopeAndName — the edge trigger sees the WINDOW', () => {
+  const insert = (
+    id: string,
+    ts: number,
+    project_slug: string | null,
+    event_name = 'instance_scope_rekey_refused',
+    payload_json = '{}',
+  ): void => {
+    db.runSync(
+      `INSERT INTO system_events (id, ts, level, module, event_name, payload_json, project_slug, duration_ms)
+       VALUES (?, ?, 'warn', 'gateway', ?, ?, ?, NULL)`,
+      [id, ts, event_name, payload_json, project_slug],
+    )
+  }
+
+  it('returns EVERY matching row inside the window, newest first', () => {
+    // Newest-first ordering matches `listRecentForScope` exactly. Returning the
+    // SET rather than the newest row is what lets the caller ask "is this
+    // payload already on the page" instead of "is it the last line" — the
+    // alternation blocker (Argus r1 on PR #322).
+    insert('old', 10, 'demo', 'instance_scope_rekey_refused', '{"n":1}')
+    insert('new', 20, 'demo', 'instance_scope_rekey_refused', '{"n":2}')
+    expect(
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50).map((r) => r.id),
+    ).toEqual(['new', 'old'])
+  })
+
+  it('scopes strictly, and ignores other event names', () => {
+    insert('foreign', 30, 'other')
+    insert('null-scoped', 31, null)
+    insert('wrong-name', 32, 'demo', 'cron_job_error')
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)).toEqual([])
+  })
+
+  it('THE BLOCKER: a row pushed OUT of the window is not visible, so it is not a repeat', () => {
+    // The refusal, then 50 unrelated in-scope events. The row still EXISTS —
+    // `system_events` has no retention sweep — but the owner's feed no longer
+    // shows it, so suppressing on it would hide the warning permanently.
+    insert('refusal', 1, 'demo')
+    for (let i = 0; i < 50; i++) insert(`filler-${i}`, 100 + i, 'demo', 'cron_job_error')
+    expect(store.listRecentForScope('demo', 50).map((r) => r.id)).not.toContain('refusal')
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50)).toEqual([])
+    // CONTROL — the same query with a window big enough to reach it finds it,
+    // which proves the empty result above is the WINDOW and not a broken query.
+    expect(
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 51).map((r) => r.id),
+    ).toEqual(['refusal'])
+  })
+
+  it('non-positive / non-finite windows show nothing → []', () => {
+    insert('refusal', 1, 'demo')
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 0)).toEqual([])
+    expect(store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', -1)).toEqual([])
+    expect(
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', Number.NaN),
+    ).toEqual([])
+    expect(
+      store.listVisibleForScopeAndName(
+        'demo',
+        'instance_scope_rekey_refused',
+        Number.POSITIVE_INFINITY,
+      ),
+    ).toEqual([])
+  })
+
+  it('a corrupt payload THROWS — which is why the caller reads it inside a try', () => {
+    insert('bad', 5, 'demo', 'instance_scope_rekey_refused', 'not json')
+    expect(() =>
+      store.listVisibleForScopeAndName('demo', 'instance_scope_rekey_refused', 50),
+    ).toThrow()
+  })
+})
+
 describe('emitSystemEventSafe — NEVER throws / rejects', () => {
   it('no-op (resolves) when sink is null/undefined', async () => {
     await expect(emitSystemEventSafe(null, { event: 'gbrain_unavailable' })).resolves.toBeUndefined()
@@ -219,8 +292,8 @@ describe('SystemEventsStore — drain flushes fire-and-forget writes', () => {
   it('a REAL store write failure never produces an unhandled rejection', async () => {
     // Throwaway DB/store local to this test so closing it doesn't collide with
     // the shared afterEach teardown of `db`.
+    seedMigratedDb(join(tmp, 'fail.db'))
     const failDb = ProjectDb.open(join(tmp, 'fail.db'))
-    applyMigrations(failDb.raw())
     const failStore = new SystemEventsStore({ db: failDb })
 
     const unhandled: unknown[] = []

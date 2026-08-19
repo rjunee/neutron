@@ -3,9 +3,11 @@
  *
  * Fills in the `MergeCleanupDeps` bodies the PR-2 `cleanupAfterMerge`
  * seam (git-mode.ts) calls on the `argus APPROVE → done` transition.
- * Both modes are host-command sequences over an injected runner (the
- * same `(cmd, cwd) => HostCommandResult` shape `defaultGitModeProbe`
- * uses), so tests assert the exact git/gh calls without shelling out.
+ * Both modes are host-command sequences over an injected runner (a
+ * `(cmd, cwd) => HostCommandResult`; `defaultGitModeProbe` takes the same
+ * shape widened with an env parameter, so it can inject the publisher's
+ * credential into its own capability call), so tests assert the exact
+ * git/gh calls without shelling out.
  *
  *   • `'pr'`    → `gh pr merge <pr> --squash --match-head-commit <reviewed OID>`,
  *                 then delete the REMOTE branch (`git push origin --delete`) +
@@ -20,10 +22,16 @@
  * worktree is orphaned unless trident removes it (the June fseventsd CPU-peg
  * wedge driver). The inner workflow's `finally{}` cleans up on every inner path;
  * this is the OUTER backstop: after the merge + branch teardown, if `run.worktree`
- * is set, best-effort `git worktree remove --force` + `git worktree prune` so
+ * is set, best-effort `git worktree remove` + `git worktree prune` so
  * `git worktree list` is clean after EVERY merge. Best-effort + non-fatal: the
  * merge has already landed, so a failed worktree removal is logged, never thrown
  * (it must not undo a completed merge).
+ *
+ * …WITH ONE HARD BOUND (ISSUES #541): a DIRTY worktree — uncommitted changes
+ * INCLUDING untracked files, or a tree we cannot prove clean — is PRESERVED, and
+ * no removal here ever passes `--force`. Force-removal from a cleanup path is
+ * what destroyed 197 insertions across 7 files on PR #171; an orphaned worktree
+ * is cosmetic, work that exists nowhere else is not. See `removeWorktreePath`.
  *
  * THE MERGE IS PINNED TO THE REVIEWED COMMIT (#545). A bare `gh pr merge` merges
  * whatever the PR head is AT MERGE TIME, which is not necessarily what Argus
@@ -41,13 +49,18 @@
  * unpinnable merge is exactly the unreviewable merge this prevents).
  */
 
+import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
+
+import { createLogger } from '@neutronai/logger'
 
 import type { HostCommandResult } from './git-mode.ts'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
 
 export type RunHostCommand = (cmd: string[], cwd?: string) => Promise<HostCommandResult>
+
+const log = createLogger('trident-merge')
 
 /** Thrown when a merge/cleanup host command exits non-zero. */
 export class TridentMergeError extends Error {
@@ -95,11 +108,24 @@ export interface MergeConflictResolver {
     run: TridentRun
     /** Files with unresolved conflict markers (`--diff-filter=U`). */
     conflicted_files: string[]
+    /**
+     * HOW THE CONFLICTED TREE WAS MADE — the two call sites differ in ways the resolver's
+     * contract depends on, and a contract that describes the wrong one is worse than none.
+     *   - `'rebase'` (default, `rebaseBranchOntoBase`): the repo's OWN working tree, part-way
+     *     through a real `git rebase`, with dependencies installed. The outer loop runs
+     *     `git rebase --continue`; the resolver can and should run the tests.
+     *   - `'replay'` (`rebaseOntoObservedBase`): a THROWAWAY DETACHED worktree at the base tip
+     *     that `git apply --3way --index` just conflicted in. No rebase is in progress, the outer
+     *     publisher commits the tree itself, and there is no `node_modules` — a test run there
+     *     either fails for unrelated reasons or resolves modules out of a DIFFERENT checkout that
+     *     other lanes are building in.
+     */
+    mode?: 'rebase' | 'replay'
   }): Promise<{ resolved: true } | { resolved: false; question: string }>
 }
 
 /** Bound the rebase-continue loop so a pathological history can't spin forever. */
-const MAX_CONFLICT_ROUNDS = 12
+export const MAX_CONFLICT_ROUNDS = 12
 
 /**
  * Resolve the base branch to merge into. Tries `origin/HEAD`'s symbolic
@@ -241,13 +267,153 @@ export async function recoverStaleGitState(run_host: RunHostCommand, repo: strin
   return wasDirty
 }
 
-/** Remove a specific worktree path (best-effort) + prune stale admin entries. */
-async function removeWorktreePath(run_host: RunHostCommand, repo: string, wt: string): Promise<void> {
+/** Symlink-resolved path, or the input when it cannot be resolved. */
+function realpathOrSelf(p: string): string {
   try {
-    await run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
-    await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+    return realpathSync(p)
   } catch {
-    // Swallow — a cleanup miss is cosmetic; the merge/refs are already durable.
+    return p
+  }
+}
+
+/**
+ * Is this worktree holding work that exists NOWHERE ELSE? (ISSUES #541)
+ *
+ * Untracked files count as dirt: the #541 incident's lost work included files git
+ * had never seen. `--untracked-files=all` then EXPANDS an untracked DIRECTORY into
+ * its individual files — plain `--porcelain` collapses a whole new `src/feature/`
+ * into one `?? src/feature/` line, and this output is what names the work for the
+ * operator. Ignored files (node_modules, build output) are NOT counted — they are
+ * not work.
+ *
+ * THE PROBE MUST BE POINTED AT A WORKTREE ROOT. `git -C <dir> status` walks UP to
+ * the enclosing repo, so a leftover PLAIN DIRECTORY inside the checkout (a crashed
+ * `worktree add`, a hand-made dir at the deterministic path) reports the SHARED
+ * CHECKOUT's dirt as its own — an empty directory would then look like precious
+ * work and fail every merge. `--show-toplevel` must name `wt` itself.
+ *
+ * UNVERIFIABLE COUNTS AS DIRTY. If the probe cannot run in a directory that DOES
+ * exist (broken worktree admin, a throwing host) we cannot prove the tree is
+ * clean, and the failure mode of guessing wrong here is unrecoverable data loss.
+ * That includes `rev-parse` itself failing: a directory git cannot classify at
+ * all is NOT the same as one it classifies as "somebody else's repo". A path that
+ * does not exist at all is not "unverifiable" either — there is no working tree
+ * there to preserve, only a stale admin entry for `prune`, which is why the
+ * `existsSync` gate is load-bearing rather than a shortcut for the probe.
+ *
+ * @returns the dirty porcelain output, or `null` when the tree is provably clean
+ *          (or absent, or a directory rooted in some OTHER repo).
+ */
+async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<string | null> {
+  if (!existsSync(wt)) return null
+  try {
+    const top = await run_host(['git', '-C', wt, 'rev-parse', '--show-toplevel'], wt)
+    const top_path = top.ok ? top.stdout.trim() : ''
+    // The directory exists but git cannot say what it is → unverifiable → dirty.
+    if (top_path === '')
+      return top.stderr || top.stdout || `git rev-parse --show-toplevel exited ${top.exit_code}`
+    // Rooted in a DIFFERENT repo: a plain directory whose status would be the
+    // PARENT repo's, not this tree's. Nothing here is preservable work of ours.
+    // git prints the SYMLINK-RESOLVED root, so `/tmp/x` on a platform where /tmp
+    // is a symlink must still match — compare against the resolved path too.
+    if (top_path !== wt && top_path !== realpathOrSelf(wt)) return null
+    const res = await run_host(['git', '-C', wt, 'status', '--porcelain', '--untracked-files=all'], wt)
+    if (!res.ok) return res.stderr || res.stdout || `git status exited ${res.exit_code}`
+    return res.stdout.trim() === '' ? null : res.stdout.trim()
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err)
+  }
+}
+
+/**
+ * Remove a specific worktree path + prune stale admin entries — UNLESS it is
+ * dirty (ISSUES #541).
+ *
+ * This used to be an unconditional `git worktree remove --force`, the outer twin
+ * of the inner workflow's force-removing cleanup agent that destroyed 197
+ * insertions across 7 files on PR #171. A dirty tree is now left exactly as it
+ * is, and the removal of a clean one uses a PLAIN `git worktree remove` so git's
+ * own dirty check is a second, independent gate on top of ours.
+ *
+ * `prune` is safe either way: it only drops admin entries whose working directory
+ * is already gone — it never deletes a working tree.
+ *
+ * @returns the reason the worktree was PRESERVED — its dirty paths, or why the
+ *          removal was refused — and `null` when it was removed (or was already
+ *          absent, or was never a worktree of ours).
+ */
+async function removeWorktreePath(
+  run_host: RunHostCommand,
+  repo: string,
+  wt: string,
+): Promise<string | null> {
+  try {
+    const dirt = await worktreeDirt(run_host, wt)
+    if (dirt !== null) {
+      // Nothing is force-removed and nothing is pruned out from under it: the
+      // caller decides whether a preserved tree is fatal (provisioning) or merely
+      // reported (post-merge cleanup).
+      log.warn('worktree_preserved_dirty', {
+        worktree: wt,
+        dirty: dirt,
+        action: `trident preserved uncommitted work at ${wt} — nothing was force-removed; recover or delete it by hand`,
+      })
+      return dirt
+    }
+    // A REFUSED REMOVAL IS NOT A REMOVAL. `git worktree remove` declines a locked
+    // tree, one with submodules, or one that was dirtied in the window between the
+    // probe above and this call (the plain — never `--force` — remove is exactly
+    // the second gate that catches that race). Ignoring the result reported those
+    // survivors as removed: `freeBranchFromWorktrees` then skipped its preservation
+    // error and the merge died three lines later on git's raw "already checked out
+    // at <path>", the confusing message this file exists to replace. The SHELL twin
+    // already scored a declined remove as `PRESERVED … reason=unverifiable`; this is
+    // the same rule on this side.
+    //
+    // ESCALATE ONLY FOR A WORKTREE ROOT THAT SURVIVED, because `remove` also fails
+    // (exit 128, "is not a working tree") for a path that was never a worktree —
+    // which is the ORDINARY provisioning case, where nothing is at that path at all.
+    // Treating that as preserved work would throw on every clean merge. The same
+    // `--show-toplevel` test `worktreeDirt` uses tells the two apart: a leftover
+    // PLAIN directory is rooted in the enclosing repo, not itself, and holds no work
+    // of ours to preserve.
+    const removal = await run_host(['git', '-C', repo, 'worktree', 'remove', wt], repo)
+    if (!removal.ok && existsSync(wt)) {
+      const top = await run_host(['git', '-C', wt, 'rev-parse', '--show-toplevel'], wt)
+      const top_path = top.ok ? top.stdout.trim() : ''
+      if (top_path === wt || top_path === realpathOrSelf(wt)) {
+        const why =
+          removal.stderr || removal.stdout || `git worktree remove exited ${removal.exit_code}`
+        log.warn('worktree_preserved_unverifiable', {
+          worktree: wt,
+          reason: why,
+          action: `trident could not remove ${wt} and did NOT force it — the tree is still there; unlock or clear it by hand`,
+        })
+        return why
+      }
+    }
+    await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+    return null
+  } catch (err) {
+    // A THROWN removal is not a removal either — the same rule as the REFUSED one
+    // above, which this used to contradict. Swallowing the throw and returning
+    // `null` told `provisionRunWorktree` the path was clear, and it went straight
+    // on to `git worktree add --force` over a tree that is still sitting there.
+    // (`add` then refuses a non-empty directory, so nothing was destroyed — but
+    // the operator got git's "already exists" instead of the preservation error
+    // this function promises, which is the confusing message it exists to replace.)
+    //
+    // A path that is GONE is still safely "removed": there is no working tree
+    // there to preserve. Anything else is UNVERIFIABLE — we cannot re-probe with a
+    // host that is throwing — and unverifiable preserves, by construction.
+    if (!existsSync(wt)) return null
+    const why = err instanceof Error ? err.message : String(err)
+    log.warn('worktree_preserved_unverifiable', {
+      worktree: wt,
+      reason: why,
+      action: `trident could not remove ${wt} and did NOT force it — the tree is still there; unlock or clear it by hand`,
+    })
+    return why
   }
 }
 
@@ -258,6 +424,20 @@ async function removeWorktreePath(run_host: RunHostCommand, repo: string, wt: st
  * at the path (a crash-resumed run reusing the deterministic path) is removed +
  * pruned first. The whole rebase (the conflict-prone step) then runs HERE, so a
  * failed rebase can only dirty THIS throwaway worktree — never the shared checkout.
+ *
+ * A stale worktree that is DIRTY is NOT force-removed (ISSUES #541): it may hold
+ * a half-finished conflict resolution that exists nowhere else. The merge FAILS
+ * LOUDLY instead, naming the path.
+ *
+ * AND IT KEEPS FAILING UNTIL A HUMAN LOOKS. `runWorktreePath` is keyed on
+ * `run.id` + `run.slug`, both stable across retries, and #194 made slugs reusable
+ * — so a retry re-derives THIS path and re-hits THIS dirty tree. That is the
+ * intended trade and not a bug to route around: the conflict resolver is told to
+ * write logs and run tests in here, so the tree it leaves behind is exactly the
+ * kind of "exists nowhere else" work #541 is about, and a merge that is wedged is
+ * recoverable while one that force-removed the resolution is not. The error names
+ * the path and the two ways out (recover it, or `git worktree remove` it) so the
+ * wedge is a 30-second fix rather than a mystery.
  */
 async function provisionRunWorktree(
   run_host: RunHostCommand,
@@ -265,7 +445,14 @@ async function provisionRunWorktree(
   wt: string,
   base: string,
 ): Promise<void> {
-  await removeWorktreePath(run_host, repo, wt)
+  const preserved = await removeWorktreePath(run_host, repo, wt)
+  if (preserved !== null) {
+    throw new TridentMergeError(
+      `refusing to reuse the merge worktree ${wt}: it has uncommitted changes that exist nowhere else, or could not be removed. Every retry re-derives this same path, so the merge will keep failing until a human clears it: rescue whatever is in that directory, then \`git -C ${repo} worktree remove --force ${wt}\` and re-run the merge`,
+      'git worktree add',
+      { ok: false, stdout: preserved, stderr: '', exit_code: -1 },
+    )
+  }
   must(
     'git worktree add',
     await run_host(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', wt, base], repo),
@@ -277,6 +464,29 @@ async function provisionRunWorktree(
  * it checked out — the inner-workflow build worktree the harness/inner-cleanup may
  * have missed. Without this, checking `branch` out in the merge worktree would fail
  * "already checked out at <path>". Parses `git worktree list --porcelain`. Best-effort.
+ *
+ * A lingering build worktree is EXACTLY the tree #541 is about — the inner
+ * cleanup left it behind, which usually means the build died mid-edit — so a
+ * DIRTY one is preserved (never `--force`d) and the merge FAILS.
+ *
+ * It fails HERE, naming the path, rather than three lines later at `git checkout
+ * <branch>` with git's own "already checked out at <path>". That raw message is
+ * what the operator would otherwise see in chat, and it reads like a trident bug
+ * instead of what it is: trident kept your uncommitted work, and it is waiting
+ * for you at a path you now know.
+ *
+ * THE SHARED CHECKOUT IS NEVER A CANDIDATE — the same rule the SHELL twin applies,
+ * for the same reason. `git worktree remove` refuses a main working tree outright
+ * ("is a main working tree"), and that path IS its own `--show-toplevel`, so
+ * `removeWorktreePath` would score the refusal as PRESERVED and this function
+ * would throw — blocking the merge over a shared checkout that holds no
+ * uncommitted work at all. Today step (0a) of `mergeLocal` moves the checkout onto
+ * `base` before we are called, so the branch match cannot reach it; that ordering
+ * is the only thing standing between this and a merge that fails forever, which is
+ * too thin a guarantee to leave the twins disagreeing about. git documents the
+ * main worktree as the FIRST `worktree` record (git-worktree(1): "The main
+ * worktree is listed first"), so it is skipped positionally, exactly as the shell
+ * twin skips it with `n > 1`.
  */
 async function freeBranchFromWorktrees(
   run_host: RunHostCommand,
@@ -287,19 +497,33 @@ async function freeBranchFromWorktrees(
   const list = await run_host(['git', '-C', repo, 'worktree', 'list', '--porcelain'], repo)
   if (!list.ok) return
   const wantRef = `refs/heads/${branch}`
+  const preserved: { path: string; dirt: string }[] = []
   let curPath: string | null = null
+  let seen = 0
   for (const raw of list.stdout.split(/\r?\n/)) {
     const line = raw.trim()
     if (line.startsWith('worktree ')) {
       curPath = line.slice('worktree '.length).trim()
+      seen += 1
     } else if (line.startsWith('branch ')) {
       const ref = line.slice('branch '.length).trim()
-      if (ref === wantRef && curPath !== null && curPath !== keepPath) {
-        await run_host(['git', '-C', repo, 'worktree', 'remove', '--force', curPath], repo)
+      // `seen > 1` skips the main working tree — see the doc comment above.
+      if (ref === wantRef && curPath !== null && curPath !== keepPath && seen > 1) {
+        const dirt = await removeWorktreePath(run_host, repo, curPath)
+        if (dirt !== null) preserved.push({ path: curPath, dirt })
       }
     }
   }
   await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+  if (preserved.length > 0) {
+    throw new TridentMergeError(
+      `trident PRESERVED uncommitted work instead of merging: ${preserved
+        .map((p) => p.path)
+        .join(', ')} still ${preserved.length === 1 ? 'has' : 'have'} changes that exist nowhere else (branch ${branch}). Nothing was force-removed. Every retry re-checks the same paths, so this blocks until a human clears ${preserved.length === 1 ? 'it' : 'them'}: rescue the work, then \`git -C ${repo} worktree remove --force <path>\` and re-run the merge.`,
+      'worktree preserved (dirty)',
+      { ok: false, stdout: preserved.map((p) => `${p.path}\n${p.dirt}`).join('\n'), stderr: '', exit_code: -1 },
+    )
+  }
 }
 
 /**
@@ -430,14 +654,20 @@ function isRebaseConflict(res: HostCommandResult): boolean {
   )
 }
 
-/** The files with unresolved conflict markers (`git diff --diff-filter=U`). */
+/**
+ * The files with unresolved conflict markers (`git diff --diff-filter=U`).
+ *
+ * `-z` + `core.quotePath=false` because this list is MACHINE-CONSUMED — it becomes the resolver's
+ * `CONFLICTED FILES`. Git's default C-quoting renders `ünicode file.txt` as
+ * `"\303\274nicode file.txt"`, naming a file the resolver cannot open.
+ */
 async function listConflictedFiles(run_host: RunHostCommand, repo: string): Promise<string[]> {
-  const res = await run_host(['git', '-C', repo, 'diff', '--name-only', '--diff-filter=U'], repo)
+  const res = await run_host(
+    ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '-z', '--name-only', '--diff-filter=U'],
+    repo,
+  )
   if (!res.ok) return []
-  return res.stdout
-    .split(/\r?\n/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0)
+  return res.stdout.split('\0').filter((s) => s.length > 0)
 }
 
 /** Abort an in-progress rebase and return the working tree to `base`. Best-effort. */
@@ -520,15 +750,11 @@ async function rebaseBranchOntoBase(
  * this is the OUTER backstop for a `run.worktree` the run row still carries.
  * Non-fatal: the merge is irreversible by this point, so any failure is
  * swallowed (a thrown removal must never undo a completed merge). Goal: `git
- * worktree list` is clean after every merge.
+ * worktree list` is clean after every merge — EXCEPT for a dirty worktree, which
+ * is preserved and logged (#541): an orphan worktree is cosmetic, and destroying
+ * uncommitted work is not.
  */
 async function removeWorktree(run_host: RunHostCommand, run: TridentRun): Promise<void> {
   if (run.worktree === null) return
-  const repo = run.repo_path
-  try {
-    await run_host(['git', '-C', repo, 'worktree', 'remove', '--force', run.worktree], repo)
-    await run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
-  } catch {
-    // Swallow — the merge already landed; a cleanup miss is cosmetic, not fatal.
-  }
+  await removeWorktreePath(run_host, run.repo_path, run.worktree)
 }

@@ -52,8 +52,12 @@ with cross-references noted inline.
    Protects: **D1**/**D2** (PoolRuntime reification / Substrate banner split) — flag/promise pair
    must move together.
 7. Substrate instance-id prefixes are pool keys; the trident fire substrate must stay warm
-   per-repo-cwd; only `cc-agent-`-prefixed instances get `enableToolBridge`.
-   `open/composer.ts:590-633,535-541`.
+   per-repo-cwd; the OWNER-FACING CONVERSATIONAL PAIR — `cc-agent-` (live chat) and `cc-nudge-`
+   (background proactive compose: fired reminders/rituals + the work-board wakeup) — and ONLY that
+   pair get `enableToolBridge` and `PROFILE_WARM_CHAT`. `cc-nudge-` is a deliberate equal-grant,
+   separate-session twin of `cc-agent-`: equal grants because a ritual composes there and ISSUES
+   #504 settled that it must reach Core tools; separate session because a background compose that
+   aborts must not poison the child the owner is talking to. `open/wiring/substrates.ts`.
    Protects: **D1**/**D2**.
 8. `Bun.serve` selects the chained fetch handler per-request inside the serve arrow so the live
    server ref reaches WS upgrades; `maxRequestBodySize` = import cap + 64MB.
@@ -100,9 +104,77 @@ with cross-references noted inline.
     Protects: **P1** (ProjectDb API widening).
 17. Migration runner: PRAGMA preamble hoisted out of the per-migration transaction;
     `PRAGMA foreign_keys=ON` re-asserted in a `finally`; per-migration BEGIN/COMMIT atomicity;
-    migration version numbers are never renumbered or backfilled. `migrations/runner.ts:89-126`.
+    migration version numbers are never renumbered or backfilled, and **the runner decides
+    "has this run?" from the migration's NAME, never from its ordinal** (`classifyMigration`;
+    `_migrations` is keyed on `name`, `version` is data and two rows may share one). Keying on the
+    ordinal is what took the live instance down three times: a migration whose number a branch
+    migration had spent read as applied, so its `ALTER`s never ran and the schema silently lacked
+    them. Renumbering to dodge a collision is not the fix — it repairs the instance where the
+    ordinal was spent and breaks every instance where the migration already applied. `migrations/runner.ts`
+    (`applyMigrations`' apply loop, `splitPragmaPreamble`) — cited by function rather than by line,
+    because the previous line anchor had drifted off the code it named.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
+    Six refusals in that runner are fail-closed and must stay so: a duplicate ordinal
+    (`assertUniqueMigrationOrdinals`), a duplicate migration NAME (`assertUniqueMigrationNames` —
+    the name is the ledger key, so two files sharing a slug make one read as applied forever), TWO
+    FILES WITH IDENTICAL BYTES where one is already applied
+    (`formatDuplicateContentMigrations` — the hash cannot tell them apart, so calling the second
+    one applied means it never runs at all), a recorded migration NO file in this build corresponds
+    to by name or by content hash
+    (`formatUnexplainedLedgerRows`, resolvable only via a hand-verified `migrations/repairs.json`
+    entry), a pending migration file the deployed checkout does not track
+    (`formatUntrackedMigration` in `migrations/runner.ts`, on the verdict from `resolveDeployedTree`
+    in `migrations/provenance.ts`), and an OCCUPIED REKEY SCRATCH NAME (`rekeyLedgerOnName` —
+    `_migrations_version_keyed` can never be this runner's own leftover, because the whole rekey is
+    one transaction, so a table there is somebody's data and is refused rather than dropped; an
+    earlier version's unconditional `DROP TABLE IF EXISTS` destroyed exactly that, silently and
+    permanently, and the test that should have caught it used a VIEW, which SQLite refuses to drop).
+    **All six decide before ANY write** — `_migrations` is created, rekeyed, and repairs are
+    acknowledged, only after the last refusal has been passed, which is what makes the untracked
+    message's claim that nothing was written true.
+    Hash widening MUST stay conditioned on the recording row being one no file in this build
+    accounts for. Widening on a bare hash set is a silent-skip bug: a new, distinctly-named,
+    tracked migration whose bytes duplicate an applied one reads as applied, so it never runs,
+    never records, and is reported under `skipped` by a boot that exits zero — this invariant's own
+    defect class, reached through its fix.
+    A name match with a MISMATCHED hash is REPORTED and never enforced: it emits
+    `migration_content_drift` (`enforced=false`) and boots. Refusing is a rejected decision (see the
+    README's "recorded and reported, not enforced" — an in-place comment edit must not become a
+    crash loop), but silence was never the decision: an amended-during-review migration renumbered
+    by the merge reads as applied while its added statements never ran. `renumbered=true` is the
+    discriminating field, because bytes AND ordinal both moving is what an in-place edit cannot do.
+    A steady-state boot must stay SILENT — a notice that fires every boot is noise.
+    The collapse must adopt the provenance triple from ONE donor row, never column by column:
+    `content_sha256`/`applied_by_commit`/`tree_provenance` are written together and mixing them
+    fabricates a tuple no row ever had, in the columns that exist to be trusted.
+    The unexplained-row refusal adjudicates ONLY rows carrying a `content_sha256`, and that gate is
+    load-bearing rather than lenient: migration files are deliberately deleted here (`0059`,
+    `0064`–`0068`), so every long-lived database holds hashless rows naming migrations this tree no
+    longer contains, and refusing on them would take down the oldest instances in the fleet over
+    evidence that is a NULL. A recorded hash is never used to REFUSE a file — only ever to mark one
+    as already applied (see the README's "recorded and reported, not enforced").
+    Reapply repairs leave the scar row immutable and transact the SQL body with its firing receipt; `migrations/__tests__/live-ledger-122-reapply.test.ts` pins the live row-122 path, rollout window, strict failure, fresh-install inertness, and second-boot no-op.
+    The untracked refusal takes PRECEDENCE over the collision check when the tree can tell a stray
+    from a real file, and that is a diagnosis rule, not a weakening: all six still throw before any
+    write. A stray landing beside a tracked file at the same ordinal reads as a duplicate ordinal,
+    which sends the operator hunting a duplicate they never committed when the real remedy is to
+    delete the stray. So `assertUniqueMigrationOrdinals` takes the tree verdict and stands aside
+    when one side of a collision is untracked. That verdict MUST be resolved on every boot that has
+    a collision — never gated on something being pending. A recorded untracked stray is a supported
+    state (the untracked loop checks pending files only, sparing a stray applied long ago), so a
+    `pending`-gated verdict reads null on the boot AFTER a successful upgrade and turns a tolerated
+    collision into a hard refusal forever. A NAME collision is a trigger too, and there the better
+    message is unreachable any other way: a shared slug makes both files read as applied, so nothing
+    is pending and the untracked loop reaches nobody. Two TRACKED files at one ordinal, and any
+    collision on an install where the tree cannot be verified, still report as a duplicate ordinal. Where tracking cannot be established (no git metadata, an index
+    shape the reader does not decode, an index that fails its own checksum or carries none, a
+    migration directory git does not track at all) the runner applies and records
+    `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from "not
+    tracked" and collapsing them either breaks tarball installs or re-opens the class. The verified
+    value is `tracked-in-index` and names its evidence: the index is the STAGED tree, so a
+    staged-but-uncommitted file passes; HEAD-tree verification is deliberately out of scope (it would
+    need a packfile reader on the boot path) and the value must not be renamed to imply otherwise.
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
     `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
     `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).
@@ -139,6 +211,141 @@ with cross-references noted inline.
     first page, strict composite later) and `latestPromptByTopic` (rowid-DESC).
     `button-store.ts:697-815`. (Duplicate of #10/#12, cross-referenced from the data-layer critic.)
     Protects: **G2**, **W3**.
+112. `code_trident_runs` INSERT is corruption-proof by construction: `INSERT_PLACEHOLDERS` is
+    DERIVED from `COLS` (`trident/store.ts:277`), so the placeholder count equals the column
+    count always — a hand-miscounted `?` list would otherwise silently corrupt every insert with
+    no type error to catch it. `trident/store.test.ts` pins `COLS.length` against the live
+    `PRAGMA table_info` column count and round-trips distinct values through every column, going
+    red on any swap or short bound array.
+    Protects: crash-recovery migration 0123 (`crash_recoveries` column) and every prior column
+    addition to the same table.
+116. SCOPE DIRECTION, and the visibility of a refusal. Two halves of one rule, added 2026-08-16
+    (defect 2026-08-14 19:35 — a slug-unset boot that inherited a live `NEUTRON_HOME` re-keyed
+    every credential row onto the `'dev'` fallback and the running gateway read zero secrets).
+    (a) A FALLBACK identity may never pull rows off an EXPLICIT handle, ON ANY SURFACE. The fallback means
+    "nobody told me who I am", and every reconciler that sweeps a scope column has to carry the
+    guard independently — closing the direction on one table set closes nothing, because the next
+    sweep simply takes what the first refused. Both live guards read the same provenance input,
+    `slugResolution.source === 'fallback'`, which is why `resolveOwnerSlugSourceFromConfig`
+    returning the wrong `source` is a scope-integrity defect and not a cosmetic one: `'file'`
+    mis-typed as `'fallback'` REFUSES a real rename and strands the owner's rows, and a BLANK
+    `NEUTRON_INSTANCE_SLUG` read as `'env'` DISARMS the guard entirely (it is a deploy that failed
+    to set the slug, so it resolves to `'fallback'` — `config/index.ts` `resolveOwnerSlugSourceFromConfig`,
+    which is where that resolver LIVES since #320; `gateway/index.ts` only re-exports it, because
+    defining it on the entry module put the entry into the Open composer's own import graph).
+    Guards, all THREE of them: `migrations/scope-rekey.ts` (the boot re-key),
+    `auth/credential-scope-reconcile.ts` `reconcileCredentialScope` (the boot credential sweep),
+    and `migrateOrphanedCredentialScope` (the EXPLICIT repair the integrations surface offers —
+    `gateway/cores/integrations.ts`, `cores-integrations-surface.ts`, `integrations-tools.ts`).
+    THE THIRD ONE IS WHY THIS SAYS "ON ANY SURFACE" AND NOT "ON THE BOOT PATH" (closed by PR #320,
+    2026-08-16; this paragraph previously recorded it as an open gap). "Explicit" is not the
+    property that makes a move safe: the owner asking is only meaningful when the process knows
+    WHO it is, so a fallback handle means there was no owner to have asked. While that surface
+    took `(db, boot_handle)` with no provenance argument the guard was real and bypassable in one
+    step — boot as `'dev'`, call the explicit migration, and every row moves off the live handle.
+    Its provenance argument is REQUIRED rather than optional-defaulting-to-false precisely so the
+    next surface cannot reintroduce the gap by omission: forgetting it is a type error
+    (`auth/credential-scope-reconcile.ts:509-539`).
+    (b) A refusal event is journalled under a handle the OWNER CAN READ, WHENEVER THIS DATABASE
+    RECORDS ONE — never under a FROZEN credential handle whose divergence from the live one is the
+    very thing being reported, and never under the anonymous handle that attempted the move EXCEPT
+    on the one documented floor named below (a database that records no identity at all, which
+    includes a diagnostic read that threw). That exception is stated here, in the first sentence,
+    because the rule previously read as absolute while the code had two lawful paths to the
+    attempting handle — and a claim of coverage the code does not have is worse than no claim, since
+    it is the sentence the next reviewer trusts instead of reading the code (Argus r1 on PR #322,
+    2026-08-16). ON ANY SURFACE, exactly as (a): the boot re-key refusal, the boot credential
+    refusal, AND the EXPLICIT owner-driven migration refusal
+    (`gateway/cores/integrations.ts` `migrateOrphanedCredentials`) all resolve the scope through the
+    same `gateway/scope-refusal-journal.ts` planner. The explicit one is not an exception on the
+    grounds of being owner-initiated: it refuses only when the handle IS the fallback, so writing it
+    under the request's own handle put the audit row for a security-relevant refusal in the same
+    unreadable place. It keeps its own two differences, both deliberate — it is NOT deduped (a
+    repeated owner ATTEMPT is the fact an audit trail exists to preserve, and the reachable surfaces
+    are owner-authenticated, so the row count is bounded by owner actions rather than by traffic),
+    and it adds `surface: 'explicit_migrate'` so one journal query finds both rows and can still
+    tell them apart. `listRecentForScope` is
+    strictly `WHERE project_slug = ?` by design (`persistence/system-events.ts`) and the refusal
+    deliberately does not re-key the ledger, so the next explicit boot takes the ledger-agrees
+    fast path and never sweeps the row back: scoped anywhere else, the guard's only observable
+    signal is invisible to the instance it protects, forever. The readable handles are the
+    ledger's (authoritative — it names a handle THIS database has booted under and committed inside
+    the re-key transaction; NOT "written only by an explicit boot", which is false — a fallback boot
+    with nothing stranded falls past the guard and seeds it, proven by
+    `migrations/__tests__/scope-rekey-direction-guard.test.ts` "a FRESH dev box still seeds", and
+    `gateway/scope-refusal-journal.ts` `resolveOwnerReadableScopes` documents why the weaker
+    property is the one relied on) or, absent that, `onboarding_state`'s; blank handles are dropped. READABILITY IS DECIDED BY THAT EVIDENCE, NOT
+    BY STRING INEQUALITY WITH THE BOOTING PROCESS: an owner whose instance really is called `dev`
+    reads under `dev`, and dropping that scope because the attempting process resolved to the same
+    string moved the row to an unreadable one — worse than the code the rule replaced (Argus r2,
+    2026-08-16). Only when the database records NO identity at all does the row fall back to the
+    attempting handle, which is the floor (exactly what shipped before) and is never the frozen
+    credential handles — there is no parameter for those any more, so the rule cannot be re-broken
+    by a branch nobody exercises. Three further rules, all in
+    `gateway/scope-refusal-journal.ts`: the attempting handle rides in `payload.attempted_by_slug`;
+    each row is NARROWED to its own scope (its own handle and counts — a foreign handle's NAME in
+    an instance-scoped feed is the cross-scope disclosure the strict predicate exists to prevent,
+    and keys are TRIMMED before they are counted or compared so a padded legacy key does not report
+    the reader zero rows of his own); and the journal is EDGE-TRIGGERED AGAINST THE VISIBLE WINDOW
+    (`listVisibleForScopeAndName` + `shouldJournal`), because the owner's window is 50 rows with
+    no retention sweep and an unconditional row per anonymous boot evicts the report it is trying to
+    appear in. FOUR properties of that trigger, each a defect when it was absent: the comparison is
+    bounded to the SAME window the feed returns (measured against unbounded history, a repeat that
+    rotated out of the feed is suppressed permanently and silently — strictly worse than the
+    starvation it prevents), and that window is `DEFAULT_MAX_RECENT_EVENTS`, the diagnostics
+    default, pinned equal by test because suppressing against a window WIDER than the feed's hides a
+    warning the owner cannot see; the dedup READ is best-effort inside a try (one corrupt historical
+    `payload_json` row would otherwise abort the boot, since the reader parses with
+    `onCorrupt: 'throw'` and this runs before the boot's own failure cleanup); BOTH
+    `credential_scope_orphaned` branches trigger, since the ordinary ambiguous orphan writes under
+    the same `(scope, event_name)` key and an unconditional write there writes a row every boot;
+    and THE COMPARISON IS MEMBERSHIP OF THE VISIBLE SET, NOT EQUALITY WITH ITS NEWEST ROW. That last
+    one is what actually closes the alternation hole, and covering both branches did not (Argus r1
+    on PR #322, 2026-08-16): the two shapes share one `(scope, event_name)` key, so a box that
+    alternates between an anonymous and an explicit boot — a unit that intermittently loses its slug
+    env — sees the OTHER shape as the newest row every time, and every boot writes. Asked "is this
+    payload already anywhere on the page", the feed settles at one row per distinct shape, and any
+    future third shape is covered without anyone noticing it exists.
+    AND NO JOURNAL PAYLOAD ON THIS PATH MAY CONTAIN AN ACTIVITY-COUPLED COUNT — no field that moves
+    when the owner merely USES his instance. The trigger hashes the payload, so such a field re-arms
+    it on every boot and the starvation returns in full, on exactly the instances that are in USE
+    and on none of the idle databases the dedup tests boot against (Argus r2 blocker on PR #322,
+    2026-08-16: `instance_scope_rekey_refused` carried `stranded_rows`, a `COUNT(*)` over ~40 swept
+    tables including `tasks`; four anonymous boots with one task between each wrote FOUR rows). That
+    same field was independently FALSE once the row moved to the live handle —
+    `stranded_slug`/`stranded_rows` named the reader's own handle and his own healthy data, which
+    the guard had just protected, and the feed rendered his ordinary growth as a worsening data-loss
+    condition. So the instance-refusal payload is `targeted_slug`, `other_targeted_handles`,
+    `attempted_by_slug`: the CONDITION, never its volume. The RULE IS ACTIVITY-COUPLING, NOT "no
+    number anywhere": the credential refusal's `orphaned_handles`/`orphaned_rows`
+    (`gateway/scope-refusal-journal.ts` `planCredentialRefusalRows`) count rows in the CREDENTIAL
+    tables only, which tasks and reminders never touch — they move only when the orphaned credential
+    set itself changes, and a changed orphan set IS new information the trigger should re-fire on
+    (the drift test pins this: four boots with a task between each hold the credential feed at one
+    row). Unbounded volumes go to the log lines, which compete with nothing — and for the same reason those log
+    counts EXCLUDE `system_events`, since counting the journal's own table reported the previous
+    boot's warning as "rows at stake" and climbed 1 → 3 → 4 across three IDENTICAL boots.
+    AND THE READER MUST RESOLVE THE SAME SCOPE BOOT FROZE: `neutron doctor`
+    (`open/owner-identity.ts` `resolveOwnerSlug` → `open/diagnostics-cli-impl.ts`) follows boot's
+    precedence exactly — `.url_slug` file > trimmed `NEUTRON_INSTANCE_SLUG` > `dev` — because a
+    resolver that disagrees by a space or ignores the rename file queries a scope no row was ever
+    written under, which is this same invisibility one layer out.
+    Protects: `migrations/__tests__/scope-rekey-direction-guard.test.ts` (policy),
+    `gateway/__tests__/owner-slug-provenance.test.ts` (the `source` field itself — including blank
+    and padded env values — plus a file-driven forward re-key through a real `boot()`),
+    `gateway/__tests__/scope-refusal-journal.test.ts` (scope choice including the `dev`-is-my-name
+    coincidence, narrowing, blank + padded handles, the nested-payload comparison, the thrown-read
+    path), `persistence/system-events.test.ts` (the window bound itself, with a wider-window control
+    proving the null is the window and not a broken query),
+    `gateway/__tests__/boot-refusal-scope.test.ts` (through a real `boot()` on the shape where the
+    frozen credential handle DIVERGES from the live one, with both unreadable scopes asserted empty
+    as the control; three identical boots writing one row; a rotated-out repeat written again; an
+    ambiguous non-refused orphan deduped across two boots; and a corrupt row that does not abort the
+    boot), `open/__tests__/diagnostics-cli.test.ts` (the doctor's scope — padded env, blank env, and
+    the rename file, with a no-file control), `open/__tests__/open-scope-rekey-direction-boot.test.ts`
+    (the flag reaching the reconciler from the composition root, and both refusal rows read back
+    through the production `listRecentForScope` with the anonymous scope asserted empty as the
+    control).
 
 ## 4. Duplication / consolidation seams (`critic-duplication.md`)
 
@@ -205,14 +412,39 @@ with cross-references noted inline.
     Protects: **O3** (Error taxonomy + typed substrate error codes).
 39. Binary-ENOENT must stay non-retryable so it can't launder into a 429 cooldown; `all_cooldown`
     must stay `retryable:true`. `build-llm-call-substrate.ts:437-442,515-523`.
+    A SUBSTRATE-LOCAL failure must never be reported as a credential fault, on EITHER
+    credential-failure lane. `detectBinaryNotFound`, `detectChannelWedged`,
+    `detectTurnTimeout` and `detectReplProcessExited` are classified AHEAD of the cooldown
+    map in `build-llm-call-substrate.ts` and MUST skip `reportFailure`: none carries an HTTP
+    status, so the map can only guess 429, and on a single-credential box (every Open
+    install) five guesses park the pool for an hour behind "all Anthropic credentials are in
+    cooldown" — a cause that is not true. The dead-REPL member is the one a lane rule cannot
+    cover: the strikes that caused the 2026-08-17 chat lockout were the owner's own
+    INTERACTIVE retries against a respawning child.
+    Because each detector matches PROSE emitted by another module, invariant 38 applies to
+    their producer literals: a reword is a behavior change, and
+    `__tests__/g6-error-string-conformance.test.ts` pins each one to its producer source.
     Protects: **O3**.
 40. Email triage LLM stub THROWS by design so triage renders its deterministic fallback;
     agent-settings fallbacks must report `available:false`, never fake success.
     `gateway/cores/mount-open-cores.ts:177-277`, `gateway/boot-helpers.ts:1163-1180`.
     Protects: **D5**, **X2**.
 41. Reminder dispatcher degrades to `literalFallback` on ANY LLM failure so a reminder always
-    delivers; outbound is persist-before-send with swallowed live-push throws.
-    `reminders/dispatcher.ts:203,232,237`, `reminders/outbound.ts:7-18`. (Cross-ref #22.)
+    delivers — but the degrade is BOUNDED: stored intent over `MAX_DEGRADED_INTENT_CHARS`
+    (300) is replaced by a generic line naming the reminder id, and a COMPOSED body over
+    `MAX_NUDGE_BODY_CHARS` (2000) is refused as a composition failure rather than posted.
+    A failed compose must NEVER post `row.message` (#293 defect B). Outbound is
+    persist-before-send with swallowed live-push throws.
+    `reminders/message-shape.ts` (`literalFallbackResult` / `overBoundNudgeBody`),
+    `reminders/dispatcher.ts` (`fallbackBody` / `compose`). (Cross-ref #22.)
+    Protects: **F1**.
+41b. A FIRED reminder is delivered to the topic that owns the work: `app:<owner>:<project>`
+    when its stored destination names an EXISTING project, General otherwise — and EVERY
+    downgrade to General is logged with a reason, never silent. The project lister must not
+    swallow read errors into "no projects exist" (that reroutes every project reminder), and
+    the resolver must never throw (a throw before the post makes the tick loop re-fire
+    forever). `open/wiring/reminder-topic.ts`, `open/composer.ts` (`listProjectIds` /
+    `resolveAppWsReminderTopic`).
     Protects: **F1**.
 42. Engagement gate fails soft to `all_messages` — a DB read error must never drop a chat turn.
     `gateway/http/chat-bridge.ts:2749-2791`.
@@ -323,9 +555,9 @@ with cross-references noted inline.
 67. `open/server.ts:58-73` env mutation happens BEFORE `boot()` — untouched by the composer split
     but adjacent; config reads must not move out of the entrypoint. (Cross-ref #1.)
     Protects: **C1**.
-68. Trident fire substrate must be WARM per-repo-cwd and only `cc-agent-` gets
+68. Trident fire substrate must be WARM per-repo-cwd and only the `cc-agent-`/`cc-nudge-` pair gets
     `enableToolBridge` — pool-key/instance-id prefixes are semantic.
-    `open/composer.ts:590-633,535-541`. (Cross-ref #7.)
+    `open/wiring/substrates.ts`. (Cross-ref #7, which carries the reasoning for the pair.)
     Protects: **D1**, **D2**.
 69. 30 `open/__tests__` wiring tests + gateway `*-production-composer` tests are the composer-split
     lock; a characterization test snapshotting which `CompositionInput` fields Open sets must be
@@ -459,6 +691,48 @@ with cross-references noted inline.
     (`engine-import-routing.ts:998-1001`) — a boot orphan-sweep must not race it into
     double-failure UX.
     Protects: **P6**.
+113. Harvest before reap: Trident's tick §1 tries `parseInnerResult` on a run row EVEN when
+    `subagent_status === 'crashed'` (`trident/orchestrator.ts:1118`) — a workflow that wrote a
+    terminal result and only then lost its launcher must still harvest, with zero relaunches
+    spent. `trident/crash-before-launch-save.test.ts`.
+    Protects: crash-recovery relaunch path (§1a-crash) from regressing the pre-existing
+    harvest-before-reap ordering guarantee.
+114. Launcher-crash recovery is budget-bounded and the budget is DURABLE: `code_trident_runs
+    .crash_recoveries` (migration 0123) is spent only by the atomic
+    `TridentRunStore.beginCrashRecovery` claim (`trident/store.ts:499`); the cap is
+    `DEFAULT_MAX_CRASH_RECOVERIES = 3` (`trident/orchestrator.ts:290`) and holds across gateway
+    restarts because the counter is a column, not process memory. The terminal reason names the
+    crash-recovery budget and must NEVER contain the token `exhausted` — `trident/delivery.ts:174`
+    classes `crash-recovery budget` as an infra failure AHEAD of the exhausted-budget matcher, so
+    it is not misclassified as agent-side spend. `trident/crash-recovery.test.ts`.
+    Protects: bounded, restart-proof recovery from spinning forever under a deploy loop.
+115. A crash-recovery relaunch is a continuation, not a retry: it never consumes `round` or
+    `ralph_round`, and only `beginCrashRecovery` may clear the `crashed` latch / null the
+    tombstoned workflow generation — never `update`/`save`/`saveIfActive` (`saveIfActive` vetoes
+    non-crashed writes onto a crashed-latched row). `trident/crash-recovery.test.ts` +
+    `trident/store.test.ts`.
+    Protects: the fix-round budget from being spent on infrastructure failures that are not the
+    agent's fault.
+116. The Work Board's `inline_active` is DISPLAY-ONLY and EVIDENCE BEATS THE STORED FLAG. Every
+    read boundary maps items through the one deriver (`work-board/inline-activity.ts`
+    `makeInlineActivityDeriver`, wired in `open/composer.ts`); the stored column is never written
+    by a read and is only ever a hint. The flag gets NO exemption from the freshness check — a
+    crashed session's stuck flag reads not-active — and the derivation must never grow a branch
+    that blocks, denies, delays or gates a tool call (it is the display-only salvage of the
+    cancelled PreToolUse-gate plan). Evidence is tier 1 only: ONE O(1) `ActivityInspector` map
+    read per board, never per row, never a shell-out. `work-board/inline-activity.test.ts` +
+    `open/__tests__/inline-activity-wiring.test.ts`.
+    Protects: the board from re-becoming a promise the agent has to remember to keep, and the
+    read path from growing per-row I/O.
+116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
+    throwing probe does nothing; malformed pids and disagreement between registry homes are
+    ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
+    detected launcher death uses the same durable crash latch as pushed crash events. The next
+    sweep harvests a completed result first or claims bounded continuation; a dead shared launcher
+    is never treated as proof that its detached build died. The 90-minute no-advance and 2-hour
+    max-inflight backstops remain unchanged.
+    `trident/tick.ts`, `trident/liveness.ts`, `trident/liveness-death-e2e.test.ts`.
+117. Brief-part receipts are measured from persisted bytes before a manifest can be returned. `trident/brief-parts.ts` (`writeVerified`), protected by the persistent-truncation regression in `trident/brief-parts.test.ts`.
 
 ## 10. Naming & vocabulary (`critic-naming-vocab.md` §6)
 
@@ -564,7 +838,14 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
-  section; its "what exists and is fine" items are folded into §11 above).
+  section; its "what exists and is fine" items are folded into §11 above). Four further items
+  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build, and #116 for
+  the derived-inline-activity build; they are appended at the end of their sections rather than
+  renumbered in, so numbering is not strictly sequential within §3 and §9.
+  section; its "what exists and is fine" items are folded into §11 above). Five further items
+  (#112–#116) were added post-synthesis — #112–#115 for the gateway-restart crash-recovery build,
+  #116 for the boot scope direction guard (2026-08-16); they are appended at the end of their
+  sections rather than renumbered in, so numbering is not strictly sequential within §3 and §9.
 - The vast majority cross-reference a specific refactor-plan unit (G/K/L/C/D/P/F/O/X/W/N/S/M
   series) that either builds a characterization test protecting the behavior or must
   demonstrably preserve it per the unit's own **Accept** criteria.

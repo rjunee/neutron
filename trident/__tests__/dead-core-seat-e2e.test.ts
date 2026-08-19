@@ -50,6 +50,7 @@ async function runWorkflow(script: Script): Promise<RunOut> {
   const agent = async (prompt: string, opts?: { label?: string }): Promise<unknown> => {
     const label = String(opts?.label ?? '')
     captured.push({ label, prompt })
+    if (label.startsWith('head-probe-round-built-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build' || label.startsWith('forge:fix-round-')) {
       return {
         prNumber: null,
@@ -152,8 +153,8 @@ describe('a CORE reviewer whose agent died, end to end', () => {
       synthesis: () => ({ verdict: 'REQUEST_CHANGES', findings: [] }),
     })
     const prompt = promptFor(out, 'argus:synthesis')
-    expect(prompt).toContain('Verdict B (Claude adversarial): DID NOT COMPLETE')
-    expect(prompt).not.toContain('Verdict B (Claude adversarial): null')
+    expect(prompt).toContain('Verdict B (Argus adversarial): DID NOT COMPLETE')
+    expect(prompt).not.toContain('Verdict B (Argus adversarial): null')
     // …and the seat that DID answer is still passed through verbatim.
     expect(prompt).toContain('Verdict A (Claude rubric): {"verdict":"REQUEST_CHANGES"')
   })

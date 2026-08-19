@@ -27,7 +27,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '../composition.ts'
@@ -58,8 +58,8 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-creds-composer-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   const auth = createAppWsAuthResolver({ project_slug: OWNER, bypass: true })
   const crypto = new SecretsStore({ data_dir: tmp, db })
@@ -132,7 +132,7 @@ afterEach(async () => {
 test('POST + GET — a project-scoped credential persists and lists (metadata only)', async () => {
   const post = await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'meta_ads', token: 'tok_A', label: 'prod' }),
+    body: JSON.stringify({ service: 'meta_ads', token: 'tok_A_credential_16', label: 'prod' }),
   })
   expect(post.status).toBe(201)
   const created = (await post.json()) as { ok: boolean; credential: { service: string; scope: string } }
@@ -157,7 +157,7 @@ test('POST + GET — a project-scoped credential persists and lists (metadata on
 test('a global credential written on the GLOBAL route is inherited by any project', async () => {
   const post = await authedFetch(h.base, '/api/app/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'google_ads', token: 'tok_G' }),
+    body: JSON.stringify({ service: 'google_ads', token: 'tok_G_credential_16' }),
   })
   expect(post.status).toBe(201)
   const get = await authedFetch(h.base, '/api/app/projects/proj-b/credentials')
@@ -172,7 +172,7 @@ test('a global credential written on the GLOBAL route is inherited by any projec
 test('the GLOBAL route lists + deletes what it wrote, through the real chain', async () => {
   await authedFetch(h.base, '/api/app/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'tavily', token: 'tok_T', label: 'shared' }),
+    body: JSON.stringify({ service: 'tavily', token: 'tok_T_credential_16', label: 'shared' }),
   })
   const list = await authedFetch(h.base, '/api/app/credentials')
   const body = (await list.json()) as { global: Array<{ service: string; scope: string }> }
@@ -190,7 +190,7 @@ test('the GLOBAL route lists + deletes what it wrote, through the real chain', a
 test('a PROJECT route cannot write global state, and nothing lands when it tries', async () => {
   const res = await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'stripe', token: 'tok_S', scope: 'global' }),
+    body: JSON.stringify({ service: 'stripe', token: 'tok_S_credential_16', scope: 'global' }),
   })
   expect(res.status).toBe(400)
   expect(((await res.json()) as { code: string }).code).toBe('scope_not_allowed')
@@ -207,7 +207,7 @@ test('a PROJECT route cannot write global state, and nothing lands when it tries
 test('a PROJECT route cannot delete a global default with ?scope=global', async () => {
   await authedFetch(h.base, '/api/app/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'shared_del', token: 'tok_X' }),
+    body: JSON.stringify({ service: 'shared_del', token: 'tok_X_credential_16' }),
   })
   const res = await authedFetch(
     h.base,
@@ -223,7 +223,7 @@ test('a PROJECT route cannot delete a global default with ?scope=global', async 
 test('per-project scope isolation — project A token is absent from project B', async () => {
   await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'meta_ads', token: 'A' }),
+    body: JSON.stringify({ service: 'meta_ads', token: 'A_credential_value_16' }),
   })
   const getB = await authedFetch(h.base, '/api/app/projects/proj-b/credentials')
   const listed = (await getB.json()) as { project: Array<{ service: string }> }
@@ -233,7 +233,7 @@ test('per-project scope isolation — project A token is absent from project B',
 test('DELETE removes a credential and 404s on re-delete', async () => {
   await authedFetch(h.base, '/api/app/projects/proj-a/credentials', {
     method: 'POST',
-    body: JSON.stringify({ service: 'apify', token: 't' }),
+    body: JSON.stringify({ service: 'apify', token: 'apify_credential_16' }),
   })
   const del = await authedFetch(h.base, '/api/app/projects/proj-a/credentials/apify', {
     method: 'DELETE',

@@ -46,6 +46,7 @@ import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
 import { buildOpenInstallTokenHandler, buildReconnectHandoff } from './install-token-handoff.ts'
 import { persistOauthTokenToEnv, requestSupervisorRestart } from './install-token-env.ts'
 import { buildLocalPlatformAdapter } from '@neutronai/runtime/platform-adapter-local.ts'
+import { buildTridentLauncherLivenessProbe } from './wiring/trident-launcher-liveness.ts'
 import type { PlatformAdapter } from '@neutronai/runtime/platform-adapter.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { resolveLandingStaticDir } from '@neutronai/gateway/wiring/build-landing-stack.ts'
@@ -131,6 +132,7 @@ import { wireLandingStack } from './wiring/landing.ts'
 import { wireUploads } from './wiring/uploads.ts'
 import { buildOpenOwnerGate } from './wiring/owner-gate.ts'
 import { buildAppWsApprovalNotifier } from './wiring/approval-notifier.ts'
+import { buildAppWsReminderTopicResolver } from './wiring/reminder-topic.ts'
 import { buildWatchdogAlertEnvelope, wireAppWs, type OnboardingMsgEmit } from './wiring/app-ws.ts'
 import { MIN_COOKIE_SECRET_LEN } from './session-cookie-secret.ts'
 import { selectAppWsToken, isValidThreadedBearer } from './owner-bearer.ts'
@@ -162,6 +164,7 @@ import {
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import {
   ensureKimiKeyExported,
+  resolveKimiApiKey,
   KIMI_CREDENTIAL_SERVICE,
 } from '@neutronai/trident/kimi-key.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
@@ -170,8 +173,17 @@ import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interv
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
 import { buildPersonaSummarizer } from '@neutronai/onboarding/persona-gen/summarize.ts'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
-import { UsageSamplesStore } from '@neutronai/persistence/usage-samples-store.ts'
-import { readTridentPhaseModels, writeTridentPhaseModels } from '@neutronai/gateway/storage/owner-metadata.ts'
+import {
+  USAGE_POOLS,
+  UsageSamplesStore,
+  type UsagePool,
+  type UsagePoolConnection,
+} from '@neutronai/persistence/usage-samples-store.ts'
+import {
+  readTridentPhaseModels,
+  readTridentPhaseModelsWithRejected,
+  writeTridentPhaseModels,
+} from '@neutronai/gateway/storage/owner-metadata.ts'
 import type { GraphComposer } from '@neutronai/gateway/boot-helpers.ts'
 import type { CompositionInput } from '@neutronai/gateway/composition.ts'
 // The OVERNIGHT-WORK report (`onboarding/overnight/morning-brief.ts`). It used to
@@ -269,6 +281,12 @@ import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-swee
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
+import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
+import {
+  buildWorkWakeupLoop,
+  type WakeupProjectWork,
+} from '@neutronai/gateway/proactive/work-wakeup.ts'
+import { selectWakeupWork } from '@neutronai/gateway/proactive/work-wakeup-selection.ts'
 import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
 import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 
@@ -344,6 +362,7 @@ import {
 import {
   GOOGLE_CLIENT_ID_ENV,
   GOOGLE_CLIENT_SECRET_ENV,
+  buildOneShotSubstrateLlm,
 } from '@neutronai/gateway/cores/mount-open-cores.ts'
 import { ensureKey } from '@neutronai/auth/secrets-store.ts'
 import { createAppLauncherSurface } from '@neutronai/gateway/http/app-launcher-surface.ts'
@@ -365,6 +384,15 @@ import {
   type ProjectScaffoldDeps,
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
+import type { ApprovalManager } from '@neutronai/tools/approval.ts'
+import {
+  createHostDeployService,
+  HOST_DEPLOY_TOKEN_SERVICE,
+  HOST_DEPLOY_URL_SERVICE,
+  resolveHostDeployConfig,
+  type HostDeployService,
+} from './host-deploy.ts'
+import { createHostDeployDispatch, createHostDeployRemoteGit } from './host-deploy-runtime.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
@@ -375,7 +403,13 @@ import { buildTelegramWebhookSurface } from '@neutronai/gateway/wiring/build-tel
 import { ProjectBackupStore } from '@neutronai/gateway/git/project-backup-store.ts'
 import { DevicePushTokenStore } from '@neutronai/gateway/push/store.ts'
 import { createPushDispatcher } from '@neutronai/gateway/push/dispatcher.ts'
+import { parseAppWsSendMarker, shouldNotifyForSend } from './wiring/app-ws-marker.ts'
 import { createExpoPushClient } from '@neutronai/gateway/push/expo-push-client.ts'
+import { buildChatMessagePushSink } from '@neutronai/gateway/push/chat-message-push.ts'
+import {
+  createWebPresenceTracker,
+  suppressPushWhileWebForeground,
+} from '@neutronai/gateway/push/web-presence.ts'
 import {
   createAppUploadSurface,
   resolveChatAttachmentLocalPath,
@@ -419,6 +453,8 @@ import { createActivitySurface } from '@neutronai/gateway/http/activity-surface.
 import { createAppUsageSurface } from '@neutronai/gateway/http/app-usage-surface.ts'
 import { createSystemNoticeSurface } from '@neutronai/gateway/http/system-notice-surface.ts'
 import { CredentialUsageMonitor } from './credential-usage-monitor.ts'
+import { KimiUsageMonitor } from './kimi-usage-monitor.ts'
+import { resolveActiveCredential } from './active-credential.ts'
 import { createCredentialLapseNotifier } from './credential-lapse-notice.ts'
 import {
   ActivityInspector,
@@ -438,9 +474,20 @@ import { createCodexCredentialSurface } from '@neutronai/gateway/http/codex-cred
 import { createGitHubConnectSurface } from '@neutronai/gateway/http/github-connect-surface.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ProjectAccountSelectionStore } from '@neutronai/project-credentials/account-selection-store.ts'
-import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
-import { makeLazyCredentialedHostRunner } from '@neutronai/trident/git-mode.ts'
+import {
+  buildRunCodexHomeResolver,
+  CodexCredentialService,
+  codexExecutorAvailability,
+} from '@neutronai/trident/codex-credential.ts'
+import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
+import {
+  defaultGitModeProbe,
+  detectMergeMode,
+  makeLazyCredentialedHostRunner,
+  type PublisherCredentialSource,
+} from '@neutronai/trident/git-mode.ts'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
+import { setGithubSpawnEnvResolver } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { resolveCodexHome } from '@neutronai/trident/codex-auth.ts'
 import { formatAvailableServicesFragment } from '@neutronai/project-credentials/fragment.ts'
 import {
@@ -453,13 +500,17 @@ import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import { deriveRunProgress } from '@neutronai/trident/run-progress.ts'
 import {
   deriveProjectActivity,
+  scanItemsForRailSignals,
   truncatePreview,
   type ProjectActivity,
   type PreviewFrom,
 } from './project-rail.ts'
+import { turnIsActive } from './wiring/typing-catchup.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
+import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
 import {
   dispatchBoardBoundBuild,
+  makeDispatchLandedProbe,
   type TridentBoardBinder,
 } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
@@ -470,6 +521,11 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import {
+  isInlineEvidenceEdge,
+  makeInlineActivityDeriver,
+  type InlineEvidenceReader,
+} from '@neutronai/work-board/inline-activity.ts'
 import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
@@ -805,7 +861,7 @@ export function buildOpenGraphComposer(
 ): GraphComposer {
   const env = options.env ?? process.env
 
-  return async ({ db, project_slug }): Promise<OpenComposition> => {
+  return async ({ db, project_slug, slug_is_fallback }): Promise<OpenComposition> => {
     const owner_home = resolveNeutronHome(env)
     const static_dir = resolveLandingStaticDir(env)
     // Single-owner: the frozen instance handle IS the boot slug.
@@ -826,10 +882,30 @@ export function buildOpenGraphComposer(
     // ISSUES #421 — Neutron Connect. Resolved HERE (early) so both halves share
     // one origin: the owner-side invite link the app renders, and the
     // data-locality disclosure the invitee sees before accepting.
+    //
+    // THE PORT COMES FROM THE VALIDATED CONFIG AND NOWHERE ELSE. This was
+    // `options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787)`, which
+    // re-read the raw environment BELOW the one place that validates it and then
+    // ran `Number()` over the result. `??` falls through on `undefined` but not
+    // on `''`, so a blank `NEUTRON_PORT` reached `Number('')` — which is **0**,
+    // not `NaN` — and the invite advertised `http://127.0.0.1:0` while the
+    // listener bound 7800 (`gateway/index.ts` maps an unset config port to an
+    // absent env and takes `DEFAULT_LISTEN_PORT`). Measured on the pre-fix tree:
+    // `NEUTRON_PORT=''` -> `connectBase=http://127.0.0.1:0`. One variable, two
+    // answers, in one boot — and the answer the OWNER hands to somebody else was
+    // the wrong one, which is the half that cannot be discovered by looking at
+    // this box.
+    //
+    // The fallback default moves 8787 -> `DEFAULT_LISTEN_PORT` in the same
+    // breath, because 8787 is a port nothing in this tree ever listens on: with
+    // `NEUTRON_PORT` absent the listener binds 7800 and the invite said 8787.
+    // The sibling site in THIS FILE that answers the same question already reads
+    // `options.config?.port ?? DEFAULT_LISTEN_PORT` (the reconnect handoff), so
+    // this is two sites in one file agreeing rather than a new convention.
     const connectBaseUrlResolved = resolveConnectBaseUrlWithSource({
       env,
       bindHost,
-      port: options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787),
+      port: options.config?.port ?? DEFAULT_LISTEN_PORT,
     })
     const connectBaseUrl = connectBaseUrlResolved.base_url
     // This install's OWN Ed25519 identity: it signs the collaborator bearers it
@@ -943,6 +1019,21 @@ export function buildOpenGraphComposer(
             project_slug,
           })
         : undefined
+    // THE SAME JOURNAL, NO CHAT SEAM — for the timer-driven nudge substrate. It
+    // shares `PROFILE_WARM_CHAT`, so it carries `frontier_model_floor` and its
+    // clamp was landing on stderr only. `deliver: () => undefined` is the sink's
+    // documented no-bubble path (`makeSubstrateNoticeSinks`'s `bubble` returns on
+    // an unresolved deliver), so the clamp is journalled to `system_events` — a
+    // best-effort write, as everywhere else this sink is used — while the lane keeps
+    // its promise not to interrupt his chat from a timer.
+    const backgroundNoticeSinks =
+      llmPool !== null
+        ? makeSubstrateNoticeSinks({
+            deliver: () => undefined,
+            owner_topic_id: ownerNoticeTopic,
+            project_slug,
+          })
+        : undefined
     const liveAgentRecoveredReplySink =
       llmPool !== null
         ? makeRecoveredReplySink({
@@ -950,6 +1041,21 @@ export function buildOpenGraphComposer(
             store: recoveredReplyStore,
           })
         : undefined
+    // THE INSTANCE'S GITHUB CREDENTIAL, REGISTERED ONCE. Which substrates get it
+    // is decided on the PROFILES (`substrate-profiles.ts` `github_credential`),
+    // not here and not at the nine construction sites — so a new substrate
+    // inherits the trust decision of the profile it picks instead of silently
+    // getting nothing, which is how an agent came to answer a live GitHub
+    // question out of documentation (`ISSUES.md` #576) and how a private-repo
+    // trident build came to die at `fatal: could not read Username`.
+    //
+    // Resolved PER SPAWN: a credential connected after boot works, and a rotated
+    // one is never stale. ⚠️ `secretsStore` is constructed further down this same
+    // scope — safe only because this closure runs at spawn time, long after
+    // composition returns. Pinned by a test.
+    setGithubSpawnEnvResolver(async () =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
+    )
     const wiringCtx: OpenWiringContext = {
       llmPool,
       owner_handle,
@@ -960,6 +1066,7 @@ export function buildOpenGraphComposer(
       prewarmSubstrate,
       ...conversationalProviderCtx,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
+      ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
         ? {
             liveAgentRecoveredReplySink,
@@ -972,6 +1079,7 @@ export function buildOpenGraphComposer(
       llmCallSubstrate,
       liveAgentSubstrate,
       makeComposeSubstrate,
+      reminderComposeSubstrate,
       makeEphemeralSubstrate,
       makeWarmFireSubstrate,
       prewarmReady,
@@ -1526,16 +1634,30 @@ export function buildOpenGraphComposer(
     // `codex_connect`/`codex_status` agent tools dispatch this ONE service:
     // validate a pasted ChatGPT-subscription auth.json (metered OPENAI_API_KEY
     // rejected), store it encrypted in the #149 credential store (service `codex`),
-    // and materialize it to the CODEX_HOME `trident/codex-review.sh` reads — the
-    // GLOBAL dir (`resolveCodexHome`) for the default, or a nested per-project dir
-    // (`codexProjectHome`) for an override. The trident loop threads the GLOBAL
-    // CODEX_HOME (the trident-wide default); `ensureMaterialized` self-heals the
-    // global file if a stored credential exists but the on-disk auth.json is
-    // missing (fresh process / wiped tmp).
+    // and materialize it to the CODEX_HOME `trident/codex-review.sh` AND
+    // `trident/codex-build.sh` read — the GLOBAL dir (`resolveCodexHome`) for the
+    // default, or a nested per-project dir (`codexProjectHome`) for an override.
+    // The trident loop resolves PER RUN — the run's project override first, the
+    // global default second (`buildRunCodexHomeResolver` → `resolveActiveCodexHome`
+    // → the #149 store resolver) — NOT the global dir unconditionally, which is
+    // what this comment used to claim and what the wiring below used to do.
+    // `ensureMaterialized` self-heals the global file if a stored credential
+    // exists but the on-disk auth.json is missing (fresh process / wiped tmp).
+    // The owner may connect more than one ChatGPT seat. Each seat owns ONE
+    // directory for its whole life (`.codex` for the first, `.codex/accounts/<slot>`
+    // for the rest) and selection is a pointer at one of them, resolved per run —
+    // never a copy of a bundle between dirs, because the codex CLI rotates the
+    // refresh token on refresh and two live copies of one account revoke each
+    // other. With a single seat this selects the same credential in the same place
+    // it has always been, which is why there is no flag and nothing to migrate.
     const codexHome = resolveCodexHome({ owner_home })
     const codexCredentialService = new CodexCredentialService({
       store: projectCredentialStore,
       codexHome,
+      rotation: new SqliteCodexRotationStore(db),
+      log: (event, fields) => {
+        log.info(event, fields)
+      },
     })
     try {
       codexCredentialService.ensureMaterialized(asOwnerHandle(project_slug))
@@ -1557,8 +1679,17 @@ export function buildOpenGraphComposer(
     // exist when the reminder DISPATCHER is built below. The dispatcher is handed a
     // stable seam that DEREFS this binding per fire, so a ritual and a nudge share
     // one dispatcher rather than one dispatcher plus one executor. `null` until
-    // `init_ritual_planner` runs (LLM-less box ⇒ never runs ⇒ every row composes as
-    // an ordinary nudge, which is fail-closed: nothing reads a ritual's prompt).
+    // `init_ritual_planner` runs (LLM-less box ⇒ never runs).
+    //
+    // ⚠️ WHAT THAT NULL MEANS WAS WRITTEN DOWN WRONG HERE. It said the fall-through
+    // was "fail-closed: nothing reads a ritual's prompt" — true about the prompt, and
+    // it made a null planner sound harmless. It was not: with no planner the
+    // dispatcher classified EVERY row as a nudge, so a ritual row composed from its
+    // stored `message`, which is the dispatch token `ritual:<id>`, and the owner's
+    // lock screen read `ritual:kaizen`. The dispatcher now refuses a ritual row
+    // outright when it cannot plan one (`reminders/dispatcher.ts`, keyed on
+    // `reminder.ritual_id`) — THAT is what makes this null fail-closed, not the
+    // absence of a prompt read.
     let ritualPlanner: RitualFirePlanner | null = null
     // ── THE canonical TaskStore — ONE instance for the whole box ────────────
     // Every task surface must be the SAME object, not merely the same table.
@@ -1974,6 +2105,37 @@ export function buildOpenGraphComposer(
     // Stateless wrapper over the SAME `db` the tick loop reads (see `boardRunStore`
     // below — "a second instance elsewhere is harmless").
     const tridentCodeRunStore = new TridentRunStore(db)
+    // ONE credential resolution, shared by the thing that PUBLISHES and the
+    // thing that PROBES whether publishing is possible.
+    //
+    // This site was ALREADY credentialed before the publisher-probe fix, and
+    // saying otherwise was the round-2 overclaim: what refused the owner's board
+    // builds was not this wiring but the QUESTION the probe asked — an unscoped
+    // `gh auth status`, which exits non-zero when any account on any host is
+    // broken, including one the publisher never uses (measured: a valid token
+    // printed `✓ Logged in … (GH_TOKEN)` and still exited 1 because of a stale
+    // `default` account). The scoping fix lives in `trident/git-mode.ts`
+    // (`PUBLISHER_AUTH_COMMAND`).
+    //
+    // What sharing the credential here DOES buy is that the probe and the
+    // publisher can never disagree about whose token is in play, and it is
+    // resolved per call, so a credential the owner connects from chat takes
+    // effect on the next probe rather than the next boot.
+    const tridentGithubEnv = async (): Promise<Record<string, string>> =>
+      githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle)))
+    const tridentPublisherCredential: PublisherCredentialSource = {
+      owner_handle,
+      source: 'the instance secrets store',
+      load: tridentGithubEnv,
+    }
+    const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
+    const tridentLandedProbe = makeDispatchLandedProbe(tridentHostRunner)
+    // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
+    // board seam. Shared rather than re-derived so a wiring test can assert the
+    // credential the board seam closes over by identity, not by `typeof`.
+    const tridentMergeModeProbe = defaultGitModeProbe(tridentPublisherCredential)
+    const resolveTridentMergeMode = (repoPath: string) =>
+      detectMergeMode(repoPath, tridentMergeModeProbe)
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -1994,6 +2156,8 @@ export function buildOpenGraphComposer(
           // `<home>/Projects/<project_slug>/code` under it (git-init-ing on first
           // use), so a project with no repo yet still builds.
           repo_path: owner_home,
+          resolveMergeMode: resolveTridentMergeMode,
+          landedProbe: tridentLandedProbe,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -2178,6 +2342,27 @@ export function buildOpenGraphComposer(
     const GENERAL_RAIL_KEY = '__general__'
     const railChatKey = (project_id?: string): string =>
       project_id !== undefined && project_id.length > 0 ? project_id : GENERAL_RAIL_KEY
+    // Same late-binding shape as buildClarifyPoster: these rail/WS closures are
+    // defined before ActivityInspector, but dereference the holder at fire time.
+    const inlineEvidenceReader: InlineEvidenceReader = {}
+    // ONE deriver for every read boundary (rail extras, the WS frame, the HTTP
+    // surface, the per-turn fragment, the agent's `work_board_list`). The scope
+    // key and the clock are decided HERE, once, so no call site can pass the
+    // wrong scope or a stale `now` — see makeInlineActivityDeriver's header.
+    const deriveInlineActivity = makeInlineActivityDeriver({
+      reader: inlineEvidenceReader,
+      scopeKey: inspectorScopeKey,
+      // The SAME "is the bound run still live" predicate the store's `isRunLive`
+      // safety invariant uses (~:3790), so a card bound to a run means one thing
+      // everywhere: a LIVE run owns the card's activity (fork lane), a TERMINAL
+      // one does not — and the card someone is now fixing inline reads active
+      // instead of staying dark. `boardRunStore` is declared later in this scope;
+      // the closure only derefs it at read time, long after composition.
+      isRunLive: (run_id: string): boolean => {
+        const run = boardRunStore.get(run_id)
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+      },
+    })
     // M1 UX REDESIGN — the rail-redesign per-project derived fields
     // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
     // `open/project-rail.ts`; here we only COLLECT the signals from the project's
@@ -2193,40 +2378,48 @@ export function buildOpenGraphComposer(
       live_runs: number
     } => {
       let liveRunCount = 0
+      let hasStalledLiveRun = false
       let hasInlineActive = false
       let hasFailedNotDone = false
-      let hasStalledLiveRun = false
       try {
         const scopeKey = workBoardScopeKey(project_slug, project_id)
         const nowMs = Date.now()
-        for (const item of workBoardStore.list(scopeKey)) {
-          if (item.inline_active) hasInlineActive = true
+        const items = deriveInlineActivity(workBoardStore.list(scopeKey), project_id)
+        // Item-level signals (pure, unit-tested via scanItemsForRailSignals):
+        // catches runless-but-failed items (cleared link / research/dispatch)
+        // AND still-bound terminal-failed runs. See open/project-rail.ts.
+        ;({ hasFailedNotDone, hasInlineActive } = scanItemsForRailSignals(
+          items,
+          (runId) => {
+            const run = boardRunStore.get(runId)
+            return run !== null && run.phase === 'failed'
+          },
+        ))
+        // Run-level signals: liveRunCount + hasStalledLiveRun require the full
+        // run row; computed here where the DB is available.
+        for (const item of items) {
           const runId = item.linked_run_id
           if (runId === null || runId.length === 0) continue
           const run = boardRunStore.get(runId)
           if (run === null) continue
-          if (isTerminalPhase(run.phase)) {
-            // A still-bound terminal run: `failed` on a not-done item = attention
-            // (the brief pre-reconcile window; a `done` run just completes it).
-            if (run.phase === 'failed' && item.status !== 'done') hasFailedNotDone = true
-            continue
-          }
+          if (isTerminalPhase(run.phase)) continue
           // Live (non-terminal) bound run.
           liveRunCount++
           if (deriveRunProgress(run, nowMs).stalled) hasStalledLiveRun = true
         }
-        // Durable failure signal — a failed build is detached from its item on
-        // terminal reconcile, so the bound-item check above only catches the brief
-        // pre-reconcile window. The run ROW persists: if this scope's MOST RECENT
-        // run is `failed` (not yet superseded by a fresh live/done run) AND the
-        // project still has an actionable (not-done) item, keep surfacing
-        // `attention` (Codex review [P2]).
+        // Secondary failure net: covers deleted items, re-bound retries, or a
+        // run-row read miss. If this scope's MOST RECENT run is `failed` (not
+        // superseded by a fresh live/done run) AND the project still has an
+        // actionable (not-done) item, keep surfacing `attention`.
         if (!hasFailedNotDone) {
           const latest = boardRunStore.latestByProjectScope(scopeKey)
           if (latest !== null && latest.phase === 'failed') {
+            // An ACTIONABLE item: neither done nor SHELVED. A shelved card
+            // (`status='archived'`, migration 0130) is parked off the active
+            // lane, so it must not keep the rail in `attention` forever.
             const hasOpenItem = workBoardStore
               .list(scopeKey)
-              .some((it) => it.status !== 'done')
+              .some((it) => it.status !== 'done' && it.status !== 'archived')
             if (hasOpenItem) hasFailedNotDone = true
           }
         }
@@ -2234,7 +2427,7 @@ export function buildOpenGraphComposer(
         // Board/run read failure → treat as no board signal (idle unless chat).
       }
       const activity = deriveProjectActivity({
-        chatTurnInProgress: activeChatProjects.has(railChatKey(project_id)),
+        chatTurnInProgress: turnIsActive(activeChatProjects, railChatKey(project_id)),
         liveRunCount,
         hasInlineActive,
         hasFailedNotDone,
@@ -2300,6 +2493,30 @@ export function buildOpenGraphComposer(
         return []
       }
     }
+    /**
+     * JUST the live project ids — the question "does this id name a project?".
+     *
+     * NOT `readProjectRows().map(r => r.id)` (Argus round 1, confirmed x2, on two
+     * counts). First, that drags the WHOLE rail computation per call —
+     * `readProjectUnread` + `readProjectRailExtras` (a `boardRunStore.get` per
+     * linked work-board item, a latest-message preview query, a live-run count) —
+     * O(projects x board items) of DB work to answer a membership test that is one
+     * indexed SELECT. Second, and worse, `readProjectRows` catches and returns `[]`:
+     * a transient DB failure would make EVERY project unknown and reroute EVERY
+     * project reminder to General, silently — the precise failure mode this card
+     * exists to eliminate, reintroduced fail-open.
+     *
+     * So this one DOES NOT CATCH. The reminder-topic resolver owns the failure and
+     * reports it as `project_list_unavailable` instead of pretending the box has no
+     * projects.
+     */
+    const listProjectIds = (): string[] =>
+      db
+        .prepare<{ id: string }, []>(
+          `SELECT id FROM projects WHERE deleted_at IS NULL ORDER BY id ASC`,
+        )
+        .all()
+        .map((r) => r.id)
     // ── The owner gate (C3c: carved to open/wiring/owner-gate.ts) ──────────
     // `coldStartRedirect` / `hasResumableState` / the React-shell bootstrap HTML
     // injection (`projectsBootstrapScript` / `onboardingBootstrapScript` /
@@ -2366,9 +2583,9 @@ export function buildOpenGraphComposer(
     // advanced its row and posted NOTHING — reminders could not actually
     // fire in Open. Wire the real dispatcher (ported from the legacy harness's
     // `reminder-agent-base.md` + `reminder-patterns.md`):
-    //   • compose — at fire time the warm conversational substrate
-    //     (`liveAgentSubstrate`, the SAME CC-spawn REPL the live chat uses —
-    //     NEVER a direct api.anthropic.com call) composes a context-aware
+    //   • compose — at fire time the warm BACKGROUND conversational substrate
+    //     (`reminderComposeSubstrate` / `cc-nudge-*` — same grants as the live
+    //     chat, its own session; NEVER a direct api.anthropic.com call) composes a context-aware
     //     nudge from the stored `message` shape (literal / smart-wrap /
     //     pattern). When LLM-less, every reminder degrades to its literal
     //     body so a fired reminder ALWAYS delivers something real.
@@ -2414,8 +2631,116 @@ export function buildOpenGraphComposer(
     // `buildAppWsSendReply` / `landing.registry`, touched only at FIRE time (tick
     // loop / brief cron / notice edge), long after boot wires the adapter — never
     // during composition. NO feature flag.
+    // NATIVE PUSH — the transport. `/api/app/devices/{register,unregister}`
+    // (mounted further down over this SAME store) records the owner's device
+    // tokens; this is the half that sends to them.
+    //
+    // ALWAYS ON, and safe to be: every send reads the token table first and
+    // returns before any fetch when the list is empty, so the zero-device state a
+    // fresh install starts in makes no network call at all.
+    //
+    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
+    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
+    const devicePushTokens = new DevicePushTokenStore(db)
+    const pushTransport = createPushDispatcher({
+      store: devicePushTokens,
+      client: createExpoPushClient(
+        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
+          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
+          : {},
+      ),
+    })
+    // THE NOTIFICATION FOR A CHAT MESSAGE, composed from the chat message, and
+    // handed to `deliver` below so every out-of-turn post THAT GOES THROUGH
+    // `deliver` carries it — the fired reminder, the ritual, the morning brief, the
+    // idle nudge, the overnight report. Built here (above `deliver`) rather than
+    // beside the reminder dispatcher because it is no longer a reminder's concern.
+    //
+    // WHAT IS NOT COVERED, NAMED RATHER THAN LEFT TO BE DISCOVERED. `deliver` is not
+    // the only path a durable agent message reaches the app-ws topic by, so "every
+    // out-of-turn post" is a claim about this seam and not about the surface:
+    //
+    //   * a TRIDENT TERMINAL posts through the ChannelRouter
+    //     (`buildTridentDelivery({ sink: channelRouter })` below → `trident/delivery.ts`
+    //     `opts.sink.send`), so a build that finishes while the owner is elsewhere lands
+    //     in his chat with no buzz. This is genuinely out-of-turn and genuinely
+    //     uncovered — it is PRE-EXISTING, not a regression here (before this change the
+    //     push was composed in the reminder tick, so nothing but a fired reminder ever
+    //     notified at all), and routing it through `deliver` is a change to the Trident
+    //     delivery seam rather than a line here.
+    //   * a STEADY-STATE live-agent reply goes through `buildAppWsSendReply`, and
+    //     it NOW NOTIFIES TOO — see the push block in that function. This line
+    //     used to read "which is deliberate: the owner sent the message that
+    //     caused it, so it is in-turn", and that was true until 2026-08-15, when
+    //     the owner overruled it: "Everything should be a chat message, and I get
+    //     notified for any and all chat messages if I'm not actively in the app."
+    //     Kept as a correction rather than deleted, because the ORIGINAL reasoning
+    //     was sound and its replacement depends on a condition that did not exist
+    //     when it was written: "in-turn" was standing in for "he is looking at
+    //     this", and the device now answers that question directly
+    //     (`app/lib/push-foreground-policy.ts`). Remove that device policy and
+    //     this exclusion becomes right again.
+    //
+    // Written down because the previous wording here said "EVERY out-of-turn post",
+    // which is the confidently-specific kind of comment that gets believed instead of
+    // checked — and a reader would have concluded a completed build notifies.
+    //
+    // 2026-08-09, owner-reported: his phone said `ritual:kaizen`. The push was
+    // composed in the reminder TICK from the reminder ROW, and a ritual row's
+    // `message` IS that dispatch token — so the notification could never contain
+    // the text that got posted, and the payload carried the owner slug where the
+    // tap needed a project id. Both halves of his complaint were that one mistake.
+    //
+    // `project_slug` is the key `/api/app/devices/register` writes its rows under
+    // (`gateway/http/app-devices-surface.ts:206` — the resolved owner bearer's
+    // slug). Reading and writing under one key is what makes "a registered device
+    // is a notified device" true rather than aspirational.
+    //
+    // 2026-08-15, owner-reported: *"can you also check if I'm actively using the
+    // web app, and if so dont send push notifications to my phone."* That is the
+    // `suppressPushWhileWebForeground` wrapper below, and the reason it goes HERE
+    // — on the single construction, rather than at either call site — is that
+    // this ONE sink feeds BOTH pushing paths: `createDeliver({ notify: … })` a
+    // few lines down (out-of-turn posts) and the `ownsNotify` branch of
+    // `buildAppWsSendReply` (ordinary in-turn replies, #300). Two copies of the
+    // presence question would be two chances for them to answer it differently.
+    const webPresence = createWebPresenceTracker()
+    const chatMessagePush = suppressPushWhileWebForeground({
+      sink: buildChatMessagePushSink({
+        fanOut: pushTransport,
+        project_slug,
+      }),
+      // The owner, and only the owner: presence is per-user, so a guest sitting
+      // in a shared project cannot silence his phone by having a tab open.
+      isWebForeground: () => webPresence.isForeground(OWNER_USER_ID),
+    })
+    /**
+     * `app:<owner>:<project>` → `<project>`; anything else (General, a foreign
+     * topic) → undefined.
+     *
+     * WHY THE DELIVER SEAM NEEDS THIS (Argus round 1). Routing the fire to the
+     * project topic is only half of "the owner sees it". `buildAppWsSendReplyResult`
+     * takes the project id as a SEPARATE argument and uses it to stamp
+     * `projects.last_activity_at` and re-fan `projects_changed` — the rail pop and
+     * the unread badge. Called with the topic alone, a fired project reminder wrote
+     * a durable row into the project topic and changed NOTHING in the rail: invisible
+     * unless the owner already happened to be sitting inside that project. Deriving
+     * the id back off the topic here makes an out-of-turn post behave exactly like a
+     * steady-state agent reply on the same topic, which is the one path already
+     * proven to light the rail. (A transient system notice is still exempt — that
+     * check lives inside `buildAppWsSendReplyResult`.)
+     */
+    const appWsProjectIdOfTopic = (topic_id: string): string | undefined => {
+      const prefix = `${appWsTopicId(OWNER_USER_ID)}:`
+      if (!topic_id.startsWith(prefix)) return undefined
+      const project_id = topic_id.slice(prefix.length)
+      return project_id.length > 0 ? project_id : undefined
+    }
     const deliver: Deliver = createDeliver({
       buttonStore: landing.buttonStore,
+      // Every durably-posted out-of-turn message notifies the owner's devices;
+      // a transient `durability: 'none'` pill does not (no row, nothing to tap).
+      notify: chatMessagePush,
       push: {
         // `buildAppWsSendReply` now AWAITS the app-ws adapter and classifies its real
         // result marker, so `delivered_live` reflects the TRUE fan-out (an offline
@@ -2423,7 +2748,7 @@ export function buildOpenGraphComposer(
         // NOT a hardcoded true or a stale pre-send registry snapshot (Codex/O6). The
         // persist + fan still happen inside the awaited send.
         app: (topic_id: string, event: ChatOutbound): Promise<boolean> =>
-          buildAppWsSendReplyResult(topic_id)(event),
+          buildAppWsSendReplyResult(topic_id, appWsProjectIdOfTopic(topic_id))(event),
         web: (topic_id: string, event: ChatOutbound): boolean =>
           landing.registry.send(topic_id, event),
       },
@@ -2438,36 +2763,51 @@ export function buildOpenGraphComposer(
     // notifier resolves the same holder (durability 'inert' — a proposal must
     // survive until he opens the app, unlike a transient notice pill).
     noticeDeliverHolder.deliver = deliver
-    // Resolve every fired reminder/brief to the app-ws topic the client binds:
-    // the owner's BARE `app:<user>`.
+    // Resolve every fired reminder/brief to the app-ws topic that OWNS the work.
     //
-    // THE BUG (M1 E2E Round 2, 2026-06-29 — the residual #105 missed): the app-ws
-    // client opens ONE `/ws/app/chat` socket and registers its live sender +
-    // replays history on the BARE `app:<user>` topic only (`app-ws-surface.ts`
-    // registers `appWsTopicId(user_id)`; `config.topicId = appWsTopicId(userId)`);
-    // project context is a per-FRAME field, NOT a topic suffix. This differs from
-    // the LEGACY web path, which bound a per-socket sender on
-    // `web:<user>:<project>` — and #105 ported that suffixing pattern here,
-    // mapping a project reminder (`app-project:<id>`) to `app:<user>:<id>`. But
-    // NO sender is ever registered on that suffixed topic, so the live push
-    // matches nothing (`registry.send` → false, dropped), AND the durable
-    // `button_prompts` row lands under a topic the client NEVER replays (it only
-    // ever hydrates the bare `app:<user>`) — so a project-scoped reminder VANISHES
-    // entirely, live and on reload. (General reminders — `explicit_topic` null →
-    // bare topic — are the only case #105's test exercised, which is why this
-    // slipped through.)
+    // THE BUG (measured 2026-08-15): 24 reminder fires landed on the bare
+    // `app:<owner>` topic across one night while the owner was reading — and
+    // writing in — `app:owner:neutron-open`. Every fire resolved to General
+    // because this closure discarded its `explicit_topic` argument. That was the
+    // CORRECT behaviour when written (the residual #105 fix, 2026-06-29): back
+    // then the app-ws client bound its live sender and replayed history on the
+    // bare `app:<user>` topic ONLY, so a project-suffixed delivery topic matched
+    // no sender and persisted under a topic nothing hydrated — the reminder
+    // vanished, live and on reload. It has been false since app-ws topic scoping
+    // (`gateway/http/app-ws-surface.ts` `resolveChannelTopicId`, ISSUES #399):
+    // each project chat now BINDS and HYDRATES its own `app:<user>:<project>`
+    // topic — which is exactly where the trident build cards the owner WAS seeing
+    // land.
     //
-    // THE FIX: deliver ALL fired reminders/briefs to the owner's bare
-    // `app:<user>` topic — exactly the general-reminder path #105 made work and
-    // the one topic the client actually binds + hydrates. Project GROUPING is
-    // unaffected: it lives on the reminder row's stored `topic_id`
-    // (`app-project:<id>`) which the reminders tab filters on (`store.listBy*`)
-    // and `deriveReminderProjectId` keys context/metering off — neither reads
-    // this delivery topic. The fired message simply surfaces in the owner's chat,
-    // the single surface the app reads, instead of silently disappearing.
+    // THE FIX: a fire resolves to the project topic when its stored destination
+    // names an EXISTING project (raw `project_id` from the Reminders Core,
+    // `app-project:<id>` from the app surface, or legacy `web:<user>:<id>`), and
+    // to General otherwise. An unknown destination deliberately falls back to
+    // General — the #105 lesson, kept: a fire must NEVER persist into a topic no
+    // client reads. `resolveAppWsReminderTopic(null)` (ritual approvals, executor
+    // ritual posts, briefs) still means General. Project GROUPING in the
+    // reminders tab is unaffected either way: it reads the reminder row's stored
+    // `topic_id` (`store.listBy*` / `deriveReminderProjectId`), not this
+    // delivery topic.
     const reminderGeneralTopic = appWsTopicId(OWNER_USER_ID)
-    const resolveAppWsReminderTopic = (_explicit_topic: string | null): string =>
-      reminderGeneralTopic
+    //
+    // EVERY downgrade to General is SAID OUT LOUD (`onDowngrade`). A fire that
+    // names a destination and lands somewhere else is precisely the defect —
+    // going quiet about it is how it survived a night unnoticed. The resolver's
+    // lister is the cheap `listProjectIds` SELECT, which does NOT swallow read
+    // errors: a DB failure reports `project_list_unavailable` rather than
+    // masquerading as "this box has no projects".
+    const resolveAppWsReminderTopic = buildAppWsReminderTopicResolver({
+      owner_user_id: OWNER_USER_ID,
+      listProjectIds,
+      onDowngrade: (event) =>
+        log.warn('reminder_topic_downgraded_to_general', {
+          explicit_topic: event.explicit_topic,
+          reason: event.reason,
+          candidate: event.candidate,
+          ...(event.error !== undefined ? { error: event.error } : {}),
+        }),
+    })
     // ONE outbound + ONE runs store hoisted so the nudge dispatcher, the ritual
     // executor, and the boot reap all post through / write to the SAME instances
     // (one deliver seam, one `code_ritual_runs` writer).
@@ -2475,25 +2815,63 @@ export function buildOpenGraphComposer(
     const ritualRuns = createRitualRunStore(db)
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: reminderOutbound,
-      ...(liveAgentSubstrate !== null
-        ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
+      // THE BACKGROUND COMPOSE REPL (`cc-nudge-*`), NOT the owner's chat REPL.
+      //
+      // Measured on the live instance 2026-08-17: a reminder's compose aborted,
+      // the very next journal line evicted the owner's warm chat child as
+      // abandon-poisoned, and his next chat turn died with `persistent-repl: REPL
+      // process exited`. He could not send a message until the service was
+      // restarted. Composition ran on `liveAgentSubstrate` — his session — so a
+      // background failure was a foreground outage.
+      //
+      // The two earlier patches at this site (the live-chat `--tools` surface, then
+      // the live-chat model) were both attempts to make sharing the session SAFE.
+      // Sharing cannot be made safe: an aborted turn poisons the session it was
+      // aborted on no matter how well its arguments match. `cc-nudge-*` is a
+      // distinct pool key, so it is a distinct child (`open/wiring/substrates.ts`).
+      ...(reminderComposeSubstrate !== null
+        ? { llm: buildSubstrateReminderLlm(reminderComposeSubstrate) }
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
       resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
-      // ⚠️ THE LIVE-CHAT TOOL SURFACE, VERBATIM — and this is load-bearing, not
-      // tidiness. A fired reminder composes on `liveAgentSubstrate`, the owner's
-      // WARM chat REPL, and the persistent pool's reuse guard EVICTS AND RESPAWNS a
-      // warm child whose requested `--tools` surface differs from the one it was
-      // spawned with (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`).
-      // The dispatcher's own default is the narrower ['Read','Glob','Grep'], so
-      // leaving it unset meant every fired reminder tore down the owner's live chat
-      // REPL and his next chat turn tore it down again. Passing the same surface is
-      // what makes "a reminder fires into the normal session" literally true.
+      // The nudge REPL's OWN model — the frontier tier, unchanged from what a
+      // fired reminder composes on today.
+      //
+      // History, because the reason has now completely changed: this was added
+      // (2026-08-16) because composition ran on the owner's chat session and the
+      // persistent pool PERSISTS the model it spawned with back into that session's
+      // registry record (`runtime/adapters/claude-code/persistent/supervision.ts`
+      // saveRecord, read back at `pool.ts` `record?.model ?? getBestModel()` — the
+      // record OVERRIDES the best model rather than falling back to it). The
+      // dispatcher's own default is the Haiku-class `FAST_MODEL`
+      // (`reminders/dispatcher.ts`, `const model = input.model ?? FAST_MODEL`), so
+      // leaving it unset silently rewrote his chat session to the fast tier and his
+      // NEXT chat turn resumed there, durably across restarts. That comment closed
+      // with "if a cheaper tier is ever wanted for composition, it needs its own
+      // substrate" — it now HAS one, so the value is no longer load-bearing for the
+      // owner's session at all. It stays at the frontier tier because that is the
+      // quality a fired nudge composes at today, and this change is not the place to
+      // regress it.
+      model: getBestModel(),
+      // The nudge REPL's constant `--tools` surface, kept equal to the live-chat
+      // list. It is NO LONGER about matching the owner's session — `cc-nudge-*` is a
+      // separate child. It is about capability: a RITUAL composes through this same
+      // seam and cannot apply its own surface, so its approval prompt's promise of
+      // web egress (`WebSearch`, the `kaizen` grant) is only true if the surface
+      // carries it (`gateway/wiring/build-live-agent-turn.ts` LIVE_AGENT_TOOL_NAMES).
+      // Still ONE constant surface, so this child never thrashes its reuse guard.
       tool_names: LIVE_AGENT_TOOL_NAMES,
       // ISSUES #504 — the ritual fire planner, DEREFERENCED PER FIRE so the
       // late-bound `ritualPlanner` (installed once the graph's ApprovalManager
-      // exists) reaches the dispatcher that was built before it. Null planner ⇒
-      // 'nudge' ⇒ the row composes from its own stored message.
+      // exists) reaches the dispatcher that was built before it.
+      //
+      // A null planner answers 'nudge', and the dispatcher applies that answer ONLY
+      // to a row with no `ritual_id`. A RITUAL row is refused there instead: it
+      // composes nothing and the owner gets one plain-language notice saying the
+      // occurrence was skipped. This comment used to stop at "⇒ the row composes
+      // from its own stored message", which was the defect stated as if it were the
+      // design — a ritual row's stored message IS `ritual:<id>`, so that is exactly
+      // how the token reached his lock screen. See `reminders/dispatcher.ts`.
       ritual_planner: {
         plan: async (reminder) =>
           ritualPlanner !== null ? ritualPlanner.plan(reminder) : { kind: 'nudge' as const },
@@ -2526,6 +2904,82 @@ export function buildOpenGraphComposer(
     // from the first seed on it is OWNER data (the ritual CONTENT stays user data),
     // and the content-hash approval check re-verifies the LIVE bytes every fire, so
     // a later owner edit drops approval by design.
+    // ── Owner-approved host deploy ────────────────────────────────────────────
+    // The agent can ASK for a deploy of the host this instance runs on; it can
+    // never perform one. `host_deploy_request` resolves the current pin, the
+    // target sha and the commits between them, and posts THAT as an Approve/Deny
+    // prompt through the SAME durable `deliver` seam ritual approvals ride. Only
+    // the owner's tap — captured deterministically at turn start below — makes
+    // the one authenticated control-plane call, and only if the target sha has
+    // not moved since he was asked.
+    //
+    // WHERE THE PROMPT LANDS (this card, 2026-08-15): the topic that REQUESTED
+    // the deploy. `approval_topic_id` below is the FALLBACK, used only when the
+    // request carries no calling topic (cron/system). It used to be the sole
+    // destination, so every prompt went to the owner's General topic and the
+    // owner was told to tap a button in a conversation he was not in.
+    //
+    // LATE-BOUND for the same reason `ritualRegistration` is: the service needs
+    // the graph's ApprovalManager, which does not exist here. `install` is
+    // called from the approval module's init. NOT gated on `llmPool` — the tools
+    // register either way, and an LLM-less box simply has nothing to call them.
+    let hostDeployService: HostDeployService | null = null
+    const hostDeployInstall = ({ approvals }: { approvals: ApprovalManager }): void => {
+      // CALL TIME, every time. Reading the endpoint + credential once here
+      // would bake in whatever the store held at boot — the
+      // failure the Decisions Log records on 2026-08-07.
+      //
+      // ONE resolver, shared by the git view and the service. They are two halves
+      // of a single conversation with the same control plane, and a git view
+      // pointed somewhere else would resolve a ref against a checkout that is not
+      // the one about to be deployed.
+      const resolveHostDeploy = (): ReturnType<typeof resolveHostDeployConfig> => {
+        const owner = asOwnerHandle(owner_handle)
+        return resolveHostDeployConfig({
+          url:
+            projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_URL_SERVICE)?.plaintext ??
+            null,
+          token:
+            projectCredentialStore.resolve(owner, undefined, HOST_DEPLOY_TOKEN_SERVICE)?.plaintext ??
+            null,
+        })
+      }
+      hostDeployService = createHostDeployService({
+        approvals,
+        // THE CONTROL PLANE RESOLVES THE REF, not this process. Resolving a
+        // remote ref means fetching, a fetch writes into the host checkout's git
+        // directory, and this service is deliberately unprivileged there — which
+        // is why the local implementation refused with `Permission denied` and
+        // the owner could not deploy at all.
+        git: createHostDeployRemoteGit({ resolveConfig: resolveHostDeploy }),
+        resolveConfig: resolveHostDeploy,
+        dispatch: createHostDeployDispatch(),
+        project_slug,
+        owner_user_id: OWNER_USER_ID,
+        // FALLBACK ONLY (2026-08-15). The prompt is raised on the topic that
+        // requested the deploy; this owner General topic is used only when a
+        // request carries no calling topic (cron/system).
+        approval_topic_id: resolveAppWsReminderTopic(null),
+        emit: async (p) => {
+          const result = await deliver(p.topic_id, {
+            body: p.body,
+            durability: 'reply',
+            options: p.options,
+            idempotency_key: p.idempotency_key,
+            metadata: p.metadata,
+          })
+          // A 'reply' deliver SWALLOWS a durable-persist failure. An approval
+          // prompt the owner cannot tap is worse than no prompt: the grant sits
+          // pending and the deploy silently never happens. Surface it so
+          // `request()` cancels the grant and reports "ask again".
+          if (!result.persisted) {
+            throw new Error('host deploy approval prompt failed to persist a durable row')
+          }
+        },
+        log: (m) => log.info('host_deploy', { detail: m }),
+      })
+    }
+
     const init_ritual_planner: CompositionInput['init_ritual_planner'] =
       llmPool !== null
         ? ({ approvals }) => {
@@ -2649,9 +3103,11 @@ export function buildOpenGraphComposer(
             // dispatcher built above. No executor, no `cc-ritual-*` substrate, no
             // subagent spawn: the planner only says what an approved ritual row
             // composes from and what must be written to `code_ritual_runs`, and
-            // `buildReminderDispatcher` composes it on `liveAgentSubstrate` — the
-            // owner's warm chat session, the ONE substrate carrying the native-MCP
-            // tool bridge — then posts it through the same `reminderOutbound` a
+            // `buildReminderDispatcher` composes it on `reminderComposeSubstrate` —
+            // the background `cc-nudge-*` session, which carries the native-MCP tool
+            // bridge and the same grants the owner's chat does (#504's "access to
+            // everything general has access to"), on its OWN warm child so a failed
+            // fire cannot evict his chat — then posts it through the same `reminderOutbound` a
             // nudge posts through. That is what lets the morning brief reach a
             // Core, which the old sandbox could not.
             ritualPlanner = buildRitualFirePlanner({
@@ -2673,6 +3129,15 @@ export function buildOpenGraphComposer(
     // contain a current-boot 'running' row (`code_ritual_runs` has no boot_id;
     // ordering IS the current-boot safety). The prune chains after the reap.
     // fireAndForget precedent: the boot dispatch sweep just above (composer:888).
+    //
+    // 2026-08-09 — this NOW NOTIFIES, and that is intended rather than incidental.
+    // The reap posts one chat message per run it found orphaned, through the same
+    // `reminderOutbound` → `deliver` path everything else uses, so those posts pick
+    // up the device notification like any other. A ritual that died mid-flight is
+    // exactly the kind of thing the owner should learn about without opening the
+    // app. It is bounded by design: the reap only speaks for runs left 'running' by
+    // a PRIOR boot, so the steady state is zero messages and a restart storm cannot
+    // manufacture new ones (a reaped row is settled, not re-reaped).
     fireAndForget(
       'composer.reapOrphanRitualRuns',
       reapOrphanRitualRuns({
@@ -3093,41 +3558,12 @@ export function buildOpenGraphComposer(
     // while this was unmounted NO device could ever register and the
     // `device_push_tokens` table stayed empty on every install.
     //
-    // ONE store instance, shared with the delivery half below, so the rows the
-    // register route writes are literally the rows the reminder push reads.
-    const devicePushTokens = new DevicePushTokenStore(db)
+    // ONE store instance, shared with the delivery half (the push transport is
+    // built earlier, above the reminder outbound that feeds it), so the rows the
+    // register route writes are literally the rows a notification is sent to.
     const appDevicesSurface = createAppDevicesSurface({
       store: devicePushTokens,
       auth: appOwnerAuth,
-    })
-    // The OTHER half of push. Registration on its own delivers nothing: the
-    // fan-out lives behind the `push_dispatcher` composition field, which
-    // `build-core-modules.ts:396-398` attaches to the reminder tick's `on_fired`
-    // hook — and until now NO composer set it, so `createPushDispatcher`
-    // (`gateway/push/dispatcher.ts:133`) had no non-test call site and the
-    // reminder deep link (`app/lib/push-deep-link-dispatch.ts:93-108`) could
-    // never be reached. It is not a route slot, so the route-slot coverage gate
-    // cannot see the gap; `tests/integration/reminders-tab-and-push.open.test.ts`
-    // is what holds this wiring down.
-    //
-    // ALWAYS ON, and safe to be: `pushReminder` reads the token table first and
-    // `dispatch` returns before any fetch when the message list is empty
-    // (`gateway/push/dispatcher.ts:145-147`), so the zero-device state every
-    // fresh install starts in makes no network call at all. Downstream of a
-    // SUCCESSFUL nudge dispatch only (`reminders/tick.ts:314-323`), so push
-    // never adds a notification for a reminder the owner was not already being
-    // told about, and its own failures are caught and logged without touching
-    // the fired row.
-    //
-    // `EXPO_ACCESS_TOKEN` is optional — Expo accepts anonymous sends and merely
-    // rate-limits them (`gateway/push/expo-push-client.ts:102-105`).
-    const push_dispatcher = createPushDispatcher({
-      store: devicePushTokens,
-      client: createExpoPushClient(
-        env['EXPO_ACCESS_TOKEN'] !== undefined && env['EXPO_ACCESS_TOKEN'].length > 0
-          ? { access_token: env['EXPO_ACCESS_TOKEN'] }
-          : {},
-      ),
     })
     // M2 task 5 — voice-note ASR. TWO backends behind one seam — local
     // whisper.cpp and the hosted OpenAI endpoint — and the owner's SETTING says
@@ -3213,13 +3649,60 @@ export function buildOpenGraphComposer(
       neutron_home: owner_home,
       free_bytes: freeBytesAt,
     })
+    // Is a Kimi K3 key usable RIGHT NOW? Defined once and shared by the settings
+    // pane (which greys the K3 tier without one) and the trident wiring below
+    // (which decides whether the panelist runs at all) — see the long note at
+    // `resolve_kimi_configured` for why the export side effect is load-bearing.
+    // One function, so the pane can never claim a capability the build lacks.
+    // Global scope: a Kimi subscription is one account for the whole install, not
+    // a per-project token. Named once and shared by the two readers below, so the
+    // reviewer and the usage gauge cannot end up asking different questions about
+    // the same key.
+    const kimiKeyLookup = (): string | null => {
+      const found = projectCredentialStore.resolve(
+        asOwnerHandle(owner_handle),
+        undefined,
+        KIMI_CREDENTIAL_SERVICE,
+      )
+      return found?.plaintext ?? null
+    }
+    const kimiConfigured = (): boolean => ensureKimiKeyExported(env, kimiKeyLookup)
     // The read/write pair for the per-phase build models. Read PER REQUEST, like
     // the transcription choice beside it: the setting is a live control, so a
     // change must reach the next build with no restart and no cache to go stale.
     const tridentPhaseModelsSurface = createTridentPhaseModelsSurface({
       auth: appOwnerAuth,
-      read: (scope) => readTridentPhaseModels(db, scope),
+      read: (scope) => readTridentPhaseModelsWithRejected(db, scope),
       write: (scope, input) => writeTridentPhaseModels(db, scope, input),
+      // THE SAME RESOLVERS THE BUILD USES (`kimiConfigured` below is this exact
+      // function). A pane that answered "available" from its own notion of
+      // configured would grey the wrong option — or worse, offer a tier whose
+      // build then never happens for a reason the owner cannot see.
+      //
+      // ALL THREE PRECONDITIONS OF "CAN CODEX RUN HERE", because the wrapper hard-fails
+      // on each of them and every failure looks the same downstream — a build that
+      // never happened: exit 10 with no credential, exit 11 with no `codex` on PATH,
+      // exit 3 `CODEX_BUILD_NO_PERL` with no `perl` (`trident/codex-build.sh` bounds
+      // every network call with `perl -e alarm`, which the `-slim` and Alpine base
+      // images do not ship). Each answer NAMES THE MISSING PIECE: an owner told "needs
+      // a Codex connection" on a box with a healthy login runs `codex login`, watches
+      // it succeed, and is exactly where they started.
+      //
+      // WHOSE PATH IS SCANNED. The wrapper is exec'd by the `claude` REPL child, not
+      // by this process — so the answer is only right if the child's PATH is this
+      // one. It is: the REPL substrate LAYERS its `env` option on top of `process.env`
+      // (`runtime/adapters/claude-code/index.ts:83-94`) and no caller in this repo
+      // puts `PATH` in that layer (`build-gbrain-memory.ts:752` is the only PATH
+      // override, and it is a different subprocess). A future caller that DID override
+      // it would have to update this answer with it — hence the note rather than a
+      // silent assumption.
+      connections: () => ({
+        codex: codexExecutorAvailability({
+          codexHome: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)),
+          env,
+        }),
+        kimi: kimiConfigured(),
+      }),
     })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({
       auth: appOwnerAuth,
@@ -3520,7 +4003,7 @@ export function buildOpenGraphComposer(
         const frame: AppWsOutboundWorkBoardChanged = {
           v: 1,
           type: 'work_board_changed',
-          items: workBoardStore.list(changedKey).map((it) => {
+          items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
             const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
             return {
@@ -3577,9 +4060,30 @@ export function buildOpenGraphComposer(
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
       // SAFETY INVARIANT — nothing may mark an item done while its build runs.
       // `boardRunStore` is the same store the tick loop reconciles from, so this
-      // reads the one authoritative phase. A run that has VANISHED (get → null)
+      // reads the one authoritative row. A run that has VANISHED (get → null)
       // counts as not-live: it cannot be reconciled either, so refusing forever
       // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
+      //
+      // DELIBERATELY *NOT* THE WAKEUP'S `runDrivingVerdict`, though a round of this
+      // change made it so and it reads like the obviously-consistent choice.
+      // WAKEABILITY AND COMPLETION-LEGALITY ARE DIFFERENT QUESTIONS and they fail
+      // in opposite directions. "Is anyone driving this?" may be answered from a
+      // stale clock, because guessing wrong costs a duplicated turn. "Did this
+      // work ship?" may not, because guessing wrong asserts a falsehood about the
+      // world — the 2026-08-11 incident above, which the owner called "horribly
+      // bad and confusing UX that should never have existed".
+      //
+      // A run whose `last_advanced_at` has gone quiet is very often STILL BUILDING:
+      // the field only moves at checkpoint boundaries (`liveness.ts:46-59`), which
+      // is the whole reason the wakeup needed a generous threshold. Completing on
+      // that signal would let an agent mark an item done while its build runs —
+      // and `complete()` only writes the board row (`work-board/store.ts:598`); it
+      // does not stop the build, so the claim would simply be false.
+      //
+      // The cost is real and accepted: an item the wakeup takes stays uncompletable
+      // by this path until its run reaches a terminal phase. That is a LOUD refusal
+      // (`WorkBoardRunStillLiveError`), not a silent one, and the right fix is to
+      // reap the stalled run — not to loosen the assertion that work shipped.
       isRunLive: (run_id: string): boolean => {
         const run = boardRunStore.get(run_id)
         return run !== null && run !== undefined && !isTerminalPhase(run.phase)
@@ -3660,6 +4164,39 @@ export function buildOpenGraphComposer(
       projectId !== null && projectId.length > 0
         ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
         : appWsTopicId(OWNER_USER_ID)
+    // #335 WIRING — the terminal-build wake observer, constructed ONCE and
+    // registered at ALL THREE composeTerminalHook sites (both terminator binds
+    // below + the tick loop via `trident.on_terminal_wake`), so a cancelled build
+    // wakes the agent exactly like a loop-reaped one (§F6a). Claim-first:
+    // `claimAgentWake` is the single writer of `agent_waked_at`, so redelivery /
+    // boot-replay / a second site observing the same row compose ZERO duplicate
+    // turns. Registered LAST in each chain so the multi-minute wake compose never
+    // delays board reconcile or skill-forge; by then the reconcile has usually
+    // detached `linked_run_id`, so the prompt's "Board item id" is commonly
+    // "none" (a module-supported shape) — the wake turn still carries run id /
+    // branch / task and has board tools to locate the item. Accepted tradeoff.
+    const terminalBuildWake = buildTerminalBuildWakeObserver({
+      claimWake: (id) => boardRunStore.claimAgentWake(id),
+      boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
+      // The SAME background `cc-nudge-*` seam the fired-reminder + work-wakeup
+      // paths compose through — never the owner's chat REPL. Null when LLM-less
+      // → the observer returns before claiming (module-tested).
+      llm:
+        reminderComposeSubstrate === null
+          ? null
+          : { compose: (spec, opts) => buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts) },
+      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
+      // Durable inert row + live push to the run's own chat; buzz only when loud.
+      post: async (run, reply, opts) => {
+        const result = await deliver(run.chat_id ?? tridentDeliveryChatId(null), {
+          body: reply,
+          durability: 'inert',
+          ...(opts.loud ? {} : { notify: 'suppress' as const }),
+        })
+        return result.persisted
+      },
+      logger: log,
+    })
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
@@ -3708,6 +4245,8 @@ export function buildOpenGraphComposer(
                 channel_kind: 'app_socket',
                 chat_id: chatId,
                 thread_id: null,
+                resolveMergeMode: resolveTridentMergeMode,
+                landedProbe: tridentLandedProbe,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -3776,9 +4315,28 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
         : null
+    // The ONE card-removal chokepoint: cancel a live bound run (trident via the
+    // §F6a terminate chokepoint, research via the dispatch stop) → dispose the
+    // card's own `plans/` doc into a folder named for the removal REASON → hard-
+    // delete the row. Built ONCE here and handed to the HTTP surface (the UI's X)
+    // AND to the agent's `work_board_remove` tool (T2), so a human removal and
+    // an agent removal run the SAME path, run-cancellation and all. `docStore` is
+    // the same instance the spec-doc service writes the doc with, so the move
+    // lands where the Documents tab reads.
+    const workBoardRemoval = new WorkBoardRemovalService({
+      store: workBoardStore,
+      trident_runs: boardRunAccess,
+      is_terminal_phase: (phase) => isTerminalPhase(phase as TridentRun['phase']),
+      ...(dispatchService !== null
+        ? { cancel_dispatch: async (id: string) => void (await dispatchService.stop(id)) }
+        : {}),
+      docs: docStore,
+    })
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
+      // The shared removal chokepoint (above) — the X's DELETE runs through it.
+      removal: workBoardRemoval,
       // #429 task 3 — no manual Build/Research picker; an omitted task_type is
       // FAST_MODEL-classified with keyword fallback (LLM-less boots classify by
       // keyword only). Explicit task_type from any caller always wins.
@@ -3786,6 +4344,15 @@ export function buildOpenGraphComposer(
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
+      // Derived inline activity — the wire `inline_active` on every item-bearing
+      // HTTP response becomes evidence truth, the stored column stays a hint.
+      // The closure DEREFS the late-bound holder at CALL time, so the
+      // construction order (this surface is built before the ActivityInspector)
+      // is safe; an unset holder reads evidence 0 ⇒ not active (fail-soft, and
+      // the correct post-crash semantics). `inspectorScopeKey('general') ===
+      // 'general'` matches the tap's General scope, so the URL project_id feeds
+      // straight through. Display-only: it gates nothing.
+      derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       // The board scope and the DOCS project id are separate arguments on purpose:
       // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
@@ -3843,6 +4410,8 @@ export function buildOpenGraphComposer(
         }
       },
     })
+    inlineEvidenceReader.lastWriteActivityAt = (scope): number =>
+      activityInspector.lastWriteActivityAt(scope)
     // The tool tap: `activity-tap.ts` (a Pre/PostToolUse hook running in the CC
     // subprocess) POSTs each tool start/finish to the substrate sink's `/activity`
     // route, which dispatches this closure. THIS is where the panel's real content
@@ -3866,7 +4435,23 @@ export function buildOpenGraphComposer(
       })
       // `null` ⇒ a row the transcript is better without (the `reply` tool's bare
       // post-ack, whose words already landed as the assistant message row).
-      if (row !== null) activityInspector.record(inspectorScopeKey(project_id), row)
+      if (row === null) return
+      const scope = inspectorScopeKey(project_id)
+      // THE OFF→ON EDGE. Nothing else pushes a board frame when evidence appears:
+      // `fanWorkBoardChanged` is driven by store writes and run transitions, and
+      // inline work makes NEITHER — that is the whole point of this card. Without
+      // this line an already-open board keeps showing the card as quiet until
+      // something unrelated happens to touch it, so acceptance (a) would hold only
+      // at server READ boundaries (reload, mutation, reconnect). Comparing the
+      // write clock before/after the record fires it only on the transition from
+      // "no fresh evidence" to "fresh": at most once per project per window, and
+      // the OFF edge is the clients' expiry poll, which this frame is what arms.
+      const before = activityInspector.lastWriteActivityAt(scope)
+      activityInspector.record(scope, row)
+      const after = activityInspector.lastWriteActivityAt(scope)
+      if (isInlineEvidenceEdge(before, after)) {
+        fanWorkBoardChanged(workBoardScopeKey(project_slug, project_id))
+      }
     }
     setReplActivityTap(wiredActivityTap)
     const activitySurface = createActivitySurface({
@@ -3895,6 +4480,14 @@ export function buildOpenGraphComposer(
     const usageSamplesStore = new UsageSamplesStore({ db })
     const credentialUsageMonitor = new CredentialUsageMonitor({
       env,
+      // The API base is threaded from THIS composition's env, the same way the Kimi
+      // poller's is below. `ANTHROPIC_BASE_URL` is the variable the Anthropic SDK
+      // itself reads, so a box pointed at a gateway keeps its gauge pointed at the
+      // same place its turns go — and it is what lets the refusal path be exercised
+      // against the composed handler without touching a real host.
+      ...(typeof env['ANTHROPIC_BASE_URL'] === 'string' && env['ANTHROPIC_BASE_URL'].length > 0
+        ? { probeDeps: { apiBaseUrl: env['ANTHROPIC_BASE_URL'] } }
+        : {}),
       onStanding: createCredentialLapseNotifier({ deliver, topic_id: ownerNoticeTopic }),
       // PERSIST every reading, so the series outlives the 60-second tick. Before this
       // the monitor measured continuously and remembered nothing: it could say a window
@@ -3915,15 +4508,121 @@ export function buildOpenGraphComposer(
         // best-effort shutdown cleanup — stop() never rejects
       }
     })
+    // The SECOND gauge, into the SAME series. Kimi publishes no rate-limit
+    // headers, so its standing has to be asked for at its own endpoint — see
+    // `kimi-usage-monitor.ts`. The key is read per tick from the store the
+    // Settings pane writes, so a key entered now is metered ten minutes from now
+    // rather than after a restart.
+    const kimiUsageMonitor = new KimiUsageMonitor({
+      key: () => resolveKimiApiKey(kimiKeyLookup),
+      // The base URL is threaded from THIS composition's env rather than read off
+      // the module-load-time constant in `trident/kimi-review.ts`. Same value in
+      // production, and it removes an import-order dependency: whether the poller
+      // honours `KIMI_BASE_URL` should not turn on whether some other module
+      // happened to be imported before the variable was set.
+      ...(typeof env['KIMI_BASE_URL'] === 'string' && env['KIMI_BASE_URL'].length > 0
+        ? { probeDeps: { baseUrl: env['KIMI_BASE_URL'] } }
+        : {}),
+      onSample: async (sample): Promise<void> => {
+        await usageSamplesStore.record({ pool: 'kimi', ...sample })
+        await usageSamplesStore.prune()
+      },
+    })
+    realmodeCleanups.push(async () => {
+      try {
+        await kimiUsageMonitor.loop.stop()
+      } catch {
+        // best-effort shutdown cleanup — stop() never rejects
+      }
+    })
+    /**
+     * Is this pool's credential present at all?
+     *
+     * Read PER REQUEST from the SAME resolvers the rest of the product uses —
+     * `kimiConfigured` is the function the Settings pane and the review panel ask,
+     * and the Codex home is the one a launch resolves. A card that answered from
+     * its own notion of "configured" would tell the owner to fix a key that is
+     * already there, or hide one that is missing.
+     *
+     * `no_meter` is a real third answer, not a rounding of the other two: a BYO
+     * Anthropic API key is connected and billed per token, so there is no window
+     * to read and never will be, and calling that "not connected" would send the
+     * owner to reconnect an account that is working.
+     *
+     * REUSING `kimiConfigured` MEANS REUSING ITS SIDE EFFECT, and that trade is
+     * made deliberately. Answering "is a key present" also exports it into the
+     * process environment (`trident/kimi-key.ts`), which is how a key entered in
+     * settings reaches the next subprocess without a restart. The write is
+     * idempotent — it only assigns when the value differs — and the Settings pane
+     * already asks this same question on its own per-request read, so this adds no
+     * new class of behaviour. A private "is it configured" check here would avoid
+     * the write and buy a second notion of configured, which is exactly how a card
+     * ends up telling the owner to fix a key that is already there.
+     */
+    const usagePoolConnection = (pool: UsagePool): UsagePoolConnection => {
+      switch (pool) {
+        case 'anthropic': {
+          const credential = resolveActiveCredential(env)
+          if (credential.kind !== 'measurable') {
+            return credential.reason === 'unsupported_credential' ? 'no_meter' : 'not_connected'
+          }
+          // A CREDENTIAL ON DISK IS NOT A CREDENTIAL UPSTREAM ACCEPTS, and the file
+          // is the only thing `resolveActiveCredential` reads — it performs no
+          // validity check, so a revoked token resolves `measurable` forever. The
+          // probe's 401 drops the cached reading and writes no sample, so without
+          // this the card sat on "No readings yet." for the one pool that HAS a
+          // shipping writer: asked, refused, and promising a first reading that
+          // could never arrive. The standing is read PER REQUEST from the live
+          // monitor and never latched into a sample, so the card recovers the moment
+          // a tick succeeds — the same rule the Kimi arm below follows, and a
+          // transient failure (`indeterminate`) stays `connected` for the same
+          // reason: a dropped packet must not repaint the card as broken.
+          return credentialUsageMonitor.readStanding() === 'lapsed' ? 'unreadable' : 'connected'
+        }
+        case 'kimi': {
+          if (!kimiConfigured()) return 'not_connected'
+          // ASKED AND REFUSED IS NOT "NO READINGS YET". Kimi's usages schema is
+          // unpublished, so the realistic first-install failure is a payload the
+          // parser will not read — and that never resolves itself, while "no
+          // readings yet" promises it will. The standing is read PER REQUEST from
+          // the live poller (never latched into a sample) so the card recovers the
+          // moment a tick succeeds. A transient error stays `connected`: the next
+          // tick retries and a dropped packet must not repaint the card as broken.
+          return kimiUsageMonitor.readStanding() === 'refused' ? 'unreadable' : 'connected'
+        }
+        case 'codex':
+          // NO POLLER EXISTS FOR THIS POOL IN THIS BUILD, so a connected Codex
+          // credential must NOT report `connected`. That state means "empty because
+          // the first reading has not landed yet", and the card renders it as "No
+          // readings yet." — a sentence promising a tick from a writer that is not in
+          // the binary. Grep for a `pool: 'codex'` sample writer and the positive
+          // controls (`'anthropic'`, `'kimi'`) hit while this one does not; the gauge
+          // lands with the Codex lane. Until then `no_gauge` says the true thing: the
+          // credential is fine, nothing is measuring it, and there is nothing to fix.
+          // No zeros are drawn either way — an unmeasured account has no row.
+          return codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)) !==
+            null
+            ? 'no_gauge'
+            : 'not_connected'
+      }
+    }
     const appUsageSurface = createAppUsageSurface({
       auth: appOwnerAuth,
       snapshot: () => credentialUsageMonitor.snapshot(),
-      // The SAME store the monitor writes into, read back as a summary. The
+      // The SAME store both monitors write into, read back as a summary. The
       // dashboard is the only reason the series is kept at all — a persisted
-      // reading nothing reads is just disk — so these two are deliberately
+      // reading nothing reads is just disk — so these are deliberately
       // constructed next to each other, and a change that unwires one should be
       // impossible to make without seeing the other.
-      dashboard: () => [usageSamplesStore.summarise('anthropic')],
+      //
+      // EVERY pool, every time, in the store's own order: a pool is omitted from
+      // this payload only by being deleted from `USAGE_POOLS`, so a provider
+      // cannot silently vanish from the screen by having no samples.
+      dashboard: () =>
+        USAGE_POOLS.map((pool) => ({
+          ...usageSamplesStore.summarise(pool),
+          connection: usagePoolConnection(pool),
+        })),
     })
 
     // `POST /api/app/system-notice` — the seam an out-of-process caller uses to
@@ -4657,17 +5356,41 @@ export function buildOpenGraphComposer(
             // token resolves the approval + schedules on approve, and the LLM turn is
             // NEVER dispatched for that act. `null` ⇒ no-op (LLM-less box), returning
             // null so the normal turn runs.
-            ritualApprovalCapture: async (i) =>
-              ritualRegistration === null ? null : ritualRegistration.handleOwnerButtonAnswer(i),
+            // HOST DEPLOY rides this SAME seam (it is the generic opaque-token
+            // capture, not a ritual-only one). Both handlers return null for a
+            // token that is not theirs — `rap:` vs `hdp:` — so chaining them is
+            // total: an approval act NEVER reaches the LLM turn, and an ordinary
+            // reply ("yes", "sure, ship it", silence) NEVER reaches an approval
+            // row. Rituals first only because they are the older caller; the two
+            // token namespaces cannot collide.
+            ritualApprovalCapture: async (i) => {
+              const ritual =
+                ritualRegistration === null ? null : await ritualRegistration.handleOwnerButtonAnswer(i)
+              if (ritual !== null) return ritual
+              return hostDeployService === null ? null : await hostDeployService.handleOwnerButtonAnswer(i)
+            },
             // Work Board (Phase 1a) — re-ground EVERY turn on the board (the
             // orchestrator's external memory). Returns the already-formatted,
             // escaped `<work_board>` DATA block for the active+next items, scoped
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
+            //
+            // The injected board carries the DERIVED inline activity (T4): the
+            // fragment's `·inline` marker reads the inspector's WRITE clock, so
+            // the agent cannot be lied to by its OWN stale flag — a crashed
+            // session's stuck `inline_active` reads not-active, and live inline
+            // work reads active with no `work_board_update` anywhere in the path.
+            // The clock being write-only is what keeps this marker meaningful
+            // here: the previous turn's `reply` is a `token` row, so a
+            // back-to-back conversation does NOT report every card as ·inline.
+            // ONE O(1) evidence read per turn; display-only, it gates nothing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
-                workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                deriveInlineActivity(
+                  workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                  project_id,
+                ),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the
@@ -4771,6 +5494,16 @@ export function buildOpenGraphComposer(
             should_reset,
           }),
       })
+      // KNOWN GAP, stated rather than implied: this sweep and the `/reset` thunk
+      // above both address `cc-agent-*` ONLY, so the background `cc-nudge-*`
+      // transcript is neither periodically swept nor reachable from `/reset`. It is
+      // left that way deliberately for now — the policy stamps its cooldown per
+      // `project_scope`, so folding a second instance's report into the same tick
+      // would let one lane's reset suppress the other's, and a nudge composes short
+      // one-shot prompts between CC's own auto-compacts rather than accumulating a
+      // conversation. If that lane is ever observed growing, it needs its OWN policy
+      // instance with its own cooldown map, not an extra `substrate_instance_id`
+      // here.
       realmodeCleanups.push(() => {
         contextResetPolicy.stop()
         // Drop every rehydration listener the live-agent runner registered on the
@@ -4801,8 +5534,22 @@ export function buildOpenGraphComposer(
     // `(out) => void` wiring contract (app-ws.ts) — a rejection must not escape into
     // sendSafe's SYNC-only guard.
     const buildAppWsSendReplyResult =
-      (channel_topic_id: string, project_id?: string) =>
+      (channel_topic_id: string, project_id?: string, opts?: { notify?: boolean }) =>
       async (out: ChatOutbound): Promise<boolean> => {
+        // WHO OWNS THE NOTIFICATION FOR THIS SEND, stated at the call site.
+        //
+        // This function has exactly two callers and they are NOT peers: a live
+        // agent turn calls it DIRECTLY, and `deliver` calls it as its live
+        // fan-out (`push.app`). So a delivered post passes through here too —
+        // and `deliver` already notifies from its own seam, with the dedup and
+        // the delivered_at stamp that belong to it.
+        //
+        // Notifying unconditionally here therefore BUZZED HIM TWICE for every
+        // out-of-turn post, which is exactly what the push E2E caught: expected
+        // 1 push, received 2. Defaulting to false and letting the live-turn call
+        // site opt IN keeps one notification per message with the ownership
+        // written down, rather than inferred from which stack frame you are in.
+        const ownsNotify = opts?.notify === true
         if (out.type !== 'agent_message') return false
         const msg: OutgoingMessage = {
           topic: {
@@ -4842,10 +5589,50 @@ export function buildOpenGraphComposer(
         // is written before this resolves. The delivered_live boolean is returned at
         // the END (after the best-effort last_activity stamp below).
         const marker = await appWs.deref((adapter) => adapter.send(msg))
-        const deliveredLive =
-          typeof marker === 'string' &&
-          !marker.startsWith('app-ws:dropped:') &&
-          !marker.startsWith('app-ws:lost:')
+        const sent = parseAppWsSendMarker(marker)
+        const deliveredLive = sent.delivered_live
+        // NOTIFY HIS DEVICES FOR AN ORDINARY REPLY TOO (owner, 2026-08-15:
+        // "Everything should be a chat message, and I get notified for any and
+        // all chat messages if I'm not actively in the app").
+        //
+        // This path was excluded ON PURPOSE until now, and the reasoning was
+        // sound at the time: he sent the message that caused this reply, so it
+        // is in-turn, and buzzing someone about the answer to what they just
+        // typed is noise. What changed is the OTHER half — the device now
+        // declines to interrupt the conversation on screen
+        // (`app/lib/push-foreground-policy.ts`). With that in place, "in-turn"
+        // stops being a proxy for "he is looking": he can send a message, put
+        // the phone down, and the reply is news exactly the way it is in every
+        // other chat app.
+        //
+        // ⚠️ SO THE TWO HALVES ARE COUPLED. If that device policy is ever
+        // weakened, this notify has to be revisited in the SAME change, or his
+        // phone buzzes while he types into it.
+        //
+        // Gated on `durable`, not on `!delivered_live`: the id has to point at a
+        // row that exists. `app-ws:dropped:<id>` — persisted, nobody listening —
+        // is precisely the case worth notifying, while `app-ws:lost:<id>` has no
+        // row for the tap to open. The old `!startsWith` predicate could not tell
+        // those apart. A `system_notice` is live-only by construction and carries
+        // no row at all.
+        if (
+          shouldNotifyForSend({
+            owns_notify: ownsNotify,
+            system_notice: out.system_notice === true,
+            sent,
+          }) &&
+          chatMessagePush !== undefined
+        ) {
+          // Fire-and-forget: a push failure must never cost the reply. The sink
+          // already records its own outcome.
+          fireAndForget('composer.chat-message-push', (async (): Promise<void> => {
+            await chatMessagePush({
+              project_id: project_id ?? null,
+              message_id: sent.message_id as string,
+              body: out.body,
+            })
+          })())
+        }
         // Rail-redesign: an agent reply on a PROJECT topic is fresh activity —
         // stamp the project's `last_activity_at` and re-fan `projects_changed`
         // so every connected rail reorders (this project pops to the top) and
@@ -4880,7 +5667,13 @@ export function buildOpenGraphComposer(
     const buildAppWsSendReply =
       (channel_topic_id: string, project_id?: string) =>
       (out: ChatOutbound): void => {
-        fireAndForget('composer.deref', buildAppWsSendReplyResult(channel_topic_id, project_id)(out))
+        // The LIVE-TURN send owns its notification: nothing else will send one
+        // for an ordinary reply. `deliver`'s call site (above) deliberately does
+        // not, because `deliver` notifies from its own seam.
+        fireAndForget(
+          'composer.deref',
+          buildAppWsSendReplyResult(channel_topic_id, project_id, { notify: true })(out),
+        )
       }
     // ── app-ws receiver + delivery cluster (C3d: carved to open/wiring/app-ws.ts) ─
     // The Path-1 closing/opening delivery (`onboardingMsg` bind), the ephemeral
@@ -4926,6 +5719,7 @@ export function buildOpenGraphComposer(
       appWsImportProgressRouter,
       buildClarifyPoster,
       appWsRegistry,
+      webPresence,
       appWsChatTurn,
       scribeOnUserTurn,
       // M2 task 5 — resolve a voice note's transcript for the SCRIBE text (voice
@@ -5003,7 +5797,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5024,7 +5818,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5260,6 +6054,111 @@ export function buildOpenGraphComposer(
       throw err
     }
 
+    // The Kimi gauge, armed the same way and UNCONDITIONALLY — like the
+    // credential probe, a tick without a key does a cheap store read and no
+    // network call, so a key entered in Settings starts being metered without a
+    // restart. Arming it only when a key exists at boot is the shape that makes a
+    // newly-connected account look broken.
+    loopRegistry.register(kimiUsageMonitor.loop.describe())
+    try {
+      kimiUsageMonitor.loop.start()
+    } catch (err) {
+      await kimiUsageMonitor.loop.stop()
+      throw err
+    }
+
+    // ── work-wakeup — the server-side continuation tick ──────────────────────
+    // "My sessions need to wake up and check every 5min … and actually take
+    // actions." A per-project 5-minute sweep: every Work Board item that is
+    // `in_progress` with NO live bound run gets its project's warm chat session
+    // re-entered with a continue-work turn (same substrate entry + tool surface
+    // as a fired reminder — `gateway/proactive/work-wakeup.ts` for why this must
+    // be server-side, never a session-scheduled wakeup). Registered
+    // UNCONDITIONALLY (like the kimi gauge): on an LLM-less box
+    // `listOutstanding` returns [] and every tick is a cheap no-op, so a
+    // credential added later starts waking work without a restart.
+    const workWakeup = buildWorkWakeupLoop({
+      // An item a live run is driving already has a wakeup driver (the trident
+      // tick) — waking it here would double-drive one work item. "Live" is
+      // measured, not assumed: a run that has stopped advancing is not a driver,
+      // and deferring to one is how this loop went silent after a single firing.
+      // The policy + the evidence live in `work-wakeup-selection.ts`.
+      listOutstanding: (): WakeupProjectWork[] => {
+        // LLM-less probe — read the substrate this loop actually composes on.
+        // It is `cc-nudge-*`, not the owner's chat REPL: this loop is
+        // timer-driven, so it moved onto the background lane along with the fired
+        // reminder. Probing `liveAgentSubstrate` here would be reading a
+        // different substrate's availability than the one the compose needs.
+        if (reminderComposeSubstrate === null) return []
+        return selectWakeupWork({
+          items: workBoardStore.listAllActive(),
+          lookupRun: (run_id: string) => boardRunStore.get(run_id),
+          owner_slug: project_slug,
+          now_ms: Date.now(),
+        })
+      },
+      // Most recent GENUINE owner turn in this project's chat, across both
+      // topic roots — the same person-only watermark the idle-nudge sweep
+      // trusts (`last_user_activity_at`; agent/system rows contribute nothing).
+      ownerActivityMs: async (project_key: string): Promise<number | null> => {
+        const want = workBoardProjectIdForKey(project_slug, project_key) ?? null
+        const rows = await landing.buttonStore.listTopicsByUser({
+          user_id_prefix: [webTopicId(OWNER_USER_ID), appWsTopicId(OWNER_USER_ID)],
+          now: Date.now(),
+        })
+        let max: number | null = null
+        for (const row of rows) {
+          if (row.project_id !== want || row.last_user_activity_at === null) continue
+          if (max === null || row.last_user_activity_at > max) max = row.last_user_activity_at
+        }
+        return max
+      },
+      // The SAME warm-substrate wrapper the fired-reminder path composes
+      // through — one substrate entry point, two callers — and on the SAME
+      // background REPL (`cc-nudge-*`), never the owner's chat REPL. This wakeup is
+      // timer-driven exactly like a fired reminder, so it carried exactly the same
+      // hazard: a compose that aborts or crashes here used to evict the warm child
+      // the owner was talking to. Null substrate never reaches compose
+      // (listOutstanding returns [] above), but the seam still throws a named
+      // reason if it somehow does.
+      llm: {
+        compose: (spec, opts): Promise<string> => {
+          if (reminderComposeSubstrate === null) {
+            return Promise.reject(
+              new Error('no background compose substrate on this instance (no model credential)'),
+            )
+          }
+          return buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts)
+        },
+      },
+      // Durable inert chat row + live push; the device buzz only for the loud
+      // cases (BLOCKED / mechanism failure) — `deliver.ts` `notify: 'suppress'`.
+      post: async ({ project_key, body, loud }): Promise<boolean> => {
+        const explicit = workBoardProjectIdForKey(project_slug, project_key) ?? null
+        const result = await deliver(resolveAppWsReminderTopic(explicit), {
+          body,
+          durability: 'inert',
+          ...(loud ? {} : { notify: 'suppress' as const }),
+        })
+        return result.persisted
+      },
+      // The nudge REPL's constant `--tools` surface — the same list the fired-
+      // reminder dispatcher passes, so both callers of `cc-nudge-*` present one
+      // surface and its reuse guard never thrashes.
+      tool_names: LIVE_AGENT_TOOL_NAMES,
+      resolveModel: getBestModel,
+    })
+    loopRegistry.register(workWakeup.describe())
+    try {
+      workWakeup.loop.start()
+    } catch (err) {
+      await workWakeup.loop.stop()
+      throw err
+    }
+    realmodeCleanups.push(async () => {
+      await workWakeup.loop.stop()
+    })
+
     // ── Telegram inbound webhook (`POST /webhook/telegram`) ──────────────────
     // The slot has been DECLARED since Sprint 18 (`gateway/http/route-slots.ts`)
     // and served by nobody, because `buildTelegramWebhookSurface` carried a
@@ -5315,6 +6214,13 @@ export function buildOpenGraphComposer(
     return {
       db,
       project_slug,
+      // ALWAYS set, never conditionally spread. A field the composer assigns
+      // only sometimes is exactly the ambiguity `composition-field-coverage`
+      // exists to catch, and it caught this. Normalising here also puts the
+      // fail-closed reading in ONE place: a caller that did not say where the
+      // handle came from has told us as much as a process that does not know
+      // who it is, so it resolves to `true` and the credential surfaces refuse.
+      slug_is_fallback: slug_is_fallback ?? true,
       // RA2 (gbrain live-or-loud) — surface the memory backend's boot-time
       // health so `boot()` can fold it into the terminal `/healthz`: a box whose
       // `gbrain` binary is missing now reports `status:'degraded'` +
@@ -5370,16 +6276,47 @@ export function buildOpenGraphComposer(
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,
       reminder_dispatcher,
-      // The reminder-fired PUSH hook. `build-core-modules.ts:396-398` attaches
-      // it to `ReminderTickLoop.on_fired`, so a fired reminder reaches the
-      // owner's registered devices instead of only the in-app chat topic.
-      push_dispatcher,
       // Executor-mode reminders (plan task 4) — the ritual executor factory
       // (llmPool-gated). `remindersModule` invokes it with the graph's
       // ApprovalManager and wires the tick's ritual dispatch branch.
       ...(init_ritual_planner !== undefined ? { init_ritual_planner } : {}),
       // P1-4 — proactive brief + idle-nudge sweep go live (see `tasksConfig`).
       tasks: tasksConfig,
+      // Email Core consolidation P1 — THE COMPOSITION SEAM for the email
+      // pipeline. `build-core-modules.ts` (tasksModule init) turns this bundle
+      // into the `email-pipeline-poll` cron job + handler on the shared
+      // registries. Everything the Core cannot reach for itself is threaded
+      // here, and ONLY here:
+      //   - `deliver` (:2385) — the ONE out-of-turn chat seam. Escalations post
+      //     with durability 'reply' onto `reminderGeneralTopic` (:2436), the
+      //     owner's BARE `app:<user>` topic: the exact topic discipline the
+      //     PR #105 deliver-to-nobody incident produced. Chat is the GUARANTEED
+      //     surface.
+      //   - `pushTransport` (:2496) — best-effort mobile push ALONGSIDE chat,
+      //     never instead of it. A zero-device box still gets the chat post.
+      //   - the substrate one-shot LLM — the ONLY model seam (no provider dep,
+      //     no new secret). Null on an LLM-less box, where the cascade
+      //     classifies deterministically instead of crashing.
+      //   - `readOwnerTimezone` — accepted now for P2's owner-local brief
+      //     windows; the P1 tick body is event-driven and does not read it.
+      email_pipeline: {
+        gmail: coresWiring.gmailClient,
+        owner_home,
+        project_slug,
+        deliver,
+        escalation_topic_id: reminderGeneralTopic,
+        // RENAMED, not rewired: #171 deleted the `push_dispatcher` composition
+        // field and renamed the local to `pushTransport` (:2496). The email
+        // pipeline's consumer was added on main AFTER that branch was cut, so the
+        // merge left a reference to a name that no longer exists. Same object.
+        push: pushTransport,
+        llm: coresSubstrate !== null ? buildOneShotSubstrateLlm(coresSubstrate) : null,
+        resolveTimezone: (slug: string): string | undefined =>
+          readOwnerTimezone(db, slug) ?? undefined,
+        register_cleanup: (fn: () => void): void => {
+          realmodeCleanups.push(fn)
+        },
+      },
       // F4 — real heartbeat source (pulsed by the gateway tick via
       // `on_gateway_tick`), replacing the never-stale `() => Date.now()` stub.
       heartbeat_tracker: heartbeatPulse,
@@ -5476,11 +6413,30 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
+      // `derive_inline_active` (T4) gives the agent's `work_board_list` the SAME
+      // evidence-derived `inline_active` the HTTP surface serves (~:3959, same
+      // closure shape). The holder deref happens at CALL time, so this input
+      // being built before the ActivityInspector is irrelevant. Display-only:
+      // one O(1) evidence read per list, never a write, never a gate.
+      // `removal` is the SAME chokepoint the UI's X runs (built above, handed to
+      // the HTTP surface) — agent removal and human removal share one path.
+      work_board: {
+        store: workBoardStore,
+        spec_doc: workBoardSpecDoc,
+        chat_ack: workBoardChatAck,
+        derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
+        removal: workBoardRemoval,
+      },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
       create_project: { service: createProjectToolService },
+      // Owner-approved host deploy (host_deploy_request / host_deploy_status) —
+      // the agent can ASK for a deploy of the host this instance runs on; the
+      // owner's in-chat tap is the only thing that performs one. No flag: the
+      // tools register on every box, and one with no control-plane endpoint
+      // configured answers `enabled:false` WITH the reason.
+      host_deploy: { service: () => hostDeployService, install: hostDeployInstall },
       // Message-search agent tool (message_search) — chat-history twin of
       // doc_search. Backed by this owner's ButtonStore turn history so the
       // live agent can recall what was said earlier in the conversation.
@@ -5553,6 +6509,10 @@ export function buildOpenGraphComposer(
       // discards this boolean — see `safeDeliver` — but the contract should be
       // honest regardless.)
       onboarding_overnight_cron: {
+        // Overnight builds detect merge mode through the SAME credential the
+        // publisher uses. Without this the overnight seam built an
+        // uncredentialed probe and refused every GitHub-backed overnight build.
+        publisher_credential: tridentPublisherCredential,
         // `general_topic_id` is not a nicety — it is the other half of the fix.
         // The reporter's fallback reads the topic out of the onboarding row,
         // and Open's production onboarding path NEVER writes that key (the
@@ -5594,6 +6554,10 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
+              on_terminal_wake: terminalBuildWake,
+              // PULL launcher-death detection covers missed push events instead
+              // of leaving the lane occupied until the 90-minute reaper.
+              probe_launcher_alive: buildTridentLauncherLivenessProbe(),
               // EVERY host command a build makes carries the instance's GitHub
               // credential, resolved PER COMMAND. Without this line the whole
               // github/ module is code nothing calls: `build-core-modules.ts`
@@ -5608,9 +6572,20 @@ export function buildOpenGraphComposer(
               //
               // Not connected → `githubProcessEnv(null)` is `{}` → byte-for-byte
               // today's behaviour, so an instance that never connects is unchanged.
-              run_host: makeLazyCredentialedHostRunner(async () =>
-                githubProcessEnv(await readGitHubToken(secretsStore, asOwnerHandle(owner_handle))),
-              ),
+              run_host: tridentHostRunner,
+              // …AND SO DOES EVERY GITHUB READ THE INNER LOOP MAKES. These are
+              // the store coordinates (data dir + frozen owner handle — never the
+              // token) that `trident/gh-authed.ts` resolves the credential from,
+              // per command, in its own process: the READ-side sibling of the
+              // `run_host` credential above, over the SAME `secretsStore`.
+              //
+              // Without them the inner workflow's readiness/CI/merge probes ran
+              // bare `gh` in a subagent Bash that inherits the trident-fire REPL's
+              // environment — which has no `GH_TOKEN`. Measured 2026-08-14: every
+              // probe answered "gh auth login", every review deferred, and every
+              // build died recorded as REQUEST_CHANGES for code nobody read.
+              gh_data_dir: owner_home,
+              gh_owner_handle: owner_handle,
               // M1 UX REDESIGN — the LIVE-PROGRESS fan. Fired by the tick loop for
               // every run whose observable progress advanced (a checkpoint crossing
               // building→reviewing→fixing→merging, a launch, or a terminal
@@ -5625,17 +6600,38 @@ export function buildOpenGraphComposer(
                 fanWorkBoardChanged(run.project_slug)
                 emitProjectsChangedIfChanged(OWNER_USER_ID)
               },
-              // The CODEX_HOME the trident loop threads into the inner workflow's
-              // optional codex reviewer. Resolved PER RUN through the credential
-              // service (`resolveActiveCodexHome`: project override → global →
-              // unset, self-healing) so a connect made AFTER boot + any project
-              // override are honored via the #149 store resolver. Trident runs are
-              // instance-scoped by `project_slug` (no per-project id), so a run
-              // resolves the GLOBAL default; the resolver still prefers an override
-              // for any project id it is given. `codex_home` (static global dir)
-              // stays as the dev/legacy fallback (see build-core-modules).
-              resolve_codex_home: (run) =>
-                codexCredentialService.resolveActiveCodexHome(asOwnerHandle(run.project_slug)),
+              // The CODEX_HOME the trident loop threads into the inner workflow —
+              // now the BUILD as well as the optional codex reviewer. Resolved PER
+              // RUN through the credential service (`resolveActiveCodexHome`:
+              // project override → global → unset, self-healing) so a connect made
+              // AFTER boot + any project override are honored via the #149 store
+              // resolver. `codex_home` (static global dir) is the fallback when the
+              // resolver has no per-run answer (see build-core-modules).
+              //
+              // THE TWO ARGUMENTS ARE NOT THE SAME THING, and conflating them took
+              // every build on the instance down (2026-08-13, run `03242fe5`). The
+              // credential is stored against the INSTANCE OWNER
+              // (`project_credentials.owner_slug`, `juno`-style, the boot-frozen
+              // handle aliased to `owner_handle` above); a `TridentRun`'s
+              // `project_slug` is the PROJECT the run belongs to (`neutron-open`).
+              // Passing the run's slug as the owner handle looked right — the name
+              // matches — and resolved a row that does not exist, so a connected,
+              // materialized credential returned null and the inner workflow got
+              // `CODEX_HOME=''`. `trident/codex-build.sh` then exits 10
+              // NOT_CONNECTED before writing a line of code. It went unnoticed
+              // because codex used to be review-only, where exit 10 degrades
+              // gracefully to a Claude-only panel; routing the BUILD through the
+              // same credential (#222) turned that silent degrade into a hard stop.
+              // So: owner handle FIRST, project id SECOND — which is also what
+              // makes a per-project override reachable at all. The closure is
+              // BUILT BY A NAMED, TESTED FACTORY rather than written inline here,
+              // because an inline closure at a wiring site is unreachable from a
+              // test and that is precisely how a one-argument error reached
+              // production. See `buildRunCodexHomeResolver` for the full account.
+              resolve_codex_home: buildRunCodexHomeResolver(
+                codexCredentialService,
+                asOwnerHandle(owner_handle),
+              ),
               codex_home: codexHome,
               // KIMI K3 — the cross-model panelist from a DIFFERENT model family.
               // Read from the environment PER LAUNCH, not captured here: a key added
@@ -5658,19 +6654,11 @@ export function buildOpenGraphComposer(
               // for a key the child cannot see would be WORSE than not configured — a
               // deferred reviewer blocks the verdict, so every review would return
               // REQUEST_CHANGES for a reason invisible to the owner.
-              resolve_kimi_configured: (): boolean =>
-                ensureKimiKeyExported(env, () => {
-                  // Global scope: a Kimi subscription is one account for the whole
-                  // instance, not a per-project token, and this resolver is handed no
-                  // run to scope by. `resolve` with no project id consults the global
-                  // default only.
-                  const found = projectCredentialStore.resolve(
-                    asOwnerHandle(owner_handle),
-                    undefined,
-                    KIMI_CREDENTIAL_SERVICE,
-                  )
-                  return found?.plaintext ?? null
-                }),
+              //
+              // THE SAME FUNCTION the settings pane asks (`connections.kimi`), so the
+              // greyed-out state the owner sees and the panelist that actually runs
+              // can never disagree.
+              resolve_kimi_configured: kimiConfigured,
               // THE PRODUCER for the per-phase model/effort config. Read per launch
               // from `instance_metadata` (migration 0118) so a setting changed after
               // boot takes effect on the next run rather than the next restart, and
@@ -5724,6 +6712,8 @@ export function buildOpenGraphComposer(
               work_board: workBoardStore,
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
+              merge_mode_probe: tridentMergeModeProbe,
+              landed_probe: tridentLandedProbe,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.

@@ -15,6 +15,8 @@
  * it. Storing `opus` for a phase already defaulting to `opus` would freeze it against
  * a future change to that default — the owner would have pinned something they only
  * meant to leave alone. It also makes "reset" fall out for free: choose the default.
+ * Cross-model seats accept every tier. A same-family panel is valid, though it offers
+ * less independent review diversity than a mixed-family panel.
  *
  * ── A rejected save changes nothing, and says everything ────────────────────
  * The server validates the whole set and rejects it entire, naming every problem. The
@@ -32,6 +34,9 @@ import {
   PhaseModelsClient,
   applyRowEdit,
   effectiveRow,
+  effortSettable,
+  rejectedModel,
+  tierChoices,
   type PhaseModelsPayload,
   type PhaseOverride,
 } from '../lib/phase-models-client';
@@ -54,6 +59,16 @@ export default function CodeGenSettingsScreen() {
 
   const [payload, setPayload] = useState<PhaseModelsPayload | null>(null);
   const [overrides, setOverrides] = useState<Record<string, PhaseOverride>>({});
+  /**
+   * Which dropdown is open, as `<phase key>:<model|effort>`.
+   *
+   * ONE at a time, and closed by default — the whole point of the table is that a
+   * step's current model is readable without unfolding anything. React Native has no
+   * `<select>`, so a dropdown here is a button that reveals its options; keeping the
+   * open one in state (rather than per-row) is what makes opening a second close the
+   * first instead of stacking two lists down the screen.
+   */
+  const [openMenu, setOpenMenu] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -83,10 +98,12 @@ export default function CodeGenSettingsScreen() {
       if (payload === null) return;
       const phase = payload.phases.find((p) => p.key === phaseKey);
       if (phase === undefined) return;
-      setOverrides((prev) => applyRowEdit(prev, phase, patch));
+      setOverrides((prev) => applyRowEdit(prev, phase, patch, payload.model_tiers));
       // A pending edit invalidates the "Saved" confirmation — leaving it up would
       // tell the owner their newest change is already stored.
       setSaved(false);
+      // Choosing closes the menu, the way a real dropdown does.
+      setOpenMenu(null);
     },
     [payload],
   );
@@ -136,8 +153,10 @@ export default function CodeGenSettingsScreen() {
 
       <ScrollView contentContainerStyle={styles.scroll}>
         <Text style={styles.muted}>
-          Which model runs each part of a build, and how hard it thinks. Changes apply to
-          the next build — nothing restarts.
+          Which model runs each step of a build, and how hard it thinks. One setting for
+          every project on this install — which model you can run is a property of your
+          subscriptions, not of the thing being built. Changes apply to the next build —
+          nothing restarts.
         </Text>
 
         {error !== null ? (
@@ -157,8 +176,14 @@ export default function CodeGenSettingsScreen() {
           <Text style={styles.muted}>Couldn&apos;t load the build settings.</Text>
         ) : (
           <>
+            {/* ONE ROW PER STEP: name · model · effort. The two controls are
+                dropdowns — closed, a row reads as one line the owner can scan; open,
+                it lists every tier with the model it resolves to today. */}
             {payload.phases.map((phase) => {
               const row = effectiveRow(phase, overrides);
+              const choices = tierChoices(phase, payload.model_tiers);
+              const dead = rejectedModel(phase, payload.rejected);
+              const chosen = choices.find((c) => c.tier === row.model);
               return (
                 <View key={phase.key} style={styles.phase} testID={`phase-${phase.key}`}>
                   <View style={styles.phaseHead}>
@@ -169,62 +194,135 @@ export default function CodeGenSettingsScreen() {
                       </Text>
                     ) : null}
                   </View>
+                  {/* The step's one line stays: it is the only thing that says what
+                      this row actually does. */}
                   <Text style={styles.phaseDesc}>{phase.description}</Text>
+                  {dead !== null ? (
+                    // A saved choice that no longer resolves is SHOWN, struck through,
+                    // with what is running instead — never silently reverted.
+                    <Text style={styles.stale} testID={`phase-${phase.key}-stale`}>
+                      <Text style={styles.struck}>{dead}</Text> is no longer available —
+                      using {row.model}
+                    </Text>
+                  ) : null}
 
-                  <Text style={styles.optionLabel}>Model</Text>
-                  <View style={styles.chips}>
-                    {payload.model_tiers.map((tier) => (
+                  <View style={styles.controls}>
+                    <View style={styles.control}>
+                      <Text style={styles.optionLabel}>Model</Text>
                       <Pressable
-                        key={tier}
                         accessibilityRole="button"
-                        accessibilityState={{ selected: row.model === tier }}
-                        accessibilityLabel={`${phase.label} model ${tier}`}
-                        testID={`phase-${phase.key}-model-${tier}`}
-                        onPress={() => edit(phase.key, { model: tier })}
-                        style={({ pressed }) => [
-                          styles.chip,
-                          row.model === tier && styles.chipOn,
-                          pressed && styles.pressed,
-                        ]}
+                        accessibilityLabel={`${phase.label} model`}
+                        testID={`phase-${phase.key}-model`}
+                        onPress={() =>
+                          setOpenMenu((cur) =>
+                            cur === `${phase.key}:model` ? null : `${phase.key}:model`,
+                          )
+                        }
+                        style={({ pressed }) => [styles.dropdown, pressed && styles.pressed]}
                       >
-                        <Text style={[styles.chipText, row.model === tier && styles.chipTextOn]}>
-                          {tier}
-                          {phase.default.model === tier ? ' ·' : ''}
+                        {/* Closed, the control already answers "which model is that" —
+                            the tier AND what it resolves to right now. */}
+                        <Text style={styles.dropdownText}>
+                          {row.model}
+                          {chosen !== undefined ? ` · ${chosen.model_id}` : ''}
                         </Text>
                       </Pressable>
-                    ))}
+                    </View>
+                    <View style={styles.control}>
+                      <Text style={styles.optionLabel}>Effort</Text>
+                      {/* Asked of the CHOSEN tier, not just the step: the build row
+                          has a live effort control on a Claude tier and none on a
+                          codex one, because the subprocess picks its own. */}
+                      {effortSettable(phase, row.model, payload.model_tiers) ? (
+                        <Pressable
+                          accessibilityRole="button"
+                          accessibilityLabel={`${phase.label} effort`}
+                          testID={`phase-${phase.key}-effort`}
+                          onPress={() =>
+                            setOpenMenu((cur) =>
+                              cur === `${phase.key}:effort` ? null : `${phase.key}:effort`,
+                            )
+                          }
+                          style={({ pressed }) => [styles.dropdown, pressed && styles.pressed]}
+                        >
+                          <Text style={styles.dropdownText}>{row.effort}</Text>
+                        </Pressable>
+                      ) : (
+                        // Disabled with the reason, not blank: an empty cell reads as
+                        // a missing feature and an enabled one would change nothing.
+                        <Text style={styles.na} testID={`phase-${phase.key}-effort-na`}>
+                          set by the CLI
+                        </Text>
+                      )}
+                    </View>
                   </View>
 
-                  <Text style={styles.optionLabel}>Effort</Text>
-                  <View style={styles.chips}>
-                    {payload.efforts.map((eff) => (
-                      <Pressable
-                        key={eff}
-                        accessibilityRole="button"
-                        accessibilityState={{ selected: row.effort === eff }}
-                        accessibilityLabel={`${phase.label} effort ${eff}`}
-                        testID={`phase-${phase.key}-effort-${eff}`}
-                        onPress={() => edit(phase.key, { effort: eff })}
-                        style={({ pressed }) => [
-                          styles.chip,
-                          row.effort === eff && styles.chipOn,
-                          pressed && styles.pressed,
-                        ]}
-                      >
-                        <Text style={[styles.chipText, row.effort === eff && styles.chipTextOn]}>
-                          {eff}
-                          {phase.default.effort === eff ? ' ·' : ''}
-                        </Text>
-                      </Pressable>
-                    ))}
-                  </View>
+                  {openMenu === `${phase.key}:model` ? (
+                    <View style={styles.menu} testID={`phase-${phase.key}-model-menu`}>
+                      {choices.map((c) => (
+                        // NEVER HIDDEN, only disabled with the reason: an option the
+                        // owner cannot see is one they cannot ask about.
+                        <Pressable
+                          key={c.tier}
+                          accessibilityRole="button"
+                          accessibilityState={{
+                            selected: row.model === c.tier,
+                            disabled: !c.selectable,
+                          }}
+                          accessibilityLabel={`${phase.label} model ${c.tier}`}
+                          disabled={!c.selectable}
+                          testID={`phase-${phase.key}-model-${c.tier}`}
+                          onPress={() => edit(phase.key, { model: c.tier })}
+                          style={({ pressed }) => [
+                            styles.menuItem,
+                            row.model === c.tier && styles.menuItemOn,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text
+                            style={[styles.menuText, !c.selectable && styles.menuTextOff]}
+                          >
+                            {c.tier} · {c.model_id}
+                            {phase.default.model === c.tier ? ' (default)' : ''}
+                            {c.reason !== null ? ` — ${c.reason}` : ''}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
+
+                  {openMenu === `${phase.key}:effort` ? (
+                    <View style={styles.menu} testID={`phase-${phase.key}-effort-menu`}>
+                      {payload.efforts.map((eff) => (
+                        <Pressable
+                          key={eff}
+                          accessibilityRole="button"
+                          accessibilityState={{ selected: row.effort === eff }}
+                          accessibilityLabel={`${phase.label} effort ${eff}`}
+                          testID={`phase-${phase.key}-effort-${eff}`}
+                          onPress={() => edit(phase.key, { effort: eff })}
+                          style={({ pressed }) => [
+                            styles.menuItem,
+                            row.effort === eff && styles.menuItemOn,
+                            pressed && styles.pressed,
+                          ]}
+                        >
+                          <Text style={styles.menuText}>
+                            {eff}
+                            {phase.default.effort === eff ? ' (default)' : ''}
+                          </Text>
+                        </Pressable>
+                      ))}
+                    </View>
+                  ) : null}
                 </View>
               );
             })}
 
             <Text style={styles.footnote}>
-              A dot marks the default. Choosing it clears the override, so the phase keeps
-              following the default if that ever changes.
+              Each option names the model it resolves to today. Choosing the one marked
+              default clears the override, so the step keeps following that default if it
+              ever moves.
             </Text>
 
             <Pressable
@@ -290,17 +388,30 @@ const styles = StyleSheet.create({
   tag: { color: THEME.warning, fontSize: 10, fontWeight: '700', textTransform: 'uppercase' },
   phaseDesc: { color: THEME.text_muted, fontSize: 12, lineHeight: 16 },
   optionLabel: { color: THEME.text_secondary, fontSize: 11, textTransform: 'uppercase' },
-  chips: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  chip: {
+  stale: { color: THEME.danger, fontSize: 12, lineHeight: 16 },
+  struck: { textDecorationLine: 'line-through' },
+  controls: { flexDirection: 'row', gap: 10 },
+  control: { flex: 1, gap: 4 },
+  dropdown: {
     paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 999,
+    paddingVertical: 8,
+    borderRadius: 8,
     borderWidth: 1,
     borderColor: THEME.hairline,
+    backgroundColor: THEME.background,
   },
-  chipOn: { backgroundColor: THEME.text_primary, borderColor: THEME.text_primary },
-  chipText: { color: THEME.text_secondary, fontSize: 12 },
-  chipTextOn: { color: THEME.background, fontWeight: '600' },
+  dropdownText: { color: THEME.text_primary, fontSize: 12 },
+  na: { color: THEME.text_muted, fontSize: 12, paddingVertical: 8 },
+  menu: {
+    borderWidth: 1,
+    borderColor: THEME.hairline,
+    borderRadius: 8,
+    overflow: 'hidden',
+  },
+  menuItem: { paddingHorizontal: 10, paddingVertical: 9 },
+  menuItemOn: { backgroundColor: THEME.hairline },
+  menuText: { color: THEME.text_primary, fontSize: 12 },
+  menuTextOff: { color: THEME.text_muted },
   primaryBtn: {
     alignItems: 'center',
     paddingVertical: 12,

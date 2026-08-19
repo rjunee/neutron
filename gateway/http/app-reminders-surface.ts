@@ -21,6 +21,11 @@
  * or NULL) are intentionally NOT included — the tab is project-scoped
  * by spec.
  *
+ * THE NO-PROJECT "General" SCOPE IS A SCOPE ON THIS ROUTE, NOT A
+ * PROJECT ID — see {@link resolveScopeSegment}. It travels as the
+ * reserved segment `~general` and lands on its own
+ * `app-project:~general` topic, which no project can ever collide with.
+ *
  * Server is authoritative — mutations return the post-mutation
  * ordered list so the client doesn't have to follow up with a GET.
  */
@@ -28,6 +33,7 @@
 import type { ReminderStore } from '@neutronai/reminders/index.ts'
 import type { AppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { sanitizeProjectId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
+import { GENERAL_RAIL_ID } from '@neutronai/wire-types/topic-id.ts'
 import { jsonResponse, ownerSlugMismatch, readJsonBody, resolveBearer } from './surface-kit.ts'
 
 const PATH_PREFIX = '/api/app/projects/'
@@ -46,6 +52,59 @@ const REMINDERS_PATH_RE =
 /** Encode the project_id into a topic_id used only by the app surface. */
 export function appProjectTopicId(project_id: string): string {
   return `app-project:${project_id}`
+}
+
+/**
+ * Resolve the URL's `<project_id>` segment to the SCOPE this surface answers
+ * for, or `null` when the segment is not a legal scope at all.
+ *
+ * THE NO-PROJECT SCOPE NEEDS A SEGMENT NO PROJECT CAN WEAR, and that is the
+ * whole reason this function exists instead of a bare `sanitizeProjectId`.
+ * `sanitizeProjectId`'s alphabet is `[A-Za-z0-9_.-]`, so EVERY string it
+ * accepts is also a legal project id — there is no value inside that alphabet
+ * that can mean "no project" without ALSO naming a project that may really
+ * exist. `general` was used anyway, and on an instance that has a project whose
+ * id is literally `general` the two rail entries resolved to ONE
+ * `app-project:general` topic: one list, and — once the reminders tab started
+ * mapping the sentinel — one create, one snooze, one cancel, shared between the
+ * General scope and an unrelated real project. A wrong-scope READ is bad; a
+ * wrong-scope WRITE is what makes this a fix rather than a note.
+ *
+ * `GENERAL_RAIL_ID` closes it because it is collision-proof BY CONSTRUCTION,
+ * not by convention: the same validator that guards every other segment rejects
+ * `~`, so no project can ever be called this (`wire-types/topic-id.ts`). It is
+ * already the rail id and already the string a chat-message push payload
+ * carries for this scope, so accepting it HERE collapses General's spellings
+ * from three to two rather than inventing a fourth.
+ *
+ * Deliberately NOT a new topic prefix. `app-project:~general` reuses the one
+ * shape every existing topic reader already decodes
+ * (`reminders/dispatcher.ts` `deriveReminderProjectId`,
+ * `gateway/http/app-focus-surface.ts` `extractProjectIdFromTopic`,
+ * `app/lib/push-deep-link-dispatch.ts`), and what they decode it BACK to —
+ * `~general` — is the rail id, which is the right answer for each of them.
+ *
+ * Scope of the fix, stated plainly because the collision is wider than this
+ * route: this closes it for reminders ONLY. The docs, tabs, work-board and
+ * activity clients still collapse General onto the literal `general` segment
+ * (`app/lib/general-scope.ts` `httpProjectSegment`), and moving those is a data
+ * migration (General's docs live under `Projects/general/docs` today), so it is
+ * filed as #183 rather than ridden in on a push fix.
+ *
+ * WHAT IS LEFT BEHIND IS NOT READ-ONLY, and the paragraph above must not be read
+ * as saying so. Reminders was the surface worth closing FIRST, not the only one
+ * that writes: `app/lib/docs-client.ts` creates, writes and deletes documents
+ * through the aliased mapper, and `app/lib/work-board-client.ts` creates,
+ * patches, moves and deletes items through it. #183 is therefore an open
+ * wrong-scope WRITE on two clients, and it is sequenced behind a data migration
+ * rather than behind a judgement that it is merely cosmetic.
+ */
+function resolveScopeSegment(raw: unknown): string | null {
+  // `unknown` mirrors `sanitizeProjectId`, which this delegates to and replaces at
+  // the call site: the regex group is `string | undefined`, and a narrower signature
+  // here would only move that check to the caller.
+  if (raw === GENERAL_RAIL_ID) return GENERAL_RAIL_ID
+  return sanitizeProjectId(raw)
 }
 
 /** Limits for create / snooze payloads. */
@@ -131,7 +190,7 @@ export function createAppRemindersSurface(
       const raw_project_id = match[1]
       const reminder_id = match[2] ?? ''
       const action = match[3] ?? ''
-      const project_id = sanitizeProjectId(raw_project_id)
+      const project_id = resolveScopeSegment(raw_project_id)
       if (project_id === null) {
         return jsonResponse(400, {
           ok: false,

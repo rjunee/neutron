@@ -102,6 +102,9 @@ import type { DiagnosticsReport } from '../diagnostics/diagnostics-report.ts'
 import { sanitizeBatch } from '../diagnostics/client-report-redaction.ts'
 import type { ClientReportRecord, ClientReportStore } from '../diagnostics/client-report-store.ts'
 import { jsonError, jsonResponse, ownerSlugMismatch, resolveBearer } from './surface-kit.ts'
+import { createLogger } from '@neutronai/logger'
+
+const moduleLog = createLogger('app-diagnostics')
 
 const DIAGNOSTICS_PATH = '/api/app/admin/diagnostics'
 const REPORTS_PATH = '/api/app/admin/diagnostics/reports'
@@ -172,9 +175,23 @@ export function createAppDiagnosticsSurface(
       // dev-bypass). Every other resolver error (missing / malformed / expired
       // / bad-signature token) is an AUTHENTICATION failure → 401.
       const status = resolved.code === 'project_mismatch' ? 403 : 401
+      // LOG IT. A refused ingest is otherwise perfectly silent on BOTH sides:
+      // the client is fire-and-forget, and the operator's only view of this
+      // route is the reports file — which stays empty, and an empty file reads
+      // exactly like "nothing went wrong". That is how web switch timings
+      // reached nobody for a day (2026-08-15) while the owner hand-pasted them
+      // into chat. The token is never included: `resolved.code` names WHY
+      // without naming the credential.
+      moduleLog.warn('report_ingest_refused', { status, code: resolved.code })
       return jsonError(status, resolved.code, resolved.message)
     }
     if (ownerSlugMismatch(resolved.project_slug, project_slug)) {
+      // The SECOND refusal branch, and it needs its own line: a wrong-slug
+      // bearer never reaches the resolver-error path above, so instrumenting
+      // only that one left the most likely real-world refusal — a client
+      // presenting a project-scoped token to an owner-scoped route — as silent
+      // as before. Caught by the test, not by reading.
+      moduleLog.warn('report_ingest_refused', { status: 403, code: 'project_mismatch' })
       return jsonError(
         403,
         'project_mismatch',
@@ -257,6 +274,7 @@ export function createAppDiagnosticsSurface(
     // bearer as an exact needle. Nothing downstream ever sees the raw values.
     const batch = sanitizeBatch(parsed, [gated.bearer])
     if (batch.reports.length === 0) {
+      moduleLog.warn('report_ingest_refused', { status: 400, code: 'no_reports' })
       return jsonError(400, 'no_reports', 'body contained no usable reports')
     }
 

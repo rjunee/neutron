@@ -41,6 +41,7 @@ import {
   type ClaudeCodeSubstrateOptions,
   type RecoveredReply,
   type DeadTurnNotice,
+  type ModelFloorNotice,
   type RateLimitBannerNotice,
   type SettingsPermissions,
   type SizeSeverity,
@@ -60,12 +61,16 @@ import {
   reportSuccess,
   selectCredential,
   type CredentialPool,
+  type FailureOrigin,
 } from '@neutronai/runtime/credential-pool.ts'
 import type { Event, SubstrateErrorClass } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { OAuthCredentialSource } from './resolve-llm-credentials.ts'
-import type { SubstrateProfile } from './substrate-profiles.ts'
+import { createLogger } from '@neutronai/logger'
+import { githubSpawnEnvRef, type SubstrateProfile } from './substrate-profiles.ts'
+
+const substrateLog = createLogger('substrate')
 
 /**
  * Discriminated failure reasons for `resolveScrubbedAuthEnv`. Mirrors the
@@ -246,6 +251,48 @@ export interface BuildLlmCallSubstrateInput {
    *  Also the instance+role discriminator the persistent substrate folds into its
    *  warm-pool key (S3 §2). */
   substrate_instance_id: string
+  /**
+   * WHOSE turns this substrate serves, for credential-pool failure accounting.
+   * Defaults to `'interactive'` — a person is waiting — which is the behaviour
+   * every existing call site had and keeps.
+   *
+   * `'background'` marks a timer-driven lane (today: the proactive nudge/ritual
+   * compose substrate, `cc-nudge-*`). Two things change, and ONLY for failures:
+   *
+   *   1. The strike ledger is left completely alone — not incremented, and not
+   *      re-read, so a background report can neither trip the
+   *      `MAX_CONSECUTIVE_FAILURES` park nor extend one that is already standing
+   *      (`runtime/credential-pool.ts` `reportFailure`, `origin`).
+   *   2. An INFERRED cooldown is not reported at all. Three things count as an
+   *      inference here and all three are suppressed: the mapper's "retryable, no
+   *      HTTP status" → 429 default; a parsed status the mapper REWRITES (a
+   *      retryable `HTTP 503` also becomes a 429); and `detectCliAuthFailure`,
+   *      which fires on the substring `401` appearing anywhere in the prose. On
+   *      this lane those are usually a wedged channel or a compose that timed out.
+   *      An interactive turn keeps the guess because a person is blocked and
+   *      backing off is the safer error. A background turn has nobody blocked, so
+   *      guessing only costs the owner his next chat turn.
+   *
+   * NOT EVERY FIX IS A LANE RULE. The substrate fast-paths above this
+   * classification — {@link detectBinaryNotFound}, {@link detectChannelWedged},
+   * {@link detectTurnTimeout}, {@link detectReplProcessExited} — suppress the
+   * cooldown on BOTH lanes, because none of them is a statement about the
+   * credential no matter who was waiting. The dead-REPL one matters most here: in
+   * the incident below the strikes that actually parked the pool were the owner's
+   * own retries against a respawning child, so no lane distinction could have
+   * caught them.
+   *
+   * A REAL provider status still cools the credential on either lane: a 429/402/401
+   * the provider actually returned is back-pressure, not an inference, and the
+   * owner's next turn would meet the same wall a second later with a worse message.
+   *
+   * WHY THIS EXISTS: on 2026-08-17 five nudge composes failed on a live instance
+   * with no quota condition at all, parked the box's ONE credential for an hour, and
+   * the owner's every chat turn then died instantly with "all Anthropic credentials
+   * are in cooldown (429/402/401)". The pool failed closed in the one direction that
+   * silences the product.
+   */
+  credential_failure_lane?: FailureOrigin
   /** Optional cwd override threaded to `createClaudeCodeSubstrateAuto` (defaults to process.cwd()). */
   cwd?: string
   /**
@@ -339,6 +386,12 @@ export interface BuildLlmCallSubstrateInput {
   onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
+  /** Floor-clamp notice — an owner-facing spawn was resolved below the configured
+   *  best tier and held at the floor. Same routing as the three above (wired only
+   *  on `cc-agent-*`), and it exists for the same reason: without a delivered
+   *  notice the clamp is a stderr line, which is how the original degradation ran
+   *  for a working day with the owner as the only detector. */
+  onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /**
    * Optional `owner_handle` keyed against `oauthRefresh.loadAccessToken`.
    * Required when `oauthRefresh` is wired; ignored otherwise.
@@ -396,18 +449,29 @@ export interface BuildLlmCallSubstrateInput {
    * Extra env overlay layered onto EVERY spawn AFTER the auth-scrub step
    * (`resolveScrubbedAuthEnv`). Values follow the same `string | undefined`
    * contract as the auth env: `undefined` deletes the inherited var, a string
-   * sets it. A general per-substrate spawn knob — e.g. a caller could inject
+   * sets it. A general per-substrate spawn knob — a caller can inject
    * `MAX_THINKING_TOKENS=0` to keep a latency-sensitive classifier spawn from
-   * burning 20-40s on extended thinking. (No production caller sets `extra_env`
-   * today; the onboarding router that once motivated it never wired it and is
-   * being removed — see the K9 entry (2026-07-04) in docs/AS_BUILT.md. Kept as the substrate's
-   * generic env-overlay seam, exercised by the substrate unit test.)
+   * burning 20-40s on extended thinking, or a credential the child's tooling
+   * reads from the environment.
+   *
+   * ── IT IS A FUNCTION, AND THAT IS THE WHOLE POINT ──────────────────────────
+   * This was a plain object until 2026-08-15, which was fine while it had no
+   * production caller. Its first real one is a CREDENTIAL (`GH_TOKEN`, so `gh`
+   * works in an agent's Bash), and a credential captured once at wiring time is
+   * wrong in both directions: an instance that connects GitHub AFTER boot never
+   * sees it, and a rotated token keeps a stale value until the process restarts.
+   * The same reason `makeLazyCredentialedHostRunner` resolves the trident host
+   * runner's credential per call rather than at construction.
+   *
+   * So there is ONE form, resolved per spawn, and no static variant to pick
+   * wrongly. Returning `{}` is the "nothing to add" answer and leaves the spawn
+   * env byte-for-byte unchanged.
    *
    * Scope note: layered per-substrate, so a dedicated substrate can carry this
    * overlay while the shared `llmCallSubstrate` does not. Keys here win over the
    * auth-scrub env on collision (applied last).
    */
-  extra_env?: Record<string, string | undefined>
+  extra_env?: () => Promise<Record<string, string | undefined>>
   /**
    * Argus r4 BLOCKER (2026-06-08) — STATELESS-ONE-SHOT mode. When `true`, every
    * `start(spec)` with no `spec.session` runs on a FRESH disposable REPL that is
@@ -604,6 +668,9 @@ export function buildLlmCallSubstrate(
   // (user, project) turns keep separate upstream sessions — mirroring the CC
   // warm-pool key dimensions.
   const openaiSessions: OpenAiSessionLedger = new Map()
+  // Credential-pool failure accounting for every turn this substrate serves.
+  // Absent ⇒ `'interactive'`, which is what every pre-existing call site meant.
+  const failureLane: FailureOrigin = input.credential_failure_lane ?? 'interactive'
   return {
     start(spec: AgentSpec): SessionHandle {
       // SWAPPABLE PROVIDER — resolve the backend for THIS turn. A NON-EMPTY per-turn
@@ -641,6 +708,7 @@ export function buildLlmCallSubstrate(
           config: input.openai,
           sessionLedger: openaiSessions,
           sessionKey,
+          failureLane,
           ...(scopeProjectId !== undefined ? { projectId: scopeProjectId } : {}),
         })
       }
@@ -694,13 +762,55 @@ export function buildLlmCallSubstrate(
         // here — that is Phase B / Phase D of the redesign.
         const effectiveSkipPermissions = input.profile?.skip_permissions ?? input.skip_permissions
         const effectiveClaudeConfigDir = input.profile?.claude_config_dir ?? input.claude_config_dir
-        const effectiveExtraEnv = input.profile?.extra_env ?? input.extra_env
+        // THE PROFILE DECIDES, THE INSTANCE SUPPLIES. A profile that opts into the
+        // GitHub credential gets `GH_TOKEN` + the git credential helper; one that
+        // does not is byte-for-byte unchanged. The decision lives on the profile so
+        // a new substrate inherits it rather than re-deciding at a tenth call site
+        // nobody rereads — the failure that produced ISSUES #576 and a private-repo
+        // build dying at `fatal: could not read Username`.
+        //
+        // RESOLVED HERE, INSIDE THE PER-SPAWN CLOSURE — never hoisted. A credential
+        // read once outside this is the boot-time snapshot that misses a GitHub
+        // connected after boot and goes stale on rotation.
+        // A CREDENTIAL READ THAT FAILS MUST NOT KILL THE SPAWN. Surfaced by CI:
+        // the resolver threw and took the whole substrate down with it, which in
+        // production would mean a locked store or an unreadable secret turning a
+        // chat turn into a dead session. Degrading to "no credential" is strictly
+        // better — `gh` then fails with git's own message, which is the behaviour
+        // of an instance that never connected GitHub, and the log says why.
+        let githubEnv: Record<string, string | undefined> | undefined
+        if (input.profile?.github_credential === true && githubSpawnEnvRef.resolve !== undefined) {
+          try {
+            githubEnv = await githubSpawnEnvRef.resolve()
+          } catch (err) {
+            substrateLog.warn('github_credential_unavailable', {
+              substrate_instance_id: input.substrate_instance_id,
+              reason: err instanceof Error ? err.message : String(err),
+            })
+            githubEnv = undefined
+          }
+        }
+        const extraEnvResolver = input.profile?.extra_env ?? input.extra_env
+        const resolvedExtraEnv = extraEnvResolver === undefined ? undefined : await extraEnvResolver()
+        // `extra_env` wins over the credential on collision: it is the explicit
+        // per-call knob, and a caller that deliberately unsets a var must not be
+        // overridden by an instance-wide default.
+        const effectiveExtraEnv =
+          githubEnv === undefined && resolvedExtraEnv === undefined
+            ? undefined
+            : { ...(githubEnv ?? {}), ...(resolvedExtraEnv ?? {}) }
         // The one profile field that is APPLIED rather than reserved. A profile
         // hosting detached work (`PROFILE_WARM_FIRE`) must not be judged by PTY
         // chatter — see that profile's docblock for the two builds this killed.
         // Absent ⇒ the pool's own DEFAULT_TURN_INACTIVITY_MS, so every other
         // profile is byte-for-byte unaffected.
         const effectiveTurnInactivityMs = input.profile?.turn_inactivity_ms
+        // The frontier-model floor — the second APPLIED profile field. Only
+        // `PROFILE_WARM_CHAT` sets it; every other profile is byte-for-byte
+        // unaffected, which is what keeps the deliberate FAST_MODEL callers
+        // (scribe / reflection / phase-spec) on the tier they chose. See the
+        // field's docblock in `substrate-profiles.ts` for the live defect.
+        const effectiveFrontierModelFloor = input.profile?.frontier_model_floor
         // Layer the optional `extra_env` overlay AFTER the auth-scrub env so
         // per-substrate spawn knobs (e.g. a `MAX_THINKING_TOKENS=0` classifier
         // knob) win over inherited vars without disturbing the auth scrubbing. The
@@ -724,6 +834,14 @@ export function buildLlmCallSubstrate(
         if (effectiveSkipPermissions !== undefined) opts.skip_permissions = effectiveSkipPermissions
         if (effectiveTurnInactivityMs !== undefined) {
           opts.turn_inactivity_ms = effectiveTurnInactivityMs
+        }
+        // Set ONLY when the profile opts IN. `false` and absent mean the same
+        // thing downstream (`frontier_model_floor?: boolean`, absent ⇒ off), so
+        // emitting `false` would add a key to every option bag for no behaviour —
+        // and the byte-identity net in `__tests__/substrate-profiles.test.ts`
+        // exists precisely to catch a field quietly appearing on all eight sites.
+        if (effectiveFrontierModelFloor === true) {
+          opts.frontier_model_floor = true
         }
         // S3 §2 — fold the SELECTED credential id (#104) + the conversational
         // identity into the warm-pool key. `cred.id` is the `PooledCredential.id`
@@ -767,6 +885,9 @@ export function buildLlmCallSubstrate(
         if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
         if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
         if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
+        if (input.onModelFloorApplied !== undefined) {
+          opts.onModelFloorApplied = input.onModelFloorApplied
+        }
         // Argus r4 BLOCKER — stateless one-shot disposable-REPL mode: a session-
         // less dispatch on this substrate gets a fresh REPL terminated after the
         // turn, so distinct one-shot purposes never share a `--resume` transcript.
@@ -872,6 +993,31 @@ export function buildLlmCallSubstrate(
                 yield ev
                 continue
               }
+              // ROOT-CAUSE FIX (2026-08-17 chat-lockout, the incident this branch
+              // is named for): the warm REPL's CHILD PROCESS DIED mid-turn
+              // (`persistent-repl: REPL process exited`, retryable, no HTTP
+              // status). A dead process is a local substrate fact and says nothing
+              // about the credential — but with no status to read, the `else`
+              // branch below maps `mapStatusForPoolCooldown(null, true)` → 429 →
+              // `reportFailure`, and five of those park the box's ONE credential
+              // for an hour behind "all Anthropic credentials are in cooldown".
+              //
+              // THIS ONE IS NOT FIXED BY THE LANE SPLIT, which is why it needs its
+              // own fast-path: in the incident the compose failure only KILLED the
+              // shared child, and the five strikes that actually parked the pool
+              // were the OWNER'S OWN RETRIES — interactive by definition. Giving
+              // the background lane its own REPL stops it reaching his session;
+              // this stops his session's respawn window from cashing itself in as
+              // an hour of quota lie. Both are needed.
+              //
+              // Classify BEFORE the cooldown map (mirrors binary-not-found /
+              // channel-wedged / turn-timeout) and re-emit UNCHANGED (retryable:
+              // true) so the turn retries on the same healthy credential once the
+              // pool has respawned a clean child.
+              if (stampedCode === undefined && detectReplProcessExited(ev.message)) {
+                yield ev
+                continue
+              }
               // AUTH-INVALID (2026-07-24 dogfood): the warm REPL's `claude` child
               // reported an invalid/expired OAuth token in its PTY output (the
               // auth-failure output-scan signature fired) and the turn was abandoned
@@ -894,15 +1040,34 @@ export function buildLlmCallSubstrate(
               // is mapped by CODE so, e.g., a caller-cancelled `aborted` turn is
               // never mis-cooled as a 401 just because its prose says `HTTP 401`.
               let cooldownStatus: number | null
+              // Whether `cooldownStatus` is a status the PROVIDER ITSELF returned,
+              // or something this file INFERRED. A background lane reports only the
+              // former — see `credential_failure_lane`.
+              //
+              // The bar is deliberately strict: `true` only when the credential
+              // status we are about to cool on IS the status that came back. A
+              // parsed `HTTP 503` that `mapStatusForPoolCooldown` turns into a 429
+              // is an inference wearing a real status's clothes, and so is
+              // `detectCliAuthFailure`, whose weakest rule is the substring `401`
+              // appearing anywhere in the prose (see that function). Getting this
+              // wrong is invisible in the good case and re-opens the whole outage in
+              // the bad one, because an inferred cooldown on a single-credential box
+              // silences the owner's chat.
+              let cooldownFromProvider = false
               if (stampedCode !== undefined) {
                 if (stampedCode === 'aborted') {
                   // Caller cancellation — never a credential fault; no cooldown.
                   cooldownStatus = null
                 } else if (stampedCode === 'rate_limited') {
+                  // The ADAPTER stamped this class off the provider's own rate-limit
+                  // response; it is a report, not a guess.
                   cooldownStatus = 429
+                  cooldownFromProvider = true
                 } else if (stampedCode === 'http_status') {
                   // The numeric status lives in the `HTTP <n>:` message prefix.
-                  cooldownStatus = mapStatusForPoolCooldown(parseHttpStatusFromMessage(ev.message), ev.retryable)
+                  const parsed = parseHttpStatusFromMessage(ev.message)
+                  cooldownStatus = mapStatusForPoolCooldown(parsed, ev.retryable)
+                  cooldownFromProvider = parsed !== null && cooldownStatus === parsed
                 } else {
                   // Every OTHER stamped class is NOT a fault of the SELECTED
                   // credential: `aborted` is a caller cancel; `all_cooldown` /
@@ -918,17 +1083,24 @@ export function buildLlmCallSubstrate(
                 const httpStatus = parseHttpStatusFromMessage(ev.message)
                 if (httpStatus !== null) {
                   cooldownStatus = mapStatusForPoolCooldown(httpStatus, ev.retryable)
+                  cooldownFromProvider = cooldownStatus === httpStatus
                 } else if (detectCliAuthFailure(ev.message)) {
+                  // PROSE HEURISTIC, NOT A PROVIDER STATUS — `detectCliAuthFailure`
+                  // returns true for the substring `401` anywhere in the message, so
+                  // a background REPL crash whose text merely mentions it would
+                  // otherwise cool the owner's only credential for five minutes.
                   cooldownStatus = 401
                 } else {
                   cooldownStatus = mapStatusForPoolCooldown(null, ev.retryable)
                 }
               }
-              if (cooldownStatus !== null) {
+              // A background lane discards an INFERRED cooldown entirely (see
+              // `credential_failure_lane`); a real provider status still cools.
+              if (cooldownStatus !== null && (cooldownFromProvider || failureLane === 'interactive')) {
                 if (ev.retry_after_ms !== undefined) {
-                  reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
+                  reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms, failureLane)
                 } else {
-                  reportFailure(pool, cred.id, cooldownStatus)
+                  reportFailure(pool, cred.id, cooldownStatus, undefined, failureLane)
                 }
               }
             }
@@ -1033,8 +1205,16 @@ export function startOpenAiFamilySession(args: {
   /** Active project id for THIS turn — bound into the MCP resolver so
    *  project-scoped tools dispatch with the correct scope (audit High). */
   projectId?: string
+  /** Credential-pool failure accounting lane — see
+   *  {@link BuildLlmCallSubstrateInput.credential_failure_lane}. Absent ⇒
+   *  `'interactive'`. This classifier is already credential-fault-only for
+   *  STAMPED events, so the lane changes less here than on the Claude path: the
+   *  strike ledger, plus the one prose inference this path still makes
+   *  (`detectCliAuthFailure` on a legacy/unstamped event). */
+  failureLane?: FailureOrigin
 }): SessionHandle {
   const { provider, spec, substrate_instance_id, config, sessionLedger, sessionKey, projectId } = args
+  const failureLane: FailureOrigin = args.failureLane ?? 'interactive'
   let innerHandle: SessionHandle | null = null
   let cancelled = false
   const events = (async function* (): AsyncGenerator<Event, void, void> {
@@ -1247,11 +1427,17 @@ export function startOpenAiFamilySession(args: {
           // conflicting-code/prose boundary is unit-tested without driving the
           // whole adapter.
           const cooldownStatus = openAiCredentialCooldownForEvent(ev)
-          if (cooldownStatus !== null) {
+          // PROSE-INFERRED, not provider-reported: an UNSTAMPED event with no
+          // `HTTP <n>:` prefix can only have been classified by
+          // `detectCliAuthFailure`, whose weakest rule is the substring `401`
+          // anywhere in the message. Suppressed on the background lane for exactly
+          // the reason the Claude path above suppresses it.
+          const proseInferred = ev.code === undefined && parseHttpStatusFromMessage(ev.message) === null
+          if (cooldownStatus !== null && !(proseInferred && failureLane === 'background')) {
             if (ev.retry_after_ms !== undefined) {
-              reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms)
+              reportFailure(pool, cred.id, cooldownStatus, ev.retry_after_ms, failureLane)
             } else {
-              reportFailure(pool, cred.id, cooldownStatus)
+              reportFailure(pool, cred.id, cooldownStatus, undefined, failureLane)
             }
           }
         }
@@ -1486,6 +1672,43 @@ export function detectChannelWedged(message: string): boolean {
  */
 export function detectTurnTimeout(message: string): boolean {
   return /persistent-repl:\s*turn timeout/i.test(message)
+}
+
+/**
+ * Detect the warm REPL's child PROCESS DYING mid-turn. `ReplSession.onDeath`
+ * fails the in-flight turn with `persistent-repl: REPL process exited`
+ * (retryable:true, no HTTP status) — see
+ * `runtime/adapters/claude-code/persistent/repl-session.ts` `onDeath`.
+ *
+ * A dead child is a LOCAL SUBSTRATE fact, not a statement about the credential.
+ * Nothing about a `claude` process exiting says the token is rate-limited,
+ * unpaid, or invalid — and rotating to a different credential cannot revive a
+ * process. Yet with no status to read, the classification below can only guess,
+ * and `mapStatusForPoolCooldown(null, retryable=true)` guesses 429.
+ *
+ * THAT GUESS IS THE OUTAGE (live instance, 2026-08-17). The journal ran: a
+ * reminder compose aborted → the warm chat child was evicted as abandon-poisoned
+ * → the owner's own next turns died `persistent-repl: REPL process exited`. Each
+ * of those was an INTERACTIVE turn, so each counted a strike; five reached
+ * {@link MAX_CONSECUTIVE_FAILURES} and parked the box's ONE credential for an
+ * hour. From then on every chat turn failed instantly with "all Anthropic
+ * credentials are in cooldown (429/402/401)" — naming a cause that was not true,
+ * for a box whose credential was never the problem.
+ *
+ * Note the shape: the owner RETRYING is what closed the trap. Each retry hit the
+ * still-respawning REPL, drew another strike, and bought an hour of silence. So
+ * the lane split alone cannot fix this one — the failures are on the interactive
+ * lane by definition — which is why this is a detector and not a lane rule.
+ *
+ * Callers MUST check this BEFORE the cooldown classification and MUST NOT call
+ * `reportFailure` when it returns true, on EITHER lane. Like
+ * {@link detectTurnTimeout} (and unlike {@link detectBinaryNotFound} /
+ * {@link detectChannelWedged}) it stays RETRYABLE: the pool already evicts the
+ * poisoned session and respawns a clean child, so the retry lands on a healthy
+ * REPL and the SAME healthy credential.
+ */
+export function detectReplProcessExited(message: string): boolean {
+  return /persistent-repl:\s*REPL process exited/i.test(message)
 }
 
 /**
