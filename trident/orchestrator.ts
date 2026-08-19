@@ -386,6 +386,12 @@ export const TRIDENT_SALVAGE_MARKER = 'build survived the failure'
  *  'failed:', or 'not enabled'. */
 export const TRIDENT_SNAPSHOT_MARKER = 'uncommitted work survived the failure'
 
+/** Appended when uncommitted work was observed but could not be anchored. Unlike
+ *  the transient step note, this marker lives on the terminal row, so both the
+ *  live terminal path and boot reconciliation can tell the operator that the
+ *  worktree still needs manual attention. */
+export const TRIDENT_SNAPSHOT_FAILURE_MARKER = 'uncommitted work capture failed'
+
 /** Appended when a terminal failure's branch has parked work. Wording is
  *  delivery-classifier-safe (see delivery.ts): it must never contain 'exhausted',
  *  'conflict', 'hang', 'stalled', 'no progress for', 'merge failed', 'git ' (with
@@ -394,7 +400,7 @@ export const TRIDENT_SNAPSHOT_MARKER = 'uncommitted work survived the failure'
 export const TRIDENT_STASH_PARKED_MARKER = 'work parked in stash'
 
 type WorktreeDisposition =
-  | { kind: 'dirty'; files: number; untracked: number; lines: number; ref: string }
+  | { kind: 'dirty'; files: number; untracked: number; lines: number; ref: string; warning?: string }
   | { kind: 'stashed'; entries: number }
   | { kind: 'failed'; detail: string }
   | { kind: 'none' }
@@ -405,7 +411,11 @@ function worktreeDispositionSuffix(
   if (disposition.kind === 'stashed') {
     return `${disposition.entries} stash entr${disposition.entries === 1 ? 'y' : 'ies'} recorded for this run's branch — ${TRIDENT_STASH_PARKED_MARKER}`
   }
-  return `${disposition.lines} uncommitted text line(s) across ${disposition.files} file(s)${disposition.untracked > 0 ? ` (${disposition.untracked} untracked)` : ''} — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${disposition.ref}`
+  return `${disposition.lines} uncommitted text line(s) across ${disposition.files} file(s)${disposition.untracked > 0 ? ` (${disposition.untracked} untracked)` : ''} — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${disposition.ref}${disposition.warning === undefined ? '' : `; capture warning: ${disposition.warning}`}`
+}
+
+function worktreeCaptureFailureSuffix(detail: string): string {
+  return `${TRIDENT_SNAPSHOT_FAILURE_MARKER}: ${detail}`
 }
 
 export interface StrandedReconcileOptions {
@@ -2178,16 +2188,114 @@ export function buildTridentOrchestrator(
     }
   }
 
-  // Rescue failures are observable in the step note, but never persisted on the run. A WeakMap
-  // keeps that diagnostic paired with the exact input object without leaking entries after the
-  // outcome is released.
+  // Unexpected reconciliation/publish exceptions remain observable in the step
+  // note. Expected worktree-capture failures are persisted on failure_reason;
+  // this WeakMap is only the last-resort diagnostic for throws outside that
+  // typed disposition.
   const salvageFailureNotes = new WeakMap<TridentRun, string>()
 
-  function failedDisposition(step: string, result?: { stderr: string; stdout: string }): WorktreeDisposition {
+  function failedDisposition(
+    step: string,
+    result?: { stderr: string; stdout: string },
+  ): Extract<WorktreeDisposition, { kind: 'failed' }> {
     const output = result === undefined ? '' : result.stderr || result.stdout
     return {
       kind: 'failed',
       detail: `${step}${output.trim() === '' ? '' : `: ${output.trim().replace(/\s+/g, ' ').slice(0, 120)}`}`,
+    }
+  }
+
+  async function measureSnapshot(
+    repo: string,
+    base: string,
+    targets: string[],
+  ): Promise<{ files: number; lines: number } | { detail: string }> {
+    // Count both captured versions. Taking the larger per-path delta avoids
+    // double-counting ordinary staged-then-edited files while ensuring an
+    // index-only path is not reported as zero work.
+    const linesByPath = new Map<string, number>()
+    for (const target of targets) {
+      const numstat = await opts.run_host(
+        ['git', '-C', repo, 'diff', '--numstat', base, target],
+        repo,
+      )
+      if (!numstat.ok) {
+        return { detail: failedDisposition('snapshot numstat failed', numstat).detail }
+      }
+      for (const line of numstat.stdout.split(/\r?\n/)) {
+        if (line === '') continue
+        const [addedText = '', removedText = '', ...pathParts] = line.split('\t')
+        const addedLines = Number.parseInt(addedText, 10)
+        const removedLines = Number.parseInt(removedText, 10)
+        const lineCount =
+          (Number.isFinite(addedLines) ? addedLines : 0) +
+          (Number.isFinite(removedLines) ? removedLines : 0)
+        const path = pathParts.join('\t') || line
+        linesByPath.set(path, Math.max(linesByPath.get(path) ?? 0, lineCount))
+      }
+    }
+    return {
+      files: linesByPath.size,
+      lines: [...linesByPath.values()].reduce((sum, count) => sum + count, 0),
+    }
+  }
+
+  async function anchoredSnapshotDisposition(run: TridentRun): Promise<WorktreeDisposition | null> {
+    const snapshotRef = `refs/tags/trident-salvage/${run.id}`
+    const anchored = await opts.run_host(
+      ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${snapshotRef}^{commit}`],
+      run.repo_path,
+    )
+    const oid = anchored.stdout.trim()
+    if (!anchored.ok || !/^[0-9a-f]{40}$/.test(oid)) return null
+
+    // The ref is the durable capture receipt. Reconstruct its counts from its
+    // own first parent rather than the branch's current HEAD: a retry can happen
+    // after the worktree and branch have both moved.
+    const parent = await opts.run_host(
+      ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${snapshotRef}^1^{commit}`],
+      run.repo_path,
+    )
+    const base = parent.stdout.trim()
+    let warning: string | undefined
+    let files = 0
+    let lines = 0
+    if (!parent.ok || !/^[0-9a-f]{40}$/.test(base)) {
+      warning = failedDisposition('anchored snapshot parent unreadable', parent).detail
+    } else {
+      const indexParent = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${snapshotRef}^2^{commit}`],
+        run.repo_path,
+      )
+      const indexOid = indexParent.stdout.trim()
+      const targets =
+        indexParent.ok && /^[0-9a-f]{40}$/.test(indexOid) ? [oid, indexOid] : [oid]
+      const measured = await measureSnapshot(run.repo_path, base, targets)
+      if ('detail' in measured) warning = measured.detail
+      else ({ files, lines } = measured)
+    }
+
+    const message = await opts.run_host(
+      ['git', '-C', run.repo_path, 'show', '-s', '--format=%B', snapshotRef],
+      run.repo_path,
+    )
+    const untrackedMatch = message.ok
+      ? message.stdout.match(/^Trident-Salvage-Untracked:\s*(\d+)$/m)
+      : null
+    const capturedWarning = message.ok
+      ? message.stdout.match(/^Trident-Salvage-Warning:\s*(.+)$/m)?.[1]?.trim()
+      : undefined
+    if (warning === undefined && capturedWarning !== undefined && capturedWarning !== '') {
+      warning = capturedWarning
+    }
+
+    return {
+      kind: 'dirty',
+      files,
+      lines,
+      untracked: untrackedMatch === null ? 0 : Number.parseInt(untrackedMatch[1] ?? '0', 10),
+      ref: snapshotRef,
+      ...(warning === undefined ? {} : { warning }),
     }
   }
 
@@ -2200,7 +2308,7 @@ export function buildTridentOrchestrator(
     const index = join(scratch, 'index')
     const snapshotRef = `refs/tags/trident-salvage/${run.id}`
     const withSnapshotIndex = (args: string[]): Promise<HostCommandResult> =>
-      opts.run_host(['env', `GIT_INDEX_FILE=${index}`, 'git', '-C', worktree, ...args], worktree)
+      opts.run_host(['git', '-C', worktree, ...args], worktree, { GIT_INDEX_FILE: index })
 
     try {
       // `stash create` is the read-only Git primitive that preserves BOTH the
@@ -2209,19 +2317,23 @@ export function buildTridentOrchestrator(
       // remains recoverable even when the worktree copy is back at HEAD.
       const hasTrackedChanges = statusEntries.some((entry) => !entry.startsWith('?? '))
       let indexParent: string | null = null
+      let warning: string | undefined
       if (hasTrackedChanges) {
         const stashed = await opts.run_host(['git', '-C', worktree, 'stash', 'create'], worktree)
         const stashOid = stashed.stdout.trim()
         if (!stashed.ok || !/^[0-9a-f]{40}$/.test(stashOid)) {
-          return failedDisposition('snapshot stash-create failed', stashed)
-        }
-        const resolvedIndex = await opts.run_host(
-          ['git', '-C', worktree, 'rev-parse', '--verify', `${stashOid}^2^{commit}`],
-          worktree,
-        )
-        indexParent = resolvedIndex.stdout.trim()
-        if (!resolvedIndex.ok || !/^[0-9a-f]{40}$/.test(indexParent)) {
-          return failedDisposition('snapshot index-parent failed', resolvedIndex)
+          warning = failedDisposition('snapshot stash-create failed', stashed).detail
+        } else {
+          const resolvedIndex = await opts.run_host(
+            ['git', '-C', worktree, 'rev-parse', '--verify', `${stashOid}^2^{commit}`],
+            worktree,
+          )
+          const resolvedOid = resolvedIndex.stdout.trim()
+          if (!resolvedIndex.ok || !/^[0-9a-f]{40}$/.test(resolvedOid)) {
+            warning = failedDisposition('snapshot index-parent failed', resolvedIndex).detail
+          } else {
+            indexParent = resolvedOid
+          }
         }
       }
 
@@ -2255,45 +2367,45 @@ export function buildTridentOrchestrator(
       ]
       if (indexParent !== null) commitArgs.push('-p', indexParent)
       commitArgs.push('-m', `trident salvage snapshot ${run.id}`)
+      const untracked = statusEntries.filter((entry) => entry.startsWith('?? ')).length
+      commitArgs.push(
+        '-m',
+        `Trident-Salvage-Untracked: ${untracked}${warning === undefined ? '' : `\nTrident-Salvage-Warning: ${warning}`}`,
+      )
       const committed = await opts.run_host(commitArgs, worktree)
       const oid = committed.stdout.trim()
       if (!committed.ok || !/^[0-9a-f]{40}$/.test(oid)) {
         return failedDisposition('snapshot commit-tree failed', committed)
       }
 
-      // Count both captured versions. Taking the larger per-path delta avoids
-      // double-counting ordinary staged-then-edited files while ensuring an
-      // index-only path is not reported as zero work.
-      const linesByPath = new Map<string, number>()
-      for (const target of indexParent === null ? [oid] : [oid, indexParent]) {
-        const numstat = await opts.run_host(
-          ['git', '-C', worktree, 'diff', '--numstat', 'HEAD', target],
-          worktree,
-        )
-        if (!numstat.ok) return failedDisposition('snapshot numstat failed', numstat)
-        for (const line of numstat.stdout.split(/\r?\n/)) {
-          if (line === '') continue
-          const [addedText = '', removedText = '', ...pathParts] = line.split('\t')
-          const addedLines = Number.parseInt(addedText, 10)
-          const removedLines = Number.parseInt(removedText, 10)
-          const lineCount =
-            (Number.isFinite(addedLines) ? addedLines : 0) +
-            (Number.isFinite(removedLines) ? removedLines : 0)
-          const path = pathParts.join('\t') || line
-          linesByPath.set(path, Math.max(linesByPath.get(path) ?? 0, lineCount))
-        }
-      }
-      const files = linesByPath.size
-      const lines = [...linesByPath.values()].reduce((sum, count) => sum + count, 0)
+      const measured = await measureSnapshot(
+        worktree,
+        'HEAD',
+        indexParent === null ? [oid] : [oid, indexParent],
+      )
+      if ('detail' in measured) return { kind: 'failed', detail: measured.detail }
 
       const anchored = await opts.run_host(
-        ['git', '-C', run.repo_path, 'update-ref', snapshotRef, oid],
+        ['git', '-C', run.repo_path, 'update-ref', snapshotRef, oid, '0000000000000000000000000000000000000000'],
         run.repo_path,
       )
-      if (!anchored.ok) return failedDisposition('snapshot update-ref failed', anchored)
+      if (!anchored.ok) {
+        // A concurrent/retried capture may have won between the initial probe
+        // and this create-only CAS. Its ref is authoritative; never move it.
+        return (
+          (await anchoredSnapshotDisposition(run)) ??
+          failedDisposition('snapshot update-ref failed', anchored)
+        )
+      }
 
-      const untracked = statusEntries.filter((entry) => entry.startsWith('?? ')).length
-      return { kind: 'dirty', files, untracked, lines, ref: snapshotRef }
+      return {
+        kind: 'dirty',
+        files: measured.files,
+        untracked,
+        lines: measured.lines,
+        ref: snapshotRef,
+        ...(warning === undefined ? {} : { warning }),
+      }
     } finally {
       rmSync(scratch, { recursive: true, force: true })
     }
@@ -2434,25 +2546,16 @@ export function buildTridentOrchestrator(
       if (!ahead.ok || !/^\d+$/.test(aheadText)) return null
       const aheadCount = Number.parseInt(aheadText, 10)
       const failureReason = run.failure_reason ?? 'run failed'
-      let snapshotAlreadyAnchored = false
-      if (failureReason.includes(TRIDENT_SNAPSHOT_MARKER)) {
-        const snapshot = await opts.run_host(
-          [
-            'git',
-            '-C',
-            run.repo_path,
-            'rev-parse',
-            '--verify',
-            `refs/tags/trident-salvage/${run.id}^{commit}`,
-          ],
-          run.repo_path,
-        )
-        snapshotAlreadyAnchored = snapshot.ok && /^[0-9a-f]{40}$/.test(snapshot.stdout.trim())
-      }
+      // Probe the run-scoped recovery ref on EVERY reconciliation, independent
+      // of the database marker. The ref can be durable even when the following
+      // store write failed; in that case it is the receipt and must win over a
+      // changed worktree on retry.
+      const anchoredDisposition = await anchoredSnapshotDisposition(run)
       const disposition =
-        options.inspect_worktree === false || snapshotAlreadyAnchored
+        anchoredDisposition ??
+        (options.inspect_worktree === false
           ? { kind: 'none' as const }
-          : await captureWorktreeDisposition(run, branch)
+          : await captureWorktreeDisposition(run, branch))
 
       const appendDisposition = (reason: string): string => {
         if (disposition.kind === 'dirty') {
@@ -2465,6 +2568,11 @@ export function buildTridentOrchestrator(
             ? reason
             : `${reason}; plus ${worktreeDispositionSuffix(disposition)}`
         }
+        if (disposition.kind === 'failed') {
+          return reason.includes(TRIDENT_SNAPSHOT_FAILURE_MARKER)
+            ? reason
+            : `${reason}; plus ${worktreeCaptureFailureSuffix(disposition.detail)}`
+        }
         return reason
       }
 
@@ -2474,10 +2582,6 @@ export function buildTridentOrchestrator(
           run.repo_path,
         )
         if (remote.ok && remote.stdout.trim().split(/\s+/)[0] === localHead && run.pr !== null) {
-          if (disposition.kind === 'failed') {
-            salvageFailureNotes.set(run, disposition.detail)
-            return null
-          }
           const annotated = appendDisposition(failureReason)
           if (annotated === failureReason) return null
           return {
@@ -2488,7 +2592,6 @@ export function buildTridentOrchestrator(
           }
         }
 
-        if (disposition.kind === 'failed') salvageFailureNotes.set(run, disposition.detail)
         const published = await publishBuiltCommit(run, null)
         const commitReason = failureReason.includes(TRIDENT_SALVAGE_MARKER)
           ? failureReason
@@ -2520,7 +2623,15 @@ export function buildTridentOrchestrator(
           last_advanced_at: now(),
         }
       }
-      if (disposition.kind === 'failed') salvageFailureNotes.set(run, disposition.detail)
+      if (disposition.kind === 'failed') {
+        if (failureReason.includes(TRIDENT_SNAPSHOT_FAILURE_MARKER)) return null
+        return {
+          ...run,
+          branch,
+          failure_reason: `${failureReason} — 0 commits; ${worktreeCaptureFailureSuffix(disposition.detail)}`,
+          last_advanced_at: now(),
+        }
+      }
       return null
     } catch (err) {
       const detail = err instanceof Error ? err.message : String(err)

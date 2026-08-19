@@ -7,8 +7,11 @@ Running log of what shipped, newest first. One entry per merged change.
 `reconcile_stranded` now checks both committed and uncommitted work before concluding that a
 failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
 tracked-and-untracked tree through a private temporary index, retains the live index as a second
-parent so staged-only work remains recoverable, and anchors the resulting commit at
+parent when `stash create` can read it, and anchors the resulting commit at
 `refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
+A live index lock or unmerged index can make that optional index-parent probe fail; capture then
+continues through the private index, preserves the working-tree version plus untracked files, and
+records the omitted-parent warning instead of abandoning the entire snapshot.
 A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
 their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
 inspection when a live run in the same project and repository owns a reused branch. Prunable
@@ -16,10 +19,14 @@ worktree entries are skipped so they cannot suppress stash evidence.
 
 Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
 outcomes make no remote mutation, while a run with both committed and dirty work publishes the
-commit and records both dispositions. A failed capture writes no success marker, remains explicit
-when committed work is still published, and never blocks a commit that appears later. Real-git
-falsification tests prove staged-only and untracked nested files are recoverable, the dirty
-worktree and HEAD remain byte-identical, stale/crafted
+commit and records both dispositions. Recovery refs are create-only: reconciliation consults the
+run-scoped ref even when a prior store write lost its marker, reconstructs the original counts from
+the anchored commit, and never moves that ref to a later worktree state. A failed capture writes no
+success marker but persists its bounded diagnostic in `failure_reason`, so both live terminal
+delivery and the boot sweep expose it; it never blocks a commit that appears later. Real-git
+falsification tests prove staged-only, untracked nested, and tracked work behind a live index lock
+are recoverable, the dirty worktree and HEAD remain byte-identical, retry after a lost store write
+keeps the first snapshot, stale/crafted
 stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
 cause while exposing the local recovery ref.
 

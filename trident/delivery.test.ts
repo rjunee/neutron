@@ -16,7 +16,10 @@ import {
   type OutboundSink,
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
-import { TRIDENT_SNAPSHOT_MARKER } from './orchestrator.ts'
+import {
+  TRIDENT_SNAPSHOT_FAILURE_MARKER,
+  TRIDENT_SNAPSHOT_MARKER,
+} from './orchestrator.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
@@ -186,6 +189,20 @@ describe('composeTerminalDelivery', () => {
     )
     expect(alreadyPublished?.text).toContain(authored)
     expect(alreadyPublished?.text).toContain(`Recovery snapshot: ${ref}.`)
+  })
+
+  test('a persisted capture failure is visible without changing failure classification', () => {
+    const authored = 'The executor disappeared before it could finish the build.'
+    const detail = 'snapshot update-ref failed: simulated ref refusal'
+    const failed = runWith({
+      phase: 'failed',
+      failure_reason: `${authored} — 0 commits; ${TRIDENT_SNAPSHOT_FAILURE_MARKER}: ${detail}`,
+    })
+
+    expect(interpretFailure(failed)).toEqual(
+      interpretFailure(runWith({ phase: 'failed', failure_reason: authored })),
+    )
+    expect(composeTerminalDelivery(failed)?.text).toContain(`Recovery warning: ${detail}.`)
   })
 
   test('stopped → a plain stopped notice', () => {

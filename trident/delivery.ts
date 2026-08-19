@@ -38,7 +38,11 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
-import { TRIDENT_SALVAGE_MARKER, TRIDENT_STASH_PARKED_MARKER } from './orchestrator.ts'
+import {
+  TRIDENT_SALVAGE_MARKER,
+  TRIDENT_SNAPSHOT_FAILURE_MARKER,
+  TRIDENT_STASH_PARKED_MARKER,
+} from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -149,9 +153,13 @@ function isToolsNotEnabled(reasonLower: string): boolean {
  * rendered separately by `composeTerminalDelivery`. */
 function authoredFailureReason(reason: string): string {
   const salvageMarker = TRIDENT_SALVAGE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const captureFailureMarker = TRIDENT_SNAPSHOT_FAILURE_MARKER.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  )
   const annotation = reason.match(
     new RegExp(
-      `(?:\\s+—\\s+(?:0 commits\\b|\\d+ commit\\(s\\),\\s+${salvageMarker}\\b|${salvageMarker}\\b|\\d+ uncommitted\\b)|;\\s+plus\\s+(?:\\d+ uncommitted\\b|\\d+ stash\\b))`,
+      `(?:\\s+—\\s+(?:0 commits\\b|\\d+ commit\\(s\\),\\s+${salvageMarker}\\b|${salvageMarker}\\b|\\d+ uncommitted\\b)|;\\s+plus\\s+(?:\\d+ uncommitted\\b|\\d+ stash\\b|${captureFailureMarker}\\b))`,
     ),
   )
   return (annotation === null ? reason : reason.slice(0, annotation.index)).trim()
@@ -159,12 +167,27 @@ function authoredFailureReason(reason: string): string {
 
 function salvageRecoveryTrail(run: TridentRun): string {
   const reason = run.failure_reason ?? ''
+  const trails: string[] = []
   const snapshotRef = reason.match(/refs\/tags\/trident-salvage\/[^\s;—]+/)?.[0]
-  if (snapshotRef !== undefined) return `\nRecovery snapshot: ${snapshotRef}.`
+  if (snapshotRef !== undefined) trails.push(`Recovery snapshot: ${snapshotRef}.`)
   if (reason.includes(TRIDENT_STASH_PARKED_MARKER)) {
-    return "\nRecovery note: work was detected in this run's stash window."
+    trails.push("Recovery note: work was detected in this run's stash window.")
   }
-  return ''
+  const captureFailure = reason.match(
+    new RegExp(
+      `${TRIDENT_SNAPSHOT_FAILURE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*(.*?)(?:\\s+—\\s+\\d+ commit\\(s\\),|$)`,
+    ),
+  )?.[1]
+  if (captureFailure !== undefined) {
+    trails.push(`Recovery warning: ${captureFailure.replace(/\.+$/, '')}.`)
+  }
+  const captureWarning = reason.match(
+    /capture warning:\s*(.*?)(?:\s+—\s+\d+ commit\(s\),|$)/,
+  )?.[1]
+  if (captureWarning !== undefined) {
+    trails.push(`Recovery warning: ${captureWarning.replace(/\.+$/, '')}.`)
+  }
+  return trails.length === 0 ? '' : `\n${trails.join('\n')}`
 }
 
 /**

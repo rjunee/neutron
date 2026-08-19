@@ -17,6 +17,7 @@ import type { RunHostCommand } from './merge.ts'
 import {
   buildTridentOrchestrator,
   TRIDENT_SALVAGE_MARKER,
+  TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_SNAPSHOT_MARKER,
   TRIDENT_STASH_PARKED_MARKER,
 } from './orchestrator.ts'
@@ -241,9 +242,9 @@ function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): Trident
 function buildHybridHost(failPush = false): { run: RunHostCommand; calls: string[][] } {
   const calls: string[][] = []
   let opened = false
-  const run: RunHostCommand = async (cmd, cwd) => {
+  const run: RunHostCommand = async (cmd, cwd, extraEnv) => {
     calls.push([...cmd])
-    if (cmd[0] === 'git' || cmd[0] === 'env') {
+    if (cmd[0] === 'git') {
       if (failPush && cmd.includes('push')) {
         return {
           ok: false,
@@ -252,7 +253,7 @@ function buildHybridHost(failPush = false): { run: RunHostCommand; calls: string
           exit_code: 128,
         }
       }
-      return spawnCapture(cmd, cwd)
+      return spawnCapture(cmd, cwd, extraEnv)
     }
     if (cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'list') return ok(opened ? '7\n' : '')
     if (cmd[0] === 'gh' && cmd[1] === 'pr' && cmd[2] === 'create') {
@@ -411,9 +412,6 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     const harness = buildHybridHost()
     expect(await gitRaw(world.worktree, 'status', '--porcelain')).toBe('')
     const beforeHead = await gitRaw(world.worktree, 'rev-parse', 'HEAD')
-    const liveIndexLock = await gitOut(world.worktree, 'rev-parse', '--git-path', 'index.lock')
-    writeFileSync(liveIndexLock, 'owned by a live build\n')
-
     const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
 
     const snapshotRef = 'refs/tags/trident-salvage/salvage-run'
@@ -425,7 +423,35 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     )
     expect(await gitRaw(world.worktree, 'status', '--porcelain')).toBe('')
     expect(await gitRaw(world.worktree, 'rev-parse', 'HEAD')).toBe(beforeHead)
+  }, 60_000)
+
+  test('tracked work survives when a live index lock makes stash-create fail', async () => {
+    const world = await seedWorld('dirty')
+    if (world.worktree === null) throw new Error('dirty fixture did not keep its worktree')
+    const harness = buildHybridHost()
+    const beforeStatus = await gitRaw(world.worktree, 'status', '--porcelain')
+    const beforeHead = await gitRaw(world.worktree, 'rev-parse', 'HEAD')
+    const liveIndexLock = await gitOut(world.worktree, 'rev-parse', '--git-path', 'index.lock')
+    writeFileSync(liveIndexLock, 'owned by a live build\n')
+
+    const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
+
+    const snapshotRef = 'refs/tags/trident-salvage/salvage-run'
+    expect(out.run.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(out.run.failure_reason).toContain('snapshot stash-create failed')
+    expect(out.run.failure_reason).not.toContain(TRIDENT_SNAPSHOT_FAILURE_MARKER)
+    expect(await gitOut(world.checkout, 'show', `${snapshotRef}:README.md`)).toBe(
+      'base\nuncommitted work',
+    )
+    expect(await gitOut(world.checkout, 'show', `${snapshotRef}:brand-new.txt`)).toBe(
+      'untracked work',
+    )
+    expect(await gitRaw(world.worktree, 'status', '--porcelain')).toBe(beforeStatus)
+    expect(await gitRaw(world.worktree, 'rev-parse', 'HEAD')).toBe(beforeHead)
     expect(existsSync(liveIndexLock)).toBe(true)
+    expect(composeTerminalDelivery(out.run)?.text).toContain(
+      'Recovery warning: snapshot stash-create failed',
+    )
     rmSync(liveIndexLock)
   }, 60_000)
 
@@ -556,7 +582,7 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     )
   }, 60_000)
 
-  test('a failed ref anchor records no success marker and does not block later commit salvage', async () => {
+  test('a failed ref anchor is persisted and does not block later commit salvage', async () => {
     const world = await seedWorld('dirty')
     if (world.worktree === null) throw new Error('dirty fixture did not keep its worktree')
     const harness = buildHybridHost()
@@ -574,9 +600,12 @@ describe('REAL git — stranded terminal-failure salvage', () => {
 
     const first = await orchestrator(world, failingAnchor).step(makeRun(world.checkout))
 
-    expect(first.run.failure_reason).toBe(FAILURE)
+    expect(first.run.failure_reason).toContain(TRIDENT_SNAPSHOT_FAILURE_MARKER)
+    expect(first.run.failure_reason).toContain('snapshot update-ref failed: simulated ref refusal')
     expect(first.run.failure_reason).not.toContain(TRIDENT_SNAPSHOT_MARKER)
-    expect(first.note).toContain('stranded build salvage failed')
+    expect(composeTerminalDelivery(first.run)?.text).toContain(
+      'Recovery warning: snapshot update-ref failed: simulated ref refusal.',
+    )
 
     await git(world.worktree, 'add', '-A')
     await git(world.worktree, ...GIT_ID, 'commit', '-q', '-m', 'finish after anchor refusal')
@@ -600,8 +629,40 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     expect(out.run.pr).toBe(7)
     expect(out.run.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
     expect(out.run.failure_reason).not.toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(out.run.failure_reason).toContain(TRIDENT_SNAPSHOT_FAILURE_MARKER)
+    expect(out.run.failure_reason).toContain('snapshot update-ref failed')
     expect(out.note).toContain('stranded build salvaged → PR #7')
-    expect(out.note).toContain('stranded worktree capture failed: snapshot update-ref failed')
+    expect(composeTerminalDelivery(out.run)?.text).toContain(
+      'Recovery warning: snapshot update-ref failed: simulated ref refusal.',
+    )
+  }, 60_000)
+
+  test('retry after a lost store write keeps the first recovery ref and snapshot', async () => {
+    const world = await seedWorld('dirty')
+    if (world.worktree === null) throw new Error('dirty fixture did not keep its worktree')
+    const harness = buildHybridHost()
+    const orch = orchestrator(world, harness.run)
+    const failedRow = makeRun(world.checkout, { phase: 'failed', failure_reason: FAILURE })
+
+    // The ref succeeds, but deliberately discard the returned row to model the
+    // boot sweep's following store update failing.
+    const first = await orch.reconcile_stranded(failedRow)
+    expect(first?.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    const snapshotRef = 'refs/tags/trident-salvage/salvage-run'
+    const firstOid = await gitOut(world.checkout, 'rev-parse', snapshotRef)
+    expect(await gitOut(world.checkout, 'show', `${snapshotRef}:README.md`)).toBe(
+      'base\nuncommitted work',
+    )
+
+    writeFileSync(join(world.worktree, 'README.md'), 'base\nchanged after failed store write\n')
+    const retry = await orch.reconcile_stranded(failedRow)
+
+    expect(retry?.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(await gitOut(world.checkout, 'rev-parse', snapshotRef)).toBe(firstOid)
+    expect(await gitOut(world.checkout, 'show', `${snapshotRef}:README.md`)).toBe(
+      'base\nuncommitted work',
+    )
+    expect(harness.calls.filter((cmd) => cmd.includes('update-ref'))).toHaveLength(1)
   }, 60_000)
 
   test('committed and uncommitted work are both reported while the commit is published', async () => {
