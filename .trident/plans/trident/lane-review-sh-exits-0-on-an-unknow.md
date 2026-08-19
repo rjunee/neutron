@@ -23,4 +23,4 @@ Regenerated 2026-08-18 against origin/main (854f5fd6). Card: `tools/lane_review.
 
 ## Post-merge note for the record checkout
 
-The record working tree (`/var/lib/neutron/tenants/n7eb7cca79ce58139/Projects/neutron-open/code`) holds the untracked precursor at `tools/lane_review.sh`. When that checkout later pulls a main containing the tracked file, git will refuse to overwrite the untracked copy — whoever pulls should diff (expect only the T1-message/T2/T3 deltas vs the precursor) and remove the untracked file first. Not the executor's concern in a fresh worktree.
+The record working tree (the instance checkout) holds the untracked precursor at `tools/lane_review.sh`. When that checkout later pulls a main containing the tracked file, git will refuse to overwrite the untracked copy — whoever pulls should diff (expect only the T1-message/T2/T3 deltas vs the precursor) and remove the untracked file first. Not the executor's concern in a fresh worktree.
