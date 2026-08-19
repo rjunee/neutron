@@ -54,7 +54,16 @@ fi
 # Best-effort: make origin/main present on a shallow checkout. Never fatal — an
 # offline/fork run falls through to the skip below rather than blocking.
 if [ "$MAIN_REF" = "origin/main" ]; then
-  git fetch --depth=1 origin main >/dev/null 2>&1 || true
+  # --depth=1 ADDS a ref to a shallow checkout but TRUNCATES a full one, writing
+  # .git/shallow. That is how a line meant to help CI shallowed the shared build
+  # checkout and produced three unrelated-looking failures in one night
+  # (unrelated histories locally, an unresolvable sha and a missing merge base in
+  # CI). Take the shallow path only when the clone is already shallow.
+  if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+    git fetch --depth=1 origin main >/dev/null 2>&1 || true
+  else
+    git fetch origin main >/dev/null 2>&1 || true
+  fi
 fi
 
 # Skip on a push-to-main run: HEAD already IS main, so there is nothing to ratchet
