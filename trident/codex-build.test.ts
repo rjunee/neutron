@@ -164,6 +164,17 @@ interface RunOpts {
   /** Insert a blank manifest line after this part index. */
   blankBriefPartLineAfter?: number
   /**
+   * Drive the ordered manifest through `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE` — the
+   * launcher-written manifest FILE — instead of (or alongside) the inline PARTS env.
+   *
+   *   true      → write `briefParts`' manifest to a file and set ONLY the FILE input
+   *   string[]  → write THESE parts to a second manifest FILE while `briefParts` stays
+   *               inline, which is the precedence fixture: two valid lists, one run
+   *   'missing' → point the FILE input at a path that does not exist
+   *   'empty'   → point the FILE input at a manifest that exists and is zero bytes
+   */
+  briefPartsFile?: true | string[] | 'missing' | 'empty'
+  /**
    * The receipt handed in for that brief. Undefined → the one the WORKFLOW would
    * compute (the production case); `null` → none at all; a string → a wrong one.
    */
@@ -553,7 +564,17 @@ exit 1
     if (opts.blankBriefPartLineAfter !== undefined) {
       partPaths.splice(opts.blankBriefPartLineAfter + 1, 0, '')
     }
-    env['NEUTRON_CODEX_BUILD_BRIEF_PARTS'] = partPaths.join('\n')
+    if (opts.briefPartsFile === true) {
+      // THE MANIFEST THE LAUNCHER WOULD HAVE WRITTEN: the same newline-separated
+      // ordered list, on disk, with the trailing newline a file written by a real
+      // launcher carries — and the inline env deliberately left UNSET, so what this
+      // fixture measures is the file input and not a quietly surviving env.
+      const manifest = join(dir, 'brief-parts.manifest')
+      writeFileSync(manifest, `${partPaths.join('\n')}\n`)
+      env['NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE'] = manifest
+    } else {
+      env['NEUTRON_CODEX_BUILD_BRIEF_PARTS'] = partPaths.join('\n')
+    }
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = join(dir, 'build.brief')
     const partIntegrity = opts.partIntegrity === undefined
       ? opts.briefParts.map(briefIntegrity)
@@ -568,6 +589,24 @@ exit 1
     const bf = join(dir, 'build.brief')
     writeFileSync(bf, brief)
     env['NEUTRON_CODEX_BUILD_BRIEF_FILE'] = bf
+  }
+  // The FILE input in its own right: a second (decoy) manifest that must lose to an
+  // inline list, or a manifest that is absent or empty and must be refused.
+  if (Array.isArray(opts.briefPartsFile)) {
+    const decoy = opts.briefPartsFile.map((part, i) => {
+      const partPath = join(dir, `decoy-brief-part-${i}.txt`)
+      writeFileSync(partPath, part)
+      return partPath
+    })
+    const manifest = join(dir, 'decoy-brief-parts.manifest')
+    writeFileSync(manifest, `${decoy.join('\n')}\n`)
+    env['NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE'] = manifest
+  } else if (opts.briefPartsFile === 'missing') {
+    env['NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE'] = join(dir, 'no-such-brief-parts.manifest')
+  } else if (opts.briefPartsFile === 'empty') {
+    const manifest = join(dir, 'empty-brief-parts.manifest')
+    writeFileSync(manifest, '')
+    env['NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE'] = manifest
   }
   // THE RECEIPT THE WORKFLOW WOULD HAVE SENT, computed by the workflow's own function
   // — so the default path here is the production path, and the wrapper's perl
@@ -1819,6 +1858,213 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.status).toBe(0)
     expect(res.codexStdin).toBe(parts.join(''))
   })
+})
+
+/**
+ * THE SAME ORDERED LIST, HANDED OVER AS A PATH INSTEAD OF AS A MULTI-LINE ENV VALUE.
+ *
+ * WHY A SECOND INPUT EXISTS. The inline `NEUTRON_CODEX_BUILD_BRIEF_PARTS` travels
+ * inside a run command that a model retypes, and a newline-embedded assignment is the
+ * most fragile token on that trip — lose the quoting and the build starts blind, which
+ * is the defect this card is about. `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE` names a
+ * manifest the LAUNCHER wrote: the identical payload, one path's worth of characters
+ * to survive. The emitting side is untouched here; this pins the wrapper's half of the
+ * contract so a later workflow change has something to land against.
+ *
+ * ARRIVAL, NOT INTENT, in every case below: the assertions read what the CHILD got —
+ * the mock `codex`'s own stdin and its own environment — or, for the refusals, prove
+ * the seam never ran at all.
+ */
+describe('codex build brief — the part list arrives as a launcher-written manifest FILE', () => {
+  const PARTS = [
+    'FORGE contract\n\nBuild the `parser`; do not alter blank lines.\n',
+    `Очень длинная строка 🚀 ${'x'.repeat(9_000)} emoji ✅ and Cyrillic конец`,
+    '\nCODA: test, commit, and stop.\n',
+  ]
+  /** The manifest FILE input, with the inline PARTS env deliberately left unset. */
+  const viaFile = (briefParts: string[], extra: Partial<RunOpts> = {}): RunResult =>
+    run({ authed: true, codexLoginExit: 0, briefParts, briefPartsFile: true, ...extra })
+  /** A refusal fixture: the seam COMMITS, so "never ran" is measurable as "no commit". */
+  const refused = (extra: Partial<RunOpts>): RunResult =>
+    run({
+      authed: true,
+      codexLoginExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: RECORDING_FAKE_BUILD },
+      ...extra,
+    })
+
+  test('a manifest FILE assembles the brief the child receives byte-identically to the inline env', () => {
+    const inline = run({ authed: true, codexLoginExit: 0, briefParts: PARTS })
+    const file = viaFile(PARTS)
+    expect(inline.status).toBe(0)
+    expect(file.status).toBe(0)
+    // What the CHILD read off its own stdin — the whole brief, in order.
+    expect(file.codexStdin).toBe(PARTS.join(''))
+    // EQUIVALENCE, measured rather than argued: same parts, same receipt, same bytes.
+    expect(file.codexStdin).toBe(inline.codexStdin)
+    // …and the FILE really was the only input on that run: the child's OWN environment
+    // carries the manifest path and no inline list, so the equality above is this
+    // wrapper reading the file and not an inline value that quietly survived.
+    expect(/^NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE=/m.test(file.codexEnv)).toBe(true)
+    expect(/^NEUTRON_CODEX_BUILD_BRIEF_PARTS=/m.test(file.codexEnv)).toBe(false)
+    expect(/^NEUTRON_CODEX_BUILD_BRIEF_PARTS=/m.test(inline.codexEnv)).toBe(true)
+    // THE ARTIFACT PATHS ARE UNCHANGED BY THE SWAP. The trailer is the run-id-keyed
+    // file the caller named, and it still lands there with the same six measured
+    // lines — a new input that moved the trailer would break correlation downstream.
+    expect(existsSync(join(file.dir, 'build.trailer'))).toBe(true)
+    expect(file.trailerRaw.trim().split('\n').length).toBe(6)
+    expect(Object.keys(file.trailer)).toEqual(Object.keys(inline.trailer))
+    expect(file.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+  })
+
+  test('the inline PARTS env WINS, and the manifest beside it is never consulted', () => {
+    const decoy = ['DECOY head\n', 'DECOY body\n']
+    const res = run({
+      authed: true,
+      codexLoginExit: 0,
+      briefParts: PARTS, // fixture A, inline — and the receipt handed in is A's
+      briefPartsFile: decoy, // fixture B, on disk, valid in its own right
+    })
+    expect(res.status).toBe(0)
+    expect(res.codexStdin).toBe(PARTS.join(''))
+    expect(res.codexStdin).not.toContain('DECOY')
+    // THE CONTROL that makes the line above precedence and not breakage: fixture B
+    // assembles perfectly well when it is the only input. Every caller on main sets
+    // the inline env, so this is the assertion that says they all stay byte-identical.
+    const alone = viaFile(decoy)
+    expect(alone.status).toBe(0)
+    expect(alone.codexStdin).toBe(decoy.join(''))
+  })
+
+  test('a manifest FILE that does not exist is REFUSED before the seam runs', () => {
+    // The pre-written brief file is present and its receipt is valid, so a wrapper that
+    // treated the unreadable manifest as "no parts" would build happily against the
+    // wrong text. Fail closed: the launcher said the brief lives in parts.
+    const res = refused({ briefPartsFile: 'missing' })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PARTS_FILE_MISSING')
+    expect(res.codexStdin).toBe('')
+    expect(res.head).toBe(res.baseHead)
+  })
+
+  test('a manifest FILE that exists but is EMPTY is refused the same way', () => {
+    const res = refused({ briefPartsFile: 'empty' })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PARTS_FILE_MISSING')
+    expect(res.codexStdin).toBe('')
+    expect(res.head).toBe(res.baseHead)
+  })
+
+  test('a manifest naming a MISSING part keeps the existing PART_MISSING marker', () => {
+    // The downstream refusals are the SAME code, reached through the new input — so
+    // they keep their own markers rather than collapsing into the file-level one.
+    const res = refused({
+      briefParts: ['head\n', 'middle\n', 'coda\n'],
+      briefPartsFile: true,
+      missingBriefPartIndex: 1,
+    })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_MISSING')
+    expect(res.codexStdin).toBe('')
+  })
+
+  test('a manifest naming an EMPTY part is refused too', () => {
+    const res = refused({ briefParts: ['head\n', '', 'coda\n'], briefPartsFile: true })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_MISSING')
+    expect(res.codexStdin).toBe('')
+  })
+
+  test('a corrupted part behind a valid receipt is refused through the FILE path', () => {
+    // "A valid receipt" under the surviving (per-part, #321) implementation means
+    // receipts taken from the parts the workflow COMPOSED, while the files on disk
+    // were altered afterwards. The manifest is transport, not trust: the corrupted
+    // part must be refused by the same per-part gate the inline path faces.
+    const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
+    const corrupted = [...intended]
+    corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
+    const res = refused({
+      briefParts: corrupted,
+      briefPartsFile: true,
+      partIntegrity: intended.map(briefIntegrity),
+    })
+    expect(res.status).toBe(3)
+    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+    expect(res.codexStdin).toBe('')
+  })
+})
+
+/**
+ * TRANSPORT SYMMETRY, pinned case by case. The manifest FILE is a way to CARRY the
+ * ordered part list, never a second entry point with weaker checks: for every refusal
+ * the inline env can raise, the same input through the manifest must produce the SAME
+ * verdict and the SAME marker. A future third transport that resolves into
+ * `$BRIEF_PARTS` upstream of the receipt gate inherits this table; one that bypasses
+ * the gate will fail it.
+ */
+describe('inline and manifest transports agree on every refusal', () => {
+  const intended = ['contract\n', 'the middle segment, long enough to matter\n', 'coda\n']
+  const corrupted = [...intended]
+  corrupted[1] = 'the middle segment, truncated'
+  const cases: Array<{ name: string; marker: string; opts: Partial<RunOpts> }> = [
+    {
+      name: 'a missing part',
+      marker: 'CODEX_BUILD_BRIEF_PART_MISSING',
+      opts: { briefParts: intended, missingBriefPartIndex: 1 },
+    },
+    {
+      name: 'an empty part',
+      marker: 'CODEX_BUILD_BRIEF_PART_MISSING',
+      opts: { briefParts: ['head\n', '', 'coda\n'] },
+    },
+    {
+      name: 'a part altered after its receipt was taken',
+      marker: 'CODEX_BUILD_BRIEF_PART_CORRUPT',
+      opts: { briefParts: corrupted, partIntegrity: intended.map(briefIntegrity) },
+    },
+    {
+      name: 'parts reordered against their receipts',
+      marker: 'CODEX_BUILD_BRIEF_PART_CORRUPT',
+      opts: { briefParts: [...intended].reverse(), partIntegrity: intended.map(briefIntegrity) },
+    },
+    {
+      name: 'no per-part receipts at all',
+      marker: 'CODEX_BUILD_NO_BRIEF_INTEGRITY',
+      opts: { briefParts: intended, partIntegrity: null },
+    },
+    {
+      name: 'fewer receipts than parts',
+      marker: 'CODEX_BUILD_NO_BRIEF_INTEGRITY',
+      opts: { briefParts: intended, partIntegrity: [briefIntegrity(intended[0]!)] },
+    },
+    {
+      name: 'more receipts than parts',
+      marker: 'CODEX_BUILD_NO_BRIEF_INTEGRITY',
+      opts: {
+        briefParts: intended,
+        partIntegrity: [...intended.map(briefIntegrity), briefIntegrity('a fourth receipt\n')],
+      },
+    },
+  ]
+  for (const c of cases) {
+    test(`${c.name}: the same verdict through both transports`, () => {
+      const base = {
+        authed: true,
+        codexLoginExit: 0,
+        env: { NEUTRON_CODEX_BUILD_EXEC_CMD: RECORDING_FAKE_BUILD },
+      }
+      const inline = run({ ...base, ...c.opts })
+      const viaManifest = run({ ...base, ...c.opts, briefPartsFile: true })
+      // The inline verdict is the reference: refused, before the seam ran.
+      expect(inline.status).toBe(3)
+      expect(inline.stderr).toContain(c.marker)
+      expect(inline.codexStdin).toBe('')
+      // And the manifest transport is REQUIRED to match it, marker and all.
+      expect(viaManifest.status).toBe(inline.status)
+      expect(viaManifest.stderr).toContain(c.marker)
+      expect(viaManifest.codexStdin).toBe('')
+    })
+  }
 })
 
 describe('the BRIEF is what codex is asked to build', () => {

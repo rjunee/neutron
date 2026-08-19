@@ -67,34 +67,6 @@ Several stale hunks were deliberately dropped. The PR's `index.ts` and `types.ts
 
 This docs round also re-derived the `stuck_agent` Scope block for the 30-minute chat window. The ordering is now explicit: on chat turns its 15-minute in-flight alert precedes both the 30-minute silence trip and the 45-minute ceiling, while it remains alert-only and does not abandon the running turn.
 
-## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
-
-`reconcile_stranded` now checks both committed and uncommitted work before concluding that a
-failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
-tracked-and-untracked tree through a private temporary index, retains the live index as a second
-parent when `stash create` can read it, and anchors the resulting commit at
-`refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
-A live index lock or unmerged index can make that optional index-parent probe fail; capture then
-continues through the private index, preserves the working-tree version plus untracked files, and
-records the omitted-parent warning instead of abandoning the entire snapshot.
-A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
-their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
-inspection when a live run in the same project and repository owns a reused branch. Prunable
-worktree entries are skipped so they cannot suppress stash evidence.
-
-Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
-outcomes make no remote mutation, while a run with both committed and dirty work publishes the
-commit and records both dispositions. Recovery refs are create-only: reconciliation consults the
-run-scoped ref even when a prior store write lost its marker, reconstructs the original counts from
-the anchored commit, and never moves that ref to a later worktree state. A failed capture writes no
-success marker but persists its bounded diagnostic in `failure_reason`, so both live terminal
-delivery and the boot sweep expose it; it never blocks a commit that appears later. Real-git
-falsification tests prove staged-only, untracked nested, and tracked work behind a live index lock
-are recoverable, the dirty worktree and HEAD remain byte-identical, retry after a lost store write
-keeps the first snapshot, stale/crafted
-stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
-cause while exposing the local recovery ref.
-
 ## 2026-08-19 — three ratchet guards silently re-shallowed the shared checkout
 
 This was the recurrence of card `01M03CH91WA6X87XG8CS5K4H84`, not a second
@@ -143,6 +115,34 @@ stale worktrees carry old guard copies until their branches rebase. They can
 temporarily recreate `.git/shallow` even though main has killed the writer. The
 dispatch chokepoint in `ensureProjectBuildWorkspace` therefore still needs its own
 probe-and-unshallow self-heal before any lane is allowed to use the shared checkout.
+
+## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
+
+`reconcile_stranded` now checks both committed and uncommitted work before concluding that a
+failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
+tracked-and-untracked tree through a private temporary index, retains the live index as a second
+parent when `stash create` can read it, and anchors the resulting commit at
+`refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
+A live index lock or unmerged index can make that optional index-parent probe fail; capture then
+continues through the private index, preserves the working-tree version plus untracked files, and
+records the omitted-parent warning instead of abandoning the entire snapshot.
+A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
+their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
+inspection when a live run in the same project and repository owns a reused branch. Prunable
+worktree entries are skipped so they cannot suppress stash evidence.
+
+Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
+outcomes make no remote mutation, while a run with both committed and dirty work publishes the
+commit and records both dispositions. Recovery refs are create-only: reconciliation consults the
+run-scoped ref even when a prior store write lost its marker, reconstructs the original counts from
+the anchored commit, and never moves that ref to a later worktree state. A failed capture writes no
+success marker but persists its bounded diagnostic in `failure_reason`, so both live terminal
+delivery and the boot sweep expose it; it never blocks a commit that appears later. Real-git
+falsification tests prove staged-only, untracked nested, and tracked work behind a live index lock
+are recoverable, the dirty worktree and HEAD remain byte-identical, retry after a lost store write
+keeps the first snapshot, stale/crafted
+stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
+cause while exposing the local recovery ref.
 
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 
@@ -569,23 +569,36 @@ fails; scan rotation rows instead of syncing → "sees a LEGACY seat that has ne
 through rotation" fails. Restored: `integrations-tab.test.tsx` 25 pass / 0 fail,
 `codex-credential.test.ts` 33 pass / 0 fail, `bunx tsc --noEmit` 0 errors.
 
-## 2026-08-17 — a failed Trident run now asks git whether the build survived
+## 2026-08-17 — Brief-part integrity arbitration (#313 vs main/#321)
 
-The outer orchestrator now performs git-truth salvage before committing every
-new PR-mode terminal failure: when the run's local branch exists and is ahead of
-base, the existing outer-loop publisher pushes the commit and opens or reuses its
-PR. The outcome remains honestly `failed`; the original `failure_reason` is
-preserved with an appended salvage note and PR number. A missing branch, a branch
-with no commits ahead, an already-published run, or a failed publishing attempt is
-left untouched.
+Both #313 (`trident/the-codex-build-bridge-loses-the-br` @ 01100526) and main
+(#321) independently built brief-part integrity. Their merge arbitrated the two
+implementations instead of keeping both verifiers live.
 
-Gateway startup now also lists the newest failed PR-mode rows and reconciles each
-one independently after the Trident loop starts. The production module exposes
-the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
-proves that removing this wiring prevents the branch publication. This startup
-sweep recovers the eleven already-stranded branches at next boot without moving
-their rows out of `failed` or introducing publishing credentials into the inner
-loop.
+The SURVIVOR is main's per-part receipt gate: `fnv_receipt()` plus
+`NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY`. This is the receipt the production
+launcher emits in parts mode: `trident/inner-workflow.mjs:1574` sends
+`BRIEF_PARTS` plus `BRIEF_PART_INTEGRITY`, while `BRIEF_INTEGRITY` is emitted only
+for the non-parts fallback, as pinned by
+`trident/inner-workflow-assembly.test.ts:239-257`. The per-part gate also names the
+corrupt part rather than reducing the failure to a whole-file mismatch.
+
+The DROPPED implementation is #313's whole-brief
+`NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` check in parts mode. That receipt remains
+only for the non-parts, pre-written-brief path. Two live verifiers of the same
+property are how the guarantee drifted: the union resolution left the manifest
+path unverified, and the branch's own corrupted-part test observed exit 0 where
+exit 3 was required.
+
+#313's `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE` manifest survives as TRANSPORT ONLY.
+It resolves into `$BRIEF_PARTS` before the receipt gate, so inline and manifest
+transports face identical refusals. Transport symmetry is pinned by the
+corrupted-part-through-manifest case (exit 3 with
+`CODEX_BUILD_BRIEF_PART_CORRUPT`) and a seven-case inline-vs-manifest symmetry
+suite. Merge-time validation was `bash -n` clean,
+`trident/codex-build.test.ts` 86 pass / 0 fail (previously 76/77), and
+`trident/inner-workflow-assembly.test.ts` 55/55. The in-file ARBITRATION comment
+in `trident/codex-build.sh` carries the same rationale.
 
 ## 2026-08-17 — the "red" T5 sweeper was never red: landing eeecad9d on main
 
@@ -606,6 +619,24 @@ Verification must always begin with `bun install --frozen-lockfile` in the workt
 so every workspace link comes from that checkout. A missing `@neutronai/*` module or
 an older workspace package is an environment failure to repair before interpreting
 test results.
+
+## 2026-08-17 — a failed Trident run now asks git whether the build survived
+
+The outer orchestrator now performs git-truth salvage before committing every
+new PR-mode terminal failure: when the run's local branch exists and is ahead of
+base, the existing outer-loop publisher pushes the commit and opens or reuses its
+PR. The outcome remains honestly `failed`; the original `failure_reason` is
+preserved with an appended salvage note and PR number. A missing branch, a branch
+with no commits ahead, an already-published run, or a failed publishing attempt is
+left untouched.
+
+Gateway startup now also lists the newest failed PR-mode rows and reconciles each
+one independently after the Trident loop starts. The production module exposes
+the fire-and-forget promise as `stranded_sweep`, and a real-git composition test
+proves that removing this wiring prevents the branch publication. This startup
+sweep recovers the eleven already-stranded branches at next boot without moving
+their rows out of `failed` or introducing publishing credentials into the inner
+loop.
 
 ## 2026-08-17 — the arrival proof is repaired to the post-merge contract (PR #377)
 
@@ -2890,62 +2921,89 @@ files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
 
-## 2026-08-16 — the citation guard counted citations instead of covering them
+## 2026-08-16 — the codex build brief is proven to ARRIVE at the child, and the run id to correlate
 
-Landed via PR #353.
+The card reported two live symptoms: the brief parts are written but
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS` never reaches the child, so the build starts blind;
+and the run id is mistyped on the same path, so the run cannot be correlated back.
+Both were RE-MEASURED on main before anything was changed, by executing the transport
+the workflow actually emits rather than by reading it. Neither reproduces. The emitted
+run command, run verbatim against the real `trident/codex-build.sh`, delivered
+`NEUTRON_CODEX_BUILD_BRIEF_PARTS` into the wrapper's child environment; the wrapper
+assembled the parts in order and what landed on the codex seam's stdin measured
+byte-identical to the prompt's OWN `NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY` receipt;
+`CODEX_BUILD_MODEL` arrived; `GH_TOKEN` was gone; and the `.exit` and `.trailer` files
+landed at exactly the run-id-keyed paths the test constructed from its own id string.
+The run id is a string end-to-end (`TridentRun.id` → `buildWorkflowArgs.runId` → the
+part filenames at `trident/brief-parts.ts:71`); there is no retyping on that path. No
+production code changed.
 
-A retroactive panel returned four findings against the citation guard after the
-PR carrying it had merged, so none were acted on. All four reproduce against the
-merged code and each is fixed here with a landed control.
+What was actually missing is the measurement that says so. Every existing suite stops
+one seam short: `inner-workflow.test.ts` asserts prompt TEXT, `codex-build.test.ts`
+hands the wrapper a HAND-BUILT environment, and the `inner-workflow-assembly.test.ts`
+lockstep executes the emitted chunk blocks but assembles files and never launches
+anything. Nothing executed the workflow-EMITTED run command and then read the CHILD's
+environment — so a regression dropping `${partsEnv}` from the command, breaking
+`shSingleQuote` on the newline-joined parts list, or drifting the run id between the
+artifact paths would have shipped green, and the symptom would have been exactly what
+the card describes.
 
-The floors were headcounts rather than coverage. Per-symbol mentions and one
-cluster-wide site total were both `>=` against a single number, so a valid
-citation added anywhere paid for a broken one lost anywhere else and the sum
-stayed conserved. Measured: mangle one of the installer's citations of its
-target path so no site matches it, which is red alone, then add one ordinary
-correct citation in a different cluster file — total restored, suite green,
-broken citation still present. The typo escaped the cited-path check too,
-because losing the separators leaves a word with no slash and that check judges
-a word as a path only when it carries one, so the blind spots lined up. The site
-floor is now keyed per file-and-target, and a second independent check reduces
-every backticked word to its letters and digits and reports one that equals a
-real citable path while not being it. Residual slack is confined to adding and
-breaking a citation of the same target in the same file in one edit, and that
-limit is written into the code rather than implied — the previous comment
-claimed a property the code did not have, which is the defect class this cluster
-exists to catch.
+`trident/codex-build-arrival.test.ts` closes it, in the `trident/gh-authed.test.ts`
+style: the real `writeBriefParts` writes the host-held parts, the real
+`inner-workflow.mjs` composes the forge:build prompt, real bash runs the prompt's own
+chunk blocks and its own run command against the real wrapper with a stub `codex`, and
+the wrapper's documented `NEUTRON_CODEX_BUILD_EXEC_CMD` seam dumps the child's
+environment and stdin. Every assertion is on a child-written artifact — the env dump,
+the stdin dump, the exit/trailer/err files — and none on an object the parent built.
+The stripped-PARTS negative control is what makes the suite able to fail: with the
+PARTS assignment cut out of the emitted command the wrapper refuses at exit 3 with
+`CODEX_BUILD_NO_BRIEF` and the seam never runs at all, so a blind build is refused
+before a token is spent rather than started and then noticed.
 
-The universality claim was false inside its own docblock. The test name promised
-that no line locator survived anywhere while the paragraph above it excluded the
-prose form deliberately, and five machine-readable forms escaped as well: the
-parenthesised, bare-L and at-sign spellings, the lowercase spelling of the
-permalink fragment, and a colon locator on an extensionless build file. Each was
-injected and left the suite green, with the plain colon form as a landed
-control; all six are red now and the name says machine-readable. Widening cost
-two measurements — the colon rule may not see a digit before the colon, or an
-ISO timestamp's seconds field parses as a locator, and the three path-shaped
-forms require a slash, or an ordinary exit-code assertion reads as a
-parenthesised locator.
+ONE HAZARD IS WORTH NAMING because it will be re-hit otherwise: the emitted run
+command contains REAL embedded newlines — inside the supervisor's `printf "%s\n"` and
+inside the single-quoted PARTS value — so it cannot be recovered by splitting the
+prompt on lines. Slicing from `rm -f ` to the trailing `</dev/null &` is the only
+correct extraction, and a line-based parse silently yields a truncated command that
+"passes" by never launching the wrapper.
+## 2026-08-16 — the codex build wrapper accepts the brief's part list BY PATH, not only as a multi-line env
 
-The comment strip could manufacture a definition. Its docblock claimed the strip
-could only remove text and so could never produce a false green; deleting a
-comment joins the line before it to the line after, which can splice a
-column-zero declaration the source never had. Measured: rename the real
-declaration and prepend a two-line block comment whose terminator is immediately
-followed by the old declaration, and the suite is green on a function that no
-longer exists under that name, while the same rename without the corpse is red.
-Comments are overwritten with spaces now, so line identity and column offsets
-survive and the claim is true.
+Hardening follow-up to the arrival proof below. The ordered list of brief parts reaches
+`trident/codex-build.sh` today as `NEUTRON_CODEX_BUILD_BRIEF_PARTS`, a newline-separated
+value quoted into a run command that a MODEL retypes — the single most fragile token on
+the trip, and the exact shape of the failure the card reported ("the parts are written
+but the PARTS env never arrives"). Arrival is now pinned by test, but the transport is
+still one lost quote away from a blind build.
 
-A mention needed no closing delimiter, so an unterminated span counted toward a
-floor made of counts. Spans must close on the same line now; every real citation
-already did, so no floor changed. The shadowed inner `words` helper is renamed
-to `spanWords`, which exposed a caller that had been silently binding to the
-shadow.
+So the wrapper learned a second, equivalent input: `NEUTRON_CODEX_BUILD_BRIEF_PARTS_FILE`,
+an absolute path to a manifest the LAUNCHER writes carrying the identical payload — one
+path's worth of characters to survive instead of an embedded newline. It RESOLVES INTO
+the existing `$BRIEF_PARTS` variable before the assembly runs, so parsing, ordering,
+concatenation and the whole-brief receipt stay ONE code path and the two inputs cannot
+drift into assembling different briefs. Equivalence is measured, not argued: the same
+parts and receipt driven through the file produce a brief the child receives
+byte-identical to the inline env's, and the trailer still lands at the run-id-keyed path
+the caller named.
 
-The four installer items in the originating brief were re-verified against the
-merged code and were already fixed there, so this change does not touch the
-installer.
+INLINE WINS AND IS READ FIRST, so this is backward compatible by construction: every
+caller on main sets the inline value, behaves exactly as before, and never touches a file
+that may not exist. The manifest is consulted only when the inline value is unset or
+empty. It FAILS CLOSED with its own marker — set but missing, unreadable or empty exits 3
+with `CODEX_BUILD_BRIEF_PARTS_FILE_MISSING` before the codex seam runs, rather than
+degrading to "no parts" and building happily against whatever pre-written brief file
+happens to be lying there (the fixture proves that brief is present and valid and still
+refused). Once the list is read, the downstream refusals are the same code reached
+through the new door and keep their own markers: `CODEX_BUILD_BRIEF_PART_MISSING` for a
+missing or empty part, `CODEX_BUILD_BRIEF_CORRUPT` for a receipt mismatch.
+
+Seven cases in `trident/codex-build.test.ts` pin it, all child-side in that file's own
+style — the real script as a subprocess with a stub `codex` that dumps its OWN stdin and
+environment: file-vs-inline byte equality (with the child's env proving only the FILE
+input was set on that run), precedence with a valid decoy manifest plus the control that
+the decoy assembles fine when it is alone, missing manifest, empty manifest, missing
+part, empty part, corrupted part. Nothing on the EMITTING side changed —
+`inner-workflow.mjs` still sends the inline env — so this is the wrapper's half of the
+contract, landed first, for a workflow change to aim at.
 
 ## 2026-08-16 — trimming one language alone split the installer from the server
 
@@ -3002,6 +3060,63 @@ and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
 the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
 assertion plus two new arms, which confirms that assertion does exercise the axis
 it names.
+
+## 2026-08-16 — the citation guard counted citations instead of covering them
+
+Landed via PR #353.
+
+A retroactive panel returned four findings against the citation guard after the
+PR carrying it had merged, so none were acted on. All four reproduce against the
+merged code and each is fixed here with a landed control.
+
+The floors were headcounts rather than coverage. Per-symbol mentions and one
+cluster-wide site total were both `>=` against a single number, so a valid
+citation added anywhere paid for a broken one lost anywhere else and the sum
+stayed conserved. Measured: mangle one of the installer's citations of its
+target path so no site matches it, which is red alone, then add one ordinary
+correct citation in a different cluster file — total restored, suite green,
+broken citation still present. The typo escaped the cited-path check too,
+because losing the separators leaves a word with no slash and that check judges
+a word as a path only when it carries one, so the blind spots lined up. The site
+floor is now keyed per file-and-target, and a second independent check reduces
+every backticked word to its letters and digits and reports one that equals a
+real citable path while not being it. Residual slack is confined to adding and
+breaking a citation of the same target in the same file in one edit, and that
+limit is written into the code rather than implied — the previous comment
+claimed a property the code did not have, which is the defect class this cluster
+exists to catch.
+
+The universality claim was false inside its own docblock. The test name promised
+that no line locator survived anywhere while the paragraph above it excluded the
+prose form deliberately, and five machine-readable forms escaped as well: the
+parenthesised, bare-L and at-sign spellings, the lowercase spelling of the
+permalink fragment, and a colon locator on an extensionless build file. Each was
+injected and left the suite green, with the plain colon form as a landed
+control; all six are red now and the name says machine-readable. Widening cost
+two measurements — the colon rule may not see a digit before the colon, or an
+ISO timestamp's seconds field parses as a locator, and the three path-shaped
+forms require a slash, or an ordinary exit-code assertion reads as a
+parenthesised locator.
+
+The comment strip could manufacture a definition. Its docblock claimed the strip
+could only remove text and so could never produce a false green; deleting a
+comment joins the line before it to the line after, which can splice a
+column-zero declaration the source never had. Measured: rename the real
+declaration and prepend a two-line block comment whose terminator is immediately
+followed by the old declaration, and the suite is green on a function that no
+longer exists under that name, while the same rename without the corpse is red.
+Comments are overwritten with spaces now, so line identity and column offsets
+survive and the claim is true.
+
+A mention needed no closing delimiter, so an unterminated span counted toward a
+floor made of counts. Spans must close on the same line now; every real citation
+already did, so no floor changed. The shadowed inner `words` helper is renamed
+to `spanWords`, which exposed a caller that had been silently binding to the
+shadow.
+
+The four installer items in the originating brief were re-verified against the
+merged code and were already fixed there, so this change does not touch the
+installer.
 
 ## 2026-08-16 — a deferral and a rejection no longer share a label
 

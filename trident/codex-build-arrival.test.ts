@@ -347,6 +347,11 @@ describe('codex build dispatch — the brief ARRIVES at the child and the run id
         expect(briefIntegrity(readFileSync(String(partsList[i]), 'utf8'))).toBe(String(receipts[i]))
       }
       expect(stdin).toBe(partsList.map((p) => readFileSync(p, 'utf8')).join(''))
+      // The branch's own whole-brief assertion (`briefIntegrity(stdin)` against
+      // NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY) is subsumed, not lost: the per-part
+      // receipts above plus this byte-for-byte assembly say the same thing about
+      // stdin, and in parts mode the launcher no longer emits a whole-file receipt
+      // for the regex to find.
 
       // (e) The routed model reached the child, and the scrub held on the seam path.
       expect(dump).toContain('CODEX_BUILD_MODEL=gpt-5-codex')
