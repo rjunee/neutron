@@ -14,8 +14,9 @@ import { spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-const SCRIPT = new URL('./lane_review.sh', import.meta.url).pathname
+const SCRIPT = fileURLToPath(new URL('./lane_review.sh', import.meta.url))
 
 let repo: string
 
@@ -75,6 +76,101 @@ beforeAll(() => {
   git('commit', '-q', '-m', 'add an export nothing calls')
   git('checkout', '-q', 'main')
 
+  // Every runtime export form below used to evade the line regex, turning an
+  // unwired branch into the affirmatively false "nothing to verify" verdict.
+  git('checkout', '-q', '-b', 'export-forms')
+  writeFileSync(
+    join(repo, 'src', 'default.ts'),
+    'export default function orphanDefault(): number {\n  return 1\n}\n',
+  )
+  writeFileSync(
+    join(repo, 'src', 'forms.ts'),
+    [
+      'export abstract class AbstractOrphan { abstract run(): void }',
+      'export enum OrphanEnum { Value }',
+      'export let orphanLet = 1',
+      'export async function* orphanGenerator() { yield 1 }',
+      'function orphanExportList(): number { return 1 }',
+      'export { orphanExportList }',
+      '',
+    ].join('\n'),
+  )
+  git('add', '-A')
+  git('commit', '-q', '-m', 'add unwired exports in common forms')
+  git('checkout', '-q', 'main')
+
+  // There is no stable identifier to search for when the default export is an
+  // anonymous expression. That is analyzer-unknown, never "nothing to verify".
+  git('checkout', '-q', '-b', 'anonymous-default')
+  writeFileSync(join(repo, 'src', 'anonymous.ts'), 'export default () => 1\n')
+  git('add', '-A')
+  git('commit', '-q', '-m', 'add anonymous default export')
+  git('checkout', '-q', 'main')
+
+  // Path transport must remain byte-safe. `git diff --name-only` C-quotes the
+  // second path by default, while an unquoted shell expansion splits the first.
+  git('checkout', '-q', '-b', 'unusual-paths')
+  writeFileSync(
+    join(repo, 'src', 'orphan file.ts'),
+    'export function orphanInSpacedFile(): number { return 1 }\n',
+  )
+  writeFileSync(
+    join(repo, 'src', 'café.ts'),
+    'export function orphanInUnicodeFile(): number { return 1 }\n',
+  )
+  git('add', '-A')
+  git('commit', '-q', '-m', 'add unwired exports under unusual paths')
+  git('checkout', '-q', 'main')
+
+  // Text mentions are not callers. Neither the comment nor the string below
+  // is a runtime identifier reference.
+  git('checkout', '-q', '-b', 'comment-only')
+  writeFileSync(
+    join(repo, 'src', 'comment-orphan.ts'),
+    'export function mentionedOnlyInProse(): number { return 1 }\n',
+  )
+  writeFileSync(
+    join(repo, 'src', 'prose.ts'),
+    [
+      '// mentionedOnlyInProse is deliberately not invoked',
+      "const description = 'mentionedOnlyInProse is not a caller'",
+      'void description',
+      '',
+    ].join('\n'),
+  )
+  git('add', '-A')
+  git('commit', '-q', '-m', 'mention an unwired export only in prose')
+  git('checkout', '-q', 'main')
+
+  // A local barrel export is metadata, not product reachability.
+  git('checkout', '-q', '-b', 'reexport-only')
+  writeFileSync(
+    join(repo, 'src', 'thing.ts'),
+    'export function barrelOrphan(): number { return 1 }\n',
+  )
+  writeFileSync(
+    join(repo, 'src', 'barrel.ts'),
+    "import { barrelOrphan } from './thing.ts'\nexport { barrelOrphan }\n",
+  )
+  git('add', '-A')
+  git('commit', '-q', '-m', 're-export without a runtime caller')
+  git('checkout', '-q', 'main')
+
+  // Positive caller control for the syntax-aware search.
+  git('checkout', '-q', '-b', 'wired-export')
+  writeFileSync(
+    join(repo, 'src', 'wired.ts'),
+    [
+      'export function newlyWired(): number { return 1 }',
+      'const result = newlyWired()',
+      'void result',
+      '',
+    ].join('\n'),
+  )
+  git('add', '-A')
+  git('commit', '-q', '-m', 'add a called export')
+  git('checkout', '-q', 'main')
+
   // The ref shape callers actually hold: a branch that exists ONLY as a
   // remote-tracking ref, with no local branch of that name (#424 #420 #411).
   git('update-ref', 'refs/remotes/origin/trident/only-remote', git('rev-parse', 'feature'))
@@ -125,5 +221,57 @@ describe('lane_review.sh fail-closed contract', () => {
     expect(code).toBe(1)
     expect(out).toContain('orphanNeverCalled')
     expect(out).toContain('NO non-test production caller')
+  })
+
+  test('all common runtime export forms are extracted and fail when unwired', () => {
+    const { code, out } = review('export-forms')
+    expect(code).toBe(1)
+    for (const symbol of [
+      'orphanDefault',
+      'AbstractOrphan',
+      'OrphanEnum',
+      'orphanLet',
+      'orphanGenerator',
+      'orphanExportList',
+    ]) {
+      expect(out).toContain(`FINDING: ${symbol} has NO non-test production caller`)
+    }
+    expect(out).not.toContain('no new exported symbols')
+  })
+
+  test('an anonymous default export fails closed instead of disappearing', () => {
+    const { code, out } = review('anonymous-default')
+    expect(code).toBe(2)
+    expect(out).toContain('anonymous default export whose caller cannot be identified')
+    expect(out).not.toContain('delivers behaviour: yes')
+  })
+
+  test('spaces and non-ASCII path names cannot erase exported symbols', () => {
+    const { code, out } = review('unusual-paths')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: orphanInSpacedFile')
+    expect(out).toContain('FINDING: orphanInUnicodeFile')
+    expect(out).not.toContain('no new exported symbols')
+  })
+
+  test('comments and strings are not production callers', () => {
+    const { code, out } = review('comment-only')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: mentionedOnlyInProse has NO non-test production caller')
+    expect(out).not.toContain('ok: mentionedOnlyInProse')
+  })
+
+  test('a bare local re-export is not a production caller', () => {
+    const { code, out } = review('reexport-only')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: barrelOrphan has NO non-test production caller')
+    expect(out).not.toContain('ok: barrelOrphan')
+  })
+
+  test('syntax-aware caller search retains a real-use positive control', () => {
+    const { code, out } = review('wired-export')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: newlyWired called by src/wired.ts')
+    expect(out).toContain('=== delivers behaviour: yes')
   })
 })

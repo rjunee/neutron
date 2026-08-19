@@ -13,16 +13,19 @@
 # DOES THIS BRANCH CHANGE WHAT THE PRODUCT DOES?
 #
 # Exit 0 = delivers something. Exit 1 = findings. Exit 2 = the check itself
-# could not run — an unresolvable ref or an empty extraction MUST fail loudly,
-# never read as clean. Measured 2026-08-18: an earlier revision printed
-# `unknown ref` and exited 0, and that empty output was indistinguishable
-# from a clean verdict on three PRs at once. There is deliberately NO lenient
+# could not run — an unresolvable ref, a failed extraction or an analyzer
+# failure MUST fail loudly, never read as clean. Measured 2026-08-18: an
+# earlier revision printed `unknown ref` and exited 0, and that empty output
+# was indistinguishable from a clean verdict on three PRs at once. There is deliberately NO lenient
 # default; a caller wanting leniency must add an explicit opt-in flag.
 #
 # Pinned by tools/lane_review.test.ts: the unknown-ref non-zero exit, the
 # origin/ fallback, the stated-empty symbol set, and the unwired finding.
 
 set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ANALYZER="$HERE/lane_review_ast.mjs"
 
 if [ $# -lt 1 ]; then
   echo "usage: lane_review.sh <branch-or-ref> [base]"
@@ -63,87 +66,95 @@ findings=0
 echo "=== $BR vs $BASE (merge-base ${MB:0:8})"
 git diff --stat "$MB".."$BR" | tail -1
 
-files=$(git diff --name-only "$MB".."$BR")
-if [ -z "$files" ]; then
+paths_file=$(mktemp)
+symbols_file=$(mktemp)
+callers_file=$(mktemp)
+trap 'rm -f "$paths_file" "$symbols_file" "$callers_file"' EXIT
+
+if ! git diff --name-only -z "$MB".."$BR" >"$paths_file"; then
+  echo "lane_review: could not list changed files — refusing to answer"
+  exit 2
+fi
+mapfile -d '' -t files <"$paths_file"
+if [ "${#files[@]}" -eq 0 ]; then
   echo "FINDING: branch is IDENTICAL to base — it built nothing."
   exit 1
 fi
 
 # --- class 1: docs-only ------------------------------------------------------
-code=$(printf '%s\n' "$files" | grep -vE '\.(md|txt)$|^docs/|^plans/' || true)
-if [ -z "$code" ]; then
+code=()
+for file in "${files[@]}"; do
+  case "$file" in
+    *.md|*.txt|docs/*|plans/*) ;;
+    *) code+=("$file") ;;
+  esac
+done
+if [ "${#code[@]}" -eq 0 ]; then
   echo "FINDING: DOCS-ONLY — every changed file is prose. Delivers no behaviour."
-  printf '  %s\n' $files
+  printf '  %s\n' "${files[@]}"
   exit 1
 fi
 
 # --- class 2: test-only ------------------------------------------------------
-prod=$(printf '%s\n' "$code" | grep -vE '\.test\.|\.spec\.|^tests?/|__tests__' || true)
-if [ -z "$prod" ]; then
+prod=()
+for file in "${code[@]}"; do
+  if [[ ! "$file" =~ \.test\.|\.spec\.|^tests?/|__tests__ ]]; then
+    prod+=("$file")
+  fi
+done
+if [ "${#prod[@]}" -eq 0 ]; then
   echo "FINDING: TEST-ONLY — no production file changed."
-  printf '  %s\n' $code
+  printf '  %s\n' "${code[@]}"
   exit 1
 fi
 
 echo "--- production files changed:"
-printf '  %s\n' $prod
+printf '  %s\n' "${prod[@]}"
 
 # --- class 3: unwired --------------------------------------------------------
-# Collect exported symbols ADDED by this branch in production files.
-syms=$(git diff "$MB".."$BR" -- $prod 2>/dev/null \
-  | grep -E '^\+' | grep -vE '^\+\+\+' \
-  | grep -oE 'export (async )?function [A-Za-z_][A-Za-z0-9_]*|export const [A-Za-z_][A-Za-z0-9_]*|export class [A-Za-z_][A-Za-z0-9_]*' \
-  | sed -E 's/.* //' | sort -u || true)
+# Compare syntax trees instead of grepping added lines. Besides handling every
+# declaration form (default/abstract/generator/enum/let/export lists), this
+# keeps comments and strings out of the caller question by construction.
+#
+# A CALLER is a reference in a non-test production file that is not the export
+# site itself. Two rules the analyzer must keep, both paid for in production:
+# a re-export (`export { s } from`) is NOT a caller — that is exactly what #400
+# did and it shipped unwired; and the DEFINING FILE is NOT skipped — only the
+# definition itself is. A symbol defined and USED inside its own module is
+# wired: #395 (verified live in the deployed tree) does exactly that, and an
+# earlier version that skipped the definer reported it as unwired.
+if ! bun "$ANALYZER" exports "$MB" "$BR" "${prod[@]}" >"$symbols_file"; then
+  echo "lane_review: exported-symbol analysis failed — refusing to answer"
+  exit 2
+fi
+mapfile -t syms <"$symbols_file"
 
-if [ -z "$syms" ]; then
+if [ "${#syms[@]}" -eq 0 ]; then
   # Stated in words, never implied by absence: "nothing to check" and
   # "checked, all wired" must not look identical.
   echo "--- no new exported symbols — nothing to verify; branch edits existing code paths (wiring N/A)"
 else
-  echo "--- new exported symbols: $(printf '%s ' $syms)"
-  for s in $syms; do
-    # A CALLER is a reference in a non-test production file that is not the
-    # export site itself. A re-export (`export { s } from`) is NOT a caller —
-    # that is exactly what #400 did and it shipped unwired.
-    callers=$(git grep -l --full-name -w "$s" "$BR" -- '*.ts' '*.tsx' 2>/dev/null \
-      | sed 's/^[^:]*://' \
-      | grep -vE '\.test\.|\.spec\.|^tests?/|__tests__' || true)
-    real=""
-    for f in $callers; do
-      body=$(git show "$BR:$f" 2>/dev/null) || continue
-      # NOTE: the defining file is NOT skipped. A symbol defined and USED inside
-      # its own module is wired — #395 (verified live in the deployed tree) does
-      # exactly that, and skipping the definer reported it as unwired. What is
-      # stripped is the DEFINITION ITSELF, not the file.
-      body=$(printf '%s' "$body" | sed -E "s/export (async )?(function|const|class) $s\b/__DEF__/")
-      # Strip re-export and import BLOCKS before looking for a use. These span
-      # MULTIPLE LINES:
-      #     export {
-      #       buildWorktreeReaperLoop,
-      #     } from './worktree-reaper.ts'
-      # A line-oriented regex misses that and reports the barrel as a caller —
-      # which is precisely how #400 passed a naive version of this check while
-      # being the unwired branch this tool exists to catch. Slurp, then strip.
-      stripped=$(printf '%s' "$body" | perl -0777 -pe "
-        s/export\s+(type\s+)?\{[^}]*\}\s*from\s*['\"][^'\"]+['\"];?//gs;
-        s/^\s*(import|export)\s+type\s+.*?;?\s*\$//gms;
-        s/import\s+(type\s+)?\{[^}]*\}\s*from\s*['\"][^'\"]+['\"];?//gs;
-      " 2>/dev/null)
-      # HERESTRING, NOT A PIPE — and this is not style. `set -o pipefail` is on.
-      # `printf … | grep -q` makes grep exit the instant it matches, which closes
-      # the pipe and kills printf with SIGPIPE (141); pipefail then reports the
-      # PIPELINE as failed. So the check reported "no caller found" exactly when
-      # the caller was found EARLY in the file, and reported correctly only when
-      # the match happened to be near the end. An inverted check that looks like
-      # a clean pass. It marked #395 — verified live in the deployed tree —
-      # unwired. Do not turn this back into a pipe.
-      grep -qE "\b$s\b" <<<"$stripped" && real="$real $f"
-    done
-    if [ -z "$real" ]; then
-      echo "  FINDING: $s has NO non-test production caller — green-and-unwired."
+  printf '%s' "--- new exported symbols:"
+  printf ' %s' "${syms[@]}"
+  printf '\n'
+
+  if ! bun "$ANALYZER" callers "$BR" "${syms[@]}" >"$callers_file"; then
+    echo "lane_review: production-caller analysis failed — refusing to answer"
+    exit 2
+  fi
+  declare -A real_callers
+  while IFS=$'\t' read -r -d '' symbol caller; do
+    real_callers["$symbol"]+="${real_callers[$symbol]:+$'\n'}$caller"
+  done <"$callers_file"
+
+  for symbol in "${syms[@]}"; do
+    if [ -z "${real_callers[$symbol]:-}" ]; then
+      echo "  FINDING: $symbol has NO non-test production caller — green-and-unwired."
       findings=$((findings+1))
     else
-      echo "  ok: $s called by$real"
+      printf '  ok: %s called by' "$symbol"
+      while IFS= read -r caller; do printf ' %s' "$caller"; done <<<"${real_callers[$symbol]}"
+      printf '\n'
     fi
   done
 fi

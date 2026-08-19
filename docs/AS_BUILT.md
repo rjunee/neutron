@@ -2,6 +2,12 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — lane_review.sh fails closed (T1–T4) (2)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript syntax trees so default/abstract/generator/enum/let/export-list declarations cannot vanish and comments, strings, imports or re-exports cannot masquerade as callers; an anonymous default with no stable caller name exits 2 instead of disappearing. Pinned by tools/lane_review.test.ts: 12 tests / 41 expect calls against a fixture git repo, including all of those false-clean witnesses and a real-call positive control. Mutants, one per original hardening: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
+## 2026-08-18 — lane_review.sh fails closed (T1–T4)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z, an earlier revision printed `unknown ref` and exited 0, indistinguishable from a clean verdict on three PRs at once); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Pinned by tools/lane_review.test.ts: 6 tests / 17 expect calls against a fixture git repo, ~0.5s, no network. Mutants, one per hardening: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
 ## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
 
 Migration repairs now have an explicit, loader-validated `reapply` kind. Unlike the existing
@@ -22,9 +28,6 @@ ships no migration SQL and does not change the schema snapshot.
 its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsified by 0130's
 rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
 `01M095E3F8YN3N9XV5AK4S9XJW`.
-
-## 2026-08-18 — lane_review.sh fails closed (T1–T4)
-tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z, an earlier revision printed `unknown ref` and exited 0, indistinguishable from a clean verdict on three PRs at once); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Pinned by tools/lane_review.test.ts: 6 tests / 17 expect calls against a fixture git repo, ~0.5s, no network. Mutants, one per hardening: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
 
 ## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
 
