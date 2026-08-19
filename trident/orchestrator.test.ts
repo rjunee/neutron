@@ -83,6 +83,7 @@ function buildHarness(opts: {
   now?: () => string
   max_inflight_ms?: number
   no_advance_hang_ms?: number
+  latest_stage_event_at?: (run_id: string) => string | null
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
@@ -151,6 +152,7 @@ function buildHarness(opts: {
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
   if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
+  if (opts.latest_stage_event_at !== undefined) o.latest_stage_event_at = opts.latest_stage_event_at
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
@@ -2748,6 +2750,125 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     expect(after?.failure_reason).toContain('suspected agent hang')
   })
 
+  /**
+   * THE WATCHDOG'S OWN PREMISE IS FALSE, and these pin the correction.
+   *
+   * It documents "a HEALTHY build re-stamps `last_advanced_at` on every
+   * inner-workflow checkpoint, so it never trips this". Checkpoints land BETWEEN
+   * phases; one Forge round runs ~40 min and re-stamps nothing while it does. So the
+   * field is stale by construction during exactly the work the watchdog is most
+   * likely to interrupt.
+   *
+   * MEASURED: run 9bece714 was reaped as "no progress for 90 min — suspected agent
+   * hang" with pid 286859 alive and its stderr written to seconds earlier.
+   */
+  test('a stale clock does NOT reap a run whose stage events prove it is advancing', async () => {
+    let t = 0
+    // The mid-phase evidence: written at t=50s, INSIDE the 60s window, while
+    // `last_advanced_at` has been frozen at t=0 since the fire.
+    let stageAt: string | null = null
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: () => stageAt,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    stageAt = new Date(50_000).toISOString()
+    t = 90_000 // past the threshold on last_advanced_at — the old code reaps here
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).not.toBe('failed')
+    expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
+    // NOTHING WAS WRITTEN. `TridentRunUpdate` re-stamps `last_advanced_at` on every
+    // save, so a re-stamp here would have landed as now() — inventing liveness and
+    // buying a wedged run a fresh full threshold. The clock stays where it was and
+    // the reprieve is recomputed from the evidence on the next tick.
+    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+  })
+
+  test('the reprieve EXPIRES on its own once the evidence stops', async () => {
+    // The other half: a stand-down must not become immortality. The re-stamp moves
+    // the clock to the last event, so a run that goes quiet is reaped on schedule
+    // measured from THAT moment.
+    let t = 0
+    let stageAt: string | null = null
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: () => stageAt,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    stageAt = new Date(50_000).toISOString()
+    t = 90_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    // Events stop. Because nothing was persisted, the very next tick past the
+    // threshold measured from the LAST event reaps as designed.
+    t = 111_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('suspected agent hang')
+  })
+
+  test('ABSENCE IS NOT EVIDENCE: no events, and no reader at all, both still reap', async () => {
+    // The two null paths must be indistinguishable from the old behaviour, or the
+    // fix trades a false death for a run nothing can ever reap.
+    for (const reader of [() => null, undefined]) {
+      let t = 0
+      const opts: Parameters<typeof buildHarness>[0] = {
+        plan: () => ({ result: null }),
+        now: () => new Date(t).toISOString(),
+        no_advance_hang_ms: 60_000,
+        max_inflight_ms: 2 * 60 * 60_000,
+      }
+      if (reader !== undefined) opts.latest_stage_event_at = reader
+      const h = buildHarness(opts)
+      const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+      await h.loop.runOnce()
+      t = 90_000
+      await h.loop.runOnce()
+
+      const after = store.get(run.id)
+      expect(after?.phase).toBe('failed')
+      expect(after?.failure_reason).toContain('suspected agent hang')
+    }
+  })
+
+  test('a stage event OLDER than the threshold is not a reprieve either', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000,
+      // Evidence exists, but it is ancient — a run that genuinely stopped.
+      latest_stage_event_at: () => new Date(1_000).toISOString(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('suspected agent hang')
+  })
+
   test('a stale orphan past the hang threshold is reaped, not redispatched', async () => {
     let t = 0
     const h = buildHarness({
@@ -3964,5 +4085,37 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     )
     expect(out).toBe(head)
     expect(waits).toEqual([])
+  })
+})
+
+/**
+ * WIRED, NOT MERELY BUILT. Five PRs in one night landed a module plus its unit
+ * tests and skipped the registration, so a green merge delivered no behaviour. A
+ * hang-watchdog reader is exactly that shape: `latest_stage_event_at` is OPTIONAL
+ * and its absence is indistinguishable from the old code, so an unwired version
+ * passes every test above while production keeps reaping live builds.
+ *
+ * This asserts the production composition root actually passes it.
+ */
+describe('hang watchdog — the stage-event reader is wired in production', () => {
+  test('build-core-modules passes latest_stage_event_at to buildTridentOrchestrator', () => {
+    const src = readFileSync(
+      new URL('../gateway/composition/build-core-modules.ts', import.meta.url),
+      'utf8',
+    )
+    // POSITIVE CONTROL FIRST: if this anchor ever moves, the assertions below would
+    // pass vacuously against an empty read, and an empty check reads as a passing
+    // check. Fail loudly instead.
+    expect(src).toContain('buildTridentOrchestrator(orchestratorOpts)')
+    expect(src).toContain('latest_stage_event_at:')
+    expect(src).toContain('store.latestStageEventAt(run_id)')
+  })
+
+  test('the store exposes the single-row reader the wiring calls', () => {
+    const src = readFileSync(new URL('./store.ts', import.meta.url), 'utf8')
+    expect(src).toContain('latestStageEventAt(run_id: string): string | null')
+    // ONE row, not the whole history — this runs per in-flight run per tick.
+    expect(src).toContain('ORDER BY id DESC')
+    expect(src).toContain('LIMIT 1')
   })
 })

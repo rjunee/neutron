@@ -314,6 +314,29 @@ export interface BuildTridentOrchestratorOptions {
    */
   no_advance_hang_ms?: number
   /**
+   * POSITIVE LIVENESS EVIDENCE for the hang watchdog: the timestamp of the most
+   * recent stage event for a run, or null when it has none.
+   *
+   * THE PREMISE OF THE WATCHDOG ABOVE IS FALSE, and this is the correction. It
+   * claims "a HEALTHY build re-stamps `last_advanced_at` on every inner-workflow
+   * checkpoint, so it never trips this". Checkpoints land BETWEEN phases; a single
+   * Forge round runs ~40 min and re-stamps nothing while it does. So the field is
+   * stale by construction during exactly the work the watchdog is most likely to
+   * interrupt, and the reaper is really asking "has a phase ended recently".
+   *
+   * MEASURED: run 9bece714 was reaped as "no progress for 90 min — suspected agent
+   * hang" while pid 286859 was alive and its stderr log had been written to seconds
+   * earlier. Three further lanes sat 57-85 min "stale" while actively logging.
+   *
+   * Stage events are written MID-PHASE, so a run that has emitted one recently is
+   * observably progressing. When this reader is supplied and reports an event newer
+   * than the hang threshold, the watchdog STANDS DOWN for that tick — writing
+   * nothing, so the reprieve is recomputed from the evidence next tick and expires
+   * the moment the events stop. Omitted, or returning null, leaves the previous
+   * behaviour exactly as it was: absence is never read as liveness.
+   */
+  latest_stage_event_at?: (run_id: string) => string | null
+  /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
    * restart case: the workflow was fired by a prior control-plane process and
@@ -1710,6 +1733,7 @@ export function buildTridentOrchestrator(
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
+  const latestStageEventAt = opts.latest_stage_event_at ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
@@ -3005,6 +3029,43 @@ export function buildTridentOrchestrator(
     //     than waiting on the 2h `maxInflightMs` ceiling below. Checked BEFORE
     //     orphan recovery so a wedged orphan is reaped instead of redispatched.
     if (run.subagent_run_id !== null && elapsedSinceAdvance(run) > noAdvanceHangMs) {
+      // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING. The clock
+      //     above measures phase boundaries, not work; a run mid-Forge is stale on
+      //     that field however hard it is working. Stage events are written
+      //     MID-phase, so one that is NEWER than the hang threshold is proof the run
+      //     advanced inside the window the watchdog just called dead.
+      //
+      //     NOTHING IS WRITTEN, DELIBERATELY. The obvious implementation re-stamps
+      //     `last_advanced_at` to the event's timestamp — but `TridentRunUpdate`
+      //     documents that the field "is always re-stamped by `save`/`update` so
+      //     callers never pass it", so that write would silently land as `now()`:
+      //     liveness the run never demonstrated, and a fresh full threshold bought
+      //     by an event that may be 89 minutes old. Returning `changed: false`
+      //     instead means the reprieve is RECOMPUTED FROM THE EVIDENCE on every
+      //     tick and expires the moment the events stop, with no stored state to
+      //     go stale and no timestamp invented anywhere.
+      //
+      //     ABSENCE IS NOT EVIDENCE: a null reader (not wired), an unparseable
+      //     timestamp, or a run with no events at all falls straight through to the
+      //     reap below, byte-identical to the old behaviour.
+      const stageAt = latestStageEventAt === null ? null : latestStageEventAt(run.id)
+      const stageMs = stageAt === null ? NaN : Date.parse(stageAt)
+      const nowMs = Date.parse(now())
+      if (Number.isFinite(stageMs) && Number.isFinite(nowMs) && nowMs - stageMs <= noAdvanceHangMs) {
+        const staleMins = Math.round(elapsedSinceAdvance(run) / 60_000)
+        const evidenceMins = Math.round(Math.max(0, nowMs - stageMs) / 60_000)
+        // DISCLOSED, not silent. A watchdog that quietly declines to fire is as hard
+        // to trust as one that quietly fires; the note names both clocks so the
+        // reason this run survived is legible in the tick log.
+        return {
+          run,
+          changed: false,
+          waiting: true,
+          note:
+            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but a stage ` +
+            `event landed ${evidenceMins} min ago — the run is advancing mid-phase`,
+        }
+      }
       fired.delete(run.id)
       redispatched.delete(run.id)
       const mins = Math.round(noAdvanceHangMs / 60_000)
