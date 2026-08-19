@@ -126,6 +126,10 @@ const {
   baseSha = null,
   prNumber = null,
   branch = null,
+  // WAVE MEMBER MODE — both values are threaded only for a child run. The task id
+  // pins planning to one checklist line; the pre-cut member branch isolates its build.
+  pinnedTaskId = null,
+  memberBranch = null,
   dbPath,
   runId,
   resumeCheckpoint = null,
@@ -309,17 +313,22 @@ const worktreeCleanupSh = worktreeCleanupScript || `${repoPath}/trident/worktree
 // default when there is no GitHub origin or `gh` is unavailable) → commit on the
 // branch ONLY; the OUTER loop's `mergeLocal` merges it. Telling a local-mode
 // Forge to `gh pr create` is a guaranteed failure (Codex review [P1]).
-const isPr = mergeMode === 'pr'
+const memberMode =
+  typeof pinnedTaskId === 'string' && pinnedTaskId.trim().length > 0 &&
+  typeof memberBranch === 'string' && memberBranch.trim().length > 0
+const pinnedMemberTaskId = memberMode ? pinnedTaskId.trim() : ''
+const pinnedMemberBranch = memberMode ? memberBranch.trim() : ''
+const isPr = mergeMode === 'pr' && !memberMode
 // A resume = a prior (crashed) run already created the branch (and, in pr mode,
 // the PR). Re-enter the existing branch instead of `git switch -c` (which would
 // collide with the existing branch) and reuse the PR — never duplicate (Codex
 // review [P2]).
-const resuming = resumeCheckpoint !== null || prNumber !== null
+const resuming = memberMode || resumeCheckpoint !== null || prNumber !== null
 
 // DETERMINISTIC branch — the cleanup step finds the worktree by this exact name
 // even if Forge fails before returning a result (see the finally block). Falls
 // back to `trident/<slug>` when the caller didn't thread an existing branch.
-const forgeBranch = branch || `trident/${slug}`
+const forgeBranch = memberMode ? pinnedMemberBranch : branch || `trident/${slug}`
 
 // RB2 (b) — `reflectionGuidance` (destructured above, threaded READY-TO-APPEND by
 // the launcher's testable `buildReflectionGuidance`) is APPENDED to the FORGE BUILDER
@@ -1102,6 +1111,18 @@ function firstUncheckedTask(body) {
   return null
 }
 
+// The exact unchecked checklist line for a wave member's pinned task id. This is
+// deliberately not a plan-graph parser: dependency/surface selection already
+// happened in the parent, and the child is allowed to do only the task it received.
+function pinnedUncheckedTaskLine(body, taskId) {
+  if (typeof body !== 'string' || typeof taskId !== 'string') return null
+  for (const line of body.split('\n')) {
+    const match = line.match(/^\s*- \[ \]\s*([^:\s]+):/)
+    if (match?.[1] === taskId) return line
+  }
+  return null
+}
+
 // GNU/BSD `cksum` of a string: the POSIX CRC-32 and the UTF-8 byte count, computed
 // from code units alone.
 //
@@ -1243,11 +1264,17 @@ function forgeStep1(reenter) {
 // Step 4 differs on git-mode: pr → push + open/reuse a GitHub PR; local → commit
 // on the branch only (no remote, no `gh pr create`).
 function forgePushStep(reenter) {
-  return isPr
+  return memberMode
+    ? `Commit on ${forgeBranch} and stop. This is a wave-member branch owned by the parent join; do NOT push, open a PR, or run \`gh\`.`
+    : isPr
     ? `Commit on ${forgeBranch} and stop. Do NOT push and do NOT run \`gh\`; the durable outer loop publishes and confirms the commit before review.`
     : `Commit on ${forgeBranch}. This repo has NO GitHub remote — do NOT push or run \`gh pr create\`; the OUTER loop merges the local branch.`
 }
-const FORGE_PR_LINE = isPr ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)' : 'PR_NUMBER=0   (local mode — no GitHub PR)'
+const FORGE_PR_LINE = memberMode
+  ? 'PR_NUMBER=0   (wave member — no GitHub PR)'
+  : isPr
+    ? 'PR_NUMBER=0   (the outer loop publishes after this build exits)'
+    : 'PR_NUMBER=0   (local mode — no GitHub PR)'
 
 // `reenter` = the branch/PR already exist (crash-resume or a fix round > 1).
 function forgeBuildContract(reenter, artifactCheckpointName, suiteScope = 'full-suite') {
@@ -1261,7 +1288,7 @@ function forgeBuildContract(reenter, artifactCheckpointName, suiteScope = 'full-
   const reportStep = artifactCommand === null ? 6 : 7
   return `You are FORGE — Neutron's autonomous build sub-agent. You build, test, and commit without blocking on human input. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE}
 
-You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${mergeMode}.
+You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${memberMode ? 'member' : mergeMode}.
 ${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrategy}\n`}
 CONTRACT
 1. ${forgeStep1(reenter)}
@@ -2000,6 +2027,27 @@ SPEC / TASK CONTEXT:
 ${task}`
 }
 
+// A wave child still gets a planning seat for the task-level execution spec, but
+// selection is already complete. It reads the shared parent plan from the member
+// branch and must quote the pinned checklist line verbatim; it may not pick an
+// earlier unchecked task or rewrite the shared plan.
+function memberPlanPrompt() {
+  const parentBranch = typeof branch === 'string' ? branch : ''
+  const planPath = `.trident/plans/${parentBranch}.md`
+  const planObject = `${pinnedMemberBranch}:${planPath}`
+  const stampCommand = workflowStageStampCommand('plan-start')
+  const stampInstruction = stampCommand === null
+    ? ''
+    : `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stampCommand}\`\n\n`
+  return `${stampInstruction}You are the TRIDENT ORCHESTRATOR / PLANNER (Fable) for ONE pinned wave-member task. ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
+Work READ-ONLY from the repo of record ${repoPath}. Run this exact read-only command to read the shared parent plan: git show ${shSingleQuote(planObject)}. Do not write or commit any file.
+1. Find the ONE unchecked checklist line whose id is exactly ${pinnedMemberTaskId}. Do not select the first unchecked line and do not select any other task.
+2. Return the full plan body byte-for-byte as implementationPlan and that pinned checklist line byte-for-byte, INCLUDING its - [ ] marker, as topTask.
+3. For ONLY that pinned line, emit executionSpec: exact TARGET FILES, ACCEPTANCE CRITERION, and TEST PLAN. Do not include work from any other checklist line.
+4. Tag its complexity as 'mechanical' or 'reasoning'; when uncertain choose 'reasoning'. Return remainingTasks as 0 because a member never selects or re-fires another task.
+Return via the schema. NEVER exit silently.`
+}
+
 // THE CHEAP PROBE THAT DECIDES WHETHER THE CONTINUATION PLANNER CAN RUN AT ALL.
 //
 // The workflow script has NO direct shell — every git fact it uses arrives through
@@ -2202,6 +2250,16 @@ ${plan.executionSpec}${briefNote}
 ${plan.implementationPlan}
 - Commit ${planPath} together with your code + tests.
 - Report \`deviatedFromSpec: true\` in your structured result ONLY if you materially deviated from the EXECUTION SPEC above (different target files, a different design, or the task as built is not the task as specced) — a true here forces the next iteration to re-derive the whole plan, so do not set it for cosmetic drift. Otherwise report false or omit it.`
+}
+
+function memberExecuteNote(plan, pinnedLine) {
+  return `\n\nRALPH WAVE MEMBER MODE — you are the EXECUTOR for ONE task already selected by the parent. Do NOT re-plan, re-select, or work on any other checklist item.
+- Implement ONLY this pinned plan line, quoted verbatim from the shared plan:
+${pinnedLine}
+- EXECUTION SPEC (follow it exactly):
+${plan.executionSpec}
+- The plan file is a shared parent-owned surface. Do NOT write, stage, or commit it; commit only this member's code and tests.
+- This member branch is joined by the parent. Do NOT push, open a PR, run Argus, or re-fire another task.`
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -5806,7 +5864,34 @@ try {
         ? `\n\nRESUME: the durable outer loop already owns PR #${pr ?? '?'} and branch ${forgeBranch}. Commit to that SAME local branch. Do NOT push and do NOT run \`gh\`; the outer loop reuses the PR.`
         : ''
     let ralphNote = ''
-    if (ralph === true) {
+    if (ralph === true || memberMode) {
+      if (memberMode) {
+        const plan = await agent(
+          memberPlanPrompt(),
+          withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+        )
+        if (!plan) {
+          throw new Error(
+            `plan:fable returned null for pinned wave task ${pinnedMemberTaskId} — refusing to run Forge without a member execution spec`,
+          )
+        }
+        const pinnedLine = pinnedUncheckedTaskLine(plan.implementationPlan, pinnedMemberTaskId)
+        if (pinnedLine === null) {
+          throw new Error(
+            `shared plan does not contain unchecked pinned task ${pinnedMemberTaskId} — refusing to re-select a different task`,
+          )
+        }
+        if (plan.topTask !== pinnedLine) {
+          log(
+            `trident-v2 member plan integrity — topTask=${JSON.stringify(plan.topTask)} is not pinned line ${JSON.stringify(pinnedLine)}; using the shared plan line verbatim`,
+          )
+        }
+        plan.topTask = pinnedLine
+        complexityTag = plan.complexity
+        ralphNote = memberExecuteNote(plan, pinnedLine)
+        ralphRemaining = 0
+        log(`trident-v2 plan:fable member → pinnedTask=${pinnedMemberTaskId} complexity=${plan.complexity} branch=${forgeBranch}`)
+      } else {
       // ── WHICH PLANNER RUNS THIS ITERATION ─────────────────────────────────
       // A PLANNED RALPH HANDOFF WHOSE BRANCH DID NOT MOVE IN THE CRASH WINDOW is
       // the ONLY shape that may skip the survey, and this predicate is exactly
@@ -6053,6 +6138,7 @@ try {
       ralphNote = ralphExecuteNote(plan, forgeBranch, usePlanNext && hasBranchMaterial)
       ralphRemaining = Number.isFinite(plan.remainingTasks) ? Math.max(0, Math.trunc(plan.remainingTasks)) : 0
       log(`trident-v2 ${plannerLabel} → topTask="${plan.topTask}" complexity=${plan.complexity} remaining=${ralphRemaining}`)
+      }
     }
 
     // Round 1: re-enter only on a genuine crash-resume (`resuming`); otherwise
@@ -6061,7 +6147,14 @@ try {
     // `forgeBuildContract(resuming, 'forge-done')` call; fix rounds retain it.
     buildSuiteScope = 'full-suite'
     let buildSuiteScopeReason = 'non-ralph'
-    if (ralph === true) {
+    if (memberMode) {
+      if (testStrategyIntermediate === '') {
+        buildSuiteScopeReason = 'fail-closed: no intermediate block'
+      } else {
+        buildSuiteScope = 'subset'
+        buildSuiteScopeReason = `wave member: ${pinnedMemberTaskId}`
+      }
+    } else if (ralph === true) {
       if (!(Number.isFinite(ralphRemaining) && ralphRemaining > 0)) {
         buildSuiteScopeReason = 'terminal'
       } else if (testStrategyIntermediate === '') {
@@ -6203,6 +6296,30 @@ ${task}${reflectionGuidance}`,
     // durable publisher and this process ends, so the panel that must not APPROVE runs
     // in a different process which has no build report to read. Empty (a healthy build,
     // or no strategy at all) writes `[]` exactly as before.
+    if (memberMode) {
+      const commitSha = normalizeOid(branchHead) || normalizeOid(forgeSha)
+      if (commitSha === '') {
+        throw new Error(
+          `wave member ${pinnedMemberTaskId} completed Forge without a full commit OID on ${forgeBranch}`,
+        )
+      }
+      await checkpoint('built', { head: commitSha })
+      const builtResult = {
+        ok: true,
+        built: true,
+        commitSha,
+        prNumber: null,
+        branch: forgeBranch,
+        verdict: null,
+        round,
+        checkpoint: 'built',
+        remainingTasks: 0,
+        blockKind: 'none',
+      }
+      log(`trident-v2 member BUILT: task=${pinnedMemberTaskId} branch=${forgeBranch} commit=${commitSha} — skipping publish, Argus, and re-fire`)
+      await writeTerminalResult(builtResult)
+      return builtResult
+    }
     await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead, findings: fullSuiteFindings(forge, buildSuiteScope) })
     if (isPr) {
       // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
