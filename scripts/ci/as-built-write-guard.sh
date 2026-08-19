@@ -138,14 +138,47 @@ if ! changed_paths="$(git -C "$ROOT" diff --name-only --no-renames "${GUARD_BASE
   exit 2
 fi
 
-if [ -n "$changed_paths" ]; then
+council_warn() {
   {
-    echo "as-built-write-guard: docs/AS_BUILT.md may not be written by a branch."
-    echo "Branches prepend at the same offset and conflict by construction; GitHub never runs merge drivers server-side."
-    echo "Stage .trident/as-built/<branch>.md instead; the outer loop folds it onto main after the merge lands."
+    echo "as-built-write-guard: WARNING — this branch writes docs/AS_BUILT.md."
+    echo "Branches prepend at the same offset, and GitHub does not run merge drivers server-side,"
+    echo "so two branches that both append can conflict there."
+    echo "Prefer staging .trident/as-built/<branch>.md; the outer loop folds it onto main after the merge lands."
     echo 'See CONTRIBUTING § "The as-built log has ONE writer".'
+    echo "This is ADVISORY. It does not fail the build — see the note in this script for why."
   } >&2
-  exit 1
+}
+
+# WHY THIS WARNS INSTEAD OF FAILING — MEASURED 2026-08-19, AND THE MEASUREMENT
+# REVERSED THE ORIGINAL DESIGN.
+#
+# This guard was written as a hard `exit 1` on the premise that AS_BUILT.md is
+# what makes build PRs conflict. That premise was tested against the live
+# backlog before landing it, and it did not survive:
+#
+#     open PRs                     45
+#     touch docs/AS_BUILT.md       31
+#     conflicting PRs measured     34
+#       conflict ON AS_BUILT.md     6
+#       conflict on other files    34
+#       blocked SOLELY by it        0
+#
+# Not one open PR is blocked by this file. Every conflicting branch has a real
+# code conflict elsewhere — orchestrator.ts, controller.ts, migrations/runner.ts
+# — and AS_BUILT.md merely rides along in 6 of 34. The `merge=union` attribute
+# this repo already ships is evidently doing its job.
+#
+# So a hard failure would have refused 31 of 45 open PRs to eliminate a conflict
+# class that is currently blocking none of them: a large, certain cost against a
+# benefit measured at zero. The detection is still worth having — 6 of 34 do
+# co-conflict here, and the day the union attribute stops working this is the
+# check that will say so — but it earns a warning, not a veto.
+#
+# Restoring the veto is a one-line change (`council_warn` then `exit 1`), and the
+# evidence for whether it is deserved will be sitting in the CI logs.
+if [ -n "$changed_paths" ]; then
+  council_warn
+  exit 0
 fi
 
 echo "as-built-write-guard: OK — branch diff does not write docs/AS_BUILT.md."

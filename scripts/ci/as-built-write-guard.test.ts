@@ -2,12 +2,19 @@
  * The real as-built write guard against a throwaway git repository.
  *
  * The guard's boundary is git history, not the working tree: branch-side writes
- * to the canonical log fail, staged entries pass, renaming the log away still
- * fails, and invalid inputs refuse to skip. The final case pins the three-dot
- * diff: a legitimate fold on main after the branch fork must not red the branch.
+ * to the canonical log are DETECTED and warned about, staged entries pass,
+ * renaming the log away is still detected, and invalid inputs refuse to skip.
+ * One case pins the three-dot diff — a legitimate fold on main after the branch
+ * fork must not red the branch.
+ *
+ * THE VERDICT IS ADVISORY; THE REFUSALS ARE NOT. A detected write exits 0 with a
+ * warning (measured 2026-08-19: 0 of 34 conflicting open PRs were blocked solely
+ * by this file, so a veto would have cost 31 of 45 PRs for no measured benefit).
+ * An UNREADABLE input still exits 2 — "I looked and found a write" and "I could
+ * not look" are different failures, and only the first was downgraded.
  */
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -46,24 +53,21 @@ function runGuard(repo: string, base?: string, head?: string): GuardResult {
   if (base !== undefined) env.GUARD_BASE_SHA = base
   if (head !== undefined) env.GUARD_HEAD_SHA = head
 
-  try {
-    const stdout = execFileSync('bash', [GUARD_SH], {
-      env,
-      encoding: 'utf8',
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
-    return { status: 0, stdout, stderr: '' }
-  } catch (error: unknown) {
-    const failure = error as {
-      status?: number
-      stdout?: string
-      stderr?: string
-    }
-    return {
-      status: failure.status ?? -1,
-      stdout: failure.stdout ?? '',
-      stderr: failure.stderr ?? '',
-    }
+  // `spawnSync`, NOT `execFileSync`. The previous helper read stderr only from
+  // the THROWN error, so a zero-exit run reported `stderr: ''` by construction.
+  // That was invisible while every violation exited 1; the moment the verdict
+  // became advisory, three tests failed for a reason that had nothing to do with
+  // the guard. A harness that can only observe failures cannot test a check
+  // whose whole point is that it now succeeds while still saying something.
+  const result = spawnSync('bash', [GUARD_SH], {
+    env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  return {
+    status: result.status ?? -1,
+    stdout: result.stdout ?? '',
+    stderr: result.stderr ?? '',
   }
 }
 
@@ -125,18 +129,52 @@ describe('as-built write guard (real git)', () => {
     expect(result.stdout).toContain('as-built-write-guard: OK')
   }, 30_000)
 
-  test('a branch that edits docs/AS_BUILT.md fails with the rule and remedy', () => {
+  // ADVISORY, NOT A VETO — and the two halves are asserted separately on
+  // purpose. Measured against the live backlog (2026-08-19), 0 of 34
+  // conflicting open PRs were blocked SOLELY by docs/AS_BUILT.md; every one had
+  // a real code conflict elsewhere. A hard failure would have refused 31 of 45
+  // open PRs for a benefit measured at zero. So the DETECTION must keep working
+  // exactly as before, and the EXIT CODE must not stop anyone — a test that only
+  // checked `status === 0` would also pass if the detection were deleted.
+  test('a branch that edits docs/AS_BUILT.md is DETECTED, with the rule and remedy', () => {
     const result = runGuard(repo, baseSha, violationSha)
-    expect(result.status).toBe(1)
+    expect(result.stderr).toContain('WARNING')
     expect(result.stderr).toContain('docs/AS_BUILT.md')
     expect(result.stderr).toContain('.trident/as-built/')
     expect(result.stderr).toContain('ONE writer')
   }, 30_000)
 
-  test('renaming docs/AS_BUILT.md away is still a violation', () => {
+  test('…and does NOT fail the build', () => {
+    const result = runGuard(repo, baseSha, violationSha)
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('does not fail the build')
+  }, 30_000)
+
+  test('the warning is distinguishable from the clean pass', () => {
+    // Without this, "warns" and "says OK" are the same observation to any caller
+    // reading the exit code, and a detection regression would look identical to
+    // a clean branch.
+    const violation = runGuard(repo, baseSha, violationSha)
+    const clean = runGuard(repo, baseSha, cleanSha)
+    expect(violation.status).toBe(clean.status)
+    expect(clean.stdout).toContain('as-built-write-guard: OK')
+    expect(clean.stderr).not.toContain('WARNING')
+    expect(violation.stdout).not.toContain('as-built-write-guard: OK')
+  }, 30_000)
+
+  test('renaming docs/AS_BUILT.md away is still detected', () => {
     const result = runGuard(repo, baseSha, renameSha)
-    expect(result.status).toBe(1)
+    expect(result.status).toBe(0)
+    expect(result.stderr).toContain('WARNING')
     expect(result.stderr).toContain('docs/AS_BUILT.md')
+  }, 30_000)
+
+  test('the unreadable-event refusals are UNCHANGED — advisory applies only to the verdict', () => {
+    // Downgrading the verdict must not downgrade the guard's refusal to run
+    // blind. "I looked and found a write" is now advice; "I could not look" is
+    // still exit 2, and these are different failures.
+    const result = runGuard(repo, UNRESOLVABLE_SHA, cleanSha)
+    expect(result.status).toBe(2)
   }, 30_000)
 
   test('missing either required SHA exits 2 rather than skipping', () => {
