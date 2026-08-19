@@ -13,7 +13,7 @@
 # origin/main's version. Any ADDED grandfathered entry FAILS the build.
 #
 # It reads main's baseline via `git show <ref>:<baseline>` (best-effort
-# `git fetch --depth=1 origin main` first so a shallow CI checkout has the ref),
+# `git -C "$ROOT" fetch --depth=1 origin main` first so a shallow CI checkout has the ref),
 # then hands both baselines to the pure comparator (depcruise-ratchet-compare.ts),
 # which keys each violation as `rule|from|to` and fails on any key present in the
 # committed set but absent from main's.
@@ -58,10 +58,10 @@ if [ "$MAIN_REF" = "origin/main" ]; then
   # checkout and produced three unrelated-looking failures in one night
   # (unrelated histories locally, an unresolvable sha and a missing merge base in
   # CI). Take the shallow path only when the clone is already shallow.
-  if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
-    git fetch --depth=1 origin main >/dev/null 2>&1 || true
+  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
+    git -C "$ROOT" fetch --depth=1 origin main >/dev/null 2>&1 || true
   else
-    git fetch origin main >/dev/null 2>&1 || true
+    git -C "$ROOT" fetch origin main >/dev/null 2>&1 || true
   fi
 fi
 
@@ -82,7 +82,7 @@ if ! git show "$MAIN_REF:$BASELINE_REL" > "$MAIN_BASELINE" 2>/dev/null; then
   # T3: name shallowness rather than leaving a true-but-useless message. An
   # "unreachable" ref on a shallow clone is not a fork or an outage, it is the
   # history simply not being present — the distinction cost hours to find once.
-  if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
     echo "depcruise-ratchet-guard: the checkout is SHALLOW (.git/shallow present), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
   fi
   echo "depcruise-ratchet-guard: $MAIN_REF has no $BASELINE_REL (bootstrap) or is unreachable — skipping."
