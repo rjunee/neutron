@@ -23,6 +23,9 @@ its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsifie
 rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
 `01M095E3F8YN3N9XV5AK4S9XJW`.
 
+## 2026-08-18 — lane_review.sh fails closed (T1–T4)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z, an earlier revision printed `unknown ref` and exited 0, indistinguishable from a clean verdict on three PRs at once); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Pinned by tools/lane_review.test.ts: 6 tests / 17 expect calls against a fixture git repo, ~0.5s, no network. Mutants, one per hardening: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
 ## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
 
 The `plan:probe` seat now also relays a byte-bounded branch log from
