@@ -8516,6 +8516,35 @@ Mutation checks (each production guard was removed independently and restored):
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
 
+### `suiteOutcome='deferred'` separates an instructed Ralph deferral from a missing suite
+
+Two independent salvage lanes exposed the same two-meanings defect: every intermediate
+Ralph brief instructed `suiteOutcome='not-run'`, while the unoverridable full-suite gate
+correctly treats `not-run` as a suite that should have run but did not. The gate therefore
+blocked the very intermediate rounds whose own contract deferred stage 2 to the terminal
+task, without any relationship to the code in those lanes.
+
+The repair has four coordinated pieces. `FORGE_SCHEMA` now accepts `deferred` (and its
+property spread covers the Codex route); all three intermediate instruction sites teach
+that value while the terminal vocabulary and Codex lane-failure rules retain `not-run`;
+the round-1 dispatch scope is threaded into `fullSuiteFindings`; and only an instructed
+`deferred` report from a subset-scoped dispatch yields no suite finding. The default scope
+remains full-suite, including fix rounds, so the exemption cannot become "no proof needed."
+
+| Report and dispatch | Expected gate result | Pinned result |
+| --- | --- | --- |
+| `testsPassed=false`, `deferred`, intermediate Ralph subset | No suite finding; checkpoint records `[]` | GREEN |
+| `testsPassed=false`, `not-run`, the same subset | `FULL SUITE NOT PROVEN` blocker | GREEN |
+| `testsPassed=false`, `deferred`, terminal Ralph full suite | Unoverridable blocker | GREEN |
+| `testsPassed=false`, `deferred`, non-Ralph full suite | Unoverridable blocker | GREEN |
+| `testsPassed=true`, `deferred`, any scope | `CONTRADICTORY SUITE CLAIM` blocker | GREEN |
+
+Mutation controls prove both directions: deleting only the subset exemption reds the
+intermediate-deferred test (67 pass / 1 fail), while bypassing the whole not-passed tail
+reds both the intermediate `not-run` case and the full-scope blocker table (55 pass /
+13 fail). With production code restored, the focused two-file run measured 152 pass /
+0 fail, and `bun test trident/` measured 2321 pass / 0 fail across 86 files.
+
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
 Task and reflection brief segments now travel by path via the `briefParts` manifest

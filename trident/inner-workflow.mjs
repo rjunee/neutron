@@ -895,8 +895,10 @@ const FORGE_SCHEMA = {
     // suite ran and was red before this branch existed". OPTIONAL on purpose: a legacy
     // launcher (no TEST EXECUTION block) and every existing test harness omit it, and
     // `fullSuiteFindings` treats an absent value exactly as it treated every
-    // `testsPassed !== true` before this field existed. See `SUITE_OUTCOME_*`.
-    suiteOutcome: { type: 'string', enum: ['passed', 'failed-new', 'failed-preexisting', 'not-run'] },
+    // `testsPassed !== true` before this field existed. `'deferred'` is the INSTRUCTED
+    // intermediate-Ralph deferral (the terminal task runs the suite); the gate honours
+    // it only on a subset-scoped dispatch — see `fullSuiteFindings`. See `SUITE_OUTCOME_*`.
+    suiteOutcome: { type: 'string', enum: ['passed', 'failed-new', 'failed-preexisting', 'not-run', 'deferred'] },
     // OPTIONAL — the base-branch comparison transcription that EARNS
     // `failed-preexisting`. Absent/empty means the claim is unearned and the gate
     // fails closed.
@@ -1264,10 +1266,10 @@ ${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrateg
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='not-run', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
+3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='deferred', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
-${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='not-run', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
+${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='deferred', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -4654,7 +4656,7 @@ function reviewPreconditionDeferred(readiness) {
  * `testStrategy === ''` (a legacy launcher, or a test harness that passes no strategy)
  * is inert — byte-identical old behaviour.
  */
-function fullSuiteFindings(report) {
+function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
   if (testStrategy === '') return []
   if (
     report?.testsPassed === true &&
@@ -4672,6 +4674,12 @@ function fullSuiteFindings(report) {
     ]
   }
   if (report?.testsPassed === true) return []
+  // An INSTRUCTED deferral is not a missing suite, but ONLY on the round DISPATCHED
+  // subset-scoped: its intermediate brief says `suiteOutcome='deferred'`, and the
+  // plan's terminal task runs the suite over the cumulative branch under its own gate.
+  // On a full-suite-scoped round the same word falls through to FULL SUITE NOT PROVEN
+  // below: `deferred` means "the terminal task will prove it", never "no proof needed".
+  if (report?.suiteOutcome === 'deferred' && dispatchedScope === 'subset') return []
   const evidence = typeof report?.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
   if (report?.suiteOutcome === 'failed-preexisting') {
     if (evidence === '') {
@@ -5647,6 +5655,8 @@ try {
   // below reads it back. That wire is what makes the gate reach PR mode at all, where
   // the build and the review are always in different processes.
   let buildReport = null
+  // Hoisted beside `buildReport`, which was itself hoisted for this same gate.
+  let buildSuiteScope = 'full-suite'
   // THE RECORDED CLAIM, read back on a resume that skips the build.
   //
   // `forge-done`, `fix-round-N` and the outer publisher's `outer-published:*` are the
@@ -5954,7 +5964,7 @@ try {
     // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
     // planner's complexity tag. The scope argument extends the original
     // `forgeBuildContract(resuming, 'forge-done')` call; fix rounds retain it.
-    let buildSuiteScope = 'full-suite'
+    buildSuiteScope = 'full-suite'
     let buildSuiteScopeReason = 'non-ralph'
     if (ralph === true) {
       if (!(Number.isFinite(ralphRemaining) && ralphRemaining > 0)) {
@@ -6090,7 +6100,7 @@ ${task}${reflectionGuidance}`,
     // durable publisher and this process ends, so the panel that must not APPROVE runs
     // in a different process which has no build report to read. Empty (a healthy build,
     // or no strategy at all) writes `[]` exactly as before.
-    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead, findings: fullSuiteFindings(forge) })
+    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead, findings: fullSuiteFindings(forge, buildSuiteScope) })
     if (isPr) {
       // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
       // NAME (`branch: forgeBranch`) — a value no model can plausibly mangle —
@@ -6190,7 +6200,7 @@ ${task}${reflectionGuidance}`,
         `forge:build completed but produced no ${missing}${unmeasured} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
       )
     }
-    await checkpoint('forge-done', { pr, head: branchHead, findings: fullSuiteFindings(buildReport) })
+    await checkpoint('forge-done', { pr, head: branchHead, findings: fullSuiteFindings(buildReport, buildSuiteScope) })
   }
 
   // First review + synthesis — UNLESS this is a resume whose recorded
@@ -6207,7 +6217,7 @@ ${task}${reflectionGuidance}`,
   // THE FULL-SUITE GATE'S ROUND-1 FINDINGS: this process's own build report when it
   // built, and otherwise the claim the building process recorded on the checkpoint this
   // run resumed from. Exactly one of the two can be non-empty.
-  const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport)
+  const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport, buildSuiteScope)
   if (resumeMode === 'fix') {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
     const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }
