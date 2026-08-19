@@ -1428,3 +1428,100 @@ describe('plan:next — the constants and the seam are the ones the card specifi
     expect(SRC).toContain("label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA")
   })
 })
+
+/**
+ * THE FAST PATH WAS DEAD CODE IN PRODUCTION, AND NOTHING SAID SO.
+ *
+ * Measured on 2026-08-19 across every workflow journal this instance has kept:
+ * `plan:fable` ran 48 times, `plan:next` ZERO times, and the `plan:next SKIPPED`
+ * diagnostic — the only line that explains a fall-through — appeared not once. The
+ * tests above all pass, because they construct the ideal handoff by hand; what they
+ * never covered is the two ways the REAL args differ from that ideal, and the fact
+ * that neither difference is observable.
+ *
+ * Each test here pins one of those.
+ */
+describe('plan:next — the production shapes that silently disabled the fast path', () => {
+  test('a ralphRound relayed as a STRING still takes the cheap path', async () => {
+    // `buildWorkflowArgs` reads an INTEGER column, but the value crosses a JSON
+    // boundary through the launcher before it arrives here. A launcher that relays
+    // `"2"` made `Number.isSafeInteger(ralphRound)` false, and because that check
+    // sits inside `cleanContinuation`, the probe was never dispatched and the
+    // SKIPPED diagnostic never fired: the full survey was paid on every iteration
+    // with no evidence anywhere that a cheaper path had been declined.
+    const out = await run({
+      ...cleanHandoff(2),
+      ralphRound: '2' as unknown as number,
+    })
+
+    expect(out.labels).toContain('plan:probe')
+    expect(out.labels).toContain('plan:next')
+    expect(out.labels).not.toContain('plan:fable')
+  })
+
+  test('a NON-numeric ralphRound still falls back to the full planner', async () => {
+    // The coercion must not become a way to smuggle nonsense past the gate:
+    // `Number('later')` is NaN, which `Number.isSafeInteger` still rejects.
+    const out = await run({
+      ...cleanHandoff(2),
+      ralphRound: 'later' as unknown as number,
+    })
+
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+    expect(out.labels).not.toContain('plan:probe')
+  })
+
+  test('a DEVIATED handoff still pays the survey, and now SAYS so', async () => {
+    // NOT A BUG — `deviatedFromSpec` above pins this as deliberate: a Forge that
+    // deviated built something the committed plan no longer describes, so re-deriving
+    // is correct. What was missing is the evidence. The live run f7ec86a6 sat at
+    // ralph round 2 on this exact checkpoint with an unmoved head, and nothing in its
+    // record distinguished "correctly declined" from "silently broken".
+    const out = await run(cleanHandoff(2, { resumeCheckpoint: 'ralph-task-built-deviated' }))
+
+    expect(out.labels).toContain('plan:fable')
+    expect(out.labels).not.toContain('plan:next')
+
+    const select = out.logs.find((l) => l.includes('planner-select'))
+    expect(select).toContain('handoff=false')
+    expect(select).toContain('cleanContinuation=false')
+    expect(select).toContain('ralph-task-built-deviated')
+  })
+})
+
+describe('planner selection is observable on EVERY ralph iteration', () => {
+  test('the cheap path logs both its inputs and its outcome', async () => {
+    const out = await run(cleanHandoff(2))
+
+    const select = out.logs.find((l) => l.includes('planner-select'))
+    expect(select).toBeDefined()
+    expect(select).toContain('cleanContinuation=true')
+    expect(select).toContain('handoff=true')
+    expect(out.logs.some((l) => l.includes('planner CHOSEN') && l.includes('plan:next'))).toBe(true)
+  })
+
+  test('THE REGRESSION THIS CARD IS ABOUT: a fall-through says WHY, outside every guard', async () => {
+    // Iteration 1 has no committed plan and correctly full-plans. The defect was
+    // never that it full-planned — it was that this case produced no line at all,
+    // because the only diagnostic was nested inside `if (cleanContinuation && ...)`.
+    // An instrument gated on the condition it exists to report cannot report it.
+    const out = await run({ ralph: true, ralphRound: 0, resumeCheckpoint: null, prNumber: null })
+
+    expect(out.labels).toContain('plan:fable')
+    const select = out.logs.find((l) => l.includes('planner-select'))
+    expect(select).toBeDefined()
+    expect(select).toContain('cleanContinuation=false')
+    expect(out.logs.some((l) => l.includes('planner CHOSEN') && l.includes('plan:fable'))).toBe(true)
+  })
+
+  test('a STRING round is reported as both what arrived and what it coerced to', async () => {
+    // Without both halves the log would say `round 2` for a value that was `"2"`,
+    // and the type accident stays invisible in exactly the record meant to expose it.
+    const out = await run({ ...cleanHandoff(2), ralphRound: '2' as unknown as number })
+
+    const select = out.logs.find((l) => l.includes('planner-select'))
+    expect(select).toContain('"2"')
+    expect(select).toContain('→ 2')
+  })
+})

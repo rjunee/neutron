@@ -5729,13 +5729,45 @@ try {
       // on iteration K+1 = 6 (ralphRound 5), 11 (10), … and also excludes
       // ralphRound 0 a second time, which is iteration 1 and must always
       // full-plan.
+      //
+      // THE ROUND ARRIVES OVER A JSON BOUNDARY, so it is COERCED before it is
+      // judged. `buildWorkflowArgs` reads `run.ralph_round` (an INTEGER column) but
+      // the value reaches this script through the launcher's `args`, and a launcher
+      // that relays `"2"` instead of `2` made `Number.isSafeInteger` false and
+      // silently disabled the whole fast path — a type accident that costs the full
+      // survey on EVERY iteration and, before the unconditional log below, said
+      // nothing at all about it. `Number(null)` is 0 and `Number(undefined)` is NaN,
+      // both of which `Number.isSafeInteger` still rejects, so a launcher that
+      // threads no round at all keeps falling back to the full planner exactly as
+      // it did before.
+      const ralphRoundNum = Number(ralphRound)
+      // THE EXACT NAME IS LOAD-BEARING, NOT AN OVERSIGHT. `ralph-task-built-deviated`
+      // must NOT qualify: a Forge that deviated from its exec spec built something the
+      // committed IMPLEMENTATION_PLAN.md no longer describes, so the cheap planner
+      // would hand the next iteration a stale document. The full survey is the correct
+      // price for that case and `deviatedFromSpec` in this file's tests pins it.
+      const ralphHandoffCheckpoint =
+        typeof resumeCheckpoint === 'string' && resumeCheckpoint.trim() === 'ralph-task-built'
       const cleanContinuation =
         resumePlan.reason === 'unknown-checkpoint' &&
-        typeof resumeCheckpoint === 'string' &&
-        resumeCheckpoint.trim() === 'ralph-task-built' &&
-        Number.isSafeInteger(ralphRound) &&
-        ralphRound >= 1 &&
-        ralphRound % PLAN_REFRESH_EVERY !== 0
+        ralphHandoffCheckpoint &&
+        Number.isSafeInteger(ralphRoundNum) &&
+        ralphRoundNum >= 1 &&
+        ralphRoundNum % PLAN_REFRESH_EVERY !== 0
+      // WHY THIS LOG IS NOT INSIDE ANY GUARD (this card). The `plan:next SKIPPED`
+      // diagnostic below only fires when `cleanContinuation` is ALREADY true, so the
+      // one failure that actually happened in production — `cleanContinuation` false
+      // — emitted nothing whatsoever. 48 recorded planner turns, every one of them
+      // the full `plan:fable`, and not a single line saying why. An instrument that
+      // is gated on the condition it exists to report cannot report it. This line
+      // names every input to the decision on EVERY ralph iteration, so the next
+      // occurrence is diagnosable from the run's own journal.
+      log(
+        `trident-v2 planner-select (ralph round ${JSON.stringify(ralphRound)} → ${JSON.stringify(ralphRoundNum)}): ` +
+          `checkpoint=${JSON.stringify(resumeCheckpoint)} handoff=${ralphHandoffCheckpoint} ` +
+          `resumeMode=${resumePlan.mode} resumeReason=${resumePlan.reason} ` +
+          `refreshEvery=${PLAN_REFRESH_EVERY} → cleanContinuation=${cleanContinuation}`,
+      )
       // The committed plan, read by the cheap probe seat — but ONLY when the cheap
       // planner could actually be used. On every other path this costs nothing,
       // because it is not dispatched.
@@ -5750,7 +5782,7 @@ try {
       // to the full `plan:fable` exactly as it does for a branch that carries no
       // committed plan at all.
       const planProbe = cleanContinuation
-        ? await seatAttempt(`plan-probe-round-${ralphRound}`, () =>
+        ? await seatAttempt(`plan-probe-round-${ralphRoundNum}`, () =>
             agent(
               planProbePrompt(),
               withModel({ label: 'plan:probe', phase: 'Build', schema: PLAN_PROBE_SCHEMA }),
@@ -5780,7 +5812,7 @@ try {
         bodyUnchecked === planProbe.uncheckedCount
       if (cleanContinuation && !usePlanNext) {
         log(
-          `trident-v2 plan:next SKIPPED (round ${ralphRound}) — ${
+          `trident-v2 plan:next SKIPPED (round ${ralphRoundNum}) — ${
             planProbe === null
               ? 'the plan probe returned nothing'
               : planProbe.planFound !== true
@@ -5801,6 +5833,12 @@ try {
         planProbe !== null && typeof planProbe.branchLog === 'string' ? planProbe.branchLog : ''
       const hasBranchMaterial = clampBranchLog(branchLog).trim() !== ''
       const plannerLabel = usePlanNext ? 'plan:next' : 'plan:fable'
+      // THE OUTCOME, ALWAYS, ON ONE GREPPABLE LINE. `planner-select` above says what
+      // the decision was made FROM; this says what it RESOLVED TO. Counting these two
+      // labels across the workflow journals is the whole measurement of this card —
+      // before it, the only way to tell which planner had run was to notice that
+      // `plan:fable` appeared as an agent label and `plan:next` never did.
+      log(`trident-v2 planner CHOSEN (ralph round ${ralphRoundNum}): ${plannerLabel}`)
       const plan = usePlanNext
         ? await agent(
             planNextPrompt(
