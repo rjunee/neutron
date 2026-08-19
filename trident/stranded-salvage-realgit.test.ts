@@ -11,9 +11,15 @@ import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
+import { interpretFailure } from './delivery.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
-import { buildTridentOrchestrator, TRIDENT_SALVAGE_MARKER } from './orchestrator.ts'
+import {
+  buildTridentOrchestrator,
+  TRIDENT_SALVAGE_MARKER,
+  TRIDENT_SNAPSHOT_MARKER,
+  TRIDENT_STASH_PARKED_MARKER,
+} from './orchestrator.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop } from './tick.ts'
 
@@ -36,14 +42,23 @@ async function gitOut(repo: string, ...args: string[]): Promise<string> {
   return res.stdout.trim()
 }
 
+async function gitRaw(repo: string, ...args: string[]): Promise<string> {
+  const res = await spawnCapture(['git', '-C', repo, ...args], repo)
+  if (!res.ok) throw new Error(`git ${args.join(' ')} failed: ${res.stderr || res.stdout}`)
+  return res.stdout
+}
+
 interface World {
   root: string
   origin: string
   checkout: string
   branchHead: string | null
+  worktree: string | null
 }
 
-async function seedWorld(kind: 'ahead' | 'missing' | 'not-ahead'): Promise<World> {
+async function seedWorld(
+  kind: 'ahead' | 'missing' | 'not-ahead' | 'dirty' | 'stashed' | 'ahead-dirty',
+): Promise<World> {
   const root = mkdtempSync(join(tmpdir(), 'trident-stranded-salvage-'))
   created.push(root)
   const origin = join(root, 'origin.git')
@@ -62,21 +77,54 @@ async function seedWorld(kind: 'ahead' | 'missing' | 'not-ahead'): Promise<World
   await git(checkout, ...GIT_ID, 'commit', '-q', '-m', 'base')
   await git(checkout, 'push', '-q', 'origin', 'main')
 
-  if (kind === 'missing') return { root, origin, checkout, branchHead: null }
+  if (kind === 'missing') return { root, origin, checkout, branchHead: null, worktree: null }
 
   await git(checkout, 'branch', BRANCH, 'main')
   if (kind === 'not-ahead') {
-    return { root, origin, checkout, branchHead: await gitOut(checkout, 'rev-parse', BRANCH) }
+    return {
+      root,
+      origin,
+      checkout,
+      branchHead: await gitOut(checkout, 'rev-parse', BRANCH),
+      worktree: null,
+    }
   }
 
   const worktree = join(root, 'builder')
   await git(checkout, 'worktree', 'add', '-q', worktree, BRANCH)
+  if (kind === 'dirty') {
+    writeFileSync(join(worktree, 'README.md'), 'base\nuncommitted work\n')
+    writeFileSync(join(worktree, 'brand-new.txt'), 'untracked work\n')
+    return {
+      root,
+      origin,
+      checkout,
+      branchHead: await gitOut(worktree, 'rev-parse', 'HEAD'),
+      worktree,
+    }
+  }
+  if (kind === 'stashed') {
+    writeFileSync(join(worktree, 'README.md'), 'base\nparked work\n')
+    await git(worktree, 'stash', 'push', '-m', 'parked-for-comparison')
+    return {
+      root,
+      origin,
+      checkout,
+      branchHead: await gitOut(worktree, 'rev-parse', 'HEAD'),
+      worktree,
+    }
+  }
+
   writeFileSync(join(worktree, 'work.txt'), 'finished work\n')
   await git(worktree, 'add', 'work.txt')
   await git(worktree, ...GIT_ID, 'commit', '-q', '-m', 'finished build')
   const branchHead = await gitOut(worktree, 'rev-parse', 'HEAD')
+  if (kind === 'ahead-dirty') {
+    writeFileSync(join(worktree, 'README.md'), 'base\nuncommitted follow-up\n')
+    return { root, origin, checkout, branchHead, worktree }
+  }
   await git(checkout, 'worktree', 'remove', '--force', worktree)
-  return { root, origin, checkout, branchHead }
+  return { root, origin, checkout, branchHead, worktree: null }
 }
 
 function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): TridentRun {
@@ -229,6 +277,83 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     } finally {
       db.close()
     }
+  }, 60_000)
+
+  test('uncommitted-only work is recorded without mutating the worktree or publishing', async () => {
+    const world = await seedWorld('dirty')
+    if (world.worktree === null) throw new Error('dirty fixture did not keep its worktree')
+    const harness = buildHybridHost()
+    const beforeStatus = await gitRaw(world.worktree, 'status', '--porcelain')
+    const beforeHead = await gitRaw(world.worktree, 'rev-parse', 'HEAD')
+
+    const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
+
+    expect(out.run.phase).toBe('failed')
+    expect(out.run.pr).toBeNull()
+    expect(out.run.failure_reason).toStartWith(FAILURE)
+    expect(out.run.failure_reason).toContain('0 commits,')
+    expect(out.run.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(out.run.failure_reason).toContain('untracked file(s) counted by name only')
+    const snapshot = out.run.failure_reason?.match(/snapshot ([0-9a-f]{40}) held/)?.[1]
+    expect(snapshot).toMatch(/^[0-9a-f]{40}$/)
+    if (snapshot === undefined) throw new Error('dirty salvage did not report a snapshot')
+    expect(
+      await gitOut(world.checkout, 'rev-parse', 'refs/tags/trident-salvage/salvage-run'),
+    ).toBe(snapshot)
+    expect(await gitOut(world.checkout, 'show', '--stat', '--oneline', snapshot)).toContain(
+      'README.md',
+    )
+    expect(await gitRaw(world.worktree, 'status', '--porcelain')).toBe(beforeStatus)
+    expect(await gitRaw(world.worktree, 'rev-parse', 'HEAD')).toBe(beforeHead)
+    expect(harness.calls.some((cmd) => cmd[0] === 'git' && cmd.includes('push'))).toBe(false)
+    expect(harness.calls.some((cmd) => cmd[0] === 'gh' && cmd[2] === 'create')).toBe(false)
+    expect(interpretFailure(out.run).klass).toBe(
+      interpretFailure(makeRun(world.checkout, { phase: 'failed', failure_reason: FAILURE })).klass,
+    )
+  }, 60_000)
+
+  test(
+    'branch-scoped stashed work is recorded without leaking its message or publishing',
+    async () => {
+      const world = await seedWorld('stashed')
+      const harness = buildHybridHost()
+
+      const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
+
+      expect(out.run.phase).toBe('failed')
+      expect(out.run.pr).toBeNull()
+      expect(out.run.failure_reason).not.toBe(FAILURE)
+      expect(out.run.failure_reason).toContain(TRIDENT_STASH_PARKED_MARKER)
+      expect(out.run.failure_reason).not.toContain('parked-for-comparison')
+      expect(harness.calls.some((cmd) => cmd[0] === 'git' && cmd.includes('push'))).toBe(false)
+      expect(harness.calls.some((cmd) => cmd[0] === 'gh' && cmd[2] === 'create')).toBe(false)
+      expect(interpretFailure(out.run).klass).toBe(
+        interpretFailure(makeRun(world.checkout, { phase: 'failed', failure_reason: FAILURE })).klass,
+      )
+    },
+    60_000,
+  )
+
+  test('committed and uncommitted work are both reported while the commit is published', async () => {
+    const world = await seedWorld('ahead-dirty')
+    const harness = buildHybridHost()
+
+    const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
+
+    expect(out.run.phase).toBe('failed')
+    expect(out.run.pr).toBe(7)
+    expect(out.run.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
+    expect(out.run.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    const remote = await spawnCapture(
+      ['git', '-C', world.checkout, 'ls-remote', '--heads', 'origin', `refs/heads/${BRANCH}`],
+      world.checkout,
+    )
+    expect(remote.ok).toBe(true)
+    if (world.branchHead === null) throw new Error('ahead-dirty fixture did not create a branch head')
+    expect(remote.stdout.trim().split(/\s+/)[0]).toBe(world.branchHead)
+    expect(await gitOut(world.checkout, 'rev-parse', 'refs/tags/trident-salvage/salvage-run')).toMatch(
+      /^[0-9a-f]{40}$/,
+    )
   }, 60_000)
 
   test('a slug-derived branch that does not exist leaves the terminal failure untouched', async () => {
