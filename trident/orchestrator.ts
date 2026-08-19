@@ -486,7 +486,12 @@ export function redactPushError(text: string): string {
       // failure. CODEX REVIEW [P1 Security]: the first cut required a colon, so the extremely
       // common single-value form `https://<token>@host/...` sailed straight through into a
       // PERSISTED failure reason. A token needs no password half to be a token.
-      .replace(/(\w+:\/\/)[^/\s@]+@/g, '$1***@')
+      // The scheme is BOUNDED (`\w{1,32}`) rather than `\w+`: an unbounded prefix before a
+      // literal `://` backtracks polynomially on input that is a long run of word characters
+      // with no `://` — CodeQL js/polynomial-redos, and this function is fed raw git stderr.
+      // No real URL scheme approaches 32 characters, so nothing that was redacted before
+      // stops being redacted.
+      .replace(/(\w{1,32}:\/\/)[^/\s@]+@/g, '$1***@')
       // Bare GitHub token shapes, in case one reaches stderr by another route.
       .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '$1***')
       .trim()
