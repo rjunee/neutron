@@ -395,6 +395,26 @@ usage() {
 #     script (install.sh ⇄ uninstall.sh). A parity test in
 #     scripts/__tests__/install-uninstall.test.ts asserts the two copies match,
 #     so install and uninstall always resolve the SAME data dir + DB file.
+# BLANK IS UNSET — the rule every TypeScript reader of these variables applies
+# (`config/index.ts` § blank-is-unset). A whitespace-only value is a typo, not a
+# path, and it must fall through to the default here for the same reason it does
+# there. Only the emptiness TEST trims; a value that IS set is still printed
+# byte-for-byte, mirroring `pinned.trim().length > 0` returning `pinned`
+# unmodified (`migrations/db-path.ts`).
+#
+# This exists because the two sides disagreed. Before the trim landed on the
+# TypeScript side, `resolveOpenDbPath` used a bare `pinned.length > 0` and this
+# script used `!= ""`, so `NEUTRON_DB_PATH='   '` resolved to the literal three
+# spaces on BOTH sides — wrong, but wrong identically, so install migrated the
+# file the server opened. Trimming one side alone turned a shared bug into a
+# split: the installer migrated `'   '` while the server opened
+# `<home>/project.db`, and on the uninstall path the same split leaves the real
+# database on disk while it deletes a file named three spaces. Parity is the
+# invariant these resolvers exist to hold, so both sides trim.
+is_set() {
+  [ -n "$(printf '%s' "${1:-}" | tr -d '[:space:]')" ]
+}
+
 # Read KEY=value from a dotenv file the way Bun's .env loader sees it: skip
 # comment / blank lines, take the LAST assignment, strip one surrounding pair of
 # quotes, and expand `$HOME` / `${HOME}` (the one var the .env.example documents —
@@ -422,16 +442,16 @@ dotenv_get() {
 # already-set variable), so a home pinned only in .env is honored too.
 resolve_neutron_home() {
   _envfile=${1:-}
-  if [ "${NEUTRON_HOME:-}" != "" ]; then
+  if is_set "${NEUTRON_HOME:-}"; then
     printf '%s\n' "$NEUTRON_HOME"; return 0
   fi
-  if [ "${OWNER_HOME:-}" != "" ]; then
+  if is_set "${OWNER_HOME:-}"; then
     printf '%s\n' "$OWNER_HOME"; return 0
   fi
   _pin=$(dotenv_get "$_envfile" NEUTRON_HOME)
-  [ "$_pin" = "" ] || { printf '%s\n' "$_pin"; return 0; }
+  if is_set "$_pin"; then printf '%s\n' "$_pin"; return 0; fi
   _pin=$(dotenv_get "$_envfile" OWNER_HOME)
-  [ "$_pin" = "" ] || { printf '%s\n' "$_pin"; return 0; }
+  if is_set "$_pin"; then printf '%s\n' "$_pin"; return 0; fi
   printf '%s\n' "$HOME/neutron"
 }
 
@@ -442,11 +462,11 @@ resolve_neutron_home() {
 resolve_db_target() {
   _home=$1
   _envfile=${2:-}
-  if [ "${NEUTRON_DB_PATH:-}" != "" ]; then
+  if is_set "${NEUTRON_DB_PATH:-}"; then
     printf '%s\n' "$NEUTRON_DB_PATH"; return 0
   fi
   _pin=$(dotenv_get "$_envfile" NEUTRON_DB_PATH)
-  [ "$_pin" = "" ] || { printf '%s\n' "$_pin"; return 0; }
+  if is_set "$_pin"; then printf '%s\n' "$_pin"; return 0; fi
   printf '%s\n' "$_home/project.db"
 }
 
