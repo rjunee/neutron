@@ -225,6 +225,33 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // T4 — AN INFRASTRUCTURE DEATH IS NOT A VERDICT (run `f384460d`, 2026-08-15).
+  // The inner workflow THREW; its catch path writes `checkpoint:'inner-error'` with no
+  // findings, and the owner was told "REQUEST_CHANGES" for work no reviewer ever judged.
+  // Same for an `infra-only` block: no review seat ran.
+  //
+  // THE MATCHED STRINGS ARE AUTHORED IN EXACTLY TWO PLACES — `infraDeathSentence`
+  // (below, this file) and `innerTerminalFailureReason` (`orchestrator.ts`), which also
+  // composes the two measured-cause sentences. THE TWO HALVES MUST MOVE TOGETHER: a
+  // reworded reason that stops matching here silently restores review-flavoured crash copy.
+  //
+  // CHECKED EARLY, and that placement is load-bearing. Two reasons EMBED the probe's or
+  // lane's measured words, so causes containing 'stalled', 'exhausted', or 'git ' would
+  // otherwise be misrouted as hang, review, or merge mechanics. `inner workflow failed at
+  // round` is main's 2026-08-15 thrown-with-cause sentence, which the old branch predates.
+  if (
+    r.includes('build infrastructure failed') ||
+    r.includes('review never ran (infra-only)') ||
+    r.includes('inner workflow failed at round')
+  ) {
+    return {
+      klass: 'infra',
+      summary:
+        'The build hit an internal error and stopped without a review verdict — this is not a rejection of the work.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   // Suspected agent hang / stalled inner workflow — already a plain reason.
   if (r.includes('suspected agent hang') || r.includes('no progress for') || r.includes('stalled')) {
     return {
@@ -341,6 +368,21 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     summary: safe && oneLine.length > 0 ? oneLine : 'The build did not complete.',
     input_needed: `${saved} ${retry}`,
   }
+}
+
+/**
+ * T4 (run `f384460d`) — THE one sentence for an INFRASTRUCTURE death.
+ *
+ * The inner workflow threw; nothing about the diff was ever judged. The reason
+ * has to say that in words, because `interpretFailure` reads the reason (not the
+ * verdict) to choose the class the owner is delivered.
+ *
+ * ONE source: the orchestrator WRITES this into `failure_reason` and
+ * `interpretFailure` READS it back to route the `infra` class, so a reworded
+ * sentence can never become one the delivery silently stops recognising.
+ */
+export function infraDeathSentence(round: number, ceiling: number): string {
+  return `build infrastructure failed at round ${round} of ${ceiling} before any review verdict`
 }
 
 /**

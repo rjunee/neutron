@@ -7,6 +7,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
+import { interpretFailure } from './delivery.ts'
 import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
@@ -4213,5 +4214,62 @@ describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('failed')
     expect(final.pr).toBe(267)
+  })
+})
+
+/**
+ * T4 — RUN `f384460d` REPLAYED: AN INFRASTRUCTURE DEATH MUST NOT BE REPORTED AS A VERDICT.
+ *
+ * The build finished, then the inner workflow threw and its catch path wrote
+ * `{ ok:false, verdict:'REQUEST_CHANGES', checkpoint:'inner-error', findings: [] }`. That
+ * verdict is the wrapper's — no reviewer ever ran — so the harvested row must carry null.
+ */
+describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f384460d)', () => {
+  test('the replayed inner-error harvest fails with a null verdict, the PR intact, and an infra reason', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          ok: false,
+          prNumber: 0,
+          branch: 'feat-x',
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: 'inner-error',
+          remainingTasks: 0,
+        },
+      }),
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBeNull()
+    expect(final.pr).toBe(267)
+    expect(final.failure_reason).toContain('build infrastructure failed')
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    expect(interpretFailure(final).klass).toBe('infra')
+  })
+
+  test('a genuine review exhaustion still reports REQUEST_CHANGES with review copy', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          round: 8,
+          checkpoint: 'argus-request-changes',
+          blockKind: 'code',
+          findings: [{ severity: 'blocker', title: 'null deref in a.ts' }],
+        },
+      }),
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.failure_reason).toContain('without Argus APPROVE')
+    expect(interpretFailure(final).klass).not.toBe('infra')
   })
 })

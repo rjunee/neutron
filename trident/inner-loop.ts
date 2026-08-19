@@ -224,6 +224,13 @@ export interface InnerResult {
    * `block_kind` only to choose which sentence frames it.
    */
   terminal_cause: string | null
+  /**
+   * True iff the raw terminal result carried a NON-EMPTY `findings` array.
+   * Fail-closed: absent / non-array / empty decodes false. Distinguishes an
+   * infrastructure death (inner-error, findings []) from a terminal result
+   * that carries real review findings (e.g. the round-lost shapes).
+   */
+  findings_present: boolean
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
   /**
@@ -671,6 +678,12 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
       typeof p.terminalCause === 'string' && p.terminalCause.trim() !== ''
         ? p.terminalCause.trim().slice(0, TERMINAL_CAUSE_MAX)
         : null,
+    // T4 — DID A REVIEWER ACTUALLY SAY ANYTHING? Decoded FAIL-CLOSED: only a non-empty
+    // array counts, so absent/garbled/`[]` all read false. The orchestrator uses this to
+    // tell an infrastructure death (`inner-error` with `findings: []` — run f384460d, the
+    // wrapper's catch path) apart from a terminal result that carries real review findings;
+    // a false positive here would report an infra death as a review verdict again.
+    findings_present: Array.isArray(p.findings) && p.findings.length > 0,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)

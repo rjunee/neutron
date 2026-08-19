@@ -80,6 +80,7 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
+import { infraDeathSentence } from './delivery.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
@@ -1676,9 +1677,45 @@ export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
   )
 }
 
+/**
+ * T4 — DID THE BUILD DIE IN INFRASTRUCTURE, BEFORE ANY REVIEWER JUDGED THE CODE?
+ *
+ * BOTH triggers are MEASURED signals, not inferences:
+ *   • `checkpoint: 'inner-error'` is written ONLY by the inner workflow wrapper's own catch
+ *     path (`inner-workflow.mjs`) — the workflow THREW, so no verdict happened. That path
+ *     also self-asserts `verdict: 'REQUEST_CHANGES'`, which is why the verdict field cannot
+ *     be trusted here and the checkpoint can.
+ *   • `block_kind: 'infra-only'` is the workflow's own statement that NO REVIEW SEAT ever
+ *     judged the code — the stop says nothing about the diff.
+ *
+ * An `inner-error` result that DOES carry findings keeps the current behavior: real review
+ * findings exist behind it, so the generic "ended without APPROVE" sentence is still true.
+ * `findings_present` is decoded fail-closed (`parseInnerResult`), so a legacy/garbled row
+ * reads false — and a false there costs an infra-flavoured message on a shape that already
+ * had no findings to show, never the reverse (a crash sold to the owner as a verdict).
+ *
+ * An APPROVE is never an infra death: it takes the merge path, and reclassifying one would
+ * silently drop a successful run.
+ *
+ * This deliberately differs from `classifyInnerFailure`: that function asks whether an
+ * outcome is safe to auto-RETRY and fails closed to `genuine`; this one asks whether we may
+ * report a VERDICT and fails closed to false. They are two deciders with different risk
+ * directions and must not be merged.
+ */
+export function isInfraDeath(
+  result: Pick<InnerResult, 'ok' | 'verdict' | 'checkpoint' | 'block_kind' | 'findings_present'>,
+): boolean {
+  if (result.verdict === 'APPROVE') return false
+  if (result.block_kind === 'infra-only') return true
+  return result.ok === false && result.checkpoint === 'inner-error' && result.findings_present === false
+}
+
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
-  result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
+  result: Pick<
+    InnerResult,
+    'ok' | 'verdict' | 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause' | 'findings_present'
+  >,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
   // copy, which a crash can leave behind at its launch value.
@@ -1752,6 +1789,12 @@ export function innerTerminalFailureReason(
         ? `review never ran (infra-only) at round ${reported} of ${ceiling}: ${cause}`
         : `inner workflow failed at round ${reported} of ${ceiling}: ${cause}`
     }
+  }
+  // T4 catches ONLY no-measured-cause shapes: an inner-error with no findings and no cause,
+  // or an infra-only stop whose cause is null/over-redacted. The measured-cause branch above
+  // keeps precedence, so every sentence main already says specifically stays byte-identical.
+  if (isInfraDeath(result)) {
+    return infraDeathSentence(reported, ceiling)
   }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
@@ -2430,10 +2473,13 @@ export function buildTridentOrchestrator(
         run: failedRun(
           launchRun,
           innerTerminalFailureReason(launchRun, {
+            ok: false,
+            verdict: null,
             round: launchRun.round,
             checkpoint: resume_checkpoint,
             block_kind: 'infra-only',
             terminal_cause: cause,
+            findings_present: false,
           }),
           false,
         ),
@@ -2942,7 +2988,8 @@ export function buildTridentOrchestrator(
           pr: result.pr_number ?? run.pr,
           branch: result.branch ?? run.branch,
           inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
-          inner_verdict: 'REQUEST_CHANGES',
+          // T4: an exhausted INFRA budget is still not a review verdict.
+          inner_verdict: isInfraDeath(result) ? null : 'REQUEST_CHANGES',
         }
         return { run: failed, changed: true, waiting: false, note: 'infrastructure retry budget used → failed' }
       }
@@ -3067,9 +3114,18 @@ export function buildTridentOrchestrator(
       // one question is the shape of this whole defect; the terminal result is authoritative
       // on how it ended, so BOTH read it the same way and in the same order.
       inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
-      inner_verdict: 'REQUEST_CHANGES',
+      // T4 — the catch path self-asserts REQUEST_CHANGES on a throw, but run-progress.ts
+      // surfaces this exact field. Null is the honest record when nobody judged the code.
+      inner_verdict: isInfraDeath(result) ? null : 'REQUEST_CHANGES',
     }
-    return { run: failed, changed: true, waiting: false, note: 'inner loop ended without APPROVE → failed' }
+    return {
+      run: failed,
+      changed: true,
+      waiting: false,
+      note: isInfraDeath(result)
+        ? 'inner loop died in infrastructure → failed (no verdict)'
+        : 'inner loop ended without APPROVE → failed',
+    }
   }
 
   /** Elapsed ms since the run last advanced (checkpoint / launch). Conservative
