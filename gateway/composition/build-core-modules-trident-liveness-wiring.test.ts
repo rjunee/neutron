@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
@@ -16,8 +16,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-liveness-wiring-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

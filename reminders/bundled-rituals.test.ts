@@ -28,7 +28,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SubagentRegistry } from '@neutronai/runtime/subagent/registry.ts'
 import { ApprovalManager, type ApprovalNotifier } from '@neutronai/tools/approval.ts'
@@ -84,8 +84,8 @@ const resolveTopic = (): string => 'app:owner-topic'
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-bundled-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   store = new ReminderStore(db)
   runs = createRitualRunStore(db)
   subagents = new SubagentRegistry()

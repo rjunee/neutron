@@ -62,7 +62,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
@@ -154,8 +154,8 @@ async function boot(slug_is_fallback: boolean | 'absent'): Promise<Harness> {
     },
   })
 
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
 
   const composer = buildOpenGraphComposer({
     env: process.env,

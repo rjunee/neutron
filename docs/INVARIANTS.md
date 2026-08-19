@@ -52,8 +52,12 @@ with cross-references noted inline.
    Protects: **D1**/**D2** (PoolRuntime reification / Substrate banner split) — flag/promise pair
    must move together.
 7. Substrate instance-id prefixes are pool keys; the trident fire substrate must stay warm
-   per-repo-cwd; only `cc-agent-`-prefixed instances get `enableToolBridge`.
-   `open/composer.ts:590-633,535-541`.
+   per-repo-cwd; the OWNER-FACING CONVERSATIONAL PAIR — `cc-agent-` (live chat) and `cc-nudge-`
+   (background proactive compose: fired reminders/rituals + the work-board wakeup) — and ONLY that
+   pair get `enableToolBridge` and `PROFILE_WARM_CHAT`. `cc-nudge-` is a deliberate equal-grant,
+   separate-session twin of `cc-agent-`: equal grants because a ritual composes there and ISSUES
+   #504 settled that it must reach Core tools; separate session because a background compose that
+   aborts must not poison the child the owner is talking to. `open/wiring/substrates.ts`.
    Protects: **D1**/**D2**.
 8. `Bun.serve` selects the chained fetch handler per-request inside the serve arrow so the live
    server ref reaches WS upgrades; `maxRequestBodySize` = import cap + 64MB.
@@ -100,9 +104,77 @@ with cross-references noted inline.
     Protects: **P1** (ProjectDb API widening).
 17. Migration runner: PRAGMA preamble hoisted out of the per-migration transaction;
     `PRAGMA foreign_keys=ON` re-asserted in a `finally`; per-migration BEGIN/COMMIT atomicity;
-    migration version numbers are never renumbered or backfilled. `migrations/runner.ts:89-126`.
+    migration version numbers are never renumbered or backfilled, and **the runner decides
+    "has this run?" from the migration's NAME, never from its ordinal** (`classifyMigration`;
+    `_migrations` is keyed on `name`, `version` is data and two rows may share one). Keying on the
+    ordinal is what took the live instance down three times: a migration whose number a branch
+    migration had spent read as applied, so its `ALTER`s never ran and the schema silently lacked
+    them. Renumbering to dodge a collision is not the fix — it repairs the instance where the
+    ordinal was spent and breaks every instance where the migration already applied. `migrations/runner.ts`
+    (`applyMigrations`' apply loop, `splitPragmaPreamble`) — cited by function rather than by line,
+    because the previous line anchor had drifted off the code it named.
     Protects: **P2** (raw() migration sweep restricts `raw()` to this file), existing schema
     snapshot test (`regen-snapshot.ts`).
+    Six refusals in that runner are fail-closed and must stay so: a duplicate ordinal
+    (`assertUniqueMigrationOrdinals`), a duplicate migration NAME (`assertUniqueMigrationNames` —
+    the name is the ledger key, so two files sharing a slug make one read as applied forever), TWO
+    FILES WITH IDENTICAL BYTES where one is already applied
+    (`formatDuplicateContentMigrations` — the hash cannot tell them apart, so calling the second
+    one applied means it never runs at all), a recorded migration NO file in this build corresponds
+    to by name or by content hash
+    (`formatUnexplainedLedgerRows`, resolvable only via a hand-verified `migrations/repairs.json`
+    entry), a pending migration file the deployed checkout does not track
+    (`formatUntrackedMigration` in `migrations/runner.ts`, on the verdict from `resolveDeployedTree`
+    in `migrations/provenance.ts`), and an OCCUPIED REKEY SCRATCH NAME (`rekeyLedgerOnName` —
+    `_migrations_version_keyed` can never be this runner's own leftover, because the whole rekey is
+    one transaction, so a table there is somebody's data and is refused rather than dropped; an
+    earlier version's unconditional `DROP TABLE IF EXISTS` destroyed exactly that, silently and
+    permanently, and the test that should have caught it used a VIEW, which SQLite refuses to drop).
+    **All six decide before ANY write** — `_migrations` is created, rekeyed, and repairs are
+    acknowledged, only after the last refusal has been passed, which is what makes the untracked
+    message's claim that nothing was written true.
+    Hash widening MUST stay conditioned on the recording row being one no file in this build
+    accounts for. Widening on a bare hash set is a silent-skip bug: a new, distinctly-named,
+    tracked migration whose bytes duplicate an applied one reads as applied, so it never runs,
+    never records, and is reported under `skipped` by a boot that exits zero — this invariant's own
+    defect class, reached through its fix.
+    A name match with a MISMATCHED hash is REPORTED and never enforced: it emits
+    `migration_content_drift` (`enforced=false`) and boots. Refusing is a rejected decision (see the
+    README's "recorded and reported, not enforced" — an in-place comment edit must not become a
+    crash loop), but silence was never the decision: an amended-during-review migration renumbered
+    by the merge reads as applied while its added statements never ran. `renumbered=true` is the
+    discriminating field, because bytes AND ordinal both moving is what an in-place edit cannot do.
+    A steady-state boot must stay SILENT — a notice that fires every boot is noise.
+    The collapse must adopt the provenance triple from ONE donor row, never column by column:
+    `content_sha256`/`applied_by_commit`/`tree_provenance` are written together and mixing them
+    fabricates a tuple no row ever had, in the columns that exist to be trusted.
+    The unexplained-row refusal adjudicates ONLY rows carrying a `content_sha256`, and that gate is
+    load-bearing rather than lenient: migration files are deliberately deleted here (`0059`,
+    `0064`–`0068`), so every long-lived database holds hashless rows naming migrations this tree no
+    longer contains, and refusing on them would take down the oldest instances in the fleet over
+    evidence that is a NULL. A recorded hash is never used to REFUSE a file — only ever to mark one
+    as already applied (see the README's "recorded and reported, not enforced").
+    Reapply repairs leave the scar row immutable and transact the SQL body with its firing receipt; `migrations/__tests__/live-ledger-122-reapply.test.ts` pins the live row-122 path, rollout window, strict failure, fresh-install inertness, and second-boot no-op.
+    The untracked refusal takes PRECEDENCE over the collision check when the tree can tell a stray
+    from a real file, and that is a diagnosis rule, not a weakening: all six still throw before any
+    write. A stray landing beside a tracked file at the same ordinal reads as a duplicate ordinal,
+    which sends the operator hunting a duplicate they never committed when the real remedy is to
+    delete the stray. So `assertUniqueMigrationOrdinals` takes the tree verdict and stands aside
+    when one side of a collision is untracked. That verdict MUST be resolved on every boot that has
+    a collision — never gated on something being pending. A recorded untracked stray is a supported
+    state (the untracked loop checks pending files only, sparing a stray applied long ago), so a
+    `pending`-gated verdict reads null on the boot AFTER a successful upgrade and turns a tolerated
+    collision into a hard refusal forever. A NAME collision is a trigger too, and there the better
+    message is unreachable any other way: a shared slug makes both files read as applied, so nothing
+    is pending and the untracked loop reaches nobody. Two TRACKED files at one ordinal, and any
+    collision on an install where the tree cannot be verified, still report as a duplicate ordinal. Where tracking cannot be established (no git metadata, an index
+    shape the reader does not decode, an index that fails its own checksum or carries none, a
+    migration directory git does not track at all) the runner applies and records
+    `tree_provenance = unverifiable:<reason>` — "cannot verify" is a distinct state from "not
+    tracked" and collapsing them either breaks tarball installs or re-opens the class. The verified
+    value is `tracked-in-index` and names its evidence: the index is the STAGED tree, so a
+    staged-but-uncommitted file passes; HEAD-tree verification is deliberately out of scope (it would
+    need a packfile reader on the boot path) and the value must not be renamed to imply otherwise.
 18. Schema snapshot test is the refactor's data-layer safety net; regenerate only via
     `regen-snapshot.ts`, never hand-edit. `migrations/snapshot.test.ts:1` (the test),
     `migrations/regen-snapshot.ts:9-15` (writes `expected-schema.txt`).
@@ -340,6 +412,18 @@ with cross-references noted inline.
     Protects: **O3** (Error taxonomy + typed substrate error codes).
 39. Binary-ENOENT must stay non-retryable so it can't launder into a 429 cooldown; `all_cooldown`
     must stay `retryable:true`. `build-llm-call-substrate.ts:437-442,515-523`.
+    A SUBSTRATE-LOCAL failure must never be reported as a credential fault, on EITHER
+    credential-failure lane. `detectBinaryNotFound`, `detectChannelWedged`,
+    `detectTurnTimeout` and `detectReplProcessExited` are classified AHEAD of the cooldown
+    map in `build-llm-call-substrate.ts` and MUST skip `reportFailure`: none carries an HTTP
+    status, so the map can only guess 429, and on a single-credential box (every Open
+    install) five guesses park the pool for an hour behind "all Anthropic credentials are in
+    cooldown" — a cause that is not true. The dead-REPL member is the one a lane rule cannot
+    cover: the strikes that caused the 2026-08-17 chat lockout were the owner's own
+    INTERACTIVE retries against a respawning child.
+    Because each detector matches PROSE emitted by another module, invariant 38 applies to
+    their producer literals: a reword is a behavior change, and
+    `__tests__/g6-error-string-conformance.test.ts` pins each one to its producer source.
     Protects: **O3**.
 40. Email triage LLM stub THROWS by design so triage renders its deterministic fallback;
     agent-settings fallbacks must report `available:false`, never fake success.
@@ -471,9 +555,9 @@ with cross-references noted inline.
 67. `open/server.ts:58-73` env mutation happens BEFORE `boot()` — untouched by the composer split
     but adjacent; config reads must not move out of the entrypoint. (Cross-ref #1.)
     Protects: **C1**.
-68. Trident fire substrate must be WARM per-repo-cwd and only `cc-agent-` gets
+68. Trident fire substrate must be WARM per-repo-cwd and only the `cc-agent-`/`cc-nudge-` pair gets
     `enableToolBridge` — pool-key/instance-id prefixes are semantic.
-    `open/composer.ts:590-633,535-541`. (Cross-ref #7.)
+    `open/wiring/substrates.ts`. (Cross-ref #7, which carries the reasoning for the pair.)
     Protects: **D1**, **D2**.
 69. 30 `open/__tests__` wiring tests + gateway `*-production-composer` tests are the composer-split
     lock; a characterization test snapshotting which `CompositionInput` fields Open sets must be
@@ -629,6 +713,17 @@ with cross-references noted inline.
     `trident/store.test.ts`.
     Protects: the fix-round budget from being spent on infrastructure failures that are not the
     agent's fault.
+116. The Work Board's `inline_active` is DISPLAY-ONLY and EVIDENCE BEATS THE STORED FLAG. Every
+    read boundary maps items through the one deriver (`work-board/inline-activity.ts`
+    `makeInlineActivityDeriver`, wired in `open/composer.ts`); the stored column is never written
+    by a read and is only ever a hint. The flag gets NO exemption from the freshness check — a
+    crashed session's stuck flag reads not-active — and the derivation must never grow a branch
+    that blocks, denies, delays or gates a tool call (it is the display-only salvage of the
+    cancelled PreToolUse-gate plan). Evidence is tier 1 only: ONE O(1) `ActivityInspector` map
+    read per board, never per row, never a shell-out. `work-board/inline-activity.test.ts` +
+    `open/__tests__/inline-activity-wiring.test.ts`.
+    Protects: the board from re-becoming a promise the agent has to remember to keep, and the
+    read path from growing per-row I/O.
 116. External launcher liveness acts only on positive death evidence: `alive`, `unknown`, or a
     throwing probe does nothing; malformed pids and disagreement between registry homes are
     ambiguous. Every running launcher is probed without the advancement sweep's 50-row cap. A
@@ -637,6 +732,7 @@ with cross-references noted inline.
     is never treated as proof that its detached build died. The 90-minute no-advance and 2-hour
     max-inflight backstops remain unchanged.
     `trident/tick.ts`, `trident/liveness.ts`, `trident/liveness-death-e2e.test.ts`.
+117. Brief-part receipts are measured from persisted bytes before a manifest can be returned. `trident/brief-parts.ts` (`writeVerified`), protected by the persistent-truncation regression in `trident/brief-parts.test.ts`.
 
 ## 10. Naming & vocabulary (`critic-naming-vocab.md` §6)
 
@@ -742,6 +838,10 @@ with cross-references noted inline.
 
 - **111 invariants** extracted from the 11 critic reports' load-bearing-subtleties /
   fail-soft-invariant / must-not-break sections (`critic-security-config.md` has no dedicated
+  section; its "what exists and is fine" items are folded into §11 above). Four further items
+  (#112–#115) were added post-synthesis for the gateway-restart crash-recovery build, and #116 for
+  the derived-inline-activity build; they are appended at the end of their sections rather than
+  renumbered in, so numbering is not strictly sequential within §3 and §9.
   section; its "what exists and is fine" items are folded into §11 above). Five further items
   (#112–#116) were added post-synthesis — #112–#115 for the gateway-restart crash-recovery build,
   #116 for the boot scope direction guard (2026-08-16); they are appended at the end of their

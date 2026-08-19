@@ -4,7 +4,8 @@
  * Behavior-preserving extraction of the substrate-construction slice of
  * `createOpenComposition` (old `open/composer.ts` lines 485-661): the warm
  * onboarding phase-spec substrate (`cc-llm-*`) + its pre-warm, the warm
- * live-chat substrate (`cc-agent-*`, the ONLY one with `enableToolBridge`), the
+ * live-chat substrate (`cc-agent-*`), the background proactive-compose substrate
+ * (`cc-nudge-*`) — the two that carry `enableToolBridge` — the
  * per-worktree ephemeral factory (`makeEphemeralSubstrate`), and the warm
  * per-repo-cwd trident-fire factory (`cc-trident-fire-*` + `fireSubstrateByCwd`
  * cache). The composer destructures the returned bag and consumes each value
@@ -14,8 +15,15 @@
  *   - `prewarmReady` NEVER rejects and is NOT awaited at boot; `prewarmSettled`
  *     is exposed as a LIVE reference (`prewarmSettledRef.settled`) the `.then`
  *     flips, so the composer's cold-window elevation reads the live value.
- *   - Only `cc-agent-*` sets `enableToolBridge: true`. `cc-llm-*`,
- *     `cc-trident-*` (ephemeral), and `cc-trident-fire-*` deliberately omit it.
+ *   - `enableToolBridge: true` on the OWNER-FACING conversational pair only —
+ *     `cc-agent-*` (live chat) and `cc-nudge-*` (background proactive compose,
+ *     where a RITUAL runs and needs Core tools per ISSUES #504). `cc-llm-*`,
+ *     `cc-compose-*`, `cc-trident-*` (ephemeral) and `cc-trident-fire-*`
+ *     deliberately omit it.
+ *   - `cc-nudge-*` MUST keep an instance id distinct from `cc-agent-*` — that
+ *     distinctness is the whole fix for a fired reminder tearing down the owner's
+ *     warm chat child. Its GRANTS are deliberately identical to the chat lane;
+ *     only the SESSION is separate.
  *   - `cc-trident-fire-*` stays WARM per repo cwd (Map cache, non-ephemeral).
  *   - The `substrateFactory` test-seam is threaded verbatim via the
  *     `...(substrateFactory !== undefined ? { substrateFactory } : {})` spread.
@@ -56,6 +64,16 @@ export interface WiredSubstrates {
    * Returns null when LLM-less (no conversational provider available).
    */
   makeComposeSubstrate: (project_id: string) => Substrate | null
+  /**
+   * BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`). The ONE REPL every
+   * timer-driven composition runs on — a fired reminder/ritual and the work-board
+   * wakeup. DISTINCT pool-key namespace from `cc-agent-*` (live chat), so an
+   * aborted / timed-out / crashed background compose can never evict, poison or
+   * respawn the warm child the owner is talking to. Same GRANTS as the chat lane
+   * (a ritual runs here — ISSUES #504); only the session is separate. Null when
+   * LLM-less.
+   */
+  reminderComposeSubstrate: Substrate | null
   /** Per-worktree ephemeral factory: `(prefix) => (cwd) => Substrate`. */
   makeEphemeralSubstrate: (instance_prefix: string) => (cwd: string) => Substrate
   /** Warm per-repo-cwd trident-fire factory (memoized, non-ephemeral). */
@@ -100,10 +118,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     ctx.bindMcpResolver !== undefined
   // CAPABILITY-PARITY (audit round 16) — the OpenAI config must grant EXACTLY the
   // capabilities the substrate's CLAUDE-path equivalent grants, never more. The
-  // decisive one is the TOOL BRIDGE: on the Claude path ONLY `cc-agent-*` (live
-  // chat) sets `enableToolBridge: true`; `cc-llm-*` (onboarding phase-spec) does
-  // NOT. So the OpenAI `toolManifest` (which becomes the GPT tool surface) is
-  // included ONLY for the live-agent substrate — never the phase-spec one, whose
+  // decisive one is the TOOL BRIDGE: on the Claude path the owner-facing
+  // conversational pair `cc-agent-*` (live chat) and `cc-nudge-*` (background
+  // proactive compose) set `enableToolBridge: true`; `cc-llm-*` (onboarding
+  // phase-spec) does NOT. So the OpenAI `toolManifest` (which becomes the GPT tool
+  // surface) is included ONLY for that pair — never the phase-spec one, whose
   // input is user-controlled ONBOARDING text. Emitting the full MCP manifest there
   // would let onboarding prompts reach work_board / dispatch / etc. = privilege
   // escalation the Claude path never permits.
@@ -139,7 +158,8 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
         }
       : {}
   // Phase-spec (`cc-llm-*`): NO tool bridge (mirrors the Claude path — it never sets
-  // enableToolBridge). Live-agent (`cc-agent-*`): tool bridge ON (mirrors enableToolBridge).
+  // enableToolBridge). Live-agent (`cc-agent-*`) and background nudge (`cc-nudge-*`):
+  // tool bridge ON (mirrors enableToolBridge), so both reuse `liveAgentProvider`.
   const phaseSpecProvider = conversationalProviderFor(false)
   const liveAgentProvider = conversationalProviderFor(true)
 
@@ -268,6 +288,15 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
                 onDeadTurnNotice: ctx.liveAgentNoticeSinks.onDeadTurnNotice,
                 onSizeAlert: ctx.liveAgentNoticeSinks.onSizeAlert,
                 onRateLimitBanner: ctx.liveAgentNoticeSinks.onRateLimitBanner,
+                // …and the model-floor clamp. This is the one substrate that gets
+                // the BUBBLING sink, because it is the one with an owner chat
+                // surface a clamp belongs on: he is sitting in this conversation
+                // when it degrades. It is NOT the only floored substrate — the
+                // nudge lane below shares `PROFILE_WARM_CHAT` and so carries
+                // `frontier_model_floor` too (pinned by the two-id assertion in
+                // `open/__tests__/open-wiring-substrates.test.ts`). That lane gets
+                // the journal-only sink instead; see its block.
+                onModelFloorApplied: ctx.liveAgentNoticeSinks.onModelFloorApplied,
               }
             : {}),
           ...(ctx.liveAgentRecoveredReplySink !== undefined
@@ -277,8 +306,9 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
             ? { delivery_topic_id: ctx.liveAgentDeliveryTopicId }
             : {}),
           // Live-agent: openai provider WITH the tool manifest (tool bridge ON),
-          // mirroring the Claude path's enableToolBridge — this is the ONE
-          // conversational substrate that gets tools on either provider.
+          // mirroring the Claude path's enableToolBridge. The background nudge lane
+          // below is the only other substrate that gets tools on either provider,
+          // and it gets them from this same `liveAgentProvider` bag.
           ...liveAgentProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
@@ -334,6 +364,106 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           ...phaseSpecProvider,
           ...(substrateFactory !== undefined ? { substrateFactory } : {}),
         })
+
+  // BACKGROUND PROACTIVE-COMPOSE substrate (`cc-nudge-*`).
+  //
+  // THE INCIDENT (live instance, 2026-08-17): a reminder came due, its compose
+  // aborted on the substrate, and the next three journal lines were the warm chat
+  // child being evicted as "abandon-poisoned" and the owner's next chat turn dying
+  // with `persistent-repl: REPL process exited`. He could not send a single message
+  // until the service was restarted. The cause was ownership, not the abort: the
+  // fire-time composer ran on `liveAgentSubstrate` — the very REPL the owner talks
+  // to — so every way a background compose can end badly (timeout abort, crashed
+  // child, a `--tools` or model mismatch tripping the reuse guard) reached into his
+  // session and tore it down.
+  //
+  // A DEDICATED REPL IS THE ONLY FIX THAT HOLDS. Matching the live-chat `--tools`
+  // surface and the live-chat model — the two patches that came before — only made
+  // the two lanes look identical enough to share a session; they could not make an
+  // aborted turn stop poisoning the session it was aborted on. The persistent pool
+  // keys on (instance, user, project, credential), so a DISTINCT instance id is
+  // what actually buys separate children. `cc-compose-*` above already earned this
+  // lesson for per-project composition (#419 B1); this is the same fix for the
+  // timer-driven lane.
+  //
+  // Callers: the fired-reminder/ritual dispatcher and the work-board wakeup, both
+  // through `buildSubstrateReminderLlm`. They keep passing the live-chat tool
+  // surface — not to match the chat session any more, but because a ritual composes
+  // on this seam and its approval prompt names capabilities (`WebSearch`) that only
+  // exist if the surface carries them. It is still ONE constant surface, so the
+  // reuse guard never thrashes this child either.
+  //
+  // THIS IS AN ISOLATION FIX, NOT A DOWNGRADE — the GRANTS stay identical to the
+  // chat lane on purpose. `PROFILE_WARM_CHAT` + `enableToolBridge: true` + the same
+  // conversational provider config, because a RITUAL composes here and ISSUES #504
+  // settled exactly this question: the previous design ran rituals on a locked-down
+  // `cc-ritual-*` REPL with no tool bridge, the morning brief could not read the
+  // owner's calendar (`mcp__neutron__calendar_list` validated and then failed), and
+  // he rejected it outright — *"The morning brief should just be a regular reminder
+  // in the general chat, with access to everything general has access to."*
+  // Tightening the profile here would rebuild that sandbox under a new name and
+  // re-break the same feature. The security boundary for this lane is the APPROVAL
+  // GATE (`reminders/ritual-fire.ts`), which is unchanged.
+  //
+  // WHAT IS DELIBERATELY DIFFERENT: the instance id (the whole point), the
+  // credential-failure lane, and the owner-facing notice/delivery sinks — which are
+  // omitted, so a failed background compose cannot push a banner or a recovered
+  // reply into his chat. That is a reduction in NOISE, not in capability.
+  //
+  // WHAT STILL REACHES AN OWNER SURFACE, stated precisely because "the owner-facing
+  // sinks are omitted" would otherwise read as broader than it is. `enableToolBridge`
+  // is one gate that installs THREE things (`persistent/spawn.ts`, the `buildSettings`
+  // call): the tool bridge itself, the TodoWrite→Work Board sync, and the Activity
+  // Inspector tool tap. Turning the bridge on here necessarily turns on the other two.
+  //   - todo sync: UNREACHABLE in practice — `TodoWrite` is not in this lane's
+  //     `--tools` surface (`LIVE_AGENT_TOOL_NAMES`, which is what both callers pass),
+  //     so the hook is installed and nothing can fire it.
+  //   - activity tap: REACHABLE and kept. A nudge compose's tool calls do land in the
+  //     owner's Activity Inspector. That is a READ-ONLY record of work done on his
+  //     behalf, not an interruption of a chat turn, and seeing why a nudge said what
+  //     it said is worth more than the silence. Not a leak: same owner, same project.
+  //   - model-floor clamp: RECORDED, not bubbled. `PROFILE_WARM_CHAT` carries
+  //     `frontier_model_floor`, so this lane CAN be clamped, and with no sink at all
+  //     that clamp was a stderr line on a box nobody reads — the same invisibility
+  //     that let a lower tier serve the owner for a working day. So it takes
+  //     `ctx.backgroundNoticeSinks`: the same `system_events` journal, built with no
+  //     chat-delivery seam, so a clamp here is journalled (best-effort, as
+  //     everywhere else that sink is used) and never bubbled. The
+  //     other three notice seams stay omitted — they describe a chat turn's health
+  //     and there is no chat turn here.
+  // The line this lane draws is between REPORTING to the owner and INTERRUPTING him.
+  const reminderComposeSubstrate =
+    conversationalAvailable
+      ? buildLlmCallSubstrate({
+          ...anthropicPoolArg,
+          substrate_instance_id: `cc-nudge-${owner_handle}`,
+          cwd: owner_home,
+          owner_handle,
+          user_id: OWNER_USER_ID,
+          project_slug,
+          profile: PROFILE_WARM_CHAT,
+          enableToolBridge: true,
+          // BACKGROUND LANE — a failure here cannot reach the STRIKE LEDGER, so it
+          // can never park the shared credential pool for the hour that locked the
+          // owner out of chat. Stated that narrowly on purpose: a real 401/402/429
+          // from THIS lane still sets its own per-status cooldown on the shared
+          // credential, and that cooldown is shared with his interactive turns. It
+          // has to be — a provider status is a fact about the credential, not about
+          // the lane that discovered it. What the lane cannot do is INVENT one, or
+          // compound several into the hour-long park. See
+          // `gateway/wiring/build-llm-call-substrate.ts` `credential_failure_lane`
+          // and `runtime/credential-pool.ts` `reportFailure`.
+          credential_failure_lane: 'background',
+          // The journal-only floor notice — see the `model-floor clamp` bullet above.
+          ...(ctx.backgroundNoticeSinks !== undefined
+            ? { onModelFloorApplied: ctx.backgroundNoticeSinks.onModelFloorApplied }
+            : {}),
+          // Same provider config as the live chat, tool manifest included — the
+          // OpenAI-path equivalent of `enableToolBridge` (capability parity).
+          ...liveAgentProvider,
+          ...(substrateFactory !== undefined ? { substrateFactory } : {}),
+        })
+      : null
 
   // Foundational Trident build-agent runner (Forge / Argus) — the `/code
   // <task>` autonomous build loop, on the CC-subprocess substrate.
@@ -449,6 +579,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
     llmCallSubstrate,
     liveAgentSubstrate,
     makeComposeSubstrate,
+    reminderComposeSubstrate,
     makeEphemeralSubstrate,
     makeWarmFireSubstrate,
     prewarmReady,

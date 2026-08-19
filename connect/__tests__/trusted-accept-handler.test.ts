@@ -9,13 +9,12 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { generateKeyPair, exportJWK, type KeyLike } from 'jose'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ConnectedMembersStore } from '../connected-members-store.ts'
 import { issueInviteToken, type InviteSigningKey } from '../../onboarding/api/invite-link-generate.ts'
@@ -34,9 +33,7 @@ function makeDb(): ProjectDb {
   const dir = mkdtempSync(join(tmpdir(), 'neutron-ph5-trusted-'))
   cleanups.push(() => rmSync(dir, { recursive: true, force: true }))
   const dbPath = join(dir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   db.raw().run(

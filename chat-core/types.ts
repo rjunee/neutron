@@ -367,11 +367,20 @@ export interface OutboundUserMessage {
   attachments?: readonly string[]
 }
 
-/** Wire envelope a client sends to request a gap-fill replay. */
+/**
+ * Wire envelope a client sends to request a gap-fill replay.
+ *
+ * `after_seq` alone asks for the newest page of everything above the client's
+ * cursor — the ordinary forward resume. `before_seq` (EXCLUSIVE) asks BACKWARDS
+ * instead: the newest page strictly below that seq, which is how a client reaches
+ * history a capped forward page skipped. See {@link parseHistoryGap} for the
+ * server signal that drives the walk, and `SyncEngine.backfillRequest`.
+ */
 export interface OutboundResume {
   v: 1
   type: 'resume'
   after_seq: number
+  before_seq?: number
 }
 
 /**
@@ -479,6 +488,36 @@ export function parseSessionReadyMaxSeq(raw: unknown): number | null {
   const v = e['last_seen_seq']
   if (typeof v !== 'number' || !Number.isFinite(v)) return null
   return Math.trunc(v)
+}
+
+/**
+ * Read the server's replay-TRUNCATION signal: the `older_than` seq off a
+ * `history_gap` frame, or `null` when the frame is absent / malformed / some other
+ * type.
+ *
+ * The server sends `history_gap` after a `resume` whose message page came back
+ * FULL: rows below `older_than` were not delivered. A client that wants its whole
+ * transcript answers with `{ type:'resume', after_seq:0, before_seq:older_than }`
+ * and receives the page below, repeating until the server stops reporting a gap.
+ *
+ * WHY A CLIENT MUST NOT IGNORE IT. Before this frame existed, a bounded replay was
+ * silent about being bounded, and the client's forward cursor advanced past the
+ * rows the page had skipped — so the missing middle of a long transcript was
+ * unreachable for good. Reading it is what converts that permanent hole into a
+ * bounded number of extra round trips.
+ *
+ * Defensive (return `null`, never throw), matching the other frame decoders. A
+ * non-positive `older_than` is `null` too: seqs start at 1, so there is nothing
+ * below 1 to ask for and a walk that kept asking would never terminate.
+ */
+export function parseHistoryGap(raw: unknown): number | null {
+  if (typeof raw !== 'object' || raw === null) return null
+  const e = raw as Record<string, unknown>
+  if (e['type'] !== 'history_gap') return null
+  const v = e['older_than']
+  if (typeof v !== 'number' || !Number.isFinite(v)) return null
+  const older_than = Math.trunc(v)
+  return older_than > 1 ? older_than : null
 }
 
 /**

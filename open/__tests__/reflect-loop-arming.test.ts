@@ -21,7 +21,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
@@ -98,8 +98,8 @@ async function bootComposer(): Promise<{
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start: () => cannedHandle(opts.substrate_instance_id),
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
   const composition = await composer({ db, project_slug: 'owner' })
   return {
@@ -193,8 +193,8 @@ test('a composer failure after the memory wiring does NOT leak the reflect inter
   const substrateFactory = (opts: ClaudeCodeSubstrateOptions): Substrate => ({
     start: () => cannedHandle(opts.substrate_instance_id),
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   try {
     const composer = buildOpenGraphComposer({ env: process.env, substrateFactory })
     await expect(composer({ db, project_slug: 'owner' })).rejects.toThrow()

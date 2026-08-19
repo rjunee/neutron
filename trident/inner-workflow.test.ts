@@ -44,6 +44,83 @@ function grabFunction(name: string): string {
   throw new Error(`could not brace-match ${name}`)
 }
 
+function loadCodexForgeSchema(): {
+  required: string[]
+  properties: Record<string, { type?: unknown; description?: string }>
+} {
+  const start = SRC.indexOf('const FORGE_SCHEMA =')
+  const end = SRC.indexOf('const PLAN_SCHEMA =', start)
+  if (start === -1 || end === -1) throw new Error('Forge schemas are missing from inner-workflow.mjs')
+  return new Function(`${SRC.slice(start, end)}; return CODEX_FORGE_SCHEMA`)() as {
+    required: string[]
+    properties: Record<string, { type?: unknown; description?: string }>
+  }
+}
+
+function loadCodexBridgePrompts(): { build: string; collect: string; wait: string } {
+  const factory = new Function(
+    'runId',
+    'slug',
+    'codexBuildSh',
+    'codexBriefByPath',
+    'chunkTextOnLines',
+    'CODEX_BRIEF_CHUNK_BYTES',
+    'briefIntegrity',
+    'codexBuildDiffFile',
+    'dbPath',
+    'checkpointSh',
+    'forgeBranch',
+    'baseBranch',
+    'mergeMode',
+    'codexHome',
+    'NO_INTERACTIVE_RULE',
+    'REDIRECT_RULE',
+    'NO_PATTERN_KILL_RULE',
+    [
+      grabFunction('shSingleQuote'),
+      grabFunction('wrapperErrTailInstruction'),
+      grabFunction('workflowStageStampCommand'),
+      grabFunction('codexBuildPrompt'),
+      grabFunction('codexCollectPrompt'),
+      grabFunction('codexWaitMorePrompt'),
+      `return {
+        build: codexBuildPrompt('r1', 'brief', { envVar: '', model: '' }, 'forge-done'),
+        collect: codexCollectPrompt('r1'),
+        wait: codexWaitMorePrompt('r1'),
+      }`,
+    ].join('\n'),
+  ) as (...args: unknown[]) => { build: string; collect: string; wait: string }
+  return factory(
+    'prompt-pin',
+    'fallback-slug',
+    '/harness/trident/codex-build.sh',
+    () => null,
+    (text: string) => [{ text, mode: 'raw' }],
+    4096,
+    () => '6:receipt',
+    () => '/tmp/reviewer.diff',
+    null,
+    '/harness/trident/checkpoint.sh',
+    'trident/prompt-pin',
+    'main',
+    'pr',
+    '/codex-home',
+    '',
+    '',
+    '',
+  )
+}
+
+function loadCodexDeferralMessage(): (
+  label: string,
+  codexStatus: string,
+  wrapperErrTail: string,
+) => string {
+  return new Function(
+    `${grabFunction('codexDeferralMessage')}; return codexDeferralMessage`,
+  )() as (label: string, codexStatus: string, wrapperErrTail: string) => string
+}
+
 // The checked-in checkpoint-writer the workflow's Bash steps invoke (P10) —
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
 const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
@@ -142,6 +219,43 @@ describe('inner-workflow.mjs — args normalization behavior', () => {
     expect(normalizeWorkflowArgs('"a-bare-string"')).toEqual({})
     expect(normalizeWorkflowArgs(null)).toEqual({})
     expect(normalizeWorkflowArgs(undefined)).toEqual({})
+  })
+})
+
+describe('inner-workflow.mjs — codex wrapper refusal propagation', () => {
+  const refusal =
+    'CODEX_BUILD_BRIEF_PART_CORRUPT: brief part X measures 27893:ff41febe but its receipt is 28462:9f34d3b0'
+
+  test('CODEX_FORGE_SCHEMA requires the wrapper stderr tail as a string', () => {
+    const schema = loadCodexForgeSchema()
+    expect(schema.properties.wrapperErrTail?.type).toBe('string')
+    expect(schema.required).toContain('wrapperErrTail')
+  })
+
+  test('build, collect, and wait bridges render the same bounded verbatim-tail instruction', () => {
+    const prompts = loadCodexBridgePrompts()
+    const errFile = '/tmp/trident-codex-build-prompt-pin-r1.err'
+    const instruction =
+      `Whenever \`codexStatus !== 'connected'\`, run \`tail -c 400 '${errFile}' 2>/dev/null || true\` and copy its output VERBATIM into \`wrapperErrTail\`; when \`codexStatus === 'connected'\`, set \`wrapperErrTail\` to \`""\`.`
+
+    for (const [bridge, prompt] of Object.entries(prompts)) {
+      expect(prompt, `${bridge} bridge is missing wrapperErrTail`).toContain('wrapperErrTail')
+      expect(prompt, `${bridge} bridge is missing the non-connected condition`).toContain(
+        "codexStatus !== 'connected'",
+      )
+      expect(prompt, `${bridge} bridge is missing the wrapper .err path`).toContain(errFile)
+      expect(prompt, `${bridge} bridge drifted from the bounded-tail instruction`).toContain(instruction)
+    }
+  })
+
+  test('the forge deferral message carries the measured refusal verbatim', () => {
+    const message = loadCodexDeferralMessage()('forge:build', 'deferred', refusal)
+    expect(message).toBe(`forge:build deferred (codexStatus=deferred): ${refusal}`)
+    expect(message).toContain('deferred')
+    expect(message).toContain(refusal)
+    expect(grabFunction('forgeAgent')).toContain(
+      'codexDeferralMessage(opts.label, res.codexStatus, res.wrapperErrTail)',
+    )
   })
 })
 
@@ -488,9 +602,24 @@ describe('inner-workflow.mjs — parallel adversarial review + asymmetric synthe
     // The re-enter step switches WITHOUT -c; the create step uses -c.
     expect(SRC).toContain('Re-enter it WITHOUT')
   })
+
+  test('the FRESH forge step tolerates a leftover local branch: create-or-re-enter, -c first', () => {
+    // Measured incident d5c1e219: a relaunched card whose earlier run left
+    // refs/heads/trident/<slug> behind died on `git switch -c` ("branch already
+    // exists") and committed on the worktree-wf_ auto branch instead. The fresh
+    // step must fall back to plain `git switch`; order (-c first) distinguishes
+    // it from the reenter step, which tries the plain switch first.
+    expect(SRC).toContain('git switch -c ${forgeBranch} 2>/dev/null || git switch ${forgeBranch}')
+    expect(SRC).toContain('git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}')
+  })
 })
 
 describe('inner-workflow.mjs — codex cross-model review panelist', () => {
+  test('the codex build coda pins both halves of the host-side branch binding', () => {
+    expect(SRC).toContain('STEP 1 IS ALREADY DONE FOR YOU')
+    expect(SRC).toContain('Stay on branch ${forgeBranch}')
+  })
+
   test('destructures codexHome from args (per-project CODEX_HOME) + gates on codexConfigured', () => {
     expect(SRC).toContain('codexHome = null')
     expect(SRC).toContain('const codexConfigured =')
@@ -505,7 +634,10 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
 
   test('the codex reviewer runs trident/codex-review.sh SYNCHRONOUSLY with per-project CODEX_HOME (never backgrounded)', () => {
     expect(SRC).toContain('function codexReviewerPrompt(diffFile)')
-    expect(SRC).toContain('/trident/codex-review.sh')
+    expect(SRC).toContain('const codexReviewSh =')
+    expect(SRC).toContain('codexReviewScript = null')
+    // The repoPath resolution IS the defect — its absence is the fix.
+    expect(SRC).not.toContain('${repoPath}/trident/codex-review.sh')
     expect(SRC).toContain('CODEX_HOME=')
     expect(SRC).toContain('do NOT background it')
     // Codex reviews the SAME diff FILE Forge wrote — NOT `git diff` in repoPath
@@ -580,6 +712,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'slug',
       'runId',
       'codexHome',
+      'codexReviewSh',
       'baseBranch',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
@@ -591,9 +724,18 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'CODEX_ENV_PREFIX',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
-    return factory('/repo', 'the-slug', runId, '/codex-home', 'main', '', '', '', "CODEX_REVIEW_MODEL='gpt-5.6-sol' ")(
-      '/tmp/some-diff.diff',
-    )
+    return factory(
+      '/repo',
+      'the-slug',
+      runId,
+      '/codex-home',
+      '/harness/trident/codex-review.sh',
+      'main',
+      '',
+      '',
+      '',
+      "CODEX_REVIEW_MODEL='gpt-5.6-sol' ",
+    )('/tmp/some-diff.diff')
   }
 
   /** Run ONLY the truncation-readback tail of the bridge command, on a fixture stderr. */

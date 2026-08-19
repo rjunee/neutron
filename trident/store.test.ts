@@ -2,15 +2,17 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { changeSignatureEntries, COLS, TridentRunStore } from './store.ts'
+import { changeSignatureEntries, COLS, TridentRunStore, waveChildSlug } from './store.ts'
 
 let tmp: string
 let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-store-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
   applyMigrations(db.raw())
 })
@@ -18,6 +20,38 @@ beforeEach(() => {
 afterEach(() => {
   db.close()
   rmSync(tmp, { recursive: true, force: true })
+})
+
+describe('claimAgentWake', () => {
+  test('returns true exactly once for a terminal run', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'wake-failed', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { phase: 'failed' })
+
+    expect(await store.claimAgentWake(run.id)).toBe(true)
+    expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
+
+  test('returns false for a non-terminal run', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'wake-active', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
+
+  test('returns false for an unknown id', async () => {
+    const store = new TridentRunStore(db)
+    expect(await store.claimAgentWake('missing')).toBe(false)
+  })
+
+  test('claim survives a full snapshot save', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'wake-save', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { phase: 'done' })
+    expect(await store.claimAgentWake(run.id)).toBe(true)
+
+    await store.save(store.get(run.id)!)
+    expect(await store.claimAgentWake(run.id)).toBe(false)
+  })
 })
 
 describe('TridentRunStore', () => {
@@ -28,6 +62,63 @@ describe('TridentRunStore', () => {
       )
       .get('code_trident_runs')
     expect(row?.name).toBe('code_trident_runs')
+  })
+
+  test('recordStageEvent + stageEvents round-trip nullable meta in insertion order', async () => {
+    const times = [
+      '2026-08-18T10:00:00.100Z',
+      '2026-08-18T10:00:00.300Z',
+      '2026-08-18T10:00:00.200Z',
+      '2026-08-18T10:00:00.400Z',
+    ]
+    const store = new TridentRunStore(db, () => times.shift()!)
+    await store.recordStageEvent('run-stage', 'launch-start', 'round=1 ralph_round=0')
+    await store.recordStageEvent('run-stage', 'fire-dispatched')
+    await store.recordStageEvent('run-stage', 'fire-settled', null)
+    await store.recordStageEvent('other-run', 'wrapper-start')
+
+    const got = store.stageEvents('run-stage')
+    expect(got.map(({ stage, at, meta }) => ({ stage, at, meta }))).toEqual([
+      { stage: 'launch-start', at: '2026-08-18T10:00:00.100Z', meta: 'round=1 ralph_round=0' },
+      { stage: 'fire-dispatched', at: '2026-08-18T10:00:00.300Z', meta: null },
+      { stage: 'fire-settled', at: '2026-08-18T10:00:00.200Z', meta: null },
+    ])
+    expect(got[0]!.id).toBeLessThan(got[1]!.id)
+    expect(got[1]!.id).toBeLessThan(got[2]!.id)
+  })
+
+  test('stage events survive a reap and append across a re-fire', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'stage-survival',
+      project_slug: 't1',
+      repo_path: '/repo',
+      task: 'measure the launch',
+    })
+    for (const stage of ['launch-start', 'fire-dispatched', 'fire-settled']) {
+      await store.recordStageEvent(run.id, stage)
+    }
+
+    await store.update(run.id, {
+      phase: 'failed',
+      subagent_status: 'failed',
+      failure_reason: 'launcher reaped',
+    })
+    expect(store.stageEvents(run.id).map((event) => event.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+    ])
+
+    await store.recordStageEvent(run.id, 'launch-start', 'round=2 ralph_round=0')
+    await store.recordStageEvent(run.id, 'fire-dispatched')
+    expect(store.stageEvents(run.id).map((event) => event.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+      'launch-start',
+      'fire-dispatched',
+    ])
   })
 
   test('create + get round-trips every column with defaults', async () => {
@@ -45,7 +136,11 @@ describe('TridentRunStore', () => {
     expect(run.max_ralph_rounds).toBe(20)
     expect(run.merge_mode).toBe('local')
     expect(run.pr).toBeNull()
+    expect(run.base_sha).toBeNull()
+    expect(run.base_behind).toBeNull()
     expect(run.subagent_status).toBeNull()
+    expect(run.infra_retries).toBe(0)
+    expect(run.brief_alert).toBeNull()
     // #317 — channel_kind defaults to telegram (migration 0081 column default).
     expect(run.channel_kind).toBe('telegram')
 
@@ -56,6 +151,45 @@ describe('TridentRunStore', () => {
     expect(got?.repo_path).toBe('/home/x/repos/neutron')
     expect(got?.started_at).toBe(run.started_at)
     expect(got?.channel_kind).toBe('telegram')
+    expect(got?.infra_retries).toBe(0)
+  })
+
+  test('brief_alert written by the host checkpoint maps onto the run object', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'brief-alert', project_slug: 't1', repo_path: '/r', task: 't' })
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [alert, run.id])
+
+    expect(store.get(run.id)?.brief_alert).toBe(alert)
+  })
+
+  test('save() and saveIfActive() preserve a workflow-owned brief_alert against stale snapshots', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'sticky-brief-alert', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stale = store.get(run.id)!
+
+    const first = 'CODEX_BUILD_BRIEF_PART_CORRUPT: first durable alert. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [first, run.id])
+    await store.save(stale)
+    expect(store.get(run.id)?.brief_alert).toBe(first)
+
+    const second = 'CODEX_BUILD_BRIEF_PART_CORRUPT: second durable alert. DEFERRED.'
+    db.raw().run('UPDATE code_trident_runs SET brief_alert = ? WHERE id = ?', [second, run.id])
+    expect(await store.saveIfActive({ ...stale, phase: 'ralph-plan' })).toBe(true)
+    expect(store.get(run.id)?.brief_alert).toBe(second)
+  })
+
+  test('base pin columns round-trip through update, save, and saveIfActive', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })
+    const sha = 'b'.repeat(40)
+    const updated = await store.update(run.id, { base_sha: sha, base_behind: 16 })
+    expect(updated?.base_sha).toBe(sha)
+    expect(updated?.base_behind).toBe(16)
+    await store.save({ ...updated!, base_behind: 17 })
+    expect(store.get(run.id)?.base_behind).toBe(17)
+    expect(await store.saveIfActive({ ...store.get(run.id)!, base_behind: 18 })).toBe(true)
+    expect(store.get(run.id)?.base_behind).toBe(18)
   })
 
   test('the checkpoint OID + findings start NULL and round-trip through update (0122)', async () => {
@@ -426,6 +560,48 @@ describe('TridentRunStore', () => {
     })
   })
 
+  describe('beginInfraRetry — the single-writer executor/transport retry claim', () => {
+    test('increments durably and clears result + every dispatch slot in one claim', async () => {
+      let clock = '2026-08-14T20:10:00.000Z'
+      const store = new TridentRunStore(db, () => clock)
+      const run = await store.create({ slug: 'infra-claim', project_slug: 't1', repo_path: '/r', task: 't' })
+      await store.update(run.id, {
+        subagent_run_id: 'wf-1',
+        subagent_status: 'completed',
+        workflow_run_id: 'generation-1',
+        inner_result: '{"verdict":"REQUEST_CHANGES"}',
+      })
+      clock = '2026-08-14T20:11:00.000Z'
+
+      const claimed = await store.beginInfraRetry(run.id)
+
+      expect(claimed).toMatchObject({
+        infra_retries: 1,
+        inner_result: null,
+        subagent_run_id: null,
+        subagent_status: null,
+        workflow_run_id: null,
+        last_advanced_at: clock,
+      })
+      expect(claimed?.round).toBe(1)
+      expect(claimed?.ralph_round).toBe(0)
+      expect(claimed?.harvested_at).toBeNull()
+    })
+
+    test('legacy NULL reads as zero and update() cannot write the owned counter', async () => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({ slug: 'infra-owned', project_slug: 't1', repo_path: '/r', task: 't' })
+      await db.run(`UPDATE code_trident_runs SET infra_retries = NULL WHERE id = ?`, [run.id])
+      expect(store.get(run.id)?.infra_retries).toBe(0)
+
+      await store.update(run.id, {
+        // @ts-expect-error — the durable retry budget is deliberately not patchable.
+        infra_retries: 99,
+      })
+      expect(store.get(run.id)?.infra_retries).toBe(0)
+    })
+  })
+
   describe('terminalTransition — atomic conditional terminal write (§F6a race guard)', () => {
     test('wins on a non-terminal run: flips the phase + reason and reports won', async () => {
       const store = new TridentRunStore(db)
@@ -471,6 +647,236 @@ describe('TridentRunStore', () => {
       expect(res.run).toBeNull()
       expect(res.won).toBe(false)
     })
+  })
+})
+
+describe('wave children (migration 0137)', () => {
+  test('ordinary rows default both wave-child fields to null', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'ordinary', project_slug: 't1', repo_path: '/r', task: 't',
+    })
+
+    expect(store.get(run.id)).toMatchObject({ parent_run_id: null, wave_task_id: null })
+  })
+
+  test('a wave child round-trips its parent and task identity', async () => {
+    const store = new TridentRunStore(db)
+    const parent = await store.create({
+      slug: 'wave-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+    const child = await store.create({
+      slug: waveChildSlug(parent.slug, 'T3'),
+      project_slug: parent.project_slug,
+      repo_path: '/r',
+      task: 'child',
+      parent_run_id: parent.id,
+      wave_task_id: 'T3',
+    })
+
+    expect(store.get(child.id)).toMatchObject({ parent_run_id: parent.id, wave_task_id: 'T3' })
+    expect(store.get(child.id)).toEqual(child)
+  })
+
+  test('create refuses a half-declared or empty wave-child pair', async () => {
+    const store = new TridentRunStore(db)
+    const parent = await store.create({
+      slug: 'pair-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+    const base = { project_slug: 't1', repo_path: '/r', task: 'child' }
+
+    await expect(
+      store.create({ ...base, slug: 'parent-only', parent_run_id: parent.id }),
+    ).rejects.toThrow(/BOTH/)
+    await expect(
+      store.create({ ...base, slug: 'task-only', wave_task_id: 'T3' }),
+    ).rejects.toThrow(/BOTH/)
+    await expect(
+      store.create({ ...base, slug: 'empty-parent', parent_run_id: '', wave_task_id: 'T3' }),
+    ).rejects.toThrow(/BOTH/)
+  })
+
+  test('wave spawn is idempotent per parent and task', async () => {
+    const store = new TridentRunStore(db)
+    const parentA = await store.create({
+      slug: 'spawn-parent-a', project_slug: 't1', repo_path: '/r', task: 'parent A',
+    })
+    const parentB = await store.create({
+      slug: 'spawn-parent-b', project_slug: 't1', repo_path: '/r', task: 'parent B',
+    })
+    await store.create({
+      id: 'spawn-a-t3-1', slug: 'spawn-a-t3-1', project_slug: 't1', repo_path: '/r', task: 'T3',
+      parent_run_id: parentA.id, wave_task_id: 'T3',
+    })
+
+    await expect(store.create({
+      id: 'spawn-a-t3-2', slug: 'spawn-a-t3-2', project_slug: 't1', repo_path: '/r', task: 'T3 retry',
+      parent_run_id: parentA.id, wave_task_id: 'T3',
+    })).rejects.toThrow(/UNIQUE/)
+    await expect(store.create({
+      slug: 'spawn-a-t4', project_slug: 't1', repo_path: '/r', task: 'T4',
+      parent_run_id: parentA.id, wave_task_id: 'T4',
+    })).resolves.toMatchObject({ parent_run_id: parentA.id, wave_task_id: 'T4' })
+    await expect(store.create({
+      slug: 'spawn-b-t3', project_slug: 't1', repo_path: '/r', task: 'T3',
+      parent_run_id: parentB.id, wave_task_id: 'T3',
+    })).resolves.toMatchObject({ parent_run_id: parentB.id, wave_task_id: 'T3' })
+  })
+
+  test('ordinary rows stay out of the wave-child unique index', async () => {
+    const store = new TridentRunStore(db)
+
+    await expect(store.create({
+      slug: 'plain-one', project_slug: 't1', repo_path: '/r', task: 'one',
+    })).resolves.toMatchObject({ parent_run_id: null, wave_task_id: null })
+    await expect(store.create({
+      slug: 'plain-two', project_slug: 't1', repo_path: '/r', task: 'two',
+    })).resolves.toMatchObject({ parent_run_id: null, wave_task_id: null })
+  })
+
+  test('listChildren returns only one parent\'s members in spawn order', async () => {
+    let clock = '2026-01-01T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    const parentA = await store.create({
+      slug: 'list-parent-a', project_slug: 't1', repo_path: '/r', task: 'parent A',
+    })
+    const parentB = await store.create({
+      slug: 'list-parent-b', project_slug: 't1', repo_path: '/r', task: 'parent B',
+    })
+    clock = '2026-01-01T00:01:00.000Z'
+    const aT2 = await store.create({
+      slug: 'list-a-t2', project_slug: 't1', repo_path: '/r', task: 'T2',
+      parent_run_id: parentA.id, wave_task_id: 'T2',
+    })
+    clock = '2026-01-01T00:02:00.000Z'
+    const aT3 = await store.create({
+      slug: 'list-a-t3', project_slug: 't1', repo_path: '/r', task: 'T3',
+      parent_run_id: parentA.id, wave_task_id: 'T3',
+    })
+    clock = '2026-01-01T00:03:00.000Z'
+    await store.create({
+      slug: 'list-b-t2', project_slug: 't1', repo_path: '/r', task: 'T2',
+      parent_run_id: parentB.id, wave_task_id: 'T2',
+    })
+
+    expect(store.listChildren(parentA.id).map((run) => run.id)).toEqual([aT2.id, aT3.id])
+    expect(store.listChildren(parentA.id).some((run) => run.id === parentA.id)).toBe(false)
+    expect(store.listChildren('missing')).toEqual([])
+  })
+
+  test('latestByProjectScope ignores later and failed wave members', async () => {
+    let clock = '2026-01-01T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    const parent = await store.create({
+      slug: 'latest-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+    clock = '2026-01-01T00:01:00.000Z'
+    const child = await store.create({
+      slug: 'latest-child', project_slug: 't1', repo_path: '/r', task: 'child',
+      parent_run_id: parent.id, wave_task_id: 'T3',
+    })
+    clock = '2026-01-01T00:02:00.000Z'
+    await store.update(child.id, {})
+
+    expect(store.latestByProjectScope('t1')?.id).toBe(parent.id)
+    clock = '2026-01-01T00:03:00.000Z'
+    await store.update(child.id, { phase: 'failed' })
+    expect(store.latestByProjectScope('t1')?.id).toBe(parent.id)
+  })
+
+  test('a child needs its deterministic suffix to avoid its live parent slug', async () => {
+    const store = new TridentRunStore(db)
+    const parent = await store.create({
+      slug: 'collision-parent', project_slug: 't1', repo_path: '/r', task: 'parent',
+    })
+
+    await expect(store.create({
+      slug: parent.slug, project_slug: 't1', repo_path: '/r', task: 'child',
+      parent_run_id: parent.id, wave_task_id: 'T3',
+    })).rejects.toThrow(/UNIQUE/)
+    await expect(store.create({
+      slug: waveChildSlug(parent.slug, 'T3'), project_slug: 't1', repo_path: '/r', task: 'child',
+      parent_run_id: parent.id, wave_task_id: 'T3',
+    })).resolves.toMatchObject({ slug: 'collision-parent--wT3' })
+  })
+
+  test('waveChildSlug identifies the parent and task', () => {
+    expect(waveChildSlug('a-slug', 'T12')).toBe('a-slug--wT12')
+  })
+})
+
+describe('round persistence (canary)', () => {
+  test('update() derives round from a fix checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-update', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, { inner_checkpoint: 'fix-round-3' })
+
+    expect(store.get(run.id)?.round).toBe(3)
+    expect(store.get(run.id)?.inner_checkpoint).toBe('fix-round-3')
+  })
+
+  test('update() keeps round monotonic while storing an older checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-monotonic', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'fix-round-3' })
+
+    await store.update(run.id, { inner_checkpoint: 'fix-round-2' })
+
+    expect(store.get(run.id)?.round).toBe(3)
+    expect(store.get(run.id)?.inner_checkpoint).toBe('fix-round-2')
+  })
+
+  test('update() does not guess a round from an unrelated checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-no-guess', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+
+    expect(store.get(run.id)?.round).toBe(1)
+  })
+
+  test('update() lets an explicit round win without a duplicate SET', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-explicit', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, { round: 9, inner_checkpoint: 'fix-round-4' })
+
+    expect(store.get(run.id)?.round).toBe(9)
+  })
+
+  test('update() persists outer-published group 3 as the round', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-published', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await store.update(run.id, {
+      inner_checkpoint: `outer-published:${'b'.repeat(40)}:2:6`,
+    })
+
+    expect(store.get(run.id)?.round).toBe(6)
+  })
+
+  test('saveIfActive() derives round from a fix checkpoint', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'round-save-active', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    expect(await store.saveIfActive({ ...store.get(run.id)!, inner_checkpoint: 'fix-round-5' })).toBe(true)
+
+    expect(store.get(run.id)?.round).toBe(5)
+  })
+
+  test('save() derives round and never lowers the stored value from a stale snapshot', async () => {
+    const store = new TridentRunStore(db)
+    const staleRun = await store.create({ slug: 'round-save-stale', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(staleRun.id, { inner_checkpoint: 'fix-round-5' })
+
+    await store.save({ ...staleRun, round: 1, inner_checkpoint: 'argus-approved' })
+
+    expect(store.get(staleRun.id)?.round).toBe(5)
+
+    const derivedRun = await store.create({ slug: 'round-save-derived', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.save({ ...store.get(derivedRun.id)!, inner_checkpoint: 'fix-round-4' })
+    expect(store.get(derivedRun.id)?.round).toBe(4)
   })
 })
 
@@ -649,22 +1055,27 @@ describe('terminalTransition retracts a stale in-flight claim', () => {
 })
 
 describe('INSERT column/placeholder/bound-array alignment — the silent-corruption guard (BLOCKING addendum)', () => {
-  test('COLS matches the live table: 34 columns, same names as PRAGMA table_info', () => {
+  test('COLS matches the 40 snapshot-writable table columns', () => {
     // The INSERT placeholder list is derived from COLS, so placeholder count =
     // column count by construction. What is NOT free is COLS agreeing with the
     // TABLE: a column added, dropped or renamed by a migration without touching
     // COLS corrupts every insert silently (STRICT only catches affinity, not
-    // arity/order). The literal 34 is deliberate — adding a column must be a
+    // arity/order). The literal 40 is deliberate — adding a column must be a
     // conscious edit here, not an invisible drift.
     const cols = COLS.split(', ')
     const pragma = db
       .prepare<{ name: string }, []>(`PRAGMA table_info(code_trident_runs)`)
       .all()
 
-    expect(cols).toHaveLength(34)
-    expect(cols).toHaveLength(pragma.length)
+    expect(cols).toHaveLength(40)
+    // agent_waked_at is deliberately absent from COLS: claimAgentWake is its sole
+    // writer, so a full snapshot can never clear an already-won delivery claim.
+    // The table therefore has 41 columns and COLS has 40 — compare against the
+    // snapshot-writable set, not the raw pragma count.
+    const snapshotWritable = pragma.filter((c) => c.name !== 'agent_waked_at')
+    expect(cols).toHaveLength(snapshotWritable.length)
     // Same members, order-independent: a rename or a drop goes red.
-    expect([...cols].sort()).toEqual([...pragma.map((c) => c.name)].sort())
+    expect([...cols].sort()).toEqual([...snapshotWritable.map((c) => c.name)].sort())
   })
 
   test('FIX-ROUND CONTRACT fields round-trip and default to unconstrained nulls', async () => {
@@ -706,6 +1117,8 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
       chat_id: 'chat-id-distinct',
       thread_id: 'thread-id-distinct',
       channel_kind: 'cli',
+      parent_run_id: 'parent-run-distinct',
+      wave_task_id: 'T7',
     })
 
     expect(store.get(run.id)).toEqual(run)

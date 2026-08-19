@@ -17,9 +17,8 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { boot } from '../index.ts'
 import type { GraphComposer } from '../boot-composition-types.ts'
@@ -50,9 +49,7 @@ beforeEach(() => {
   // `resolveOwnerSlugFromConfig` prefers `<ownerHome ?? neutronHome>/.url_slug`
   // over `NEUTRON_INSTANCE_SLUG`, so this pins the boot handle to 'juno'.
   writeFileSync(join(home, '.url_slug'), `${BOOT_SLUG}\n`, 'utf8')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
 })
 
 afterEach(() => {

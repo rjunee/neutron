@@ -1,15 +1,17 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import type { HostCommandResult } from './git-mode.ts'
+import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
+  remoteAlreadyAtPublishHead,
+  resolveClaimedCommit,
   resolveResumeLiveHead,
   RESUME_HEAD_RETRY_DELAYS_MS,
 } from './orchestrator.ts'
@@ -19,6 +21,7 @@ import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
+import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -36,8 +39,8 @@ let store: TridentRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-orch-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   store = new TridentRunStore(db)
 })
 
@@ -62,6 +65,7 @@ const ghPrDiffTo = (joined: string, body: string): HostCommandResult => {
 
 interface Harness {
   loop: TridentTickLoop
+  step: import('./orchestrator.ts').TridentStep
   /** Flush queued workflow completions (write their `inner_result` to the DB). */
   complete: () => Promise<void>
   hostCalls: string[][]
@@ -79,12 +83,18 @@ function buildHarness(opts: {
   now?: () => string
   max_inflight_ms?: number
   no_advance_hang_ms?: number
+  latest_stage_event_at?: (run_id: string) => string | null
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_active_runs?: () => number
+  record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   on_terminal?: TridentTerminalHook
+  /** null exercises production base detection instead of the usual deterministic test base. */
+  base_branch?: string | null
+  /** Local build ref returned to launch's pre-fire leftover-branch probe; absent by default. */
+  local_branch_tip?: string | null
 }): Harness {
   const hostCalls: string[][] = []
   const refirePatches: import('./store.ts').TridentRunUpdate[] = []
@@ -97,14 +107,34 @@ function buildHarness(opts: {
   const sim = buildSimFirer(store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
-    if (cmd.join(' ').includes('rev-parse --is-shallow-repository')) return ok('false')
-    return opts.hostResponder ? opts.hostResponder(cmd) : ok()
+    const joined = cmd.join(' ')
+    if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    if (joined.includes('rev-parse --verify --quiet refs/heads/')) {
+      return opts.local_branch_tip === undefined || opts.local_branch_tip === null
+        ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        : ok(opts.local_branch_tip)
+    }
+    const stubbed = opts.hostResponder?.(cmd)
+    if (
+      stubbed !== undefined &&
+      (!joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}') ||
+        !stubbed.ok ||
+        stubbed.stdout.trim() !== '')
+    ) {
+      return stubbed
+    }
+    // Board-shaped PR runs now pin before every first fire. Most tests do not care
+    // which base commit was observed, so give the harness a valid fetched tip while
+    // preserving any explicit responder value (including failures) above.
+    if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
+      return ok('0'.repeat(40))
+    }
+    return stubbed ?? ok()
   }
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: sim.fire_workflow,
     db_path: join(tmp, 'project.db'),
     run_host: host,
-    base_branch: 'main',
     now,
     // The resume head-read retries are SPACED in production (a `pr`-mode read is a
     // network call). The suite injects a no-op wait so those attempts stay free.
@@ -117,15 +147,18 @@ function buildHarness(opts: {
       return store.update(id, patch).then(() => {})
     },
   }
+  if (opts.base_branch !== null) o.base_branch = opts.base_branch ?? 'main'
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
   if (opts.mint_run_id !== undefined) o.mint_run_id = opts.mint_run_id
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
   if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
+  if (opts.latest_stage_event_at !== undefined) o.latest_stage_event_at = opts.latest_stage_event_at
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
     o.resolve_reflection_context = opts.resolve_reflection_context
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
+  if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
@@ -133,7 +166,7 @@ function buildHarness(opts: {
     step: orch.step,
     ...(opts.on_terminal !== undefined ? { on_terminal: opts.on_terminal } : {}),
   })
-  return { loop, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
+  return { loop, step: orch.step, complete: sim.drain, hostCalls, inputs: sim.inputs, refirePatches }
 }
 
 /** Tick, then simulate the in-flight workflow finishing (write its result), so a
@@ -160,11 +193,29 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
   })
 }
 
+test('a bound_pr run never takes the build path', async () => {
+  const h = buildHarness({
+    plan: () => ({ result: { verdict: 'APPROVE', prNumber: 515, branch: 'feat-x' } }),
+    base_branch: null,
+  })
+  const run = await createRun({ bound_pr: 515 })
+
+  await h.loop.runOnce()
+
+  expect(h.inputs).toHaveLength(0)
+  expect(h.hostCalls).toHaveLength(0)
+  const persisted = store.get(run.id)!
+  expect(persisted.phase).toBe('failed')
+  expect(persisted.failure_reason).toContain('PR #515')
+  expect(persisted.failure_reason).toContain('review-only')
+  expect(persisted.failure_reason).toContain('no branch, no commit')
+})
+
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    // The remote must be BEHIND the local head, or the zero-ahead gate ("nothing was built")
-    // correctly refuses to publish a branch that is already fully pushed.
+    // The remote is BEHIND the local head, so this exercises the real lease push; a remote
+    // already AT the head is the no-op-success path, tested below.
     const stale = '9'.repeat(40)
     let fires = 0
     let prLists = 0
@@ -208,59 +259,68 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
   })
 
-  /**
-   * THE DEVIATION SUFFIX IS THE ONLY THING THAT SURVIVES THE PROCESS BOUNDARY in pr
-   * mode. The build invocation exits at the publish handoff, so the Forge that
-   * reported it deviated from its exec spec is long gone by the time the SECOND
-   * invocation writes `ralph-task-built*`. The outer publisher's checkpoint string
-   * is the only channel between them — drop the suffix here and the next iteration
-   * silently plans from a document the build no longer matches.
-   */
-  test('a publish handoff carrying deviatedFromSpec suffixes the outer-published checkpoint', async () => {
+  test('an intermediate Ralph publish handoff defers publishing and atomically renames the checkpoint', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    const stale = '9'.repeat(40)
-    let fires = 0
-    let lsRemotes = 0
     const h = buildHarness({
-      plan: () => {
-        fires += 1
-        return fires === 1
-          ? {
-              result: {
-                verdict: 'REQUEST_CHANGES',
-                branch: 'feat-x',
-                checkpoint: 'forge-done',
-                publishRequested: true,
-                publishHead: head,
-                remainingTasks: 2,
-                deviatedFromSpec: true,
-              },
-            }
-          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
-      },
-      hostResponder: (cmd) => {
-        const joined = cmd.join(' ')
-        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
-        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
-          lsRemotes += 1
-          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
-        }
-        if (joined.includes('diff --name-only')) return ok('changed.ts')
-        if (joined.includes('gh pr list')) return ok('42')
-        return ok()
-      },
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+          remainingTasks: 2,
+        },
+      }),
     })
     const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    await store.update(run.id, { inner_checkpoint_head: head })
 
-    await runToTerminal(h, run.id)
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
 
-    // Both the persisted patch and the relaunch input carry it — the row is what a
-    // crashed outer loop re-reads, the input is what the workflow actually parses.
-    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:2:1:deviated`)
-    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:2:1:deviated`)
-    // …and the suffix must not break the recorded-OID extraction the live-head read
-    // is gated on, or the resume would rebuild for the wrong reason.
-    expect(h.inputs[1]!.resume_live_head).toBe(head)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    expect(h.refirePatches).toHaveLength(1)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe('ralph-task-built')
+    expect('inner_checkpoint_head' in h.refirePatches[0]!).toBe(false)
+    expect(store.get(run.id)?.inner_checkpoint_head).toBe(head)
+  })
+
+  /** Deviation now crosses the process boundary as the checkpoint NAME. The
+   * intermediate task is not published, so there is deliberately no
+   * `outer-published:*:deviated` handoff to carry it. */
+  test('a deviated intermediate Ralph handoff uses the deviated checkpoint name without publishing', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+          remainingTasks: 2,
+          deviatedFromSpec: true,
+        },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, ralph: true })
+    await store.update(run.id, { inner_checkpoint_head: head })
+
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes(' push '))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
+    expect(h.refirePatches).toHaveLength(1)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe('ralph-task-built-deviated')
+    expect('inner_checkpoint_head' in h.refirePatches[0]!).toBe(false)
+    expect(store.get(run.id)?.inner_checkpoint_head).toBe(head)
   })
 
   /**
@@ -340,11 +400,19 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('the outer publisher refuses a commit that is not the local branch tip — naming BOTH values', async () => {
     const requested = 'abcdef0123456789abcdef0123456789abcdef01'
     const resolved = '1111111111111111111111111111111111111111'
+    let lsRemotes = 0
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: requested } }),
-      hostResponder: (cmd) => cmd.join(' ').includes('rev-parse --verify refs/heads/feat-x')
-        ? ok(resolved)
-        : ok(),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(resolved)
+        if (joined.includes(`--end-of-options ${requested}^{commit}`)) return ok(requested)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(`${lsRemotes === 1 ? '9'.repeat(40) : resolved}\trefs/heads/feat-x`)
+        }
+        return ok()
+      },
     })
     const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
     expect(final.phase).toBe('failed')
@@ -354,8 +422,100 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.failure_reason).toContain(resolved)
     // …and it must not blame a review that never ran.
     expect(final.failure_reason).not.toContain('Argus')
-    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(' push '))).toBe(false)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
     expect(h.inputs).toHaveLength(1)
+  })
+
+  test("a claim that resolves to no git object is ABSENT — the publisher publishes from git's head", async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const claim = '924b42906950'
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => ++fires === 1
+        ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: claim } }
+        : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes(`--end-of-options ${claim}^{commit}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: Needed a single revision', exit_code: 128 }
+        }
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++lsRemotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(' push '))).toBe(true)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a short-sha claim resolving to the same commit is accepted by OID equality', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const claim = head.slice(0, 7)
+    let fires = 0
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => ++fires === 1
+        ? { result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: claim } }
+        : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes(`--end-of-options ${claim}^{commit}`)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++lsRemotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes(`--end-of-options ${claim}^{commit}`))).toBe(true)
+  })
+
+  test("PR #271's string claim comparison cannot return", () => {
+    const source = readFileSync(join(import.meta.dir, 'orchestrator.ts'), 'utf8')
+    expect(source).not.toContain('startsWith(claimedHead')
+    expect(source).toContain('resolveClaimedCommit')
+  })
+
+  describe('resolveClaimedCommit — real git', () => {
+    test('resolves full and abbreviated commit OIDs and rejects absent or non-sha claims', async () => {
+      const repo = join(tmp, 'claim-resolution-real-git')
+      mkdirSync(repo)
+      const git = (...args: string[]) => Bun.spawnSync(['git', '-C', repo, ...args], { stdout: 'pipe', stderr: 'pipe' })
+      expect(git('init').exitCode).toBe(0)
+      expect(git('config', 'user.email', 'test@example.com').exitCode).toBe(0)
+      expect(git('config', 'user.name', 'Test').exitCode).toBe(0)
+      writeFileSync(join(repo, 'one'), 'one')
+      expect(git('add', 'one').exitCode).toBe(0)
+      expect(git('commit', '-m', 'one').exitCode).toBe(0)
+      const a = git('rev-parse', 'HEAD').stdout.toString().trim()
+      expect(await resolveClaimedCommit(spawnCapture, repo, a)).toBe(a)
+      expect(await resolveClaimedCommit(spawnCapture, repo, a.slice(0, 8))).toBe(a)
+      expect(await resolveClaimedCommit(spawnCapture, repo, '924b42906950')).toBeNull()
+      expect(git('cat-file', '-t', '924b42906950').exitCode).not.toBe(0)
+      expect(await resolveClaimedCommit(spawnCapture, repo, 'not-a-sha')).toBeNull()
+      expect(await resolveClaimedCommit(spawnCapture, repo, null)).toBeNull()
+      expect(await resolveClaimedCommit(spawnCapture, repo, 'HEAD')).toBeNull()
+      writeFileSync(join(repo, 'two'), 'two')
+      expect(git('add', 'two').exitCode).toBe(0)
+      expect(git('commit', '-m', 'two').exitCode).toBe(0)
+      const b = git('rev-parse', 'HEAD').stdout.toString().trim()
+      expect(await resolveClaimedCommit(spawnCapture, repo, b.slice(0, 8))).toBe(b)
+      expect(b).not.toBe(a)
+    })
   })
 
   describe('FIX-ROUND ANCESTRY GATE', () => {
@@ -657,6 +817,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         // The publisher's OWN read of the head (T1) is `rev-parse --verify refs/heads/<branch>` —
         // matched BEFORE the rebase step's generic `rev-parse --verify <baseSha>^{commit}` probe.
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(oldHead)
+        if (joined.includes(`--end-of-options ${oldHead}^{commit}`)) return ok(oldHead)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(oldHead)
@@ -885,6 +1046,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         // Publisher's own head read (T1) before the rebase step's generic `--verify` probe.
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
@@ -970,6 +1132,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1039,6 +1202,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1089,6 +1253,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1132,6 +1297,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1192,6 +1358,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         hostResponder: (cmd) => {
           const joined = cmd.join(' ')
           if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
           if (joined.includes('merge-base --is-ancestor')) return failWith('')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
           if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1266,6 +1433,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1334,6 +1502,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1394,6 +1563,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         hostResponder: (cmd) => {
           const joined = cmd.join(' ')
           if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
           if (joined.includes('merge-base --is-ancestor')) return failWith('')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
           if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1457,6 +1627,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         }
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (joined.includes('rev-parse --verify refs/heads/feat-x')) return ok(head)
+        if (joined.includes(`--end-of-options ${head}^{commit}`)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
         if (joined.includes('rev-parse HEAD')) return ok(newHead)
         if (joined.includes('rev-parse refs/heads/feat-x')) return ok(head)
@@ -1500,6 +1671,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1538,6 +1710,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1574,6 +1747,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1612,6 +1786,7 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       hostResponder: (cmd) => {
         const joined = cmd.join(' ')
         if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${newBaseSha}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok(`${head}\trefs/heads/feat-x`)
         if (joined.includes('merge-base --is-ancestor')) return failWith('')
         if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
         if (joined.includes('rev-parse --verify')) return ok(newBaseSha)
@@ -1736,9 +1911,9 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
 
   test('a claimed sha that disagrees with rev-parse FAILS, naming both values', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
-    // Full-length and abbreviated: the prefix check must catch BOTH, or an abbreviation
-    // silently becomes "accept anything".
+    // Full-length and abbreviated claims both resolve to a real, different commit.
     for (const claimed of ['f'.repeat(40), 'baddad1']) {
+      let lsRemotes = 0
       const h = buildHarness({
         plan: () => ({
           result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', publishRequested: true, publishHead: claimed },
@@ -1746,6 +1921,10 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
         hostResponder: (cmd) => {
           const joined = cmd.join(' ')
           if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+          if (joined.includes(`--end-of-options ${claimed}^{commit}`)) return ok('f'.repeat(40))
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+            return ok(`${++lsRemotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+          }
           return ok()
         },
       })
@@ -1756,26 +1935,178 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
       expect(final.failure_reason).toContain(claimed)
       expect(final.failure_reason).toContain(head)
       expect(final.failure_reason).not.toContain('Argus')
-      expect(calls.some((c) => c.includes(' push '))).toBe(false)
+      expect(calls.some((c) => c.includes(' push '))).toBe(true)
       expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
       expect(h.inputs).toHaveLength(1)
     }
   })
 
-  test('zero commits ahead of the remote still fails — "nothing was built" is a real outcome', async () => {
-    // Reading the head from git must not convert a build that committed nothing into a
-    // publish of the remote back onto itself.
-    const { h } = publishFixture({ publishHead: null }, true)
-    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+  test('first publish refuses a branch not cut from the pinned base', async () => {
+    const base = 'b'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+        },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) return ok('')
+        if (joined.includes(`merge-base --is-ancestor ${base} ${head}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { base_sha: base })
+    const final = await runToTerminal(h, run.id)
     const calls = h.hostCalls.map((c) => c.join(' '))
 
     expect(final.phase).toBe('failed')
-    expect(final.failure_reason).toContain('no new commits')
-    expect(final.failure_reason).toContain('feat-x')
-    expect(final.failure_reason).not.toContain('Argus')
+    expect(final.failure_reason).toBe(
+      `publish failed: branch feat-x does not contain the origin/main tip pinned at launch (${base.slice(0, 7)}) — not cut from origin/main; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+    )
+    expect(final.failure_reason).toContain('not cut from origin/')
+    expect(final.failure_reason).toContain("refusing to publish work built on another lane's branch")
+    expect(final.failure_reason).toContain('Verify the card instead of rebuilding')
+    expect(final.failure_reason).toContain(base.slice(0, 7))
     expect(calls.some((c) => c.includes(' push '))).toBe(false)
-    expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
-    expect(h.inputs).toHaveLength(1)
+    expect(calls.some((c) => c.includes('gh pr diff'))).toBe(false)
+    expect(calls.some((c) => c.includes('.trident-worktrees/rebase-'))).toBe(false)
+  })
+
+  test('first publish proceeds when the branch contains the pinned base', async () => {
+    const base = 'b'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    let fires = 0
+    let branchReads = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                publishHead: head,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          branchReads += 1
+          return branchReads === 1 ? ok('') : ok(`${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes(`merge-base --is-ancestor ${base} ${head}`)) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { base_sha: base })
+    const final = await runToTerminal(h, run.id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls).toContain(`git -C /repo merge-base --is-ancestor ${base} ${head}`)
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a null base pin skips the first-publish cut assertion', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    let fires = 0
+    let branchReads = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? {
+              result: {
+                verdict: 'REQUEST_CHANGES',
+                branch: 'feat-x',
+                checkpoint: 'forge-done',
+                publishRequested: true,
+                publishHead: head,
+              },
+            }
+          : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          branchReads += 1
+          return branchReads === 1 ? ok('') : ok(`${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { inner_checkpoint: 'forge-done' })
+    const final = await runToTerminal(h, run.id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls.some((c) => c.includes('merge-base --is-ancestor'))).toBe(false)
+    expect(calls.some((c) => c.includes(' push '))).toBe(true)
+  })
+
+  test('a branch already fully on origin publishes as a NO-OP success — the work was simply already published', async () => {
+    // 3 occurrences 2026-08-17 (runs 26ed32c1 / 88efe1ca / 95fcfb91): the remote already at
+    // the built sha used to be refused as "the build left no new commits to publish", failing
+    // a finished build and inviting a relaunch that rebuilds pushed work. The publisher now
+    // resolves to that commit and continues; the genuine nothing-built outcome is the
+    // EMPTY-DIFF refusal, tested above.
+    const { h, head } = publishFixture({ publishHead: null }, true)
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+    // The publisher RESOLVED to the already-published commit and re-fired review on it:
+    expect(h.inputs[1]!.resume_checkpoint).toBe(`outer-published:${head}:0:1`)
+    // …without performing the push it did not have to perform:
+    expect(calls.some((c) => c.includes('--force-with-lease'))).toBe(false)
+  })
+
+  test('the no-op publish is visible in the record — the note says the push was a no-op because the ref was already correct', async () => {
+    const { h, head } = publishFixture({ publishHead: null }, true)
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce() // fire the inner workflow
+    await h.complete()     // it writes the publish-requested terminal result
+    const outcome = await h.step(store.get(run.id)!) // harvest → the publish transition
+    expect(outcome.note).toContain('push no-op')
+    expect(outcome.note).toContain('the ref was already correct')
+    expect(outcome.note).toContain(head)
+  })
+
+  describe('remoteAlreadyAtPublishHead — the push-necessity predicate', () => {
+    const H = 'abcdef0123456789abcdef0123456789abcdef01'
+    test('remote already exactly at the head to publish → no-op', () => {
+      expect(remoteAlreadyAtPublishHead(H, H)).toBe(true)
+    })
+    test('an empty observation is a FIRST PUSH, never a no-op', () => {
+      expect(remoteAlreadyAtPublishHead('', H)).toBe(false)
+    })
+    test('a stale remote still needs the real lease push', () => {
+      expect(remoteAlreadyAtPublishHead('9'.repeat(40), H)).toBe(false)
+    })
   })
 
   test('pr mode: fires, harvests inner_result, merges PR, persists inner_verdict', async () => {
@@ -2245,6 +2576,67 @@ describe('orchestrator — fire did not settle → failed', () => {
   })
 })
 
+describe('orchestrator — durable pre-build stage stamps', () => {
+  test('a successful fire stamps launch, dispatch, and settle in order', async () => {
+    const stamped: Array<{ run_id: string; stage: string; meta: string | null | undefined }> = []
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      record_stage: (run_id, stage, meta) => stamped.push({ run_id, stage, meta }),
+    })
+    const created = await createRun()
+    const run = (await store.update(created.id, { round: 3, ralph_round: 2 }))!
+
+    await h.loop.runOnce()
+
+    expect(stamped.map((entry) => entry.stage)).toEqual([
+      'launch-start',
+      'fire-dispatched',
+      'fire-settled',
+    ])
+    expect(stamped.every((entry) => entry.run_id === run.id)).toBe(true)
+    expect(stamped[0]!.meta).toContain('round=3')
+    expect(stamped[0]!.meta).toContain('ralph_round=2')
+  })
+
+  test('a failed fire stamps dispatch but never settle', async () => {
+    const stages: string[] = []
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'failed', error: 'boom' } }),
+      record_stage: (_run_id, stage) => stages.push(stage),
+    })
+    await createRun()
+
+    await h.loop.runOnce()
+
+    expect(stages).toEqual(['launch-start', 'fire-dispatched'])
+  })
+
+  test('a throwing record_stage seam cannot prevent the fire from advancing', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      record_stage: () => {
+        throw new Error('ledger unavailable')
+      },
+    })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.subagent_status).toBe('running')
+  })
+
+  test('omitting record_stage preserves the existing successful fire path', async () => {
+    const h = buildHarness({ plan: () => ({ fire: { status: 'fired', error: null } }) })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.subagent_status).toBe('running')
+  })
+})
+
 describe('orchestrator — idempotent crash-resume', () => {
   test('a prior partial run threads resume_checkpoint + reuses the existing PR (no dup)', async () => {
     const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' } }) })
@@ -2353,6 +2745,125 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     // Past the hang threshold with no advance → reaped to failed with the hang reason.
     t = 90_000
     await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('suspected agent hang')
+  })
+
+  /**
+   * THE WATCHDOG'S OWN PREMISE IS FALSE, and these pin the correction.
+   *
+   * It documents "a HEALTHY build re-stamps `last_advanced_at` on every
+   * inner-workflow checkpoint, so it never trips this". Checkpoints land BETWEEN
+   * phases; one Forge round runs ~40 min and re-stamps nothing while it does. So the
+   * field is stale by construction during exactly the work the watchdog is most
+   * likely to interrupt.
+   *
+   * MEASURED: run 9bece714 was reaped as "no progress for 90 min — suspected agent
+   * hang" with pid 286859 alive and its stderr written to seconds earlier.
+   */
+  test('a stale clock does NOT reap a run whose stage events prove it is advancing', async () => {
+    let t = 0
+    // The mid-phase evidence: written at t=50s, INSIDE the 60s window, while
+    // `last_advanced_at` has been frozen at t=0 since the fire.
+    let stageAt: string | null = null
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: () => stageAt,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    stageAt = new Date(50_000).toISOString()
+    t = 90_000 // past the threshold on last_advanced_at — the old code reaps here
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).not.toBe('failed')
+    expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
+    // NOTHING WAS WRITTEN. `TridentRunUpdate` re-stamps `last_advanced_at` on every
+    // save, so a re-stamp here would have landed as now() — inventing liveness and
+    // buying a wedged run a fresh full threshold. The clock stays where it was and
+    // the reprieve is recomputed from the evidence on the next tick.
+    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+  })
+
+  test('the reprieve EXPIRES on its own once the evidence stops', async () => {
+    // The other half: a stand-down must not become immortality. The re-stamp moves
+    // the clock to the last event, so a run that goes quiet is reaped on schedule
+    // measured from THAT moment.
+    let t = 0
+    let stageAt: string | null = null
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: () => stageAt,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    stageAt = new Date(50_000).toISOString()
+    t = 90_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    // Events stop. Because nothing was persisted, the very next tick past the
+    // threshold measured from the LAST event reaps as designed.
+    t = 111_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason).toContain('suspected agent hang')
+  })
+
+  test('ABSENCE IS NOT EVIDENCE: no events, and no reader at all, both still reap', async () => {
+    // The two null paths must be indistinguishable from the old behaviour, or the
+    // fix trades a false death for a run nothing can ever reap.
+    for (const reader of [() => null, undefined]) {
+      let t = 0
+      const opts: Parameters<typeof buildHarness>[0] = {
+        plan: () => ({ result: null }),
+        now: () => new Date(t).toISOString(),
+        no_advance_hang_ms: 60_000,
+        max_inflight_ms: 2 * 60 * 60_000,
+      }
+      if (reader !== undefined) opts.latest_stage_event_at = reader
+      const h = buildHarness(opts)
+      const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+      await h.loop.runOnce()
+      t = 90_000
+      await h.loop.runOnce()
+
+      const after = store.get(run.id)
+      expect(after?.phase).toBe('failed')
+      expect(after?.failure_reason).toContain('suspected agent hang')
+    }
+  })
+
+  test('a stage event OLDER than the threshold is not a reprieve either', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: 60_000,
+      max_inflight_ms: 2 * 60 * 60_000,
+      // Evidence exists, but it is ancient — a run that genuinely stopped.
+      latest_stage_event_at: () => new Date(1_000).toISOString(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.failure_reason).toContain('suspected agent hang')
@@ -2646,6 +3157,31 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     // not asserted: it depends on this box's live cores/RAM, and the arithmetic is
     // already pinned against fixed inputs in test-strategy.test.ts.
     expect(strategy).toContain('NEUTRON_TEST_JOBS=')
+  })
+
+  test('threads the detail intermediate block to the firer verbatim', async () => {
+    const marker = 'task-2-intermediate-thread-marker'
+    const activeRuns = 1_000_000
+    const repo = knobRepo()
+    const h = buildHarness({
+      plan: approve,
+      resolve_active_runs: () => activeRuns,
+      base_branch: marker,
+    })
+    const run = await createRun({ repo_path: repo })
+    await runToTerminal(h, run.id)
+
+    // A very high active-run count fixes jobs at 1, so the expected rendered bytes
+    // remain stable even if MemAvailable moves between these two budget reads.
+    const budget = readHostBudget()
+    const detail = buildTestStrategyDetail(repo, {
+      cores: budget.cores,
+      active_runs: activeRuns,
+      mem_available_bytes: budget.mem_available_bytes,
+      base_branch: marker,
+    })
+    expect(detail.intermediate_block).toContain(marker)
+    expect(h.inputs[0]?.test_strategy_intermediate).toBe(detail.intermediate_block)
   })
 
   test('a THROWING resolve_active_runs still launches, with a strategy (degrades to 1 run)', async () => {
@@ -3085,14 +3621,57 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           : ok(),
     })
 
-  test("a 'ralph-task-built' checkpoint is exempt — the fire still happens on an unreadable head", async () => {
-    const h = unreadable()
-    const run = await resumeRun({ inner_checkpoint: 'ralph-task-built' })
-    await launchOnce(h)
-    expect(h.inputs).toHaveLength(1)
-    expect(h.inputs[0]!.resume_live_head).toBe('')
-    expect(store.get(run.id)!.phase).not.toBe('failed')
-  })
+  test.each(['ralph-task-built', 'ralph-task-built-deviated'] as const)(
+    "a deferred '%s' re-fire reads the local branch tip and never asks stale origin",
+    async (checkpoint) => {
+      const localHead = 'b'.repeat(40)
+      const staleRemoteHead = 'c'.repeat(40)
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/heads/feat-x^{commit}')) return ok(localHead)
+          if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+            return ok(`${staleRemoteHead}\trefs/heads/feat-x\n`)
+          }
+          return ok()
+        },
+      })
+      seq += 1
+      const run = await createRun({
+        merge_mode: 'pr' as MergeMode,
+        slug: `deferred-refire-${seq}`,
+        ralph: true,
+      })
+      await store.update(run.id, {
+        subagent_run_id: 'stale-id-from-prior-process',
+        subagent_status: 'running',
+        pr: 42,
+        ralph_round: 1,
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: localHead,
+      })
+
+      await launchOnce(h)
+
+      expect(h.hostCalls).toContainEqual([
+        'git',
+        '-C',
+        '/repo',
+        'rev-parse',
+        '--verify',
+        'refs/heads/feat-x^{commit}',
+      ])
+      expect(
+        h.hostCalls.some((cmd) =>
+          cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x'),
+        ),
+      ).toBe(false)
+      expect(h.inputs).toHaveLength(1)
+      expect(h.inputs[0]!.resume_live_head).toBe(localHead)
+      expect(store.get(run.id)!.phase).not.toBe('failed')
+    },
+  )
 
   test("a RALPH 'forge-done' is exempt too — its rebuild does not depend on the head", async () => {
     const h = unreadable()
@@ -3172,16 +3751,186 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
   })
 
-  test('a FRESH launch is byte-identical: no head read, no field at all', async () => {
-    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }) })
-    await createRun({ merge_mode: 'pr' as MergeMode })
+  test('a FRESH board-shaped pr launch fetches and pins origin/main before firing', async () => {
+    const HEAD = 'a'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(HEAD.toUpperCase())
+        if (joined.includes('rev-list --count refs/heads/main..refs/remotes/origin/main')) return ok('16')
+        return ok()
+      },
+    })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
     await launchOnce(h)
 
     expect(h.inputs).toHaveLength(1)
     expect('resume_live_head' in h.inputs[0]!).toBe(false)
+    expect(h.inputs[0]!.base_sha).toBe(HEAD)
+    expect(store.listNonTerminal()[0]?.base_sha).toBe(HEAD)
+    expect(store.listNonTerminal()[0]?.base_behind).toBe(16)
     const calls = h.hostCalls.map((c) => c.join(' '))
     expect(calls.some((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))).toBe(false)
-    expect(calls.some((c) => c.includes('rev-parse'))).toBe(false)
+    expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
+    expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
+      .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
+    expect(calls.some((c) => c.includes('rev-parse --verify --quiet refs/heads/trident/add-thing'))).toBe(true)
+  })
+
+  test("a fresh launch refuses another lane's local branch without firing", async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(final.failure_reason).toContain("refusing to build on another lane's work")
+    expect(final.failure_reason).toContain('branch -D')
+  })
+
+  test('an ancestor-only local branch leftover proceeds', async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test("this run's own crash-leftover branch proceeds from its prior pin", async () => {
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: BASE, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(BASE)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(BASE)
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('a checkpointed resume does not fetch or pin a base', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    const run = await resumeRun()
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBeNull()
+    expect(store.get(run.id)?.base_behind).toBeNull()
+  })
+
+  test('a pre-pinned relaunch keeps its original base without fetching again', async () => {
+    const PINNED = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: PINNED, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(PINNED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(PINNED)
+    expect(store.get(run.id)?.base_behind).toBe(7)
+  })
+
+  test('a checkpointed resume does not fetch or pin a base', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/feat-x')
+          ? ok(`${HEAD}\trefs/heads/feat-x\n`)
+          : ok(),
+    })
+    const run = await resumeRun()
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBeNull()
+    expect(store.get(run.id)?.base_behind).toBeNull()
+  })
+
+  test('a pre-pinned relaunch keeps its original base without fetching again', async () => {
+    const PINNED = 'b'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: PINNED, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.base_sha).toBe(PINNED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(store.get(run.id)?.base_sha).toBe(PINNED)
+    expect(store.get(run.id)?.base_behind).toBe(7)
+  })
+
+  test('two failed fresh-base fetches fail loudly without firing', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: (cmd) => cmd.includes('fetch')
+        ? { ok: false, stdout: '', stderr: 'network down', exit_code: 1 }
+        : ok(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: null })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    expect(h.hostCalls.filter((c) => c.includes('fetch'))).toHaveLength(2)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toContain('could not fetch origin/main')
   })
 
   test('a local-mode resume asks the LOCAL ref', async () => {
@@ -3336,5 +4085,37 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     )
     expect(out).toBe(head)
     expect(waits).toEqual([])
+  })
+})
+
+/**
+ * WIRED, NOT MERELY BUILT. Five PRs in one night landed a module plus its unit
+ * tests and skipped the registration, so a green merge delivered no behaviour. A
+ * hang-watchdog reader is exactly that shape: `latest_stage_event_at` is OPTIONAL
+ * and its absence is indistinguishable from the old code, so an unwired version
+ * passes every test above while production keeps reaping live builds.
+ *
+ * This asserts the production composition root actually passes it.
+ */
+describe('hang watchdog — the stage-event reader is wired in production', () => {
+  test('build-core-modules passes latest_stage_event_at to buildTridentOrchestrator', () => {
+    const src = readFileSync(
+      new URL('../gateway/composition/build-core-modules.ts', import.meta.url),
+      'utf8',
+    )
+    // POSITIVE CONTROL FIRST: if this anchor ever moves, the assertions below would
+    // pass vacuously against an empty read, and an empty check reads as a passing
+    // check. Fail loudly instead.
+    expect(src).toContain('buildTridentOrchestrator(orchestratorOpts)')
+    expect(src).toContain('latest_stage_event_at:')
+    expect(src).toContain('store.latestStageEventAt(run_id)')
+  })
+
+  test('the store exposes the single-row reader the wiring calls', () => {
+    const src = readFileSync(new URL('./store.ts', import.meta.url), 'utf8')
+    expect(src).toContain('latestStageEventAt(run_id: string): string | null')
+    // ONE row, not the whole history — this runs per in-flight run per tick.
+    expect(src).toContain('ORDER BY id DESC')
+    expect(src).toContain('LIMIT 1')
   })
 })

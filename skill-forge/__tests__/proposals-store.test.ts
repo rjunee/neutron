@@ -2,9 +2,8 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SkillForgeProposalsStore, type CreateProposalInput } from '../proposals-store.ts'
 import type { CompletedWorkflow } from '../types.ts'
@@ -41,9 +40,7 @@ function input(over: Partial<CreateProposalInput> = {}): CreateProposalInput {
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'skill-forge-store-'))
   dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   db = ProjectDb.open(dbPath)
   now = 1_000_000
   store = new SkillForgeProposalsStore({ db, now: () => now })

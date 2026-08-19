@@ -24,7 +24,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -55,8 +55,8 @@ let sentPrompts: Array<{ prompt: ButtonPrompt }>
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-nd2-real-export-'))
   owner_home = join(tmp, 'owner_home')
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   buttonStore = new ButtonStore({ db })
   stateStore = new InMemoryOnboardingStateStore()
   transcript = new TranscriptWriter({

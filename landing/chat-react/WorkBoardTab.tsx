@@ -2,8 +2,10 @@
  * landing/chat-react — web WORK tab content (M1 UX redesign).
  *
  * The live work-tracking view for the web project shell: the project's board —
- * what's in progress / next at the top, the completed history collapsed at the
- * bottom — rendered as the builtin `work_board` tab (user-facing label "Work")
+ * what's in progress / next at the top, then two collapsed sections at the
+ * bottom, "Shelved · N" (`status='archived'` — deprioritised, NEVER counted as
+ * done) and the "Done · N" history — rendered as the builtin `work_board` tab
+ * (user-facing label "Work")
  * inside `ProjectShell`, the sibling of `DocumentsTab`.
  *
  * ── Distinct from Tasks ─────────────────────────────────────────────────────
@@ -28,7 +30,8 @@
  * (#344).
  *
  * ── Order is the engine's ───────────────────────────────────────────────────
- * The store returns active+next first (by `sort_order`) then completed
+ * The store returns active+next first (by `sort_order`), then SHELVED
+ * (`status='archived'`), then completed
  * (reverse-chron). The tab NEVER re-sorts — it splits the snapshot by status and
  * renders each lane in the order the server gave. A live `work_board_changed`
  * frame carries the SAME full snapshot, so applying it is a drop-in replacement
@@ -76,11 +79,13 @@ export interface WorkBoardLiveSource {
 }
 
 /** Cycle an item's status forward: upcoming → in_progress → done. A failed item
- *  re-queues to upcoming on manual advance (the primary action is the ▶/↻ retry). */
+ *  re-queues to upcoming on manual advance (the primary action is the ▶/↻ retry),
+ *  and so does a SHELVED (archived) item — advancing it un-shelves it. */
 function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress'
   if (status === 'in_progress') return 'done'
   if (status === 'failed') return 'upcoming'
+  if (status === 'archived') return 'upcoming'
   return 'done'
 }
 
@@ -89,6 +94,7 @@ function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress'
   if (status === 'done') return 'Done'
   if (status === 'failed') return 'Failed'
+  if (status === 'archived') return 'Shelved'
   return 'Upcoming'
 }
 
@@ -115,11 +121,16 @@ function isLinkedRunning(item: WorkBoardItem): boolean {
  * the old `status !== 'in_progress'` clause made a failed-run in_progress card
  * unrecoverable from the UI).
  *
- * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): prevents a
- * competing Trident build while an inline agent action is executing. STALENESS
- * CAVEAT: if the agent dies mid-inline-work without clearing the flag, the card
- * enters a permanent pulse+no-▶ state. Acceptable until an inline heartbeat
- * reconciler lands (mirrors app/lib/work-board-helpers.ts canPlay).
+ * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): suppresses ▶
+ * while the card shows RECENT WRITE ACTIVITY, so the owner does not launch a
+ * Trident build on top of a repo an inline agent was just rewriting. No stronger
+ * claim than that: the wire field is DERIVED server-side from a 90 s
+ * write-evidence window, so a crashed session's stale flag reads false on the
+ * next read (it heals on a clock, not an event — which is why the poll below
+ * re-reads while any card is inline-active), and inline work that writes nothing
+ * for 90 s (a long test run, a research turn) reads NOT active and ▶ returns.
+ * That false negative is deliberate: a hint, never a lock, and nothing here
+ * blocks (mirrors app/lib/work-board-helpers.ts canPlay).
  */
 function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active
@@ -172,6 +183,29 @@ function failureReasonText(rp: RunProgress | undefined): string | null {
   if (rp === undefined || resolveStepLabel(rp) !== 'failed') return null
   const reason = rp.failure_reason
   return reason !== null && reason.length > 0 ? reason : null
+}
+
+/** Brief-integrity refusals remain visible after a successful bridge retry, when
+ *  the run is live and therefore has no terminal failure reason. */
+function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null
+  const alert = rp.brief_alert
+  return typeof alert === 'string' && alert.length > 0 ? alert : null
+}
+
+interface RunNotice {
+  text: string
+  tone: 'failure' | 'alert'
+}
+
+function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp)
+  if (failure !== null) return { text: failure, tone: 'failure' }
+  // A recovered integrity alert is evidence, not a fallback explanation for an
+  // unrelated terminal failure whose reason happens to be missing.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null
+  const alert = briefAlertText(rp)
+  return alert === null ? null : { text: alert, tone: 'alert' }
 }
 
 interface DotState {
@@ -325,6 +359,8 @@ export function WorkBoardTab({
   const [listError, setListError] = useState<string | null>(null)
   const [actionError, setActionError] = useState<string | null>(null)
   const [completedOpen, setCompletedOpen] = useState(false)
+  // Separate open-state: Shelved and Done are two independent collapsed sections.
+  const [archivedOpen, setArchivedOpen] = useState(false)
 
   // Add composer (bottom of the active items, above Done — #344).
   const [newTitle, setNewTitle] = useState('')
@@ -430,6 +466,14 @@ export function WorkBoardTab({
   // (via `isLinkedRunning`) so a finished/terminal run does NOT poll forever.
   const hasLiveRun = useMemo(() => items.some(isLinkedRunning), [items])
 
+  // …and while any card reads INLINE-ACTIVE, for the same reason in reverse. That
+  // flag is now DERIVED server-side from a 90 s evidence window, so it goes stale
+  // by the clock, with no write to fan a frame — a stationary board would keep
+  // pulsing (and keep ▶ hidden) until something else happened to touch it. Note a
+  // derived-inline card is runless BY CONSTRUCTION (rule R2 in
+  // `work-board/inline-activity.ts`), so `hasLiveRun` can never cover this case.
+  const hasInlineActive = useMemo(() => items.some((it) => it.inline_active), [items])
+
   // PR-4 — surface the live-activity roll-up to the desktop slide-out pane on
   // every board change (initial load, live snapshot, or poll). The pane keys its
   // auto-open/close + header count off this; `summarize` is pure so the effect
@@ -438,12 +482,12 @@ export function WorkBoardTab({
     onSummary?.(summarize(items))
   }, [items, onSummary])
   useEffect(() => {
-    if (!hasLiveRun) return
+    if (!hasLiveRun && !hasInlineActive) return
     const interval = setInterval(() => {
       refresh(true)
     }, 15_000)
     return () => clearInterval(interval)
-  }, [hasLiveRun, refresh])
+  }, [hasLiveRun, hasInlineActive, refresh])
 
   const addItem = useCallback((): void => {
     const title = newTitle.trim()
@@ -598,7 +642,12 @@ export function WorkBoardTab({
     [removeItem],
   )
 
-  const active = items.filter((it) => it.status !== 'done')
+  // Three-way bucketing. `archived` (SHELVED) must be excluded from BOTH: a bare
+  // `status !== 'done'` would resurrect it in the active lane the server already
+  // excluded (and make it drag-reorderable), and folding it into `completed`
+  // would report parked work in the Done count as shipped progress.
+  const active = items.filter((it) => it.status !== 'done' && it.status !== 'archived')
+  const archived = items.filter((it) => it.status === 'archived')
   const completed = items.filter((it) => it.status === 'done')
 
   // Drag-to-reorder — persist via the existing reorder route. Dropping the
@@ -682,7 +731,7 @@ export function WorkBoardTab({
           <div className="cwb-empty">Loading…</div>
         ) : listError !== null ? (
           <div className="cwb-empty">{listError}</div>
-        ) : active.length === 0 && completed.length === 0 ? (
+        ) : active.length === 0 && archived.length === 0 && completed.length === 0 ? (
           <>
             <div className="cwb-empty cwb-empty-zero">
               No work tracked yet. Ask Neutron to start something, or add an item.
@@ -739,23 +788,28 @@ export function WorkBoardTab({
             {/* #344 — add box at the bottom of active items, ABOVE Done. */}
             {addForm}
 
-            {completed.length > 0 ? (
+            {/* SHELVED — its own collapsed section, reusing the Done section's
+                styles. It sits ABOVE Done and is counted separately: an archived
+                card is parked, not shipped, so it never enters `Done · N`. Rows
+                carry the neutral upcoming dot and NO "Merged · <date>" line
+                (there is no completed_at to show). */}
+            {archived.length > 0 ? (
               <div className="cwb-completed">
                 <button
                   type="button"
                   className="cwb-completed-toggle"
-                  aria-expanded={completedOpen}
-                  onClick={() => setCompletedOpen((v) => !v)}
+                  aria-expanded={archivedOpen}
+                  onClick={() => setArchivedOpen((v) => !v)}
                 >
-                  <span className="cwb-completed-caret">{completedOpen ? '▾' : '▸'}</span>
-                  Done · {completed.length}
+                  <span className="cwb-completed-caret">{archivedOpen ? '▾' : '▸'}</span>
+                  Shelved · {archived.length}
                 </button>
-                {completedOpen ? (
-                  <ul className="cwb-ul cwb-completed-ul" aria-label="Done">
-                    {completed.map((it) => (
+                {archivedOpen ? (
+                  <ul className="cwb-ul cwb-completed-ul" aria-label="Shelved">
+                    {archived.map((it) => (
                       <li key={it.id} className="cwb-row cwb-row-done">
                         <div className="cwb-row-line1">
-                          <span className="cwb-dot cwb-dot-done" aria-label="Done" />
+                          <span className="cwb-dot cwb-dot-upcoming" aria-label="Shelved" />
                           <span className="cwb-title" title={it.title}>
                             {it.title}
                           </span>
@@ -778,14 +832,68 @@ export function WorkBoardTab({
                             </button>
                           )}
                         </div>
-                        {/* A completed row always carries its "Merged · <date>" on line 2. */}
-                        <div className="cwb-row-meta">
-                          <span className="cwb-date">
-                            Merged · {formatCompletedShort(it.completed_at)}
-                          </span>
-                        </div>
                       </li>
                     ))}
+                  </ul>
+                ) : null}
+              </div>
+            ) : null}
+
+            {completed.length > 0 ? (
+              <div className="cwb-completed">
+                <button
+                  type="button"
+                  className="cwb-completed-toggle"
+                  aria-expanded={completedOpen}
+                  onClick={() => setCompletedOpen((v) => !v)}
+                >
+                  <span className="cwb-completed-caret">{completedOpen ? '▾' : '▸'}</span>
+                  Done · {completed.length}
+                </button>
+                {completedOpen ? (
+                  <ul className="cwb-ul cwb-completed-ul" aria-label="Done">
+                    {completed.map((it) => {
+                      const alert = briefAlertText(it.run_progress)
+                      return (
+                        <li key={it.id} className="cwb-row cwb-row-done">
+                          <div className="cwb-row-line1">
+                            <span className="cwb-dot cwb-dot-done" aria-label="Done" />
+                            <span className="cwb-title" title={it.title}>
+                              {it.title}
+                            </span>
+                            {confirmDelete?.id === it.id ? (
+                              <InlineConfirm
+                                running={false}
+                                onConfirm={() => confirmRemove(it)}
+                                onCancel={cancelRemove}
+                              />
+                            ) : (
+                              <button
+                                type="button"
+                                className="cwb-btn cwb-btn-icon"
+                                onClick={() => requestRemove(it)}
+                                disabled={busyId === it.id}
+                                title="Delete item"
+                                aria-label="Delete item"
+                              >
+                                ✕
+                              </button>
+                            )}
+                          </div>
+                          {/* A completed row always carries its "Merged · <date>" on line 2. */}
+                          <div className="cwb-row-meta">
+                            <span className="cwb-date">
+                              Merged · {formatCompletedShort(it.completed_at)}
+                            </span>
+                            {alert !== null ? (
+                              <span className="cwb-brief-alert" title={alert}>
+                                {alert}
+                              </span>
+                            ) : null}
+                          </div>
+                        </li>
+                      )
+                    })}
                   </ul>
                 ) : null}
               </div>
@@ -858,7 +966,7 @@ function WorkBoardRow({
   const dot = dotState(item)
   const tag = stepTag(item.run_progress)
   const round = roundText(item.run_progress)
-  const failReason = failureReasonText(item.run_progress)
+  const notice = runNotice(item.run_progress)
   const docLabel = docLinkLabel(item.design_doc_ref)
   const showPlay = canPlay(item)
   const retry = isRetry(item)
@@ -999,9 +1107,12 @@ function WorkBoardRow({
         <div className="cwb-row-meta">
           {tag !== null ? <span className={`cwb-tag ${tag.cls}`}>{tag.label}</span> : null}
           {round !== null ? <span className="cwb-round">{round}</span> : null}
-          {failReason !== null ? (
-            <span className="cwb-fail-reason" title={failReason}>
-              {failReason}
+          {notice !== null ? (
+            <span
+              className={notice.tone === 'failure' ? 'cwb-fail-reason' : 'cwb-brief-alert'}
+              title={notice.text}
+            >
+              {notice.text}
             </span>
           ) : null}
         </div>

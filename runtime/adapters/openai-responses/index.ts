@@ -291,6 +291,40 @@ function isPreviousResponseExpired(message: string): boolean {
   return /previous_response_not_found:/i.test(message)
 }
 
+/**
+ * The largest delay `setTimeout` can actually express. Above this the delay does
+ * not saturate — it OVERFLOWS the 32-bit signed field and the timer fires almost
+ * immediately (measured in this runtime: `0x7fff_ffff + 1` fires in ~4 ms, `1e12`
+ * in ~1 ms with a `TimeoutOverflowWarning: Timeout duration was set to 1`), while
+ * `0x7fff_ffff` itself waits properly. Same idiom as the `0x7fffffff` bounds in
+ * `wire-types/doc-links.ts` and `app/lib/anchor-lines.ts`.
+ */
+export const MAX_TIMER_DELAY_MS = 0x7fff_ffff
+
+/**
+ * Bound a delay to what a timer can hold, so a back-off stays a back-off.
+ *
+ * THE HAZARD IS AN OVERFLOW, NOT A LONG WAIT, and that is why the guard belongs
+ * HERE rather than at the producer. `positiveMs` (responses-stream.ts) rejects
+ * non-finite and non-positive hints, but it has no upper bound and should not have
+ * one: a finite `retry-after: 3000000` is a real instruction from the provider, and
+ * discarding it as garbage would buy a 60-second cooldown where the provider asked
+ * for weeks — less safe, not more. The value is fine; the TIMER cannot hold it.
+ *
+ * WHY THE CONSUMER AND NOT THE PRODUCER — the field has two consumers and only one
+ * of them was broken. {@link reportFailure} in `runtime/credential-pool.ts` parks the
+ * credential and clamps its own park at `cooldown_started_at + MAX_PARK_MS` (6 h), so
+ * that side was already bounded; this adapter's rotation back-off is a SECOND consumer
+ * that reads the raw hint and never consults the pool. Clamping here caps the wait this
+ * lane can express while leaving the pool the provider's untouched number to apply its
+ * OWN ceiling to — bounding `positiveMs` instead would silently rewrite what every
+ * consumer sees, and would put a `setTimeout` implementation limit inside a function
+ * whose job is deciding whether a hint is usable at all.
+ */
+export function clampTimerDelayMs(ms: number): number {
+  return ms > MAX_TIMER_DELAY_MS ? MAX_TIMER_DELAY_MS : ms
+}
+
 function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms))
+  return new Promise((resolve) => setTimeout(resolve, clampTimerDelayMs(ms)))
 }

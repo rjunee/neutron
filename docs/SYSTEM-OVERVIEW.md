@@ -637,10 +637,20 @@ a slash-command.
   calls `setReplToolBridge(graph.get('mcp'))` once the registry is populated;
   shutdown clears it. LLM-less boxes (no graph) leave it unset → no second
   server.
-- **Security (opt-in per substrate).** Only the owner's WARM conversational
-  substrate (`cc-agent-*`) sets `enableToolBridge: true`. The untrusted
-  history-import REPL (`cc-import-*`), the per-project onboarding-compose REPL
-  (`cc-compose-*` — see "Per-project isolated onboarding compose" below), and the
+- **Security (opt-in per substrate).** The owner's two WARM conversational
+  substrates set `enableToolBridge: true`: the live chat (`cc-agent-*`) and the
+  background proactive-compose REPL (`cc-nudge-*` — fired reminders/rituals and the
+  work-board wakeup). The second is an equal-grant, separate-session twin of the
+  first: it runs `PROFILE_WARM_CHAT` with the same bridge, GitHub credential and
+  frontier-model floor, because a RITUAL composes there and ISSUES #504 settled that
+  a fired ritual must have "access to everything general has access to" — the
+  previous locked-down `cc-ritual-*` lane could not read the owner's calendar and was
+  rejected. What is separate is the SESSION, so a background compose that aborts
+  cannot evict the child the owner is chatting on; the security boundary for that
+  lane remains the ritual APPROVAL GATE (`reminders/ritual-fire.ts`), not the
+  substrate. The untrusted history-import REPL (`cc-import-*`), the per-project
+  onboarding-compose REPL (`cc-compose-*` — see "Per-project isolated onboarding
+  compose" below), and the
   Trident build / fire REPLs (`cc-trident-*` / `cc-trident-fire-*`) leave it off,
   so a prompt-injection in untrusted content can never reach a Core tool. The bridge's MCP namespace is
   permitted via `--allowedTools mcp__neutron`. The built-in `--tools` surface is
@@ -1480,11 +1490,20 @@ a ninth project opens exactly as it does today), the active scope excluded, one
 warm at a time, `WARM_FIRST_DELAY_MS = 2000` after the rail lands and
 `WARM_GAP_MS = 750` between scopes so eight never arrive as a burst at a gateway
 the owner is also talking to. Bytes per scope are bounded by the server, not the
-client: a cold resume replays at most `DEFAULT_REPLAY_LIMIT = 500` messages per
-topic (`persistence/app-chat-store.ts`). There is deliberately **no wifi-vs-
-cellular gate** — that needs a native network module, which would cost the
-OTA-shippability of everything in this section; the bound above is what makes
-cellular acceptable instead.
+client: one replay carries at most `DEFAULT_REPLAY_LIMIT = 500` messages per
+topic — the NEWEST 500 in the range asked for, not the oldest
+(`persistence/app-chat-store.ts`, `persistence/app-chat-event-core.ts`
+`rowsAfter`). It IS a page size now, and the ceiling is a page size times a
+round budget: a client whose page came back full is told so (`history_gap`) and
+walks backwards a page at a time, up to `MAX_HISTORY_BACKFILL_ROUNDS = 3` pages
+per catch-up (`chat-core/sync-engine.ts`), so the per-scope worst case is 2000
+messages rather than 500 and still does not grow with how long the owner's chats
+are. A ceiling that could not be walked past was the previous shape, and it was
+losing the middle of long transcripts permanently — see § Chat sync. There is
+deliberately **no wifi-vs-cellular gate** — that needs a native network module,
+which would cost the OTA-shippability of everything in this section; the bound
+above is what makes cellular acceptable instead, and it is why the bound must
+stay a bound.
 
 **The yield is the load-bearing part.** A prefetch that delays the transcript the
 owner is waiting on has made the app slower at the one interaction it was built
@@ -2772,6 +2791,109 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   global-scoped: the tool context carries only the owner boundary), all dispatching
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
+
+### More than one Codex seat — rotation at the CODEX_HOME resolver
+
+One ChatGPT subscription can run out before its window resets. The owner may
+therefore connect several seats, and trident picks one per run.
+
+- **A seat is a SLOT with its own directory, for its whole life.** The first seat
+  keeps the bare service name `codex` and the bare `<owner_home>/.codex` — so a
+  one-seat install is unchanged and nothing migrates, which is also why there is no
+  feature flag: rotation always runs and with a single slot it trivially selects the
+  credential that was always there. Additional seats are service
+  `codex-acct-<slot>` (the store's service grammar admits dashes,
+  `project-credentials/store.ts:164`) materialized to
+  `<owner_home>/.codex/accounts/<slot>/`, which cannot collide with the override
+  tree at `.codex/projects/<id>/`.
+- **Selection is a POINTER, never a copy.** The codex CLI rewrites `auth.json` when
+  it refreshes and that refresh ROTATES the refresh token, so two live directories
+  holding one account revoke each other — whichever refreshed later wins. Rotation
+  therefore changes only WHICH directory is handed to a run, and the
+  re-materialize guard stays only-if-missing. Copying a stored bundle over a
+  CLI-refreshed file would install a token the server already invalidated.
+- **Harvest-back keeps the stored copy honest.** When a seat's on-disk
+  `last_refresh` is newer than the stored row's, the disk bundle is re-encrypted
+  back into the store. Without it the store drifts staler with every refresh and the
+  self-heal path eventually restores a dead token over a live login — a hazard that
+  predates rotation.
+- **The exhaustion signal is harvested, not probed.** There is no free usage-gauge
+  endpoint. Every `codex` session appends a rollout JSONL under
+  `<CODEX_HOME>/sessions/YYYY/MM/DD/` whose `token_count` events carry
+  `rate_limits` — `used_percent`, `window_minutes`, `resets_at` (epoch SECONDS,
+  converted once at the parse boundary), `plan_type`. That the rollout follows
+  `CODEX_HOME` was verified live: pointing `CODEX_HOME` at an empty directory and
+  running `codex exec` produced the whole state root, `sessions/` included, even
+  though the run never authenticated.
+- **The threshold is keyed on `window_minutes`, not on `primary`/`secondary`.**
+  Measured across 12,582 real `token_count` samples from 600 rollout files
+  (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a WEEK — in every
+  sample and `secondary` was null in every sample. A policy that read `primary` as
+  "the 5-hour window" would apply the session threshold and a session-length
+  cooldown to a weekly cap and rotate a still-capped seat back into service. A
+  window at or under 1440 minutes cools at 98%, longer windows at 99%, and the
+  fallback cooldown is the window's own declared length, CLAMPED to 32 days — the
+  same binary also declares `daily-limit`, `monthly-limit` and `annual-limit`, so an
+  unclamped length would bench a paid seat for a year and an absurd value would reach
+  `Infinity`, which SQLite stores as a REAL that no clock comparison can clear.
+- **A `resets_at` already in the PAST means the reading is stale, not that there is
+  no reset.** The window has since rolled over and the quota with it, so that sample
+  is ignored rather than cooling the seat for a fresh full window. Collapsing
+  "expired" into "absent" would bench a healthy seat off a days-old rollout — and
+  because the seat is then skipped, it might never run to produce a newer one.
+- **Only a real usage event counts as evidence.** `rate_limits` is read only from the
+  node whose own `type` is `token_count`, which is the shape a real rollout line has
+  (`event_msg` → `token_count` → `rate_limits`); a same-named object nested anywhere
+  else is ignored. `window_duration_mins` is accepted alongside `window_minutes`,
+  since both names ship in the same binary and a miss would default to 0, which
+  classes as a long window.
+- **The scan is bounded.** A positioned tail read rather than a whole-file read, the
+  newest date partition visited first, a cap on files collected, and at most one scan
+  a minute per seat. The resolver is reached by a read-only status request as well as
+  by a run launch, and the CLI never prunes `sessions/`.
+- **Two rules are load-bearing and inherited from the Anthropic rotator.** A
+  harvest that ERRORS or finds nothing cools nothing — a transient read failure must
+  never retire a seat the owner is paying for. And when EVERY seat is cooling the
+  current one is KEPT, never dropped: a capped seat returns a legible retryable
+  error, whereas no seat silently removes codex from the review. That case logs
+  `codex_rotation_exhausted`.
+- **A seat with no usable credential is not a quota problem.** A slot whose stored
+  bundle is missing or expired cools as `unauthorized`, which ignores the clock and
+  stays ineligible until the owner reconnects that seat — waiting does not fix it —
+  and selection SKIPS it rather than returning no credential, because dropping codex
+  out of the review is worse than any capped seat.
+  **THERE IS NO STDERR CLASSIFIER, deliberately.** An earlier revision shipped one and
+  it could not have worked: its two window discriminators, `weekly limit` and
+  `session limit`, return ZERO hits against the literals in codex-cli 0.147.0, while
+  `usage limit` returns 23 and the controls `codex-cli` and `rate_limit_reached_type`
+  return 9 and 17 — the search works, the discriminators are absent, and the CLI's real
+  messages never name the window. It also had no production caller, since codex
+  failures surface only in the shell wrappers and the `.mjs` inner workflow. The window
+  class comes instead from `rate_limit_reached_type`, which the CLI sets itself and
+  which rides the same `token_count` event the harvest already reads. The rollout
+  harvest is the ONE signal that cools a seat.
+- **Per-project overrides are OUTSIDE rotation** and resolve first, verbatim: an
+  override exists to pin one project to one subscription.
+- **Adding a seat, from the app.** Settings → Integrations → Model providers lists
+  every seat with its state, marks the one that runs next, and gives each its own
+  Remove. The paste box stays on screen after the first connection — hiding it is what
+  made a second seat unreachable — and takes an optional seat name.
+- **Adding a seat, from chat or HTTP.** `codex_connect` with `account: "work"` plus
+  the pasted `auth.json`. HTTP: `POST /api/app/codex-auth` with
+  `{ auth, account: "work" }`. `GET /api/app/codex-auth` lists every seat with its
+  cooldown and last usage while keeping all of its original top-level fields.
+  `DELETE /api/app/codex-auth?account=work` removes ONE seat; an unqualified
+  `DELETE /api/app/codex-auth` removes them ALL, which is what the single
+  "Disconnect Codex" control means — leaving named seats stored and selectable behind
+  it would keep using a credential the owner had been told was gone. Omitting
+  `account` on connect means the first seat, so pre-rotation clients are unaffected.
+- **Operator rule.** Once a seat is connected to Neutron, stop using that same
+  ChatGPT login for codex anywhere else. One seat, one live store — otherwise the
+  CLI's refresh rotation revokes whichever copy refreshed earlier.
+
+Code: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts`
+(rollout harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0134_codex_rotation.sql`.
 
 ### Connect GitHub — the device flow, and the control that finally starts it (#551)
 
@@ -4383,9 +4505,13 @@ ritual content in chat.
   what must be recorded about it? A `nudge` answer composes the row's stored
   message; a `skipped` answer (the fail-closed verdict) writes a durable
   `code_ritual_runs` 'skipped' row and posts NOTHING; a `fire` answer writes a
-  durable `'running'` row and composes the APPROVED PROMPT — on the owner's own
-  warm `cc-agent-*` session, through the same `llm.compose` call and the same
+  durable `'running'` row and composes the APPROVED PROMPT — on the warm BACKGROUND
+  compose session (`cc-nudge-*`), through the same `llm.compose` call and the same
   `deliver()` outbound a nudge uses — then settles the ledger `finished`/`failed`.
+  That session was `cc-agent-*`, the owner's chat REPL, until 2026-08-16: one
+  aborted compose poisoned it and he could not chat until the service restarted
+  (see the AS_BUILT entry). The lane is still ONE fire path with the live-chat
+  `--tools` surface — it simply no longer runs inside the session he is talking to.
   A `silent` ritual skips the success post; a failure posts one one-line notice and
   escalates once per 3-consecutive-failure streak. `reapOrphanRitualRuns` still
   reaps prior-boot orphaned `'running'` rows to `'crashed'` at boot and prunes runs
@@ -5763,9 +5889,16 @@ indicator. No feature flags — one live path.
     turn (no dup reply, no double LLM spend, no double Bash/Write/Edit side
     effects).
   - **#3 gap-free reconnect** — `session_ready.last_seen_seq` + a
-    `{type:'resume',after_seq}` replay of everything after the client's cursor,
-    so a reply emitted during a socket blip is recovered (no orphaned "hung"
-    reply).
+    `{type:'resume',after_seq}` replay of the NEWEST page after the client's
+    cursor, so a reply emitted during a socket blip is recovered (no orphaned
+    "hung" reply). A page that came back FULL is reported as `history_gap
+    {older_than}`, and the client asks for the page below it with
+    `{type:'resume',after_seq:0,before_seq}` — up to
+    `MAX_HISTORY_BACKFILL_ROUNDS` pages per catch-up, restarting from its own
+    oldest applied seq on the next one, so a transcript longer than one page
+    completes instead of keeping a permanent hole. Both halves are needed: the
+    server is the only party that knows a page was capped, and the client is the
+    only party that knows what it already holds.
   - **#4 receipts / reactions / edits** — persisted + fanned as `receipt_update`
     / `reaction_update` / `edit_update`, replayed on resume.
   - **#4b answered prompts (ISSUES #415 + #419)** — a `button_choice` is CLAIMED
@@ -7318,6 +7451,24 @@ chased a non-bug. The string detector + its test were **removed**.
   `reportFailure`, and re-emits it unchanged — so a slow turn is a recoverable
   single-turn retry (the substrate poisons + respawns the warm session) instead
   of parking the credential and cascading into "all credentials in cooldown".
+- **A BACKGROUND lane cannot park the owner's credential (2026-08-16).** The three
+  fast-paths above are per-SYMPTOM: each names one substrate failure that must not
+  be mistaken for a quota condition. A dead REPL child was not on that list, so it
+  fell through to `mapStatusForPoolCooldown(null, retryable)` → 429; five reminder
+  composes reached `MAX_CONSECUTIVE_FAILURES` and parked the box's single
+  credential for an hour, after which every owner chat turn failed instantly with
+  "all Anthropic credentials are in cooldown". The structural guard is a LANE, not
+  another symptom: `BuildLlmCallSubstrateInput.credential_failure_lane`
+  (`'interactive'` by default, `'background'` on `cc-nudge-*`) makes a background
+  failure leave the pool-wide strike ledger entirely alone (`reportFailure`'s
+  `origin`, `runtime/credential-pool.ts`: neither incremented nor re-read, so it can
+  neither trip the hour-long park nor EXTEND one an interactive turn tripped) and
+  decline to report an INFERRED cooldown at all. "Inferred" is drawn strictly: the
+  retryable→429 default, a parsed status the mapper REWRITES (a retryable `HTTP 503`
+  also maps to 429), and `detectCliAuthFailure`, whose weakest rule is the substring
+  `401` anywhere in the prose. A REAL provider status (a 429/402/401 the provider
+  itself returned, or an adapter-stamped `rate_limited`) still cools on either lane —
+  the owner's next turn would meet that wall a second later regardless.
 - **Regression guard.** `dev-channel-pty-bind.e2e.test.ts` spawns claude under a
   real `Bun.spawn({terminal})` PTY and asserts `/channel-bound` fires + a turn
   round-trips DESPITE the benign warning (opt-in `NEUTRON_PTY_E2E=1`, skipped in
@@ -8118,8 +8269,15 @@ notes (audio upload + Whisper transcription → prompt + scribe).
 **Not yet at parity (documented gaps):** "load earlier" history paging beyond the
 resume replay window — this is the one remaining named-scope gap, and it is NOT
 client-only: chat-core + the app-ws surface are forward-only (a single
-`{type:'resume', after_seq}` replay, `replayAfter` ASC capped at 500), so there
-is no backfill primitive to page OLDER messages. Closing it is an additive
+`{type:'resume', after_seq}` replay, `replayAfter` capped at 500 rows), so there
+is no backfill primitive to page OLDER messages. That gap has TEETH on a topic
+longer than the window: the replay returns the NEWEST 500 after the cursor, and
+because a resume cursor only moves forward, the older messages it skipped are not
+reachable by any later resume — so a very long chat shows its recent history with
+an unmarked hole before it. The window direction was chosen that way on purpose
+(the alternative put the hole where the owner actually reads), but the hole is
+real, it is why the item below is the next thing to build, and it is the reason a
+bigger `DEFAULT_REPLAY_LIMIT` is not the fix. Closing it is an additive
 cross-layer change (a `replayBefore`/`{type:'history', before_seq}` request on
 the app-ws surface + persistence + a `WebChatSession.loadEarlier()` correlation
 + a controller cursor + a "Load earlier" button) that must not destabilize the

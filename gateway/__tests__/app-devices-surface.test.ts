@@ -20,7 +20,7 @@ import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
 import { createLogger } from '@neutronai/logger'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { DevicePushTokenStore } from '../push/store.ts'
 import {
@@ -65,8 +65,8 @@ interface StartOpts {
 
 async function startGateway(opts: StartOpts = {}): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-devices-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = opts.store ?? new DevicePushTokenStore(db)
   const auth = createAppWsAuthResolver({ project_slug: 'demo', bypass: true })
   // The REAL logger with a capturing sink, not a mock: these tests assert on

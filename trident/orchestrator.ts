@@ -63,6 +63,7 @@
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createLogger } from '@neutronai/logger'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -85,6 +86,8 @@ import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunUpdate } from './store.ts'
 import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
+const log = createLogger('trident')
+
 export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
 }
@@ -98,6 +101,8 @@ export interface BuildTridentOrchestratorOptions {
   db_path: string
   /** Host command runner — base-branch detect, existing-PR probe, merge. */
   run_host: RunHostCommand
+  /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
+  record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   /** ISO-8601 UTC clock. Defaults to wall-clock. */
   now?: () => string
   /** Injectable wait, used to SPACE the resume head-read retries
@@ -261,6 +266,16 @@ export interface BuildTridentOrchestratorOptions {
    */
   begin_crash_recovery?: (run_id: string) => Promise<TridentRun | null>
   /**
+   * INFRASTRUCTURE RETRY CLAIM — atomically clear a harvested executor/transport
+   * failure and spend one durable `infra_retries` unit. Omitted means legacy
+   * terminal behaviour byte-for-byte; existing callers do not opt in implicitly.
+   */
+  begin_infra_retry?: (run_id: string) => Promise<TridentRun | null>
+  /** Maximum measured infrastructure failures retried for one run. */
+  max_infra_retries?: number
+  /** Best-effort owner/visibility seam, invoked once on durable attempt 1 only. */
+  on_infra_retry?: (run: TridentRun, attempt: number, cause: string) => Promise<void>
+  /**
    * How many launcher crashes on ONE run may be recovered by relaunching before
    * the run is failed terminally. Default {@link DEFAULT_MAX_CRASH_RECOVERIES}.
    *
@@ -299,6 +314,29 @@ export interface BuildTridentOrchestratorOptions {
    */
   no_advance_hang_ms?: number
   /**
+   * POSITIVE LIVENESS EVIDENCE for the hang watchdog: the timestamp of the most
+   * recent stage event for a run, or null when it has none.
+   *
+   * THE PREMISE OF THE WATCHDOG ABOVE IS FALSE, and this is the correction. It
+   * claims "a HEALTHY build re-stamps `last_advanced_at` on every inner-workflow
+   * checkpoint, so it never trips this". Checkpoints land BETWEEN phases; a single
+   * Forge round runs ~40 min and re-stamps nothing while it does. So the field is
+   * stale by construction during exactly the work the watchdog is most likely to
+   * interrupt, and the reaper is really asking "has a phase ended recently".
+   *
+   * MEASURED: run 9bece714 was reaped as "no progress for 90 min — suspected agent
+   * hang" while pid 286859 was alive and its stderr log had been written to seconds
+   * earlier. Three further lanes sat 57-85 min "stale" while actively logging.
+   *
+   * Stage events are written MID-PHASE, so a run that has emitted one recently is
+   * observably progressing. When this reader is supplied and reports an event newer
+   * than the hang threshold, the watchdog STANDS DOWN for that tick — writing
+   * nothing, so the reprieve is recomputed from the evidence next tick and expires
+   * the moment the events stop. Omitted, or returning null, leaves the previous
+   * behaviour exactly as it was: absence is never read as liveness.
+   */
+  latest_stage_event_at?: (run_id: string) => string | null
+  /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
    * restart case: the workflow was fired by a prior control-plane process and
@@ -322,6 +360,15 @@ export interface BuildTridentOrchestratorOptions {
  * forever. Tune via `max_crash_recoveries` (exists chiefly for tests).
  */
 export const DEFAULT_MAX_CRASH_RECOVERIES = 3
+
+/**
+ * Infrastructure retry spacing: one minute, five minutes, then fifteen minutes
+ * (long enough at the tail to outlast a token refresh). The retry count is
+ * DERIVED from this schedule so count and duration can never disagree — the
+ * lesson pinned by PR #279's readiness budget.
+ */
+export const INFRA_RETRY_BACKOFF_MS = [60_000, 300_000, 900_000] as const
+export const DEFAULT_MAX_INFRA_RETRIES = INFRA_RETRY_BACKOFF_MS.length
 
 /**
  * RC2 — did the OUTER loop genuinely HARVEST a result into this committed
@@ -486,6 +533,71 @@ export function classifyPublishFailure(text: string): PublishFailureClass {
   ].some((p) => t.includes(p))
   if (credential) return 'publish-credential'
   return 'publish-unknown'
+}
+
+/**
+ * The outer publisher's push-necessity predicate (deploy-blocker card, 3 occurrences
+ * 2026-08-17: runs 26ed32c1 / 88efe1ca / 95fcfb91). The remote ref ALREADY holding exactly
+ * the head to publish is a publish the publisher does not have to perform — a no-op
+ * SUCCESS, never a failure and never "the build left no new commits": the commit exists,
+ * it is on origin, it was simply already published. An empty observation ('' — the remote
+ * ref does not exist yet) is a FIRST PUSH, not a no-op. Production call site:
+ * `publishBuiltCommit`; deleting that call turns the no-op regression tests red.
+ */
+export function remoteAlreadyAtPublishHead(observedRemoteSha: string, headToPublish: string): boolean {
+  return observedRemoteSha !== '' && observedRemoteSha === headToPublish
+}
+
+/** A harvested no-APPROVE result is either safe to retry or a genuine outcome. */
+export type InnerFailureClass = 'infrastructure' | 'genuine'
+
+/** Closed executor/transport vocabulary. WORDS only: never match bare status
+ * numbers because an unrelated 40-hex commit id can contain them. */
+export const INFRA_CAUSE_WORDS: readonly string[] = [
+  'deferred',
+  'timed out',
+  'timeout',
+  'econnreset',
+  'econnrefused',
+  'fetch failed',
+  'socket hang up',
+  'bad gateway',
+  'service unavailable',
+  'internal server error',
+  'gateway timeout',
+  'overloaded',
+]
+
+/**
+ * Classify only from measured terminal fields, fail-closed to `genuine`.
+ * `infra-only` explicitly means the code was never judged. Legacy `inner-error`
+ * is retryable only when its measured cause contains the closed transport list.
+ * Real review verdicts (`code`/`review`/`round-lost`), findings-carrying
+ * REQUEST_CHANGES, compile/test failures, provenance rejects, garbled/hang reaps,
+ * and publish failures remain genuine/owned elsewhere.
+ *
+ * Launcher crashes are the third named infrastructure class in this card's
+ * acceptance, but §1a-crash already serves them through `crash_recoveries`.
+ * This classifier deliberately never sees `subagent_status='crashed'`.
+ */
+export function classifyInnerFailure(
+  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'terminal_cause' | 'checkpoint'>,
+): InnerFailureClass {
+  if (result.verdict === 'APPROVE') return 'genuine'
+  const cause = result.terminal_cause
+  if (result.block_kind === 'infra-only' && typeof cause === 'string' && cause.trim() !== '') {
+    return 'infrastructure'
+  }
+  if (
+    result.checkpoint === 'inner-error' &&
+    result.block_kind === null &&
+    typeof cause === 'string' &&
+    cause.trim() !== ''
+  ) {
+    const measured = cause.toLowerCase()
+    if (INFRA_CAUSE_WORDS.some((word) => measured.includes(word))) return 'infrastructure'
+  }
+  return 'genuine'
 }
 
 /**
@@ -1259,6 +1371,29 @@ export async function rebaseOntoObservedBase(
       // exactly as an unconflicted apply would — and still faces the full review gate.
       autoResolved = [...everConflicted]
     }
+    // THE REPLAY NOTE IS METADATA, NEVER A SUBJECT. This was measured on main in e6d4610d
+    // (#354), 47144a2a (#348), bce629e2 (#327), and d2680a09 (#328): every PR title on
+    // 2026-08-17/18 was this replay string instead of the builder's subject. Carrying `%B` makes
+    // the note body-only metadata. A replay of a replay reads that carried message again, so the
+    // original subject survives arbitrarily many replays and every replay appends exactly one
+    // provenance line. The read fails CLOSED: committing the note alone when git cannot read the
+    // original would silently reproduce the measured defect precisely when git is broken.
+    const replayNote =
+      `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`
+    const originalMessage = await run_host(
+      ['git', '-C', scratchDir, 'log', '-1', '--format=%B', oldHead],
+      scratchDir,
+    )
+    if (!originalMessage.ok)
+      throw new Error(
+        publishFailureReason(
+          'read the commit message of',
+          branch,
+          originalMessage.stderr || 'git log -1 failed with no output',
+        ),
+      )
+    const carried = originalMessage.stdout.trim()
+    const commitMessage = carried === '' ? replayNote : `${carried}\n\n${replayNote}`
     const committed = await run_host(
       [
         'git',
@@ -1270,7 +1405,7 @@ export async function rebaseOntoObservedBase(
         'user.email=trident@neutron.local',
         'commit',
         '-m',
-        `rebase ${branch} onto ${base} @ ${baseSha.slice(0, 7)} (replayed from ${oldHead.slice(0, 7)})`,
+        commitMessage,
       ],
       scratchDir,
     )
@@ -1549,6 +1684,32 @@ export function innerTerminalFailureReason(
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }
 
+/**
+ * GIT-TRUTH FOR THE CLAIM, NOT ONLY THE BRANCH (card 2026-08-16). A model-relayed
+ * sha that names NO git object is not a disagreement with the real head — there is
+ * only one candidate commit, git's — so it resolves to ABSENT (null), never to a
+ * refusal. Measured: hallucinated claim '924b42906950' (git cat-file: not a valid
+ * object name) refused a good build and stranded 924b4290ea81….
+ * A claim is a sha, never a refname: non-hex input returns null WITHOUT asking git,
+ * so 'HEAD'/branch names cannot resolve by accident (4 = git's minimum abbreviation).
+ * `--end-of-options` keeps hostile-shaped input from being read as a flag.
+ */
+export async function resolveClaimedCommit(
+  run_host: RunHostCommand,
+  repo_path: string,
+  claim: string | null,
+): Promise<string | null> {
+  if (claim === null) return null
+  const c = claim.trim().toLowerCase()
+  if (!/^[0-9a-f]{4,40}$/.test(c)) return null
+  const res = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${c}^{commit}`],
+    repo_path,
+  )
+  const oid = res.stdout.trim()
+  return res.ok && /^[0-9a-f]{40}$/.test(oid) ? oid : null
+}
+
 export function buildTridentOrchestrator(
   opts: BuildTridentOrchestratorOptions,
 ): { step: TridentStep; drain: () => Promise<void> } {
@@ -1572,8 +1733,12 @@ export function buildTridentOrchestrator(
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
+  const latestStageEventAt = opts.latest_stage_event_at ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
+  const beginInfraRetry = opts.begin_infra_retry
+  const maxInfraRetries = opts.max_infra_retries ?? DEFAULT_MAX_INFRA_RETRIES
+  const onInfraRetry = opts.on_infra_retry
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -1583,9 +1748,19 @@ export function buildTridentOrchestrator(
   // Run ids redispatched in THIS process — the per-process bound on orphan
   // recovery so a crash-restart loop can't spin forever.
   const redispatched = new Set<string>()
+  // Deliberately in-memory: a restart replaces the failing pool/generation, while
+  // each individual process still bounds launch faults and cannot retry forever.
+  const launchFaults = new Map<string, { count: number; last: string }>()
+  const MAX_LAUNCH_FAULTS = 3
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
+  /**
+   * Delay only, intentionally in memory: the LOOP BOUND is durable in
+   * `infra_retries`. Losing this map on restart is harmless because the restart
+   * itself supplies delay; it can only make the next eligible retry earlier.
+   */
+  const infraRetryNotBefore = new Map<string, number>()
 
   async function resolveBase(run: TridentRun): Promise<string> {
     if (opts.base_branch !== undefined) return opts.base_branch
@@ -1612,13 +1787,44 @@ export function buildTridentOrchestrator(
     return null
   }
 
+  /** Best-effort, read-only probe for a PR that already reached MERGED while its
+   *  launcher was unavailable. No evidence is never treated as a merge. */
+  async function detectMergedPr(run: TridentRun): Promise<number | null> {
+    if (run.merge_mode !== 'pr') return null
+    try {
+      if (run.pr !== null) {
+        const res = await opts.run_host(
+          ['gh', 'pr', 'view', String(run.pr), '--json', 'state,number', '--jq', '.state'],
+          run.repo_path,
+        )
+        return res.ok && res.stdout.trim() === 'MERGED' ? run.pr : null
+      }
+      const branch = run.branch ?? `trident/${run.slug}`
+      const res = await opts.run_host(
+        ['gh', 'pr', 'list', '--head', branch, '--state', 'merged', '--json', 'number', '--jq', '.[0].number // empty'],
+        run.repo_path,
+      )
+      if (!res.ok) return null
+      const n = parseInt(res.stdout.trim(), 10)
+      return Number.isFinite(n) && n > 0 ? n : null
+    } catch {
+      return null
+    }
+  }
+
   /**
    * A COMMIT OID IS READ, NOT REPORTED. `claimedHead` is whatever the build SAID it
    * committed — possibly abbreviated, possibly absent. The head that actually gets
    * published is the one git resolves for the branch the inner loop named (a name a
-   * model cannot plausibly mangle). A claim is only ever a CHECK against that.
+   * model cannot plausibly mangle). A claim is only ever a CHECK against that. The
+   * claim is itself resolved through git first (`resolveClaimedCommit`): unresolvable
+   * = ABSENT; only two real, DIFFERENT OIDs refuse, and only after the push, so a
+   * refusal never strands the commit.
    */
-  async function publishBuiltCommit(run: TridentRun, claimedHead: string | null): Promise<{ pr: number; head: string }> {
+  async function publishBuiltCommit(
+    run: TridentRun,
+    claimedHead: string | null,
+  ): Promise<{ pr: number; head: string; push: 'pushed' | 'noop-already-at-head' }> {
     if (run.merge_mode !== 'pr') throw new Error('outer publish requested outside pr mode')
     const branch = run.branch ?? `trident/${run.slug}`
     // `--verify` so a missing/ambiguous ref is an ERROR rather than an echoed argument.
@@ -1633,14 +1839,15 @@ export function buildTridentOrchestrator(
         `outer publisher could not resolve branch ${branch} locally${detail === '' ? '' : `: ${detail}`}`,
       )
     }
-    // THE CLAIM IS A CHECK, NEVER THE SOURCE. `startsWith` makes a full 40-char claim an
-    // equality test and a 7-char one a prefix test. A disagreement is a real signal (wrong
-    // branch, wrong worktree) and names BOTH values — neither is silently preferred.
-    if (claimedHead !== null && !resolvedHead.startsWith(claimedHead.toLowerCase())) {
-      throw new Error(
-        `outer publisher refused: the build reported commit '${claimedHead}' but branch ${branch} resolves to '${resolvedHead}'`,
-      )
-    }
+    // THE CLAIM IS A CHECK, NEVER THE SOURCE — and it is RESOLVED before it may check
+    // anything. A claim naming no git object is ABSENT, not a conflict (there is only
+    // one candidate commit: git's). Resolved OIDs are compared for EQUALITY — a prefix
+    // compare is wrong both ways: a hallucinated prefix refused a good build, and a
+    // short sha of the right commit is only honored by resolving it. The refusal
+    // itself is DEFERRED until after the push (see below) so it can never strand the
+    // commit; it remains only for two real, resolvable, DIFFERENT commits.
+    const resolvedClaim = await resolveClaimedCommit(opts.run_host, run.repo_path, claimedHead)
+    const claimConflict = resolvedClaim !== null && resolvedClaim !== resolvedHead
     // FIX-ROUND ANCESTRY GATE (mandated by the Fable arbitration on #289 vs #318).
     // A fix round carries the head the review verdict was ABOUT; the head it produced
     // must DESCEND from it. Run fec4d3aa rebuilt from main with no ancestry of the
@@ -1676,6 +1883,32 @@ export function buildTridentOrchestrator(
         result = await opts.run_host(command, run.repo_path)
       }
       return result
+    }
+    // Observe the branch before replay: a missing remote ref proves this is the lane's FIRST
+    // publish, which is the only point where the launch pin can prove the branch was cut from
+    // this run's base rather than inherited from another lane. The same observation remains the
+    // push lease below, so a branch that appears while replay is running is still refused.
+    const observed = await runWithRetries(
+      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+    )
+    if (!observed.ok) {
+      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
+    }
+    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
+    // not exist, so a first push of a new card stays correct — and is still refused if the branch
+    // appeared underneath us between this read and the push.
+    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
+    if (expected === '' && run.base_sha !== null) {
+      const cutFromPinnedBase = await opts.run_host(
+        ['git', '-C', run.repo_path, 'merge-base', '--is-ancestor', run.base_sha, resolvedHead],
+        run.repo_path,
+      )
+      if (!cutFromPinnedBase.ok) {
+        const base = await resolveBase(run)
+        throw new Error(
+          `branch ${branch} does not contain the origin/${base} tip pinned at launch (${run.base_sha.slice(0, 7)}) — not cut from origin/${base}; refusing to publish work built on another lane's branch. Verify the card instead of rebuilding.`,
+        )
+      }
     }
     // THE REBASE ONTO CURRENT `main` HAPPENS HERE, BEFORE THE REVIEW IS RE-FIRED.
     //
@@ -1729,46 +1962,51 @@ export function buildTridentOrchestrator(
     // trusts `refs/remotes/origin/<b>`, which any concurrent `git fetch` can advance — at which
     // point the lease certifies a state nobody ever looked at, and quietly degrades to `--force`.
     // The explicit `<ref>:<sha>` form cannot be undermined that way.
-    const observed = await runWithRetries(
-      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
-    )
-    if (!observed.ok) {
-      throw new Error(publishFailureReason('read the remote state of', branch, observed.stderr))
-    }
-    // Empty is MEANINGFUL, not a missing value: to git an empty expectation asserts the ref does
-    // not exist, so a first push of a new card stays correct — and is still refused if the branch
-    // appeared underneath us between this read and the push.
-    const expected = observed.stdout.trim().split(/\s+/)[0] ?? ''
-    // NOTHING BUILT IS A REAL OUTCOME. With the head read from git rather than relayed by a
-    // model, a run that committed nothing would otherwise publish its own remote back to
-    // itself and read as a success. `resolvedHead` is the PRE-rebase local tip, read before
-    // the replay above could move the branch ref, so this compares exactly "commits ahead of
-    // the remote". Zero ahead fails; an EMPTY `expected` means the remote branch does not
-    // exist yet (first push) and stays publishable.
-    if (expected === resolvedHead) {
-      throw new Error(
-        `outer publisher refused: branch ${branch} is already at ${resolvedHead} on origin — the build left no new commits to publish`,
-      )
-    }
-    const pushed = await runWithRetries([
-      'git',
-      '-C',
-      run.repo_path,
-      'push',
-      `--force-with-lease=refs/heads/${branch}:${expected}`,
-      'origin',
-      `refs/heads/${branch}:refs/heads/${branch}`,
-    ])
-    // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
-    // whatever moved and turn the retry into the force this code exists to avoid.
-    if (!pushed.ok) throw new Error(publishFailureReason('push', branch, pushed.stderr))
+    // ALREADY PUBLISHED IS A SUCCESS THE PUBLISHER DID NOT HAVE TO PERFORM (3 occurrences
+    // 2026-08-17, runs 26ed32c1 / 88efe1ca / 95fcfb91). A resumed or relaunched run whose
+    // branch is already fully on origin used to be REFUSED here as "the build left no new
+    // commits to publish" — a finished, reviewed, PUSHED build recorded `failed`, and the
+    // natural relaunch rebuilt work that was already on origin. The remote holding EXACTLY
+    // `headToPublish` means the push is a NO-OP: resolve to that commit and continue.
+    // Compared against the POST-rebase head, not `resolvedHead` — a remote at the
+    // pre-rebase tip while the replay produced a new head still needs the real lease push.
+    // The genuine "nothing was built" outcome keeps its guard where it belongs: the empty
+    // base..head diff refusal below, which measures CONTENT against the base.
+    const alreadyPublished = remoteAlreadyAtPublishHead(expected, headToPublish)
+    if (!alreadyPublished) {
+      const pushed = await runWithRetries([
+        'git',
+        '-C',
+        run.repo_path,
+        'push',
+        `--force-with-lease=refs/heads/${branch}:${expected}`,
+        'origin',
+        `refs/heads/${branch}:refs/heads/${branch}`,
+      ])
+      // NOTE the lease is deliberately NOT re-observed between retries. Re-reading it would adopt
+      // whatever moved and turn the retry into the force this code exists to avoid.
+      if (!pushed.ok) throw new Error(publishFailureReason('push', branch, pushed.stderr))
 
-    const witnessed = await runWithRetries(
-      ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
-    )
-    const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
-    if (remoteHead !== headToPublish) {
-      throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+      const witnessed = await runWithRetries(
+        ['git', '-C', run.repo_path, 'ls-remote', '--heads', 'origin', `refs/heads/${branch}`],
+      )
+      const remoteHead = witnessed.ok ? witnessed.stdout.trim().split(/\s+/)[0] : ''
+      if (remoteHead !== headToPublish) {
+        throw new Error(`outer publisher could not confirm commit ${headToPublish} on origin`)
+      }
+    }
+    // On the no-op path the `observed` read above IS the witness: origin was measured at
+    // exactly `headToPublish` moments ago and this publisher performed no write since.
+
+    // THE REFUSAL FIRES ONLY AFTER THE PUSH IS CONFIRMED (defect 2, 2026-08-14: the
+    // throw preceded the push, so a wrong refusal left the commit unreachable —
+    // 924b4290ea81… was stranded). A refusal is about which commit to REVIEW, not
+    // about whether the work may exist: the branch is on origin for inspection; only
+    // the PR / review dispatch is refused.
+    if (claimConflict) {
+      throw new Error(
+        `outer publisher refused: the build reported commit '${claimedHead}' (resolves to '${resolvedClaim}') but branch ${branch} resolved to '${resolvedHead}' before publish — the branch was pushed to origin for inspection; no PR or review was dispatched`,
+      )
     }
 
     let pr = prBefore
@@ -1811,7 +2049,7 @@ export function buildTridentOrchestrator(
       run.repo_path,
     )
     if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
-    return { pr, head: headToPublish }
+    return { pr, head: headToPublish, push: alreadyPublished ? 'noop-already-at-head' : 'pushed' }
   }
 
   function failedRun(run: TridentRun, reason: string, keepSubagentId: boolean): TridentRun {
@@ -1830,6 +2068,35 @@ export function buildTridentOrchestrator(
    *  clean fire. Folds any existing PR + the last checkpoint into the args for
    *  idempotent resume. */
   async function launch(run: TridentRun): Promise<AdvanceOutcome> {
+    const stamp = (stage: string, meta?: string): void => {
+      try {
+        opts.record_stage?.(run.id, stage, meta ?? null)
+      } catch {
+        // A stamp must never fail a launch.
+      }
+    }
+    // A review-only bound run fails CLOSED (SPEC card 2026-08-18; bound_pr was 0 of 190 runs).
+    // The measured failure mode is a "review PR #N" dispatch building a docs PR about reviewing
+    // (#542/#541/#530) while #N's review-gate stays red. Guarding at launch covers BOTH call sites
+    // (the fresh launch ~2896 and the crash-recovery relaunch ~2769). When the review executor
+    // lands (plan task 2) this branch becomes its entry point; a fix-round lane that wants
+    // commit-capable bound runs must add a discriminator and change this deliberately.
+    if (run.bound_pr !== null) {
+      return {
+        run: failedRun(
+          run,
+          `run is bound to PR #${run.bound_pr} for a review-only round, but review-only execution is not yet wired — refusing the build path: no branch, no commit, and no new PR were created (the target PR was not touched)`,
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (bound_pr review-only: build path refused, no fire)`,
+      }
+    }
+    // MERGE NOTE: the bound_pr guard above runs BEFORE this stamp on purpose. A refused
+    // run never launches, so stamping first would write a launch-start event for a launch
+    // that never happened — and this stage ledger is exactly what the latency card reads.
+    stamp('launch-start', `round=${run.round} ralph_round=${run.ralph_round}`)
     const base = await resolveBase(run)
     const resume_checkpoint = run.inner_checkpoint
     // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
@@ -1863,7 +2130,14 @@ export function buildTridentOrchestrator(
             {
               repo_path: run.repo_path,
               branch: run.branch,
-              merge_mode: run.merge_mode,
+              // Deferred Ralph waves deliberately leave origin stale. These checkpoints
+              // rebuild regardless of the head; the local match is planner-only, allowing
+              // the clean name to open plan:next through cleanContinuation.
+              merge_mode:
+                resume_checkpoint === 'ralph-task-built' ||
+                resume_checkpoint === 'ralph-task-built-deviated'
+                  ? 'local'
+                  : run.merge_mode,
             },
             // The RETRY SPACING seam (see `resolveResumeLiveHead`): a `pr`-mode read is a
             // network call and the consequence of `''` is terminal, so the attempts are
@@ -1916,6 +2190,104 @@ export function buildTridentOrchestrator(
       }
     }
 
+    const freshLaunch = launchRun.inner_checkpoint === null
+    const priorBaseSha = launchRun.base_sha
+    const freshBuild = freshLaunch && priorBaseSha === null
+    let base_sha: string | null = priorBaseSha
+    let base_behind: number | null = null
+    if (freshBuild && launchRun.merge_mode === 'pr') {
+      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
+      let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      if (!fetched.ok) {
+        await (opts.sleep ?? realSleep)(1000)
+        fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
+      }
+      if (!fetched.ok) {
+        const detail = redactPushError(fetched.stderr).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${base} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
+        }
+      }
+      const remoteRef = `refs/remotes/origin/${base}`
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `${remoteRef}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
+        const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
+        return {
+          run: failedRun(launchRun, `trident infra: fetched origin/${base} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          changed: true,
+          waiting: false,
+          note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
+        }
+      }
+      base_sha = oid
+      const behind = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `refs/heads/${base}..${remoteRef}`],
+        launchRun.repo_path,
+      )
+      const count = Number.parseInt(behind.stdout.trim(), 10)
+      if (behind.ok && Number.isFinite(count)) base_behind = count
+    } else if (freshBuild && launchRun.merge_mode === 'local') {
+      const resolved = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', `refs/heads/${base}^{commit}`],
+        launchRun.repo_path,
+      )
+      const oid = resolved.stdout.trim().toLowerCase()
+      if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) base_sha = oid
+    }
+    const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
+
+    if (
+      freshLaunch &&
+      base_sha !== null &&
+      typeof launchRun.branch === 'string' &&
+      launchRun.branch.length > 0
+    ) {
+      const branchTipResult = await opts.run_host(
+        ['git', '-C', launchRun.repo_path, 'rev-parse', '--verify', '--quiet', `refs/heads/${launchRun.branch}`],
+        launchRun.repo_path,
+      )
+      const branchTip = branchTipResult.stdout.trim().toLowerCase()
+      // A missing or ambiguous local ref is the normal first-launch shape: Forge
+      // will cut it from pinnedRun.base_sha. Once git resolves a concrete tip,
+      // however, only ancestry can prove that this lane owns what is already there.
+      if (branchTipResult.ok && /^[0-9a-f]{40}$/.test(branchTip)) {
+        const containedInBase = await opts.run_host(
+          ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
+          launchRun.repo_path,
+        )
+        let ownCrashLeftover = false
+        if (!containedInBase.ok && priorBaseSha !== null) {
+          const descendsFromPriorBase = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
+            launchRun.repo_path,
+          )
+          ownCrashLeftover = descendsFromPriorBase.ok
+        }
+        if (!containedInBase.ok && !ownCrashLeftover) {
+          const ahead = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
+            launchRun.repo_path,
+          )
+          const rawAheadCount = ahead.stdout.trim()
+          const aheadCount = /^\d+$/.test(rawAheadCount) ? rawAheadCount : '?'
+          const reason = `branch ${launchRun.branch} already carries ${aheadCount} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. Verify or delete the branch (git -C ${launchRun.repo_path} branch -D ${launchRun.branch}), then re-dispatch.`
+          return {
+            run: failedRun(pinnedRun, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${launchRun.phase} → failed (local branch belongs to another lane — no fire)`,
+          }
+        }
+      }
+    }
+
     const id = mint()
     if (typeof id !== 'string' || id.length === 0) {
       return {
@@ -1933,11 +2305,11 @@ export function buildTridentOrchestrator(
     // leaving the run stuck non-terminal with no dispatch id and retrying every tick
     // (Codex r4 [P1]). Mirror the chat path (`build-live-agent-turn.ts`), which
     // catches `loadContext()` and degrades to no context. Silent degrade to null —
-    // the orchestrator has no logger and surfaces faults via its AdvanceOutcome.
+    // this resolver's failure surfaces only through its best-effort fallback.
     let reflection_context: string | null = null
     if (opts.resolve_reflection_context) {
       try {
-        reflection_context = opts.resolve_reflection_context(launchRun)
+        reflection_context = opts.resolve_reflection_context(pinnedRun)
       } catch {
         reflection_context = null
       }
@@ -1949,6 +2321,7 @@ export function buildTridentOrchestrator(
     // never fail because the strategy could not be derived. Null → the workflow's
     // contract is byte-identical legacy.
     let test_strategy: string | null = null
+    let test_strategy_intermediate: string | null = null
     // The numbers behind that block, carried into this launch's AdvanceOutcome note so
     // the divisor and the chosen jobs value are VISIBLE. Round-3 review: a box with
     // enough parked runs to pin every build at `jobs=1` logged nothing at all and was
@@ -1971,25 +2344,29 @@ export function buildTridentOrchestrator(
         }
       }
       const budget = readHostBudget()
-      const detail = buildTestStrategyDetail(launchRun.repo_path, {
+      const detail = buildTestStrategyDetail(pinnedRun.repo_path, {
         cores: budget.cores,
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
         base_branch: base,
       })
       test_strategy = detail.block
+      test_strategy_intermediate = detail.intermediate_block
       test_strategy_summary = detail.summary
     } catch {
       test_strategy = null
+      test_strategy_intermediate = null
       test_strategy_summary = null
     }
 
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
+    stamp('fire-dispatched')
     const firePromise = fireWorkflow({
-      run: launchRun,
+      run: pinnedRun,
       base_branch: base,
+      ...(base_sha !== null ? { base_sha } : {}),
       db_path,
       max_rounds: run.max_rounds,
       resume_checkpoint,
@@ -2004,7 +2381,7 @@ export function buildTridentOrchestrator(
       // shadowing cost on 2026-08-13 and why the fallback cannot resurrect a
       // revoked credential.
       codex_home:
-        (opts.resolve_codex_home ? opts.resolve_codex_home(launchRun) : null) ??
+        (opts.resolve_codex_home ? opts.resolve_codex_home(pinnedRun) : null) ??
         opts.codex_home ??
         null,
       // The credentialed-`gh` runner's store coordinates, so the inner loop's
@@ -2027,6 +2404,7 @@ export function buildTridentOrchestrator(
       // The rendered TEST EXECUTION block (derived best-effort above), spliced by the
       // workflow into the FORGE build contract only — never the argus review gate.
       test_strategy,
+      test_strategy_intermediate,
       // The owner's per-phase model/effort choices. `buildWorkflowArgs` re-validates
       // and OMITS the argument when nothing valid is configured, so an untouched
       // instance produces byte-identical workflow args.
@@ -2054,21 +2432,22 @@ export function buildTridentOrchestrator(
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
       return {
-        run: failedRun(run, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
+        run: failedRun(pinnedRun, `inner workflow fire failed: ${outcome.error ?? 'unknown'}`, false),
         changed: true,
         waiting: false,
         note: `${run.phase} → failed (fire did not settle)`,
       }
     }
 
+    stamp('fire-settled')
     fired.add(run.id)
     const next: TridentRun = {
-      ...launchRun,
+      ...pinnedRun,
       subagent_run_id: id,
       subagent_status: 'running',
       // The exact pooled launcher generation is the crash-ownership token. A
       // legacy/test fire seam without one retains the old observability id.
-      workflow_run_id: outcome.launcher_session_key ?? launchRun.workflow_run_id ?? id,
+      workflow_run_id: outcome.launcher_session_key ?? pinnedRun.workflow_run_id ?? id,
       last_advanced_at: now(),
     }
     return {
@@ -2102,7 +2481,11 @@ export function buildTridentOrchestrator(
    * resurrect a concurrently force-terminated run; `saveIfActive` still commits the
    * (unchanged, non-terminal) phase under its race guard.
    */
-  async function refireNextRalphTask(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
+  async function refireNextRalphTask(
+    run: TridentRun,
+    result: InnerResult,
+    checkpointNameOverride?: 'ralph-task-built' | 'ralph-task-built-deviated',
+  ): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
     const pr = result.pr_number ?? run.pr
@@ -2147,6 +2530,7 @@ export function buildTridentOrchestrator(
       inner_verdict: null,
       pr,
       branch,
+      ...(checkpointNameOverride !== undefined ? { inner_checkpoint: checkpointNameOverride } : {}),
     }
     await persistRefireReset(run.id, resetPatch)
 
@@ -2164,6 +2548,7 @@ export function buildTridentOrchestrator(
       subagent_status: null,
       inner_result: null,
       inner_verdict: null,
+      ...(checkpointNameOverride !== undefined ? { inner_checkpoint: checkpointNameOverride } : {}),
       last_advanced_at: now(),
     }
     return {
@@ -2197,6 +2582,13 @@ export function buildTridentOrchestrator(
     }
 
     if (result.publish_requested) {
+      if (run.ralph && (result.remaining_tasks ?? 0) > 0) {
+        return refireNextRalphTask(
+          run,
+          result,
+          result.deviated_from_spec ? 'ralph-task-built-deviated' : 'ralph-task-built',
+        )
+      }
       try {
         // The handoff is the BRANCH NAME; a relayed sha is only a check. A build that
         // reported no OID is still published — `publishBuiltCommit` reads the head from git.
@@ -2222,7 +2614,10 @@ export function buildTridentOrchestrator(
           run: { ...run, ...resetPatch, last_advanced_at: now() },
           changed: true,
           waiting: false,
-          note: `outer publisher confirmed ${published.head} and PR #${published.pr} → re-fire review`,
+          note:
+            published.push === 'noop-already-at-head'
+              ? `outer publisher confirmed ${published.head} already on origin (push no-op — the ref was already correct) and PR #${published.pr} → re-fire review`
+              : `outer publisher confirmed ${published.head} and PR #${published.pr} → re-fire review`,
         }
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err)
@@ -2276,6 +2671,52 @@ export function buildTridentOrchestrator(
     // provenance gate. Re-fire a fresh iteration for the next task instead.
     if (result.remaining_tasks !== null && result.remaining_tasks > 0) {
       return refireNextRalphTask(run, result)
+    }
+
+    // RUN-LEVEL INFRASTRUCTURE AUTO-RETRY. This sits before the harvest stamp:
+    // nothing was harvested into a terminal decision when the atomic claim wins.
+    // With the seam unwired, legacy callers take the exact existing path below.
+    if (beginInfraRetry !== undefined && classifyInnerFailure(result) === 'infrastructure') {
+      if (run.infra_retries >= maxInfraRetries) {
+        const terminalRun = { ...run, harvested_at: nowMs() }
+        const failed: TridentRun = {
+          ...failedRun(
+            terminalRun,
+            `infrastructure failure persisted after ${maxInfraRetries} automatic retries ` +
+              `(budget ${maxInfraRetries}) — not retrying again. Last measured cause: ${result.terminal_cause}`,
+            true,
+          ),
+          pr: result.pr_number ?? run.pr,
+          branch: result.branch ?? run.branch,
+          inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
+          inner_verdict: 'REQUEST_CHANGES',
+        }
+        return { run: failed, changed: true, waiting: false, note: 'infrastructure retry budget used → failed' }
+      }
+
+      const claimed = await beginInfraRetry(run.id)
+      if (claimed === null) {
+        return { run, changed: false, waiting: true, note: 'infra-retry claim lost — re-read next tick' }
+      }
+      const backoffMs =
+        INFRA_RETRY_BACKOFF_MS[claimed.infra_retries - 1] ?? INFRA_RETRY_BACKOFF_MS.at(-1)!
+      infraRetryNotBefore.set(run.id, Date.parse(now()) + backoffMs)
+      if (claimed.infra_retries === 1 && onInfraRetry !== undefined) {
+        try {
+          await onInfraRetry(claimed, 1, result.terminal_cause ?? '')
+        } catch (err) {
+          log.warn('infra_retry_observer_failed', {
+            run: claimed.id,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        }
+      }
+      return {
+        run: claimed,
+        changed: true,
+        waiting: true,
+        note: `infra failure → auto-retry attempt ${claimed.infra_retries} of ${maxInfraRetries} scheduled`,
+      }
     }
 
     // RC2 — STAMP the durable outer-harvest marker up front, so EVERY outcome
@@ -2392,6 +2833,8 @@ export function buildTridentOrchestrator(
     if (isTerminalPhase(run.phase)) {
       fired.delete(run.id)
       redispatched.delete(run.id)
+      infraRetryNotBefore.delete(run.id)
+      launchFaults.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -2445,6 +2888,39 @@ export function buildTridentOrchestrator(
       //     harvested. Unwired (`begin_crash_recovery` absent) → falls through to the
       //     unchanged reap below, byte-stable for legacy callers.
       if (run.subagent_status === 'crashed' && beginCrashRecovery !== undefined) {
+        // MEASURED 2026-08-16 23:21 gateway restart: recovery blindly relaunched
+        // finished PRs #336/#337 and the owner hand-cancelled both. A merged PR is
+        // terminal and outranks the recovery budget, but the claim MUST precede the
+        // return: it clears the crash latch whose save veto would otherwise silently
+        // discard done/completed. The claim spending one recovery unit is harmless
+        // because the run ends terminal. Nothing was harvested, so do NOT stamp
+        // `harvested_at` (applyResult remains its sole writer).
+        const mergedPr = await detectMergedPr(run)
+        if (mergedPr !== null) {
+          const claimed = await beginCrashRecovery(run.id)
+          if (claimed === null) {
+            return { run, changed: false, waiting: true, note: 'crash-recovery claim lost — re-read next tick' }
+          }
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const adopted: TridentRun = {
+            ...claimed,
+            phase: 'done',
+            pr: mergedPr,
+            branch: claimed.branch ?? run.branch,
+            inner_checkpoint: 'pr-merged',
+            inner_verdict: 'APPROVE',
+            subagent_status: 'completed',
+            failure_reason: null,
+            last_advanced_at: now(),
+          }
+          return {
+            run: adopted,
+            changed: true,
+            waiting: false,
+            note: `PR #${mergedPr} already merged — adopted after launcher crash → done (no relaunch)`,
+          }
+        }
         if (run.crash_recoveries >= maxCrashRecoveries) {
           fired.delete(run.id)
           redispatched.delete(run.id)
@@ -2479,7 +2955,33 @@ export function buildTridentOrchestrator(
         redispatched.delete(run.id)
         // CONTINUATION, not a restart: `launch()` folds `inner_checkpoint`/`pr`/`branch`
         // so the workflow resumes on the pushed branch and reuses the PR.
-        return launch(claimed)
+        try {
+          const out = await launch(claimed)
+          launchFaults.delete(run.id)
+          return out
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err)
+          const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+          launchFaults.set(run.id, { count, last: msg })
+          if (count < MAX_LAUNCH_FAULTS) {
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+            }
+          }
+          launchFaults.delete(run.id)
+          fired.delete(run.id)
+          redispatched.delete(run.id)
+          const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+          return {
+            run: failedRun(run, reason, false),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launch kept throwing)`,
+          }
+        }
       }
       // (1a) TERMINAL-BUT-GARBLED harvest guard. The inner workflow marks
       //     `subagent_status='completed'` in the SAME sqlite UPDATE that writes
@@ -2527,6 +3029,43 @@ export function buildTridentOrchestrator(
     //     than waiting on the 2h `maxInflightMs` ceiling below. Checked BEFORE
     //     orphan recovery so a wedged orphan is reaped instead of redispatched.
     if (run.subagent_run_id !== null && elapsedSinceAdvance(run) > noAdvanceHangMs) {
+      // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING. The clock
+      //     above measures phase boundaries, not work; a run mid-Forge is stale on
+      //     that field however hard it is working. Stage events are written
+      //     MID-phase, so one that is NEWER than the hang threshold is proof the run
+      //     advanced inside the window the watchdog just called dead.
+      //
+      //     NOTHING IS WRITTEN, DELIBERATELY. The obvious implementation re-stamps
+      //     `last_advanced_at` to the event's timestamp — but `TridentRunUpdate`
+      //     documents that the field "is always re-stamped by `save`/`update` so
+      //     callers never pass it", so that write would silently land as `now()`:
+      //     liveness the run never demonstrated, and a fresh full threshold bought
+      //     by an event that may be 89 minutes old. Returning `changed: false`
+      //     instead means the reprieve is RECOMPUTED FROM THE EVIDENCE on every
+      //     tick and expires the moment the events stop, with no stored state to
+      //     go stale and no timestamp invented anywhere.
+      //
+      //     ABSENCE IS NOT EVIDENCE: a null reader (not wired), an unparseable
+      //     timestamp, or a run with no events at all falls straight through to the
+      //     reap below, byte-identical to the old behaviour.
+      const stageAt = latestStageEventAt === null ? null : latestStageEventAt(run.id)
+      const stageMs = stageAt === null ? NaN : Date.parse(stageAt)
+      const nowMs = Date.parse(now())
+      if (Number.isFinite(stageMs) && Number.isFinite(nowMs) && nowMs - stageMs <= noAdvanceHangMs) {
+        const staleMins = Math.round(elapsedSinceAdvance(run) / 60_000)
+        const evidenceMins = Math.round(Math.max(0, nowMs - stageMs) / 60_000)
+        // DISCLOSED, not silent. A watchdog that quietly declines to fire is as hard
+        // to trust as one that quietly fires; the note names both clocks so the
+        // reason this run survived is legible in the tick log.
+        return {
+          run,
+          changed: false,
+          waiting: true,
+          note:
+            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but a stage ` +
+            `event landed ${evidenceMins} min ago — the run is advancing mid-phase`,
+        }
+      }
       fired.delete(run.id)
       redispatched.delete(run.id)
       const mins = Math.round(noAdvanceHangMs / 60_000)
@@ -2564,7 +3103,49 @@ export function buildTridentOrchestrator(
 
     // (3) Launch-if-needed — the single fire site (null-guarded).
     if (run.subagent_run_id === null) {
-      return launch(run)
+      // The infra-retry backoff is checked BEFORE the launch-fault budget: a run
+      // that is deliberately waiting out a backoff has not attempted a launch, so
+      // it must not consume a fault from the budget that reaps a THROWING launch.
+      const notBefore = infraRetryNotBefore.get(run.id)
+      if (notBefore !== undefined) {
+        const remainingMs = notBefore - Date.parse(now())
+        if (remainingMs > 0) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `infra-retry backoff (${Math.ceil(remainingMs / 1_000)}s remaining)`,
+          }
+        }
+        infraRetryNotBefore.delete(run.id)
+      }
+      try {
+        const out = await launch(run)
+        launchFaults.delete(run.id)
+        return out
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        const count = (launchFaults.get(run.id)?.count ?? 0) + 1
+        launchFaults.set(run.id, { count, last: msg })
+        if (count < MAX_LAUNCH_FAULTS) {
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note: `launch threw (attempt ${count} of ${MAX_LAUNCH_FAULTS}): ${msg} — retrying next tick`,
+          }
+        }
+        launchFaults.delete(run.id)
+        fired.delete(run.id)
+        redispatched.delete(run.id)
+        const reason = `launch failed ${MAX_LAUNCH_FAULTS} time(s); not retrying — last error: ${msg}`
+        return {
+          run: failedRun(run, reason, false),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (launch kept throwing)`,
+        }
+      }
     }
 
     // (4) In flight (fired by THIS process, no result yet). Reap a stalled

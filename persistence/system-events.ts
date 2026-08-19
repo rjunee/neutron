@@ -76,6 +76,13 @@ export type SystemEventName =
   | 'dead_turn_notice'
   | 'session_size_alert'
   | 'rate_limit_banner'
+  // A fourth REPL notice, from the frontier-model floor
+  // (`runtime/.../model-floor.ts`): an owner-facing conversational spawn resolved
+  // a model BELOW the configured best tier and was held at the floor instead. It
+  // earns a durable row rather than a log line because the degradation it records
+  // is invisible from the outside — the chat still answers, just worse — and the
+  // only detector before this was the owner noticing.
+  | 'model_floor_applied'
   // #451 — the boot scope reconciler migrated stranded rows forward after a
   // rename. NOT a silent-degradation entry (it follows the `watchdog_alert`
   // precedent): a REPAIR happened to the owner's database and the row is the
@@ -164,6 +171,7 @@ export const ALL_SYSTEM_EVENT_NAMES: ReadonlyArray<SystemEventName> = [
   'dead_turn_notice',
   'session_size_alert',
   'rate_limit_banner',
+  'model_floor_applied',
   'instance_scope_rekeyed',
   'credential_scope_migrated',
   'credential_scope_orphaned',

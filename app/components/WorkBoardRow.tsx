@@ -45,11 +45,11 @@ import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme
 import {
   canPlay,
   dotState,
-  failureReasonText,
   formatCompletedShort,
   isLinkedRunning,
   isRetry,
   roundText,
+  runNotice,
   statusLabel,
   stepTag,
   type DotColorKey,
@@ -131,7 +131,7 @@ function WorkBoardRowImpl({
   const dot = dotState(item);
   const tag = stepTag(item.run_progress);
   const round = roundText(item.run_progress);
-  const failReason = failureReasonText(item.run_progress);
+  const notice = runNotice(item.run_progress);
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
   const retry = isRetry(item);
@@ -327,9 +327,13 @@ function WorkBoardRowImpl({
             </View>
           ) : null}
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
-          {failReason !== null ? (
-            <Text style={styles.failReason} numberOfLines={1}>
-              {failReason}
+          {notice !== null ? (
+            <Text
+              style={notice.tone === 'failure' ? styles.failReason : styles.briefAlert}
+              numberOfLines={1}
+              testID={`work-board-run-notice-${notice.tone}`}
+            >
+              {notice.text}
             </Text>
           ) : null}
         </View>
@@ -338,16 +342,31 @@ function WorkBoardRowImpl({
   );
 }
 
-/** The dimmed completed-history row: green dot + strikethrough title + mono datestamp + delete. */
+/**
+ * The dimmed history row, in two variants.
+ *
+ * `done` (default): green dot + strikethrough title + the "Merged · <date>"
+ * datestamp + delete.
+ *
+ * `archived` (SHELVED): the SAME collapsed, read-only-ish shape, but it must not
+ * borrow ANY of done's completion signals — no green merge dot, no strikethrough,
+ * and NO datestamp line (a shelved card has no `completed_at`, and rendering
+ * "Merged · " with an empty date would report parked work as shipped). It gets
+ * the neutral upcoming outline dot instead.
+ */
 function WorkBoardCompletedRowImpl({
   item,
   busy,
   onDelete,
+  variant = 'done',
 }: {
   item: WorkBoardItem;
   busy: boolean;
   onDelete: () => void;
+  variant?: 'done' | 'archived';
 }) {
+  const archived = variant === 'archived';
+  const alert = archived ? null : runNotice(item.run_progress);
   const requestDelete = (): void => {
     Alert.alert('Remove this item?', undefined, [
       { text: 'Keep', style: 'cancel' },
@@ -355,20 +374,39 @@ function WorkBoardCompletedRowImpl({
     ]);
   };
   return (
-    <View style={[styles.row, styles.rowDone]} testID={`wb-done-${item.id}`}>
+    <View
+      style={[styles.row, styles.rowDone]}
+      testID={`wb-${archived ? 'archived' : 'done'}-${item.id}`}
+    >
       <View style={styles.line1}>
         <View style={styles.dotHit}>
-          <View style={[styles.dot, styles.dotDone]} />
+          <View style={[styles.dot, archived ? styles.dotArchived : styles.dotDone]} />
         </View>
-        <Text style={[styles.title, styles.titleFill, styles.titleDone]} numberOfLines={1} ellipsizeMode="tail">
+        <Text
+          style={[styles.title, styles.titleFill, archived ? styles.titleArchived : styles.titleDone]}
+          numberOfLines={1}
+          ellipsizeMode="tail"
+        >
           {item.title}
         </Text>
         <IconButton label="Delete item" glyph="✕" disabled={busy} onPress={requestDelete} />
       </View>
-      {/* A completed row always carries its "Merged · <date>" on line 2. */}
-      <View style={styles.meta}>
-        <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
-      </View>
+      {/* A completed row always carries its "Merged · <date>" on line 2; a
+          shelved row carries no datestamp at all. */}
+      {archived ? null : (
+        <View style={styles.meta}>
+          <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
+          {alert !== null && alert.tone === 'alert' ? (
+            <Text
+              style={styles.briefAlert}
+              numberOfLines={1}
+              testID="work-board-completed-brief-alert"
+            >
+              {alert.text}
+            </Text>
+          ) : null}
+        </View>
+      )}
     </View>
   );
 }
@@ -439,6 +477,8 @@ const styles = StyleSheet.create({
     borderWidth: DOT_BORDER,
   },
   dotDone: { borderColor: PHASE.merge.fg, backgroundColor: PHASE.merge.fg },
+  // Shelved: the neutral 'upcoming' outline — never the merge green.
+  dotArchived: { borderColor: THEME.text_muted, backgroundColor: 'transparent' },
   titleCol: { flex: 1, justifyContent: 'center' },
   titleFill: { flex: 1 },
   title: {
@@ -452,6 +492,8 @@ const styles = StyleSheet.create({
     lineHeight: TYPOGRAPHY.caption.lineHeight,
   },
   titleDone: { color: THEME.text_muted, textDecorationLine: 'line-through' },
+  // Shelved: muted, but NOT struck through — the work was parked, not finished.
+  titleArchived: { color: THEME.text_muted },
   editInput: {
     flex: 1,
     color: THEME.text_primary,
@@ -482,6 +524,14 @@ const styles = StyleSheet.create({
   failReason: {
     flexShrink: 1,
     color: PHASE.failed.fg,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+  },
+  // A recovered integrity incident remains readable without painting a healthy
+  // or merged run as terminally failed.
+  briefAlert: {
+    flexShrink: 1,
+    color: THEME.text_muted,
     fontSize: TYPOGRAPHY.caption.fontSize,
     lineHeight: TYPOGRAPHY.caption.lineHeight,
   },

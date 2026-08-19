@@ -36,7 +36,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { writeOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
 
@@ -49,8 +49,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-onboarding-tz-'))
+  seedMigratedDb(join(tmpDir, 'project.db'))
   db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {
