@@ -2,6 +2,630 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
+
+The `plan:probe` seat now also relays a byte-bounded branch log from
+`git log --name-only <base>..<ref> | head -c 12288 | iconv -c … || true`. Its Forge-branch
+and base-branch fetches are independent, so a local-only Forge branch cannot
+prevent `origin/<base>` from refreshing. The log has no checksum because it is
+synthesis material, not a persisted relay. The workflow independently clamps the
+relayed value to 12,288 UTF-8 bytes before prompt interpolation, neutralises a
+literal `</BRANCH_LOG_DATA>` from commit text, and fences commit messages as
+untrusted data. `plan:next` returns an optional
+`branchBrief` with BUILT / SEAMS / REJECTED / SUITES sections: evidence-only and
+REGENERATED each round, so any prior round's brief is superseded.
+`clampBranchBrief()` enforces `BRANCH_BRIEF_MAX_BYTES = 4096` in code at the
+single consumption point. `ralphExecuteNote` appends that clamped brief to the
+Forge prompt only when `usePlanNext` selected its authoritative producer; a
+`plan:fable` answer cannot activate the shared schema's optional field. A missing
+or empty branch log also blocks brief transport in code even if the planner emits
+a schema-valid brief anyway. It emits nothing when the brief is absent or empty.
+The brief is independently fenced as untrusted reference data before Forge sees
+it, and both fence delimiters are neutralised before the byte cap. It is absent
+from the persisted plan and every checkpoint prompt, leaving no accumulation
+channel. A missing or empty branch log or brief fails open: the cheap path remains
+selected and no header is emitted. The iteration-1 and genuine crash-resume
+`plan:fable` paths remain byte-untouched, guarded by canary assertions.
+
+The historical BEFORE on the 2026-08-18 continuation round of card
+`trident-cannot-review-an-existing-p` was planner 2m54 (versus 9m50 for round-1
+Fable, 3.4x cheaper) and codex build 30m01. FORGE re-deriving branch state was
+estimated at approximately 14 minutes of that build. Instrument caveat: that
+30m01 used the legacy wrapper proxy; `codex-exec-end` did not exist yet. It is
+context, not an instrument-matched baseline, and cannot by itself validate an
+AFTER measured with the new exact pair.
+
+AFTER: not yet measurable — this branch has not merged, so no real continuation
+round can have consumed the new brief. The wrapper now durably stamps both
+`codex-exec-start` and `codex-exec-end` on success and failure, and
+`trident/stage-attribution.ts` reports the latest start/end pair in the fire
+window. This selects the retry when an earlier invocation failed after stamping
+its end, and also handles a killed first attempt with no end. Checkpoint time and
+the next fire are no longer timing proxies.
+
+`BRANCH-BRIEF-MEASUREMENT: PENDING`. Removal gate: by 2026-08-25 the Trident owner
+must replace that marker with the result from a real multi-task continuation,
+quoting its exact `codex-exec-start→codex-exec-end` AFTER beside the historical
+30m01 and explicitly retaining the instrument caveat. An instrument-matched
+no-brief control is required before claiming the delta came from this feature.
+If no qualifying measurement is recorded by the deadline, the exact duration
+does not drop, or no matched control substantiates attribution, the owner reverts
+the branch-state brief rather than retaining an unproven optimisation.
+The deadline remains an operational removal gate; historical test runs do not
+change outcome based on the wall clock.
+
+## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
+
+Migration 0133 adds `code_trident_stage_events`, an append-only SQLite ledger read
+and written through `TridentRunStore`. Host launches now record `launch-start`,
+`fire-dispatched`, and `fire-settled`; the Codex wrapper records `wrapper-start`
+and brackets execution with `codex-exec-start` / `codex-exec-end` through the
+always-exit-0 `trident/stage-stamp.sh`.
+Every writer uses millisecond ISO-8601 UTC where the host supports it, preserves
+insertion order by row id, and is best-effort so instrumentation cannot change a
+launch or wrapper exit.
+
+These stage names are the fixed vocabulary for deterministic writers. The reserved
+workflow-side names are `plan-start`, `build-agent-start`, and `wrapper-invoke`.
+The previous `/tmp` part-mtime method is retired because part files are rewritten on
+re-fire and can produce negative or cross-fire intervals; completed ledger rows
+instead survive run failure and later re-fire unchanged.
+
+## 2026-08-18 — Review-shaped Trident dispatches are refused unless they bind the existing PR
+
+`dispatchBoardBoundBuild` now owns the review-only dispatch contract. It detects
+requests for a review round of an existing PR and refuses review-shaped free text
+that omits `bound_pr`; the refusal names both `bound_pr` and the detected PR number
+instead of silently creating a new build. A supplied `bound_pr` must be a positive
+integer, bypasses only the build-specific ask-before-acting gate, and is persisted
+into the existing `code_trident_runs.bound_pr` column. Malformed and unbound-review
+refusals occur before workspace resolution, run creation, or board attachment.
+
+The `work_board_dispatch_build` schema now advertises and passes through `bound_pr`.
+`work_board_start` remains build-only because it starts a card's saved spec; review
+rounds use the explicit dispatch tool. No production wiring changed: inspection
+confirmed `gateway/composition/build-core-modules.ts` already registers
+`registerTridentBuildToolSurface`, while `McpServer.listToolSchemas()` generically
+exposes each shared-registry tool's `input_schema` to the MCP bridge.
+
+Until the review executor lands, `launch()` fails a bound run closed before
+`resolveBase`: no workflow fire and no host/git command can create a branch, commit,
+or PR. Its terminal reason names the bound PR and states that the target was not
+touched. This is deliberately incompatible with commit-capable fix-round use of
+`bound_pr`; that lane must add a separate discriminator before it ships.
+
+Both load-bearing boundaries were mutation-proved. Disabling the dispatch refusal
+made `a review-shaped task with no bound_pr is REFUSED at dispatch, naming bound_pr`
+fail (`received true` instead of `false`). Moving the launch guard below
+`resolveBase` made `a bound_pr run never takes the build path` fail because one host
+command was recorded instead of zero. Both mutations were restored; the three
+targeted test files then passed 164 tests. The full Trident directory passed
+2,043 tests across 78 files, and `tsc -p trident/tsconfig.json --noEmit` was
+clean. The repository runner completed its 1,353-file coverage audit but reported
+40 failing files; rerunning exactly those files from a detached `main` worktree
+reproduced failures in all 40 (59 failures in each of two 20-file batches), proving
+that full-suite red is pre-existing and not caused by this change.
+
+## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
+
+Migration repairs now have an explicit, loader-validated `reapply` kind. Unlike the existing
+suppress entries, an active reapply does not hide its named file: when the ledger records that
+name at the incident ordinal and the exact firing receipt is absent, the file joins the same
+tracked-tree guards and transactional apply path as pending work. Its SQL body and plain
+`_migration_repairs` receipt commit together; `_migrations` is never inserted, updated, or
+deleted. A body failure rolls both back, and the receipt makes every later boot a no-op.
+
+The shipped row-122 entry is intentionally inert during the deploy window before a file named
+`work_board_items_pr` exists, on fresh installs, and wherever that name is legitimately recorded
+at its tree ordinal. The live-replica harness pins the old silent-skip control, the repaired
+first boot, byte-identical scar row, second-boot idempotence, file-absent rollout order,
+fresh-install behavior, duplicate-column strictness, and untracked-file refusal. This change
+ships no migration SQL and does not change the schema snapshot.
+
+#269 must NOT merge until this is merged AND deployed; after it lands #269 must rebase and fix
+its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsified by 0130's
+rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
+`01M095E3F8YN3N9XV5AK4S9XJW`.
+
+## 2026-08-18 — a cache miss is not an absence of deletion, and a refused receipt is not a sent one (#411-followup)
+
+Two defects in #409, found by the cross-model and adversarial review that #409 was
+merged WITHOUT. Both were live on the reference deployment before this landed.
+
+**A deleted project's transcript could come back.** The `projects_changed`
+invalidation iterated `transcriptCache.keys()` and raised its `dropped` flag only
+when a delete FOUND an entry — so a topic whose FIRST read was still in flight,
+which is precisely the case the epoch guard exists for, could not raise it. The
+epoch stayed put, the read's write-back passed the guard at `controller.ts`
+`handleChange`, and the deleted project's history was re-created in the cache where
+a later `setProject` would serve it. The mechanism the comment described was right;
+the condition gating it was keyed on "did the map contain it" rather than "did the
+server say it is gone". Invalidation now scans every topic this controller has an
+opinion about, in-flight reads included, via a new `inFlightTranscriptTopics` set
+held only for the duration of the await.
+
+**A read receipt refused by the socket was recorded as sent, permanently.**
+`markVisibleAgentRead` filled its per-topic ledger from the ids it OFFERED, while
+`WebChatSession.markRead` records an id only when `ws.send` succeeds — specifically
+so a failed send is re-offered next time. Filling the ledger from the argument
+cancelled that retry: the id was filtered out of every later call and the receipt
+was never sent again. Not an edge case — on EVERY page load the transcript is read
+from the local store and reported before the WebSocket handshake completes, so the
+whole hydrated transcript was offered into a closed socket, dropped, and ledgered.
+The owner's read watermark never advanced and unread counts returned on messages he
+was looking at. `markRead` now RETURNS the ids it actually sent (web and mobile
+sessions both), and the caller ledgers only those.
+
+**Mutation evidence, both directions.** Restoring the old ledger reds
+`switch-transcript-cache.test.ts` "a receipt the socket REFUSED is offered again"
+(26 pass / 1 fail); restoring the old invalidation reds "A DELETION LANDING WHILE
+THE FIRST READ IS IN FLIGHT STILL STICKS" (26 pass / 1 fail); with both fixes,
+27 pass / 0 fail. `chat-core` 171 pass / 0 fail.
+
+📌 **The first version of the resurrection test was DECORATION and is worth
+recording as such:** it passed with the bug restored, because it stalled the session
+AFTER entering the project, by which time the read had already resolved. A guard that
+cannot fail for the reason under test is not a guard. It was rewritten to register
+the stalled session BEFORE the switch — `createSession` reuses an existing entry —
+and only then did the mutation go red.
+
+📌 **The suite could not see either defect because its session stub accepted every
+receipt unconditionally**, and #409's own test "acknowledges each agent message ONCE"
+pinned the defect as the desired behaviour. The stub now models a closed socket.
+
+**SYSTEM-OVERVIEW.md changes:** none (bug fix inside existing modules; no new module,
+HTTP surface, lifecycle behaviour, deploy step or env flag — `markRead`'s return type
+is a widened contract on an existing method, not a new surface).
+
+### Follow-up — the cross-model review found the receipt fix was only half of one
+
+Codex reviewed the change above and returned two findings.
+
+**A refused receipt was made ELIGIBLE for retry, and nothing retried.** Not
+ledgering a refused id restores the session's retry contract; it does not perform
+one. `handleStatus('open')` only published, and an up-to-date `session_ready` with
+no replay and nothing queued emits no `onChange` — so on a cold load, where the
+transcript is read from the local store and reported before the handshake finishes
+and therefore refused wholesale, the next attempt waited on UNRELATED activity. The
+watermark stayed stale exactly as before, just for a different reason. The socket's
+transition to `open` now re-offers; `markVisibleAgentRead` is idempotent (the ledger
+filters ids already confirmed sent), so it costs nothing when there is nothing owed.
+
+**The in-flight tracker is now reference-counted rather than a Set** — two reads for
+one topic can overlap, and the first to settle removed membership while the second
+was still outstanding.
+
+📌 **That second one is kept on REASONING and the guard for it was DELETED rather
+than shipped.** The test I wrote passed against the Set, because in the ordinary
+overlap the first read to settle writes a cache entry, which keeps the topic in the
+invalidation's `known` set through the cache no matter what the tracker says. The
+real gap needs a read whose write-back is refused — a generation spanning `stop()`
+then `start()` — which was not reproduced. A guard that cannot fail for the reason
+under test is worse than no guard: it reads as coverage. The count is retained
+because it cannot be worse than the Set and costs three lines, and
+`controller.ts` says so at the declaration.
+
+**Mutation:** removing the socket-open re-offer reds "RE-OFFERS refused receipts the
+moment the socket opens" (28 pass / 1 fail). Restored: 29 pass / 0 fail on that
+suite, 208 pass / 0 fail across it plus `switch-render-cost` and `chat-core`,
+`bunx tsc --noEmit` 0 errors.
+
+## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
+
+Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Codex
+wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
+`_CORRUPT` refusal through the host checkpoint before retaining the same exit-3
+fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
+cannot leak the project database path or displace the refusal tag from the bounded
+wrapper-error tail; a short stable failure tag remains when recording itself fails.
+A missing run row is now a nonzero checkpoint result rather than a diagnostic-only
+exit 0, so a mis-threaded run id cannot lose the alert without a trace. Alert-only
+writes do not refresh `last_advanced_at`: recording evidence is not workflow progress.
+
+`deriveRunProgress` now carries the alert through the Work-board HTTP and live
+snapshot shape. Terminal reconciliation retains the run link on successful cards,
+so both web and mobile rows show the subdued alert while a recovered run continues
+and in completed history after it merges. Moving completed work back to an active
+lane clears the stale link. An actual terminal failure reason takes precedence as
+the card's outcome; an earlier alert never substitutes for an absent failure reason.
+The alert is explicitly workflow-owned, so stale `save()`/`saveIfActive()` snapshots
+cannot erase it. Tests cover all three persisted refusal paths, store/progress
+mapping, client parsing, recovery→done reconciliation, and both client renderers.
+
+## 2026-08-18 — brief-part receipts now attest to persisted bytes
+
+`writeBriefParts` now encodes each task/reflection part once, writes it, reads the
+file back, and compares a byte-domain FNV receipt with the composed text receipt.
+An unfaithful write is retried exactly once; a persistent mismatch or I/O error is
+reported through a content-safe warning seam and refuses the whole manifest. In
+particular, failed reflection verification can no longer degrade non-empty owner
+guidance into a task-only manifest.
+
+`trident/brief-parts.test.ts` pins byte/string receipt parity (including lone
+surrogates and a >30 KB vector), persistent 569-byte truncation refusal, transient
+short-write recovery, reflection-only refusal, unchanged happy-path receipts, and
+loud write failures. The production default remains the existing
+`trident/inner-loop.ts` caller; `trident/codex-build.sh` and
+`trident/inner-workflow.mjs` are unchanged.
+
+## 2026-08-18 — lane_review.sh fails closed (T1–T4)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
+
+Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
+
+The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
+
+Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
+## 2026-08-18 — the web pane could destroy every Codex seat, and could only ever write the first one
+
+Three defects found by the adversarial review of #407 — which was merged with its
+verdict standing at REQUEST_CHANGES and no cross-model pass. All three were LIVE on
+the reference deployment, and **all three are on the web pane, which #407 never
+touched**: rotation changed what the server does with an unchanged request, so the
+client became wrong by standing still.
+
+**Disconnect became destructive without changing.** The button posts a bare
+`DELETE /api/app/codex-auth`, which the gateway now maps to `disconnectAllAccounts`.
+Before rotation it removed one credential. After it, one click removes EVERY
+connected subscription — and none can be re-minted without a fresh `codex login` on
+each original machine, which is worse than it sounds because the instance has been
+refreshing those tokens and the copies left behind are likely already revoked. There
+was no confirmation anywhere on the path, and the section copy still read
+*"This is an account-wide credential"* — singular. It now confirms through the tab's
+existing injectable `confirmImpl`, and the message NAMES THE COUNT, because the whole
+failure is that the owner believes he is clearing one thing.
+
+**The multi-seat UI shipped mobile-only.** `WebCodexCredentialClient.connectGlobal`
+took no `account`, so every paste resolved to `DEFAULT_SLOT` server-side: pasting a
+SECOND subscription silently destroyed the first, created nothing, and rendered
+"✓ Connected". The web `CodexStatus` type never declared `accounts` / `next` /
+`exhausted` either — the gateway had been sending all three the whole time — so there
+was no seat list, no cooling state and no per-seat remove. All now rendered, with the
+seat name REQUIRED once any seat exists.
+
+**Nothing stopped one ChatGPT account occupying two seats.** Both clients instruct the
+owner to *"run `codex login` on any machine and paste that account's auth.json"*, so
+pasting a laptop's file and then a desktop's is the documented path — and the CLI
+rotates refresh tokens, so the first refresh in each seat revokes the other. Both die,
+each is cooled `unauthorized` (the one state that never expires on a timer), and
+cross-model review is silently gone. That is ISSUES #573 re-created through the UI.
+`codex-rotation.ts` claims the design prevents it, and that is true of the code — the
+copy is made by the OWNER, not by us, which is the docblock-describes-intent shape.
+`connectAccount` now refuses a bundle whose `tokens.account_id` matches another seat,
+using a discriminator the normalizer already preserved and nothing read. A bundle with
+NO `account_id` is allowed through rather than refused: blocking every unidentifiable
+bundle would make a legitimate second seat impossible on a CLI version that omits the
+field, which is a worse failure than the one being prevented.
+
+**Mutation evidence — four guards, four reds.** Drop the confirm → "DISCONNECT-ALL
+confirms first" fails. Point per-seat Remove at the unqualified route → "REMOVE on one
+seat" fails. Stop sending the seat name → "ADD SEAT sends the seat name" fails. Remove
+the duplicate check → "REFUSES a second seat holding an account another seat already
+has" fails. Restored: `integrations-tab.test.tsx` 23 pass / 0 fail,
+`codex-credential.test.ts` 32 pass / 0 fail. The two ALLOW cases (a genuinely
+different account, and reconnecting the same account into its OWN seat — the repair
+path) stay green under the duplicate mutation, so the guard is not merely
+"no second seat, ever".
+
+**SYSTEM-OVERVIEW.md changes:** none (defect fix on an existing surface; no new module,
+HTTP route, lifecycle behaviour, deploy step or env flag — `connectGlobal` gaining an
+optional argument and `CodexStatus` declaring fields the server already sent are
+widenings of existing contracts).
+
+### Follow-up, same day — the cross-model review found the fix reintroducing the defect
+
+Codex reviewed the change above and returned four findings. Two were P1 and one of
+them was the same bug one step later.
+
+**The pane stored the POST's own reply, which erased the pool it had just fixed.**
+`POST /api/app/codex-auth` answers `{ status, mode, scope, account }`; ONLY the GET
+enriches with `accounts` / `next` / `exhausted`. Saving the POST reply therefore
+dropped the seat list, turned `codexSeatNameRequired` back off, and re-armed the
+blank-name overwrite of `default`. The pane now re-reads `statusGlobal()` after a
+successful connect, which the per-seat remove already did.
+
+📌 **It survived the first review because THE TEST STUB WAS MORE GENEROUS THAN THE
+SERVER** — it returned the full two-seat body from the POST, a shape production
+never sends. A stub that answers better than reality does not merely fail to catch
+the bug; it certifies it. Both stubs are now the real shapes, and the older Codex
+test's GET is STATEFUL (not_connected until the POST lands) because a GET frozen at
+`not_connected` contradicts the POST it just accepted.
+
+**The duplicate-account guard asked the wrong store.** It scanned
+`rotation.listSlots()`, but a rotation row is not proof a seat exists and its absence
+is not proof one does not: on an upgraded install the legacy `codex` credential
+predates rotation, so the list answers EMPTY while the credential is real and in use.
+The guard would find nothing and admit the same account under a named seat. It now
+scans `syncSlots()`, which re-derives seats from the persisted credential rows.
+
+**Two more, both taken:** the pane derived its whole display from the legacy
+top-level `status`, which only inspects the bare `codex` row — so removing `default`
+while named seats remain, or naming a first seat, printed "Not connected" over a
+healthy pool AND hid every control for managing it; it now derives from the pool.
+And `connectAccount` is serialized per owner, because the duplicate check reads and
+then writes, so two concurrent connects for one account could both pass before either
+stored — a double-click on "Add seat" is enough, and the damage needs a fresh
+`codex login` on both machines to undo.
+
+**Mutations, three more reds:** drop the re-read → "RE-READS the pool after
+connecting" fails; derive from legacy status → "shows a NAMED-ONLY pool as connected"
+fails; scan rotation rows instead of syncing → "sees a LEGACY seat that has never been
+through rotation" fails. Restored: `integrations-tab.test.tsx` 25 pass / 0 fail,
+`codex-credential.test.ts` 33 pass / 0 fail, `bunx tsc --noEmit` 0 errors.
+
+## 2026-08-17 — "already at the built sha" is a publish no-op, not a failure
+
+The outer publisher refused to publish when origin's branch ref already equalled the
+commit the build produced — `outer publisher refused: branch … is already at … on origin
+— the build left no new commits to publish` — and the run was recorded `failed`. Three
+occurrences on 2026-08-17 across both repos (enterprise run `26ed32c1`, open run
+`88efe1ca` — the deploy-blocker card, whose PR #391 was open and mergeable with the
+complete fix — and the `95fcfb91` near-miss): in every one the work was finished and on
+origin, and the natural relaunch would have rebuilt already-published work.
+
+`publishBuiltCommit` (`trident/orchestrator.ts`) now asks `remoteAlreadyAtPublishHead`
+against the POST-rebase head: the remote already holding exactly the head to publish
+skips the lease push as a no-op SUCCESS — the publish resolves to that commit and
+continues to the PR/review handoff, and the transition note records that the push was a
+no-op because the ref was already correct. The genuine "nothing was built" outcome keeps
+its guard where it belongs: the empty base-to-head diff refusal. A remote at the
+PRE-rebase tip while the replay produced a new head still takes the real lease push.
+
+## 2026-08-17 — CI caches the bun install, so a third party's outage reds this repo's PRs far less often (#410)
+
+`.github/workflows/ci.yml` restores bun's global install cache before every
+`bun install --frozen-lockfile`, keyed on `bun.lock` and the pinned bun version.
+
+"Far less often", not "never" — and the difference is the whole reason the scoping
+paragraph below exists. A warm restore needs no network at all, but a cold leg still
+fetches from the third party, and legs are still cold in three cases: the first run
+after a `bun.lock` change, any run before `main` has published an entry, and any run
+after GitHub LRU-evicts the entry. The change removes the REPEATED exposure — twelve
+identical fetches per PR, every PR — it does not remove the dependency.
+
+The install was never local work. `bun.lock` takes `gbrain` as a **git** dependency
+(`github:garrytan/gbrain#<sha>`), so resolving it is a network fetch from a third-party
+host rather than a registry read. It is SHA-pinned, so the content is deterministic — but
+availability is not. The eight-shard split in the entry below took that fetch to twelve
+occurrences per PR (8 shards + typecheck + lint + purity + layering), and there was no
+`actions/cache` anywhere in the file. On 2026-08-17 that URL answered `504` and redded
+**six jobs at once** on a PR whose only real defect was one type error, which presented as
+"9 failing checks" and cost a full review round to attribute.
+
+Measured on this tree, `bun install --frozen-lockfile` over 2501 packages:
+
+| run | outbound HTTP | time |
+|---|---|---|
+| cold, empty cache | allowed | 118.3 s |
+| warm cache, `node_modules` deleted | allowed | 35.8 s |
+| warm cache, `node_modules` deleted | **blackholed** | 21.7 s |
+| empty cache | **blackholed** | never installed a package; killed after 10 min |
+
+The last two rows are the point and the control for it. A warm cache needs **no network at
+all**; the same blackhole with an empty cache cannot proceed, which is what proves the
+blackhole was really blocking bun rather than the warm run merely being fast. Bun stores
+the git dependency in that cache as `@GH@garrytan-gbrain-<sha>@@@1`, so the cached artefact
+is the one the outage denied.
+
+In CI the trade is different and the entry should say so rather than flatter the change.
+Across all 12 legs of #410's cold run vs its warm one, `bun install` drops from a ~13 s
+median to ~9.5 s — but restoring the 237 MB cache costs 5-10 s a cold run never pays, so
+the median leg goes from **~14 s to ~17.5 s**. On a GitHub-hosted runner the network is
+fast enough that downloading the packages beats restoring them, so **this buys reliability
+and costs ~3.5 s per leg**, paid in parallel. That is the right trade: the comparison that
+matters is not 14 s against 17.5 s, it is 17.5 s against a job that fails outright, which
+is what a cold install got on 2026-08-17. The local numbers above are what the cold path
+costs once the third party is merely ordinary rather than fast.
+
+Cache scoping decides when the benefit lands, and it is not obvious: an Actions cache is
+readable from the branch that wrote it and from the default branch, nowhere else. A cache
+written by a PR run warms only that PR. The cross-PR win begins when a `push` run on `main`
+writes the main-scoped entry, after which every PR restores from it until `bun.lock` moves.
+
+The jobs stay **independent**. A cache is not the shared-artifact handoff the header rules
+out, because a cache MISS still installs and still passes, so every gate remains runnable on
+its own.
+
+The cached path cannot **drift**, and this is asserted rather than assumed. The wiring is an
+identity between two strings written independently in each of five jobs — the `path`
+`actions/cache` saves, and the `BUN_INSTALL_CACHE_DIR` bun writes to — ten literals with
+nothing in YAML relating them. Break one and the cache saves an empty directory and restores
+it forever: no error, a green job, and every install still going to the third party. The
+first cut of this entry claimed the two were "one string by construction", which was false;
+`scripts/ci/ci-workflow.test.ts` ('bun install cache wiring') now walks every job that
+installs and checks the path identity, the ordering, the key's lockfile hash and bun version,
+the 40-hex pin, and that all five jobs share one key. Ten mutations were run against it —
+including the empty-directory one — and each reds the suite.
+
+The build cannot go **wrong**, stated narrowly, because the loose version of that claim is
+not true. `--frozen-lockfile` guarantees RESOLUTION: bun will not re-resolve or rewrite
+`bun.lock`, so every name@version and the git dep's exact commit come from the committed
+lockfile and no cache entry can change them; an entry the lockfile does not name is never
+asked for. It does **not** re-verify the bytes of a restored entry. Registry packages carry an
+integrity hash in the lockfile (`zod` ends in `sha512-…`), but the `gbrain` git dependency
+does not — its tuple ends in the cache folder name `garrytan-gbrain-<sha>` — and bun documents
+no per-restore content check. What bounds the remaining risk is scope, not verification: an
+Actions cache is writable only from runs on this repo's own branches, so poisoning one needs
+the privilege of pushing here.
+
+`restore-keys` gives a lockfile change a partial hit: packages the change did not touch
+still come from the cache, so a one-line dependency bump costs one download rather than 2500.
+Its cost is that the entry only ever grows — a prefix hit restores the old superset and then
+saves that superset plus whatever is new, and nothing prunes what a removed dependency left
+behind. Far enough out that reaches the repo's 10 GB Actions cache ceiling, GitHub LRU-evicts,
+and installs go cold with no signal but the timings. Accepted here (the entry is ~237 MB and
+`bun.lock` moves rarely); the fix if it bites is a salt in the key, not dropping
+`restore-keys`.
+
+Vendoring `gbrain` would remove the network dependency outright rather than caching around
+it, and would also close the byte-verification gap above by putting the content in the tree
+under review. It is deliberately NOT done here — recorded in #410 rather than lost.
+## 2026-08-17 — a Codex subscription is no longer one account for the whole instance (#407)
+
+PR #407. The owner may connect several ChatGPT seats; trident picks one per run at
+the existing `resolve_codex_home` seam and skips any seat that has hit its usage cap.
+This supersedes the earlier statement in this log that "a Codex subscription is one
+account for the whole instance" — that was true when written and is what changed here.
+
+New: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts` (rollout
+harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0134_codex_rotation.sql`. Edited: `trident/codex-credential.ts`,
+`trident/codex-credential-tool.ts`, `gateway/http/codex-credential-surface.ts`,
+`open/composer.ts`, `app/app/integrations.tsx`, `app/lib/codex-credential-client.ts`.
+Ordinal 0134 skips 0133, which another open branch already claims.
+
+Slot `default` is byte-identical to before — same service row (`codex`), same directory
+(`<owner_home>/.codex`), same bytes — so a one-seat install is unchanged, nothing
+migrates, and rotation is the single code path with no feature flag. Extra seats are
+service `codex-acct-<slot>` at `<owner_home>/.codex/accounts/<slot>/`.
+
+A seat's bundle is NEVER copied between directories. The codex CLI rewrites `auth.json`
+on refresh and that refresh rotates the refresh token, so two live copies of one account
+revoke each other. Selection is a pointer at a directory; the re-materialize guard stays
+only-if-missing. Harvest-back re-encrypts a CLI-refreshed bundle back into the store when
+the on-disk `last_refresh` is newer, which also closes a hazard that predated this change:
+the stored copy used to drift staler with every refresh, so the self-heal path would
+eventually restore a token the server had already invalidated. It runs for the seat that
+just RAN as well as the one about to run — the seat that just refreshed is precisely the
+one whose stored copy is now stale, and it may be cooling for a week before it is resolved
+again.
+
+The exhaustion signal is harvested, not probed — there is no free usage gauge. Every
+session appends a rollout under `<CODEX_HOME>/sessions/`, whose `token_count` events carry
+`rate_limits`. That rollouts follow the run's `CODEX_HOME` was verified live rather than
+assumed: an empty `CODEX_HOME` plus one `codex exec` produced the whole state root there,
+`sessions/` included, on a run that never authenticated. The parser requires `rate_limits`
+to sit on the node whose own `type` is `token_count`, which is the shape a real rollout
+line has, so an unrelated event carrying a same-named object is not read as evidence.
+
+The threshold is keyed on `window_minutes`, NOT on whether the CLI called a window
+`primary` or `secondary`. Measured across 12,582 real `token_count` samples from 600
+rollout files (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a week — in every
+sample and `secondary` was null in every sample. Reading `primary` as the 5-hour window,
+as the design assumed, would have applied a session threshold and a session-length
+cooldown to a weekly cap and rotated a still-capped seat back into service. Windows at or
+under 1440 minutes cool at 98%, longer ones at 99%. The fallback cooldown is the window's
+own length, CLAMPED to 32 days: the same binary declares `daily-limit`, `weekly-limit`,
+`monthly-limit` and `annual-limit`, so an unclamped length would bench a paid seat for a
+year, and an absurd value reaches `Infinity`, which SQLite round-trips as a REAL that no
+clock comparison can clear. `resets_at` is epoch seconds, converted once at the parse
+boundary, and classified three ways rather than two: a reset already in the PAST means the
+window has rolled over, so that sample is ignored instead of starting a fresh full-length
+cooldown from a stale reading.
+
+NO stderr classifier ships, and that is a correction of an earlier claim in this entry's
+first revision. It stated the patterns had been "measured off the shipped binary's own
+literals". They had not: `weekly limit` and `session limit` each return ZERO hits against
+the literals in codex-cli 0.147.0, while `usage limit` returns 23 and the positive controls
+`codex-cli` and `rate_limit_reached_type` return 9 and 17 — so the search works and those
+two discriminators are simply absent. The binary's real messages never name the window, so
+no pattern can recover it from text. The classifier also had no production caller. Both
+it and `applyFailureCooldown` are deleted. The window class now comes from
+`rate_limit_reached_type`, which the CLI itself sets, rides the `token_count` event the
+harvest already reads, and needs no new seam.
+
+Fail-safe rules, each pinned by a mutation applied and observed red: a harvest that errors
+or finds nothing cools nothing; when every seat is cooling the current one is kept and
+`codex_rotation_exhausted` is logged; a seat whose stored credential is missing or expired
+is cooled `unauthorized` and SKIPPED rather than returning no credential at all; an
+`unauthorized` cooldown ignores the clock until the seat is reconnected; per-project
+overrides resolve first and stay out of rotation. A reconnect stamps `connected_at` and
+clears the previous occupant's cooldown and usage — for the first seat as well as a named
+one — so a different subscription in a reused directory is not judged on its predecessor's
+history, which the seat's own `sessions/` tree would otherwise supply.
+
+The rollout scan is bounded: a positioned tail read rather than a whole-file read, the
+newest date partition visited first, a file cap, and one scan a minute per seat — the
+resolver is reached by a read-only status request as well as a run launch, and the CLI
+never prunes `sessions/`.
+
+Owner-facing, and on screen: the Settings integrations pane lists every seat with its
+state, which one runs next, and a per-seat Remove; the paste box stays available after the
+first connection, with an optional seat name, because adding a second seat is the point.
+Also `codex_connect` with `account: "work"`, or `POST /api/app/codex-auth` with
+`{ auth, account }`. `GET` lists seats, cooldowns and the next seat while keeping every
+legacy top-level field; `DELETE ?account=<slot>` removes one seat, and an UNQUALIFIED
+`DELETE` removes them all — that is the shipped "Disconnect Codex" button, and leaving
+named seats live and selectable behind it would keep using a credential the owner was told
+was gone. Omitting `account` on connect means the first seat, so pre-rotation clients are
+unaffected.
+## 2026-08-17 — a PR waits on the slowest shard, so the suite runs on eight of them and the split is by COST
+
+`.github/workflows/ci.yml` runs the suite on **eight** shard legs, up from four, and
+`scripts/run-tests.sh` §2c splits the general lane by **estimated cost** instead of
+round-robin by file index.
+
+Both halves exist because CI wall-clock is the SLOWEST shard, not the average.
+Round-robin balances FILE COUNT, which is the right thing to balance only if files cost
+about the same. They do not: a fully-migrated project database is built by replaying the
+whole migration tree, measured at ~137 ms of CPU, and 334 test call sites do exactly that
+(`applyMigrations(db.raw())` — counted with `git grep` against `origin/main`). So one
+runner can draw a disproportionate share of the expensive files and set the wait for
+everyone.
+
+The general lane is now bin-packed longest-processing-time-first: each file gets
+`150 + 137 x (migration replays in it)` ms from its own CONTENT, heaviest goes to the
+lightest shard, and every runner computes the identical assignment independently — so the
+partition property is untouched. Weights are content-derived on purpose rather than a
+checked-in timing manifest: a manifest is a second source of truth that rots every time a
+test is added, and a stale weight looks exactly like a fresh one. The PGLite and device
+lanes stay on round-robin, deliberately — both are dominated by a fixed per-file cost (a
+WASM compile; a DOM + module-registry install) rather than by migration work, so counting
+IS their cost model.
+
+Measured over the 1296 general-lane files on this tree, slowest shard's estimated cost:
+
+| legs | round-robin | cost-packed |
+| --- | --- | --- |
+| 4 | 72.7s | 70.4s |
+| 8 | 39.8s | 35.2s |
+
+**Correcting a figure carried into this work: the rebalance is worth ~3% at four legs, not
+the ~14% previously claimed.** At 1296 files round-robin is already near-balanced by the
+law of large numbers, and the weighting only starts paying as the bins get smaller — 11.4%
+at eight legs. Which is the real relationship between the two halves: more legs is the
+lever (70.4s to 35.2s), and cost-packing is what stops the extra legs being wasted on an
+unlucky draw. The partition is exact at both sizes, verified by union: four shards emit
+336 + 338 + 339 + 338 = 1351 distinct files, identical to the unsharded plan's 1351.
+
+The balance assertion in `scripts/__tests__/run-tests-shard.test.ts` changed shape with
+it. It used to require file counts within one of each other, which now FORBIDS the fix —
+an uneven count is the expected shape of a cost-balanced split. It asserts on the runner's
+own reported per-shard cost instead (parsed from the log, never recomputed in the test: a
+reimplementation of the model would agree with itself while the script's model was broken).
+Mutation-proved — reverting the packer to round-robin fails it on both 2 and 4 legs
+(3836 > 1454 tolerance) while the gaps/overlap assertions stay green, so it fails for
+imbalance and nothing else. `run-tests-shard` 13 pass, `ci-workflow` + `run-tests-selftest`
+49 pass.
+
+The eight-leg matrix and the `/8` denominator have to move together or shards 5-8 run
+NOTHING while reporting green; that pairing is already guarded by
+`scripts/ci/ci-workflow.test.ts` ('the shard matrix size MATCHES the /N').
+
+A cross-model review of this change found two ways it could have produced a GREEN run
+that executed nothing, and both are fixed here — worth recording because they are the
+same failure class the surrounding script exists to prevent, reintroduced by the fix
+for a different problem:
+
+- **`grep -c` over exactly ONE file prints the bare count with no path.** The weight
+  parser then read the count AS the path, nothing matched a discovered file, and the
+  general lane planned zero tests and exited 0. A one-file lane is reachable — a
+  `NEUTRON_TEST_ROOT`-scoped run at shard 1/1 — so `-H` is now load-bearing and pinned
+  by a test. Mutation-proved: with `-H` removed the run FAILS LOUD instead of running
+  nothing.
+- **The packer replaced `GENERAL_FILES` before anything checked its status, and
+  `SHARD_TOTAL` is derived from the replaced array.** So a short list did not trip the
+  coverage audit — it LOWERED the bar the audit checks against. The packer now writes to
+  a file rather than a process substitution (a substitution's exit status is
+  unobservable), reports how many records it saw so a truncated pipeline cannot pass as a
+  small shard, and the restore loop's output count is compared against what was assigned
+  so a mangled path cannot vanish silently. Four separate refusals, all fail-closed.
+  grep's exit 1 (matched nothing) is normalised to success and only 2+ (could not read)
+  is treated as failure — a blanket `|| true` here would have thrown away the one status
+  that matters.
+
+Landed by PR #402.
 ## 2026-08-17 — a failed Trident run now asks git whether the build survived
 
 The outer orchestrator now performs git-truth salvage before committing every
@@ -20,244 +644,608 @@ sweep recovers the eleven already-stranded branches at next boot without moving
 their rows out of `failed` or introducing publishing credentials into the inner
 loop.
 
-## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
+## 2026-08-17 — a read in flight outlives the cache it was read from, and the instrument settled on the wrong frame (#409)
 
-Landed via PR #378.
+Three defects found by review on the switch-latency work, sharing one shape: an
+artefact that is real, current, and about the wrong thing.
 
-Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
-those had already merged when this round's review landed, so the remediation could
-not go back into either; every finding below was re-verified against `main` before
-anything changed.
+**1. The transcript write-back survived its own invalidation.** `handleChange` files a
+resolved read into the transcript cache BEFORE the session-changed-underfoot guard, and
+that ordering is deliberate — a read that lands after the owner has already switched away
+still belongs to its own topic, and filing it is what makes the NEXT entry into that
+topic paint instantly. The same ordering also puts it after `stop()` and after the
+`projects_changed` deletion sweep, so an outstanding read re-created the entry
+milliseconds after the clear. Consequences, in order of severity: a project deleted and
+recreated under the same id could paint the DEAD project's history into its first frame,
+and a stopped controller could paint a transcript on restart. Both of them **after** the
+code written to prevent exactly that had run and reported success — which is why neither
+was visible from the invalidation site.
 
-**The seam the composer alone reaches, now driven end to end.** #375 gave the
-timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
-being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
-which proves `wireSubstrates` routes what it is handed and says nothing about whether
-anything hands it that. One line in `open/composer.ts` does. Deleting it left the
-suite green while returning the lane to a stderr-only clamp — the review measured 862
-tests passing across 105 files under that deletion, which is its number and not one
-re-measured here; what WAS re-measured is that the deletion is now red (below). The
-class is the one this repo keeps shipping, one level up from "built but never wired":
-WIRED, and the wire pinned by nothing.
+Fixed with an invalidation generation (`transcriptCacheEpoch`) captured in the same
+synchronous instant as the session and the topic; a read that resolves across a bump is
+not filed. It over-invalidates by one counter — an unrelated read in flight beside a
+deletion is also dropped — which costs that topic one re-read and is the same asymmetry
+the deletion branch was already decided on: over-invalidating is free, under-invalidating
+paints the wrong history.
 
-`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
-`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
-the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
-reminder (nothing shorter reaches that lane — its options exist only once something
-composes on it), then reads what the production composition actually handed each one.
-The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
-connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
-without it, "the nudge lane produced no bubble" could equally mean the harness cannot
-see bubbles at all. Then the same notice on the nudge lane produces no frame from the
-same socket in the same test, and both reach the `system_events` journal. Three
-mutations, each red on a different assertion: deleting the composer's
-`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
-sinks (the two sinks are identical), and giving the background sink the chat
-`deliver` (ten bubbles where zero were asserted).
+**2. The paint mark timed an empty pane on a cold switch.** `frame_rendered` was
+scheduled from `setProject` unconditionally. On a cache MISS the frame `setProject`
+publishes is empty and the transcript arrives in a later one, so the mark landed on the
+paint of a blank pane, the record settled, and the switch reported over while the owner
+was still waiting — the original misattribution (an instrument reporting a step that is
+not the step being waited through) reappearing one mark along, inside the fix for it. The
+mark is now scheduled from exactly ONE of the two publishes, chosen by whether the first
+carries what he came to see. Scheduling from both is not a safe middle: the first stamp
+wins, and on a cold switch the first stamp is the empty one.
 
-**An unbounded park could not be shortened, and the release was unreachable.**
-Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
-had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
-every finite replacement, and `reportSuccess` is the only release but cannot run while
-the credential is parked, because `selectCredential` filters a cooled credential out
-and no dispatch means no success to report. On a single-credential box, which every
-Open install is, that is the product silent until the process restarts.
+**3. An abandoned switch was reported as a complete sub-millisecond switch.**
+`supersede()` flushed without recording why, and `incomplete` was derived from the marks
+alone. A cache-served switch's only REQUIRED mark is `vm_published`, stamped in the first
+millisecond — so a switch the owner gave up on at 40 ms satisfied "every required mark is
+in" and entered the sample as a success. Rapid consecutive clicking is what someone does
+when switching is slow, so the metric got better precisely as the product got worse, and
+it is the metric that judges this work. The cause now rides on the record
+(`superseded`), `incomplete` covers it, and the emitted line names it `abandoned=` rather
+than leaving it to read as a failure. `schema` → 4, because filtering a v3 sample on
+`incomplete === false` and a v4 sample the same way selects different populations.
 
-The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
-legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
-`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
-then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
-pool clamps every park at the new `MAX_PARK_MS` (six hours: clear of the reset window
-the owner waits out — a Claude subscription window is five — and short of every window
-indistinguishable from a brick), and `reportFailure` discards a `retry_after_ms` that is
-not a positive finite millisecond count in favour of the status default rather than
-believing it. The `NaN`
-direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
-instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
-`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
-The parser now yields `undefined` for any value that cannot become a real millisecond
-count — including a non-positive one.
+Two smaller ones in the same path. A cache hit on a topic carrying an UNREAD badge is a
+hit on a transcript that provably lacks the message he clicked in to read — an inactive
+topic's `onChange` is discarded, so nothing refreshed it while he was away — and it is no
+longer reported as served-from-cache: it paints instantly and finishes late, like a cold
+switch. And read receipts are now acknowledged once per topic instead of rebuilding the
+full id list on the cached frame, on the resolved read, and on every inbound frame
+thereafter (533 ids per call on the owner's biggest topic).
 
-**The fourth park was the one nothing tested.** #375's own log claimed the fix was
-"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
-strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
-pair left every existing test green (the review counted 124 across four suites; that is
-its measurement, and what is re-measured here is that the revert is now red), because
-reaching that branch needs a standing park LONGER than the hour — which only a
-`retry-after` produces — while the owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
-says wait two hours, in-flight turns fail their way to the threshold, and the strike
-park would then release the credential 60 minutes into a 120-minute window the
-provider asked for, relabelled. Now covered with its control (with nothing standing,
-the fifth strike still parks for the hour), and mutation-proved: that one test goes
-red, the control stays green.
+`switch-render-cost.test.tsx` asserted a TOTAL of two surface renders while its name
+claimed "leaves every background conversation untouched". A total of two is satisfied by
+the two WRONG surfaces, so the assertion could not support the claim; it now captures
+`vm.projectId` per `useChatRuntime` call and asserts the set is exactly the surface left
+and the surface entered, with General's absence as the actual content of the claim.
 
-**Two record corrections, appended rather than rewritten**, since this log is
-append-only and a correction that edits history is how a sibling's entry gets lost:
-- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
-  had benched" says "Seven new tests cover it" and "three of them red … four
-  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
-  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
-  reports never walk the park outward`, which is a real assertion and not a control.
-  A mutation proof asserts a negative, so a miscount in it is the one number that must
-  be right.
-- That same entry says the clamp "is now durably recorded". It is not, and its own
-  closing paragraph says so three paragraphs later: the journal is best-effort at
-  every call site. The wording is corrected where it can be — the two test comments
-  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
-  dropped.
+| Mutant | Result |
+| --- | --- |
+| write-back ungated by the epoch | RED — both lifecycle cases (stop, deletion) |
+| paint mark scheduled unconditionally in `setProject` | RED — cold-switch ordering |
+| `supersede()` without recording the cause | RED — abandonment case |
+| surface-render assertion (control: expected set changed) | RED — reports `alpha, beta`, so the ids are real |
 
-**A ZERO IS NOT A SHORT PARK, IT IS AN ABSENT ONE** — and flooring negatives at zero,
-which the paragraph above originally described as part of the fix, was the remaining
-hole rather than the close of it. `parseRetryAfterMs` turned `retry-after: -30` into a
-DEFINED `0`, as it did for any HTTP-date already past, which plain clock skew produces.
-`0` cleared `reportFailure`'s `>= 0` boundary, `park` wrote `cooldown_until = now`, and
-`hasUsableCredential` / `selectCredential` / `soonestCooldownUntil` all count
-`<= now` as AVAILABLE — so a real 429 bought a zero-length cooldown and we answered the
-provider's back-pressure with an instant retry. Worst on the background lane, which by
-design never touches the strike ledger and so has no second net beneath it. The guard is
-now `> 0` and the parser returns `undefined` for the same values, so a header that told
-us nothing usable routes to the status default. The existing negative test passed
-throughout because it fed the pool a raw `-60000` — an input no producer could produce.
+## 2026-08-17 — a readiness poll must wait for the thing it claims to prove (#411)
 
-**`parseRetryAfterFromMessage` still had the post-multiply overflow** the header parser
-was fixed for, because the two carried separate copies of the check: it tested
-`Number.isFinite` on the parsed number and then multiplied by 1000. A streamed 429
-carries no header, so that is the only path reading the hint out of the prose, and its
-`Infinity` lands somewhere worse than the pool — `openaiResponsesSubstrate` sleeps
-`retry_after_ms` before rotating and `setTimeout(Infinity)` resolves in about 14 ms, so
-the back-off is SKIPPED and the retry is immediate. Both parsers now share one boundary.
+`gateway/index.ts` `boot()` now binds `process.once('SIGTERM'|'SIGINT')`
+(`:1078`) BEFORE it announces readiness, and announces it twice: `READY=1`
+(`:1102`) for systemd, then `gateway_signal_handlers_ready` (`:1118`) as the
+last statement before the returned handle.
+`tests/integration/orphan-survival.test.ts` waits for that log line instead of
+for a migration row count plus a fixed sleep.
 
-**`MAX_PARK_MS` was not a bound.** The ceiling was re-derived from `Date.now()` on every
-report, and reports DO arrive during a park: a parked credential is never SELECTED, but
-turns dispatched before the park started keep reporting per error event, and each late
-report computed a ceiling further out that the monotonic rule then adopted. Measured:
-two over-ceiling reports five hours apart walked one park from 21,600,000 ms to
-39,600,000 ms — six hours to eleven — with every existing ceiling assertion still green.
-The ceiling is now anchored to `cooldown_started_at`, the moment the park began, so the
-bound covers the whole park instead of each report inside it; `reportSuccess` clears the
-anchor with the park, and `memoize-credential-pool` carries it across a re-resolve
-alongside `cooldown_until` so a rebuild cannot re-anchor it.
+The revision that reddened #406 and #407 broke its poll as soon as `_migrations`
+held at least one row, then slept 100 ms, under a comment claiming the poll
+proved the signal handler was registered. Each migration commits in its own
+transaction, so a non-zero count means migration k of N (measured breaking at
+k=2..60; N is derived from disk and moved 124 → 126 while this branch was in
+review, which is why no count is written down here), and the handler binds much
+later regardless: `applyMigrationsToProjectDb` at `gateway/index.ts:295`, the
+binds at `:1078`, with the whole composition and the listener bind at `:831` in
+between. The same comment's numbered boot path also had the handler installing
+before `Bun.serve`; the code is the reverse. Signalling inside that gap kills
+the child at SIGTERM's default disposition (exit 143, DB never closed), which is
+how this test reddened two unrelated PRs in one night.
 
-**The anchor had the same hole one step further in**, found by the cross-model leg of
-this round's review and reproduced before it was believed. Installing an anchor only for
-a FRESH park left a STANDING park that carries none — a credential brought across a pool
-re-resolve from before the field existed, or any `cooldown_until` written by another path
-— re-deriving its ceiling from every report and never gaining an anchor to stop it.
-Measured: late reports at +5h, +10h and +15h against a standing six-hour park walked it
-to 11h, 16h, then 21h, unbounded. `park` now adopts `now` as the anchor whenever one is
-missing, standing or not. The true start is unknowable by then, so the park may run up to
-one window past six hours from its real beginning and never further — bounded and
-honest, where the alternative was unbounded. The same review noted the memoizer's carry
-was asserted by nothing: the re-resolve test checked only `cooldown_until` and stayed
-green with the carry deleted, so it now names `cooldown_started_at` and the six-hour
-bound.
+`READY=1` used to be sent at the listener bind, ~190 synchronous lines before
+those binds. `Type=notify` lets systemd queue a stop job the instant it lands,
+so `active` meant "accepting traffic", never "will handle a stop" — and the
+sibling systemd test below stopped the unit on exactly that proxy. Moving the
+send below the binds costs nothing (there is no top-level `await` between them,
+so it is the same synchronous tick) and makes the signal true. A throw from
+`sdNotify` now retires the two listeners before rethrowing into the shared
+boot-failure cleanup, which otherwise had no way to know they existed.
 
-Two more corrections from that leg. `positiveMs` rounded AFTER testing positivity, so
-`0.1` passed `> 0` and `Math.round` returned a defined `0` — the exact value the
-function exists to reject, reachable from any sub-millisecond hint; it now rounds first.
-And two docblocks overstated: the claim that `undefined` "routes both consumers to their
-own default" is only half true — the pool falls back to the per-status window, but model
-rotation has no default and simply skips the back-off, which is correct on that path
-because rotating moves to a DIFFERENT model rather than retrying the one that refused —
-while `MAX_PARK_MS` called `reportSuccess` flatly unreachable during a park when the same
-file documents an in-flight success reaching it. It is unreachable for NEW dispatches,
-which is what makes the ceiling the guarantee and the in-flight success luck.
+The log marker is level-gated at info like any other log call, so it is not an
+unconditional supervisor contract: the comment names the level requirement and
+points systemd users at `READY=1`, which carries the same guarantee with no
+level dependency. The test pins `NEUTRON_LOG_LEVEL=info` on the spawned gateway
+for the same reason — inheriting a runner that exports `warn` or `error` would
+suppress the marker and time the poll out deterministically.
 
-One claim from that leg was REFUTED rather than adopted: that a large finite hint
-overflows the timer and makes rotation immediate. Measured directly in this runtime, a
-`setTimeout` of one year does not fire early — it was still pending after 120 seconds, so
-the failure is the opposite one and it is neither new nor in this diff.
+**Pass rate, three arms, each named.** 30 consecutive runs of the file per arm,
+back to back on one box at load average 224-240 across 8 cores (five other lanes
+were live, which is the load this flake needs and an idle box cannot supply):
 
-Seven mutations, each red on exactly the intended pin with the rest of the suite green as
-control: `>= 0` restored (both zero tests), the negative floor restored (both
-negative-hint parser tests), the finiteness check dropped (both overflow tests,
-header and streamed), the ceiling un-anchored (the walk-outward test), and anchoring on
-a merely-PRESENT `cooldown_started_at` rather than a STANDING park (the re-anchor
-control, which proves a once-parked credential can still be parked again), anchoring
-only FRESH parks (the anchor-less standing-park test), and deleting the memoizer's
-carry of the anchor (the re-resolve test, which that assertion now catches).
+| arm | what it is | result |
+|---|---|---|
+| pre-#407 | the revision that reddened #406/#407 (`count > 0` + 100 ms) | **0/30 pass** — 30/30 failed with exactly `Received: 143` |
+| base branch | `main`, i.e. #407's revision (all migrations + `[loop-registry]` + 50 ms) | **30/30 pass** |
+| this branch | wait for the signal-handler marker, no sleep | **30/30 pass** |
 
-Three docblocks corrected where they promised properties the code does not hold — the
-defect class this repo tracks separately from the code. `MAX_PARK_MS` claimed six hours
-is "past every reset window we actually honour" while `gateway/http/app-usage-surface.ts`
-meters a 7-day window, so a weekly cap IS clamped and the six-hourly probe is a priced
-cost rather than an absent one. `park`'s non-finite arm was credited with a live defence
-it does not provide: `reportFailure` filters non-finite before it, and no other call site
-can reach it, so it is now labelled a belt on an untrusted-arithmetic path. And "a
-cooldown is a FLOOR" is narrowed to a floor AGAINST FAILURE REPORTS, because
-`reportSuccess` clears a park unconditionally — including a provider-mandated one, when
-a turn dispatched before the park completes after it — which stays deliberate and is now
-argued rather than contradicted.
+Naming the baseline matters because it changes the claim. #407 already stopped
+the bleeding: at this load its revision does not reproduce the failure, so this
+branch is **not** measurable as a flake fix against `main`. What it contributes
+over `main` is (a) the residual 50 ms sleep is gone, so the remaining race is
+closed rather than narrowed, (b) `READY=1` no longer promises a graceful stop
+before the handlers exist, and (c) the guards below are falsifiable.
 
-The end-to-end nudge test is also hermetic now. It passes the real `process.env` to the
-real composer, so an ambient `NEUTRON_MODEL_PROVIDER=openai` built the OpenAI lanes, the
-injected Claude `substrateFactory` was never called, and the file failed with `waitFor
-timed out` — a wiring-failure message for an environment problem. That variable and
-`OPENAI_API_KEY` are now saved and cleared like the rest; teardown no longer removes a
-`tmpDir` it may never have created (a `TypeError` there replaces whatever setup actually
-failed); and the harness drains `realmode_cleanups` through the production
-`drainRealmodeCleanups` instead of calling them un-awaited before `db.close()`.
+**Falsifiability, four mutation runs against this branch, each observed:**
 
-**THE REFUTATION ABOVE WAS ITSELF WRONG, AND THE CLAIM IT DISMISSED IS A REAL DEFECT** —
-appended rather than rewritten, per this entry's own correction rule. The paragraph
-beginning "One claim from that leg was REFUTED" reports that a `setTimeout` of one year
-"does not fire early — it was still pending after 120 seconds". Re-measured directly, with
-a control in each direction: `setTimeout(31_536_000_000)` — one year, the very value that
-paragraph names — fires after **3 ms**, and this runtime prints its own diagnosis while
-doing it, `TimeoutOverflowWarning: 31536000000 does not fit into a 32-bit signed integer.
-Timeout duration was set to 1.` The controls are what make that a measurement rather than
-another guess: a timer at `0x7fff_ffff` did NOT fire inside a 2-second window (so the
-probe can show a real wait) and a 5 ms timer fired in 6 ms (so it can see a timer fire at
-all). A one-year delay was never pending for 120 seconds; it had already elapsed before
-the observation began. This is the shape the repo already tracks — a check that returns a
-negative which reads exactly like an answer — and the cost of getting it wrong here was
-higher than a wasted round: the log stated the defect did not exist, which is the one
-thing that reliably stops the NEXT reader from fixing it.
+- control (unmutated) → green, `1 pass 1 skip 8 expect()`;
+- remove both `process.once` binds → **red**, `Expected: 0 / Received: 143`;
+- skip `db.close()` in `shutdown()` → **red**, `-wal still holds 152472
+  uncheckpointed bytes`. This is the hole the flake was hiding: the process
+  exits 0 and SQLite replays the WAL on re-open, so every other assertion stays
+  green. The discriminator is the sidecar byte count — a clean close truncates
+  rather than unlinks it, so an existence check would pass for the wrong reason;
+- take the DB out of WAL mode → **red** at the new pre-signal assertion, `no
+  -wal sidecar while the gateway is live`. That assertion exists so the
+  post-exit "0 bytes" cannot hold vacuously.
 
-**A back-off that overflows is no back-off.** `positiveMs` rejects non-finite and
-non-positive hints and has no upper bound, which is right — a finite `retry-after:
-3000000` is a real instruction, and discarding it as garbage would buy the 60-second
-status default where the provider asked for weeks. The value is fine; the TIMER cannot
-hold it. Above `0x7fff_ffff` ms a `setTimeout` delay does not saturate, it overflows the
-32-bit signed field and fires in about a millisecond, so the adapter answered "wait weeks"
-with an instant retry against a provider that had just rate-limited it: a hot retry loop,
-and worse than having no `retry-after` handling at all.
+Two things the prover itself taught, both of which had produced a false result
+first time:
 
-It survived three rounds on this exact field because the field has TWO consumers and only
-one was bounded. `reportFailure` clamps its park at `cooldown_started_at + MAX_PARK_MS`,
-so the pool was safe; the adapter's rotation back-off is a second consumer that reads the
-raw hint into `rotateDelay` and never consults the pool. Guarding the producer and
-bounding one consumer both looked complete while a second consumer slept on the unbounded
-value. Every consumer was then enumerated by grepping the field name rather than asserted
-to be complete: the adapter's sleep (broken, fixed here), `reportFailure` via
-`build-llm-call-substrate` and `build-import-substrate` (already bounded), `rotate`'s
-`delay_ms` copy (raw, but nothing sleeps on it — its docblock now says what a future
-sleeper must do first), and the pure propagators that never treat it as a duration
-(`events.ts`, `errors.ts`, `substrate-text.ts`, `agent-dispatch`, the history-import
-type). `TelegramRetryAfterError` shares the field NAME only and has a different source.
+- `db.close()` appears six times in `gateway/index.ts` and five are error paths
+  a healthy boot never reaches. A text-matched mutation landed on the
+  scope-reconcile failure path at `:363` instead of the shutdown drain at
+  `:1061`, the test stayed green, and that green read as "the guard is
+  vacuous" when it actually meant "the mutation was a no-op". The arm is now
+  anchored on its surrounding lines and greps for its own marker.
+- `journal_mode` is set in two places and persisted in the DB header, so
+  migration 0001's preamble overrides the connection pragma in
+  `persistence/db.ts`. Mutating only the pragma leaves a real `-wal` on disk and
+  proves nothing; the arm mutates both.
 
-Fixed at the CONSUMER, inside `sleep` — the adapter's only `setTimeout`, so nothing in
-that file can route around it. Bounding `positiveMs` instead would rewrite what every
-consumer sees and would put a `setTimeout` implementation limit inside a function whose
-job is deciding whether a hint is usable at all; clamping at the sleep caps what this lane
-can wait while leaving the pool the provider's untouched number to apply its own six-hour
-ceiling to, so neither consumer's policy overwrites the other's. The tests assert the
-delay the timer is ARMED with, because a correctly-clamped delay can never be awaited —
-the sibling exhaustion test takes 4.6 s precisely because its `retry-after: 4` is a
-genuine sleep, so 24.8 days would hang CI forever. Three mutations, each red on exactly
-its own pin with the rest green: unclamping the sleep reds the end-to-end test and its
-failure prints the raw `3000000000` reaching the timer; making the clamp a blanket cap
-reds the two "unchanged" controls (`30_000` and the bound itself), which is what proves it
-is a clamp and not a cap; and restoring `< 0` in place of `<= 0` reds the sub-millisecond
-guard, which is what proves an upper bound did not quietly turn a hint that must be
-refused into an accepted one.
+Round 2's entry claimed a `86552`-byte figure for the skip-close mutation. That
+number is not reproducible from the mutation it was attributed to — it is what
+the live sidecar measures under a different mutation entirely. Replaced above
+with the measured 152472.
 
-No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
-— a bounded park, a discarded bogus header value, and coverage for two branches that
-had none.
+The Linux-without-systemd shape is not re-listed as a mutation arm: the probes
+now sit at module scope feeding `test.skipIf`, which is visible in every run's
+`1 skip` rather than something a mutation has to demonstrate.
 
-Nor does the round above add one: a rotation back-off that can no longer overflow into an
-instant retry is the same subsystem behaving as it already claimed to.
+The systemd sibling test had the readiness defect in its own dialect (fixed
+2 s/7 s/1 s sleeps for conditions systemd answers directly) and now polls
+`is-active` and a genuinely changed `MainPID`. Four further corrections to it:
+
+- it read `is-active`, which collapses `activating`, `deactivating`, `failed`
+  and a systemctl error into one "not active" answer. It now reads `ActiveState`
+  and the stop-wait requires the terminal `inactive` — `!isActive()` was
+  satisfied mid-shutdown and by a broken systemctl alike;
+- `systemctl stop`'s exit status was discarded. A stop that never ran (unknown
+  unit, dead user manager) would have left the assertions to certify a shutdown
+  nobody requested. It is asserted;
+- the respawn wait re-read `MainPID` a fourth time to assert on, so a second
+  respawn between the two reads would have made the assertions describe a
+  process the wait never saw. The value that satisfied the predicate is
+  captured and asserted instead;
+- the test's NAME said "restarted within RestartSec" while the wait allowed
+  25 s. `RestartSec=5` is a minimum retry delay, not a deadline systemd
+  promises to meet, and the respawn also cold-starts bun and replays every
+  migration. The name now claims only what the test checks — a fresh `MainPID`
+  under `Restart=always` — with the reasoning inline so it is not "fixed" back.
+
+#407 landed a narrower fix to the same flake while this branch was in review:
+wait for every migration on disk, then for the `[loop-registry]` composition
+line, then sleep 50 ms. The readiness marker is emitted strictly later than
+both, so it subsumes them and the sleep goes away. #407's disk-derived
+`MIGRATION_FILE_COUNT` is kept, promoted from readiness gate to post-boot
+ASSERTION — a partial replay is now a named failure here rather than a confusing
+`applied !== []` on the re-open.
+
+Three smaller corrections to the SIGTERM subtest: it reaps its child in the
+`finally` (every readiness-timeout path previously leaked a live gateway, its
+watchdog interval and two stream readers onto a data dir the test then deleted);
+its outer budget went 30 s → 45 s so a 19 s readiness still fails on the
+diagnostic throw that carries the child's stderr rather than on a bare runner
+timeout; and the stdout/stderr drains are now awaited under a 2 s race rather
+than unbounded. Those promises end on pipe EOF, and EOF needs every holder of
+the write end closed — a gateway descendant that inherited the fds would hang
+the test with no diagnostic at all, which is a worse failure than the one being
+fixed.
+
+**One production change, flagged for deliberate acceptance rather than
+incidental merge:** `sdNotify('READY=1')` moves from the listener bind (`:917`
+on the base branch) to `:1102`, after the signal-handler binds — roughly 190
+lines later in `boot()`. It is safe by inspection and by test: there is no
+top-level `await` between the two positions, so it is the same synchronous tick;
+the later throw point is covered by `bootFailureCleanup`, with the two listeners
+explicitly retired first because that cleanup had no way to know they existed;
+and the boot-init-cleanup suite passes on both sides. It is still a change to
+production boot ordering made by a test-flake PR, so it should be accepted on
+purpose. The reason it is in scope: without it, `Type=notify` lets systemd queue
+a stop job the instant `READY=1` lands, so `active` meant "accepting traffic"
+and never "will handle a stop" — the sibling systemd test stopped the unit on
+exactly that proxy, and WAL recovery on the reopen is forgiving enough that its
+assertions would have certified a clean shutdown that never happened.
+
+## 2026-08-17 — the migration tree is replayed once per PROCESS and copied per test, and the runner keeps a zero-line diff (#406)
+
+`tests/support/migrated-db.ts` seeds a test database by COPYING a template that the
+**unmodified `applyMigrations`** builds once per process, replacing the per-test replay at
+the call sites that only ever wanted a migrated database. The seed moves ABOVE the open —
+`seedMigratedDb(path)` then `ProjectDb.open(path)` — which is what lets a file copy do the
+work, since it never has to reach a handle somebody already holds.
+
+Why a copy and not something cleverer: phase decomposition of `applyMigrations` on this
+tree puts **86% of it in SQL execution** and another 16% in the per-migration ledger
+inserts, against ~2.1% for `loadMigrations` and ~2.0% for the git index read. So memoising
+the loaded/hashed tree is a dead end — it can recover 4-5% at best, and a steady-state
+re-apply on an already-migrated database still costs ~48 ms because it re-reads the tree
+and re-hashes every recorded file for the content-drift notice. An SQL-dump-hydration
+variant was prototyped and rejected: conformant, but ~122 ms/op and ~170 CREATE statements
+re-executed per test. `Database.deserialize` cannot help — static-only, returns a NEW
+handle, and no backup API exists. A byte copy is ~4.6 ms.
+
+`migrations/runner.ts` is NOT MODIFIED — a zero-line diff on the file that had three real
+defects fixed in it the day before. There is no second migration engine here and no fast
+path that could drift, because the template IS a real replay: the real runner, over the
+real tree, in the same checkout. Every seeded database is byte-for-byte that replay — same
+schema, same rows, same `_migrations` ledger including `content_sha256`,
+`applied_by_commit` and `tree_provenance`, same persisted `journal_mode`. Production is
+untouched STRUCTURALLY rather than by a flag: the gateway boot and the install CLI keep
+calling the real runner, and `tests/support/` is not a workspace package, so nothing on the
+production package graph can import the helper. The eslint `import/no-relative-packages`
+entry records that as deliberate rather than incidental.
+
+The equivalence is DIFFED, not asserted.
+`tests/support/migrated-db-conformance.test.ts` builds one database each way over the full
+tree and compares five things: schema byte-identically through the same serializer
+`migrations/snapshot.test.ts` pins; `PRAGMA journal_mode`; every user table's full contents
+ordered, minus an exhaustive one-entry allowlist of wall-clock columns
+(`_migrations.applied_at`) — the arm that covers the ledger, since `version`, `name`,
+`content_sha256`, `applied_by_commit` and `tree_provenance` are all inside it; the REAL
+runner certifying the seed, which must report `applied = []` with the whole tree `skipped`;
+and `PRAGMA integrity_check` = ok with an empty `foreign_key_check`. Two real replays
+already differ on `applied_at`, so arm 3 is the strongest equality that exists between two
+independently built databases — a future migration seeding time-dependent data breaks it
+loudly, and the resolution is a deliberate allowlist entry, never a loosened comparison.
+
+Mutation-tested BOTH ways in the same file, because a control that cannot fail is
+decoration:
+
+| Mutant | Result |
+| --- | --- |
+| inject one extra `_migrations` row into the seeded database | RED — arm 3, the full-data diff |
+| inject one extra table into the seeded database | RED — arm 1, the schema |
+| drop the WAL-index materialisation from the helper | RED — arm 6, the read-only open |
+
+Each is asserted identical BEFORE its mutation, so the failure is caused by the mutation
+and not by a pre-existing difference.
+
+**Arm 6 exists because the first five could not fail on the bug that shipped.** A copied
+template is a complete, checkpointed WAL database — and a WAL database can only be read
+through its `-shm` shared-memory index, which a READ-ONLY connection is not permitted to
+create. SQLite fails the open outright. A replayed database never hit that, because the
+test held an open read-write handle from `ProjectDb.open` the whole time the migrations
+ran, so the index already existed by the time anything opened the path read-only. A byte
+copy holds no handle, so seeding broke exactly the call sites whose SUBJECT opens read-only
+and nothing else. `seedMigratedDb` now materialises the index itself, with `PRAGMA
+user_version` — a read transaction that touches only the header; reading `sqlite_schema`
+instead also works and costs ~20x more (33 ms/seed against 1.4 ms) because it makes SQLite
+parse the whole 124-migration schema.
+
+Arms 1-5 each open the seeded database READ-WRITE, which creates that index before any
+assertion runs — so they passed, green, against databases no read-only consumer could open.
+Arm 6 is therefore its own test, with nothing touching the file before the reader does.
+
+Arm 6's sidecar check is a COMPARISON against a real replay rather than an absolute, and
+that correction is worth recording because the first draft got it wrong in a way that only
+CI could see. It asserted `existsSync(-shm) === true` — a platform claim wearing the costume
+of an invariant. On macOS the sidecars survive a full close; on the Linux runner SQLite
+removes them, and a read-only open there succeeds without one. So the absolute assertion was
+green locally and RED on CI, which is the same class of mistake as the bug it was written to
+catch: the original defect reproduced locally and not on CI, and the first control
+reproduced on CI and not locally. What holds on both is that a seeded database must leave a
+later reader looking at exactly what a replayed one leaves — the standard every other arm in
+the file is already held to.
+
+Two smaller corrections in the same pass. The conformance dump's `ORDER BY` now names
+`"table"."column"` rather than the bare identifier: SQLite resolves a bare name in
+`ORDER BY` against the output ALIASES first, so an allowlisted column — selected as the
+constant `'<wall-clock>' AS "applied_at"` — sorted by that constant and contributed nothing
+to the ordering. It changes no result today, and would have silently on the next allowlist
+entry. And `seedMigratedDb` now refuses to seed once `NEUTRON_COMMIT_SHA` differs from the
+value the template baked in: the template is built once per process and stamps that
+variable into every `applied_by_commit`, so a test that set it would otherwise inherit
+whichever test seeded FIRST — a difference the conformance diff cannot see, because both of
+its databases are built in the same process under the same environment.
+
+**Measured, matched A/B** — 21 converted test files (work-board, cores runtime, auth,
+channels), same machine, same `node_modules`, back to back, `origin/main`'s content for
+exactly those files as the BEFORE leg:
+
+| | tests | user CPU | sys | wall |
+| --- | --- | --- | --- | --- |
+| before | 369 | 42.84s | 12.04s | 89.9s |
+| after | 369 | **1.27s** | 1.31s | **6.7s** |
+
+**369 tests on both sides — no coverage was removed.** One test is GREEN only after: a
+`ButtonStore` same-millisecond-tiebreak case that was timing out at the 5000 ms budget
+because the replay ate it. The implied per-replay cost, 41.6 s over 369 tests, is
+**~113 ms of CPU** — which independently reproduces the ~110-137 ms figure this work was
+planned against, from a completely different measurement than the one that produced it.
+
+Full suite, from CI's own shard wall-clock (immutable checkout, same runner class) —
+`main` at the commit this branched from, against this branch:
+
+| | slowest shard | sum of 8 shards |
+| --- | --- | --- |
+| before | 221s | 1431s |
+| after | **182s** | **918s** |
+
+Total shard time falls 36%; the SLOWEST shard, which is what a PR actually waits on, falls
+only 18% — and two shards got slower. That gap is worth naming: `scripts/run-tests.sh`
+bin-packs the general lane by a cost model whose only real signal is the number of
+`applyMigrations(` calls a file's CONTENT contains. This change removes 334 of them, so
+nearly every file now weighs the same flat base cost and the packing degenerates toward
+round-robin — the spread widens from 150-221s to 67-182s. The runner is deliberately NOT
+touched here (one concern per change), but its weighting is now measuring something that
+has largely gone away, and rebalancing it is the obvious follow-up.
+
+`seedMigratedDb` REFUSES a non-empty target and deliberately has no fallback to a slow
+path: seeding is only equivalent to a replay on a fresh database, so the one case where it
+would not be, it throws. That is what makes a wrongly-converted call site fail loudly
+instead of quietly masking a refusal, a repair entry or a legacy-ledger rekey that only the
+real runner performs. Every suite under `migrations/` stays on the real runner untouched —
+the ledger, provenance, ordinal identity, the rekey, the refusal paths — because those
+replays ARE the coverage that caught four boot-breaking defects. Sites inside otherwise
+converted files that pass a custom migrations directory or assert on the result object stay
+too; those files import both.
+
+## 2026-08-17 — the project switch was never waiting on the store, and the mark that said so was measuring the render (#409)
+
+The owner's web UI took 3-9 s to switch projects. 47 real `project_switch` samples from
+his client diagnostics read `transcript_read` median 3283 ms / p90 6614 ms / max 9198 ms
+against `vm_published` median 3 ms / max 39 ms, which reads as "rendering is instant, the
+store read is effectively 100% of the switch". Every number in that report is real and
+the conclusion it invites is wrong in both halves.
+
+**The read is not slow, and the reason is structural rather than a benchmark.** Read
+`chat-core/stores/opfs-store.ts:113-115`: `list()` delegates straight to the in-memory index
+(`chat-core/store.ts:413-417`). **There is no OPFS I/O in the read path at all** — the only
+OPFS reads are the one-shot `hydrate()` at boot and the snapshot writes. That is checkable
+from the tree by anyone, needs no timing, and is the actual argument; a copy-and-sort over
+533 in-memory rows cannot cost a second.
+
+⚠️ The corroborating magnitudes below are **one-off measurements against a throwaway
+harness that is NOT committed**, so they cannot be reproduced from this repo and should be
+read as indicative only. Method, for anyone who wants to redo them: drive the real
+`OpfsChatStore` + `SyncEngine` + `SendQueue` over a 12-topic × 533-message store with
+injected per-operation OPFS latencies, then time
+`Promise.all([session.messages(), session.pendingCount()])`. That gave median 0.1 ms / p90
+0.4 ms / max 1.0 ms, 0.2 ms with a 60-upsert write burst in flight, and 184 ms for a
+one-shot 3.8 MB `hydrate()`. No benchmark was added to the suite deliberately: a committed
+timing assertion measures the runner's load, which is the class `scripts/ci/lint.sh`
+CHECK 5 exists to keep out of the tree.
+
+**The mark charges the read for the main thread it waited on.** `vm_published` is stamped
+the instant `publish()` returns, and `publish()` only *schedules* the render: it computes
+the VM and notifies subscribers, and React flushes the resulting render synchronously at
+the END of the discrete event — after `setProject` has already returned. So `vm_published`
+contains none of the paint. `transcript_read` is stamped after an `await` in
+`handleChange`, whose continuation is a microtask, and microtasks cannot run until that
+flush completes — so it contains all of it. The proof is a CONTROL, and is labelled as one
+everywhere it now appears: a subscriber with a deliberately **injected** 250 ms
+synchronous body, driven through React's synthetic discrete-event path, put `render_ended`
+at 256.6 ms and `transcript_read` at 257.6 ms while `vm_published` reported 0.2 ms — and
+the same injected body on a plain (non-React) listener, where React defers, reported
+`transcript_read` **1.8 ms**. That discriminates "the render lands inside the transcript
+window" from "it doesn't", which is all it was built to do. The instrument's own docblock
+— "if this mark is already hundreds of ms the problem is the paint, not the data" — had
+named the right discriminator and then put the mark on the wrong side of it.
+
+**What is NOT established, and must not be read into the above.** Nobody has measured how
+long the owner's 533-row markdown thread actually takes to paint. The 250 ms is an
+injected number, not his. So this change does not claim the 3-9 s shrinks, and no
+committed measurement here shows that it does — `frame_rendered` is precisely the
+instrument that will produce the first real answer, out of his next samples.
+
+Three changes, all in `landing/chat-react/`:
+
+- **`controller.ts` — the switch reads the transcript synchronously.** A bounded
+  per-TOPIC cache (`transcriptCache`, 24 entries, ordered by last use) holds the last
+  resolved `{ msgs, pending }` for every visited topic, written by `handleChange` under
+  the topic captured in the same synchronous instant as the session. `setProject` reads it
+  before it publishes, so the FIRST frame of a re-entered project already carries that
+  project's transcript instead of an empty thread a second render replaces. A first-ever
+  visit still publishes empty and fills from the read, because there is genuinely nothing
+  yet to paint.
+
+  **This removes the empty frame, not the render.** The resolved read still publishes
+  behind it, `handleChange` is still called on every switch, and the total row-construction
+  work is unchanged — 533 rows built once either way. It MOVES into the click-blocking
+  frame, which an adversarial review measured at 0.19 ms → 2.37 ms of synchronous
+  `setProject` cost — their harness, cited rather than reproduced here. What the owner
+  gains is that the first thing he sees is his conversation; what he does not gain, yet,
+  is a shorter wait for it.
+
+- **`controller.ts` — rows that are painted are rows that are read.** The read receipt for
+  the cached rows is now sent from the switch, through the entered project's session,
+  rather than only from the resolved read. Painting agent messages while acknowledging
+  nothing meant a stalled read left the server watermark un-advanced, so its next
+  `projects_changed` restored the unread badge on messages the owner was looking at.
+
+- **`switch-timing.ts` — a `frame_rendered` mark, so this cannot recur.** Stamped from a
+  `requestAnimationFrame` plus a trailing task (a single rAF callback runs *before* that
+  frame's paint), it is the first instant at which the published frame has actually been
+  drawn. `frame_rendered ≈ transcript_read` ⇒ the render is the cost;
+  `frame_rendered ≪ transcript_read` ⇒ the store is. No pair of the original four marks
+  could tell those apart, which is why the report pointed at the wrong subsystem.
+
+  Three things had to be true for it to be worth having, and only the first was at the
+  start. **(1)** Its absence is a NORMAL outcome, reported `not_painted` alongside
+  `socket_open`'s `reused` — rAF does not run in a hidden or backgrounded tab, and a boot
+  deep-link can switch projects in one, so a required paint mark manufactured
+  `Project switch incomplete … never_arrived=frame_rendered` for switches that completed.
+  **(2)** But the recorder still WAITS 250 ms for it once every required mark is in,
+  because the paint necessarily lands a frame after the `transcript` mark that would
+  otherwise flush the record — without that window the mark would be dropped on nearly
+  every switch. **(3)** `incomplete` is now derived from the marks inside `flush()` rather
+  than passed in by whichever timer woke it, so all four flush paths agree on one
+  definition. The deadline also rose 8 s → 30 s: it was shorter than his own measured
+  max of 9198 ms, so the slowest switches — the only ones that mattered — were truncated
+  as incomplete before their last mark could land.
+
+  `buildSwitchReport` now stamps `schema: 2`, because `total` silently changed meaning:
+  it is the largest mark seen and `frame_rendered` is normally the last, so a v2 `total`
+  includes the paint where v1 stopped at `transcript`. The owner has a 47-sample baseline
+  stamped `1`; averaging the two would have read the shift as a regression.
+
+The session-changed-underfoot guard (a real Codex P2) is untouched and now has its own
+tests: a stalled read for the topic the owner LEFT cannot clobber the topic they entered,
+and cannot route the old topic's read receipts through the new project's session. The
+cache write is deliberately on the other side of that guard — the rows belong to the topic
+captured before the await, and filing them under whatever topic happens to be active when
+a slow read lands is precisely how one project's messages would reach another's frame.
+
+Two claims that were in this entry's first draft were **wrong**, found by review, and are
+corrected above rather than quietly dropped: "the switch is off the store's critical path
+entirely" (`handleChange` is still called on every switch) and "there is one render, not
+two" (both frames still render; the second's rows keep their identities so the list memo
+can bail, which is not the same thing). A cache entry was also documented as "a reference
+to rows the store already holds" — `chat-core/store.ts:413-417` builds a fresh `{ ...m }`
+per message, so an entry is a real retained copy and the limit is sized rather than
+assumed. And topic-keying was credited with preventing cross-project serving on id reuse;
+`topicForProject` is a pure function of (userId, projectId), so it prevents nothing of the
+sort — deletion invalidation, driven off the `projects_changed` frame, is what does.
+
+**The misattribution is now a test, not a comment.** `switchTimingNow` injects the
+stopwatch's clock (the same seam `switchConnectingGraceMs` and `switchTimingEmit` already
+are), so the decomposition can be asserted exactly instead of against real elapsed time,
+which measures the runner (ISSUES #438). The test reproduces the report's *shape*:
+`publish()` only SCHEDULES React's render, React flushes it synchronously at the end of the
+discrete event — after `setProject` returns, and therefore before any microtask — and the
+awaited read resumes in a microtask behind it. With a 250 ms render, `vm_published` reads
+**0** and `transcript_read` reads **250**. That is the owner's "3 ms vs 3283 ms" in
+miniature, and it means the two halves of the false conclusion now both fail if the
+mechanism is disturbed. Getting this right took one wrong attempt: modelling the render
+inside the subscriber put it inside `vm_published`, and the entire reason the bug was
+invisible is that it is *not* there.
+
+`landing/chat-react/__tests__/switch-transcript-cache.test.ts` (19 tests) pins all of it,
+and every guard was mutation-tested: **15 mutations, 15 killed, 0 survived.** The one that
+mattered most had to be rebuilt: the original `frame_rendered` test asserted only that the
+mark was PRESENT, and a review mutation that stamped it synchronously — the exact defect
+the mark exists to detect — kept 25 of 25 tests green. Presence is what a broken
+implementation also has. The replacement asserts WHEN the mark lands, deterministically
+(rAF under test control; a second `setProject` supersedes the timer, which flushes on
+demand), and kills both the synchronous stamp and a bare `raf(fn)` that would time the
+render instead of the picture.
+
+One mutation was tried and **discarded rather than counted**: `DEFAULT_DEADLINE_MS` back to
+8 s survives, because no test waits 8 s and any assertion for it would be a constant
+restating a constant. It is a tuning number justified by a measurement in its docblock,
+with no behavioural guard — recording that beats adding a tautological test to make the
+table look complete.
+
+📌 Two lessons, and the second is the one that nearly shipped. **An instrument stamped
+after an `await` measures the queue, not the work** — the number was current, real, and
+about a different subsystem than its name. And **a guard for an ordering property must
+assert the ordering**: a presence check over an async mark passes for the async
+implementation and the synchronous one alike, so it reads as coverage while testing
+nothing. The tell is available for free — mutate the line the test exists to protect and
+watch whether anything goes red.
+
+## 2026-08-17 — the switch was re-rendering every transcript alive, including the ones nobody was looking at (#409)
+
+Takes over #394 (its commits are included verbatim; both of its held P2s are fixed
+here) and closes the actual latency complaint behind it: 3-9 s to switch projects in
+the web client.
+
+**The cause, measured with the render finally separable from the store.** A switch
+re-rendered every mounted conversation's whole transcript. Two independent reasons,
+neither visible from a single-surface measurement:
+
+- `landing/chat-react/controller.ts` kept its render cache in ONE map for the whole
+  controller. `computeVm` builds the next map from the ENTERED topic's rows, so on a
+  switch it consulted a map still holding the topic just LEFT — every lookup missed,
+  every row was minted fresh, and the messages array was new too. Nothing about that
+  looks wrong from outside: the frame is correct and the rows are correct. But the
+  bubble contexts in `ChatApp` are memoized on that array, **a context value change
+  bypasses `React.memo`**, and assistant-ui's converter cache is keyed on message
+  identity — so re-entering a project whose transcript had not changed by a byte
+  re-converted and re-rendered every row in it.
+- `ChatApp` renders EVERY mounted conversation on every publish and nothing was
+  memoized, so each publish also paid for the transcripts of up to seven surfaces the
+  owner was not looking at.
+
+**What the measurement actually supports — and what it does not.** The first pass at
+this entry led with milliseconds: 1106 ms down to 144 ms for one switch at 533 messages
+a side. **Those numbers did not survive being measured twice.** Three back-to-back runs
+of the same UNFIXED tree gave 1322 ms, 415 ms and 368 ms for the identical switch,
+because the first run in a bun process pays JIT and happy-dom warm-up. The spread
+between runs of one tree is larger than the gap being claimed between two trees, so any
+single millisecond figure from that harness is an artefact of run order dressed as a
+property of the code. They are not quoted here, and the earlier draft that did quote
+them was wrong to.
+
+**The counts are the measurement.** Same harness, spies on `useChatRuntime` (once per
+conversation-surface render) and `toThreadMessage` (once per message conversion), plus a
+controller subscriber. Byte-identical on every run and at both transcript sizes:
+
+| one warm switch | before | after |
+| --- | --- | --- |
+| conversation surfaces rendered | 4 | 2 |
+| message conversions | N (50 at N=50, 533 at N=533) | 0 |
+| controller publishes | 2 | 1 |
+| surfaces rendered switching into an EMPTY conversation | 6 | 2 |
+
+`conversions = N` is the whole diagnosis in one number: every message in the project
+being entered was re-converted on entry, so the cost scaled with the transcript exactly
+as the owner experienced it. And the empty-conversation row is the second cause on its
+own — a switch into a conversation with nothing in it still rendered six surfaces,
+paying for transcripts neither on screen nor entered.
+
+The harness is NOT committed (a timing assertion would measure the runner, which is what
+`scripts/ci/lint.sh` CHECK 5 exists to keep out), but the counts above are all asserted
+by `switch-render-cost.test.tsx`, so the claim is reproducible from the tree even though
+the harness is not. Method for redoing the harness: mount `ChatApp` over a
+`NeutronChatController` with two seeded topics, warm both surfaces, then drive one
+`setProject` inside `act()` with the two module spies installed.
+
+**Markdown re-parses were already zero** before any of this, because `Markdown` is
+memoized and the bodies are unchanged strings. Worth recording: it was the obvious
+suspect, the one a profile of a cold mount would have accused, and windowing the list
+to fix it would have optimised something that was not firing.
+
+**Shipped.** The render cache is keyed by topic, alongside the transcript cache it
+mirrors and invalidated with it (deleted project, `stop()`, LRU bound).
+`MountedConversation` is memoized, with every callback prop ref-stabilized at the
+`ChatApp` boundary and `useAttachmentDraft`'s return object memoized — load-bearing,
+not tidiness, since `ProjectShell` passes an inline arrow and one unstable prop turns
+the memo into a no-op silently. `publish()` skips notifying when the frame is
+unchanged, which removes the second full render `setProject` used to force by
+unconditionally kicking a refresh that resolves to what is already on screen; its
+comparator is a record keyed by `keyof ChatViewModel`, so adding a field without
+deciding how it compares is a compile error rather than a frozen update nobody sees.
+
+**The stopwatch's own second misattribution, fixed.** `transcript_read` and
+`transcript` were REQUIRED, so a switch already painted from cache stayed open until a
+background refresh nobody waited on answered, and then reported that wait as the
+store's. That is the same error `frame_rendered` was added to end, reappearing inside
+the fix for it — the first version charged the store for the render it was waiting
+behind, this one charged the switch for work done after the switch was over. Both come
+of treating "the last thing that finished" as "what the user waited for". `setProject`
+now TELLS the timer when the first frame carried cached rows, because the marks cannot
+reveal it: both kinds of switch stamp the same five in the same order and the only
+difference is what was on screen while they were stamped. Report schema 2 to 3, since
+`total` changed meaning again.
+
+`landing/chat-react/__tests__/switch-render-cost.test.tsx` pins all of it in counts and
+object identities, never durations — the per-surface render counter is a spy on
+`useChatRuntime` (called once per surface render) and the per-message counter a spy on
+`toThreadMessage`, so no counter had to be added to the code under test. It also carries
+the inverse case (a refresh that brings something NEW still publishes), because a
+comparator that over-matches freezes the transcript and passes every test that only
+counts publishes downward. `bun test landing/chat-react/` 693 pass / 0 fail; typecheck
+clean.
+
+| Mutant | Result |
+| --- | --- |
+| render-cache lookup mis-keyed (always misses) | RED — array identity, publish count, render count |
+| `publish()` notifies unconditionally | RED — publish count and render count |
+| `MountedConversation` not memoized | RED — 6 surface renders, expected 2 |
+| `onOpenActivity` back to an inline fallback arrow | RED — surface render count |
+| draft object identity unstable | RED — 3 surface renders, expected 2 |
+| timer never told the frame was cache-served | RED — record never completes at the paint |
 
 ## 2026-08-17 — an ordinal is not an identity, so the migration ledger stopped being keyed on one
 
@@ -1157,6 +2145,245 @@ read-only, so it could not re-run either mutation itself, and five of the 14 tes
 in the repl-home file failed in its sandbox purely because `mkdtemp` was denied.
 Both were run here with write access, and the numbers in this block are from those
 runs.
+## 2026-08-17 — a park with no ceiling is a brick, and the nudge lane's sink was pinned by nothing
+
+Landed via PR #378.
+
+Third round on the same defect family as PR #356 and its follow-up PR #375. Both of
+those had already merged when this round's review landed, so the remediation could
+not go back into either; every finding below was re-verified against `main` before
+anything changed.
+
+**The seam the composer alone reaches, now driven end to end.** #375 gave the
+timer-driven nudge lane a JOURNAL-ONLY floor-clamp sink so a clamp on that lane stops
+being a stderr line. Two tests covered it and both INJECTED the sink bags themselves,
+which proves `wireSubstrates` routes what it is handed and says nothing about whether
+anything hands it that. One line in `open/composer.ts` does. Deleting it left the
+suite green while returning the lane to a stderr-only clamp — the review measured 862
+tests passing across 105 files under that deletion, which is its number and not one
+re-measured here; what WAS re-measured is that the deletion is now red (below). The
+class is the one this repo keeps shipping, one level up from "built but never wired":
+WIRED, and the wire pinned by nothing.
+
+`open/__tests__/nudge-floor-notice-composer-wiring.test.ts` drives the REAL
+`buildOpenGraphComposer` over a live server with a capturing `substrateFactory`, gets
+the chat lane's options from an ordinary turn and the nudge lane's from a REAL fired
+reminder (nothing shorter reaches that lane — its options exist only once something
+composes on it), then reads what the production composition actually handed each one.
+The chat lane's sink is asserted to BUBBLE as a live `system_notice` frame on a
+connected `/ws/app/chat` socket, which is the POSITIVE CONTROL the file rests on:
+without it, "the nudge lane produced no bubble" could equally mean the harness cannot
+see bubbles at all. Then the same notice on the nudge lane produces no frame from the
+same socket in the same test, and both reach the `system_events` journal. Three
+mutations, each red on a different assertion: deleting the composer's
+`backgroundNoticeSinks` thread (the sink is absent), handing the nudge lane the LIVE
+sinks (the two sinks are identical), and giving the background sink the chat
+`deliver` (ten bubbles where zero were asserted).
+
+**An unbounded park could not be shortened, and the release was unreachable.**
+Making cooldowns monotonic in #375 — so a short park could not truncate a long one —
+had an unpriced cost: with no ceiling, ONE absurd park is permanent. `>=` rejects
+every finite replacement, and `reportSuccess` is the only release but cannot run while
+the credential is parked, because `selectCredential` filters a cooled credential out
+and no dispatch means no success to report. On a single-credential box, which every
+Open install is, that is the product silent until the process restarts.
+
+The value that gets there is upstream and ordinary: `retry-after: 31536000` is one
+legal year, and `runtime/adapters/openai-responses/responses-stream.ts` shipped
+`Infinity` outright — `parseRetryAfterMs` checked `Number.isFinite` on the SECONDS and
+then multiplied by 1000. Fixed at both ends, because either alone leaves a hole. The
+pool clamps every park at the new `MAX_PARK_MS` (six hours: clear of the reset window
+the owner waits out — a Claude subscription window is five — and short of every window
+indistinguishable from a brick), and `reportFailure` discards a `retry_after_ms` that is
+not a positive finite millisecond count in favour of the status default rather than
+believing it. The `NaN`
+direction is the mirror hazard and is why the clamp maps non-finite to the ceiling
+instead of writing it through: `NaN` is falsy and `NaN > now` is false, so a written
+`NaN` would make a PARKED credential read as AVAILABLE at every reader in the file.
+The parser now yields `undefined` for any value that cannot become a real millisecond
+count — including a non-positive one.
+
+**The fourth park was the one nothing tested.** #375's own log claimed the fix was
+"applied on BOTH lanes". True of the code; pinned by nothing. Reverting only the
+strike branch's `park(...)` to the unconditional `cooldown_until`/`cooldown_reason`
+pair left every existing test green (the review counted 124 across four suites; that is
+its measurement, and what is re-measured here is that the revert is now red), because
+reaching that branch needs a standing park LONGER than the hour — which only a
+`retry-after` produces — while the owner's own strikes accumulate underneath it. That sequence is ordinary: the provider
+says wait two hours, in-flight turns fail their way to the threshold, and the strike
+park would then release the credential 60 minutes into a 120-minute window the
+provider asked for, relabelled. Now covered with its control (with nothing standing,
+the fifth strike still parks for the hour), and mutation-proved: that one test goes
+red, the control stays green.
+
+**Two record corrections, appended rather than rewritten**, since this log is
+append-only and a correction that edits history is how a sibling's entry gets lost:
+- The 2026-08-17 entry "a short cooldown was releasing a credential the owner's lane
+  had benched" says "Seven new tests cover it" and "three of them red … four
+  controls". The describe block it refers to holds EIGHT tests, and the mutation turns
+  FOUR of them red — the omitted one being `NOT SELF-COMPOUNDING — repeated background
+  reports never walk the park outward`, which is a real assertion and not a control.
+  A mutation proof asserts a negative, so a miscount in it is the one number that must
+  be right.
+- That same entry says the clamp "is now durably recorded". It is not, and its own
+  closing paragraph says so three paragraphs later: the journal is best-effort at
+  every call site. The wording is corrected where it can be — the two test comments
+  that repeated the claim now say the row is ATTEMPTED and name both ways it can be
+  dropped.
+
+**A ZERO IS NOT A SHORT PARK, IT IS AN ABSENT ONE** — and flooring negatives at zero,
+which the paragraph above originally described as part of the fix, was the remaining
+hole rather than the close of it. `parseRetryAfterMs` turned `retry-after: -30` into a
+DEFINED `0`, as it did for any HTTP-date already past, which plain clock skew produces.
+`0` cleared `reportFailure`'s `>= 0` boundary, `park` wrote `cooldown_until = now`, and
+`hasUsableCredential` / `selectCredential` / `soonestCooldownUntil` all count
+`<= now` as AVAILABLE — so a real 429 bought a zero-length cooldown and we answered the
+provider's back-pressure with an instant retry. Worst on the background lane, which by
+design never touches the strike ledger and so has no second net beneath it. The guard is
+now `> 0` and the parser returns `undefined` for the same values, so a header that told
+us nothing usable routes to the status default. The existing negative test passed
+throughout because it fed the pool a raw `-60000` — an input no producer could produce.
+
+**`parseRetryAfterFromMessage` still had the post-multiply overflow** the header parser
+was fixed for, because the two carried separate copies of the check: it tested
+`Number.isFinite` on the parsed number and then multiplied by 1000. A streamed 429
+carries no header, so that is the only path reading the hint out of the prose, and its
+`Infinity` lands somewhere worse than the pool — `openaiResponsesSubstrate` sleeps
+`retry_after_ms` before rotating and `setTimeout(Infinity)` resolves in about 14 ms, so
+the back-off is SKIPPED and the retry is immediate. Both parsers now share one boundary.
+
+**`MAX_PARK_MS` was not a bound.** The ceiling was re-derived from `Date.now()` on every
+report, and reports DO arrive during a park: a parked credential is never SELECTED, but
+turns dispatched before the park started keep reporting per error event, and each late
+report computed a ceiling further out that the monotonic rule then adopted. Measured:
+two over-ceiling reports five hours apart walked one park from 21,600,000 ms to
+39,600,000 ms — six hours to eleven — with every existing ceiling assertion still green.
+The ceiling is now anchored to `cooldown_started_at`, the moment the park began, so the
+bound covers the whole park instead of each report inside it; `reportSuccess` clears the
+anchor with the park, and `memoize-credential-pool` carries it across a re-resolve
+alongside `cooldown_until` so a rebuild cannot re-anchor it.
+
+**The anchor had the same hole one step further in**, found by the cross-model leg of
+this round's review and reproduced before it was believed. Installing an anchor only for
+a FRESH park left a STANDING park that carries none — a credential brought across a pool
+re-resolve from before the field existed, or any `cooldown_until` written by another path
+— re-deriving its ceiling from every report and never gaining an anchor to stop it.
+Measured: late reports at +5h, +10h and +15h against a standing six-hour park walked it
+to 11h, 16h, then 21h, unbounded. `park` now adopts `now` as the anchor whenever one is
+missing, standing or not. The true start is unknowable by then, so the park may run up to
+one window past six hours from its real beginning and never further — bounded and
+honest, where the alternative was unbounded. The same review noted the memoizer's carry
+was asserted by nothing: the re-resolve test checked only `cooldown_until` and stayed
+green with the carry deleted, so it now names `cooldown_started_at` and the six-hour
+bound.
+
+Two more corrections from that leg. `positiveMs` rounded AFTER testing positivity, so
+`0.1` passed `> 0` and `Math.round` returned a defined `0` — the exact value the
+function exists to reject, reachable from any sub-millisecond hint; it now rounds first.
+And two docblocks overstated: the claim that `undefined` "routes both consumers to their
+own default" is only half true — the pool falls back to the per-status window, but model
+rotation has no default and simply skips the back-off, which is correct on that path
+because rotating moves to a DIFFERENT model rather than retrying the one that refused —
+while `MAX_PARK_MS` called `reportSuccess` flatly unreachable during a park when the same
+file documents an in-flight success reaching it. It is unreachable for NEW dispatches,
+which is what makes the ceiling the guarantee and the in-flight success luck.
+
+One claim from that leg was REFUTED rather than adopted: that a large finite hint
+overflows the timer and makes rotation immediate. Measured directly in this runtime, a
+`setTimeout` of one year does not fire early — it was still pending after 120 seconds, so
+the failure is the opposite one and it is neither new nor in this diff.
+
+Seven mutations, each red on exactly the intended pin with the rest of the suite green as
+control: `>= 0` restored (both zero tests), the negative floor restored (both
+negative-hint parser tests), the finiteness check dropped (both overflow tests,
+header and streamed), the ceiling un-anchored (the walk-outward test), and anchoring on
+a merely-PRESENT `cooldown_started_at` rather than a STANDING park (the re-anchor
+control, which proves a once-parked credential can still be parked again), anchoring
+only FRESH parks (the anchor-less standing-park test), and deleting the memoizer's
+carry of the anchor (the re-resolve test, which that assertion now catches).
+
+Three docblocks corrected where they promised properties the code does not hold — the
+defect class this repo tracks separately from the code. `MAX_PARK_MS` claimed six hours
+is "past every reset window we actually honour" while `gateway/http/app-usage-surface.ts`
+meters a 7-day window, so a weekly cap IS clamped and the six-hourly probe is a priced
+cost rather than an absent one. `park`'s non-finite arm was credited with a live defence
+it does not provide: `reportFailure` filters non-finite before it, and no other call site
+can reach it, so it is now labelled a belt on an untrusted-arithmetic path. And "a
+cooldown is a FLOOR" is narrowed to a floor AGAINST FAILURE REPORTS, because
+`reportSuccess` clears a park unconditionally — including a provider-mandated one, when
+a turn dispatched before the park completes after it — which stays deliberate and is now
+argued rather than contradicted.
+
+The end-to-end nudge test is also hermetic now. It passes the real `process.env` to the
+real composer, so an ambient `NEUTRON_MODEL_PROVIDER=openai` built the OpenAI lanes, the
+injected Claude `substrateFactory` was never called, and the file failed with `waitFor
+timed out` — a wiring-failure message for an environment problem. That variable and
+`OPENAI_API_KEY` are now saved and cleared like the rest; teardown no longer removes a
+`tmpDir` it may never have created (a `TypeError` there replaces whatever setup actually
+failed); and the harness drains `realmode_cleanups` through the production
+`drainRealmodeCleanups` instead of calling them un-awaited before `db.close()`.
+
+**THE REFUTATION ABOVE WAS ITSELF WRONG, AND THE CLAIM IT DISMISSED IS A REAL DEFECT** —
+appended rather than rewritten, per this entry's own correction rule. The paragraph
+beginning "One claim from that leg was REFUTED" reports that a `setTimeout` of one year
+"does not fire early — it was still pending after 120 seconds". Re-measured directly, with
+a control in each direction: `setTimeout(31_536_000_000)` — one year, the very value that
+paragraph names — fires after **3 ms**, and this runtime prints its own diagnosis while
+doing it, `TimeoutOverflowWarning: 31536000000 does not fit into a 32-bit signed integer.
+Timeout duration was set to 1.` The controls are what make that a measurement rather than
+another guess: a timer at `0x7fff_ffff` did NOT fire inside a 2-second window (so the
+probe can show a real wait) and a 5 ms timer fired in 6 ms (so it can see a timer fire at
+all). A one-year delay was never pending for 120 seconds; it had already elapsed before
+the observation began. This is the shape the repo already tracks — a check that returns a
+negative which reads exactly like an answer — and the cost of getting it wrong here was
+higher than a wasted round: the log stated the defect did not exist, which is the one
+thing that reliably stops the NEXT reader from fixing it.
+
+**A back-off that overflows is no back-off.** `positiveMs` rejects non-finite and
+non-positive hints and has no upper bound, which is right — a finite `retry-after:
+3000000` is a real instruction, and discarding it as garbage would buy the 60-second
+status default where the provider asked for weeks. The value is fine; the TIMER cannot
+hold it. Above `0x7fff_ffff` ms a `setTimeout` delay does not saturate, it overflows the
+32-bit signed field and fires in about a millisecond, so the adapter answered "wait weeks"
+with an instant retry against a provider that had just rate-limited it: a hot retry loop,
+and worse than having no `retry-after` handling at all.
+
+It survived three rounds on this exact field because the field has TWO consumers and only
+one was bounded. `reportFailure` clamps its park at `cooldown_started_at + MAX_PARK_MS`,
+so the pool was safe; the adapter's rotation back-off is a second consumer that reads the
+raw hint into `rotateDelay` and never consults the pool. Guarding the producer and
+bounding one consumer both looked complete while a second consumer slept on the unbounded
+value. Every consumer was then enumerated by grepping the field name rather than asserted
+to be complete: the adapter's sleep (broken, fixed here), `reportFailure` via
+`build-llm-call-substrate` and `build-import-substrate` (already bounded), `rotate`'s
+`delay_ms` copy (raw, but nothing sleeps on it — its docblock now says what a future
+sleeper must do first), and the pure propagators that never treat it as a duration
+(`events.ts`, `errors.ts`, `substrate-text.ts`, `agent-dispatch`, the history-import
+type). `TelegramRetryAfterError` shares the field NAME only and has a different source.
+
+Fixed at the CONSUMER, inside `sleep` — the adapter's only `setTimeout`, so nothing in
+that file can route around it. Bounding `positiveMs` instead would rewrite what every
+consumer sees and would put a `setTimeout` implementation limit inside a function whose
+job is deciding whether a hint is usable at all; clamping at the sleep caps what this lane
+can wait while leaving the pool the provider's untouched number to apply its own six-hour
+ceiling to, so neither consumer's policy overwrites the other's. The tests assert the
+delay the timer is ARMED with, because a correctly-clamped delay can never be awaited —
+the sibling exhaustion test takes 4.6 s precisely because its `retry-after: 4` is a
+genuine sleep, so 24.8 days would hang CI forever. Three mutations, each red on exactly
+its own pin with the rest green: unclamping the sleep reds the end-to-end test and its
+failure prints the raw `3000000000` reaching the timer; making the clamp a blanket cap
+reds the two "unchanged" controls (`30_000` and the bound itself), which is what proves it
+is a clamp and not a cap; and restoring `< 0` in place of `<= 0` reds the sub-millisecond
+guard, which is what proves an upper bound did not quietly turn a hint that must be
+refused into an accepted one.
+
+No surface change: no new module, route, env flag, deploy step or lifecycle behaviour
+— a bounded park, a discarded bogus header value, and coverage for two branches that
+had none.
+
+Nor does the round above add one: a rotation back-off that can no longer overflow into an
+instant retry is the same subsystem behaving as it already claimed to.
+
 ## 2026-08-17 — a chat replayed its OLDEST 500 messages, so a long transcript stopped short of the present
 
 Landed via PR #370.
@@ -1403,6 +2630,44 @@ files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
 
+## 2026-08-16 — a deferral and a rejection no longer share a label
+
+A run blocked for an INFRASTRUCTURE reason — a required check that never ran, a PR
+conflicting with base, a credential that blinked — terminated wearing the same clothes as
+a genuine code rejection: `REQUEST_CHANGES`, ❌, "the reviewer still had blocking
+findings". No reviewer had read the diff. The board filled with `[failed]` cards whose
+builds were fine and whose infrastructure was not, and reading it you could not tell "the
+machine was broken" from "the code was wrong" without opening a findings file.
+
+The signal already existed and was already durable: the inner workflow writes
+`blockKind: 'infra-only'` plus the measured `terminalCause` into
+`code_trident_runs.inner_result`, and `parseInnerResult` decodes both fail-closed. Nothing
+downstream read it. `trident/infra-block.ts` `deriveInfraBlock` is now the ONE place that
+does — delivery reads it today and the board payload reads the same function next, because
+two copies of the gate would let the two surfaces disagree.
+
+The gate is `phase === 'failed' && harvested_at !== null && block_kind === 'infra-only'`.
+`harvested_at` is load-bearing, not belt-and-braces: a force-terminated or cancelled row
+keeps a stale but perfectly parseable `inner_result` from an earlier iteration
+(`saveIfActive` never overwrites it), so the column alone cannot say how the run actually
+ended — and `harvested_at` is written EXCLUSIVELY by `orchestrator.applyResult`, i.e. by
+the outer loop deciding on that exact result.
+
+`interpretFailure` gains the class `'infra-blocked'` and checks it FIRST, ahead of every
+string branch. That order is the fix, not a preference: the measured cause is model/CI
+prose, and a cause reading "PR is conflicting with base" hit `isAuthoredConflictQuestion`'s
+bare `conflict` token and produced the confident false sentence "two changes edited the
+same code in ways I could not reconcile automatically" about a build nobody reviewed. Such
+a run now composes with 🚧 "build deferred (infrastructure), not rejected", quotes the
+measured cause, and says what would clear it (rebase the base branch; re-run the required
+check; retry when the infrastructure is healthy) — with "Nothing about the code was
+rejected — it was never reviewed" said out loud. No migration: the signal was already in
+`inner_result`.
+
+Genuine rejections are byte-identical to before — the test asserts equality against the
+composition of a row carrying no structured result at all — and a run with no findings and
+no infra signal keeps its existing generic ❌ handling rather than being relabelled in
+either direction.
 ## 2026-08-16 — "done" is refused on the write path, not on one of its doors
 
 A review of the stalled-driver wakeup change (#341) reproduced the 2026-08-11 incident on a store that already carried the guard. `WorkBoardStore.complete()` refused to mark an item done while its bound run was live, but `complete()` was never the only door: `update()` accepts the full status enum, and the `work_board_update` agent tool hands a model's `status` straight to it. Patching `{status:'done'}` walked past the check and stamped `completed_at` mid-build — the same false claim, through the other door.

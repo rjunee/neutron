@@ -45,11 +45,11 @@ import { DENSITY, MOTION, PHASE, SPACING, THEME, TYPOGRAPHY } from '../lib/theme
 import {
   canPlay,
   dotState,
-  failureReasonText,
   formatCompletedShort,
   isLinkedRunning,
   isRetry,
   roundText,
+  runNotice,
   statusLabel,
   stepTag,
   type DotColorKey,
@@ -131,7 +131,7 @@ function WorkBoardRowImpl({
   const dot = dotState(item);
   const tag = stepTag(item.run_progress);
   const round = roundText(item.run_progress);
-  const failReason = failureReasonText(item.run_progress);
+  const notice = runNotice(item.run_progress);
   const docLabel = docLinkLabel(item.design_doc_ref);
   const showPlay = canPlay(item) && onPlay !== undefined;
   const retry = isRetry(item);
@@ -327,9 +327,13 @@ function WorkBoardRowImpl({
             </View>
           ) : null}
           {round !== null ? <Text style={styles.round}>{round}</Text> : null}
-          {failReason !== null ? (
-            <Text style={styles.failReason} numberOfLines={1}>
-              {failReason}
+          {notice !== null ? (
+            <Text
+              style={notice.tone === 'failure' ? styles.failReason : styles.briefAlert}
+              numberOfLines={1}
+              testID={`work-board-run-notice-${notice.tone}`}
+            >
+              {notice.text}
             </Text>
           ) : null}
         </View>
@@ -362,6 +366,7 @@ function WorkBoardCompletedRowImpl({
   variant?: 'done' | 'archived';
 }) {
   const archived = variant === 'archived';
+  const alert = archived ? null : runNotice(item.run_progress);
   const requestDelete = (): void => {
     Alert.alert('Remove this item?', undefined, [
       { text: 'Keep', style: 'cancel' },
@@ -391,6 +396,15 @@ function WorkBoardCompletedRowImpl({
       {archived ? null : (
         <View style={styles.meta}>
           <Text style={styles.date}>Merged · {formatCompletedShort(item.completed_at)}</Text>
+          {alert !== null && alert.tone === 'alert' ? (
+            <Text
+              style={styles.briefAlert}
+              numberOfLines={1}
+              testID="work-board-completed-brief-alert"
+            >
+              {alert.text}
+            </Text>
+          ) : null}
         </View>
       )}
     </View>
@@ -510,6 +524,14 @@ const styles = StyleSheet.create({
   failReason: {
     flexShrink: 1,
     color: PHASE.failed.fg,
+    fontSize: TYPOGRAPHY.caption.fontSize,
+    lineHeight: TYPOGRAPHY.caption.lineHeight,
+  },
+  // A recovered integrity incident remains readable without painting a healthy
+  // or merged run as terminally failed.
+  briefAlert: {
+    flexShrink: 1,
+    color: THEME.text_muted,
     fontSize: TYPOGRAPHY.caption.fontSize,
     lineHeight: TYPOGRAPHY.caption.lineHeight,
   },

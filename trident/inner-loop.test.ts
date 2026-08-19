@@ -25,6 +25,7 @@ import {
   buildSubstrateWorkflowFire,
   CODEX_BUILD_SCRIPT_PATH,
   CODEX_REVIEW_SCRIPT_PATH,
+  STAGE_STAMP_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -475,6 +476,13 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(threaded.startsWith('/')).toBe(true)
   })
 
+  test('buildWorkflowArgs carries the harness stage-stamp writer path', () => {
+    const threaded = buildWorkflowArgs(input()).stageStampScript
+    expect(threaded).toBe(STAGE_STAMP_SCRIPT_PATH)
+    expect(String(threaded)).toEndWith('/trident/stage-stamp.sh')
+    expect(existsSync(String(threaded))).toBe(true)
+  })
+
   test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
@@ -618,6 +626,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // whether to splice, and an absent arg must reproduce the pre-existing prompt.
     expect(buildWorkflowArgs(input()).testStrategy).toBe('')
     expect(buildWorkflowArgs(input({ test_strategy: null })).testStrategy).toBe('')
+  })
+
+  test('args carry the orchestrator-composed testStrategyIntermediate verbatim', () => {
+    const marker = 'TEST EXECUTION\nTASK-2-INTERMEDIATE-MARKER'
+    const args = buildWorkflowArgs(input({ test_strategy_intermediate: marker }))
+    expect(args['testStrategyIntermediate']).toBe(marker)
+  })
+
+  test('args carry an EMPTY testStrategyIntermediate when none was composed', () => {
+    expect(buildWorkflowArgs(input()).testStrategyIntermediate).toBe('')
+    expect(buildWorkflowArgs(input({ test_strategy_intermediate: null })).testStrategyIntermediate).toBe('')
   })
 
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {

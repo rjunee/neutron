@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   WorkBoardRemovalService,
@@ -25,6 +25,8 @@ function fakeItem(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
     sort_order: 1,
     design_doc_ref: null,
     task_type: 'build',
+    blocked_by: [],
+    declared_surfaces: null,
     inline_active: false,
     linked_run_id: null,
     created_at: '2026-08-14T00:00:00Z',
@@ -331,8 +333,8 @@ describe('WorkBoardRemovalService against a real store', () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-work-board-removal-'))
+    seedMigratedDb(join(tmp, 'project.db'))
     db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
   })
 
   afterEach(() => {

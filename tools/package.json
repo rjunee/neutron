@@ -7,6 +7,7 @@
     "@neutronai/cores-sdk": "workspace:*",
     "@neutronai/logger": "workspace:*",
     "@neutronai/migrations": "workspace:*",
-    "@neutronai/persistence": "workspace:*"
+    "@neutronai/persistence": "workspace:*",
+    "typescript": "5.9.3"
   }
 }

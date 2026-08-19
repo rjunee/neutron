@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '../composer.ts'
 import { buildGBrainMemory } from '@neutronai/gateway/wiring/build-gbrain-memory.ts'
@@ -73,8 +73,8 @@ afterEach(() => {
 // as ~5000ms timeouts rather than assertion failures. The assertion is
 // deterministic; only the wall-clock allowance was too tight.
 test('RA2: the Open composition sets memory_health with a consistent, non-sensitive summary', async () => {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({ env: process.env })
   const composition = await composer({ db, project_slug: 'owner' })
   try {
@@ -129,8 +129,8 @@ test('RA2: boot() folds the REAL Open composition memory_health into the SERVED 
   // fold in gateway/index.ts turns this red.
   {
     // Migrate the DB the composer/boot will open, then hand boot() the path.
+    seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
     const seed = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-    applyMigrations(seed.raw())
     seed.close()
   }
   const realComposer = buildOpenGraphComposer({ env: process.env })

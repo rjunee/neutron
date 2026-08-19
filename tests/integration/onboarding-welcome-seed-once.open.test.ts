@@ -36,7 +36,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
@@ -120,8 +120,12 @@ async function waitFor(pred: () => boolean, timeoutMs = 20_000): Promise<void> {
  * state — same persisted store.
  */
 async function startHarness(): Promise<Harness> {
+  // The database is seeded ONCE per test, in `beforeEach` — deliberately not
+  // here. This function is called twice to simulate a process restart, and the
+  // restart must find the SAME persisted store the first boot wrote. Seeding per
+  // call would either wipe it or (with `seedMigratedDb`'s non-empty refusal)
+  // throw, and either way the test would stop testing what it is named for.
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
 
   const specs: AgentSpec[] = []
   const composer = buildOpenGraphComposer({
@@ -236,6 +240,7 @@ beforeEach(() => {
       NOTIFY_SOCKET: undefined,
     },
   })
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
 })
 
 const openHarnesses: Harness[] = []

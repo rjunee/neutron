@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import {
@@ -22,8 +22,8 @@ let secrets: SecretsStore
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'neutron-fts-'))
+  seedMigratedDb(join(dir, 'owner.db'))
   db = ProjectDb.open(join(dir, 'owner.db'))
-  applyMigrations(db.raw())
   secrets = new SecretsStore({ data_dir: dir, db, now: () => NOW })
 })
 

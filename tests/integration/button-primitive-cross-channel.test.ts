@@ -36,6 +36,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { DefaultButtonRouter } from '@neutronai/channels/button-routing.ts'
@@ -81,8 +82,8 @@ let receivedChoiceValues: string[]
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-int-bp-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   store = new ButtonStore({ db })
   router = new DefaultButtonRouter({ store })
   sendCalls = []
@@ -197,8 +198,8 @@ describe('button-primitive cross-channel — app-socket round-trip (S5)', () => 
   test('agent emits via app-socket → user delivers choice → router surfaces identical ButtonChoice', async () => {
     // Boot a SECOND store/router wired over the mock app-socket transport.
     const tmpDir2 = mkdtempSync(join(tmpdir(), 'neutron-int-bp-as-'))
+    seedMigratedDb(join(tmpDir2, 'owner.db'))
     const db2 = ProjectDb.open(join(tmpDir2, 'owner.db'))
-    applyMigrations(db2.raw())
     const store2 = new ButtonStore({ db: db2 })
     const router2 = new DefaultButtonRouter({ store: store2 })
     const server = createMockAppSocketServer()

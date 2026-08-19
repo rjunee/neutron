@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../../tests/support/migrated-db.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
 import type { OutgoingMessage, Topic } from '../../../types.ts'
 import { AppWsAdapter } from '../adapter.ts'
@@ -39,8 +39,8 @@ function setup() {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-ws-seq-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

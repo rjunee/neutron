@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import {
   AppChatEditStore,
   AppChatEditNotAuthorizedError,
@@ -33,8 +33,8 @@ async function appendMessage(message_id: string, role: 'user' | 'agent' = 'user'
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-chat-edits-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   messages = new AppChatStore({ db })
   edits = new AppChatEditStore({ db })
 })

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { AppChatStore, DEFAULT_REPLAY_LIMIT } from './app-chat-store.ts'
 import { ProjectDb } from './db.ts'
 
@@ -14,8 +14,8 @@ let store: AppChatStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-chat-store-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   store = new AppChatStore({ db })
 })
 

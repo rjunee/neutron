@@ -25,6 +25,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph, type CompositionInput } from '@neutronai/gateway/composition.ts'
 import {
@@ -236,8 +237,8 @@ describe('Sprint B engine-seam contract — InterviewEngine consumes SlugAvailab
 
     const tmpDir = mkdtempSync(join(tmpdir(), 'neutron-engine-seam-'))
     const dbPath = join(tmpDir, 'owner.db')
+    seedMigratedDb(dbPath)
     const instanceDb = ProjectDb.open(dbPath)
-    applyMigrations(instanceDb.raw())
 
     try {
       const platform = buildLocalPlatformAdapter({ selfOwner: SELF_OWNER })
@@ -319,8 +320,8 @@ describe('Sprint B production-composer reachability — composeProductionGraph b
   beforeEach(() => {
     tmpDir = mkdtempSync(join(tmpdir(), 'neutron-sprint-b-reachability-'))
     dbPath = join(tmpDir, 'owner.db')
+    seedMigratedDb(dbPath)
     db = ProjectDb.open(dbPath)
-    applyMigrations(db.raw())
   })
 
   afterEach(() => {

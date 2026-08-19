@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
 import {
@@ -22,6 +22,9 @@ import { TridentTickLoop } from './tick.ts'
 const INCIDENT_CAUSE =
   'forge:build was routed to the codex executor and NO BUILD HAPPENED ' +
   '(codexStatus=deferred) — Refusing to continue…'
+const WRAPPER_REFUSAL =
+  'CODEX_BUILD_BRIEF_PART_CORRUPT: brief part X measures 27893:ff41febe but its receipt is 28462:9f34d3b0'
+const WRAPPER_DEFERRAL_CAUSE = `forge:build deferred (codexStatus=deferred): ${WRAPPER_REFUSAL}`
 
 const infraResult = (cause = INCIDENT_CAUSE) => ({
   ok: false,
@@ -39,8 +42,8 @@ let clockMs: number
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-infra-retry-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   clockMs = 0
   store = new TridentRunStore(db, () => new Date(clockMs).toISOString())
 })
@@ -101,6 +104,7 @@ describe('measured-fields classifier is conservative and total', () => {
   test('recognises only explicit infra-only or closed executor/transport words', () => {
     expect(classify('REQUEST_CHANGES', 'infra-only', 'review service unavailable')).toBe('infrastructure')
     expect(classify('REQUEST_CHANGES', null, INCIDENT_CAUSE)).toBe('infrastructure')
+    expect(classify('REQUEST_CHANGES', null, WRAPPER_DEFERRAL_CAUSE)).toBe('infrastructure')
     expect(classify('REQUEST_CHANGES', null, 'upstream returned Bad Gateway')).toBe('infrastructure')
     expect(classify('REQUEST_CHANGES', null, 'tests failed: 3 failing')).toBe('genuine')
     expect(classify('REQUEST_CHANGES', null, null)).toBe('genuine')
