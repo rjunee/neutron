@@ -118,6 +118,12 @@ function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): Trident
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,
+    // These three became required on TridentRun while this branch sat stranded:
+    // brief_alert with #431, parent_run_id/wave_task_id with #439's wave children.
+    // The fixture predates all of them, which is what the typecheck caught.
+    brief_alert: null,
+    parent_run_id: null,
+    wave_task_id: null,
     ...overrides,
   }
 }
