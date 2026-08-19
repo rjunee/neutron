@@ -589,6 +589,12 @@ export function buildCoreModules(
           fire_workflow,
           db_path: input.db.path,
           run_host: tridentWiring.run_host ?? spawnCapture,
+          // The hang watchdog's positive-liveness reader (see `latest_stage_event_at`
+          // in orchestrator.ts). UNCONDITIONAL, and deliberately not behind a
+          // `tridentWiring` flag: the orchestrator already treats a null answer as
+          // "no evidence" and reaps exactly as before, so gating the wire-up would
+          // be how this fix ships green, tested, and inert in production.
+          latest_stage_event_at: (run_id) => store.latestStageEventAt(run_id),
         }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session

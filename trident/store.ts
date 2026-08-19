@@ -502,6 +502,32 @@ export class TridentRunStore {
     )
   }
 
+  /**
+   * The timestamp of the MOST RECENT stage event for a run, or null when it has
+   * none. ONE row, deliberately — this is read on the hang watchdog's hot path
+   * (`buildTridentOrchestrator`'s `latest_stage_event_at`), where pulling a run's
+   * whole history every tick would make a cheap check expensive.
+   *
+   * WHY IT EXISTS. `last_advanced_at` only moves at CHECKPOINT boundaries, and
+   * checkpoints land BETWEEN phases; during a long Forge step the field is stale by
+   * construction, so a reaper keyed on it asks "has a phase ended recently", not "is
+   * anything alive". Stage events are written MID-PHASE (`wrapper-start`,
+   * `codex-exec-start`, …), which makes them the positive liveness evidence that
+   * field is not.
+   */
+  latestStageEventAt(run_id: string): string | null {
+    const row = this.db
+      .prepare<{ at: string }, [string]>(
+        `SELECT at
+           FROM code_trident_stage_events
+          WHERE run_id = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+      )
+      .get(run_id)
+    return row === null ? null : row.at
+  }
+
   stageEvents(run_id: string): TridentStageEvent[] {
     return this.db
       .prepare<TridentStageEvent, [string]>(
