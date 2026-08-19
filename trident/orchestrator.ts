@@ -60,12 +60,22 @@
  * `computeTransition`'s `ralph-plan`/`ralph-task` branches.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs'
-import { basename, dirname, isAbsolute, join } from 'node:path'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
+import { tmpdir } from 'node:os'
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
-import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
+import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
   type FireOutcome,
@@ -81,6 +91,7 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
+import { infraDeathSentence } from './infra-block.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
@@ -389,6 +400,12 @@ export const TRIDENT_SALVAGE_MARKER = 'build survived the failure'
  *  'failed:', or 'not enabled'. */
 export const TRIDENT_SNAPSHOT_MARKER = 'uncommitted work survived the failure'
 
+/** Appended when uncommitted work was observed but could not be anchored. Unlike
+ *  the transient step note, this marker lives on the terminal row, so both the
+ *  live terminal path and boot reconciliation can tell the operator that the
+ *  worktree still needs manual attention. */
+export const TRIDENT_SNAPSHOT_FAILURE_MARKER = 'uncommitted work capture failed'
+
 /** Appended when a terminal failure's branch has parked work. Wording is
  *  delivery-classifier-safe (see delivery.ts): it must never contain 'exhausted',
  *  'conflict', 'hang', 'stalled', 'no progress for', 'merge failed', 'git ' (with
@@ -397,23 +414,42 @@ export const TRIDENT_SNAPSHOT_MARKER = 'uncommitted work survived the failure'
 export const TRIDENT_STASH_PARKED_MARKER = 'work parked in stash'
 
 type WorktreeDisposition =
-  | { kind: 'dirty'; files: number; untracked: number; lines: number; oid: string | null }
+  | { kind: 'dirty'; files: number; untracked: number; lines: number; ref: string; warning?: string }
   | { kind: 'stashed'; entries: number }
+  | { kind: 'failed'; detail: string }
   | { kind: 'none' }
 
 function worktreeDispositionSuffix(
-  disposition: Exclude<WorktreeDisposition, { kind: 'none' }>,
-  run: TridentRun,
+  disposition: Exclude<WorktreeDisposition, { kind: 'none' | 'failed' }>,
 ): string {
   if (disposition.kind === 'stashed') {
     return `${disposition.entries} stash entr${disposition.entries === 1 ? 'y' : 'ies'} recorded for this run's branch — ${TRIDENT_STASH_PARKED_MARKER}`
   }
-  return `${disposition.lines} uncommitted line(s) across ${disposition.files} file(s)${disposition.untracked > 0 ? ` (${disposition.untracked} untracked file(s) counted by name only)` : ''} — ${TRIDENT_SNAPSHOT_MARKER}${disposition.oid ? ` — snapshot ${disposition.oid} held at refs/tags/trident-salvage/${run.id}` : ''}`
+  return `${disposition.lines} uncommitted text line(s) across ${disposition.files} file(s)${disposition.untracked > 0 ? ` (${disposition.untracked} untracked)` : ''} — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${disposition.ref}${disposition.warning === undefined ? '' : `; capture warning: ${disposition.warning}`}`
+}
+
+function worktreeCaptureFailureSuffix(detail: string): string {
+  return `${TRIDENT_SNAPSHOT_FAILURE_MARKER}: ${detail}`
+}
+
+export interface StrandedReconcileOptions {
+  /** False when the boot sweep observed another live run on this branch (or
+   * could not establish that no such run exists). Commit publication remains
+   * enabled; only inspection of a possibly-live checkout/stash is suppressed. */
+  inspect_worktree?: boolean
 }
 
 export interface StrandedFailureSweepDeps {
-  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'update'>
-  reconcile: (run: TridentRun) => Promise<TridentRun | null>
+  store: Pick<TridentRunStore, 'listFailedPrRuns' | 'listNonTerminal' | 'update'>
+  reconcile: (
+    run: TridentRun,
+    options?: StrandedReconcileOptions,
+  ) => Promise<TridentRun | null>
+}
+
+function strandedWorktreeScope(run: TridentRun): string {
+  const branch = run.branch ?? `trident/${run.slug}`
+  return JSON.stringify([run.project_slug, resolve(run.repo_path), branch])
 }
 
 /** Best-effort boot reconciliation for failed PR-mode runs. A broken row, git
@@ -428,9 +464,19 @@ export async function sweepStrandedFailures({
   } catch {
     return
   }
+  let liveWorktreeScopes: Set<string> | null = null
+  try {
+    liveWorktreeScopes = new Set(store.listNonTerminal(10_000).map(strandedWorktreeScope))
+  } catch {
+    // Failure to establish liveness fails CLOSED for checkout inspection while
+    // still allowing the existing commit-only reconciliation below.
+  }
   for (const row of rows) {
     try {
-      const salvaged = await reconcile(row)
+      const salvaged = await reconcile(row, {
+        inspect_worktree:
+          liveWorktreeScopes !== null && !liveWorktreeScopes.has(strandedWorktreeScope(row)),
+      })
       if (salvaged === null) continue
       await store.update(row.id, {
         pr: salvaged.pr,
@@ -1689,9 +1735,45 @@ export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
   )
 }
 
+/**
+ * T4 — DID THE BUILD DIE IN INFRASTRUCTURE, BEFORE ANY REVIEWER JUDGED THE CODE?
+ *
+ * BOTH triggers are MEASURED signals, not inferences:
+ *   • `checkpoint: 'inner-error'` is written ONLY by the inner workflow wrapper's own catch
+ *     path (`inner-workflow.mjs`) — the workflow THREW, so no verdict happened. That path
+ *     also self-asserts `verdict: 'REQUEST_CHANGES'`, which is why the verdict field cannot
+ *     be trusted here and the checkpoint can.
+ *   • `block_kind: 'infra-only'` is the workflow's own statement that NO REVIEW SEAT ever
+ *     judged the code — the stop says nothing about the diff.
+ *
+ * An `inner-error` result that DOES carry findings keeps the current behavior: real review
+ * findings exist behind it, so the generic "ended without APPROVE" sentence is still true.
+ * `findings_present` is decoded fail-closed (`parseInnerResult`), so a legacy/garbled row
+ * reads false — and a false there costs an infra-flavoured message on a shape that already
+ * had no findings to show, never the reverse (a crash sold to the owner as a verdict).
+ *
+ * An APPROVE is never an infra death: it takes the merge path, and reclassifying one would
+ * silently drop a successful run.
+ *
+ * This deliberately differs from `classifyInnerFailure`: that function asks whether an
+ * outcome is safe to auto-RETRY and fails closed to `genuine`; this one asks whether we may
+ * report a VERDICT and fails closed to false. They are two deciders with different risk
+ * directions and must not be merged.
+ */
+export function isInfraDeath(
+  result: Pick<InnerResult, 'ok' | 'verdict' | 'checkpoint' | 'block_kind' | 'findings_present'>,
+): boolean {
+  if (result.verdict === 'APPROVE') return false
+  if (result.block_kind === 'infra-only') return true
+  return result.ok === false && result.checkpoint === 'inner-error' && result.findings_present === false
+}
+
 export function innerTerminalFailureReason(
   run: Pick<TridentRun, 'max_rounds' | 'round' | 'inner_checkpoint'>,
-  result: Pick<InnerResult, 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause'>,
+  result: Pick<
+    InnerResult,
+    'ok' | 'verdict' | 'round' | 'checkpoint' | 'block_kind' | 'terminal_cause' | 'findings_present'
+  >,
 ): string {
   // Prefer the round the INNER workflow reports (what actually happened) over the row's
   // copy, which a crash can leave behind at its launch value.
@@ -1766,6 +1848,12 @@ export function innerTerminalFailureReason(
         : `inner workflow failed at round ${reported} of ${ceiling}: ${cause}`
     }
   }
+  // T4 catches ONLY no-measured-cause shapes: an inner-error with no findings and no cause,
+  // or an infra-only stop whose cause is null/over-redacted. The measured-cause branch above
+  // keeps precedence, so every sentence main already says specifically stays byte-identical.
+  if (isInfraDeath(result)) {
+    return infraDeathSentence(reported, ceiling)
+  }
   const at = checkpoint === null ? '' : ` at checkpoint '${checkpoint}'`
   return `inner workflow ended at round ${reported} of ${ceiling}${at} without Argus APPROVE`
 }
@@ -1801,7 +1889,10 @@ export function buildTridentOrchestrator(
 ): {
   step: TridentStep
   drain: () => Promise<void>
-  reconcile_stranded: (run: TridentRun) => Promise<TridentRun | null>
+  reconcile_stranded: (
+    run: TridentRun,
+    options?: StrandedReconcileOptions,
+  ) => Promise<TridentRun | null>
 } {
   const now = opts.now ?? (() => new Date().toISOString())
   /** ms-epoch derived from the (injectable) ISO clock — the `harvested_at`
@@ -2157,10 +2248,261 @@ export function buildTridentOrchestrator(
     }
   }
 
-  // Rescue failures are observable in the step note, but never persisted on the run. A WeakMap
-  // keeps that diagnostic paired with the exact input object without leaking entries after the
-  // outcome is released.
+  // Unexpected reconciliation/publish exceptions remain observable in the step
+  // note. Expected worktree-capture failures are persisted on failure_reason;
+  // this WeakMap is only the last-resort diagnostic for throws outside that
+  // typed disposition.
   const salvageFailureNotes = new WeakMap<TridentRun, string>()
+
+  function failedDisposition(
+    step: string,
+    result?: { stderr: string; stdout: string },
+  ): Extract<WorktreeDisposition, { kind: 'failed' }> {
+    const output = result === undefined ? '' : result.stderr || result.stdout
+    return {
+      kind: 'failed',
+      detail: `${step}${output.trim() === '' ? '' : `: ${output.trim().replace(/\s+/g, ' ').slice(0, 120)}`}`,
+    }
+  }
+
+  async function measureSnapshot(
+    repo: string,
+    base: string,
+    targets: string[],
+  ): Promise<{ files: number; lines: number } | { detail: string }> {
+    // Count both captured versions. Taking the larger per-path delta avoids
+    // double-counting ordinary staged-then-edited files while ensuring an
+    // index-only path is not reported as zero work.
+    const linesByPath = new Map<string, number>()
+    for (const target of targets) {
+      const numstat = await opts.run_host(
+        ['git', '-C', repo, 'diff', '--numstat', base, target],
+        repo,
+      )
+      if (!numstat.ok) {
+        return { detail: failedDisposition('snapshot numstat failed', numstat).detail }
+      }
+      for (const line of numstat.stdout.split(/\r?\n/)) {
+        if (line === '') continue
+        const [addedText = '', removedText = '', ...pathParts] = line.split('\t')
+        const addedLines = Number.parseInt(addedText, 10)
+        const removedLines = Number.parseInt(removedText, 10)
+        const lineCount =
+          (Number.isFinite(addedLines) ? addedLines : 0) +
+          (Number.isFinite(removedLines) ? removedLines : 0)
+        const path = pathParts.join('\t') || line
+        linesByPath.set(path, Math.max(linesByPath.get(path) ?? 0, lineCount))
+      }
+    }
+    return {
+      files: linesByPath.size,
+      lines: [...linesByPath.values()].reduce((sum, count) => sum + count, 0),
+    }
+  }
+
+  async function anchoredSnapshotDisposition(run: TridentRun): Promise<WorktreeDisposition | null> {
+    const snapshotRef = `refs/tags/trident-salvage/${run.id}`
+    const anchored = await opts.run_host(
+      ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${snapshotRef}^{commit}`],
+      run.repo_path,
+    )
+    const oid = anchored.stdout.trim()
+    if (!anchored.ok || !/^[0-9a-f]{40}$/.test(oid)) return null
+
+    // The ref is the durable capture receipt. Reconstruct its counts from its
+    // own first parent rather than the branch's current HEAD: a retry can happen
+    // after the worktree and branch have both moved.
+    const parent = await opts.run_host(
+      ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${snapshotRef}^1^{commit}`],
+      run.repo_path,
+    )
+    const base = parent.stdout.trim()
+    let warning: string | undefined
+    let files = 0
+    let lines = 0
+    if (!parent.ok || !/^[0-9a-f]{40}$/.test(base)) {
+      warning = failedDisposition('anchored snapshot parent unreadable', parent).detail
+    } else {
+      const indexParent = await opts.run_host(
+        ['git', '-C', run.repo_path, 'rev-parse', '--verify', `${snapshotRef}^2^{commit}`],
+        run.repo_path,
+      )
+      const indexOid = indexParent.stdout.trim()
+      const targets =
+        indexParent.ok && /^[0-9a-f]{40}$/.test(indexOid) ? [oid, indexOid] : [oid]
+      const measured = await measureSnapshot(run.repo_path, base, targets)
+      if ('detail' in measured) warning = measured.detail
+      else ({ files, lines } = measured)
+    }
+
+    const message = await opts.run_host(
+      ['git', '-C', run.repo_path, 'show', '-s', '--format=%B', snapshotRef],
+      run.repo_path,
+    )
+    const untrackedMatch = message.ok
+      ? message.stdout.match(/^Trident-Salvage-Untracked:\s*(\d+)$/m)
+      : null
+    const capturedWarning = message.ok
+      ? message.stdout.match(/^Trident-Salvage-Warning:\s*(.+)$/m)?.[1]?.trim()
+      : undefined
+    if (warning === undefined && capturedWarning !== undefined && capturedWarning !== '') {
+      warning = capturedWarning
+    }
+
+    return {
+      kind: 'dirty',
+      files,
+      lines,
+      untracked: untrackedMatch === null ? 0 : Number.parseInt(untrackedMatch[1] ?? '0', 10),
+      ref: snapshotRef,
+      ...(warning === undefined ? {} : { warning }),
+    }
+  }
+
+  async function snapshotWorktree(
+    run: TridentRun,
+    worktree: string,
+    statusEntries: string[],
+  ): Promise<WorktreeDisposition> {
+    const scratch = mkdtempSync(join(tmpdir(), 'trident-salvage-index-'))
+    const index = join(scratch, 'index')
+    const snapshotRef = `refs/tags/trident-salvage/${run.id}`
+    const withSnapshotIndex = (args: string[]): Promise<HostCommandResult> =>
+      opts.run_host(['git', '-C', worktree, ...args], worktree, { GIT_INDEX_FILE: index })
+
+    try {
+      // `stash create` is the read-only Git primitive that preserves BOTH the
+      // live index and the tracked working tree. Its second parent is the index
+      // snapshot. Retain that parent on our final commit so staged-only content
+      // remains recoverable even when the worktree copy is back at HEAD.
+      const hasTrackedChanges = statusEntries.some((entry) => !entry.startsWith('?? '))
+      let indexParent: string | null = null
+      let warning: string | undefined
+      if (hasTrackedChanges) {
+        const stashed = await opts.run_host(['git', '-C', worktree, 'stash', 'create'], worktree)
+        const stashOid = stashed.stdout.trim()
+        if (!stashed.ok || !/^[0-9a-f]{40}$/.test(stashOid)) {
+          warning = failedDisposition('snapshot stash-create failed', stashed).detail
+        } else {
+          const resolvedIndex = await opts.run_host(
+            ['git', '-C', worktree, 'rev-parse', '--verify', `${stashOid}^2^{commit}`],
+            worktree,
+          )
+          const resolvedOid = resolvedIndex.stdout.trim()
+          if (!resolvedIndex.ok || !/^[0-9a-f]{40}$/.test(resolvedOid)) {
+            warning = failedDisposition('snapshot index-parent failed', resolvedIndex).detail
+          } else {
+            indexParent = resolvedOid
+          }
+        }
+      }
+
+      // Build the worktree-facing tree in a PRIVATE temporary index. This adds
+      // untracked files without opening or locking the live index; the optional
+      // index parent above preserves the distinct staged version.
+      const seeded = await withSnapshotIndex(['read-tree', 'HEAD'])
+      if (!seeded.ok) return failedDisposition('snapshot read-tree failed', seeded)
+
+      const added = await withSnapshotIndex(['add', '-A', '--', '.'])
+      if (!added.ok) return failedDisposition('snapshot add failed', added)
+
+      const tree = await withSnapshotIndex(['write-tree'])
+      const treeOid = tree.stdout.trim()
+      if (!tree.ok || !/^[0-9a-f]{40}$/.test(treeOid)) {
+        return failedDisposition('snapshot write-tree failed', tree)
+      }
+
+      const commitArgs = [
+        'git',
+        '-C',
+        worktree,
+        '-c',
+        'user.name=Neutron Trident',
+        '-c',
+        'user.email=trident@neutron.local',
+        'commit-tree',
+        treeOid,
+        '-p',
+        'HEAD',
+      ]
+      if (indexParent !== null) commitArgs.push('-p', indexParent)
+      commitArgs.push('-m', `trident salvage snapshot ${run.id}`)
+      const untracked = statusEntries.filter((entry) => entry.startsWith('?? ')).length
+      commitArgs.push(
+        '-m',
+        `Trident-Salvage-Untracked: ${untracked}${warning === undefined ? '' : `\nTrident-Salvage-Warning: ${warning}`}`,
+      )
+      const committed = await opts.run_host(commitArgs, worktree)
+      const oid = committed.stdout.trim()
+      if (!committed.ok || !/^[0-9a-f]{40}$/.test(oid)) {
+        return failedDisposition('snapshot commit-tree failed', committed)
+      }
+
+      const measured = await measureSnapshot(
+        worktree,
+        'HEAD',
+        indexParent === null ? [oid] : [oid, indexParent],
+      )
+      if ('detail' in measured) return { kind: 'failed', detail: measured.detail }
+
+      const anchored = await opts.run_host(
+        ['git', '-C', run.repo_path, 'update-ref', snapshotRef, oid, '0000000000000000000000000000000000000000'],
+        run.repo_path,
+      )
+      if (!anchored.ok) {
+        // A concurrent/retried capture may have won between the initial probe
+        // and this create-only CAS. Its ref is authoritative; never move it.
+        return (
+          (await anchoredSnapshotDisposition(run)) ??
+          failedDisposition('snapshot update-ref failed', anchored)
+        )
+      }
+
+      return {
+        kind: 'dirty',
+        files: measured.files,
+        untracked,
+        lines: measured.lines,
+        ref: snapshotRef,
+        ...(warning === undefined ? {} : { warning }),
+      }
+    } finally {
+      rmSync(scratch, { recursive: true, force: true })
+    }
+  }
+
+  async function branchStashDisposition(run: TridentRun, branch: string): Promise<WorktreeDisposition> {
+    const format = '--format=%H%x09%ct%x09%gs'
+    // `stash list` and the underlying reflog are intentionally read separately:
+    // either view can be unavailable/corrupt while the other still carries the
+    // evidence. Entries are deduplicated by object id.
+    const [listed, reflogged] = await Promise.all([
+      opts.run_host(['git', '-C', run.repo_path, 'stash', 'list', format], run.repo_path),
+      opts.run_host(
+        ['git', '-C', run.repo_path, 'reflog', 'show', format, 'refs/stash'],
+        run.repo_path,
+      ),
+    ])
+    const started = Date.parse(run.started_at) / 1_000
+    const ended = Date.parse(run.last_advanced_at) / 1_000
+    const entries = new Set<string>()
+    for (const result of [listed, reflogged]) {
+      if (!result.ok) continue
+      for (const line of result.stdout.split(/\r?\n/)) {
+        const [oid = '', epochText = '', ...subjectParts] = line.split('\t')
+        const epoch = Number.parseInt(epochText, 10)
+        const subject = subjectParts.join('\t')
+        const belongsToBranch =
+          subject.startsWith(`WIP on ${branch}:`) || subject.startsWith(`On ${branch}:`)
+        const belongsToRun =
+          Number.isFinite(epoch) &&
+          (!Number.isFinite(started) || epoch >= Math.floor(started)) &&
+          (!Number.isFinite(ended) || epoch <= Math.ceil(ended))
+        if (/^[0-9a-f]{40}$/.test(oid) && belongsToBranch && belongsToRun) entries.add(oid)
+      }
+    }
+    return entries.size > 0 ? { kind: 'stashed', entries: entries.size } : { kind: 'none' }
+  }
 
   async function captureWorktreeDisposition(
     run: TridentRun,
@@ -2173,77 +2515,66 @@ export function buildTridentOrchestrator(
       )
       let worktree: string | null = null
       if (listed.ok) {
-        for (const stanza of listed.stdout.split(/\r?\n\r?\n/)) {
-          const stanzaLines = stanza.split(/\r?\n/)
+        const stanzas = listed.stdout
+          .split(/\r?\n\r?\n/)
+          .map((stanza) => stanza.split(/\r?\n/))
+        const primary = stanzas[0]?.find((line) => line.startsWith('worktree '))?.slice('worktree '.length)
+        const recorded = run.worktree === null ? null : resolve(run.worktree)
+        const runStarted = Date.parse(run.started_at)
+        const runEnded = Date.parse(run.last_advanced_at)
+        const candidates: string[] = []
+        for (const stanzaLines of stanzas) {
           if (stanzaLines.includes(`branch refs/heads/${branch}`)) {
             const pathLine = stanzaLines.find((line) => line.startsWith('worktree '))
-            if (pathLine !== undefined) worktree = pathLine.slice('worktree '.length)
-            break
+            if (pathLine === undefined) continue
+            const candidate = pathLine.slice('worktree '.length)
+            // The first stanza is the operator/shared checkout. It is never a
+            // salvage target, even if somebody has checked the build branch out
+            // there. Prefer the durable run-owned path when one was recorded.
+            if (candidate === primary || resolve(candidate) === resolve(run.repo_path)) continue
+            if (recorded !== null && resolve(candidate) !== recorded) continue
+            // `worktree list` deliberately retains deleted linked worktrees as
+            // prunable admin entries. They are not capture failures and must
+            // not prevent the shared stash leg from running.
+            if (stanzaLines.some((line) => line.startsWith('prunable'))) continue
+            // A linked worktree's `.git` pointer is created with that worktree
+            // and is not rewritten by ordinary edits/commits. Its mtime is a
+            // second ownership proof: a checkout created after this failed row
+            // ended belongs to a later dispatch on the reused branch.
+            let createdAt: number
+            try {
+              createdAt = statSync(join(candidate, '.git')).mtimeMs
+            } catch {
+              // The checkout may disappear after the porcelain read. Treat it
+              // like a prunable entry and continue to stash inspection.
+              continue
+            }
+            const inRunWindow =
+              (!Number.isFinite(runStarted) || createdAt >= runStarted - 1_000) &&
+              (!Number.isFinite(runEnded) || createdAt <= runEnded + 1_000)
+            if (!inRunWindow) continue
+            candidates.push(candidate)
           }
         }
+        if (candidates.length === 1) worktree = candidates[0] ?? null
       }
 
       if (worktree !== null) {
         const status = await opts.run_host(
-          ['git', '-C', worktree, 'status', '--porcelain'],
+          ['git', '-C', worktree, 'status', '--porcelain=v1', '-z', '--untracked-files=all'],
           worktree,
         )
-        if (status.ok && status.stdout.trim() !== '') {
-          const statusLines = status.stdout.split(/\r?\n/).filter((line) => line.trim() !== '')
-          const untracked = statusLines.filter((line) => line.startsWith('??')).length
-          const numstat = await opts.run_host(
-            ['git', '-C', worktree, 'diff', '--numstat', 'HEAD'],
-            worktree,
-          )
-          let lines = 0
-          if (numstat.ok) {
-            for (const line of numstat.stdout.split(/\r?\n/)) {
-              const cols = line.trim().split(/\s+/)
-              if (cols.length < 2) continue
-              const added = parseInt(cols[0] ?? '', 10)
-              const removed = parseInt(cols[1] ?? '', 10)
-              if (Number.isFinite(added)) lines += added
-              if (Number.isFinite(removed)) lines += removed
-            }
-          }
-
-          const snapshot = await opts.run_host(
-            ['git', '-C', worktree, 'stash', 'create'],
-            worktree,
-          )
-          const candidate = snapshot.stdout.trim()
-          let oid = snapshot.ok && /^[0-9a-f]{40}$/.test(candidate) ? candidate : null
-          if (oid !== null) {
-            const anchored = await opts.run_host(
-              [
-                'git',
-                '-C',
-                run.repo_path,
-                'update-ref',
-                `refs/tags/trident-salvage/${run.id}`,
-                oid,
-              ],
-              run.repo_path,
-            )
-            if (!anchored.ok) oid = null
-          }
-          return { kind: 'dirty', files: statusLines.length, untracked, lines, oid }
-        }
+        if (!status.ok) return failedDisposition('worktree status failed', status)
+        const statusEntries = status.stdout.split('\0').filter((entry) => entry !== '')
+        if (statusEntries.length > 0) return snapshotWorktree(run, worktree, statusEntries)
       }
 
-      const stashes = await opts.run_host(
-        ['git', '-C', run.repo_path, 'stash', 'list'],
-        run.repo_path,
+      return branchStashDisposition(run, branch)
+    } catch (err) {
+      return failedDisposition(
+        'worktree capture threw',
+        err instanceof Error ? { stderr: err.message, stdout: '' } : undefined,
       )
-      if (!stashes.ok) return { kind: 'none' }
-      const entries = stashes.stdout
-        .split(/\r?\n/)
-        .filter(
-          (line) => line.includes(`WIP on ${branch}:`) || line.includes(`On ${branch}:`),
-        ).length
-      return entries > 0 ? { kind: 'stashed', entries } : { kind: 'none' }
-    } catch {
-      return { kind: 'none' }
     }
   }
 
@@ -2251,17 +2582,13 @@ export function buildTridentOrchestrator(
    *  "a failed run must be asked whether it built something"). NEVER throws.
    *  Returns the annotated run to persist, or null when there is nothing to
    *  salvage or the rescue failed. */
-  async function reconcile_stranded(run: TridentRun): Promise<TridentRun | null> {
+  async function reconcile_stranded(
+    run: TridentRun,
+    options: StrandedReconcileOptions = {},
+  ): Promise<TridentRun | null> {
     try {
       if (run.merge_mode !== 'pr') return null
       const branch = run.branch ?? `trident/${run.slug}`
-      if (
-        [TRIDENT_SALVAGE_MARKER, TRIDENT_SNAPSHOT_MARKER, TRIDENT_STASH_PARKED_MARKER].some(
-          (marker) => (run.failure_reason ?? '').includes(marker),
-        )
-      ) {
-        return null
-      }
 
       const local = await opts.run_host(
         ['git', '-C', run.repo_path, 'rev-parse', '--verify', `refs/heads/${branch}`],
@@ -2278,7 +2605,36 @@ export function buildTridentOrchestrator(
       const aheadText = ahead.stdout.trim()
       if (!ahead.ok || !/^\d+$/.test(aheadText)) return null
       const aheadCount = Number.parseInt(aheadText, 10)
-      const disposition = await captureWorktreeDisposition(run, branch)
+      const failureReason = run.failure_reason ?? 'run failed'
+      // Probe the run-scoped recovery ref on EVERY reconciliation, independent
+      // of the database marker. The ref can be durable even when the following
+      // store write failed; in that case it is the receipt and must win over a
+      // changed worktree on retry.
+      const anchoredDisposition = await anchoredSnapshotDisposition(run)
+      const disposition =
+        anchoredDisposition ??
+        (options.inspect_worktree === false
+          ? { kind: 'none' as const }
+          : await captureWorktreeDisposition(run, branch))
+
+      const appendDisposition = (reason: string): string => {
+        if (disposition.kind === 'dirty') {
+          return reason.includes(TRIDENT_SNAPSHOT_MARKER)
+            ? reason
+            : `${reason}; plus ${worktreeDispositionSuffix(disposition)}`
+        }
+        if (disposition.kind === 'stashed') {
+          return reason.includes(TRIDENT_STASH_PARKED_MARKER)
+            ? reason
+            : `${reason}; plus ${worktreeDispositionSuffix(disposition)}`
+        }
+        if (disposition.kind === 'failed') {
+          return reason.includes(TRIDENT_SNAPSHOT_FAILURE_MARKER)
+            ? reason
+            : `${reason}; plus ${worktreeCaptureFailureSuffix(disposition.detail)}`
+        }
+        return reason
+      }
 
       if (aheadCount > 0) {
         const remote = await opts.run_host(
@@ -2286,42 +2642,53 @@ export function buildTridentOrchestrator(
           run.repo_path,
         )
         if (remote.ok && remote.stdout.trim().split(/\s+/)[0] === localHead && run.pr !== null) {
-          if (disposition.kind !== 'dirty') return null
+          const annotated = appendDisposition(failureReason)
+          if (annotated === failureReason) return null
           return {
             ...run,
             branch,
-            failure_reason: `${run.failure_reason ?? 'run failed'} — ${worktreeDispositionSuffix(disposition, run)}`,
+            failure_reason: annotated,
             last_advanced_at: now(),
           }
         }
 
         const published = await publishBuiltCommit(run, null)
-        const commitReason = `${run.failure_reason ?? 'run failed'} — ${TRIDENT_SALVAGE_MARKER} — branch ${branch} pushed to origin as PR #${published.pr}, unreviewed`
+        const commitReason = failureReason.includes(TRIDENT_SALVAGE_MARKER)
+          ? failureReason
+          : `${failureReason} — ${aheadCount} commit(s), ${TRIDENT_SALVAGE_MARKER} — branch ${branch} pushed to origin as PR #${published.pr}, unreviewed`
         return {
           ...run,
           pr: published.pr,
           branch,
-          failure_reason:
-            disposition.kind === 'dirty'
-              ? `${commitReason}; plus ${worktreeDispositionSuffix(disposition, run)}`
-              : commitReason,
+          failure_reason: appendDisposition(commitReason),
           last_advanced_at: now(),
         }
       }
 
       if (disposition.kind === 'dirty') {
+        if (failureReason.includes(TRIDENT_SNAPSHOT_MARKER)) return null
         return {
           ...run,
           branch,
-          failure_reason: `${run.failure_reason ?? 'run failed'} — 0 commits, ${worktreeDispositionSuffix(disposition, run)}`,
+          failure_reason: `${failureReason} — 0 commits; ${worktreeDispositionSuffix(disposition)}`,
           last_advanced_at: now(),
         }
       }
       if (disposition.kind === 'stashed') {
+        if (failureReason.includes(TRIDENT_STASH_PARKED_MARKER)) return null
         return {
           ...run,
           branch,
-          failure_reason: `${run.failure_reason ?? 'run failed'} — 0 commits; ${worktreeDispositionSuffix(disposition, run)}`,
+          failure_reason: `${failureReason} — 0 commits; ${worktreeDispositionSuffix(disposition)}`,
+          last_advanced_at: now(),
+        }
+      }
+      if (disposition.kind === 'failed') {
+        if (failureReason.includes(TRIDENT_SNAPSHOT_FAILURE_MARKER)) return null
+        return {
+          ...run,
+          branch,
+          failure_reason: `${failureReason} — 0 commits; ${worktreeCaptureFailureSuffix(disposition.detail)}`,
           last_advanced_at: now(),
         }
       }
@@ -2447,10 +2814,13 @@ export function buildTridentOrchestrator(
         run: failedRun(
           launchRun,
           innerTerminalFailureReason(launchRun, {
+            ok: false,
+            verdict: null,
             round: launchRun.round,
             checkpoint: resume_checkpoint,
             block_kind: 'infra-only',
             terminal_cause: cause,
+            findings_present: false,
           }),
           false,
         ),
@@ -2959,7 +3329,8 @@ export function buildTridentOrchestrator(
           pr: result.pr_number ?? run.pr,
           branch: result.branch ?? run.branch,
           inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
-          inner_verdict: 'REQUEST_CHANGES',
+          // T4: an exhausted INFRA budget is still not a review verdict.
+          inner_verdict: isInfraDeath(result) ? null : 'REQUEST_CHANGES',
         }
         return { run: failed, changed: true, waiting: false, note: 'infrastructure retry budget used → failed' }
       }
@@ -3099,9 +3470,18 @@ export function buildTridentOrchestrator(
       // one question is the shape of this whole defect; the terminal result is authoritative
       // on how it ended, so BOTH read it the same way and in the same order.
       inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
-      inner_verdict: 'REQUEST_CHANGES',
+      // T4 — the catch path self-asserts REQUEST_CHANGES on a throw, but run-progress.ts
+      // surfaces this exact field. Null is the honest record when nobody judged the code.
+      inner_verdict: isInfraDeath(result) ? null : 'REQUEST_CHANGES',
     }
-    return { run: failed, changed: true, waiting: false, note: 'inner loop ended without APPROVE → failed' }
+    return {
+      run: failed,
+      changed: true,
+      waiting: false,
+      note: isInfraDeath(result)
+        ? 'inner loop died in infrastructure → failed (no verdict)'
+        : 'inner loop ended without APPROVE → failed',
+    }
   }
 
   /** Elapsed ms since the run last advanced (checkpoint / launch). Conservative
@@ -3453,11 +3833,20 @@ export function buildTridentOrchestrator(
     if (out.changed && out.run.phase === 'failed' && !isTerminalPhase(run.phase)) {
       const salvaged = await reconcile_stranded(out.run)
       if (salvaged !== null) {
+        const publishedNow =
+          !(out.run.failure_reason ?? '').includes(TRIDENT_SALVAGE_MARKER) &&
+          (salvaged.failure_reason ?? '').includes(TRIDENT_SALVAGE_MARKER)
         const salvageNote =
-          salvaged.pr !== null
+          publishedNow && salvaged.pr !== null
             ? `stranded build salvaged → PR #${salvaged.pr}`
             : 'stranded work recorded without a publish'
-        return { ...out, run: salvaged, note: `${out.note}; ${salvageNote}` }
+        const failureNote = salvageFailureNotes.get(out.run)
+        if (failureNote !== undefined) salvageFailureNotes.delete(out.run)
+        return {
+          ...out,
+          run: salvaged,
+          note: `${out.note}; ${salvageNote}${failureNote === undefined ? '' : `; stranded worktree capture failed: ${failureNote}`}`,
+        }
       }
       const failureNote = salvageFailureNotes.get(out.run)
       if (failureNote !== undefined) {

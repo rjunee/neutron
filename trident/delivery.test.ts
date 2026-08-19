@@ -11,11 +11,16 @@ import { describe, expect, test } from 'bun:test'
 import {
   buildTridentDelivery,
   composeTerminalDelivery,
+  infraDeathSentence,
   interpretFailure,
   topicForRun,
   type OutboundSink,
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import {
+  TRIDENT_SNAPSHOT_FAILURE_MARKER,
+  TRIDENT_SNAPSHOT_MARKER,
+} from './orchestrator.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
@@ -159,6 +164,46 @@ describe('composeTerminalDelivery', () => {
     expect(out!.text).toContain(question)
     // ...framed with a plain-language summary of what happened.
     expect(out!.text).toContain('edited the same code')
+  })
+
+  test('salvage metadata keeps the authored cause and exposes the recovery ref', () => {
+    const authored =
+      'The build paused after the executor disappeared; inspect the preserved edits before retrying.'
+    const ref = 'refs/tags/trident-salvage/run-1'
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        failure_reason: `${authored} — 0 commits; 292 uncommitted text line(s) across 3 file(s) (2 untracked) — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${ref}`,
+      }),
+    )
+
+    expect(out?.text).toContain(authored)
+    expect(out?.text).toContain(`Recovery snapshot: ${ref}.`)
+    expect(out?.text).not.toContain('The build did not complete.')
+
+    const alreadyPublished = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        pr: 7,
+        failure_reason: `${authored}; plus 12 uncommitted text line(s) across 2 file(s) — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${ref}`,
+      }),
+    )
+    expect(alreadyPublished?.text).toContain(authored)
+    expect(alreadyPublished?.text).toContain(`Recovery snapshot: ${ref}.`)
+  })
+
+  test('a persisted capture failure is visible without changing failure classification', () => {
+    const authored = 'The executor disappeared before it could finish the build.'
+    const detail = 'snapshot update-ref failed: simulated ref refusal'
+    const failed = runWith({
+      phase: 'failed',
+      failure_reason: `${authored} — 0 commits; ${TRIDENT_SNAPSHOT_FAILURE_MARKER}: ${detail}`,
+    })
+
+    expect(interpretFailure(failed)).toEqual(
+      interpretFailure(runWith({ phase: 'failed', failure_reason: authored })),
+    )
+    expect(composeTerminalDelivery(failed)?.text).toContain(`Recovery warning: ${detail}.`)
   })
 
   test('stopped → a plain stopped notice', () => {
@@ -613,5 +658,74 @@ describe('buildTridentDelivery.onTerminal', () => {
     })
     await hook.onTerminal(runWith({ phase: 'done', chat_id: '1' }))
     expect(sent[0]!.inline_choices).toEqual([{ label: 'View', callback_data: 'v' }])
+  })
+})
+
+/**
+ * T4 — AN INFRASTRUCTURE DEATH IS NOT A VERDICT (run `f384460d`, 2026-08-15).
+ *
+ * The inner workflow threw; its catch path self-asserted `verdict:'REQUEST_CHANGES'` and
+ * the owner was told the reviewer rejected work no reviewer ever saw. Every authored
+ * infrastructure sentence must land in the `infra` class before embedded cause words can
+ * route it into review, hang, or merge-mechanics copy.
+ */
+describe('interpretFailure — an infrastructure death is delivered as infrastructure', () => {
+  test('the authored infra sentence → klass infra, not a review outcome', () => {
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: infraDeathSentence(3, 10) }),
+    )
+    expect(interp.klass).toBe('infra')
+    expect(interp.summary.toLowerCase()).toContain('internal error')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test("an infra-only reason whose measured cause contains 'stalled' is NOT a hang", () => {
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason:
+          'review never ran (infra-only) at round 1 of 10: readiness probe stalled: gh auth login',
+      }),
+    )
+    expect(interp.klass).toBe('infra')
+  })
+
+  test("an infra reason carrying 'exhausted' is still infra, never review-unresolved", () => {
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason:
+          'review never ran (infra-only) at round 1 of 10: the pool exhausted its slots',
+      }),
+    )
+    expect(interp.klass).toBe('infra')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test("main's thrown-with-cause sentence carrying 'git ' stays infra, never merge mechanics", () => {
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        failure_reason: 'inner workflow failed at round 2 of 10: git push exited 128 mid-publish',
+      }),
+    )
+    expect(interp.klass).toBe('infra')
+  })
+
+  test('the composed delivery names the internal error, keeps the PR, and claims no verdict', () => {
+    const out = composeTerminalDelivery(
+      runWith({
+        phase: 'failed',
+        merge_mode: 'pr',
+        pr: 267,
+        inner_verdict: null,
+        failure_reason: infraDeathSentence(1, 8),
+      }),
+    )
+    expect(out).not.toBeNull()
+    expect(out!.text.toLowerCase()).toContain('internal error')
+    expect(out!.text).toContain('PR #267 left open')
+    expect(out!.text).not.toContain('blocking findings')
+    expect(out!.text).not.toContain('without an approved review')
   })
 })

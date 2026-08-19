@@ -100,7 +100,15 @@ describe('build-completion heads come from git', () => {
     expect(out.labels.some((l) => l.startsWith('argus:'))).toBe(false)
     const reason = innerTerminalFailureReason(
       { max_rounds: 3, round: 1, inner_checkpoint: null },
-      { round: 1, checkpoint: 'forge-done', block_kind: 'infra-only', terminal_cause: out.result.terminalCause },
+      {
+        ok: false,
+        verdict: null,
+        round: 1,
+        checkpoint: 'forge-done',
+        block_kind: 'infra-only',
+        terminal_cause: out.result.terminalCause,
+        findings_present: false,
+      },
     )
     expect(reason).toContain(claim)
     expect(reason).toContain(H)
@@ -249,7 +257,15 @@ describe('an empty build is never reported as an unreadable head', () => {
     expect(out.result.blockKind).toBeUndefined()
     const reason = innerTerminalFailureReason(
       { max_rounds: 3, round: 1, inner_checkpoint: null },
-      { round: 1, checkpoint: 'inner-error', block_kind: null, terminal_cause: out.result.terminalCause },
+      {
+        ok: false,
+        verdict: null,
+        round: 1,
+        checkpoint: 'inner-error',
+        block_kind: null,
+        terminal_cause: out.result.terminalCause,
+        findings_present: false,
+      },
     )
     expect(reason).toContain('nothing was built')
     expect(reason).not.toContain('without Argus APPROVE')

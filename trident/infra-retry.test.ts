@@ -198,6 +198,7 @@ describe('(c) retry budget and backoff are separate from fix rounds', () => {
     expect(after.failure_reason).toContain('(budget 2)')
     expect(after.failure_reason).toContain(INCIDENT_CAUSE)
     expect(after.failure_reason).not.toContain('exhausted')
+    expect(after.inner_verdict).toBeNull()
   })
 
   test('the attempt-1 observer is restart-proof told-once and a throw cannot stop retries', async () => {
@@ -235,10 +236,13 @@ describe('legacy wiring and atomic claim ownership', () => {
     await writeResult(run.id, infraResult())
     const before = store.get(run.id)!
     const expected = innerTerminalFailureReason(before, {
+      ok: false,
+      verdict: 'REQUEST_CHANGES' as const,
       round: 1,
       checkpoint: 'inner-error',
       block_kind: null,
       terminal_cause: INCIDENT_CAUSE,
+      findings_present: false,
     })
 
     await h.loop.runOnce()
