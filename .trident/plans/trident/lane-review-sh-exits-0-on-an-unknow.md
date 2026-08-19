@@ -1,0 +1,26 @@
+# IMPLEMENTATION_PLAN — lane_review.sh must fail closed (unknown ref exits non-zero; origin/ fallback; stated-empty symbol set; pinned by its own test)
+
+Regenerated 2026-08-18 against origin/main (854f5fd6). Card: `tools/lane_review.sh` — the guard against the repo's signature green-but-unwired failure (#386, #400, #408) — printed `lane_review: unknown ref <ref>` and exited 0 when handed a ref it could not resolve (measured 2026-08-18T08:13Z). Empty output from a guard reads exactly like a clean verdict; three PRs (#424, #420, #411) were nearly merged on that silence.
+
+## Measured repo truth (this planning pass, 2026-08-18)
+
+- `tools/lane_review.sh` exists ONLY as an UNTRACKED file in the record checkout. It is in NO ref anywhere: not in origin/main (854f5fd6), no history on any branch (`git log --all -- tools/lane_review.sh` is empty). A branch cut from main starts WITHOUT it — this card's branch ADDS the guard to the repo; it does not edit a tracked file.
+- The untracked copy TODAY measures exit=2 on an unknown ref (the 08:13Z transcript's exit=0 came from an earlier revision or a `$?`-after-pipe misread). That does NOT satisfy the card: the repo ships no guard at all, T2 (origin/ fallback) is entirely absent from the copy, T4's test exists nowhere, and an uncommitted single-box file cannot be promoted to a CI gate. Do not conclude "already fixed" from re-measuring the record copy.
+- T2 is real, not hypothetical: `origin/trident/a-poll-must-wait-for-what-it-claims` exists as a remote-tracking ref and the bare `trident/...` name does not resolve (git's DWIM does not search `refs/remotes/origin/` for a bare `trident/<slug>`).
+- Adjacent branch `origin/trident/the-review-script-is-still-resolved` touches `trident/inner-*` only — no collision with this card.
+- `tools/` is a bun workspace with existing `*.test.ts` (approval.test.ts et al.); a new `tools/lane_review.test.ts` is auto-discovered by the sharded required `test` gate — no CI wiring needed. Precedent for spawning a bash script from a test: `scripts/__tests__/run-tests-shard.test.ts` (`spawnSync('bash', [...], ...)` from `node:child_process`).
+- Planner pre-validated the EXACT artifacts in a fixture repo: 6 tests / 17 assertions pass in ~0.5s, and three mutants (fail-open exit, deleted fallback, silenced empty-set line) each turn the suite red. The execution spec carries both files verbatim.
+
+## Tasks
+
+- [x] Land the fail-closed lane_review guard IN THE REPO as one coherent change: add `tools/lane_review.sh` (T1: unresolvable ref/base → exit 2, naming the ref, saying "could not be resolved", never 0; T2: bare `<ref>` falls back to `origin/<ref>` and the output reports `=== resolved '<in>' -> '<resolved>'`; T3: an empty new-symbol set is stated as `no new exported symbols — nothing to verify; ...`) plus `tools/lane_review.test.ts` (T4: the unknown-ref non-zero exit asserted DIRECTLY, positive controls proving a known-good branch still exits 0 with its verdict line and the unwired finding still fires). Preserve the untracked copy's load-bearing comments verbatim (SIGPIPE herestring rationale, multi-line import/re-export strip, definer-not-skipped rule). `git add` BOTH files EXPLICITLY — never `git add -A` (an out-of-scope untracked `tools/lane_shepherd.sh` sits beside them on some workspaces and must not be swept into the commit).
+
+## Out of scope (do not build here)
+
+- Promoting lane_review.sh to a required CI gate — the card's "why it matters now", a follow-up card once the fail-closed contract is landed and pinned.
+- `tools/lane_shepherd.sh` (untracked sibling; a different tool; not named by this card).
+- Any lenient/ignore-unresolvable mode — deliberately NOT built; the spec says a caller wanting leniency opts in explicitly, so that flag is added by the first caller who needs it, not speculatively.
+
+## Post-merge note for the record checkout
+
+The record working tree (`/var/lib/neutron/tenants/n7eb7cca79ce58139/Projects/neutron-open/code`) holds the untracked precursor at `tools/lane_review.sh`. When that checkout later pulls a main containing the tracked file, git will refuse to overwrite the untracked copy — whoever pulls should diff (expect only the T1-message/T2/T3 deltas vs the precursor) and remove the untracked file first. Not the executor's concern in a fresh worktree.
