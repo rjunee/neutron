@@ -25499,3 +25499,17 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-19 — salvage #239: the buffered-pipeline guard and the 30-minute chat window, ported fresh onto main
+
+PR #239 (`trident/turn-lifecycle`, head `19673841`, merge-base `6dfe3388`) was 187 commits stale. Its residual was ported onto a fresh branch from origin/main `5895e268`; the stale branch was neither merged nor rebased, conflicts resolve toward main because it is the thinner copy, and it was deliberately not deleted. Before the port, `CHAT_TURN_INACTIVITY_MS`, `PIPELINE_GUARD_HOOK_PATH`, and `findBufferedPipelineConsumer` were each verified in zero files on main.
+
+The hook is installed, not merely written. `PIPELINE_GUARD_HOOK_PATH` is exported and consumed by `build-settings.ts`, whose `PreToolUse` entry uses `matcher: 'Bash'`, emits the guard first, and appends activityTap instead of replacing the existing entries. `spawn.ts` activates it with `pipelineGuard: {}` inside the `enableToolBridge` gate only: owner chat and the nudge lane are guarded, while disposable Trident build REPLs remain exempt because post-exit `| tail` is legitimate there.
+
+The spawned-hook positive control sends `producer | tail -20` against a live producer and goes red with exit 2 and the offender named; `producer | tee build.log` stays green. Emptying `FULL_BUFFERING_CONSUMERS` flipped four of six guard tests, including the positive control, and the exact restore returned the focused run to green.
+
+For chat turns, `CHAT_TURN_INACTIVITY_MS` is 30 minutes, replacing the 90 s/180 s composer split below the untouched 45-minute absolute ceiling. The `completedUserText` stale-Retry guard acknowledges a delayed Retry but never re-dispatches completed work. Mutant m1 restored the 90,000 ms window and went red on three assertions; mutant m2 removed set-on-success and went red on the new delayed-Retry test. Both were restored exactly.
+
+Several stale hunks were deliberately dropped. The PR's `index.ts` and `types.ts` “(30min)” comment edits were false on the PR itself because `DEFAULT_TURN_INACTIVITY_MS` is 90,000 on both sides; `build-repl-argv.*` churn was net zero; and the PR's old mid-file AS_BUILT insertion is superseded by this append-only entry.
+
+This docs round also re-derived the `stuck_agent` Scope block for the 30-minute chat window. The ordering is now explicit: on chat turns its 15-minute in-flight alert precedes both the 30-minute silence trip and the 45-minute ceiling, while it remains alert-only and does not abandon the running turn.
