@@ -13,6 +13,15 @@ infrastructure copy, keeping the writer and reader from drifting. `isInfraDeath`
 answers verdict honesty separately from `classifyInnerFailure`, whose stricter question is
 whether a measured failure is safe to auto-retry.
 
+## 2026-08-19 — a prNumber of 0 is a sentinel, never a PR number (ported from #282)
+
+The inner wrapper emits `PR_NUMBER=0` when no PR exists. `parseInnerResult` now decodes any
+non-positive or non-integer `prNumber` to `null` instead of letting 0 flow onward as a real
+PR number, and `inner-workflow.mjs` writes or adopts a PR number only when it is a positive
+integer — at the checkpoint, the terminal result, and forge adoption alike. A failed round
+reporting `prNumber` 0 therefore keeps the known PR on the row instead of overwriting it
+with the sentinel. The wrapper's `PR_NUMBER=0` trailer contract itself is byte-identical.
+
 ## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
 
 `reconcile_stranded` now checks both committed and uncommitted work before concluding that a
