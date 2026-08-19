@@ -11,7 +11,7 @@
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { copyFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -19,6 +19,7 @@ import { fileURLToPath } from 'node:url'
 const SCRIPT = fileURLToPath(new URL('./lane_review.sh', import.meta.url))
 
 let repo: string
+let analyzerlessScriptDirectory: string
 
 // Isolate every git invocation from host config (gpg signing, hook paths).
 const env = () => ({
@@ -51,6 +52,15 @@ function reviewFrom(directory: string, ...args: string[]): { code: number | null
   return { code: r.status, out: `${r.stdout}${r.stderr}` }
 }
 
+function reviewWithoutAnalyzer(...args: string[]): { code: number | null; out: string } {
+  const r = spawnSync('bash', [join(analyzerlessScriptDirectory, 'lane_review.sh'), ...args], {
+    cwd: repo,
+    encoding: 'utf8',
+    env: env(),
+  })
+  return { code: r.status, out: `${r.stdout}${r.stderr}` }
+}
+
 function fixtureBranch(name: string, files: Record<string, string>): void {
   git('checkout', '-q', '-b', name)
   for (const [file, source] of Object.entries(files)) {
@@ -64,6 +74,8 @@ function fixtureBranch(name: string, files: Record<string, string>): void {
 
 beforeAll(() => {
   repo = mkdtempSync(join(tmpdir(), 'lane-review-'))
+  analyzerlessScriptDirectory = mkdtempSync(join(tmpdir(), 'lane-review-no-analyzer-'))
+  copyFileSync(SCRIPT, join(analyzerlessScriptDirectory, 'lane_review.sh'))
   git('init', '-q', '-b', 'main')
   mkdirSync(join(repo, 'src'), { recursive: true })
   writeFileSync(
@@ -142,6 +154,70 @@ beforeAll(() => {
       'console.log(invoked(), renamedDefault())',
       '',
     ].join('\n'),
+  })
+
+  fixtureBranch('wired-plain-barrel', {
+    'src/barrel-api.ts': 'export function viaPlainBarrel(): number { return 1 }\n',
+    'src/barrel-middle.ts': "export * from './barrel-api.ts'\n",
+    'src/barrel-public.ts': "export * from './barrel-middle.ts'\n",
+    'src/barrel-caller.ts': [
+      "import { viaPlainBarrel } from './barrel-public.ts'",
+      'console.log(viaPlainBarrel())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('wired-workspace-barrel', {
+    'package.json': JSON.stringify({ private: true, workspaces: ['packages/*'] }),
+    'packages/library/package.json': JSON.stringify({
+      name: '@acme/library',
+      main: './index.ts',
+    }),
+    'packages/library/api.ts': 'export function originalWorkspace(): number { return 1 }\n',
+    'packages/library/direct.ts': 'export function viaWorkspaceSubpath(): number { return 2 }\n',
+    'packages/library/internal.ts': "export { originalWorkspace as viaWorkspace } from './api.ts'\n",
+    'packages/library/index.ts': "export { viaWorkspace } from './internal.ts'\n",
+    'src/workspace-caller.ts': [
+      "import { viaWorkspace } from '@acme/library'",
+      "import { viaWorkspaceSubpath } from '@acme/library/direct.ts'",
+      'console.log(viaWorkspace(), viaWorkspaceSubpath())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('wired-dynamic-import', {
+    'src/dynamic-api.ts': 'export function dynamicallyCalled(): number { return 1 }\n',
+    'src/dynamic-caller.ts': [
+      'async function run(): Promise<number> {',
+      "  const { dynamicallyCalled: invoke } = await import('./dynamic-api.ts')",
+      '  return invoke()',
+      '}',
+      'void run()',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('wired-commonjs-require', {
+    'src/require-api.cts': 'export function requiredApi(): number { return 1 }\n',
+    'src/require-caller.cjs': [
+      "const { requiredApi: invoke } = require('./require-api.cts')",
+      'console.log(invoke())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('shadowed-commonjs-require', {
+    'src/shadowed-require-api.cts': 'export function shadowedRequireApi(): number { return 1 }\n',
+    'src/shadowed-require-caller.cjs': [
+      'function require() { return { shadowedRequireApi: () => 2 } }',
+      "const { shadowedRequireApi } = require('./shadowed-require-api.cts')",
+      'console.log(shadowedRequireApi())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('nested-test-only', {
+    'pkg/tests/helper.ts': 'export function testHelper(): number { return 1 }\n',
   })
 
   fixtureBranch('self-contained-exports', {
@@ -266,6 +342,7 @@ beforeAll(() => {
 
 afterAll(() => {
   rmSync(repo, { recursive: true, force: true })
+  rmSync(analyzerlessScriptDirectory, { recursive: true, force: true })
 })
 
 describe('lane_review.sh fail-closed contract', () => {
@@ -309,6 +386,22 @@ describe('lane_review.sh fail-closed contract', () => {
     expect(code).toBe(1)
     expect(out).toContain('orphanNeverCalled')
     expect(out).toContain('NO non-test production caller')
+  })
+
+  test('an analyzer launch failure exits 2 instead of masquerading as findings', () => {
+    const { code, out } = reviewWithoutAnalyzer('unwired')
+    expect(code).toBe(2)
+    expect(out).toContain('bound production-caller analysis failed')
+    expect(out).toContain('refusing to answer')
+    expect(out).not.toContain('delivers behaviour: yes')
+  })
+
+  test('a nested tests/ directory is classified as test-only by the shell and analyzer', () => {
+    const { code, out } = review('nested-test-only')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: TEST-ONLY')
+    expect(out).not.toContain('delivers behaviour: yes')
+    expect(out).not.toContain('no new exported symbols')
   })
 
   test('all common runtime export forms are extracted and fail when unwired', () => {
@@ -394,6 +487,40 @@ describe('lane_review.sh fail-closed contract', () => {
     expect(code).toBe(0)
     expect(out).toContain('ok: publicFunction called by src/alias-caller.ts')
     expect(out).toContain('ok: realDefault called by src/alias-caller.ts')
+  })
+
+  test('callers through multiple plain export-star barrels retain their bindings', () => {
+    const { code, out } = review('wired-plain-barrel')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: viaPlainBarrel called by src/barrel-caller.ts')
+    expect(out).not.toContain('FINDING: viaPlainBarrel')
+  })
+
+  test('workspace package specifiers resolve through package barrels', () => {
+    const { code, out } = review('wired-workspace-barrel')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: viaWorkspace called by src/workspace-caller.ts')
+    expect(out).toContain('ok: viaWorkspaceSubpath called by src/workspace-caller.ts')
+    expect(out).not.toContain('FINDING: viaWorkspace')
+  })
+
+  test('dynamic import destructuring is a production caller', () => {
+    const { code, out } = review('wired-dynamic-import')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: dynamicallyCalled called by src/dynamic-caller.ts')
+  })
+
+  test('CommonJS require destructuring in .cjs is a production caller', () => {
+    const { code, out } = review('wired-commonjs-require')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: requiredApi called by src/require-caller.cjs')
+  })
+
+  test('a locally shadowed require function cannot manufacture a caller', () => {
+    const { code, out } = review('shadowed-commonjs-require')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: shadowedRequireApi has NO non-test production caller')
+    expect(out).not.toContain('ok: shadowedRequireApi')
   })
 
   test('self and mutual references inside new definitions are not product reachability', () => {

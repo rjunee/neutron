@@ -25,6 +25,11 @@
 
 set -uo pipefail
 
+if [ $# -lt 1 ]; then
+  echo "usage: lane_review.sh <branch-or-ref> [base]"
+  exit 2
+fi
+
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ANALYZER="$HERE/lane_review_ast.mjs"
 
@@ -32,10 +37,6 @@ ROOT=$(git rev-parse --show-toplevel 2>/dev/null) \
   || { echo "lane_review: could not find the repository root"; exit 2; }
 cd "$ROOT" || { echo "lane_review: could not enter the repository root"; exit 2; }
 
-if [ $# -lt 1 ]; then
-  echo "usage: lane_review.sh <branch-or-ref> [base]"
-  exit 2
-fi
 BR_IN="$1"
 BASE_IN="${2:-origin/main}"
 
@@ -100,7 +101,7 @@ fi
 # --- class 2: test-only ------------------------------------------------------
 prod=()
 for file in "${code[@]}"; do
-  if [[ ! "$file" =~ \.test\.|\.spec\.|^tests?/|__tests__ ]]; then
+  if [[ ! "$file" =~ (^|/)(tests?|__tests__)(/|$)|\.(test|spec)\. ]]; then
     prod+=("$file")
   fi
 done
@@ -127,7 +128,10 @@ printf '  %s\n' "${prod[@]}"
 # earlier version that skipped the definer reported it as unwired.
 bun "$ANALYZER" analyze "$MB" "$BR" "${prod[@]}"
 analysis_status=$?
-if [ "$analysis_status" -eq 1 ]; then
+# The analyzer reserves 10 for a completed analysis with findings. Bun itself
+# exits 1 for launch/import failures and uncaught exceptions, so treating 1 as
+# a wiring verdict would collapse "could not run" into "unwired".
+if [ "$analysis_status" -eq 10 ]; then
   exit 1
 elif [ "$analysis_status" -ne 0 ]; then
   echo "lane_review: bound production-caller analysis failed — refusing to answer"

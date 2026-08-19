@@ -11,6 +11,7 @@ import ts from 'typescript'
 
 const MAX_BUFFER = 256 * 1024 * 1024
 const VIRTUAL_ROOT = '/__lane_review__'
+const FINDINGS_EXIT = 10
 
 function die(message) {
   console.error(`lane_review: ${message}`)
@@ -74,6 +75,11 @@ function sourcesAt(ref, paths) {
   return sources
 }
 
+function sourceAt(ref, file) {
+  if (!pathsAt(ref).has(file)) return undefined
+  return sourcesAt(ref, [file]).get(file)
+}
+
 function isSource(file) {
   return /\.(?:[cm]?[jt]s|jsx|tsx)$/.test(file)
 }
@@ -102,6 +108,74 @@ function repoPath(fileName) {
   return normalized.startsWith(prefix) ? normalized.slice(prefix.length) : undefined
 }
 
+function parseJsonAt(ref, file) {
+  const source = sourceAt(ref, file)
+  if (source === undefined) return undefined
+  try {
+    return JSON.parse(source)
+  } catch {
+    die(`${file} could not be parsed as JSON`)
+  }
+}
+
+function workspacePatterns(manifest) {
+  if (Array.isArray(manifest?.workspaces)) return manifest.workspaces
+  if (Array.isArray(manifest?.workspaces?.packages)) return manifest.workspaces.packages
+  return []
+}
+
+function workspacePattern(pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+  return new RegExp(`^${escaped.replaceAll('**', '\0').replaceAll('*', '[^/]*').replaceAll('\0', '.*')}$`)
+}
+
+function exportTarget(value) {
+  if (typeof value === 'string') return value
+  if (!value || typeof value !== 'object') return undefined
+  for (const condition of ['bun', 'import', 'require', 'default', 'types']) {
+    const target = exportTarget(value[condition])
+    if (target) return target
+  }
+  return undefined
+}
+
+function workspacePaths(ref) {
+  const rootManifest = parseJsonAt(ref, 'package.json')
+  const patterns = workspacePatterns(rootManifest)
+    .filter((pattern) => typeof pattern === 'string')
+    .map(workspacePattern)
+  if (patterns.length === 0) return {}
+
+  const mappings = {}
+  const packageFiles = [...pathsAt(ref)]
+    .filter((file) => file !== 'package.json' && file.endsWith('/package.json'))
+    .sort()
+  for (const packageFile of packageFiles) {
+    const directory = path.posix.dirname(packageFile)
+    if (!patterns.some((pattern) => pattern.test(directory))) continue
+    const manifest = parseJsonAt(ref, packageFile)
+    if (typeof manifest?.name !== 'string') continue
+
+    const rootExport = exportTarget(
+      typeof manifest.exports === 'string' ? manifest.exports : manifest.exports?.['.'],
+    )
+    const entry = rootExport ?? manifest.module ?? manifest.main ?? manifest.types ?? './index.ts'
+    if (typeof entry === 'string') {
+      mappings[manifest.name] = [path.posix.join(directory, entry)]
+    }
+
+    if (manifest.exports && typeof manifest.exports === 'object') {
+      for (const [subpath, value] of Object.entries(manifest.exports)) {
+        if (!subpath.startsWith('./') || subpath === '.') continue
+        const target = exportTarget(value)
+        if (target) mappings[`${manifest.name}/${subpath.slice(2)}`] = [path.posix.join(directory, target)]
+      }
+    }
+    mappings[`${manifest.name}/*`] ??= [`${directory}/*`]
+  }
+  return mappings
+}
+
 function buildProgram(ref) {
   const files = [...pathsAt(ref)].filter(isProductionSource).sort()
   const byPath = sourcesAt(ref, files)
@@ -127,6 +201,8 @@ function buildProgram(ref) {
     moduleResolution: ts.ModuleResolutionKind.Bundler,
     noEmit: true,
     noLib: true,
+    baseUrl: VIRTUAL_ROOT,
+    paths: workspacePaths(ref),
     skipLibCheck: true,
     target: ts.ScriptTarget.Latest,
   }
@@ -158,13 +234,13 @@ function buildProgram(ref) {
   for (const sourceFile of program.getSourceFiles()) {
     const file = repoPath(sourceFile.fileName)
     if (file === undefined) continue
-    if (sourceFile.parseDiagnostics.length > 0) {
+    if (program.getSyntacticDiagnostics(sourceFile).length > 0) {
       die(`${file} could not be parsed as JavaScript/TypeScript`)
     }
     sourceFiles.set(file, sourceFile)
   }
 
-  return { checker: program.getTypeChecker(), sourceFiles }
+  return { checker: program.getTypeChecker(), host, options, sourceFiles }
 }
 
 function unalias(checker, symbol) {
@@ -221,10 +297,20 @@ function addedExports(base, branch, changedPaths) {
   )
 }
 
-function modulePathForSpecifier(checker, specifier) {
-  const symbol = checker.getSymbolAtLocation(specifier)
+function modulePathForSpecifier(program, specifier) {
+  const symbol = program.checker.getSymbolAtLocation(specifier)
   const declaration = symbol?.declarations?.find(ts.isSourceFile)
-  return declaration ? sourcePathOf(declaration) : undefined
+  if (declaration) return sourcePathOf(declaration)
+  if (!ts.isStringLiteralLike(specifier)) return undefined
+  const importer = sourcePathOf(specifier)
+  if (!importer) return undefined
+  const resolved = ts.resolveModuleName(
+    specifier.text,
+    virtualName(importer),
+    program.options,
+    program.host,
+  ).resolvedModule
+  return resolved ? repoPath(resolved.resolvedFileName) : undefined
 }
 
 function addToSymbolMap(map, symbol, record) {
@@ -235,6 +321,10 @@ function addToSymbolMap(map, symbol, record) {
     map.set(symbol, records)
   }
   records.add(record)
+}
+
+function addRecordsToSymbolMap(map, symbol, records) {
+  for (const record of records ?? []) addToSymbolMap(map, symbol, record)
 }
 
 function isInside(node, ancestor) {
@@ -317,44 +407,155 @@ function definitionNodes(checker, records, changedPaths) {
   return definitions
 }
 
-function collectCallers(branch, records, changedPaths) {
-  const byModule = new Map()
+function exportedRecordRoutes(branch, records) {
+  const recordsByTarget = new Map()
   for (const record of records) {
-    let moduleRecords = byModule.get(record.modulePath)
-    if (!moduleRecords) {
-      moduleRecords = new Map()
-      byModule.set(record.modulePath, moduleRecords)
-    }
-    moduleRecords.set(record.name, record)
+    addToSymbolMap(recordsByTarget, unalias(branch.checker, record.symbol), record)
   }
 
+  const routes = new Map()
+  for (const [modulePath, sourceFile] of branch.sourceFiles) {
+    const moduleRecords = new Map()
+    for (const [name, symbol] of exportsOf(branch.checker, sourceFile)) {
+      const matching = recordsByTarget.get(unalias(branch.checker, symbol))
+      if (matching) moduleRecords.set(name, matching)
+    }
+    if (moduleRecords.size > 0) routes.set(modulePath, moduleRecords)
+  }
+  return routes
+}
+
+function recordsForSpecifier(branch, routes, specifier) {
+  const modulePath = modulePathForSpecifier(branch, specifier)
+  return modulePath ? routes.get(modulePath) : undefined
+}
+
+function unwrapExpression(node) {
+  let current = node
+  while (
+    ts.isAwaitExpression(current) ||
+    ts.isParenthesizedExpression(current) ||
+    ts.isAsExpression(current) ||
+    ts.isTypeAssertionExpression(current) ||
+    ts.isNonNullExpression(current) ||
+    ts.isSatisfiesExpression(current)
+  ) {
+    current = current.expression
+  }
+  return current
+}
+
+function loaderSpecifier(checker, node) {
+  const expression = unwrapExpression(node)
+  if (!ts.isCallExpression(expression) || expression.arguments.length !== 1) return undefined
+  const callee = expression.expression
+  const isDynamicImport = callee.kind === ts.SyntaxKind.ImportKeyword
+  const requireSymbol = ts.isIdentifier(callee) && callee.text === 'require'
+    ? checker.getSymbolAtLocation(callee)
+    : undefined
+  const isRequire = ts.isIdentifier(callee) && callee.text === 'require' &&
+    !requireSymbol?.declarations?.length
+  if (!isDynamicImport && !isRequire) return undefined
+  const specifier = expression.arguments[0]
+  return ts.isStringLiteralLike(specifier) ? specifier : undefined
+}
+
+function recordsForLoader(branch, routes, node) {
+  const specifier = loaderSpecifier(branch.checker, node)
+  return specifier ? recordsForSpecifier(branch, routes, specifier) : undefined
+}
+
+function recordsForLoaderAccess(branch, routes, node) {
+  const expression = unwrapExpression(node)
+  if (ts.isPropertyAccessExpression(expression)) {
+    return recordsForLoader(branch, routes, expression.expression)?.get(expression.name.text)
+  }
+  if (
+    ts.isElementAccessExpression(expression) &&
+    expression.argumentExpression &&
+    ts.isStringLiteralLike(expression.argumentExpression)
+  ) {
+    return recordsForLoader(branch, routes, expression.expression)
+      ?.get(expression.argumentExpression.text)
+  }
+  return undefined
+}
+
+function bindObjectPattern(checker, directBindings, pattern, moduleRecords) {
+  for (const element of pattern.elements) {
+    if (element.dotDotDotToken || !ts.isIdentifier(element.name)) continue
+    const importedName = element.propertyName && ts.isPropertyName(element.propertyName)
+      ? element.propertyName.getText().replace(/^['"]|['"]$/g, '')
+      : element.name.text
+    addRecordsToSymbolMap(
+      directBindings,
+      checker.getSymbolAtLocation(element.name),
+      moduleRecords.get(importedName),
+    )
+  }
+}
+
+function collectCallers(branch, records, changedPaths) {
+  const routes = exportedRecordRoutes(branch, records)
   const directBindings = new Map()
   const namespaceBindings = new Map()
   for (const sourceFile of branch.sourceFiles.values()) {
-    for (const statement of sourceFile.statements) {
-      if (!ts.isImportDeclaration(statement) || !statement.importClause || statement.importClause.isTypeOnly) {
-        continue
-      }
-      const modulePath = modulePathForSpecifier(branch.checker, statement.moduleSpecifier)
-      const moduleRecords = modulePath ? byModule.get(modulePath) : undefined
-      if (!moduleRecords) continue
-      const clause = statement.importClause
-      if (clause.name) {
-        const record = moduleRecords.get('default')
-        if (record) addToSymbolMap(directBindings, branch.checker.getSymbolAtLocation(clause.name), record)
-      }
-      if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
-        for (const element of clause.namedBindings.elements) {
-          if (element.isTypeOnly) continue
-          const importedName = (element.propertyName ?? element.name).text
-          const record = moduleRecords.get(importedName)
-          if (record) addToSymbolMap(directBindings, branch.checker.getSymbolAtLocation(element.name), record)
+    function collectBindings(node) {
+      if (ts.isImportDeclaration(node) && node.importClause && !node.importClause.isTypeOnly) {
+        const moduleRecords = recordsForSpecifier(branch, routes, node.moduleSpecifier)
+        if (moduleRecords) {
+          const clause = node.importClause
+          if (clause.name) {
+            addRecordsToSymbolMap(
+              directBindings,
+              branch.checker.getSymbolAtLocation(clause.name),
+              moduleRecords.get('default'),
+            )
+          }
+          if (clause.namedBindings && ts.isNamedImports(clause.namedBindings)) {
+            for (const element of clause.namedBindings.elements) {
+              if (element.isTypeOnly) continue
+              const importedName = (element.propertyName ?? element.name).text
+              addRecordsToSymbolMap(
+                directBindings,
+                branch.checker.getSymbolAtLocation(element.name),
+                moduleRecords.get(importedName),
+              )
+            }
+          } else if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
+            const symbol = branch.checker.getSymbolAtLocation(clause.namedBindings.name)
+            if (symbol) namespaceBindings.set(symbol, moduleRecords)
+          }
         }
-      } else if (clause.namedBindings && ts.isNamespaceImport(clause.namedBindings)) {
-        const symbol = branch.checker.getSymbolAtLocation(clause.namedBindings.name)
-        if (symbol) namespaceBindings.set(symbol, moduleRecords)
+      } else if (
+        ts.isImportEqualsDeclaration(node) &&
+        !node.isTypeOnly &&
+        ts.isExternalModuleReference(node.moduleReference) &&
+        node.moduleReference.expression
+      ) {
+        const moduleRecords = recordsForSpecifier(branch, routes, node.moduleReference.expression)
+        const symbol = branch.checker.getSymbolAtLocation(node.name)
+        if (moduleRecords && symbol) namespaceBindings.set(symbol, moduleRecords)
+      } else if (ts.isVariableDeclaration(node) && node.initializer) {
+        const moduleRecords = recordsForLoader(branch, routes, node.initializer)
+        if (moduleRecords) {
+          if (ts.isIdentifier(node.name)) {
+            const symbol = branch.checker.getSymbolAtLocation(node.name)
+            if (symbol) namespaceBindings.set(symbol, moduleRecords)
+          } else if (ts.isObjectBindingPattern(node.name)) {
+            bindObjectPattern(branch.checker, directBindings, node.name, moduleRecords)
+          }
+        } else if (ts.isIdentifier(node.name)) {
+          addRecordsToSymbolMap(
+            directBindings,
+            branch.checker.getSymbolAtLocation(node.name),
+            recordsForLoaderAccess(branch, routes, node.initializer),
+          )
+        }
       }
+      ts.forEachChild(node, collectBindings)
     }
+    collectBindings(sourceFile)
   }
 
   const localTargets = new Map()
@@ -372,6 +573,11 @@ function collectCallers(branch, records, changedPaths) {
 
   for (const [callerPath, sourceFile] of branch.sourceFiles) {
     function visit(node) {
+      if (!insideAddedDefinition(node, definitions)) {
+        for (const record of recordsForLoaderAccess(branch, routes, node) ?? []) {
+          record.callers.add(callerPath)
+        }
+      }
       if (ts.isIdentifier(node) && isRuntimeReference(node) && !insideAddedDefinition(node, definitions)) {
         const symbol = branch.checker.getSymbolAtLocation(node)
         if (symbol) {
@@ -383,16 +589,18 @@ function collectCallers(branch, records, changedPaths) {
 
           if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node) {
             const moduleRecords = namespaceBindings.get(symbol)
-            const record = moduleRecords?.get(node.parent.name.text)
-            if (record) record.callers.add(callerPath)
+            for (const record of moduleRecords?.get(node.parent.name.text) ?? []) {
+              record.callers.add(callerPath)
+            }
           } else if (
             ts.isElementAccessExpression(node.parent) &&
             node.parent.expression === node &&
             ts.isStringLiteral(node.parent.argumentExpression)
           ) {
             const moduleRecords = namespaceBindings.get(symbol)
-            const record = moduleRecords?.get(node.parent.argumentExpression.text)
-            if (record) record.callers.add(callerPath)
+            for (const record of moduleRecords?.get(node.parent.argumentExpression.text) ?? []) {
+              record.callers.add(callerPath)
+            }
           }
         }
       }
@@ -409,7 +617,7 @@ function runAnalyze(baseRef, branchRef, changedPaths) {
   const records = addedExports(base, branch, productionPaths)
 
   if (records.length === 0) {
-    console.log('--- no new exported symbols — nothing to verify; branch edits existing code paths (wiring N/A)')
+    console.log('--- no new exported symbols — nothing to verify (wiring N/A)')
     return
   }
 
@@ -425,7 +633,7 @@ function runAnalyze(baseRef, branchRef, changedPaths) {
       console.log(`  ok: ${record.displayName} called by ${callers.join(' ')}`)
     }
   }
-  if (findings > 0) process.exitCode = 1
+  if (findings > 0) process.exitCode = FINDINGS_EXIT
 }
 
 const [mode, baseRef, branchRef, ...rest] = process.argv.slice(2)
