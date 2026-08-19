@@ -18,6 +18,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { checkpointRound } from './checkpoint-round.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -70,6 +71,10 @@ export interface TridentRun {
   ralph_round: number
   max_ralph_rounds: number
   branch: string | null
+  /** The origin/<base> commit the build branch was cut from, read in code at launch; null for legacy rows/local-mode failures. */
+  base_sha: string | null
+  /** How many commits local <base> was behind origin/<base> at cut time; observability only. */
+  base_behind: number | null
   pr: number | null
   merge_mode: MergeMode
   subagent_run_id: string | null
@@ -88,6 +93,13 @@ export interface TridentRun {
    */
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
+  /**
+   * Host-recorded brief-integrity refusal; null until the build wrapper detects
+   * one. Intentionally sticky for this run: a bridge retry can recover and let
+   * the run continue, but the card must still reveal that refusal. A manual
+   * retry creates a new run row with a fresh null.
+   */
+  brief_alert: string | null
   /**
    * Trident v2 (migration 0089) — the CC workflow run id of the last
    * inner-loop dispatch. Observability only (correlate the row with its
@@ -171,12 +183,36 @@ export interface TridentRun {
    * agent's failure and must not consume its fix rounds.
    */
   crash_recoveries: number
+  /**
+   * INFRASTRUCTURE AUTO-RETRY BUDGET SPENT (migration 0126) — how many
+   * harvested executor/transport failures have been atomically claimed for a
+   * continuation retry. Legacy rows (NULL) read as 0.
+   *
+   * RETRY-OWNED, SINGLE WRITER: only {@link TridentRunStore.beginInfraRetry}
+   * writes it. It is deliberately absent from `TridentRunUpdate`, `update()`,
+   * `save()` and `saveIfActive()`, so a stale full-row snapshot cannot refund a
+   * budget unit. Durable across restarts, and separate from agent fix rounds and
+   * from launcher `crash_recoveries`.
+   */
+  infra_retries: number
   /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
   reviewed_head: string | null
   /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
   bound_pr: number | null
   /** FIX-ROUND CONTRACT (migration 0124), pinned at dispatch, enforced by publishBuiltCommit; null = unconstrained (every pre-existing row). Dispatch-owned and deliberately absent from update/save. */
   fenced_paths: string | null
+  /** WAVE FAN-OUT (migration 0137): the run id this row is a wave MEMBER of; null for every ordinary run. CREATE-ONCE, dispatch-owned: deliberately absent from TridentRunUpdate/update()/save()/saveIfActive(), so no snapshot can ever re-parent a row. */
+  parent_run_id: string | null
+  /** WAVE FAN-OUT (migration 0137): the plan-graph task id (e.g. 'T3') this member builds; non-null iff parent_run_id is non-null; the pair is covered by the partial UNIQUE index so wave spawn is idempotent. */
+  wave_task_id: string | null
+}
+
+export interface TridentStageEvent {
+  id: number
+  run_id: string
+  stage: string
+  at: string
+  meta: string | null
 }
 
 export interface CreateTridentRunInput {
@@ -205,6 +241,9 @@ export interface CreateTridentRunInput {
   reviewed_head?: string | null
   bound_pr?: number | null
   fenced_paths?: string | null
+  /** Both-or-neither; `create` refuses a half-declared pair. */
+  parent_run_id?: string | null
+  wave_task_id?: string | null
 }
 
 /**
@@ -217,6 +256,8 @@ export interface TridentRunUpdate {
   round?: number
   ralph_round?: number
   branch?: string | null
+  base_sha?: string | null
+  base_behind?: number | null
   pr?: number | null
   merge_mode?: MergeMode
   subagent_run_id?: string | null
@@ -248,6 +289,8 @@ interface TridentRunDbRow {
   ralph_round: number
   max_ralph_rounds: number
   branch: string | null
+  base_sha: string | null
+  base_behind: number | null
   pr: number | null
   merge_mode: MergeMode
   subagent_run_id: string | null
@@ -259,6 +302,7 @@ interface TridentRunDbRow {
   thread_id: string | null
   channel_kind: Topic['channel_kind']
   failure_reason: string | null
+  brief_alert: string | null
   workflow_run_id: string | null
   inner_checkpoint: string | null
   inner_checkpoint_head: string | null
@@ -269,25 +313,30 @@ interface TridentRunDbRow {
   last_advanced_at: string
   harvested_at: number | null
   crash_recoveries: number | null
+  infra_retries: number | null
   reviewed_head: string | null
   bound_pr: number | null
   fenced_paths: string | null
+  parent_run_id: string | null
+  wave_task_id: string | null
 }
 
 /** Exported solely so tests can pin the column-count invariant. */
 export const COLS =
   'id, slug, project_slug, phase, round, max_rounds, ralph, ralph_round, ' +
   'max_ralph_rounds, branch, pr, merge_mode, subagent_run_id, subagent_status, ' +
-  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, ' +
+  'repo_path, worktree, task, chat_id, thread_id, channel_kind, failure_reason, brief_alert, ' +
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
-  'started_at, last_advanced_at, harvested_at, crash_recoveries, ' +
-  'reviewed_head, bound_pr, fenced_paths'
+  'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
+  'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind, parent_run_id, wave_task_id'
 
-// Derived from COLS so placeholder-count = column-count BY CONSTRUCTION. A
+// The nullable launch-pin columns deliberately backfill through their database
+// NULL default; all inserted columns still derive their placeholders here. A
 // hand-miscounted `?` list silently corrupts every insert and no type error
 // catches it — so the list is never typed by hand.
-const INSERT_PLACEHOLDERS = COLS.split(', ')
+const INSERT_COLS = COLS.split(', ').filter((col) => col !== 'base_sha' && col !== 'base_behind')
+const INSERT_PLACEHOLDERS = INSERT_COLS
   .map(() => '?')
   .join(', ')
 
@@ -323,6 +372,17 @@ export class TridentRunStore {
   ) {}
 
   async create(input: CreateTridentRunInput): Promise<TridentRun> {
+    const parentRunId = input.parent_run_id ?? null
+    const waveTaskId = input.wave_task_id ?? null
+    const pairProblems = [
+      parentRunId === null ? 'parent_run_id is missing' : parentRunId === '' ? 'parent_run_id is empty' : null,
+      waveTaskId === null ? 'wave_task_id is missing' : waveTaskId === '' ? 'wave_task_id is empty' : null,
+    ].filter((problem): problem is string => problem !== null)
+    if ((parentRunId === null) !== (waveTaskId === null) || parentRunId === '' || waveTaskId === '') {
+      throw new Error(
+        `wave child rows need BOTH parent_run_id and wave_task_id (${pairProblems.join(', ')})`,
+      )
+    }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()
     const run: TridentRun = {
@@ -343,6 +403,8 @@ export class TridentRunStore {
       ralph_round: 0,
       max_ralph_rounds: input.max_ralph_rounds ?? 20,
       branch: input.branch ?? null,
+      base_sha: null,
+      base_behind: null,
       pr: null,
       merge_mode: input.merge_mode ?? 'local',
       subagent_run_id: null,
@@ -354,6 +416,7 @@ export class TridentRunStore {
       thread_id: input.thread_id ?? null,
       channel_kind: input.channel_kind ?? 'telegram',
       failure_reason: null,
+      brief_alert: null,
       workflow_run_id: null,
       inner_checkpoint: null,
       inner_checkpoint_head: null,
@@ -364,12 +427,15 @@ export class TridentRunStore {
       last_advanced_at: ts,
       harvested_at: null,
       crash_recoveries: 0,
+      infra_retries: 0,
       reviewed_head: input.reviewed_head ?? null,
       bound_pr: input.bound_pr ?? null,
       fenced_paths: input.fenced_paths ?? null,
+      parent_run_id: parentRunId,
+      wave_task_id: waveTaskId,
     }
     await this.db.run(
-      `INSERT INTO code_trident_runs (${COLS})
+      `INSERT INTO code_trident_runs (${INSERT_COLS.join(', ')})
        VALUES (${INSERT_PLACEHOLDERS})`,
       [
         run.id,
@@ -393,6 +459,7 @@ export class TridentRunStore {
         run.thread_id,
         run.channel_kind,
         run.failure_reason,
+        run.brief_alert,
         run.workflow_run_id,
         run.inner_checkpoint,
         run.inner_checkpoint_head,
@@ -403,9 +470,12 @@ export class TridentRunStore {
         run.last_advanced_at,
         run.harvested_at,
         run.crash_recoveries,
+        run.infra_retries,
         run.reviewed_head,
         run.bound_pr,
         run.fenced_paths,
+        run.parent_run_id,
+        run.wave_task_id,
       ],
     )
     return run
@@ -418,6 +488,55 @@ export class TridentRunStore {
       )
       .get(id)
     return row === null ? null : rowToRun(row)
+  }
+
+  async recordStageEvent(
+    run_id: string,
+    stage: string,
+    meta?: string | null,
+  ): Promise<void> {
+    await this.db.run(
+      `INSERT INTO code_trident_stage_events (run_id, stage, at, meta)
+       VALUES (?, ?, ?, ?)`,
+      [run_id, stage, this.now(), meta ?? null],
+    )
+  }
+
+  /**
+   * The timestamp of the MOST RECENT stage event for a run, or null when it has
+   * none. ONE row, deliberately — this is read on the hang watchdog's hot path
+   * (`buildTridentOrchestrator`'s `latest_stage_event_at`), where pulling a run's
+   * whole history every tick would make a cheap check expensive.
+   *
+   * WHY IT EXISTS. `last_advanced_at` only moves at CHECKPOINT boundaries, and
+   * checkpoints land BETWEEN phases; during a long Forge step the field is stale by
+   * construction, so a reaper keyed on it asks "has a phase ended recently", not "is
+   * anything alive". Stage events are written MID-PHASE (`wrapper-start`,
+   * `codex-exec-start`, …), which makes them the positive liveness evidence that
+   * field is not.
+   */
+  latestStageEventAt(run_id: string): string | null {
+    const row = this.db
+      .prepare<{ at: string }, [string]>(
+        `SELECT at
+           FROM code_trident_stage_events
+          WHERE run_id = ?
+          ORDER BY id DESC
+          LIMIT 1`,
+      )
+      .get(run_id)
+    return row === null ? null : row.at
+  }
+
+  stageEvents(run_id: string): TridentStageEvent[] {
+    return this.db
+      .prepare<TridentStageEvent, [string]>(
+        `SELECT id, run_id, stage, at, meta
+           FROM code_trident_stage_events
+          WHERE run_id = ?
+          ORDER BY id`,
+      )
+      .all(run_id)
   }
 
   getBySlug(project_slug: string, slug: string): TridentRun | null {
@@ -469,11 +588,27 @@ export class TridentRunStore {
         `SELECT ${COLS}
            FROM code_trident_runs
           WHERE project_slug = ?
+            -- Wave members are internal machinery: the parent is project-facing,
+            -- and a member's later stamp or failure must not shadow it on the board rail.
+            AND parent_run_id IS NULL
           ORDER BY last_advanced_at DESC
           LIMIT 1`,
       )
       .get(project_slug)
     return row === null ? null : rowToRun(row)
+  }
+
+  /** Every wave member spawned by this parent, in spawn order; empty for a run with no wave. */
+  listChildren(parentId: string): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, [string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE parent_run_id = ?
+          ORDER BY started_at ASC, id ASC`,
+      )
+      .all(parentId)
+      .map(rowToRun)
   }
 
   /**
@@ -617,6 +752,56 @@ export class TridentRunStore {
   }
 
   /**
+   * TERMINAL AGENT-WAKE CLAIM (migration 0127) — atomically claim the right to
+   * dispatch this run's ONE terminal agent-wake turn. Returns true exactly once
+   * per run (the winning claim); false when already claimed, when the run is not
+   * terminal, or when the id does not exist — so redelivery, retry, and a
+   * gateway boot that re-runs terminal observers can never fan out duplicate
+   * agent turns. SINGLE WRITER of `agent_waked_at`: the column is DELIBERATELY
+   * absent from `TridentRun`, `TridentRunUpdate`, `update()`, `save()` and
+   * `saveIfActive()` (same ownership discipline as `crash_recoveries`), so no
+   * full-snapshot save can ever un-claim a delivered wake.
+   */
+  async claimAgentWake(id: string): Promise<boolean> {
+    return this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET agent_waked_at = ?
+          WHERE id = ? AND agent_waked_at IS NULL
+            AND phase IN ${TERMINAL_PHASE_SQL}`,
+        [Date.now(), id],
+      )
+      return res.changes > 0
+    })
+  }
+
+  /**
+   * Atomically CLAIM a measured infrastructure failure for retry: spend one
+   * durable budget unit, clear the harvested result and release every dispatch
+   * slot in ONE conditional UPDATE. A racing terminal transition, second tick,
+   * or crash latch wins cleanly and returns null. This is the only writer of
+   * `infra_retries`; agent rounds and `harvested_at` are intentionally untouched.
+   */
+  async beginInfraRetry(id: string): Promise<TridentRun | null> {
+    const won = await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE code_trident_runs
+            SET infra_retries = COALESCE(infra_retries, 0) + 1,
+                inner_result = NULL,
+                subagent_run_id = NULL,
+                subagent_status = NULL,
+                workflow_run_id = NULL,
+                last_advanced_at = ?
+          WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND subagent_status IS NOT 'crashed'`,
+        [this.now(), id],
+      )
+      return res.changes > 0
+    })
+    return won ? this.get(id) : null
+  }
+
+  /**
    * Apply a partial update by id, re-stamping `last_advanced_at`. Only the
    * provided fields are written. Returns the reloaded row (or `null` if
    * the id no longer exists).
@@ -632,6 +817,8 @@ export class TridentRunStore {
     if (patch.round !== undefined) push('round', patch.round)
     if (patch.ralph_round !== undefined) push('ralph_round', patch.ralph_round)
     if (patch.branch !== undefined) push('branch', patch.branch)
+    if (patch.base_sha !== undefined) push('base_sha', patch.base_sha)
+    if (patch.base_behind !== undefined) push('base_behind', patch.base_behind)
     if (patch.pr !== undefined) push('pr', patch.pr)
     if (patch.merge_mode !== undefined) push('merge_mode', patch.merge_mode)
     if (patch.subagent_run_id !== undefined) push('subagent_run_id', patch.subagent_run_id)
@@ -640,6 +827,18 @@ export class TridentRunStore {
     if (patch.failure_reason !== undefined) push('failure_reason', patch.failure_reason)
     if (patch.workflow_run_id !== undefined) push('workflow_run_id', patch.workflow_run_id)
     if (patch.inner_checkpoint !== undefined) push('inner_checkpoint', patch.inner_checkpoint)
+    // CANARY round-persist: `round` was dead — 1 on all 195 measured rows while
+    // inner_checkpoint recorded fix-round-2..7. Derive the real round from the
+    // checkpoint being persisted, in the SAME UPDATE, monotonic in SQL (MAX
+    // against the STORED value — never lowered). An explicit patch.round
+    // (tests/sim) still wins and skips the derivation.
+    if (patch.round === undefined && patch.inner_checkpoint !== undefined) {
+      const derived = checkpointRound(patch.inner_checkpoint)
+      if (derived !== null) {
+        sets.push('round = MAX(round, ?)')
+        params.push(derived)
+      }
+    }
     if (patch.inner_checkpoint_head !== undefined) push('inner_checkpoint_head', patch.inner_checkpoint_head)
     if (patch.inner_checkpoint_findings !== undefined)
       push('inner_checkpoint_findings', patch.inner_checkpoint_findings)
@@ -763,16 +962,17 @@ export class TridentRunStore {
   /**
    * Persist a full run snapshot (the shape `advanceTridentRun` returns).
    * Re-stamps `last_advanced_at`. Mutable columns only — `id`, `slug`,
-   * `project_slug`, `repo_path`, `task`, `started_at`, the caps, and
-   * `chat_id`/`thread_id` are write-once at create time.
+   * `project_slug`, `repo_path`, `task`, `started_at`, the caps,
+   * `chat_id`/`thread_id`, and `parent_run_id`/`wave_task_id` are write-once at
+   * create time.
    *
-   * `inner_result` is DELIBERATELY NOT written here (Phase 2a): it is
-   * WORKFLOW-OWNED — only the inner workflow's own Bash step writes it (the
-   * harvest-ready signal), and the OUTER loop only ever READS it. Excluding it
-   * from this full-snapshot save means an orchestrator `save()` (e.g. the launch
-   * persist, whose in-memory run still carries a stale null) can never clobber a
-   * result the detached workflow wrote out-of-band. Use `update({inner_result})`
-   * for the workflow-sim write in tests.
+   * `inner_result` and `brief_alert` are DELIBERATELY NOT written here: both are
+   * WORKFLOW-OWNED, out-of-band writes that the OUTER loop only ever READS.
+   * Excluding them from this full-snapshot save means an orchestrator `save()`
+   * (e.g. a launch persist whose in-memory run still carries a stale null) can
+   * never clobber a result or recovered integrity alert. Use
+   * `update({inner_result})` for the workflow-sim result write in tests;
+   * `brief_alert` is written by `trident/checkpoint.sh`.
    *
    * `inner_checkpoint_head`/`inner_checkpoint_findings` (0122) are excluded for the
    * same reason AND a sharper one: they are only meaningful PAIRED with the
@@ -785,15 +985,17 @@ export class TridentRunStore {
   async save(run: TridentRun): Promise<void> {
     await this.db.run(
       `UPDATE code_trident_runs
-          SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
+          SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
               worktree = ?, failure_reason = ?, workflow_run_id = ?,
               inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+              base_sha = ?, base_behind = ?,
               last_advanced_at = ?
         WHERE id = ?`,
       [
         run.phase,
         run.round,
+        checkpointRound(run.inner_checkpoint) ?? 0,
         run.ralph_round,
         run.branch,
         run.pr,
@@ -806,6 +1008,8 @@ export class TridentRunStore {
         run.inner_checkpoint,
         run.inner_verdict,
         run.harvested_at,
+        run.base_sha,
+        run.base_behind,
         this.now(),
         run.id,
       ],
@@ -831,10 +1035,11 @@ export class TridentRunStore {
     return this.db.transaction((tx) => {
       const res = tx.runSync(
         `UPDATE code_trident_runs
-            SET phase = ?, round = ?, ralph_round = ?, branch = ?, pr = ?,
+            SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+                base_sha = ?, base_behind = ?,
                 last_advanced_at = ?
           WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
             AND (subagent_status IS NOT 'crashed' OR ? = 'crashed')
@@ -849,6 +1054,7 @@ export class TridentRunStore {
         [
           run.phase,
           run.round,
+          checkpointRound(run.inner_checkpoint) ?? 0,
           run.ralph_round,
           run.branch,
           run.pr,
@@ -861,6 +1067,8 @@ export class TridentRunStore {
           run.inner_checkpoint,
           run.inner_verdict,
           run.harvested_at,
+          run.base_sha,
+          run.base_behind,
           this.now(),
           run.id,
           run.subagent_status,
@@ -905,6 +1113,8 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     ralph_round: row.ralph_round,
     max_ralph_rounds: row.max_ralph_rounds,
     branch: row.branch,
+    base_sha: row.base_sha,
+    base_behind: row.base_behind ?? null,
     pr: row.pr,
     merge_mode: row.merge_mode,
     subagent_run_id: row.subagent_run_id,
@@ -916,6 +1126,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     thread_id: row.thread_id,
     channel_kind: row.channel_kind,
     failure_reason: row.failure_reason,
+    brief_alert: row.brief_alert,
     workflow_run_id: row.workflow_run_id,
     inner_checkpoint: row.inner_checkpoint,
     inner_checkpoint_head: row.inner_checkpoint_head,
@@ -927,8 +1138,22 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     harvested_at: row.harvested_at,
     // Legacy rows predate migration 0123 and read NULL — no budget spent yet.
     crash_recoveries: row.crash_recoveries ?? 0,
+    // Legacy rows predate migration 0126 and read NULL — no retry budget spent.
+    infra_retries: row.infra_retries ?? 0,
     reviewed_head: row.reviewed_head,
     bound_pr: row.bound_pr,
     fenced_paths: row.fenced_paths,
+    parent_run_id: row.parent_run_id,
+    wave_task_id: row.wave_task_id,
   }
+}
+
+/**
+ * The slug a wave member runs under. The live-slug UNIQUE index (migration
+ * 0120) spans (project_slug, slug) on LIVE rows, so a member can never reuse
+ * its live parent's slug; this deterministic suffix dodges that collision and
+ * keeps members identifiable.
+ */
+export function waveChildSlug(parentSlug: string, taskId: string): string {
+  return `${parentSlug}--w${taskId}`
 }

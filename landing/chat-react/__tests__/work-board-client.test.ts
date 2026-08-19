@@ -232,6 +232,7 @@ describe('parseWorkBoardItems', () => {
           pr: null,
           verdict: null,
           failure_reason: null,
+          brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.',
         },
       },
       // A bogus phase_label → run_progress dropped, but the item survives.
@@ -244,6 +245,7 @@ describe('parseWorkBoardItems', () => {
     ])
     expect(out[0]!.run_progress?.phase_label).toBe('building')
     expect(out[0]!.run_progress?.round).toBe(2)
+    expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(out[1]!.run_progress).toBeUndefined()
   })
 })

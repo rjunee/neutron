@@ -96,6 +96,16 @@ export interface MiscCompositionInput {
      */
     on_run_terminal?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**
+     * #335 wiring — the terminal-build WAKE observer. Runs in the tick loop's
+     * composeTerminalHook chain for EVERY terminal run, after board reconcile +
+     * on_run_terminal. The composer wires buildTerminalBuildWakeObserver here —
+     * the SAME value it registers at both terminate() chokepoints — so a
+     * loop-reaped, a cancelled, and a codegen-cancelled build all wake the agent
+     * through one chain (§F6a). Claim-first (`agent_waked_at` single writer), so
+     * a second site observing the same row composes no duplicate turn.
+     */
+    on_terminal_wake?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
+    /**
      * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
      * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
      * run whose observable progress advanced (a checkpoint crossing
@@ -328,6 +338,26 @@ export interface MiscCompositionInput {
      * silent until the turn's single reply() lands. Omitted → no post.
      */
     chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
+    /**
+     * Derived-inline-activity batch dep for `work_board_list` — mirrors the HTTP
+     * surface's `derive_inline_active` dep (T3), so the agent reads the SAME
+     * evidence truth the clients do. Display-only: ONE O(1) evidence read per
+     * call, never a write, and it never gates, denies or delays a tool call.
+     * Omitted ⇒ raw stored-flag passthrough (unchanged behaviour).
+     */
+    derive_inline_active?: (
+      items: import('@neutronai/work-board/store.ts').WorkBoardItem[],
+      project_id: string,
+    ) => import('@neutronai/work-board/store.ts').WorkBoardItem[]
+    /**
+     * The composer-built card-removal chokepoint (cancel a live bound run →
+     * dispose the card's `plans/` doc by reason → hard-delete the row) — the
+     * SAME instance the HTTP DELETE behind the UI's X uses. When supplied, the
+     * `work_board_remove` agent tool registers, so an agent removal and a human
+     * removal share one path. Omitted → the tool is absent (legacy boots
+     * unchanged).
+     */
+    removal?: import('@neutronai/work-board/removal.ts').WorkBoardRemovalService
   }
   /**
    * Work Board Phase 2b — when supplied, the `tools` module registers the
@@ -357,6 +387,13 @@ export interface MiscCompositionInput {
      * assertable at the boot-wiring test instead of merely being a function.
      */
     merge_mode_probe: import('@neutronai/trident/git-mode.ts').GitModeProbe
+    /**
+     * The ALREADY-LANDED probe. Like `merge_mode_probe` this is the composer's
+     * to own, because it shells out through the credentialed host runner: it
+     * asks GitHub whether this card's branch already merged, so a lane refuses
+     * to rebuild work that is already on main.
+     */
+    landed_probe?: import('@neutronai/trident/board-dispatch.ts').DispatchLandedProbe
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number

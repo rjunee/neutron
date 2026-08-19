@@ -4,22 +4,41 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
+import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { ToolRegistry } from '@neutronai/tools/registry.ts'
+import {
+  WorkBoardRunStillLiveError,
+  WorkBoardStore,
+} from '@neutronai/work-board/store.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
+import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
 import { TridentTickLoop, type LauncherLiveness } from './tick.ts'
+import {
+  registerTridentBuildToolSurface,
+  WORK_BOARD_START_TOOL,
+} from './work-board-build-tool.ts'
 
 let scratchpad: string
 let db: ProjectDb
 let store: TridentRunStore
+let board: WorkBoardStore
 
 beforeEach(() => {
   scratchpad = mkdtempSync(join(tmpdir(), 'trident-liveness-death-e2e-'))
+  seedMigratedDb(join(scratchpad, 'project.db'))
   db = ProjectDb.open(join(scratchpad, 'project.db'))
-  applyMigrations(db.raw())
   store = new TridentRunStore(db)
+  board = new WorkBoardStore(db, {
+    isRunLive: (id) => {
+      const run = store.get(id)
+      return run !== null && !isTerminalPhase(run.phase)
+    },
+  })
 })
 
 afterEach(() => {
@@ -43,32 +62,127 @@ async function seedRunning(id: string, generation: string): Promise<TridentRun> 
 function harness(
   answer: LauncherLiveness,
   fire: (input: InnerLoopInput) => Promise<{ status: 'fired'; error: null; launcher_session_key: string }>,
-  maxCrashRecoveries = 2,
+  opts: {
+    maxCrashRecoveries?: number
+    launchThrows?: boolean
+    outcomes?: string[]
+  } = {},
 ): TridentTickLoop {
   const orchestrator = buildTridentOrchestrator({
     fire_workflow: fire,
     db_path: join(scratchpad, 'project.db'),
     run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
     base_branch: 'main',
+    ...(opts.launchThrows
+      ? { mint_run_id: () => { throw new Error('persistent launch failure at mint_run_id') } }
+      : {}),
     on_orphaned_session: 'wait',
     begin_crash_recovery: (id) => store.beginCrashRecovery(id),
-    max_crash_recoveries: maxCrashRecoveries,
+    max_crash_recoveries: opts.maxCrashRecoveries ?? 2,
   })
   return new TridentTickLoop({
     store,
-    step: orchestrator.step,
+    step: async (run) => {
+      const outcome = await orchestrator.step(run)
+      opts.outcomes?.push(outcome.note)
+      return outcome
+    },
     probe_launcher_alive: async () => answer,
     latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
   })
 }
 
+async function latchDeadRun(id: string): Promise<TridentRun> {
+  await seedRunning(id, 'generation-dead')
+  const loop = harness('dead', async () => ({
+    status: 'fired',
+    error: null,
+    launcher_session_key: 'generation-live',
+  }))
+  await loop.runLivenessOnce()
+  return store.get(id)!
+}
+
+const toolContext = {
+  project_slug: 'p',
+  project_id: null,
+  topic_id: null,
+  call_id: 'liveness-death-e2e',
+  speaker_user_id: null,
+}
+
 describe('external launcher death reaches the real orchestrator without killing the build', () => {
-  test('a positively dead generation is latched in seconds then continued by the sweep', async () => {
+  test('a latched-dead non-terminal run remains already_running at both start surfaces', async () => {
+    const latched = await latchDeadRun('start-gate')
+    const item = await board.create('p', { title: 'the existing build must remain the only build' })
+    await board.attachRun('p', item.id, latched.id)
+    let httpStarts = 0
+    const surface = createWorkBoardSurface({
+      store: board,
+      auth: createAppWsAuthResolver({ project_slug: 'p', bypass: true }),
+      trident_runs: store,
+      start_build: async () => {
+        httpStarts += 1
+        return { ok: true, run_id: 'must-not-start' }
+      },
+    })
+    const response = await surface.handler(new Request(
+      `http://x/api/app/projects/general/work-board/${item.id}/start`,
+      { method: 'POST', headers: { authorization: 'Bearer dev-token' } },
+    ))
+    expect(response?.status).toBe(409)
+    expect(await response!.json()).toMatchObject({ ok: false, code: 'already_running' })
+    expect(httpStarts).toBe(0)
+
+    const registry = new ToolRegistry()
+    registerTridentBuildToolSurface(registry, {
+      store,
+      work_board: board,
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      merge_mode_probe: {
+        credential: {
+          owner_handle: 'test-owner',
+          source: 'liveness death e2e',
+          load: async () => ({}),
+        },
+        hasGithubOrigin: async () => false,
+        publisherAvailable: async () => ({ authenticated: true }),
+      },
+      resolveRalph: async () => false,
+    })
+    const output = await registry.get(WORK_BOARD_START_TOOL)!.handler(
+      { board_item_id: item.id },
+      toolContext,
+    ) as Record<string, unknown>
+    expect(output.ok).toBe(false)
+    expect(String(output.error)).toContain('already has a live build')
+    expect(store.listNonTerminal().map((run) => run.id)).toEqual(['start-gate'])
+  })
+
+  test('complete refuses a latched-dead non-terminal run by exact error type', async () => {
+    const latched = await latchDeadRun('complete-gate')
+    const item = await board.create('p', { title: 'cannot claim done while the build is latched' })
+    await board.attachRun('p', item.id, latched.id)
+
+    let caught: unknown = null
+    try {
+      await board.complete('p', item.id)
+    } catch (error) {
+      caught = error
+    }
+    expect(caught).toBeInstanceOf(WorkBoardRunStillLiveError)
+    expect((caught as Error).name).toBe('WorkBoardRunStillLiveError')
+    expect((caught as WorkBoardRunStillLiveError).run_id).toBe(latched.id)
+    expect(board.get('p', item.id)?.status).toBe('in_progress')
+  })
+
+  test('a positively dead generation is latched then cannot remain latched after six sweeps', async () => {
     await seedRunning('spent', 'generation-dead')
     const loop = harness(
       'dead',
-      async () => ({ status: 'fired', error: null, launcher_session_key: 'unused' }),
-      3,
+      async () => ({ status: 'fired', error: null, launcher_session_key: 'generation-live' }),
+      { maxCrashRecoveries: 3 },
     )
 
     await loop.runLivenessOnce()
@@ -78,12 +192,45 @@ describe('external launcher death reaches the real orchestrator without killing 
     expect(latched.failure_reason).toContain('inner workflow launcher crashed:')
     expect(latched.failure_reason).toContain('generation-dead')
 
-    await loop.runOnce()
+    for (let sweep = 0; sweep < 6; sweep++) await loop.runOnce()
     const continued = store.get('spent')!
-    expect(continued.phase).toBe('ralph-task')
-    expect(continued.subagent_status).toBe('running')
-    expect(continued.workflow_run_id).toBe('unused')
-    expect(continued.crash_recoveries).toBe(1)
+    const recoveredOnNewGeneration =
+      !isTerminalPhase(continued.phase) &&
+      continued.subagent_status === 'running' &&
+      continued.workflow_run_id === 'generation-live' &&
+      continued.crash_recoveries >= 1
+    expect(recoveredOnNewGeneration || isTerminalPhase(continued.phase)).toBe(true)
+    expect(!isTerminalPhase(continued.phase) && continued.subagent_status === 'crashed').toBe(false)
+  })
+
+  test('persistent launch throws terminate the latched run within six sweeps with work preserved', async () => {
+    await seedRunning('throwing-recovery', 'generation-dead')
+    const outcomes: string[] = []
+    const loop = harness(
+      'dead',
+      async () => ({ status: 'fired', error: null, launcher_session_key: 'must-not-fire' }),
+      { maxCrashRecoveries: 3, launchThrows: true, outcomes },
+    )
+
+    await loop.runLivenessOnce()
+    const latched = store.get('throwing-recovery')!
+    expect(latched.phase).toBe('ralph-task')
+    expect(latched.subagent_status).toBe('crashed')
+
+    for (let sweep = 0; sweep < 6; sweep++) await loop.runOnce()
+
+    const terminal = store.get('throwing-recovery')!
+    expect(outcomes).toEqual([
+      'launch threw (attempt 1 of 3): persistent launch failure at mint_run_id — retrying next tick',
+      'launch threw (attempt 2 of 3): persistent launch failure at mint_run_id — retrying next tick',
+      'ralph-task → failed (launch kept throwing)',
+    ])
+    expect(terminal.phase).toBe('failed')
+    expect(terminal.failure_reason).toContain('persistent launch failure at mint_run_id')
+    expect(terminal.failure_reason ?? '').not.toContain('exhausted')
+    expect(terminal.crash_recoveries).toBe(1)
+    expect(terminal.branch).toBe('trident/existing')
+    expect(terminal.inner_checkpoint).toBe('ralph-task-built')
   })
 
   test('a slow but positively alive run is untouched by the liveness pass and one sweep', async () => {

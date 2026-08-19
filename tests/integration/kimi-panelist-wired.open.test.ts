@@ -30,7 +30,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
@@ -59,6 +59,12 @@ beforeEach(() => {
       KIMI_API_KEY: undefined,
     },
   })
+  // Once per test, here — not inside the helpers below. Both of them open the
+  // SAME database, and more than one of them runs in most tests: the point of
+  // several of these tests is that a key stored through one helper is still
+  // there when the other reads it. A per-helper seed would either wipe that or
+  // (with `seedMigratedDb`'s non-empty refusal) throw.
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
 })
 
 afterEach(() => {
@@ -68,7 +74,6 @@ afterEach(() => {
 /** File a key under the `kimi` service exactly as the settings pane does. */
 async function storeKimiKeyInSettings(value: string): Promise<void> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const secrets = new SecretsStore({ data_dir: process.env['NEUTRON_HOME']!, db })
   const creds = new ProjectCredentialStore(db, { crypto: secrets })
   await creds.set(asOwnerHandle(SLUG), {
@@ -81,7 +86,6 @@ async function storeKimiKeyInSettings(value: string): Promise<void> {
 
 async function resolverFromComposer(): Promise<() => boolean> {
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composition = await buildOpenGraphComposer({ env: process.env })({
     db,
     project_slug: SLUG,

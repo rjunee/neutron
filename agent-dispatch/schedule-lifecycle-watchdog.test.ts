@@ -20,7 +20,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   SystemEventsStore,
@@ -114,8 +114,8 @@ describe('scheduleDispatchLifecycleWatchdog (F4)', () => {
 
   test('Blocker-C: a stuck dispatched subagent produces a watchdog_alert system_event', async () => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-dispatch-o4-'))
+    seedMigratedDb(join(tmp, 'project.db'))
     db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
     // Wire the ambient O4 sink exactly as the gateway boot does.
     registerSystemEventSink(new SystemEventsStore({ db }))
 

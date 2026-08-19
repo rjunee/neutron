@@ -236,9 +236,29 @@ export function saveRegistry(path: string, registry: ReplRegistry): void {
   atomicWriteFileSync(path, serializeRegistry(registry))
 }
 
-/** Read the record for `sessionKey`, or undefined. */
+/**
+ * Read the record for `sessionKey`, or undefined.
+ *
+ * `model` IS COERCED HERE, AT THE ONE READER, AND NOT AT THE EIGHT CALL SITES.
+ * The field is declared `model?: string` above and never schema-checked, while
+ * every consumer spends it the same way — `record?.model ?? getBestModel()`
+ * (`pool.ts:176` is the shared one) — straight into a child's `--model` argv. A
+ * `??` only catches `null`/`undefined`, so a row carrying a number or an object
+ * (a hand-edit, a foreign build, a partial write) would be handed to the CLI
+ * verbatim by seven profiles that have no floor in front of them. Reducing an
+ * UNUSABLE value to absent makes every one of those `??` fall back to the best
+ * model, which is what each of them already meant.
+ *
+ * The record is only copied on that abnormal branch, so the normal read still
+ * returns the loaded object untouched.
+ */
 export function getRecord(path: string, sessionKey: string): ReplRegistryRecord | undefined {
-  return loadRegistry(path)[sessionKey]
+  const record = loadRegistry(path)[sessionKey]
+  if (record === undefined) return undefined
+  if (record.model === undefined) return record
+  if (typeof record.model === 'string' && record.model.trim() !== '') return record
+  const { model: _unusable, ...rest } = record
+  return rest
 }
 
 // Per-process monotonic counter so two sidecars written in the SAME

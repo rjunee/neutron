@@ -38,6 +38,8 @@
 #   in  NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY `<bytes>:<fnv32>` for a non-parts brief AS
 #                                       THE WORKFLOW COMPOSED IT. Required only on the
 #                                       chunked bridge-agent fallback path.
+#   in  NEUTRON_CODEX_BUILD_STAGE_SCRIPT optional append-only stage-ledger writer.
+#                                       Best-effort; it can never change build exit.
 #   in  CODEX_HOME                      the per-project subscription credential dir.
 #   in  CODEX_BUILD_MODEL               which GPT tier to build on. A DIFFERENT knob
 #                                       from the reviewer's `CODEX_REVIEW_MODEL` on
@@ -407,11 +409,43 @@ MERGE_MODE='pr'
 [ "${3:-}" = 'local' ] && MERGE_MODE='local'
 : "${CODEX_HOME:=}"
 WORKTREE="$(pwd)"
+
+# Durable build timing stamps. Best-effort by contract — stage-stamp.sh always
+# exits 0; `|| true` also protects the wrapper from a replacement recorder.
+stamp_stage() {
+  if [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+    bash "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" "$1" || true
+  fi
+}
+
+stamp_stage wrapper-start
+
+BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
 # local branch tip, and the remote branch tip — one per line. Populated just before
 # the launch below. A head found in this set is not this build's commit, whatever the
 # transcript says. See the header for the re-entry case that needs all three.
 PRE_EXISTING_HEADS=''
+
+# Compose the environment for EVERY spawned build child at the dispatch boundary.
+# The wrapper itself may inherit the gateway's live data-home selectors; copying those
+# into an unreviewed build is the incident this boundary closes. The child gets a home
+# inside ITS OWN isolated worktree, created immediately before launch, while the
+# wrapper's environment remains untouched. `env -u` removes the two fallback keys as
+# properties — an empty value would still be an inherited selector to future readers.
+run_build_child() {
+  # The data home is deliberately untracked runtime state. Its own ignore file keeps
+  # the database/ownership marker from making every otherwise-clean disposable
+  # worktree look dirty to worktree-cleanup.sh.
+  if ! mkdir -p "$BUILD_DATA_HOME" || ! printf '*\n' > "$BUILD_DATA_HOME/.gitignore"; then
+    echo "CODEX_BUILD_DATA_HOME_FAILED: could not create the isolated build data home at $BUILD_DATA_HOME. DEFERRED." >&2
+    return 1
+  fi
+  env -u OWNER_HOME -u NEUTRON_DB_PATH -u GH_TOKEN -u GITHUB_TOKEN \
+    NEUTRON_HOME="$BUILD_DATA_HOME" "$@"
+}
 
 # A full-length lowercase-hex sha, or the empty string. Charset AND length, because
 # `git rev-parse --verify HEAD` in a repo with no commits echoes the literal `HEAD`
@@ -506,6 +540,69 @@ remote_tip() {
 # whose remote will not answer has a baseline nobody measured.
 has_origin() {
   git config --get remote.origin.url >/dev/null 2>&1
+}
+
+# Print the position and path of the first OTHER worktree holding this branch.
+# Git documents the first porcelain entry as the shared main working tree; callers
+# need that position so they can refuse to detach it.
+branch_holder() {
+  local want worktree_real
+  want="refs/heads/$1"
+  worktree_real="$(pwd -P)"
+  git worktree list --porcelain | awk \
+    -v want="$want" -v worktree="$WORKTREE" -v worktree_real="$worktree_real" '
+      /^worktree / { path = substr($0, 10); n++; next }
+      /^branch / {
+        if (substr($0, 8) == want && path != worktree && path != worktree_real) {
+          print n " " path
+          exit
+        }
+      }
+    '
+}
+
+# Return 0 when a process cwd is in the holder, 1 when none is provable, and 2 when
+# liveness cannot be verified. Unverifiable REFUSES: a wrong detach puts two rounds
+# on one branch, while a wrong refusal costs only the deferral we already have today.
+holder_is_live() {
+  local holder holder_real out p cwd line
+  holder="$1"
+  holder_real="$(cd "$holder" 2>/dev/null && pwd -P || printf '%s' "$holder")"
+
+  if [ -d /proc ]; then
+    for p in /proc/[0-9]*/cwd; do
+      cwd="$(readlink "$p" 2>/dev/null)" || continue
+      case "$cwd" in
+        "$holder"|"$holder"/*|"$holder_real"|"$holder_real"/*) return 0 ;;
+      esac
+    done
+    return 1
+  fi
+
+  if command -v lsof >/dev/null 2>&1; then
+    out="${TMPDIR:-/tmp}/trident-codex-build-lsof.$$"
+    if ! bounded "$out" 10 lsof -Fn -d cwd; then
+      rm -f "$out"
+      return 2
+    fi
+    while IFS= read -r line; do
+      case "$line" in
+        n*)
+          cwd="${line#n}"
+          case "$cwd" in
+            "$holder"|"$holder"/*|"$holder_real"|"$holder_real"/*)
+              rm -f "$out"
+              return 0
+              ;;
+          esac
+          ;;
+      esac
+    done < "$out"
+    rm -f "$out"
+    return 1
+  fi
+
+  return 2
 }
 
 # Is this a `pr`-mode run? See THE MERGE MODE DECIDES WHAT MUST BE TRUE in the header:
@@ -676,6 +773,19 @@ BRIEF_PARTS="${NEUTRON_CODEX_BUILD_BRIEF_PARTS:-}"
 fnv_receipt() {
   perl -e 'use integer; open my $f, "<:raw", $ARGV[0] or exit 1; local $/; my $d = <$f>; my $h = 0x811c9dc5; for my $b (unpack "C*", $d) { $h = ($h ^ $b) & 0xffffffff; $h = ($h * 0x01000193) & 0xffffffff; } printf "%d:%08x", length($d), $h' "$1"
 }
+record_brief_alert() {
+  if [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] \
+    && [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ]; then
+    # Best-effort observability must not weaken the refusal or leak the
+    # project database path through sqlite diagnostics copied into failure_reason.
+    bash "${NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT}" \
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB}" \
+      "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID}" \
+      brief_alert "$1" 2>/dev/null \
+      || echo "CODEX_BUILD_BRIEF_ALERT_FAILED" >&2
+  fi
+}
 if [ -n "$BRIEF_PARTS" ]; then
   if [ -z "$BRIEF_FILE" ]; then
     echo "CODEX_BUILD_NO_BRIEF: NEUTRON_CODEX_BUILD_BRIEF_PARTS is set but NEUTRON_CODEX_BUILD_BRIEF_FILE is unset — there is nowhere to assemble the brief. DEFERRED." >&2
@@ -695,7 +805,9 @@ if [ -n "$BRIEF_PARTS" ]; then
     [ -z "$part" ] && continue
     n=$((n + 1))
     if [ ! -s "$part" ]; then
-      echo "CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED." >&2
+      brief_alert_msg="CODEX_BUILD_BRIEF_PART_MISSING: brief part $part is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED."
+      record_brief_alert "$brief_alert_msg"
+      echo "$brief_alert_msg" >&2
       exit 3
     fi
     receipt="$(printf '%s\n' "$PART_INTEGRITY" | sed -n "${n}p")"
@@ -705,7 +817,9 @@ if [ -n "$BRIEF_PARTS" ]; then
     fi
     measured="$(fnv_receipt "$part" 2>/dev/null || true)"
     if [ "$measured" != "$receipt" ]; then
-      echo "CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+      brief_alert_msg="CODEX_BUILD_BRIEF_PART_CORRUPT: brief part $part measures ${measured:-<unreadable>} but its receipt is ${receipt} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote."
+      record_brief_alert "$brief_alert_msg"
+      echo "$brief_alert_msg" >&2
       exit 3
     fi
     cat "$part" >> "$BRIEF_FILE"
@@ -741,7 +855,9 @@ if [ -z "$BRIEF_PARTS" ]; then
   # would round and every checksum after the first byte would be wrong).
   BRIEF_MEASURED="$(fnv_receipt "$BRIEF_FILE" 2>/dev/null || true)"
   if [ "$BRIEF_MEASURED" != "$BRIEF_INTEGRITY" ]; then
-    echo "CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote." >&2
+    brief_alert_msg="CODEX_BUILD_BRIEF_CORRUPT: the brief in $BRIEF_FILE measures ${BRIEF_MEASURED:-<unreadable>} but the workflow composed ${BRIEF_INTEGRITY} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote."
+    record_brief_alert "$brief_alert_msg"
+    echo "$brief_alert_msg" >&2
     exit 3
   fi
 fi
@@ -784,6 +900,106 @@ if [ "$codex_auth_ok" -ne 1 ]; then
   exit 3
 fi
 
+# ── BIND THE WORKTREE TO THE RUN'S BRANCH, BEFORE ANY TOKEN IS SPENT ──────
+# A failed bind is DEFERRED here, before codex launches, so it costs a round but no
+# tokens. This is the measured d5c1e219 incident: a worktree-wf_ auto branch plus a
+# leftover local run branch made the prompt's `git switch -c` collide, and the build
+# committed on the branch the run could not merge.
+# Runs c5c5fb4a/ad6ac515 exposed the other collision: a dead prior-round holder. Detach
+# it in place, never destroy it; the accepted probe/detach race can only admit this
+# run's earlier round, whose plausible writers the immediately preceding probe checked.
+LAUNCH_HEAD_BEFORE_BIND="$(sha_or_empty "$(git rev-parse --verify HEAD 2>/dev/null || true)")"
+if [ -n "$BRANCH" ]; then
+  current_branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null || true)"
+  if [ "$current_branch" != "$BRANCH" ]; then
+    bind_err="${TMPDIR:-/tmp}/trident-codex-build-bind.$$"
+    rm -f "$bind_err"
+    if git show-ref --verify --quiet "refs/heads/$BRANCH"; then
+      if ! git switch "$BRANCH" 2>"$bind_err"; then
+        bind_n=1
+        bind_ok=0
+        while [ "$bind_n" -le 3 ]; do
+          entry="$(branch_holder "$BRANCH")"
+          [ -n "$entry" ] || break
+          holder_index="${entry%% *}"
+          holder="${entry#* }"
+
+          if [ "$holder_index" -eq 1 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in the SHARED main checkout '${holder}' — refusing to detach the operator's own worktree. DEFERRED before any tokens were spent." >&2
+            exit 3
+          fi
+
+          if [ ! -d "$holder" ]; then
+            git worktree prune >/dev/null 2>&1
+            if git switch "$BRANCH" 2>"$bind_err"; then
+              bind_ok=1
+              break
+            fi
+            bind_n=$((bind_n + 1))
+            continue
+          fi
+
+          holder_is_live "$holder"
+          holder_live=$?
+          if [ "$holder_live" -eq 0 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in worktree '${holder}' and a LIVE process is standing in it — refusing to detach a live worktree; that is how two rounds end up committing to one branch. DEFERRED before any tokens were spent." >&2
+            exit 3
+          elif [ "$holder_live" -eq 2 ]; then
+            rm -f "$bind_err"
+            echo "CODEX_BUILD_BRANCH_UNBOUND: the run's branch '${BRANCH}' is checked out in worktree '${holder}' and this host offers no way to prove nothing live is standing in it (no /proc, no usable lsof) — refusing to detach on a guess. DEFERRED before any tokens were spent." >&2
+            exit 3
+          fi
+
+          if ! git -C "$holder" checkout --detach 2>"$bind_err"; then
+            break
+          fi
+          echo "CODEX_BUILD_BRANCH_RECLAIMED: worktree '${holder}' held '${BRANCH}' with no live process standing in it — detached it in place (files preserved for post-mortem) and freed the branch. Nothing was killed and nothing was deleted." >&2
+          if git switch "$BRANCH" 2>"$bind_err"; then
+            bind_ok=1
+            break
+          fi
+          bind_n=$((bind_n + 1))
+        done
+
+        if [ "$bind_ok" -ne 1 ]; then
+          bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+          rm -f "$bind_err"
+          echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+          exit 3
+        fi
+      fi
+    elif is_pr_mode && has_origin; then
+      _tip="$(remote_tip "$BRANCH" 3)"
+      if [ "$_tip" = 'unknown' ]; then
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: git ls-remote never answered, so this worktree cannot know whether the run's branch '${BRANCH}' exists remotely before creating it locally. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      elif [ -n "$_tip" ]; then
+        bounded /dev/null 30 env GIT_TERMINAL_PROMPT=0 git fetch --no-tags origin "refs/heads/$BRANCH" || true
+        if ! git switch -c "$BRANCH" "$_tip" 2>"$bind_err"; then
+          bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+          rm -f "$bind_err"
+          echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not check out the run's branch '${BRANCH}' at remote tip '${_tip}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+          exit 3
+        fi
+      elif ! git switch -c "$BRANCH" 2>"$bind_err"; then
+        bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+        rm -f "$bind_err"
+        echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not create the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+        exit 3
+      fi
+    elif ! git switch -c "$BRANCH" 2>"$bind_err"; then
+      bind_detail="$(head -c 800 "$bind_err" 2>/dev/null || true)"
+      rm -f "$bind_err"
+      echo "CODEX_BUILD_BRANCH_UNBOUND: this worktree is on '${current_branch}' and could not create the run's branch '${BRANCH}': ${bind_detail}. DEFERRED before any tokens were spent — a build here would commit on a branch the run does not merge." >&2
+      exit 3
+    fi
+    rm -f "$bind_err"
+  fi
+fi
+
 # ── Run the build SYNCHRONOUSLY (never backgrounded) ──────────────────────────
 # The prompt goes in on STDIN (`codex exec -`), never as an argv entry: the brief
 # carries the whole task text and a long one in a single argument can exceed the OS
@@ -794,8 +1010,10 @@ fi
 # the build's, and the trailer's "did it commit" question is answered by comparing
 # against this set. All three tips, because the brief tells a re-entry to
 # `git switch <branch>` and that moves HEAD onto the previous round's commit without
-# producing one (header: THE TWO SHAS).
+# producing one (header: THE TWO SHAS). After the bind, HEAD is the branch tip; retain
+# the pre-bind parked base sha too so it can never be reported as this build's commit.
 for _pre in \
+  "$LAUNCH_HEAD_BEFORE_BIND" \
   "$(git rev-parse --verify HEAD 2>/dev/null || true)" \
   "$(git rev-parse --verify "refs/heads/${BRANCH}" 2>/dev/null || true)"; do
   _pre="$(sha_or_empty "$_pre")"
@@ -855,10 +1073,13 @@ fi
 # a credential the thing it stands in for cannot see, and would "prove" a publish path
 # that does not exist in production.
 if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
-  if <"$BRIEF_FILE" env -u GH_TOKEN -u GITHUB_TOKEN sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+  stamp_stage codex-exec-start
+  if <"$BRIEF_FILE" run_build_child sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+    stamp_stage codex-exec-end
     emit_trailer ok
     exit 0
   fi
+  stamp_stage codex-exec-end
   emit_trailer failed
   echo "CODEX_BUILD_CALL_FAILED: the codex build call failed. DEFERRED — no build happened." >&2
   exit 5
@@ -932,11 +1153,16 @@ fi
 # reading its own `/proc/self/environ`. Both, because the exclude covers the whole
 # family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
 # matter absolutely.
-if <"$BRIEF_FILE" env -u GH_TOKEN -u GITHUB_TOKEN \
+# Codex duration is the exact durable codex-exec-start→codex-exec-end pair.
+stamp_stage codex-exec-start
+
+if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
+  stamp_stage codex-exec-end
   emit_trailer ok
   exit 0
 fi
+stamp_stage codex-exec-end
 emit_trailer failed
 echo "CODEX_BUILD_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — the build did not complete." >&2
 exit 5

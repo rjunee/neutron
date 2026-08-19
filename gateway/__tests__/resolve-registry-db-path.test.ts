@@ -14,6 +14,22 @@
  * These tests pin all four resolution tiers so future drift is
  * detected at unit-test latency rather than during an instance's first
  * boot.
+ *
+ * `resolveOwnerHome` — THE OTHER RESOLVER IN THE SAME FILE — is pinned at the
+ * bottom, and it was not always. This suite's docblock advertised itself as
+ * covering "all four resolution tiers", which was true of the function it
+ * named and read as true of the file. `boot-listener-registry.ts` exports a
+ * SECOND resolver with two more tiers, and dropping `.trim()` from BOTH of them
+ * left this suite at **8 pass / 0 fail**. Its whitespace behaviour was pinned
+ * only in `open/__tests__/owner-slug-agreement.test.ts`, three packages away,
+ * as part of a cross-reader agreement argument.
+ *
+ * That is the same shape as the `migrations/db-path.ts` gap fixed in the same
+ * change, and the same shape as the defect the two of them are about: a claim
+ * whose scope is wider than the check behind it. A reader who edits this file
+ * and runs the tests beside it must see the failure; "there is a suite
+ * somewhere that would have caught this" is not a property anyone can rely on
+ * at the moment they need it.
  */
 
 import { describe, expect, test, spyOn } from 'bun:test'
@@ -21,6 +37,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 import { resolveRegistryDbPath } from '../index.ts'
+import { resolveOwnerHome } from '../boot-listener-registry.ts'
 
 describe('resolveRegistryDbPath', () => {
   test('tier 1 — NEUTRON_REGISTRY_DB_PATH wins', () => {
@@ -171,6 +188,59 @@ describe('resolveRegistryDbPath', () => {
       }
     } finally {
       warnSpy.mockRestore()
+    }
+  })
+})
+
+describe('resolveOwnerHome — the second resolver in this file, blank is unset on both tiers', () => {
+  const BLANKS: ReadonlyArray<string> = ['', ' ', '   ', '\t', '\n']
+  const DEFAULT_OWNER_HOME = join(homedir(), '.local', 'share', 'neutron')
+
+  test('tier 1 — a REAL OWNER_HOME wins, verbatim', () => {
+    // CONTROL for the fall-through tests below: they must pass because a blank
+    // was rejected, not because this tier stopped being read at all.
+    expect(resolveOwnerHome({ OWNER_HOME: '/srv/owner' } as NodeJS.ProcessEnv)).toBe('/srv/owner')
+    // A padded path is a REAL path — the predicate trims, the return does not.
+    expect(resolveOwnerHome({ OWNER_HOME: ' /srv/padded ' } as NodeJS.ProcessEnv)).toBe(
+      ' /srv/padded ',
+    )
+  })
+
+  test('tier 1 — a BLANK OWNER_HOME falls through to NEUTRON_DB_PATH', () => {
+    for (const blank of BLANKS) {
+      expect(
+        resolveOwnerHome({
+          OWNER_HOME: blank,
+          NEUTRON_DB_PATH: '/srv/inst/db/project.db',
+        } as NodeJS.ProcessEnv),
+      ).toBe('/srv/inst')
+    }
+  })
+
+  test('tier 2 — a BLANK NEUTRON_DB_PATH does not resolve the owner home to the process CWD', () => {
+    // The concrete defect: `dirname(dirname('  '))` is `'.'`, so a blank pin
+    // silently answered "the owner's data lives wherever this process was
+    // started" — which for a service is whatever directory the service manager
+    // happened to choose.
+    for (const blank of BLANKS) {
+      const got = resolveOwnerHome({ NEUTRON_DB_PATH: blank } as NodeJS.ProcessEnv)
+      expect(got).toBe(DEFAULT_OWNER_HOME)
+      expect(got).not.toBe('.')
+    }
+  })
+
+  test('tier 2 — a REAL NEUTRON_DB_PATH still resolves two levels up', () => {
+    // CONTROL for the test above.
+    expect(
+      resolveOwnerHome({ NEUTRON_DB_PATH: '/srv/inst/db/project.db' } as NodeJS.ProcessEnv),
+    ).toBe('/srv/inst')
+  })
+
+  test('BOTH blank resolves to the documented default', () => {
+    for (const blank of BLANKS) {
+      expect(
+        resolveOwnerHome({ OWNER_HOME: blank, NEUTRON_DB_PATH: blank } as NodeJS.ProcessEnv),
+      ).toBe(DEFAULT_OWNER_HOME)
     }
   })
 })

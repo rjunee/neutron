@@ -281,10 +281,12 @@ import { buildLlmNudgeRater } from '@neutronai/gateway/proactive/idle-nudge-swee
 import { buildButtonStoreProactiveSink } from '@neutronai/gateway/proactive/button-store-sink.ts'
 import { buildOwnerIdleTopicEnumerator } from '@neutronai/gateway/proactive/idle-topic-enumeration.ts'
 import { webTopicId } from '@neutronai/gateway/http/web-topic-id.ts'
+import { buildTerminalBuildWakeObserver } from '@neutronai/gateway/proactive/terminal-build-wake.ts'
 import {
   buildWorkWakeupLoop,
   type WakeupProjectWork,
 } from '@neutronai/gateway/proactive/work-wakeup.ts'
+import { selectWakeupWork } from '@neutronai/gateway/proactive/work-wakeup-selection.ts'
 import { resolveLocalTimezone } from '@neutronai/gateway/proactive/local-timezone.ts'
 import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 
@@ -477,6 +479,7 @@ import {
   CodexCredentialService,
   codexExecutorAvailability,
 } from '@neutronai/trident/codex-credential.ts'
+import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import {
   defaultGitModeProbe,
   detectMergeMode,
@@ -504,8 +507,10 @@ import {
 } from './project-rail.ts'
 import { turnIsActive } from './wiring/typing-catchup.ts'
 import { WorkBoardSpecDocService } from '@neutronai/work-board/spec-doc-service.ts'
+import { WorkBoardRemovalService } from '@neutronai/work-board/removal.ts'
 import {
   dispatchBoardBoundBuild,
+  makeDispatchLandedProbe,
   type TridentBoardBinder,
 } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
@@ -516,6 +521,11 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { buildTridentTerminator, type TridentTerminator } from '@neutronai/trident/terminate.ts'
 import type { WorkBoardStartResult } from '@neutronai/gateway/http/work-board-surface.ts'
 import { formatWorkBoardFragment } from '@neutronai/work-board/fragment.ts'
+import {
+  isInlineEvidenceEdge,
+  makeInlineActivityDeriver,
+  type InlineEvidenceReader,
+} from '@neutronai/work-board/inline-activity.ts'
 import { buildNexusReaderSeam } from './wiring/nexus-reader-seam.ts'
 import { InMemoryConsumedTokens } from '@neutronai/runtime/consumed-tokens-in-memory.ts'
 import type {
@@ -872,10 +882,30 @@ export function buildOpenGraphComposer(
     // ISSUES #421 — Neutron Connect. Resolved HERE (early) so both halves share
     // one origin: the owner-side invite link the app renders, and the
     // data-locality disclosure the invitee sees before accepting.
+    //
+    // THE PORT COMES FROM THE VALIDATED CONFIG AND NOWHERE ELSE. This was
+    // `options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787)`, which
+    // re-read the raw environment BELOW the one place that validates it and then
+    // ran `Number()` over the result. `??` falls through on `undefined` but not
+    // on `''`, so a blank `NEUTRON_PORT` reached `Number('')` — which is **0**,
+    // not `NaN` — and the invite advertised `http://127.0.0.1:0` while the
+    // listener bound 7800 (`gateway/index.ts` maps an unset config port to an
+    // absent env and takes `DEFAULT_LISTEN_PORT`). Measured on the pre-fix tree:
+    // `NEUTRON_PORT=''` -> `connectBase=http://127.0.0.1:0`. One variable, two
+    // answers, in one boot — and the answer the OWNER hands to somebody else was
+    // the wrong one, which is the half that cannot be discovered by looking at
+    // this box.
+    //
+    // The fallback default moves 8787 -> `DEFAULT_LISTEN_PORT` in the same
+    // breath, because 8787 is a port nothing in this tree ever listens on: with
+    // `NEUTRON_PORT` absent the listener binds 7800 and the invite said 8787.
+    // The sibling site in THIS FILE that answers the same question already reads
+    // `options.config?.port ?? DEFAULT_LISTEN_PORT` (the reconnect handoff), so
+    // this is two sites in one file agreeing rather than a new convention.
     const connectBaseUrlResolved = resolveConnectBaseUrlWithSource({
       env,
       bindHost,
-      port: options.config?.port ?? Number(env['NEUTRON_PORT'] ?? 8787),
+      port: options.config?.port ?? DEFAULT_LISTEN_PORT,
     })
     const connectBaseUrl = connectBaseUrlResolved.base_url
     // This install's OWN Ed25519 identity: it signs the collaborator bearers it
@@ -989,6 +1019,21 @@ export function buildOpenGraphComposer(
             project_slug,
           })
         : undefined
+    // THE SAME JOURNAL, NO CHAT SEAM — for the timer-driven nudge substrate. It
+    // shares `PROFILE_WARM_CHAT`, so it carries `frontier_model_floor` and its
+    // clamp was landing on stderr only. `deliver: () => undefined` is the sink's
+    // documented no-bubble path (`makeSubstrateNoticeSinks`'s `bubble` returns on
+    // an unresolved deliver), so the clamp is journalled to `system_events` — a
+    // best-effort write, as everywhere else this sink is used — while the lane keeps
+    // its promise not to interrupt his chat from a timer.
+    const backgroundNoticeSinks =
+      llmPool !== null
+        ? makeSubstrateNoticeSinks({
+            deliver: () => undefined,
+            owner_topic_id: ownerNoticeTopic,
+            project_slug,
+          })
+        : undefined
     const liveAgentRecoveredReplySink =
       llmPool !== null
         ? makeRecoveredReplySink({
@@ -1021,6 +1066,7 @@ export function buildOpenGraphComposer(
       prewarmSubstrate,
       ...conversationalProviderCtx,
       ...(liveAgentNoticeSinks !== undefined ? { liveAgentNoticeSinks } : {}),
+      ...(backgroundNoticeSinks !== undefined ? { backgroundNoticeSinks } : {}),
       ...(liveAgentRecoveredReplySink !== undefined
         ? {
             liveAgentRecoveredReplySink,
@@ -1033,6 +1079,7 @@ export function buildOpenGraphComposer(
       llmCallSubstrate,
       liveAgentSubstrate,
       makeComposeSubstrate,
+      reminderComposeSubstrate,
       makeEphemeralSubstrate,
       makeWarmFireSubstrate,
       prewarmReady,
@@ -1596,10 +1643,21 @@ export function buildOpenGraphComposer(
     // what this comment used to claim and what the wiring below used to do.
     // `ensureMaterialized` self-heals the global file if a stored credential
     // exists but the on-disk auth.json is missing (fresh process / wiped tmp).
+    // The owner may connect more than one ChatGPT seat. Each seat owns ONE
+    // directory for its whole life (`.codex` for the first, `.codex/accounts/<slot>`
+    // for the rest) and selection is a pointer at one of them, resolved per run —
+    // never a copy of a bundle between dirs, because the codex CLI rotates the
+    // refresh token on refresh and two live copies of one account revoke each
+    // other. With a single seat this selects the same credential in the same place
+    // it has always been, which is why there is no flag and nothing to migrate.
     const codexHome = resolveCodexHome({ owner_home })
     const codexCredentialService = new CodexCredentialService({
       store: projectCredentialStore,
       codexHome,
+      rotation: new SqliteCodexRotationStore(db),
+      log: (event, fields) => {
+        log.info(event, fields)
+      },
     })
     try {
       codexCredentialService.ensureMaterialized(asOwnerHandle(project_slug))
@@ -2071,6 +2129,7 @@ export function buildOpenGraphComposer(
       load: tridentGithubEnv,
     }
     const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
+    const tridentLandedProbe = makeDispatchLandedProbe(tridentHostRunner)
     // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
     // board seam. Shared rather than re-derived so a wiring test can assert the
     // credential the board seam closes over by identity, not by `typeof`.
@@ -2098,6 +2157,7 @@ export function buildOpenGraphComposer(
           // use), so a project with no repo yet still builds.
           repo_path: owner_home,
           resolveMergeMode: resolveTridentMergeMode,
+          landedProbe: tridentLandedProbe,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -2282,6 +2342,27 @@ export function buildOpenGraphComposer(
     const GENERAL_RAIL_KEY = '__general__'
     const railChatKey = (project_id?: string): string =>
       project_id !== undefined && project_id.length > 0 ? project_id : GENERAL_RAIL_KEY
+    // Same late-binding shape as buildClarifyPoster: these rail/WS closures are
+    // defined before ActivityInspector, but dereference the holder at fire time.
+    const inlineEvidenceReader: InlineEvidenceReader = {}
+    // ONE deriver for every read boundary (rail extras, the WS frame, the HTTP
+    // surface, the per-turn fragment, the agent's `work_board_list`). The scope
+    // key and the clock are decided HERE, once, so no call site can pass the
+    // wrong scope or a stale `now` — see makeInlineActivityDeriver's header.
+    const deriveInlineActivity = makeInlineActivityDeriver({
+      reader: inlineEvidenceReader,
+      scopeKey: inspectorScopeKey,
+      // The SAME "is the bound run still live" predicate the store's `isRunLive`
+      // safety invariant uses (~:3790), so a card bound to a run means one thing
+      // everywhere: a LIVE run owns the card's activity (fork lane), a TERMINAL
+      // one does not — and the card someone is now fixing inline reads active
+      // instead of staying dark. `boardRunStore` is declared later in this scope;
+      // the closure only derefs it at read time, long after composition.
+      isRunLive: (run_id: string): boolean => {
+        const run = boardRunStore.get(run_id)
+        return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+      },
+    })
     // M1 UX REDESIGN — the rail-redesign per-project derived fields
     // (`activity` / `preview` / `preview_from` / `live_runs`). Pure derivation in
     // `open/project-rail.ts`; here we only COLLECT the signals from the project's
@@ -2303,7 +2384,7 @@ export function buildOpenGraphComposer(
       try {
         const scopeKey = workBoardScopeKey(project_slug, project_id)
         const nowMs = Date.now()
-        const items = workBoardStore.list(scopeKey)
+        const items = deriveInlineActivity(workBoardStore.list(scopeKey), project_id)
         // Item-level signals (pure, unit-tested via scanItemsForRailSignals):
         // catches runless-but-failed items (cleared link / research/dispatch)
         // AND still-bound terminal-failed runs. See open/project-rail.ts.
@@ -2333,9 +2414,12 @@ export function buildOpenGraphComposer(
         if (!hasFailedNotDone) {
           const latest = boardRunStore.latestByProjectScope(scopeKey)
           if (latest !== null && latest.phase === 'failed') {
+            // An ACTIONABLE item: neither done nor SHELVED. A shelved card
+            // (`status='archived'`, migration 0130) is parked off the active
+            // lane, so it must not keep the rail in `attention` forever.
             const hasOpenItem = workBoardStore
               .list(scopeKey)
-              .some((it) => it.status !== 'done')
+              .some((it) => it.status !== 'done' && it.status !== 'archived')
             if (hasOpenItem) hasFailedNotDone = true
           }
         }
@@ -2499,9 +2583,9 @@ export function buildOpenGraphComposer(
     // advanced its row and posted NOTHING — reminders could not actually
     // fire in Open. Wire the real dispatcher (ported from the legacy harness's
     // `reminder-agent-base.md` + `reminder-patterns.md`):
-    //   • compose — at fire time the warm conversational substrate
-    //     (`liveAgentSubstrate`, the SAME CC-spawn REPL the live chat uses —
-    //     NEVER a direct api.anthropic.com call) composes a context-aware
+    //   • compose — at fire time the warm BACKGROUND conversational substrate
+    //     (`reminderComposeSubstrate` / `cc-nudge-*` — same grants as the live
+    //     chat, its own session; NEVER a direct api.anthropic.com call) composes a context-aware
     //     nudge from the stored `message` shape (literal / smart-wrap /
     //     pattern). When LLM-less, every reminder degrades to its literal
     //     body so a fired reminder ALWAYS delivers something real.
@@ -2731,51 +2815,51 @@ export function buildOpenGraphComposer(
     const ritualRuns = createRitualRunStore(db)
     const reminder_dispatcher = buildReminderDispatcher({
       outbound: reminderOutbound,
-      ...(liveAgentSubstrate !== null
-        ? { llm: buildSubstrateReminderLlm(liveAgentSubstrate) }
+      // THE BACKGROUND COMPOSE REPL (`cc-nudge-*`), NOT the owner's chat REPL.
+      //
+      // Measured on the live instance 2026-08-17: a reminder's compose aborted,
+      // the very next journal line evicted the owner's warm chat child as
+      // abandon-poisoned, and his next chat turn died with `persistent-repl: REPL
+      // process exited`. He could not send a message until the service was
+      // restarted. Composition ran on `liveAgentSubstrate` — his session — so a
+      // background failure was a foreground outage.
+      //
+      // The two earlier patches at this site (the live-chat `--tools` surface, then
+      // the live-chat model) were both attempts to make sharing the session SAFE.
+      // Sharing cannot be made safe: an aborted turn poisons the session it was
+      // aborted on no matter how well its arguments match. `cc-nudge-*` is a
+      // distinct pool key, so it is a distinct child (`open/wiring/substrates.ts`).
+      ...(reminderComposeSubstrate !== null
+        ? { llm: buildSubstrateReminderLlm(reminderComposeSubstrate) }
         : {}),
       context: buildStatusMdContextSource({ owner_home }),
       resolveTopicId: ({ explicit_topic }): string => resolveAppWsReminderTopic(explicit_topic),
-      // ⚠️ THE LIVE-CHAT MODEL, for exactly the reason the tool surface below is
-      // passed verbatim: a fired reminder composes on `liveAgentSubstrate`, the
-      // owner's WARM chat REPL, and the persistent pool PERSISTS the model it
-      // spawned with back into that session's registry record
-      // (`runtime/adapters/claude-code/persistent/supervision.ts` saveRecord, read
-      // back at `pool.ts` `record?.model ?? getBestModel()` — the record OVERRIDES
-      // the best model rather than falling back to it). The dispatcher's own
-      // default is the Haiku-class `FAST_MODEL` (`reminders/dispatcher.ts:258`,
-      // `const model = input.model ?? FAST_MODEL`), so leaving this unset meant
-      // every fired reminder rewrote the owner's chat session to the fast tier and
-      // his NEXT chat turn resumed there — silently, and durably across restarts,
-      // because the record carries it.
+      // The nudge REPL's OWN model — the frontier tier, unchanged from what a
+      // fired reminder composes on today.
       //
-      // Measured on the live instance 2026-08-16: of 26 session records exactly
-      // one held `claude-haiku-4-5-…` — the `cc-agent-*` session of the project
-      // whose reminders had fired — while every other session, including that same
-      // project's `cc-compose-*` lane, held an Opus id. Repointing the record by
-      // hand held only until the next fire; it recurred twice in one day and the
-      // owner had to report it both times.
-      //
-      // The sibling below already learned this lesson for `--tools`: a differing
-      // surface EVICTS AND RESPAWNS the warm child. The model is the same class of
-      // shared session property and was simply missed — note `resolve_ritual_model`
-      // further down already passes `getBestModel` for the ritual lane, "so it
-      // tracks the chat agent's model instead of pinning a stale id". This is that
-      // same fix for the nudge path.
-      //
-      // A reminder composing on the owner's session must use the OWNER'S model. If
-      // a cheaper tier is ever wanted for composition, it needs its own substrate —
-      // it cannot be taken out of the session he is talking to.
+      // History, because the reason has now completely changed: this was added
+      // (2026-08-16) because composition ran on the owner's chat session and the
+      // persistent pool PERSISTS the model it spawned with back into that session's
+      // registry record (`runtime/adapters/claude-code/persistent/supervision.ts`
+      // saveRecord, read back at `pool.ts` `record?.model ?? getBestModel()` — the
+      // record OVERRIDES the best model rather than falling back to it). The
+      // dispatcher's own default is the Haiku-class `FAST_MODEL`
+      // (`reminders/dispatcher.ts`, `const model = input.model ?? FAST_MODEL`), so
+      // leaving it unset silently rewrote his chat session to the fast tier and his
+      // NEXT chat turn resumed there, durably across restarts. That comment closed
+      // with "if a cheaper tier is ever wanted for composition, it needs its own
+      // substrate" — it now HAS one, so the value is no longer load-bearing for the
+      // owner's session at all. It stays at the frontier tier because that is the
+      // quality a fired nudge composes at today, and this change is not the place to
+      // regress it.
       model: getBestModel(),
-      // ⚠️ THE LIVE-CHAT TOOL SURFACE, VERBATIM — and this is load-bearing, not
-      // tidiness. A fired reminder composes on `liveAgentSubstrate`, the owner's
-      // WARM chat REPL, and the persistent pool's reuse guard EVICTS AND RESPAWNS a
-      // warm child whose requested `--tools` surface differs from the one it was
-      // spawned with (`runtime/adapters/claude-code/persistent/spawn.ts:824,837`).
-      // The dispatcher's own default is the narrower ['Read','Glob','Grep'], so
-      // leaving it unset meant every fired reminder tore down the owner's live chat
-      // REPL and his next chat turn tore it down again. Passing the same surface is
-      // what makes "a reminder fires into the normal session" literally true.
+      // The nudge REPL's constant `--tools` surface, kept equal to the live-chat
+      // list. It is NO LONGER about matching the owner's session — `cc-nudge-*` is a
+      // separate child. It is about capability: a RITUAL composes through this same
+      // seam and cannot apply its own surface, so its approval prompt's promise of
+      // web egress (`WebSearch`, the `kaizen` grant) is only true if the surface
+      // carries it (`gateway/wiring/build-live-agent-turn.ts` LIVE_AGENT_TOOL_NAMES).
+      // Still ONE constant surface, so this child never thrashes its reuse guard.
       tool_names: LIVE_AGENT_TOOL_NAMES,
       // ISSUES #504 — the ritual fire planner, DEREFERENCED PER FIRE so the
       // late-bound `ritualPlanner` (installed once the graph's ApprovalManager
@@ -3019,9 +3103,11 @@ export function buildOpenGraphComposer(
             // dispatcher built above. No executor, no `cc-ritual-*` substrate, no
             // subagent spawn: the planner only says what an approved ritual row
             // composes from and what must be written to `code_ritual_runs`, and
-            // `buildReminderDispatcher` composes it on `liveAgentSubstrate` — the
-            // owner's warm chat session, the ONE substrate carrying the native-MCP
-            // tool bridge — then posts it through the same `reminderOutbound` a
+            // `buildReminderDispatcher` composes it on `reminderComposeSubstrate` —
+            // the background `cc-nudge-*` session, which carries the native-MCP tool
+            // bridge and the same grants the owner's chat does (#504's "access to
+            // everything general has access to"), on its OWN warm child so a failed
+            // fire cannot evict his chat — then posts it through the same `reminderOutbound` a
             // nudge posts through. That is what lets the morning brief reach a
             // Core, which the old sandbox could not.
             ritualPlanner = buildRitualFirePlanner({
@@ -3917,7 +4003,7 @@ export function buildOpenGraphComposer(
         const frame: AppWsOutboundWorkBoardChanged = {
           v: 1,
           type: 'work_board_changed',
-          items: workBoardStore.list(changedKey).map((it) => {
+          items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
             const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
             return {
@@ -3974,9 +4060,30 @@ export function buildOpenGraphComposer(
       onChange: (changedKey: string): void => fanWorkBoardChanged(changedKey),
       // SAFETY INVARIANT — nothing may mark an item done while its build runs.
       // `boardRunStore` is the same store the tick loop reconciles from, so this
-      // reads the one authoritative phase. A run that has VANISHED (get → null)
+      // reads the one authoritative row. A run that has VANISHED (get → null)
       // counts as not-live: it cannot be reconciled either, so refusing forever
       // would strand the card. See `WorkBoardStoreOptions.isRunLive`.
+      //
+      // DELIBERATELY *NOT* THE WAKEUP'S `runDrivingVerdict`, though a round of this
+      // change made it so and it reads like the obviously-consistent choice.
+      // WAKEABILITY AND COMPLETION-LEGALITY ARE DIFFERENT QUESTIONS and they fail
+      // in opposite directions. "Is anyone driving this?" may be answered from a
+      // stale clock, because guessing wrong costs a duplicated turn. "Did this
+      // work ship?" may not, because guessing wrong asserts a falsehood about the
+      // world — the 2026-08-11 incident above, which the owner called "horribly
+      // bad and confusing UX that should never have existed".
+      //
+      // A run whose `last_advanced_at` has gone quiet is very often STILL BUILDING:
+      // the field only moves at checkpoint boundaries (`liveness.ts:46-59`), which
+      // is the whole reason the wakeup needed a generous threshold. Completing on
+      // that signal would let an agent mark an item done while its build runs —
+      // and `complete()` only writes the board row (`work-board/store.ts:598`); it
+      // does not stop the build, so the claim would simply be false.
+      //
+      // The cost is real and accepted: an item the wakeup takes stays uncompletable
+      // by this path until its run reaches a terminal phase. That is a LOUD refusal
+      // (`WorkBoardRunStillLiveError`), not a silent one, and the right fix is to
+      // reap the stalled run — not to loosen the assertion that work shipped.
       isRunLive: (run_id: string): boolean => {
         const run = boardRunStore.get(run_id)
         return run !== null && run !== undefined && !isTerminalPhase(run.phase)
@@ -4057,6 +4164,39 @@ export function buildOpenGraphComposer(
       projectId !== null && projectId.length > 0
         ? `${appWsTopicId(OWNER_USER_ID)}:${projectId}`
         : appWsTopicId(OWNER_USER_ID)
+    // #335 WIRING — the terminal-build wake observer, constructed ONCE and
+    // registered at ALL THREE composeTerminalHook sites (both terminator binds
+    // below + the tick loop via `trident.on_terminal_wake`), so a cancelled build
+    // wakes the agent exactly like a loop-reaped one (§F6a). Claim-first:
+    // `claimAgentWake` is the single writer of `agent_waked_at`, so redelivery /
+    // boot-replay / a second site observing the same row compose ZERO duplicate
+    // turns. Registered LAST in each chain so the multi-minute wake compose never
+    // delays board reconcile or skill-forge; by then the reconcile has usually
+    // detached `linked_run_id`, so the prompt's "Board item id" is commonly
+    // "none" (a module-supported shape) — the wake turn still carries run id /
+    // branch / task and has board tools to locate the item. Accepted tradeoff.
+    const terminalBuildWake = buildTerminalBuildWakeObserver({
+      claimWake: (id) => boardRunStore.claimAgentWake(id),
+      boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
+      // The SAME background `cc-nudge-*` seam the fired-reminder + work-wakeup
+      // paths compose through — never the owner's chat REPL. Null when LLM-less
+      // → the observer returns before claiming (module-tested).
+      llm:
+        reminderComposeSubstrate === null
+          ? null
+          : { compose: (spec, opts) => buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts) },
+      projectChatScope: (run) => workBoardProjectIdForKey(project_slug, run.project_slug) ?? 'general',
+      // Durable inert row + live push to the run's own chat; buzz only when loud.
+      post: async (run, reply, opts) => {
+        const result = await deliver(run.chat_id ?? tridentDeliveryChatId(null), {
+          body: reply,
+          durability: 'inert',
+          ...(opts.loud ? {} : { notify: 'suppress' as const }),
+        })
+        return result.persisted
+      },
+      logger: log,
+    })
     // #337 — late-bound clarifying-question poster (assigned once the app-ws
     // adapter exists, below). When the ▶ route trips the ask-before-acting gate
     // on an underspecified card, we post a SHORT clarifying question to the CHAT
@@ -4106,6 +4246,7 @@ export function buildOpenGraphComposer(
                 chat_id: chatId,
                 thread_id: null,
                 resolveMergeMode: resolveTridentMergeMode,
+                landedProbe: tridentLandedProbe,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -4174,9 +4315,28 @@ export function buildOpenGraphComposer(
       llmCallSubstrate !== null
         ? buildAnthropicLlmCall({ substrate: llmCallSubstrate, model: FAST_MODEL })
         : null
+    // The ONE card-removal chokepoint: cancel a live bound run (trident via the
+    // §F6a terminate chokepoint, research via the dispatch stop) → dispose the
+    // card's own `plans/` doc into a folder named for the removal REASON → hard-
+    // delete the row. Built ONCE here and handed to the HTTP surface (the UI's X)
+    // AND to the agent's `work_board_remove` tool (T2), so a human removal and
+    // an agent removal run the SAME path, run-cancellation and all. `docStore` is
+    // the same instance the spec-doc service writes the doc with, so the move
+    // lands where the Documents tab reads.
+    const workBoardRemoval = new WorkBoardRemovalService({
+      store: workBoardStore,
+      trident_runs: boardRunAccess,
+      is_terminal_phase: (phase) => isTerminalPhase(phase as TridentRun['phase']),
+      ...(dispatchService !== null
+        ? { cancel_dispatch: async (id: string) => void (await dispatchService.stop(id)) }
+        : {}),
+      docs: docStore,
+    })
     const workBoardSurface = createWorkBoardSurface({
       store: workBoardStore,
       auth: appOwnerAuth,
+      // The shared removal chokepoint (above) — the X's DELETE runs through it.
+      removal: workBoardRemoval,
       // #429 task 3 — no manual Build/Research picker; an omitted task_type is
       // FAST_MODEL-classified with keyword fallback (LLM-less boots classify by
       // keyword only). Explicit task_type from any caller always wins.
@@ -4184,6 +4344,15 @@ export function buildOpenGraphComposer(
       // Item 1 (live progress on GET) + item 3 (delete cancels the linked run,
       // now via the §F6a `terminate()` chokepoint so the observers fire).
       trident_runs: boardRunAccess,
+      // Derived inline activity — the wire `inline_active` on every item-bearing
+      // HTTP response becomes evidence truth, the stored column stays a hint.
+      // The closure DEREFS the late-bound holder at CALL time, so the
+      // construction order (this surface is built before the ActivityInspector)
+      // is safe; an unset holder reads evidence 0 ⇒ not active (fail-soft, and
+      // the correct post-crash semantics). `inspectorScopeKey('general') ===
+      // 'general'` matches the tap's General scope, so the URL project_id feeds
+      // straight through. Display-only: it gates nothing.
+      derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       // The board scope and the DOCS project id are separate arguments on purpose:
       // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a
@@ -4241,6 +4410,8 @@ export function buildOpenGraphComposer(
         }
       },
     })
+    inlineEvidenceReader.lastWriteActivityAt = (scope): number =>
+      activityInspector.lastWriteActivityAt(scope)
     // The tool tap: `activity-tap.ts` (a Pre/PostToolUse hook running in the CC
     // subprocess) POSTs each tool start/finish to the substrate sink's `/activity`
     // route, which dispatches this closure. THIS is where the panel's real content
@@ -4264,7 +4435,23 @@ export function buildOpenGraphComposer(
       })
       // `null` ⇒ a row the transcript is better without (the `reply` tool's bare
       // post-ack, whose words already landed as the assistant message row).
-      if (row !== null) activityInspector.record(inspectorScopeKey(project_id), row)
+      if (row === null) return
+      const scope = inspectorScopeKey(project_id)
+      // THE OFF→ON EDGE. Nothing else pushes a board frame when evidence appears:
+      // `fanWorkBoardChanged` is driven by store writes and run transitions, and
+      // inline work makes NEITHER — that is the whole point of this card. Without
+      // this line an already-open board keeps showing the card as quiet until
+      // something unrelated happens to touch it, so acceptance (a) would hold only
+      // at server READ boundaries (reload, mutation, reconnect). Comparing the
+      // write clock before/after the record fires it only on the transition from
+      // "no fresh evidence" to "fresh": at most once per project per window, and
+      // the OFF edge is the clients' expiry poll, which this frame is what arms.
+      const before = activityInspector.lastWriteActivityAt(scope)
+      activityInspector.record(scope, row)
+      const after = activityInspector.lastWriteActivityAt(scope)
+      if (isInlineEvidenceEdge(before, after)) {
+        fanWorkBoardChanged(workBoardScopeKey(project_slug, project_id))
+      }
     }
     setReplActivityTap(wiredActivityTap)
     const activitySurface = createActivitySurface({
@@ -5188,9 +5375,22 @@ export function buildOpenGraphComposer(
             // to the ACTIVE project (`workBoardScopeKey`) so the injected board
             // matches the board the agent's `work_board_*` writes land on. General
             // (no project_id) → the owner slug, as before.
+            //
+            // The injected board carries the DERIVED inline activity (T4): the
+            // fragment's `·inline` marker reads the inspector's WRITE clock, so
+            // the agent cannot be lied to by its OWN stale flag — a crashed
+            // session's stuck `inline_active` reads not-active, and live inline
+            // work reads active with no `work_board_update` anywhere in the path.
+            // The clock being write-only is what keeps this marker meaningful
+            // here: the previous turn's `reply` is a `token` row, so a
+            // back-to-back conversation does NOT report every card as ·inline.
+            // ONE O(1) evidence read per turn; display-only, it gates nothing.
             workBoardSnapshot: (slug: string, project_id: string | undefined): string =>
               formatWorkBoardFragment(
-                workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                deriveInlineActivity(
+                  workBoardStore.listActive(workBoardScopeKey(slug, project_id)),
+                  project_id,
+                ),
               ),
             // Layer B (SPEC WAVE 3.5) — the rehydration seam. The context-reset bus
             // (periodic policy + manual `/reset`) publishes a reset scope here; the
@@ -5294,6 +5494,16 @@ export function buildOpenGraphComposer(
             should_reset,
           }),
       })
+      // KNOWN GAP, stated rather than implied: this sweep and the `/reset` thunk
+      // above both address `cc-agent-*` ONLY, so the background `cc-nudge-*`
+      // transcript is neither periodically swept nor reachable from `/reset`. It is
+      // left that way deliberately for now — the policy stamps its cooldown per
+      // `project_scope`, so folding a second instance's report into the same tick
+      // would let one lane's reset suppress the other's, and a nudge composes short
+      // one-shot prompts between CC's own auto-compacts rather than accumulating a
+      // conversation. If that lane is ever observed growing, it needs its OWN policy
+      // instance with its own cooldown map, not an extra `substrate_instance_id`
+      // here.
       realmodeCleanups.push(() => {
         contextResetPolicy.stop()
         // Drop every rehydration listener the live-agent runner registered on the
@@ -5587,7 +5797,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5608,7 +5818,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5868,32 +6078,24 @@ export function buildOpenGraphComposer(
     // `listOutstanding` returns [] and every tick is a cheap no-op, so a
     // credential added later starts waking work without a restart.
     const workWakeup = buildWorkWakeupLoop({
+      // An item a live run is driving already has a wakeup driver (the trident
+      // tick) — waking it here would double-drive one work item. "Live" is
+      // measured, not assumed: a run that has stopped advancing is not a driver,
+      // and deferring to one is how this loop went silent after a single firing.
+      // The policy + the evidence live in `work-wakeup-selection.ts`.
       listOutstanding: (): WakeupProjectWork[] => {
-        if (liveAgentSubstrate === null) return []
-        const grouped = new Map<string, WakeupProjectWork>()
-        for (const item of workBoardStore.listAllActive()) {
-          if (item.status !== 'in_progress') continue
-          // An item a live run is driving already has a wakeup driver (the
-          // trident tick) — waking it here would double-drive one work item.
-          if (item.linked_run_id !== null) {
-            const run = boardRunStore.get(item.linked_run_id)
-            if (run !== null && run !== undefined && !isTerminalPhase(run.phase)) continue
-          }
-          const key = item.project_slug
-          const project_id = workBoardProjectIdForKey(project_slug, key)
-          const entry = grouped.get(key) ?? {
-            project_key: key,
-            // The live-chat session scope: 'general' for the General board,
-            // the project id verbatim otherwise (`turn.project_id ?? 'general'`,
-            // `gateway/wiring/build-live-agent-turn.ts`).
-            chat_scope: project_id ?? 'general',
-            label: project_id === undefined ? 'your General workspace' : `project "${project_id}"`,
-            items: [],
-          }
-          entry.items.push({ title: item.title })
-          grouped.set(key, entry)
-        }
-        return [...grouped.values()]
+        // LLM-less probe — read the substrate this loop actually composes on.
+        // It is `cc-nudge-*`, not the owner's chat REPL: this loop is
+        // timer-driven, so it moved onto the background lane along with the fired
+        // reminder. Probing `liveAgentSubstrate` here would be reading a
+        // different substrate's availability than the one the compose needs.
+        if (reminderComposeSubstrate === null) return []
+        return selectWakeupWork({
+          items: workBoardStore.listAllActive(),
+          lookupRun: (run_id: string) => boardRunStore.get(run_id),
+          owner_slug: project_slug,
+          now_ms: Date.now(),
+        })
       },
       // Most recent GENUINE owner turn in this project's chat, across both
       // topic roots — the same person-only watermark the idle-nudge sweep
@@ -5912,17 +6114,21 @@ export function buildOpenGraphComposer(
         return max
       },
       // The SAME warm-substrate wrapper the fired-reminder path composes
-      // through — one substrate entry point, two callers. Null substrate never
-      // reaches compose (listOutstanding returns [] above), but the seam still
-      // throws a named reason if it somehow does.
+      // through — one substrate entry point, two callers — and on the SAME
+      // background REPL (`cc-nudge-*`), never the owner's chat REPL. This wakeup is
+      // timer-driven exactly like a fired reminder, so it carried exactly the same
+      // hazard: a compose that aborts or crashes here used to evict the warm child
+      // the owner was talking to. Null substrate never reaches compose
+      // (listOutstanding returns [] above), but the seam still throws a named
+      // reason if it somehow does.
       llm: {
         compose: (spec, opts): Promise<string> => {
-          if (liveAgentSubstrate === null) {
+          if (reminderComposeSubstrate === null) {
             return Promise.reject(
-              new Error('no live-agent substrate on this instance (no model credential)'),
+              new Error('no background compose substrate on this instance (no model credential)'),
             )
           }
-          return buildSubstrateReminderLlm(liveAgentSubstrate).compose(spec, opts)
+          return buildSubstrateReminderLlm(reminderComposeSubstrate).compose(spec, opts)
         },
       },
       // Durable inert chat row + live push; the device buzz only for the loud
@@ -5936,9 +6142,9 @@ export function buildOpenGraphComposer(
         })
         return result.persisted
       },
-      // ⚠️ THE LIVE-CHAT SURFACE VERBATIM — a differing `--tools` surface would
-      // evict the owner's warm chat REPL on every wakeup (the reuse guard,
-      // `runtime/adapters/claude-code/persistent/spawn.ts`).
+      // The nudge REPL's constant `--tools` surface — the same list the fired-
+      // reminder dispatcher passes, so both callers of `cc-nudge-*` present one
+      // surface and its reuse guard never thrashes.
       tool_names: LIVE_AGENT_TOOL_NAMES,
       resolveModel: getBestModel,
     })
@@ -6207,7 +6413,20 @@ export function buildOpenGraphComposer(
       // by the SAME canonical store the HTTP surface + per-turn injection use,
       // so an agent mutation and a human HTTP write share one code path + one
       // live `work_board_changed` push.
-      work_board: { store: workBoardStore, spec_doc: workBoardSpecDoc, chat_ack: workBoardChatAck },
+      // `derive_inline_active` (T4) gives the agent's `work_board_list` the SAME
+      // evidence-derived `inline_active` the HTTP surface serves (~:3959, same
+      // closure shape). The holder deref happens at CALL time, so this input
+      // being built before the ActivityInspector is irrelevant. Display-only:
+      // one O(1) evidence read per list, never a write, never a gate.
+      // `removal` is the SAME chokepoint the UI's X runs (built above, handed to
+      // the HTTP surface) — agent removal and human removal share one path.
+      work_board: {
+        store: workBoardStore,
+        spec_doc: workBoardSpecDoc,
+        chat_ack: workBoardChatAck,
+        derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
+        removal: workBoardRemoval,
+      },
       // Create-project agent tool (create_project) — agent-native parity with
       // the project-rail Create Project button; same owner-scoped create path
       // the HTTP surface uses (one code path).
@@ -6335,6 +6554,7 @@ export function buildOpenGraphComposer(
             trident: {
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
+              on_terminal_wake: terminalBuildWake,
               // PULL launcher-death detection covers missed push events instead
               // of leaving the lane occupied until the 90-minute reaper.
               probe_launcher_alive: buildTridentLauncherLivenessProbe(),
@@ -6493,6 +6713,7 @@ export function buildOpenGraphComposer(
               repo_path: owner_home,
               channel_kind: 'app_socket' as const,
               merge_mode_probe: tridentMergeModeProbe,
+              landed_probe: tridentLandedProbe,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.

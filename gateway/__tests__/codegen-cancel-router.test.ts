@@ -2,10 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
 import { CodegenInputError, CodegenOrchestrator, type CodegenRunner } from '@neutronai/codegen-core'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
 import { buildTridentTerminator } from '@neutronai/trident/terminate.ts'
@@ -19,9 +18,7 @@ let trident: TridentRunStore
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'unified-cancel-'))
   const path = join(tmp, 'project.db')
-  const raw = new Database(path, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(path)
   db = ProjectDb.open(path)
   trident = new TridentRunStore(db)
 })

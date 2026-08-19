@@ -126,6 +126,10 @@ export class OpfsChatStore implements Store {
     return this.mem.lastSeenSeq(topic_id)
   }
 
+  earliestSeenSeq(topic_id: string): Promise<number> {
+    return this.mem.earliestSeenSeq(topic_id)
+  }
+
   pendingSends(topic_id: string): Promise<ChatMessage[]> {
     return this.mem.pendingSends(topic_id)
   }

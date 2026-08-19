@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
@@ -36,8 +36,8 @@ let store: TridentRunStore
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'trident-crash-recovery-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   store = new TridentRunStore(db)
 })
 
@@ -70,7 +70,10 @@ function crashingFirer(counter: { fires: number }) {
 
 function orchestrator(
   fire: unknown,
-  over: { max_crash_recoveries?: number } = {},
+  over: {
+    max_crash_recoveries?: number
+    run_host?: (cmd: string[], cwd?: string) => Promise<{ ok: boolean; stdout: string; stderr: string; exit_code: number }>
+  } = {},
 ): ReturnType<typeof buildTridentOrchestrator> {
   return buildTridentOrchestrator({
     fire_workflow: fire as never,
@@ -312,5 +315,115 @@ describe('(e) the board never reads FAILED while a recovery is in flight', () =>
     await loop.runOnce() // budget used up → terminal, exactly once
     expect(calls).toEqual([{ run_id: run.id, outcome: 'failed' }])
     expect(counter.fires).toBe(2)
+  })
+})
+
+describe('(f) a merged PR is ADOPTED at recovery, never rebuilt', () => {
+  function scriptedHost(
+    seen: string[][],
+    answer: (argv: string[]) => { ok: boolean; stdout: string; stderr?: string; exit_code?: number },
+  ) {
+    return async (argv: string[]) => {
+      seen.push(argv)
+      const result = answer(argv)
+      return { stderr: '', exit_code: result.ok ? 0 : 1, ...result }
+    }
+  }
+
+  test('a crashed run whose PR is already merged is adopted — done, zero fires', async () => {
+    // RED-mutation check, verified by hand: deleting the detectMergedPr call makes
+    // this test red because the firer count becomes 1.
+    const fires: InnerLoopInput[] = []
+    const commands: string[][] = []
+    const run_host = scriptedHost(commands, () => ({ ok: true, stdout: 'MERGED\n' }))
+    const orch = orchestrator(recordingFirer(fires), { run_host })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    await seedCrashedMidBuild('adopt-merged')
+    await store.update('adopt-merged', { merge_mode: 'pr' })
+
+    await loop.runOnce()
+
+    const after = store.get('adopt-merged')!
+    expect(after.phase).toBe('done')
+    expect(after.subagent_status).toBe('completed')
+    expect(after.pr).toBe(61)
+    expect(after.failure_reason).toBeNull()
+    expect(after.inner_checkpoint).toBe('pr-merged')
+    expect(after.harvested_at).toBeNull()
+    expect(fires).toHaveLength(0)
+    expect(commands).toEqual([['gh', 'pr', 'view', '61', '--json', 'state,number', '--jq', '.state']])
+    expect(commands.flat()).not.toContain('push')
+    expect(commands.flat()).not.toContain('merge')
+  })
+
+  test('an open PR still relaunches as a continuation carrying checkpoint + pr', async () => {
+    const fires: InnerLoopInput[] = []
+    const commands: string[][] = []
+    const orch = orchestrator(recordingFirer(fires), {
+      run_host: scriptedHost(commands, () => ({ ok: true, stdout: 'OPEN\n' })),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    await seedCrashedMidBuild('adopt-open')
+    await store.update('adopt-open', { merge_mode: 'pr' })
+
+    await loop.runOnce()
+
+    expect(fires).toHaveLength(1)
+    expect(fires[0]?.resume_checkpoint).toBe('ralph-task-built')
+    expect(fires[0]?.run.pr).toBe(61)
+    expect(store.get('adopt-open')!.phase).toBe('ralph-task')
+    expect(commands[0]).toEqual(['gh', 'pr', 'view', '61', '--json', 'state,number', '--jq', '.state'])
+  })
+
+  test('a merged-probe outage never adopts', async () => {
+    const fires: InnerLoopInput[] = []
+    const commands: string[][] = []
+    const orch = orchestrator(recordingFirer(fires), {
+      run_host: scriptedHost(commands, () => ({ ok: false, stdout: '' })),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    await seedCrashedMidBuild('adopt-outage')
+    await store.update('adopt-outage', { merge_mode: 'pr' })
+
+    await loop.runOnce()
+
+    expect(fires).toHaveLength(1)
+    expect(store.get('adopt-outage')!.phase).not.toBe('done')
+  })
+
+  test('no recorded pr: the merged-list probe adopts by branch', async () => {
+    const fires: InnerLoopInput[] = []
+    const commands: string[][] = []
+    const run_host = scriptedHost(commands, () => ({ ok: true, stdout: '72\n' }))
+    const orch = orchestrator(recordingFirer(fires), { run_host })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    await seedCrashedMidBuild('adopt-list')
+    await store.update('adopt-list', { pr: null, merge_mode: 'pr' })
+
+    await loop.runOnce()
+
+    expect(store.get('adopt-list')!.phase).toBe('done')
+    expect(store.get('adopt-list')!.pr).toBe(72)
+    expect(fires).toHaveLength(0)
+    expect(commands).toEqual([
+      ['gh', 'pr', 'list', '--head', 'trident/x', '--state', 'merged', '--json', 'number', '--jq', '.[0].number // empty'],
+    ])
+  })
+
+  test('local merge-mode: no probe command issued, relaunch as today', async () => {
+    const fires: InnerLoopInput[] = []
+    const commands: string[][] = []
+    const orch = orchestrator(recordingFirer(fires), {
+      run_host: scriptedHost(commands, () => ({ ok: true, stdout: 'MERGED\n' })),
+    })
+    const loop = new TridentTickLoop({ store, step: orch.step })
+    await seedCrashedMidBuild('adopt-local')
+    await store.update('adopt-local', { merge_mode: 'local' })
+
+    await loop.runOnce()
+
+    expect(fires).toHaveLength(1)
+    expect(store.get('adopt-local')!.phase).not.toBe('done')
+    expect(commands.filter((argv) => argv[0] === 'gh')).toEqual([])
   })
 })

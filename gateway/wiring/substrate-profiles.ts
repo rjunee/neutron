@@ -197,15 +197,21 @@ export const PROFILE_TOOLLESS_UTILITY: SubstrateProfile = {
  * `PROFILE_UNTRUSTED_IMPORT` even though identical now: the redesign keeps the
  * owner's chat grant while tightening the untrusted-import one.
  *
- * Site: `open/wiring/substrates.ts` (`cc-agent-*` liveAgentSubstrate).
+ * Sites: `open/wiring/substrates.ts` — `cc-agent-*` (liveAgentSubstrate) and
+ * `cc-nudge-*` (reminderComposeSubstrate, the background proactive-compose lane).
+ * The second site is a SESSION split, not a trust split: a fired ritual composes
+ * there and ISSUES #504 settled that it must have "access to everything general
+ * has access to", so it shares this profile deliberately. What it does NOT share
+ * is the pool key — see that file for the outage that forced the split.
  */
 export const PROFILE_WARM_CHAT: SubstrateProfile = {
   skip_permissions: true,
   // the owner's own chat. `gh pr list` and `git` in its Bash are the point.
   github_credential: true,
-  // THE ONE PROFILE THAT SETS THIS. It is the surface the owner builds on, it is
-  // the surface the Haiku regression landed on twice in one day, and it is the
-  // only one where a lower tier is never a legitimate choice.
+  // THE ONE PROFILE THAT SETS THIS, and now the two substrates that share it. It
+  // is the surface the owner builds on, it is the surface the Haiku regression
+  // landed on twice in one day, and it is the only one where a lower tier is never
+  // a legitimate choice.
   frontier_model_floor: true,
 }
 

@@ -48,7 +48,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
@@ -131,8 +131,8 @@ async function startHarness(withTelegramSecrets: boolean): Promise<Harness> {
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
 
+  seedMigratedDb(join(dir, 'project.db'))
   const db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
   if (withTelegramSecrets) {
     const secrets = new SecretsStore({ data_dir: dir, db })
     const owner_handle = asOwnerHandle(OWNER_SLUG)
@@ -318,8 +318,8 @@ describe('POST /webhook/telegram — UNCONFIGURED instance (every default Open i
     // asserted here), and the handler fails closed even if some other caller
     // hands it an empty token.
     const dir = mkdtempSync(join(tmpdir(), 'neutron-telegram-empty-'))
+    seedMigratedDb(join(dir, 'project.db'))
     const db = ProjectDb.open(join(dir, 'project.db'))
-    applyMigrations(db.raw())
     const secrets = new SecretsStore({ data_dir: dir, db })
     const owner_handle = asOwnerHandle(OWNER_SLUG)
     await secrets.put({ owner_handle, kind: 'bot_token', label: 'telegram', plaintext: BOT_TOKEN })

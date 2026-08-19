@@ -5,5 +5,27 @@
     "file_name": "trident_checkpoint_head",
     "note": "An unmerged branch migration ran against the live database at 18:55:09Z. The merged 0122 migration's inner_checkpoint_head and inner_checkpoint_findings ALTERs were applied by hand at 22:04Z. The _migrations row is deliberately retained as the incident record and must never be rewritten (tracker #575).",
     "date": "2026-08-14"
+  },
+  {
+    "version": 124,
+    "recorded_name": "dispatch_dependencies_and_claims",
+    "file_name": "code_trident_runs_fix_round_contract",
+    "note": "Same class as the 0122 incident (#575): an unmerged branch migration consumed ordinal 124 against a live database, so the merged 0124 reads as a name mismatch and boot refuses. The merged 0124 itself DID run, recorded at ordinal 125, and its three ALTERs (reviewed_head, bound_pr, fenced_paths on code_trident_runs) were hand-verified present via pragma_table_info before this entry was written. Nothing was applied by hand and no _migrations row was rewritten.",
+    "date": "2026-08-16"
+  },
+  {
+    "version": 125,
+    "recorded_name": "code_trident_runs_fix_round_contract",
+    "file_name": "code_trident_runs_base_sha",
+    "note": "Third instance of the #575 class. During the 0124 incident the merged fix-round-contract migration ran against the live database recorded at ordinal 125, so the merged 0125 (code_trident_runs_base_sha) reads as a name mismatch and boot refuses. 0125's ALTERs (base_sha, base_behind) therefore NEVER ran on the live database — this entry only acknowledges the row and SKIPS 0125; migration 0131 is what actually creates the columns, on every path. Verified via pragma_table_info 2026-08-17: base_sha and base_behind absent, infra_retries (126) present. Nothing was applied by hand, no _migrations row was rewritten, and row 125 must never be rewritten.",
+    "date": "2026-08-17"
+  },
+  {
+    "version": 122,
+    "recorded_name": "work_board_items_pr",
+    "file_name": "work_board_items_pr",
+    "reapply": true,
+    "note": "Fourth instance of the #575 class — the second life of row 122. The 08-14 unmerged-branch migration added pr/pr_url to work_board_items and recorded this row; 0130's table rebuild (08-17, CREATE new → INSERT SELECT → DROP → RENAME) silently dropped those columns, so the row records schema the database no longer has. Verified via pragma_table_info 2026-08-18: pr and pr_url absent, row 122 intact with NULL content_sha256. When a migration NAMED work_board_items_pr next ships (#269, renumbered 0133), it must APPLY despite recorded-by-name; its firing is recorded in _migration_repairs inside the apply transaction, and row 122 is never rewritten. A scar implies the instance also ran 0130, so the columns are absent wherever this activates — the re-ALTER is safe fleet-wide. Inert on fresh installs and wherever the tree's ordinal for this name matches the recorded row.",
+    "date": "2026-08-18"
   }
 ]

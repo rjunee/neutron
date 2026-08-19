@@ -24,7 +24,7 @@
 import { prefixedRandomId } from './ids.ts'
 import { SendQueue } from './send-queue.ts'
 import { InMemoryStore, type Store } from './store.ts'
-import { SyncEngine } from './sync-engine.ts'
+import { MAX_HISTORY_BACKFILL_ROUNDS, SyncEngine } from './sync-engine.ts'
 import {
   isTransientSystemNotice,
   normalizeEditUpdate,
@@ -32,6 +32,7 @@ import {
   normalizePromptResolved,
   normalizeReactionUpdate,
   normalizeReceiptUpdate,
+  parseHistoryGap,
   parseSessionReadyMaxSeq,
   type ChatMessage,
   type OutboundButtonChoice,
@@ -200,11 +201,22 @@ export class WebChatSession {
   private resumeFallbackHandle: unknown = null
   /** GAP-5 — whether resume+drain has already run for the CURRENT open. Reset to
    *  false on every (re)open; set true whenever `resumeAndFlush` runs (fallback OR
-   *  session_ready). Guarantees exactly one resume per open — a late session_ready
-   *  arriving AFTER the fallback fired does NOT resume/resend a second time,
-   *  UNLESS its stale-store reconcile actually reset the store (which needs a
-   *  fresh resume-from-0). */
+   *  session_ready). Guarantees exactly one FORWARD resume per open — a late
+   *  session_ready arriving AFTER the fallback fired does NOT resume/resend a
+   *  second time, UNLESS its stale-store reconcile actually reset the store (which
+   *  needs a fresh resume-from-0). It does NOT bound `resume` frames in general:
+   *  the BACKWARDS history walk sends more of them within the same open, capped
+   *  separately by {@link MAX_HISTORY_BACKFILL_ROUNDS}. Do not read this guard as
+   *  "one resume per socket" — that reading, applied to the mobile session which
+   *  has no guard at all, is what justified a lossy replay window. */
   private resumedThisOpen = false
+  /** Backwards-walk state, reset by every forward resume: how many pages of older
+   *  history this catch-up has asked for, and the lowest `before_seq` it asked
+   *  from. The count is the ceiling ({@link MAX_HISTORY_BACKFILL_ROUNDS}); the
+   *  floor is the liveness guard — a `history_gap` that does not STRICTLY descend
+   *  is ignored, so a server that repeated itself could not spin this client. */
+  private backfillRounds = 0
+  private backfillFloor: number | null = null
   private readonly resumeFallbackMs: number
   /** Web presence — the owner's last reported visibility for THIS session.
    *  Starts `true` because a session is constructed by a surface that is being
@@ -241,9 +253,11 @@ export class WebChatSession {
       createSocket:
         opts.createSocket ??
         ((url: string) => new WebSocket(url) as unknown as SocketLike),
-      // GAP-5 — on EVERY (re)open, guarantee resume + queue-drain runs EXACTLY
-      // once. Reset the per-open guard, then arm a fallback that fires resume+drain
-      // if the server's session_ready (the fast path, in handleInbound) never lands.
+      // GAP-5 — on EVERY (re)open, guarantee the FORWARD resume + queue-drain runs
+      // EXACTLY once. Reset the per-open guard, then arm a fallback that fires
+      // resume+drain if the server's session_ready (the fast path, in
+      // handleInbound) never lands. (The backwards history walk is bounded by its
+      // own round budget, not by this guard.)
       onOpen: () => {
         this.resumedThisOpen = false
         this.armResumeFallback()
@@ -414,6 +428,14 @@ export class WebChatSession {
       }
       return
     }
+    // The server admitting its replay was TRUNCATED: rows below `older_than` were
+    // not sent. Ask for the page below it — this is the only path by which a
+    // transcript longer than one replay page ever completes.
+    const historyGap = parseHistoryGap(data)
+    if (historyGap !== null) {
+      this.requestHistoryBackfill(historyGap)
+      return
+    }
     // Track B Phase 4 — a receipt_update carries the latest delivered/read
     // aggregate for an already-applied message. Merge it (set-union) onto the
     // stored row so the bubble's tick advances. No-op if the message isn't
@@ -494,12 +516,33 @@ export class WebChatSession {
    * after reconnect re-reports it because the id only enters {@link readSent}
    * once a frame is actually accepted.
    */
-  markRead(messageIds: readonly string[]): void {
+  /**
+   * Report read messages. Best-effort: an id is recorded ONLY when the socket
+   * accepted the frame, so a send that failed (commonly: the socket is still
+   * connecting right after a project switch) is retried on the next call.
+   *
+   * RETURNS THE IDS ACTUALLY SENT. That retry only works if callers keeping their
+   * own ledger fill it from this RETURN rather than from the argument they passed
+   * — filling it from the argument marks a failed send as done and removes the id
+   * from every later call, so the receipt is never sent again and the unread badge
+   * stalls until a reload. Already-sent ids are included in the return: they are
+   * confirmed sent, which is what a caller's ledger is asking about.
+   */
+  markRead(messageIds: readonly string[]): readonly string[] {
+    const accepted: string[] = []
     for (const message_id of messageIds) {
-      if (message_id.length === 0 || this.readSent.has(message_id)) continue
+      if (message_id.length === 0) continue
+      if (this.readSent.has(message_id)) {
+        accepted.push(message_id)
+        continue
+      }
       const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' }
-      if (this.ws.send(env)) this.readSent.add(message_id)
+      if (this.ws.send(env)) {
+        this.readSent.add(message_id)
+        accepted.push(message_id)
+      }
     }
+    return accepted
   }
 
   /**
@@ -597,6 +640,32 @@ export class WebChatSession {
     }, this.topic_id)
     this.armAckTimersFor(flushed)
     if (flushed.length > 0) this.emitChange()
+    // LAST, behind the queue drain: history is never more urgent than the owner's
+    // undelivered sends. A fresh budget per forward resume, then one backwards
+    // request if this device's own oldest applied seq shows history below it — the
+    // server can only report a gap for a page it just sent, so without this local
+    // test a walk that ran out of budget on one open could never be picked up on
+    // the next.
+    this.backfillRounds = 0
+    this.backfillFloor = null
+    const backfillFrom = await this.engine.backfillFrom(this.topic_id)
+    if (backfillFrom !== null) this.requestHistoryBackfill(backfillFrom)
+  }
+
+  /**
+   * Ask for the page of history below `before_seq` — one round of the backwards
+   * walk. Refuses to run past {@link MAX_HISTORY_BACKFILL_ROUNDS} rounds, and
+   * refuses any bound that does not strictly descend, so the walk always
+   * terminates. A send that fails (socket gone) is not retried here: the next
+   * forward resume restarts the walk from the store.
+   */
+  private requestHistoryBackfill(before_seq: number): void {
+    if (before_seq <= 1) return
+    if (this.backfillRounds >= MAX_HISTORY_BACKFILL_ROUNDS) return
+    if (this.backfillFloor !== null && before_seq >= this.backfillFloor) return
+    this.backfillFloor = before_seq
+    this.backfillRounds += 1
+    this.ws.send(this.engine.backfillRequest(before_seq))
   }
 
   private async flush(): Promise<void> {

@@ -3,6 +3,7 @@
 // rate-limit banner notice dispatcher (D2 split).
 
 import type { DeadTurnNotice } from './api5xx-dead-turn-watcher.ts'
+import type { ModelFloorNotice } from './model-floor.ts'
 import type { SettingsPermissions } from './build-settings.ts'
 import { EventChannel } from './event-channel.ts'
 import { buildDetectorContext } from './output-scan.ts'
@@ -282,8 +283,27 @@ export interface PersistentReplSubstrateOptions {
    * exactly so a new substrate must state its answer.
    */
   frontierModelFloor?: boolean
+  /**
+   * Notice-family DI seam for the floor above — fired when a spawn on THIS
+   * substrate was resolved below the configured best tier and clamped up.
+   *
+   * WHY IT EXISTS: the clamp's first implementation was a `log.warn`, i.e. a
+   * journald line, i.e. invisible to the owner — the identical silence that let
+   * the degradation run for a working day twice. The gateway wires this to the
+   * same two surfaces as the dead-turn / rate-limit notices (`system_events` +
+   * an owner chat bubble); unwired ⇒ the structured warn alone. Notify-only, and
+   * a throw is swallowed — a notice never fails a spawn.
+   */
+  onModelFloorApplied?: (notice: ModelFloorNotice) => void
   /** `claude` binary override. Default `process.env.CLAUDE_BIN ?? 'claude'`. */
   claude_bin?: string
+  /**
+   * Reasoning-effort pin forwarded to `--effort` (#345's twin). `undefined` →
+   * resolveReplEffort (NEUTRON_REPL_EFFORT env, else DEFAULT_REPL_EFFORT
+   * 'high'); `''` → deliberately unpinned (flag omitted). See
+   * DEFAULT_REPL_EFFORT in build-repl-argv.ts for the why.
+   */
+  effort?: string
   /** Append `--dangerously-skip-permissions` (managed headless REPLs MUST). */
   skip_permissions?: boolean
   /**

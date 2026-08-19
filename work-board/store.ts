@@ -27,12 +27,23 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 
-/** The board lane. `failed` is a run-driven terminal lane (a bound trident run
- *  that FAILED): it stays in the active list (`status != done`), KEEPS its
- *  `linked_run_id` so the client shows a red dot + "Failed" tag + the run's
- *  `failure_reason`, and is re-actionable via the ▶/↻ retry. It is NOT a
- *  client-writable status — only the terminal reconcile sets it. */
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed'
+/** The board lane. Terminal run reconciliation keeps `linked_run_id` on BOTH
+ *  outcomes so terminal evidence stays reachable: `failed` cards show the red
+ *  dot + reason and can retry, while `done` history can still show a recovered
+ *  integrity alert. Moving either card back to an active lane clears the stale
+ *  terminal link; a retry then replaces it through `attachRun`. `failed` is NOT
+ *  a client-writable status — only terminal reconciliation sets it.
+ *
+ *  `archived` (owner-facing: "Shelved", migration 0130) is the DEPRIORITISE
+ *  lane, and it is deliberately NOT `done`. Done means SHIPPED — it stamps
+ *  `completed_at` and counts as progress. Archived means PARKED: it never
+ *  stamps `completed_at`, it is counted as completed NOWHERE, and it leaves the
+ *  active lane (out of `listActive`/`listAllActive`/the per-turn fragment/the
+ *  reorder lane) while remaining in `list()` under the clients' collapsed
+ *  Shelved section. Unlike `failed` it IS client-writable — it exists precisely
+ *  so an agent asked to take a card off the board no longer has to misreport it
+ *  as done (2026-08-14). */
+export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived'
 
 /**
  * The kind of work a card represents — the ▶/play routing discriminator (#379,
@@ -54,6 +65,10 @@ export interface WorkBoardItem {
   design_doc_ref: string | null
   /** #379 — the ▶ routing discriminator ('build' → Trident, 'research' → Atlas). */
   task_type: WorkBoardTaskType
+  /** Same-board cards that must land before this card may dispatch. */
+  blocked_by: string[]
+  /** Expected path/glob writes. Null means undeclared (and later gates fail safe). */
+  declared_surfaces: string[] | null
   /** Lightweight inline (in-topic) work marker. Sub-agent activity is
    *  DERIVED via `linked_run_id` (Phase 2), not stored here. */
   inline_active: boolean
@@ -71,6 +86,8 @@ export interface CreateWorkBoardItemInput {
   design_doc_ref?: string | null
   /** #379 — the ▶ routing kind; defaults to 'build' when absent. */
   task_type?: WorkBoardTaskType
+  blocked_by?: string[]
+  declared_surfaces?: string[]
   /** Test-injectable id; defaults to a fresh ULID. */
   id?: string
 }
@@ -83,6 +100,10 @@ export interface WorkBoardItemUpdate {
    *  an item it is working INLINE in the main topic (caret `›`) vs via a bound
    *  sub-agent/trident run (fork `⑂`, derived from `linked_run_id`). */
   inline_active?: boolean
+  /** Replaces the whole dependency set; an empty array clears it. */
+  blocked_by?: string[]
+  /** Replaces the declaration; null or an empty array clears to undeclared. */
+  declared_surfaces?: string[] | null
 }
 
 /** Outcome of a bound run reaching a terminal phase (drives the reconcile). */
@@ -208,7 +229,8 @@ export function workBoardProjectIdForKey(
 
 const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
-  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type'
+  'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
+  'blocked_by, declared_surfaces'
 
 interface WorkBoardItemDbRow {
   id: string
@@ -223,6 +245,8 @@ interface WorkBoardItemDbRow {
   updated_at: string
   completed_at: string | null
   task_type: WorkBoardTaskType
+  blocked_by: string | null
+  declared_surfaces: string | null
 }
 
 /**
@@ -266,6 +290,159 @@ export function validateDesignDocRef(raw: string | null | undefined): string | n
   )
 }
 
+function dedupe(values: string[]): string[] {
+  return [...new Set(values)]
+}
+
+function validateBlockedBy(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    throw new WorkBoardValidationError('invalid_blocked_by', 'blocked_by must be an array')
+  }
+  for (const blocker of raw) {
+    if (typeof blocker !== 'string' || blocker.length === 0 || blocker.length > 128) {
+      throw new WorkBoardValidationError(
+        'invalid_blocked_by',
+        'blocked_by entries must be non-empty strings of at most 128 chars',
+      )
+    }
+  }
+  const normalized = dedupe(raw as string[])
+  if (normalized.length > 20) {
+    throw new WorkBoardValidationError(
+      'invalid_blocked_by',
+      'blocked_by must contain at most 20 unique entries',
+    )
+  }
+  return normalized
+}
+
+function validateDeclaredSurfaces(raw: unknown): string[] {
+  if (!Array.isArray(raw)) {
+    throw new WorkBoardValidationError(
+      'invalid_declared_surfaces',
+      'declared_surfaces must be an array',
+    )
+  }
+  const normalized: string[] = []
+  for (const surface of raw) {
+    if (typeof surface !== 'string') {
+      throw new WorkBoardValidationError(
+        'invalid_declared_surfaces',
+        'declared_surfaces entries must be strings',
+      )
+    }
+    const trimmed = surface.trim()
+    if (trimmed.length === 0 || trimmed.length > 512 || /[\n\0]/.test(trimmed)) {
+      throw new WorkBoardValidationError(
+        'invalid_declared_surfaces',
+        'declared_surfaces entries must be non-empty, at most 512 chars, and contain no newline or NUL',
+      )
+    }
+    normalized.push(trimmed)
+  }
+  const unique = dedupe(normalized)
+  if (unique.length > 64) {
+    throw new WorkBoardValidationError(
+      'invalid_declared_surfaces',
+      'declared_surfaces must contain at most 64 unique entries',
+    )
+  }
+  return unique
+}
+
+function parseStoredStringArray(raw: string | null): string[] | null {
+  if (raw === null) return null
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) && parsed.every((value) => typeof value === 'string')
+      ? parsed
+      : null
+  } catch {
+    return null
+  }
+}
+
+function serializeStringArray(values: string[]): string | null {
+  return values.length === 0 ? null : JSON.stringify(values)
+}
+
+interface DependencyRow {
+  id: string
+  blocked_by: string | null
+}
+
+function dependencyCyclePath(
+  rows: DependencyRow[],
+  candidateId: string,
+  candidateEdges: string[],
+): string[] | null {
+  const graph = new Map(
+    rows.map((row) => [row.id, parseStoredStringArray(row.blocked_by) ?? []] as const),
+  )
+  graph.set(candidateId, candidateEdges)
+  const visited = new Set<string>()
+
+  const visit = (id: string, path: string[]): string[] | null => {
+    if (visited.has(id)) return null
+    visited.add(id)
+    for (const blocker of graph.get(id) ?? []) {
+      if (blocker === candidateId) return [...path, candidateId]
+      const cycle = visit(blocker, [...path, blocker])
+      if (cycle !== null) return cycle
+    }
+    return null
+  }
+
+  return visit(candidateId, [candidateId])
+}
+
+function validateDependencyWrite(
+  tx: ProjectDb,
+  project_slug: string,
+  candidateId: string,
+  candidateEdges: string[],
+): void {
+  if (candidateEdges.includes(candidateId)) {
+    throw new WorkBoardValidationError(
+      'dependency_cycle',
+      `dependency cycle refused: ${candidateId} → ${candidateId}`,
+    )
+  }
+
+  if (candidateEdges.length > 0) {
+    const placeholders = candidateEdges.map(() => '?').join(', ')
+    const found = new Set(
+      tx
+        .prepare<{ id: string }, string[]>(
+          `SELECT id FROM work_board_items
+            WHERE project_slug = ? AND id IN (${placeholders})`,
+        )
+        .all(project_slug, ...candidateEdges)
+        .map((row) => row.id),
+    )
+    const missing = candidateEdges.filter((blocker) => !found.has(blocker))
+    if (missing.length > 0) {
+      throw new WorkBoardValidationError(
+        'unknown_blocker',
+        `unknown blocker id(s) on board ${project_slug}: ${missing.join(', ')}`,
+      )
+    }
+  }
+
+  const rows = tx
+    .prepare<DependencyRow, [string]>(
+      'SELECT id, blocked_by FROM work_board_items WHERE project_slug = ?',
+    )
+    .all(project_slug)
+  const cycle = dependencyCyclePath(rows, candidateId, candidateEdges)
+  if (cycle !== null) {
+    throw new WorkBoardValidationError(
+      'dependency_cycle',
+      `dependency cycle refused: ${cycle.join(' → ')}`,
+    )
+  }
+}
+
 /**
  * 48-bit timestamp + 80 random bits, Crockford base32 (sortable). Mirrors
  * the `notes` / `comments` stores; there is no `ulid` package in the repo.
@@ -306,21 +483,26 @@ function rowToItem(row: WorkBoardItemDbRow): WorkBoardItem {
     updated_at: row.updated_at,
     completed_at: row.completed_at,
     task_type: row.task_type,
+    blocked_by: parseStoredStringArray(row.blocked_by) ?? [],
+    declared_surfaces: parseStoredStringArray(row.declared_surfaces),
   }
 }
 
 /**
- * Thrown when something tries to mark an item done while its bound run is still
- * live. Carries both ids so the caller can say WHICH item and WHICH run rather
- * than a bare failure.
+ * Thrown when something tries to mark an item done — or to SHELVE it — while its
+ * bound run is still live. Carries both ids so the caller can say WHICH item and
+ * WHICH run rather than a bare failure. `action` only selects the explanation;
+ * both refusals are the same rule (a terminal claim about a live build).
  */
 export class WorkBoardRunStillLiveError extends Error {
   readonly item_id: string
   readonly run_id: string
-  constructor(item_id: string, run_id: string) {
+  constructor(item_id: string, run_id: string, action: 'complete' | 'archive' = 'complete') {
     super(
-      `refusing to complete item ${item_id}: its build (run ${run_id}) is still running. ` +
-        'Completion is reconciled from the run reaching a terminal phase — it cannot be asserted by hand or by an agent while the build is live.',
+      `refusing to ${action} item ${item_id}: its build (run ${run_id}) is still running. ` +
+        (action === 'archive'
+          ? 'Shelving says the work is parked, which is not true while the build is live — cancel or remove the card, or wait for the run to reach a terminal phase.'
+          : 'Completion is reconciled from the run reaching a terminal phase — it cannot be asserted by hand or by an agent while the build is live.'),
     )
     this.name = 'WorkBoardRunStillLiveError'
     this.item_id = item_id
@@ -370,6 +552,8 @@ export class WorkBoardStore {
     const design_doc_ref = validateDesignDocRef(input.design_doc_ref)
     const completed_at = status === 'done' ? ts : null
     const task_type: WorkBoardTaskType = input.task_type ?? 'build'
+    const blocked_by = validateBlockedBy(input.blocked_by ?? [])
+    const declared_surfaces = validateDeclaredSurfaces(input.declared_surfaces ?? [])
 
     const item: WorkBoardItem = {
       id,
@@ -384,9 +568,17 @@ export class WorkBoardStore {
       updated_at: ts,
       completed_at,
       task_type,
+      blocked_by,
+      // Empty and undeclared are deliberately the same fail-safe state: callers
+      // get an incentive to declare real paths instead of claiming an empty set.
+      declared_surfaces: declared_surfaces.length === 0 ? null : declared_surfaces,
     }
 
     await this.db.transaction(async (tx) => {
+      // Referential + graph reads share the write transaction/mutex. Concurrent
+      // dependency writes therefore cannot each pass a stale graph check and
+      // jointly commit a cycle (the same rationale as MAX(sort_order) below).
+      validateDependencyWrite(tx, project_slug, item.id, item.blocked_by)
       const max = tx
         .prepare<{ next: number }, [string]>(
           `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
@@ -396,7 +588,7 @@ export class WorkBoardStore {
       item.sort_order = max?.next ?? 1
       await tx.run(
         `INSERT INTO work_board_items (${COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           item.id,
           item.project_slug,
@@ -410,6 +602,8 @@ export class WorkBoardStore {
           item.updated_at,
           item.completed_at,
           item.task_type,
+          serializeStringArray(item.blocked_by),
+          item.declared_surfaces === null ? null : JSON.stringify(item.declared_surfaces),
         ],
       )
     })
@@ -427,12 +621,13 @@ export class WorkBoardStore {
     return row === null ? null : rowToItem(row)
   }
 
-  /** Active + next (status != done) ordered by `sort_order`. */
+  /** The ACTIVE lane: everything that is neither shipped nor shelved
+   *  (`status NOT IN ('done','archived')`), ordered by `sort_order`. */
   listActive(project_slug: string): WorkBoardItem[] {
     return this.db
       .prepare<WorkBoardItemDbRow, [string]>(
         `SELECT ${COLS} FROM work_board_items
-          WHERE project_slug = ? AND status != 'done'
+          WHERE project_slug = ? AND status NOT IN ('done', 'archived')
           ORDER BY sort_order ASC`,
       )
       .all(project_slug)
@@ -440,8 +635,9 @@ export class WorkBoardStore {
   }
 
   /**
-   * Active + next (status != done) across ALL scopes for the owner (General +
-   * every project), ordered by scope then `sort_order`. The durable memory-index
+   * The ACTIVE lane (neither shipped nor shelved) across ALL scopes for the
+   * owner (General + every project), ordered by scope then `sort_order`. The
+   * durable memory-index
    * manifest (RB1) is an OWNER-WIDE breadth surface regenerated at entity-write
    * time — when there is no "current project" — so it aggregates active work from
    * every board rather than a single scope. A pure read; no writer.
@@ -450,7 +646,7 @@ export class WorkBoardStore {
     return this.db
       .prepare<WorkBoardItemDbRow, []>(
         `SELECT ${COLS} FROM work_board_items
-          WHERE status != 'done'
+          WHERE status NOT IN ('done', 'archived')
           ORDER BY project_slug ASC, sort_order ASC`,
       )
       .all()
@@ -470,12 +666,35 @@ export class WorkBoardStore {
   }
 
   /**
-   * The full board: active+next first (by `sort_order`), then the completed
-   * history (reverse-chron). This is the snapshot the HTTP GET + the
-   * `work_board_changed` frame send.
+   * SHELVED (status = archived) most-recently-shelved first. Deliberately a
+   * SEPARATE list from {@link listCompleted}: an archived card is parked, not
+   * shipped, and must never be counted as completed anywhere the board reports
+   * progress. It has no `completed_at` to sort by, so it orders by `updated_at`
+   * (when it was shelved).
+   */
+  listArchived(project_slug: string): WorkBoardItem[] {
+    return this.db
+      .prepare<WorkBoardItemDbRow, [string]>(
+        `SELECT ${COLS} FROM work_board_items
+          WHERE project_slug = ? AND status = 'archived'
+          ORDER BY updated_at DESC`,
+      )
+      .all(project_slug)
+      .map(rowToItem)
+  }
+
+  /**
+   * The full board: the active lane first (by `sort_order`), then the SHELVED
+   * cards (reverse-chron), then the completed history (reverse-chron). This is
+   * the snapshot the HTTP GET + the `work_board_changed` frame send; the
+   * clients bucket it back out by status (active / Shelved / Done).
    */
   list(project_slug: string): WorkBoardItem[] {
-    return [...this.listActive(project_slug), ...this.listCompleted(project_slug)]
+    return [
+      ...this.listActive(project_slug),
+      ...this.listArchived(project_slug),
+      ...this.listCompleted(project_slug),
+    ]
   }
 
   /**
@@ -488,8 +707,14 @@ export class WorkBoardStore {
    * collide with the renumbered active items. The status path runs in a
    * transaction because the reopen read-compute-write (MAX `sort_order`) must
    * be atomic. Scoped by `project_slug`. Any REAL transition into a terminal
-   * status ('done'/'failed') unconditionally clears `inline_active` — overriding
-   * an explicit patch value — for parity with attachRun/detachRun.
+   * status ('done'/'failed'/'archived') unconditionally clears `inline_active` —
+   * overriding an explicit patch value — for parity with attachRun/detachRun.
+   *
+   * A genuine →'archived' (SHELVED) transition NEVER stamps `completed_at`
+   * (shelved ≠ shipped) and is REFUSED while the card's bound run is still live
+   * — see the guard below. Shelving OFF done nulls `completed_at`, and leaving
+   * archived re-appends the card to the END of the active lane, both through
+   * the same re-open branch.
    */
   async update(
     project_slug: string,
@@ -508,10 +733,69 @@ export class WorkBoardStore {
     if (patch.design_doc_ref !== undefined) {
       designDocRef = validateDesignDocRef(patch.design_doc_ref)
     }
+    const blockedBy =
+      patch.blocked_by === undefined ? undefined : validateBlockedBy(patch.blocked_by)
+    const declaredSurfaces =
+      patch.declared_surfaces === undefined || patch.declared_surfaces === null
+        ? patch.declared_surfaces
+        : validateDeclaredSurfaces(patch.declared_surfaces)
+
+    // REFUSE to SHELVE a card whose bound run is still live, before any write.
+    // A shelf-write is a claim about the world too — that the work is parked —
+    // and nothing may park a card whose build is still running: the build would
+    // keep going, off the board, and its terminal reconcile would then write
+    // done/failed over the shelf. Same shape as `complete()`'s guard (see
+    // `isRunLive` in the options for the incident): it THROWS rather than
+    // returning null, because null already means "no such item" and a refusal
+    // that looks like a miss gets silently swallowed by every caller. Guards
+    // ONLY the genuine →archived transition; every other status write is
+    // untouched.
+    if (patch.status === 'archived') {
+      const existing = this.get(project_slug, id)
+      if (
+        existing !== null &&
+        existing.status !== 'archived' &&
+        existing.linked_run_id !== null &&
+        this.isRunLive !== undefined &&
+        this.isRunLive(existing.linked_run_id)
+      ) {
+        throw new WorkBoardRunStillLiveError(id, existing.linked_run_id, 'archive')
+      }
+    }
 
     const result = await this.db.transaction(async (tx): Promise<WorkBoardItem | null> => {
       const current = this.get(project_slug, id)
       if (current === null) return null
+      if (blockedBy !== undefined) {
+        // This graph snapshot and the eventual UPDATE are protected by the same
+        // write mutex, so no concurrent edge write can create a jointly-committed
+        // cycle between validation and storage.
+        validateDependencyWrite(tx, project_slug, id, blockedBy)
+      }
+      // REFUSE any real transition into 'done' while the bound run is still live.
+      // "Done" is a claim about the world — that work shipped — and nothing may
+      // assert it on behalf of a build that is still running.
+      //
+      // The guard lives HERE, on the one write path, rather than on `complete()`:
+      // `complete()` is not the only door. The `work_board_update` agent tool
+      // exposes the full status enum and routes straight to this method
+      // (`work-board/agent-tool.ts`), so a guard on `complete()` alone was a
+      // guard on the door nobody has to use — an agent that patched
+      // `{status:'done'}` walked past it and got `completed_at` stamped mid-build.
+      // One invariant, one place, no way around it.
+      //
+      // It throws rather than returning null because null already means "no such
+      // item", and a refusal that looks like a miss would be silently swallowed by
+      // both callers. Better it refuse loudly than lie quietly.
+      if (
+        patch.status === 'done' &&
+        current.status !== 'done' &&
+        current.linked_run_id !== null &&
+        this.isRunLive !== undefined &&
+        this.isRunLive(current.linked_run_id)
+      ) {
+        throw new WorkBoardRunStillLiveError(id, current.linked_run_id)
+      }
       const sets: string[] = []
       const params: (string | number | null)[] = []
       const push = (col: string, val: string | number | null): void => {
@@ -520,16 +804,29 @@ export class WorkBoardStore {
       }
       if (title !== undefined) push('title', title)
       if (designDocRef !== undefined) push('design_doc_ref', designDocRef)
-      // A REAL transition into a terminal lane ('done'/'failed') UNCONDITIONALLY
-      // clears the inline marker — a finished card can never still claim live
-      // inline work (generic-path parity with attachRun/detachRun, which already
-      // clear it). The clear WINS over any explicit patch.inline_active value,
-      // so the explicit write is suppressed for that case (this also avoids a
-      // duplicate SET column in the UPDATE statement).
+      if (blockedBy !== undefined) push('blocked_by', serializeStringArray(blockedBy))
+      if (declaredSurfaces !== undefined) {
+        // null and [] both mean UNDECLARED. This fail-safe state intentionally
+        // differs from declaring real paths; later dispatch gates treat it as
+        // touching everything.
+        push(
+          'declared_surfaces',
+          declaredSurfaces === null || declaredSurfaces.length === 0
+            ? null
+            : JSON.stringify(declaredSurfaces),
+        )
+      }
+      // A REAL transition OFF the active lane ('done'/'failed'/'archived')
+      // UNCONDITIONALLY clears the inline marker — a finished OR SHELVED card can
+      // never still claim live inline work (generic-path parity with
+      // attachRun/detachRun, which already clear it). The clear WINS over any
+      // explicit patch.inline_active value, so the explicit write is suppressed
+      // for that case (this also avoids a duplicate SET column in the UPDATE
+      // statement).
       const terminalTransition =
         patch.status !== undefined &&
         patch.status !== current.status &&
-        (patch.status === 'done' || patch.status === 'failed')
+        (patch.status === 'done' || patch.status === 'failed' || patch.status === 'archived')
       if (patch.inline_active !== undefined && !terminalTransition) {
         push('inline_active', patch.inline_active ? 1 : 0)
       }
@@ -537,12 +834,23 @@ export class WorkBoardStore {
         push('status', patch.status)
         if (terminalTransition) push('inline_active', 0)
         if (patch.status === 'done') {
-          // Genuine completion — stamp the datestamp ONCE.
+          // Genuine completion — stamp the datestamp ONCE. NOTE this is the ONLY
+          // path that ever stamps `completed_at`; shelving (→'archived') falls
+          // through to the branches below and leaves it null, because a shelved
+          // card is parked, not shipped.
           push('completed_at', this.now())
-        } else if (current.status === 'done') {
-          // Re-open OFF done: clear the completion + re-append to the active
-          // lane end so the stale done-row sort_order can't collide.
+        } else if (current.status === 'done' || current.status === 'archived') {
+          // Coming OFF done or OFF the shelf (including done→archived): clear any
+          // completion datestamp — a shelved card must never carry one — and
+          // re-append to the active lane end so the stale done/shelved-row
+          // sort_order can't collide with the renumbered active lane. Harmless on
+          // done→archived, where the appended sort_order is simply unused until
+          // the card is un-shelved.
           push('completed_at', null)
+          // A completed card retains its terminal run only while it is history,
+          // so recovered alerts remain visible there. Reopening/shelving starts
+          // a new lifecycle and must not derive progress from the old run.
+          if (current.status === 'done') push('linked_run_id', null)
           const max = tx
             .prepare<{ next: number }, [string]>(
               `SELECT COALESCE(MAX(sort_order), 0) + 1 AS next
@@ -581,20 +889,10 @@ export class WorkBoardStore {
    * refresh `completed_at` (it routes through the same transition logic).
    */
   async complete(project_slug: string, id: string): Promise<WorkBoardItem | null> {
-    // REFUSE while the bound run is still live. "Done" is a claim about the world
-    // — that work shipped — and nothing may assert it on behalf of a build that
-    // is still running. See `isRunLive` in the options for the incident.
-    //
-    // It throws rather than returning null because null already means "no such
-    // item", and a refusal that looks like a miss would be silently swallowed by
-    // both callers. The owner's own words on this class of bug: better it refuse
-    // loudly than lie quietly.
-    const existing = this.get(project_slug, id)
-    if (existing !== null && existing.linked_run_id !== null && this.isRunLive !== undefined) {
-      if (this.isRunLive(existing.linked_run_id)) {
-        throw new WorkBoardRunStillLiveError(id, existing.linked_run_id)
-      }
-    }
+    // The live-run refusal is NOT repeated here. It lives on `update()`, which
+    // this delegates to and which every other door into 'done' also goes through
+    // — one invariant in one place. Duplicating it would be a second copy to
+    // drift, and the copy on this path was never the one being walked past.
     return this.update(project_slug, id, { status: 'done' })
   }
 
@@ -609,7 +907,7 @@ export class WorkBoardStore {
       const ids = tx
         .prepare<{ id: string }, [string]>(
           `SELECT id FROM work_board_items
-            WHERE project_slug = ? AND status != 'done'
+            WHERE project_slug = ? AND status NOT IN ('done', 'archived')
             ORDER BY sort_order ASC`,
         )
         .all(project_slug)
@@ -751,8 +1049,9 @@ export class WorkBoardStore {
   /**
    * Phase 2b — RECONCILE a bound run that reached a terminal phase. Finds the
    * item by `run_id` and sets the lane from the outcome:
-   *   - `done`   → CLEAR the run binding (fork icon goes dark) + complete the
-   *               item (datestamped history).
+   *   - `done`   → complete the item (datestamped history) and KEEP the run
+   *               binding so terminal evidence such as a recovered brief alert
+   *               remains visible. Reopening the card clears this stale link.
    *   - `failed` → mark the item FAILED and KEEP the run binding (#340). The
    *               still-linked failed run is what the client derives the red dot
    *               + "Failed" tag + `failure_reason` one-liner from (its
@@ -774,8 +1073,9 @@ export class WorkBoardStore {
       const sets = ['inline_active = 0']
       const params: (string | number | null)[] = []
       if (outcome === 'done') {
-        // Done — clear the binding (fork ⑂ dark) + complete the item.
-        sets.push('linked_run_id = NULL', "status = 'done'")
+        // Done — keep the terminal binding so completed history can still
+        // derive durable run evidence (notably a recovered integrity alert).
+        sets.push("status = 'done'")
         // Stamp the datestamp only on a genuine →done transition.
         if (current.status !== 'done') {
           sets.push('completed_at = ?')

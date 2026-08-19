@@ -11,6 +11,8 @@ function item(partial: Partial<WorkBoardItem>): WorkBoardItem {
     sort_order: 1,
     design_doc_ref: null,
     task_type: 'build',
+    blocked_by: [],
+    declared_surfaces: null,
     inline_active: false,
     linked_run_id: null,
     created_at: '2026-06-29T00:00:00.000Z',

@@ -18,46 +18,23 @@ import { describe, expect, test } from 'bun:test'
 
 import { buildTridentTerminator, type TridentTerminateStore } from './terminate.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 import type { TridentTerminalHook } from './tick.ts'
 
 function fakeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'demo',
     project_slug: 'owner',
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
-    branch: null,
-    pr: null,
-    merge_mode: 'local',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/tmp/repo',
-    worktree: null,
     task: 'demo task',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-07-14T00:00:00.000Z',
     last_advanced_at: '2026-07-14T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 const TERMINAL = new Set<TridentPhase>(['done', 'failed', 'stopped'])

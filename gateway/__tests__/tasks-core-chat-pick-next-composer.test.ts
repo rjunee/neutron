@@ -50,7 +50,7 @@ import {
   loadManifest as loadTasksManifest,
 } from '@neutronai/tasks-core'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore as CanonicalTaskStore } from '@neutronai/tasks/store.ts'
 import { composeProductionGraph } from '../composition.ts'
@@ -98,8 +98,8 @@ const noOpInputBase = {
 
 async function startHarness(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-tasks-chat-composer-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   // Single canonical store, shared between the Tasks Core's adapter
   // AND the P5.4 HTTP surface. The brief's production-composer guard:

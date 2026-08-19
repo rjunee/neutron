@@ -92,31 +92,46 @@ export function statusLabel(status: WorkBoardStatus): string {
   if (status === 'in_progress') return 'In progress';
   if (status === 'done') return 'Done';
   if (status === 'failed') return 'Failed';
+  if (status === 'archived') return 'Shelved';
   return 'Upcoming';
 }
 
 /** Cycle a status forward: upcoming → in_progress → done (done stays done). A
  *  failed item re-queues to upcoming on manual advance (the primary action is
- *  the ▶/↻ retry). */
+ *  the ▶/↻ retry), and so does a SHELVED item — advancing a shelved card
+ *  un-shelves it back onto the active lane. */
 export function nextStatus(status: WorkBoardStatus): WorkBoardStatus {
   if (status === 'upcoming') return 'in_progress';
   if (status === 'in_progress') return 'done';
   if (status === 'failed') return 'upcoming';
+  if (status === 'archived') return 'upcoming';
   return 'done';
 }
 
-/** Split a board snapshot into the active lane + the completed history. */
+/**
+ * Split a board snapshot into the active lane + the SHELVED cards + the
+ * completed history.
+ *
+ * Archived is bucketed FIRST-CLASS, never folded into either neighbour. Folding
+ * it into `completed` would report parked work as shipped progress — the exact
+ * misreport the shelved lane exists to kill — and the old two-way
+ * `status === 'done' ? completed : active` bucketing would resurrect a shelved
+ * card in the active lane the server already excluded.
+ */
 export function splitBoard(items: readonly WorkBoardItem[]): {
   active: WorkBoardItem[];
+  archived: WorkBoardItem[];
   completed: WorkBoardItem[];
 } {
   const active: WorkBoardItem[] = [];
+  const archived: WorkBoardItem[] = [];
   const completed: WorkBoardItem[] = [];
   for (const it of items) {
     if (it.status === 'done') completed.push(it);
+    else if (it.status === 'archived') archived.push(it);
     else active.push(it);
   }
-  return { active, completed };
+  return { active, archived, completed };
 }
 
 /**
@@ -199,6 +214,32 @@ export function failureReasonText(rp: RunProgress | undefined): string | null {
   if (rp === undefined || resolveStepLabel(rp) !== 'failed') return null;
   const reason = rp.failure_reason;
   return reason !== null && reason.length > 0 ? reason : null;
+}
+
+/** A brief-integrity refusal is shown even when the bridge recovered and the run
+ *  continued, which is exactly the case where `failure_reason` stays null. */
+export function briefAlertText(rp: RunProgress | undefined): string | null {
+  if (rp === undefined) return null;
+  const alert = rp.brief_alert;
+  return typeof alert === 'string' && alert.length > 0 ? alert : null;
+}
+
+export interface RunNotice {
+  text: string;
+  tone: 'failure' | 'alert';
+}
+
+/** Terminal failure is the card's outcome; a recovered brief alert is only the
+ * fallback notice while no terminal failure reason exists. */
+export function runNotice(rp: RunProgress | undefined): RunNotice | null {
+  const failure = failureReasonText(rp);
+  if (failure !== null) return { text: failure, tone: 'failure' };
+  // A recovered integrity incident is evidence, not a substitute outcome. If a
+  // terminal failure has no recorded reason, do not relabel the earlier alert
+  // as though it caused that failure.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed') return null;
+  const alert = briefAlertText(rp);
+  return alert === null ? null : { text: alert, tone: 'alert' };
 }
 
 /** The leading dot's color bucket, or 'upcoming' (faint gray outline, no fill). */
@@ -286,11 +327,20 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  *
  * DELIBERATE SPEC EXTENSION — `inline_active` (third suppressor): the spec's
  * two-clause form (`!isLinkedRunning && status !== 'done'`) does not mention
- * inline_active. This extension prevents launching a competing Trident build
- * while an inline agent action is already executing. STALENESS CAVEAT: if the
- * agent dies mid-inline-work without clearing the flag, the card enters a
- * permanent pulse+no-▶ state — the same unrecoverable-card defect on a
- * narrower path. Acceptable until an inline-action heartbeat/reconciler lands.
+ * inline_active. It suppresses ▶ while the card shows RECENT WRITE ACTIVITY, so
+ * the owner does not launch a Trident build on top of a repo an inline agent was
+ * just rewriting. Say it that way and no stronger: the wire field is now DERIVED
+ * server-side from a 90 s write-evidence window
+ * (`work-board/inline-activity.ts`), which means
+ *   - a crashed session's stale flag reads false on the NEXT read (the old
+ *     permanent pulse+no-▶ state is gone), but it heals on a CLOCK, not on an
+ *     event, so a client that stops re-reading keeps showing the last frame it
+ *     was sent — hence the board screen's quiet re-poll while any card reads
+ *     inline-active; and
+ *   - inline work that writes nothing for 90 s (a long test/build run, a
+ *     research turn) reads NOT active and ▶ comes back. That is a deliberate
+ *     false negative: this is a HINT, never a lock, and nothing here blocks.
+ * This helper keeps reading the wire field unchanged.
  */
 export function canPlay(item: WorkBoardItem): boolean {
   return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;

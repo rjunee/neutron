@@ -18,9 +18,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { storeGitHubToken } from '@neutronai/github/credential.ts'
 import { runGhAuthed } from './gh-authed.ts'
@@ -45,9 +44,7 @@ beforeEach(() => {
   mkdirSync(stubBin, { recursive: true })
   mkdirSync(fakeHome, { recursive: true })
   dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
 
   // The capture file lives OUTSIDE the temp tree the "never written to disk"
   // assertion sweeps, because it is the one place the token is deliberately
@@ -252,15 +249,16 @@ describe('gh-authed: the env it builds (unit seam)', () => {
     expect(envs[0]!['GIT_CONFIG_KEY_0']).toBe('credential.https://github.com.helper')
   })
 
-  test('with no stored token: no GH_TOKEN, no git config injection at all', async () => {
+  test('with no stored token: the child env IS the inherited environment — nothing injected', async () => {
     const { spawn, envs } = recorder()
     const code = await runGhAuthed(
       ['--db', dbPath, '--data-dir', dataDir, '--owner', OWNER, '--', 'pr', 'view', '1'],
       spawn,
     )
     expect(code).toBe(0)
-    expect(envs[0]!['GH_TOKEN']).toBeUndefined()
-    expect(envs[0]!['GIT_CONFIG_KEY_0']).toBeUndefined()
+    // The child inherits process.env by design (invariant 4), so absolute absence
+    // would assert a fact about the host shell. Equality proves nothing was injected.
+    expect(envs[0]).toEqual({ ...process.env })
   })
 
   test('the gh tail is passed VERBATIM, and the flags never leak into it', async () => {

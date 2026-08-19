@@ -20,6 +20,7 @@ export {
   normalizePromptResolved,
   spentChoiceValue,
   parseSessionReadyMaxSeq,
+  parseHistoryGap,
   parseReactions,
   parseOptions,
   parseUploadAffordance,
@@ -81,7 +82,7 @@ export {
   type MessageSearchOptions,
 } from './search.ts'
 
-export { SyncEngine, type ApplyResult } from './sync-engine.ts'
+export { SyncEngine, MAX_HISTORY_BACKFILL_ROUNDS, type ApplyResult } from './sync-engine.ts'
 
 // THE id generator for every client surface. `crypto` is absent on the mobile
 // runtime — see `ids.ts` for the incident this file exists to prevent.

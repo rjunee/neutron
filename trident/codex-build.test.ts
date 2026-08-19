@@ -27,7 +27,8 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
+import { Database } from 'bun:sqlite'
+import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
   existsSync,
@@ -36,15 +37,19 @@ import {
   readFileSync,
   readdirSync,
   realpathSync,
+  rmSync,
   symlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
+const CHECKPOINT_SCRIPT = join(HERE, 'checkpoint.sh')
 const SCRIPT_TEXT = readFileSync(SCRIPT, 'utf8')
 
 /**
@@ -73,8 +78,30 @@ const briefIntegrity = loadBriefIntegrity()
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
 interface RunOpts {
+  /** Branch used by `git init -b`; defaults to the wrapper argv branch. */
+  initBranch?: string
+  /** Create the wrapper argv branch at the base commit while remaining on initBranch. */
+  leftoverBranch?: boolean
+  /** Check the leftover branch out in a second worktree, making it unbindable here. */
+  holdLeftoverBranch?: boolean
+  /** Keep a process whose cwd is the holder alive while the wrapper runs. */
+  liveHolder?: boolean
+  /** Delete the holder directory while leaving its stale worktree admin entry. */
+  holderDirDeleted?: boolean
+  /** Leave observable uncommitted evidence in the holder. */
+  holderDirt?: boolean
   /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
   checkpointExit?: number
+  /** Stderr emitted by that recorder; the wrapper must never pass it through. */
+  checkpointStderr?: string
+  /** Install a stage-event argv recorder; its exit status exercises best effort. */
+  stageExit?: number
+  /** Use this stage writer instead of the argv recorder. */
+  stageScript?: string
+  /** Database coordinate handed to the stage writer. */
+  stageDb?: string
+  /** Run coordinate handed to the stage writer. */
+  stageRunId?: string
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -192,6 +219,7 @@ const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n
 
 interface RunResult {
   checkpointArgs: string
+  stageCalls: string
   status: number | null
   /** The signal the harness killed the wrapper with, or null if it exited by itself. */
   signal: NodeJS.Signals | null
@@ -363,7 +391,7 @@ exit 1
     const r = spawnSync('git', args, { cwd: dir, encoding: 'utf8' })
     if (r.status !== 0) throw new Error(`git ${args.join(' ')} failed: ${r.stderr}`)
   }
-  git('init', '-q', '-b', branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
+  git('init', '-q', '-b', opts.initBranch ?? branch, ...(opts.objectFormat === undefined ? [] : ['--object-format', opts.objectFormat]))
   git('config', 'user.email', 'build@localhost')
   git('config', 'user.name', 'build')
   let baseHead = ''
@@ -377,6 +405,20 @@ exit 1
     const bare = join(dir, 'origin.git')
     spawnSync('git', ['init', '-q', '--bare', bare])
     git('remote', 'add', 'origin', bare)
+  }
+  if (opts.leftoverBranch === true) git('branch', branch)
+  if (opts.holdLeftoverBranch === true) {
+    if (opts.leftoverBranch !== true) git('branch', branch)
+    git('worktree', 'add', join(dir, 'holder'), branch)
+    if (opts.holderDirt === true) {
+      writeFileSync(join(dir, 'holder', 'post-mortem.txt'), 'evidence\n')
+    }
+  }
+  const liveHolder = opts.holdLeftoverBranch === true && opts.liveHolder === true
+    ? spawn('sleep', ['300'], { cwd: join(dir, 'holder'), stdio: 'ignore' })
+    : undefined
+  if (opts.holdLeftoverBranch === true && opts.holderDirDeleted === true) {
+    rmSync(join(dir, 'holder'), { recursive: true, force: true })
   }
   if (opts.pushUrl !== undefined) git('remote', 'set-url', '--push', 'origin', opts.pushUrl)
   if (opts.credentialHelper === true) {
@@ -397,12 +439,30 @@ exit 1
   }
   if (opts.checkpointExit !== undefined) {
     const checkpoint = join(dir, 'checkpoint-stub.sh')
-    writeFileSync(checkpoint, `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\nexit ${opts.checkpointExit}\n`)
+    const checkpointStderr = opts.checkpointStderr === undefined
+      ? ''
+      : `printf '%s\\n' ${JSON.stringify(opts.checkpointStderr)} >&2\n`
+    writeFileSync(
+      checkpoint,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\n${checkpointStderr}exit ${opts.checkpointExit}\n`,
+    )
     chmodSync(checkpoint, 0o755)
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT'] = checkpoint
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = '/tmp/run.db'
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = 'run-123'
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_NAME'] = 'forge-done'
+  }
+  if (opts.stageExit !== undefined) {
+    const stage = join(dir, 'stage-stub.sh')
+    writeFileSync(stage, `#!/bin/sh\nprintf '%s\n' "$*" >> "$HOME/stage-args.txt"\nexit ${opts.stageExit}\n`)
+    chmodSync(stage, 0o755)
+    env['NEUTRON_CODEX_BUILD_STAGE_SCRIPT'] = stage
+  } else if (opts.stageScript !== undefined) {
+    env['NEUTRON_CODEX_BUILD_STAGE_SCRIPT'] = opts.stageScript
+  }
+  if (opts.stageExit !== undefined || opts.stageScript !== undefined) {
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = opts.stageDb ?? '/tmp/stage-run.db'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = opts.stageRunId ?? 'run-stage'
   }
   Object.assign(env, opts.env ?? {})
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
@@ -458,12 +518,18 @@ exit 1
       : opts.base === undefined
         ? [SCRIPT, branch]
         : [SCRIPT, branch, opts.base]
-  const res = spawnSync(BASH, argv, {
-    cwd: dir,
-    encoding: 'utf8',
-    env,
-    ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
-  })
+  const res = (() => {
+    try {
+      return spawnSync(BASH, argv, {
+        cwd: dir,
+        encoding: 'utf8',
+        env,
+        ...(opts.spawnTimeoutMs === undefined ? {} : { timeout: opts.spawnTimeoutMs }),
+      })
+    } finally {
+      liveHolder?.kill()
+    }
+  })()
   const readOr = (name: string): string => {
     try {
       return readFileSync(join(dir, name), 'utf8')
@@ -474,6 +540,7 @@ exit 1
   const trailerRaw = readOr('build.trailer')
   return {
     checkpointArgs: readOr('checkpoint-args.txt'),
+    stageCalls: readOr('stage-args.txt'),
     status: res.status,
     /** Non-null when the harness had to KILL the wrapper — i.e. it did not finish. */
     signal: res.signal ?? null,
@@ -519,6 +586,67 @@ const FAKE_BUILD_NO_DIFF = `cat >/dev/null; ${NARRATE}; echo built >> built.txt;
 const FAKE_NO_COMMIT = `cat >/dev/null; ${NARRATE}; echo edited > built.txt`
 const FAKE_FAIL = `cat >/dev/null; ${NARRATE}; echo "boom" >&2; exit 7`
 
+describe("the wrapper BINDS the worktree to the run's branch — the binding is measured setup, not the model's job", () => {
+  test('a fresh auto-named worktree branch is bound before the build commits', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+  })
+
+  test('the measured leftover-local-branch incident re-enters and advances that branch', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', leftoverBranch: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    const ancestor = spawnSync('git', ['merge-base', '--is-ancestor', r.baseHead, 'refs/heads/trident/a-run'], { cwd: r.dir })
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(ancestor.status).toBe(0)
+  })
+
+  test('a branch held by a DEAD round-0 worktree is RECLAIMED — detached in place, then built', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, holderDirt: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const holder = join(r.dir, 'holder')
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
+    const worktrees = spawnSync('git', ['worktree', 'list', '--porcelain'], { cwd: r.dir, encoding: 'utf8' }).stdout
+    expect(r.status).toBe(0)
+    expect(r.stderr).toContain('CODEX_BUILD_BRANCH_RECLAIMED')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_BRANCH']).toBe('trident/a-run')
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).not.toBe(r.baseHead)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(readFileSync(join(holder, 'post-mortem.txt'), 'utf8')).toBe('evidence\n')
+    expect(holderBranch).toBe('HEAD')
+    expect(worktrees).toContain(`worktree ${realpathSync(holder)}`)
+  })
+
+  test.skipIf(process.platform !== 'linux')('a branch held by a LIVE worktree is still refused, before any token is spent', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, liveHolder: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const holder = join(r.dir, 'holder')
+    const holderBranch = spawnSync('git', ['rev-parse', '--abbrev-ref', 'HEAD'], { cwd: holder, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(3)
+    expect(r.stderr).toContain('CODEX_BUILD_BRANCH_UNBOUND')
+    expect(r.stderr).toContain('LIVE')
+    expect(r.stderr).toContain(holder)
+    expect(r.codexStdin).toBe('')
+    expect(holderBranch).toBe('trident/a-run')
+  })
+
+  test('a holder whose directory is GONE is pruned, not fatal', () => {
+    const r = run({ authed: true, codexLoginExit: 0, initBranch: 'worktree-wf_x1-2', holdLeftoverBranch: true, holderDirDeleted: true, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+    const branchHead = spawnSync('git', ['rev-parse', 'refs/heads/trident/a-run'], { cwd: r.dir, encoding: 'utf8' }).stdout.trim()
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe(branchHead)
+    expect(r.stderr).not.toContain('CODEX_BUILD_BRANCH_UNBOUND')
+  })
+})
+
 describe('artifact-time checkpoint', () => {
   test('records the measured HEAD after commit and diff', () => {
     const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
@@ -541,6 +669,149 @@ describe('artifact-time checkpoint', () => {
     const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 1, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('CODEX_BUILD_CHECKPOINT_FAILED')
+  })
+})
+
+describe('durable pre-build stage stamps', () => {
+  test('wrapper-start is recorded before a not-connected refusal', () => {
+    const r = run({ authed: false, codexLoginExit: 0, stageExit: 0 })
+    expect(r.status).toBe(10)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+    ])
+  })
+
+  test('a successful Codex path durably brackets the exact execution window', () => {
+    const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 0 })
+    expect(r.status).toBe(0)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+
+  test('a failed Codex path still records codex-exec-end', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      stageExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_FAIL },
+    })
+    expect(r.status).toBe(5)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+
+  test('without the stage env the wrapper keeps its exit behaviour and calls no recorder', () => {
+    const r = run({ authed: false, codexLoginExit: 0 })
+    expect(r.status).toBe(10)
+    expect(r.stageCalls).toBe('')
+  })
+
+  test('the real wrapper → stage-stamp.sh → sqlite chain appends a row', () => {
+    const migrated = mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-'))
+    const stageDb = join(migrated, 'project.db')
+    seedMigratedDb(stageDb)
+    const migratedDb = new Database(stageDb)
+    applyMigrations(migratedDb)
+    migratedDb.close()
+    try {
+      const r = run({
+        authed: false,
+        codexLoginExit: 0,
+        stageScript: fileURLToPath(new URL('./stage-stamp.sh', import.meta.url)),
+        stageDb,
+        stageRunId: 'run-real-stage',
+      })
+      expect(r.status).toBe(10)
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query('SELECT run_id, stage FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      expect(rows).toEqual([{ run_id: 'run-real-stage', stage: 'wrapper-start' }])
+    } finally {
+      rmSync(migrated, { recursive: true, force: true })
+    }
+  })
+
+  test('a non-zero stage script cannot change the wrapper exit code', () => {
+    const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 19 })
+    expect(r.status).toBe(0)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+})
+
+describe('build-child environment — a build can migrate only its own worktree home', () => {
+  const inherited = {
+    NEUTRON_HOME: '/fake/live/home',
+    OWNER_HOME: '/fake/owner',
+    NEUTRON_DB_PATH: '/fake/live.db',
+    NEUTRON_BUILD_CHILD_ENV_PROBE: 'inherited',
+  }
+
+  function parsedEnv(raw: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const line of raw.trim().split('\n')) {
+      const split = line.indexOf('=')
+      if (split > 0) out[line.slice(0, split)] = line.slice(split + 1)
+    }
+    return out
+  }
+
+  test.each([
+    ['the fake-build composition site', true],
+    ['the real codex composition site', false],
+  ])('%s scopes inherited live selectors to the isolated worktree', (_label, fakeBuild) => {
+    const parentEnv = { ...inherited }
+    const parentBefore = { ...parentEnv }
+    const processBefore = {
+      NEUTRON_HOME: process.env['NEUTRON_HOME'],
+      OWNER_HOME: process.env['OWNER_HOME'],
+      NEUTRON_DB_PATH: process.env['NEUTRON_DB_PATH'],
+    }
+    const captured = 'build-child-env.txt'
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        ...parentEnv,
+        ...(fakeBuild
+          ? { NEUTRON_CODEX_BUILD_EXEC_CMD: `env > "$HOME/${captured}"; ${FAKE_BUILD}` }
+          : {}),
+      },
+    })
+
+    expect(r.status).toBe(0)
+    const childEnv = parsedEnv(
+      fakeBuild ? readFileSync(join(r.dir, captured), 'utf8') : r.codexEnv,
+    )
+    const worktree = r.trailer['NEUTRON_CODEX_BUILD_WORKTREE']!
+    const childHome = join(worktree, '.neutron-home')
+    expect(childEnv['NEUTRON_HOME']).toBe(childHome)
+    expect(relative(worktree, childEnv['NEUTRON_HOME']!)).toBe('.neutron-home')
+    expect(existsSync(childHome)).toBe(true)
+    expect(readFileSync(join(childHome, '.gitignore'), 'utf8')).toBe('*\n')
+    expect(
+      spawnSync('git', ['check-ignore', join(childHome, 'project.db')], { cwd: worktree }).status,
+    ).toBe(0)
+    expect('OWNER_HOME' in childEnv).toBe(false)
+    expect('NEUTRON_DB_PATH' in childEnv).toBe(false)
+    expect(childEnv['NEUTRON_BUILD_CHILD_ENV_PROBE']).toBe('inherited')
+    expect(parentEnv).toEqual(parentBefore)
+    expect({
+      NEUTRON_HOME: process.env['NEUTRON_HOME'],
+      OWNER_HOME: process.env['OWNER_HOME'],
+      NEUTRON_DB_PATH: process.env['NEUTRON_DB_PATH'],
+    }).toEqual(processBefore)
   })
 })
 /**
@@ -778,6 +1049,49 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     expect(codexStdin).toBe('')
   })
 
+  test('a corrupt whole brief records the exact refusal sentence on the run row', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-corrupt-whole-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'corrupt-whole-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const whole = `${DEFAULT_BRIEF}Then run the tests, commit, and open a PR.\n`
+      const res = run({
+        authed: true,
+        codexLoginExit: 0,
+        brief: DEFAULT_BRIEF,
+        integrity: briefIntegrity(whole),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_CORRUPT: the brief in ${join(res.dir, 'build.brief')} measures ${briefIntegrity(DEFAULT_BRIEF)} but the workflow composed ${briefIntegrity(whole)} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
   test('a brief REWORDED to the same length is still refused', () => {
     // The byte count alone would pass this one. The checksum is what makes "the same
     // size" and "the same text" different questions.
@@ -903,15 +1217,148 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexStdin).toBe(parts.join(''))
   })
 
-  test('a part altered after its receipt was taken is refused', () => {
+  test('a part altered after its receipt was taken is refused with byte-identical stderr when checkpoint env is absent', () => {
     const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
     const corrupted = [...intended]
     corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
     const res = success(corrupted, { partIntegrity: intended.map(briefIntegrity) })
+    const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
-    expect(res.stderr).toContain('brief-part-1.txt')
+    expect(res.stderr).toBe(`${sentence}\n`)
     expect(res.codexArgv).toBe('')
+  })
+
+  test('a corrupt part records the exact refusal sentence on the run row and still exits 3', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-corrupt-part-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'corrupt-part-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
+      const corrupted = [...intended]
+      corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a missing part also records its exact refusal sentence on the run row', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-missing-part-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'missing-part-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const res = success(['head\n', 'middle\n', 'coda\n'], {
+        missingBriefPartIndex: 1,
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_PART_MISSING: brief part ${join(res.dir, 'missing-brief-part-1.txt')} is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a failed alert write is swallowed and the corrupt-part refusal still exits 3', () => {
+    const intended = ['contract\n', 'middle\n']
+    const corrupted = ['contract\n', 'mangled\n']
+    const res = success(corrupted, {
+      partIntegrity: intended.map(briefIntegrity),
+      checkpointExit: 19,
+      checkpointStderr: 'sqlite: unable to open /sensitive/project.db',
+    })
+    const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+
+    expect(res.status).toBe(3)
+    expect(res.stderr).toBe(
+      `CODEX_BUILD_BRIEF_ALERT_FAILED\n${sentence}\n`,
+    )
+    expect(res.checkpointArgs.trim().split('\n')).toEqual([
+      '/tmp/run.db', 'run-123', 'brief_alert', sentence,
+    ])
+    expect(res.stderr).not.toContain('/sensitive/project.db')
+    expect(Buffer.from(res.stderr).subarray(-400).toString()).toContain(
+      'CODEX_BUILD_BRIEF_PART_CORRUPT',
+    )
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('a checkpoint aimed at a missing run reports alert recording failure', () => {
+    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-'))
+    const dbPath = join(alertDir, 'project.db')
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.close()
+    try {
+      const intended = ['contract\n', 'middle\n']
+      const corrupted = ['contract\n', 'mangled\n']
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: 'no-such-run',
+        },
+      })
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_ALERT_FAILED')
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
   })
 
   test('a missing part refuses before codex is invoked', () => {
@@ -1472,10 +1919,9 @@ describe('the trailer MEASURES the repository — it never repeats a claim', () 
     // …and the trailer says it produced nothing, which is the truth.
     expect(second.trailer['NEUTRON_CODEX_BUILD_HEAD']).toBe('')
     expect(second.trailerRaw).not.toContain(roundOne)
-    // It took three asks to establish the baseline, and the witness was never reached
-    // (there is no head of our own to witness) — so this is the baseline's retry being
-    // measured, not the witness's.
-    expect(probes()).toBe(3)
+    // It took three asks to bind at the remote tip, then one to capture that bound tip
+    // in the baseline. The witness was never reached because there is no new head.
+    expect(probes()).toBe(4)
   })
 
   test('a baseline probe that NEVER answers DEFERS the build instead of starting it blind', () => {

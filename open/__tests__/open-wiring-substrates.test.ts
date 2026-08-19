@@ -6,7 +6,10 @@
  * CARE invariants the carve must preserve:
  *   - substrate instance-id prefixes are byte-identical (`cc-llm-`, `cc-agent-`,
  *     ephemeral `cc-trident-*`, warm `cc-trident-fire-*`);
- *   - `enableToolBridge: true` ONLY on `cc-agent-*`; the rest omit it;
+ *   - `enableToolBridge: true` ONLY on the owner-facing conversational pair
+ *     `cc-agent-*` + `cc-nudge-*`; the rest omit it — asserted as an enumerated
+ *     set over every wired substrate, never as a positive case with an
+ *     exclusive-sounding title;
  *   - `cc-trident-fire-*` is WARM per repo cwd (Map cache: same cwd → same id +
  *     same instance; distinct cwd → distinct id) and NON-ephemeral;
  *   - `prewarmReady` never rejects and `prewarmSettledRef.settled` flips true
@@ -111,6 +114,29 @@ async function drain(sub: Substrate): Promise<void> {
   }
 }
 
+/**
+ * Drain EVERY substrate this wiring builds, so an "only X does Y" claim is a
+ * measured set difference rather than a positive assertion wearing an exclusive
+ * title. Nullable entries are LLM-less compositions; skip those, and the callers
+ * assert a non-empty result so a wholesale null cannot make the claim vacuous.
+ *
+ * Anything added to `WiredSubstrates` must be drained here — that is the point:
+ * a new substrate joins every exclusivity assertion automatically instead of
+ * being silently outside them.
+ */
+async function drainEveryWiredSubstrate(w: ReturnType<typeof wireSubstrates>): Promise<void> {
+  await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
+  await drain(w.makeWarmFireSubstrate('/repo/alpha'))
+  for (const s of [
+    w.liveAgentSubstrate,
+    w.llmCallSubstrate,
+    w.reminderComposeSubstrate,
+    w.makeComposeSubstrate('proj'),
+  ]) {
+    if (s !== null) await drain(s)
+  }
+}
+
 // `githubSpawnEnvRef` is module-level state a composer registers at boot, so a
 // composer test running earlier IN THE SAME SHARD leaves a live resolver behind
 // and every profile that opts into the credential then calls it. CI found this;
@@ -133,16 +159,33 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(opts!.skip_permissions).toBe(true)
   })
 
-  test('ONLY cc-agent-* opts into the tool bridge', async () => {
+  test('ONLY the owner-facing conversational pair opts into the tool bridge', async () => {
+    // ENUMERATED, not asserted-positive-and-titled-"only". The earlier version of
+    // this test drained `cc-agent-*` alone and asserted its bridge was on, so the
+    // exclusivity lived entirely in the title — and went quietly false the moment a
+    // second substrate was granted the bridge. Drain EVERY substrate this wiring
+    // builds and compare the whole set.
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)
-    expect(w.liveAgentSubstrate).not.toBeNull()
-    await drain(w.liveAgentSubstrate!)
-    const opts = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')
-    expect(opts).toBeDefined()
-    expect(opts!.enableToolBridge).toBe(true)
-    expect(opts!.ephemeral).not.toBe(true)
-    expect(opts!.skip_permissions).toBe(true)
+    await drainEveryWiredSubstrate(w)
+
+    const bridged = new Set(
+      captured.filter((o) => o.enableToolBridge === true).map((o) => o.substrate_instance_id),
+    )
+    // `cc-nudge-*` is the background proactive-compose lane. It is an equal-grant,
+    // SEPARATE-SESSION twin of the chat lane on purpose: a ritual composes there and
+    // ISSUES #504 settled that it must reach Core tools (the locked-down `cc-ritual-*`
+    // sandbox is exactly what that issue deleted, after the morning brief could not
+    // read the owner's calendar). Its containment is the approval gate, not the
+    // substrate. If a THIRD id ever appears here, that is a real privilege change and
+    // this test is the place it must be argued.
+    expect([...bridged].sort()).toEqual(['cc-agent-owner', 'cc-nudge-owner'])
+
+    for (const id of bridged) {
+      const opts = captured.find((o) => o.substrate_instance_id === id)!
+      expect(opts.ephemeral, id).not.toBe(true)
+      expect(opts.skip_permissions, id).toBe(true)
+    }
   })
 
   test('THE PROFILE DECIDES which substrates carry the GitHub credential', async () => {
@@ -237,6 +280,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       expect(o.onDeadTurnNotice).toBeUndefined()
       expect(o.onSizeAlert).toBeUndefined()
       expect(o.onRateLimitBanner).toBeUndefined()
+      expect(o.onModelFloorApplied).toBeUndefined()
       expect(o.onRecoveredReply).toBeUndefined()
       expect(o.delivery_topic_id).toBeUndefined()
       expect(o.skip_permissions).toBe(true)
@@ -250,6 +294,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
         onDeadTurnNotice: () => {},
         onSizeAlert: () => {},
         onRateLimitBanner,
+        onModelFloorApplied: () => {},
       },
       liveAgentDeliveryTopicId: 'app:owner',
     })
@@ -278,9 +323,10 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     const onDeadTurnNotice = (): void => {}
     const onSizeAlert = (): void => {}
     const onRateLimitBanner = (): void => {}
+    const onModelFloorApplied = (): void => {}
     const onRecoveredReply = (): void => {}
     const { ctx, captured } = makeCtx({
-      liveAgentNoticeSinks: { onDeadTurnNotice, onSizeAlert, onRateLimitBanner },
+      liveAgentNoticeSinks: { onDeadTurnNotice, onSizeAlert, onRateLimitBanner, onModelFloorApplied },
       liveAgentRecoveredReplySink: onRecoveredReply,
       liveAgentDeliveryTopicId: 'app:owner',
     })
@@ -295,6 +341,10 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     expect(agent.onDeadTurnNotice).toBe(onDeadTurnNotice)
     expect(agent.onSizeAlert).toBe(onSizeAlert)
     expect(agent.onRateLimitBanner).toBe(onRateLimitBanner)
+    // The floor-clamp notice rides the SAME wiring — it is the fourth member of
+    // the family now, and without it a clamp is a stderr line on a box the owner
+    // does not read (the silence that let the degradation run for a day).
+    expect(agent.onModelFloorApplied).toBe(onModelFloorApplied)
     expect(agent.onRecoveredReply).toBe(onRecoveredReply)
     expect(agent.delivery_topic_id).toBe('app:owner')
 
@@ -364,10 +414,7 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // Several are nullable (LLM-less compositions); drain whichever exist and
     // assert below that we actually collected some, so a wholesale null does not
     // turn this into a vacuous pass.
-    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
-    for (const s of [w.makeComposeSubstrate('proj'), w.liveAgentSubstrate, w.llmCallSubstrate]) {
-      if (s !== null) await drain(s)
-    }
+    await drainEveryWiredSubstrate(w)
 
     const fire = captured.filter((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))
     expect(fire.length).toBeGreaterThan(0)
@@ -378,8 +425,8 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     for (const o of others) expect(o.turn_inactivity_ms).toBeUndefined()
   })
 
-  test('ONLY the owner\u2019s chat substrate carries the frontier-model floor', async () => {
-    // THE WIRING, not the constant \u2014 same reasoning as the fire-window test
+  test('ONLY the two PROFILE_WARM_CHAT substrates carry the frontier-model floor', async () => {
+    // THE WIRING, not the constant — same reasoning as the fire-window test
     // directly above. The floor is worthless unless the REAL composition passes
     // `PROFILE_WARM_CHAT` down to the spawn, and the counter-assertion matters
     // just as much: scribe/reflection/phase-spec run on FAST_MODEL deliberately,
@@ -388,24 +435,102 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
     // The defect it guards: a REPL registry row OVERRIDES the best model
     // (`record.model ?? getBestModel()`), and the spawn writes the row back, so a
     // single wrong value is permanent. The owner's project chat ran a full day on
-    // Haiku on that path, twice in one day.
+    // Haiku on that path, twice in one day — which is ALSO why the background
+    // nudge lane carries the floor: a fired reminder used to compose on the chat
+    // session and rewrite its registry row to the fast tier. It now composes on
+    // its own child, and that child must not be the cheap one either.
+    //
+    // ⚠️ SCOPE, stated because the counter-assertion below reads wider than it is:
+    // this drives `wireSubstrates` ONLY. The scribe extractor, the correction judge
+    // and the consolidation pass — the deliberate fast-tier callers the counter-
+    // assertion is really about — are built by `wireMemory`, so flipping one of
+    // THEM onto the chat profile would not fail here. That half lives in
+    // `open-wiring-memory.test.ts` § "no memory substrate carries the frontier-
+    // model floor", which drives the real memory call sites.
     const { ctx, captured } = makeCtx()
     const w = wireSubstrates(ctx)
-    await drain(w.liveAgentSubstrate!)
-    await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
-    await drain(w.makeWarmFireSubstrate('/repo/alpha'))
-    for (const s of [w.makeComposeSubstrate('proj'), w.llmCallSubstrate]) {
-      if (s !== null) await drain(s)
-    }
+    await drainEveryWiredSubstrate(w)
 
-    const chat = captured.filter((o) => o.substrate_instance_id === 'cc-agent-owner')
-    expect(chat.length).toBeGreaterThan(0)
-    for (const o of chat) expect(o.frontier_model_floor).toBe(true)
+    const floored = new Set(
+      captured.filter((o) => o.frontier_model_floor === true).map((o) => o.substrate_instance_id),
+    )
+    expect([...floored].sort()).toEqual(['cc-agent-owner', 'cc-nudge-owner'])
 
-    const others = captured.filter((o) => o.substrate_instance_id !== 'cc-agent-owner')
+    const others = captured.filter((o) => !floored.has(o.substrate_instance_id))
     expect(others.length).toBeGreaterThan(0)
     for (const o of others) {
       expect(o.frontier_model_floor, o.substrate_instance_id).not.toBe(true)
+    }
+  })
+
+  test('BOTH floored substrates get a floor-clamp sink, and they get DIFFERENT ones', async () => {
+    // THE GAP THIS CLOSES. The test directly above proves the nudge lane is floored,
+    // so `applyModelFloor` CAN clamp it — and that lane was built with no notice sink
+    // at all, which made its clamp a stderr line on a box nobody reads. That is the
+    // exact silent degradation the floor notice exists to end, reintroduced on a new
+    // lane. A comment in `substrates.ts` had also claimed the chat lane was "the only
+    // one that can ever emit the notice", which this file's own assertion disproved.
+    //
+    // Why two sinks and not one: the chat lane's sink BUBBLES into the owner's chat,
+    // which is right when he is sitting in the conversation that degraded and wrong
+    // when a timer fired it. The nudge lane takes the journal-only sink, so the clamp
+    // is RECORDED — best-effort, said exactly: `emitSystemEventSafe` swallows a write
+    // failure and an unregistered ambient sink is a no-op, so what the split buys is
+    // an attempt at a findable row, not a guaranteed one — without a background lane
+    // pushing anything into his chat.
+    // If a future edit hands the nudge lane `liveAgentNoticeSinks` instead, the
+    // identity assertions below fail rather than shipping a timer-driven bubble.
+    const liveFloor = (): void => {}
+    const journalFloor = (): void => {}
+    const { ctx, captured } = makeCtx({
+      liveAgentNoticeSinks: {
+        onDeadTurnNotice: () => {},
+        onSizeAlert: () => {},
+        onRateLimitBanner: () => {},
+        onModelFloorApplied: liveFloor,
+      },
+      backgroundNoticeSinks: {
+        onDeadTurnNotice: () => {},
+        onSizeAlert: () => {},
+        onRateLimitBanner: () => {},
+        onModelFloorApplied: journalFloor,
+      },
+    })
+    const w = wireSubstrates(ctx)
+    await drainEveryWiredSubstrate(w)
+
+    const agent = captured.find((o) => o.substrate_instance_id === 'cc-agent-owner')!
+    const nudge = captured.find((o) => o.substrate_instance_id === 'cc-nudge-owner')!
+
+    // No floored substrate is left on the stderr fallback.
+    expect(agent.onModelFloorApplied).toBe(liveFloor)
+    expect(nudge.onModelFloorApplied).toBe(journalFloor)
+    expect(nudge.onModelFloorApplied).not.toBe(agent.onModelFloorApplied)
+
+    // The lane's other promise is unchanged: the three CHAT-TURN notice seams and
+    // the recovered-reply/delivery seams stay omitted, so no NOTICE from a timer
+    // reaches his chat. Only the floor clamp crossed, and only to the journal.
+    //
+    // ⚠️ NOT "nothing from a timer reaches an owner surface" — that would be false
+    // and this test cannot prove it. `enableToolBridge` also installs the Activity
+    // Inspector tap, which fans tool activity to the owner's app socket. That is
+    // pre-existing, deliberate, and argued in the block comment above this lane in
+    // `substrates.ts`: a read-only record of work done on his behalf. The scope of
+    // what is asserted here is the NOTICE family and the delivery seams.
+    expect(nudge.onDeadTurnNotice).toBeUndefined()
+    expect(nudge.onSizeAlert).toBeUndefined()
+    expect(nudge.onRateLimitBanner).toBeUndefined()
+    expect(nudge.onRecoveredReply).toBeUndefined()
+    expect(nudge.delivery_topic_id).toBeUndefined()
+    // (`credential_failure_lane` is deliberately NOT asserted here: it is a
+    // `buildLlmCallSubstrate` input consumed by the pool reporter, not an adapter
+    // option, so it never appears on `captured`. It is pinned where it is actually
+    // observable — `background-lane-never-locks-out-owner.test.ts`.)
+
+    // COUNTER-ASSERTION — the journal-only sink did not leak onto anything else.
+    for (const o of captured) {
+      if (o.substrate_instance_id === 'cc-nudge-owner') continue
+      expect(o.onModelFloorApplied, o.substrate_instance_id).not.toBe(journalFloor)
     }
   })
 
@@ -439,7 +564,12 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       const orch = buildTridentOrchestrator({
         fire_workflow: async () => ({ status: 'fired', run_id: 'wf-dead', error: null }),
         db_path: join(dir, 'project.db'),
-        run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+        run_host: async (cmd) => ({
+          ok: true,
+          stdout: cmd.includes('refs/remotes/origin/main^{commit}') ? 'a'.repeat(40) : '',
+          stderr: '',
+          exit_code: 0,
+        }),
       })
       const loop = new TridentTickLoop({
         store: runs,

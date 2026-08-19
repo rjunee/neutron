@@ -17,12 +17,15 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   buildWorkflowFirer,
   buildWorkflowArgs,
   buildSubstrateWorkflowFire,
+  CODEX_BUILD_SCRIPT_PATH,
+  CODEX_REVIEW_SCRIPT_PATH,
+  STAGE_STAMP_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -39,45 +42,24 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 function makeRun(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'add-widget',
     project_slug: 'proj',
-    phase: 'forge-init',
-    round: 1,
     max_rounds: 3,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/add-widget',
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: null,
     subagent_status: null,
     repo_path: '/repo',
-    worktree: null,
     task: 'Add a widget',
-    chat_id: null,
-    thread_id: null,
-    channel_kind: 'telegram',
-    failure_reason: null,
-    workflow_run_id: null,
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '1970-01-01T00:00:00.000Z',
     last_advanced_at: '1970-01-01T00:00:00.000Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 function input(over: Partial<InnerLoopInput> = {}): InnerLoopInput {
@@ -338,6 +320,14 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
   })
 
+  test('a valid launch base sha is threaded and invalid values are omitted', () => {
+    const sha = 'a'.repeat(40)
+    expect(buildWorkflowArgs(input({ base_sha: sha })).baseSha).toBe(sha)
+    expect('baseSha' in buildWorkflowArgs(input())).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'abc' }))).toBe(false)
+    expect('baseSha' in buildWorkflowArgs(input({ base_sha: 'A'.repeat(40) }))).toBe(false)
+  })
+
   /**
    * The live head the launcher READ from git (never a model's report of it). The key's
    * PRESENCE is the signal that a code-read answer exists, so it must be absent — not
@@ -486,6 +476,37 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(threaded.startsWith('/')).toBe(true)
   })
 
+  test('buildWorkflowArgs carries the harness stage-stamp writer path', () => {
+    const threaded = buildWorkflowArgs(input()).stageStampScript
+    expect(threaded).toBe(STAGE_STAMP_SCRIPT_PATH)
+    expect(String(threaded)).toEndWith('/trident/stage-stamp.sh')
+    expect(existsSync(String(threaded))).toBe(true)
+  })
+
+  test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexBuildScript":"([^"]*\/trident\/codex-build\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_BUILD_SCRIPT_PATH)
+  })
+
+  test('args thread the harness codexReviewScript abs path (the target repo need not contain trident/)', async () => {
+    const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
+    const firer = buildWorkflowFirer({ fire })
+    await firer(input())
+    const m = calls[0]!.prompt.match(/"codexReviewScript":"([^"]*\/trident\/codex-review\.sh)"/)
+    expect(m).not.toBeNull()
+    const threaded = m![1]!
+    expect(threaded.startsWith('/')).toBe(true)
+    expect(existsSync(threaded)).toBe(true)
+    expect(threaded).toBe(CODEX_REVIEW_SCRIPT_PATH)
+  })
+
   test('args thread the checked-in worktreeCleanupScript abs path (#541 — no LLM in the destructive path)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
@@ -605,6 +626,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // whether to splice, and an absent arg must reproduce the pre-existing prompt.
     expect(buildWorkflowArgs(input()).testStrategy).toBe('')
     expect(buildWorkflowArgs(input({ test_strategy: null })).testStrategy).toBe('')
+  })
+
+  test('args carry the orchestrator-composed testStrategyIntermediate verbatim', () => {
+    const marker = 'TEST EXECUTION\nTASK-2-INTERMEDIATE-MARKER'
+    const args = buildWorkflowArgs(input({ test_strategy_intermediate: marker }))
+    expect(args['testStrategyIntermediate']).toBe(marker)
+  })
+
+  test('args carry an EMPTY testStrategyIntermediate when none was composed', () => {
+    expect(buildWorkflowArgs(input()).testStrategyIntermediate).toBe('')
+    expect(buildWorkflowArgs(input({ test_strategy_intermediate: null })).testStrategyIntermediate).toBe('')
   })
 
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {

@@ -12,7 +12,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore, type Task } from '@neutronai/tasks/store.ts'
 import { composeHttpHandler, type ComposedHttpHandler } from '../http/compose.ts'
@@ -47,8 +47,8 @@ interface Harness {
 
 async function startGateway(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-app-tasks-focus-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = new TaskStore(db)
   const auth = createAppWsAuthResolver({ project_slug: PROJECT_SLUG, bypass: true })
   const surface = createAppTasksSurface({ store, auth })

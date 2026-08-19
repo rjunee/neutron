@@ -7,47 +7,26 @@ import {
   STALLED_WARN_MS,
 } from './run-progress.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const T0 = Date.parse('2026-07-02T00:00:00Z')
 
 function run(over: Partial<TridentRun> = {}): TridentRun {
-  return {
+  return makeTridentRun({
     id: 'run-1',
     slug: 'demo',
     project_slug: 'owner',
-    phase: 'forge-init',
-    round: 1,
-    max_rounds: 8,
-    ralph: false,
-    ralph_round: 0,
-    max_ralph_rounds: 20,
     branch: 'trident/demo',
-    pr: null,
     merge_mode: 'pr',
     subagent_run_id: 'wf-1',
-    subagent_status: 'running',
     repo_path: '/repo',
-    worktree: null,
     task: 'build a thing',
-    chat_id: null,
-    thread_id: null,
     channel_kind: 'app_socket',
-    failure_reason: null,
     workflow_run_id: 'wf-1',
-    inner_checkpoint: null,
-    inner_checkpoint_head: null,
-    inner_checkpoint_findings: null,
-    inner_verdict: null,
-    inner_result: null,
     started_at: '2026-07-02T00:00:00Z',
     last_advanced_at: '2026-07-02T00:00:00Z',
-    harvested_at: null,
-    crash_recoveries: 0,
-    reviewed_head: null,
-    bound_pr: null,
-    fenced_paths: null,
     ...over,
-  }
+  })
 }
 
 describe('deriveRunProgress — phase/checkpoint → label', () => {
@@ -91,10 +70,33 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.round).toBe(1)
   })
 
-  test('fix-round-N checkpoint → building round N', () => {
+  test('fix-round-N checkpoint → REVIEWING round N (the fix is already built)', () => {
+    // This asserted 'building' and was wrong, in a way this same file already
+    // contradicted: `deriveStepLabel` has always answered 'reviewing' for this
+    // checkpoint, so one snapshot carried `phase_label: 'building'` beside
+    // `step_label: 'reviewing'`. The authority is the resume classifier —
+    // `inner-workflow.mjs` `classifyResume`: "`forge-done` = built but never
+    // judged; `fix-round-N` = fixed but never re-judged. Both mean the head in
+    // front of us has NO verdict → review it", and both resume into review mode.
+    // The checkpoint names the phase that just ENDED; the run is in the next one.
     const p = deriveRunProgress(run({ inner_checkpoint: 'fix-round-3' }), T0)
-    expect(p.phase_label).toBe('building')
+    expect(p.phase_label).toBe('reviewing')
     expect(p.round).toBe(3)
+  })
+
+  test('phase_label and step_label never contradict each other', () => {
+    // Pin the AGREEMENT, not one instance of it: the bug above was two decoders
+    // of the same checkpoint, in the same file, disagreeing.
+    for (const cp of ['forge-done', 'fix-round-1', 'fix-round-3', 'argus-approved']) {
+      const p = deriveRunProgress(run({ inner_checkpoint: cp }), T0)
+      expect(p.phase_label).not.toBe('building')
+      expect(deriveStepLabel('forge-init', cp)).not.toBe('building')
+    }
+    // Positive control: a checkpoint whose next phase IS a build reads that way
+    // on both sides, so the assertion above cannot pass by everything being inert.
+    const fixing = deriveRunProgress(run({ inner_checkpoint: 'argus-request-changes' }), T0)
+    expect(fixing.phase_label).toBe('building')
+    expect(deriveStepLabel('forge-init', 'argus-request-changes')).toBe('fixing')
   })
 
   test('argus-approved checkpoint → reviewing (about to merge)', () => {
@@ -120,6 +122,14 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.phase_label).toBe('merged')
     expect(p.pr).toBe(42)
     expect(p.verdict).toBe('APPROVE')
+  })
+
+  test('carries a recovered brief refusal independently of terminal failure', () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: persisted bytes disagree. DEFERRED.'
+    const p = deriveRunProgress(run({ phase: 'forge-init', brief_alert: alert }), T0)
+    expect(p.phase_label).toBe('planning')
+    expect(p.failure_reason).toBeNull()
+    expect(p.brief_alert).toBe(alert)
   })
 })
 

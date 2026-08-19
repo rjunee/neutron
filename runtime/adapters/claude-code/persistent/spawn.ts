@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AgentSpec } from '../../../substrate.ts'
 import { type DeadTurnNotice, startApi5xxDeadTurnWatcher } from './api5xx-dead-turn-watcher.ts'
-import { buildReplArgv } from './build-repl-argv.ts'
+import { buildReplArgv, resolveReplEffort } from './build-repl-argv.ts'
 import { supportsAutocompact } from './autocompact-support.ts'
 import { buildSettings } from './build-settings.ts'
 import { bunTerminalHost } from './bun-terminal-host.ts'
@@ -57,13 +57,28 @@ async function spawnSession(
   // whatever wrote the record, and (b) un-poisons the row in the same breath, so
   // the value cannot self-perpetuate into the next respawn. A substrate without
   // the floor is returned verbatim — the deliberate FAST_MODEL utility callers
-  // are untouched. See the module header for why the writer was not chased.
+  // are untouched. The module header records the writer that was found (#340)
+  // and the two reasons the floor is still load-bearing without it.
   const model = applyModelFloor({
     requested: requestedModel,
     enabled: options.frontierModelFloor === true,
     sessionKey,
     source: resume !== undefined ? 'resume' : 'spawn',
+    // The half of "make it loud" that leaves the box. Without this the clamp is
+    // a stderr line on a box nobody reads — the same invisibility that let the
+    // degradation run for a day. Both FLOORED substrates supply it
+    // (`open/wiring/substrates.ts`), and they supply DIFFERENT sinks: the owner's
+    // chat lane bubbles + journals, the timer-driven nudge lane journals only, so
+    // a background clamp is recorded without interrupting him. A substrate that
+    // omits it keeps the stderr fallback.
+    ...(options.onModelFloorApplied !== undefined
+      ? { notify: options.onModelFloorApplied }
+      : {}),
   })
+  // Resolve ONCE, here: like `model` above, this single binding feeds the argv
+  // now and the launch record/registry stamp (T2), so the reported value cannot
+  // diverge from the spawned one.
+  const effort = resolveReplEffort(options.effort)
   // Respawn-is-always-resume (brief § 0 / § 2): when a resume directive is
   // present (from the registry on a post-crash next-turn, or from the watchdog /
   // admin respawn actuation), re-attach the captured session UUID via `--resume`
@@ -143,17 +158,22 @@ async function spawnSession(
   // land in `--settings`. Absent ⇒ the Stop-hook-only write, unchanged.
   buildSettings({
     settingsPath,
-    // WAVE 3.5 task B — wire the TodoWrite→Work Board PostToolUse hook ONLY on the
-    // owner's warm conversational REPL (the one that opts into the Neutron tool
-    // bridge). The disposable Trident build REPLs + the untrusted history-import
-    // REPL never enable the bridge, so their TodoWrite stays build-internal and
-    // never lands on the owner's board. The sink is already started (above), so
-    // its port/token are bound here.
-    // ACTIVITY INSPECTOR — the tool tap rides the same gate for the same reason:
-    // it is wired ONLY on the owner's warm conversational REPL (the one that opts
-    // into the Neutron tool bridge), never on the disposable Trident build REPLs or
-    // the untrusted history-import REPL, so a build's internal tool churn never
-    // lands on the owner's project panel.
+    // WAVE 3.5 task B — wire the TodoWrite→Work Board PostToolUse hook on the REPLs
+    // that opt into the Neutron tool bridge. The disposable Trident build REPLs + the
+    // untrusted history-import REPL never enable the bridge, so their TodoWrite stays
+    // build-internal and never lands on the owner's board. The sink is already
+    // started (above), so its port/token are bound here.
+    // ACTIVITY INSPECTOR — the tool tap rides the same gate for the same reason,
+    // never on the disposable Trident build REPLs or the untrusted history-import
+    // REPL, so a build's internal tool churn never lands on the owner's project panel.
+    //
+    // NB "the bridge REPLs" is no longer a synonym for "the owner's chat REPL": the
+    // background proactive-compose lane (`cc-nudge-*`, `open/wiring/substrates.ts`)
+    // also enables the bridge, deliberately, so a ritual can reach the same tools the
+    // owner's chat can. So these two hooks ride onto that lane as well. That is
+    // intended — both are OWNER-FACING REPORTING of work done for the owner, not a
+    // chat interruption — and it is why this gate is described by what it grants
+    // rather than by which single session used to carry it.
     ...(options.enableToolBridge === true
       ? {
           todoSync: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
@@ -182,6 +202,7 @@ async function spawnSession(
     settingsPath,
     appendSystemPromptFile,
     model,
+    effort,
     addDir: cwd,
     tools: toolSurface,
     // Token budget upstream; omit it for older CLIs that reject the option.

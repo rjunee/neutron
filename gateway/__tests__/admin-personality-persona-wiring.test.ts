@@ -30,7 +30,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { createAppWsAuthResolver } from '@neutronai/channels/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { createAdminPersonalitySurface } from '../http/admin-personality-surface.ts'
 import { composeHttpHandler } from '../http/compose.ts'
@@ -94,8 +94,8 @@ async function startHarness(): Promise<Harness> {
     'utf8',
   )
 
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   // The SHARED loader — every consumer reads/invalidates this instance.
   const personaLoader = new PersonaPromptLoader({ owner_home, log: () => {} })

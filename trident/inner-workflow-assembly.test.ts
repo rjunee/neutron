@@ -86,9 +86,14 @@ interface RunOpts {
    * wants the checkpoint steps silent.
    */
   recordCheckpoints?: boolean
+  /** Explicit coordinates let stage-stamp gating cover either half missing. */
+  dbPath?: string | null
+  runId?: string | null
+  stageStampScript?: string | null
   /** `'pr'` stops the run at the durable publisher handoff, which is where the build's
    *  claim and the review panel end up in DIFFERENT PROCESSES. */
   mergeMode?: 'pr' | 'local'
+  baseSha?: string
 }
 
 async function runWorkflow(
@@ -162,6 +167,7 @@ async function runWorkflow(
     repoPath: '/repo',
     task: opts.task ?? 'build the feature',
     baseBranch: 'main',
+    ...(opts.baseSha !== undefined ? { baseSha: opts.baseSha } : {}),
     slug: 'test-run',
     maxRounds: 3,
     ralph: opts.ralph === true,
@@ -171,9 +177,18 @@ async function runWorkflow(
     prNumber: null,
     branch: null,
     // dbPath null → checkpoint()/writeTerminalResult() no-op (no bash agent steps).
-    dbPath: opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
-    runId: opts.recordCheckpoints === true ? 'run-assembly-1' : null,
+    dbPath: opts.dbPath !== undefined
+      ? opts.dbPath
+      : opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
+    runId: opts.runId !== undefined
+      ? opts.runId
+      : opts.recordCheckpoints === true ? 'run-assembly-1' : null,
     checkpointScript: opts.recordCheckpoints === true ? '/repo/trident/checkpoint.sh' : null,
+    stageStampScript: opts.stageStampScript === undefined
+      ? '/harness/trident/stage-stamp.sh'
+      : opts.stageStampScript,
+    codexBuildScript: '/harness/trident/codex-build.sh',
+    codexReviewScript: '/harness/trident/codex-review.sh',
     resumeCheckpoint: null,
     codexHome: '/codex', // → codexConfigured, so argus:codex runs (and is asserted excluded)
     kimiConfigured: true, // → the kimi cross-model seat runs too, so its prompt is captured
@@ -212,6 +227,62 @@ const LARGE_TASK = [
 const forgeBuildPrompt = (captured: Captured[]): string =>
   captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
 
+const STAGE_DB = '/tmp/stage-events.db'
+const STAGE_RUN = 'run-stage-events'
+const STAGE_SCRIPT = '/harness/trident/stage-stamp.sh'
+const stageCommand = (stage: string): string =>
+  `bash '${STAGE_SCRIPT}' '${STAGE_DB}' '${STAGE_RUN}' '${stage}'`
+
+describe('inner-workflow.mjs — workflow-side stage stamps on existing turns', () => {
+  test('plan:fable and Claude Forge lead with their gated stage calls without adding a stage seat', async () => {
+    const { captured } = await runWorkflow('', {
+      ralph: true,
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+    })
+
+    const fable = captured.find((c) => c.label === 'plan:fable')?.prompt ?? ''
+    expect(fable).toStartWith(
+      `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stageCommand('plan-start')}\`\n\n`,
+    )
+
+    const forgePrompts = captured.filter(
+      (c) => c.label === 'forge:build' || String(c.label).startsWith('forge:fix-round-'),
+    )
+    expect(forgePrompts.length).toBeGreaterThan(0)
+    for (const forge of forgePrompts) {
+      expect(forge.prompt).toStartWith(
+        `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stageCommand('build-agent-start')}\`\n\n`,
+      )
+    }
+
+    expect(captured.some((c) => String(c.label).includes('stage'))).toBe(false)
+  })
+
+  test.each([
+    { name: 'dbPath missing', dbPath: null, runId: STAGE_RUN },
+    { name: 'runId missing', dbPath: STAGE_DB, runId: null },
+  ])('$name leaves plan:fable and Claude Forge byte-identical to the unstamped output', async ({ dbPath, runId }) => {
+    const common = { ralph: true, dbPath, runId }
+    const withConfiguredScript = (await runWorkflow('', {
+      ...common,
+      stageStampScript: STAGE_SCRIPT,
+    })).captured
+    const withFallbackScript = (await runWorkflow('', {
+      ...common,
+      stageStampScript: null,
+    })).captured
+
+    for (const label of ['plan:fable', 'forge:build', 'forge:fix-round-2']) {
+      const configured = withConfiguredScript.find((c) => c.label === label)?.prompt ?? ''
+      const fallback = withFallbackScript.find((c) => c.label === label)?.prompt ?? ''
+      expect(configured).toBe(fallback)
+      expect(configured).not.toContain('plan-start')
+      expect(configured).not.toContain('build-agent-start')
+    }
+  })
+})
+
 describe('inner-workflow.mjs — artifact-time durability checkpoint', () => {
   test('threads the semantic checkpoint names into round-one and fix-round contracts', async () => {
     const { captured } = await runWorkflow('', { recordCheckpoints: true })
@@ -229,6 +300,80 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     taskIntegrity: briefIntegrity(task),
     reflectionFile: null,
     reflectionIntegrity: null,
+  })
+
+  test('threads the stage writer beside checkpoint coordinates and omits it without them', async () => {
+    const withCoordinates = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      recordCheckpoints: true,
+    })).captured)
+    expect(withCoordinates).toContain(
+      "NEUTRON_CODEX_BUILD_CHECKPOINT_DB='/tmp/does-not-exist.db' NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID='run-assembly-1' NEUTRON_CODEX_BUILD_CHECKPOINT_NAME='forge-done' NEUTRON_CODEX_BUILD_STAGE_SCRIPT='/harness/trident/stage-stamp.sh'",
+    )
+
+    const withoutCoordinates = forgeBuildPrompt((await runWorkflow('', { codexBuild: true })).captured)
+    expect(withoutCoordinates).not.toContain('NEUTRON_CODEX_BUILD_STAGE_SCRIPT=')
+  })
+
+  test('stamps build-agent-start as a standalone call before CALL 1 with never-merge wording', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+    })).captured)
+    const stamp = stageCommand('build-agent-start')
+    const stampIndex = prompt.indexOf(`\`${stamp}\``)
+    const callOneIndex = prompt.indexOf('CALL 1 of ')
+
+    expect(stampIndex).toBeGreaterThan(-1)
+    expect(callOneIndex).toBeGreaterThan(stampIndex)
+    expect(prompt.slice(stampIndex, callOneIndex)).toContain(
+      'This is its own separate Bash call. NEVER merge or combine it with CALL 1 or any chunk write.',
+    )
+  })
+
+  test('prefixes the detached launch line with wrapper-invoke before the unchanged rm/nohup sequence', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+    })).captured)
+    const unstampedPrompt = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      dbPath: null,
+      runId: STAGE_RUN,
+    })).captured)
+    const prefix = `${stageCommand('wrapper-invoke')}; rm -f `
+    const launchIndex = prompt.indexOf(prefix)
+    const launchLine = prompt.slice(launchIndex, prompt.indexOf('\n', launchIndex))
+    const unstampedLaunchLine = unstampedPrompt.split('\n').find((line) => line.startsWith('rm -f '))
+    if (unstampedLaunchLine === undefined) throw new Error('unstamped detached launch line missing')
+
+    expect(launchIndex).toBeGreaterThan(-1)
+    expect(prompt.indexOf('nohup setsid ', launchIndex)).toBeGreaterThan(launchIndex + prefix.length)
+    expect(launchLine).toMatch(
+      /^bash .* 'wrapper-invoke'; rm -f .*; nohup setsid /,
+    )
+    expect(launchLine.slice(stageCommand('wrapper-invoke').length + 2)).toBe(unstampedLaunchLine)
+  })
+
+  test.each([
+    { name: 'dbPath missing', dbPath: null, runId: STAGE_RUN },
+    { name: 'runId missing', dbPath: STAGE_DB, runId: null },
+  ])('$name leaves both Codex insertion points byte-identical to the unstamped output', async ({ dbPath, runId }) => {
+    const common = { codexBuild: true, dbPath, runId }
+    const configured = forgeBuildPrompt((await runWorkflow('', {
+      ...common,
+      stageStampScript: STAGE_SCRIPT,
+    })).captured)
+    const fallback = forgeBuildPrompt((await runWorkflow('', {
+      ...common,
+      stageStampScript: null,
+    })).captured)
+
+    expect(configured).toBe(fallback)
+    expect(configured).not.toContain('build-agent-start')
+    expect(configured).not.toContain('wrapper-invoke')
   })
 
   test('a >30 KB task travels by path and is absent from every agent prompt', async () => {
@@ -821,6 +966,29 @@ describe('AS-BUILT: TEST EXECUTION strategy threading (executed prompt capture)'
     const prompt = forgeBuildPrompt(captured)
     expect(prompt.indexOf(MARKER)).toBeLessThan(prompt.indexOf('\nCONTRACT\n'))
     expect(prompt.indexOf('WORKTREE=<your worktree pwd>')).toBeGreaterThan(prompt.indexOf(MARKER))
+  })
+})
+
+describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
+  test('pins branch creation and the reviewer diff when baseSha is present', async () => {
+    const sha = 'a'.repeat(40)
+    const prompt = forgeBuildPrompt((await runWorkflow('', { baseSha: sha })).captured)
+    expect(prompt).toContain(`git switch -c trident/test-run ${sha}`)
+    expect(prompt).toContain(`git diff ${sha}..HEAD`)
+  })
+
+  test('falls back to the unpinned create-or-re-enter branch and diff when baseSha is absent', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('')).captured)
+    // The fallback must NOT name a base — that is the whole distinction from the
+    // pinned case above. It asserts the ABSENCE of a pin rather than one exact
+    // sentence, because the unpinned branch line also has to stay create-or-
+    // re-enter (`|| git switch`): a leftover local branch from an earlier round
+    // must not kill the build with "branch already exists". Pinning that literal
+    // to `git switch -c <branch>` + backtick made this test fail the moment the
+    // re-enter clause landed, while the behaviour it guards was still correct.
+    expect(prompt).toContain('git switch -c trident/test-run 2>/dev/null || git switch trident/test-run')
+    expect(prompt).not.toContain('as observed at launch')
+    expect(prompt).toContain('git diff main..HEAD')
   })
 })
 

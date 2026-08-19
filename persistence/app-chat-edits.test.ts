@@ -11,7 +11,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import {
   AppChatEditStore,
   AppChatEditNotAuthorizedError,
@@ -33,8 +33,8 @@ async function appendMessage(message_id: string, role: 'user' | 'agent' = 'user'
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-chat-edits-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   messages = new AppChatStore({ db })
   edits = new AppChatEditStore({ db })
 })
@@ -161,7 +161,7 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     expect(await edits.aggregatesAfter(TOPIC, 0)).toEqual([])
   })
 
-  it('the limit caps replayed messages', async () => {
+  it('the limit caps replayed messages to the NEWEST past the cursor', async () => {
     await appendMessage('m1') // seq 1
     await appendMessage('m2') // seq 2
     await appendMessage('m3') // seq 3
@@ -169,8 +169,11 @@ describe('AppChatEditStore — aggregatesAfter (resume replay)', () => {
     await edits.record({ topic_id: TOPIC, message_id: 'm2', editor_device_id: 'devA', action: 'edit', body: 'e2', at: 2 })
     await edits.record({ topic_id: TOPIC, message_id: 'm3', editor_device_id: 'devA', action: 'edit', body: 'e3', at: 3 })
 
+    // The NEWEST past the cursor, ascending — the same window the message replay
+    // takes, which is what keeps a capped replay's tombstones aligned with the
+    // messages it delivers (`AppChatEditLog.aggregatesAfter` carries the argument).
     const capped = await edits.aggregatesAfter(TOPIC, 0, 2)
-    expect(capped.map((a) => a.message_id)).toEqual(['m1', 'm2'])
+    expect(capped.map((a) => a.message_id)).toEqual(['m2', 'm3'])
   })
 
   it('aggregate() returns rev 0 / empty for an unedited message', async () => {
