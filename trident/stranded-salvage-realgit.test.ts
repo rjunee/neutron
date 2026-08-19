@@ -198,7 +198,7 @@ describe('REAL git — stranded terminal-failure salvage', () => {
         branch: null,
         channel_kind: run.channel_kind,
       })
-      await store.update(run.id, { branch: run.branch, round: run.round })
+      await store.update(run.id, { branch: run.branch, round: run.round, inner_checkpoint: 'forge-done' })
 
       const orch = orchestrator(world, harness.run)
       const loop = new TridentTickLoop({ store, step: orch.step })
@@ -263,7 +263,7 @@ describe('REAL git — stranded terminal-failure salvage', () => {
   test('a failed rescue leaves the failure row byte-identical and the origin untouched', async () => {
     const world = await seedWorld('ahead')
     const harness = buildHybridHost(true)
-    const run = makeRun(world.checkout)
+    const run = makeRun(world.checkout, { inner_checkpoint: 'forge-done' })
     const out = await orchestrator(world, harness.run).step(run)
 
     expect(out.run).toEqual({
