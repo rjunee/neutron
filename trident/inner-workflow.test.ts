@@ -1638,6 +1638,42 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
   })
 })
 
+// RUN f384460d (2026-08-15) — `pr` WENT 267 → 0 AND THE RUN DIED ON IT.
+//
+// The build wrapper's pr-mode trailer is `PR_NUMBER=0` BY DESIGN (FORGE_PR_LINE: "the outer
+// loop publishes after this build exits"), so the sentinel is CORRECT and stays. What was
+// wrong is that three consumers treated it as a measurement: the forge adoption took it over
+// the PR threaded in at launch, and `checkpoint()` + `writeTerminalResult()` then persisted
+// the zero onto the run row. GitHub numbers PRs from 1, so a non-positive one is never an
+// answer — each site now adopts/writes only a POSITIVE INTEGER.
+describe('inner-workflow.mjs — a prNumber of 0 is a sentinel, never a PR number', () => {
+  test('the forge adoption takes a positive integer ONLY (the old nullish test is gone)', () => {
+    expect(SRC).toContain('if (Number.isInteger(forge.prNumber) && forge.prNumber > 0) pr = forge.prNumber')
+    // The mutation this kills: restoring the "anything that is not null/undefined" test,
+    // which is exactly what adopted the 0.
+    expect(SRC).not.toContain('forge.prNumber !== null && forge.prNumber !== undefined')
+  })
+
+  test('checkpoint() refuses to persist a non-positive pr', () => {
+    expect(SRC).toContain('const prNum = Number(o.pr)')
+    expect(SRC).toContain('if (Number.isInteger(prNum) && prNum > 0) fields.push(`pr ${prNum}`)')
+    expect(SRC).not.toContain('if (o.pr !== undefined && o.pr !== null)')
+  })
+
+  test('writeTerminalResult() refuses to persist a non-positive pr', () => {
+    expect(SRC).toContain('const terminalPr = Number(result.prNumber)')
+    expect(SRC).toContain('if (Number.isInteger(terminalPr) && terminalPr > 0)')
+    expect(SRC).not.toContain('if (result.prNumber !== undefined && result.prNumber !== null)')
+  })
+
+  test('the wrapper contract itself is UNCHANGED — the sentinel is the consumers\' problem', () => {
+    // Hardening the readers must not quietly rewrite what the build reports; the trailer
+    // line stays exactly as the wrapper and the build brief agree on it.
+    expect(SRC).toContain('PR_NUMBER=0   (the outer loop publishes after this build exits)')
+    expect(SRC).toContain('PR_NUMBER=0   (local mode — no GitHub PR)')
+  })
+})
+
 describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordination', () => {
   // The ROLE→prompt gating + placement are covered BEHAVIORALLY against the as-built
   // script by `inner-workflow-assembly.test.ts` (a mock-execution harness that captures

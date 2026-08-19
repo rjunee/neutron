@@ -2184,7 +2184,12 @@ async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
   const fields = []
-  if (o.pr !== undefined && o.pr !== null) fields.push(`pr ${Number(o.pr)}`)
+  // A NON-POSITIVE pr IS NEVER WRITTEN. `pr 0` is not "the PR is zero", it is the
+  // build wrapper's "no PR yet" sentinel arriving where a number was expected — and
+  // writing it ERASES the PR the run already knows about (run f384460d: 267 → 0).
+  // Skipping the field leaves the column at whatever the row already holds.
+  const prNum = Number(o.pr)
+  if (Number.isInteger(prNum) && prNum > 0) fields.push(`pr ${prNum}`)
   fields.push(`branch ${shSingleQuote(forgeBranch)}`)
   fields.push(`inner_checkpoint ${shSingleQuote(name)}`)
   fields.push(`inner_checkpoint_head ${shSingleQuote(normalizeOid(o.head))}`)
@@ -2242,8 +2247,12 @@ async function writeTerminalResult(result) {
     `inner_verdict ${shSingleQuote(verdict)}`,
     `branch ${shSingleQuote(forgeBranch)}`,
   ]
-  if (result.prNumber !== undefined && result.prNumber !== null) {
-    fields.push(`pr ${Number(result.prNumber)}`)
+  // Same rule as `checkpoint()`: only a positive integer is a PR number. The terminal
+  // write is the LAST chance to erase a known pr, and it is where run f384460d's zero
+  // became the row's final answer.
+  const terminalPr = Number(result.prNumber)
+  if (Number.isInteger(terminalPr) && terminalPr > 0) {
+    fields.push(`pr ${terminalPr}`)
   }
   await agent(
     `Terminal-result step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "terminal-result ok":
@@ -5989,7 +5998,15 @@ ${task}${reflectionGuidance}`,
 
     if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
     buildReport = forge
-    if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
+    // A FORGE PR NUMBER IS ADOPTED ONLY WHEN IT IS A REAL ONE. The build's pr-mode
+    // trailer is PR number 0 BY DESIGN (see FORGE_PR_LINE above: "the outer loop
+    // publishes after this build exits"), so 0 is the "no PR yet" sentinel — never a
+    // PR, since GitHub numbers start at 1. The old `!== null && !== undefined` test
+    // adopted the sentinel and CLOBBERED the pr threaded in at launch: run f384460d
+    // (2026-08-15) went 267 → 0, and the forge-done checkpoint then persisted the
+    // zero onto the run row. `pr` keeps its known value unless a positive integer
+    // arrives to replace it.
+    if (Number.isInteger(forge.prNumber) && forge.prNumber > 0) pr = forge.prNumber
 
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
     const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''

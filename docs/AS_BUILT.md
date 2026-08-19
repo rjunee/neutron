@@ -2,6 +2,26 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-19 — an infrastructure death is never a verdict (ported from #282)
+
+Run f384460d exposed a wrapper catch path that self-asserted `REQUEST_CHANGES` after an
+infrastructure throw, making the owner see a rejection for work no reviewer judged.
+`findings_present` now decodes fail-closed from only a non-empty findings array, and both
+terminal failed transitions null the verdict when `isInfraDeath` identifies that measured
+shape. `infraDeathSentence` authors the stored wording that `interpretFailure` routes back to
+infrastructure copy, keeping the writer and reader from drifting. `isInfraDeath` deliberately
+answers verdict honesty separately from `classifyInnerFailure`, whose stricter question is
+whether a measured failure is safe to auto-retry.
+
+## 2026-08-19 — a prNumber of 0 is a sentinel, never a PR number (ported from #282)
+
+The inner wrapper emits `PR_NUMBER=0` when no PR exists. `parseInnerResult` now decodes any
+non-positive or non-integer `prNumber` to `null` instead of letting 0 flow onward as a real
+PR number, and `inner-workflow.mjs` writes or adopts a PR number only when it is a positive
+integer — at the checkpoint, the terminal result, and forge adoption alike. A failed round
+reporting `prNumber` 0 therefore keeps the known PR on the row instead of overwriting it
+with the sentinel. The wrapper's `PR_NUMBER=0` trailer contract itself is byte-identical.
+
 ## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
 
 `reconcile_stranded` now checks both committed and uncommitted work before concluding that a
