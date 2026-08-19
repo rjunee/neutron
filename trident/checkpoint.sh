@@ -120,7 +120,35 @@ frozen() {
   printf 'CASE WHEN phase IN %s THEN %s ELSE %s END' "$terminal_phases" "$1" "$2"
 }
 
+# THE CANONICAL CHECKPOINT → PHASE TABLE, mirrored from
+# `trident/checkpoint-phase.ts` (`phaseForCheckpoint`) and pinned against it by
+# `trident/checkpoint-phase.test.ts`, which parses the case arms below out of THIS
+# file and asserts both copies answer identically for every checkpoint name the
+# inner workflow can emit. Read that module's header for the measurement that
+# motivated this; the short version is that `phase` never moved off `forge-init`
+# for the entire life of a build, and this script is the ONLY writer positioned to
+# fix that — the inner workflow checkpoints by invoking this script, not through
+# `TridentRunStore.update`, so a TypeScript-side derivation would never see the
+# live transitions that matter.
+#
+# Empty output means "this checkpoint implies NOTHING about the phase" and the
+# column is left untouched. That is the answer for terminal-adjacent names
+# (`pr-merged`, and the throw-path `inner-error`/`awaiting-trailer`), for the
+# outer loop's own markers, and for any name this table has never seen — an
+# unrecognised checkpoint must not assert a phase nobody chose.
+phase_for_checkpoint() {
+  case "$1" in
+    forge-done | argus-approved) printf 'argus' ;;
+    fix-round-[0-9] | fix-round-[0-9][0-9] | fix-round-[0-9][0-9][0-9]) printf 'argus' ;;
+    argus-request-changes) printf 'forge-fix' ;;
+    argus-request-changes-round-[0-9] | argus-request-changes-round-[0-9][0-9] | argus-request-changes-round-[0-9][0-9][0-9]) printf 'forge-fix' ;;
+    ralph-task-built) printf 'ralph-task' ;;
+    *) printf '' ;;
+  esac
+}
+
 sets=()
+derived_phase=''
 stamps_liveness=0
 while [ "$#" -gt 0 ]; do
   field="$1"
@@ -159,6 +187,11 @@ while [ "$#" -gt 0 ]; do
       # legitimate write, not a no-op: it CLEARS a previous checkpoint's OID so a
       # phase that could not report a sha never inherits the last one's.
       sets+=("$field='$(sql_quote "$value")'")
+      # A checkpoint that NAMES a live phase also writes it — see the phase block
+      # below the loop for why this script is the only place that can.
+      if [ "$field" = inner_checkpoint ]; then
+        derived_phase="$(phase_for_checkpoint "$value")"
+      fi
       ;;
     inner_findings_file)
       stamps_liveness=1
@@ -185,6 +218,26 @@ while [ "$#" -gt 0 ]; do
       ;;
   esac
 done
+
+# THE PHASE WRITE — frozen on a terminal row, and the freeze is load-bearing in a
+# way the liveness columns' is not.
+#
+# `phase` is the ONLY column here that drives control flow. `isTerminalPhase(phase)`
+# is what stops the tick driver loading a run (`tick.ts`), what makes
+# `advanceTridentRun`'s step a no-op (`orchestrator.ts`), and what keeps a stopped
+# run out of the active-lane budget (`active-runs.ts`). Cancelling a build does NOT
+# kill the detached workflow that was building it (rjunee/neutron#177) — the
+# workflow keeps going and keeps checkpointing. Writing `phase` unguarded would
+# therefore let a cancelled run's own orphaned workflow flip `stopped` back to
+# `argus` and RESURRECT it: re-loaded by the driver, re-driven, re-merged. That is
+# strictly worse than the stale liveness claim the existing freeze retracts, which
+# is only ever a display lie.
+#
+# So the freeze is reused deliberately rather than a phase-specific guard being
+# invented: identical terminal set, identical CASE, one thing to keep true.
+if [ -n "$derived_phase" ]; then
+  sets+=("phase=$(frozen phase "'$(sql_quote "$derived_phase")'")")
+fi
 
 # Both legacy progress UPDATEs unconditionally re-stamped last_advanced_at. It is
 # the hang watchdog's heartbeat, so it is LIVENESS — frozen on a terminal row.
