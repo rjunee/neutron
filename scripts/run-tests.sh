@@ -125,6 +125,46 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="${NEUTRON_TEST_ROOT:-$(cd "${SCRIPT_DIR}/.." && pwd)}"
 cd "$ROOT"
 
+# --- 0. REFUSE A TREE THAT WAS NEVER INSTALLED -------------------------------
+# Measured 2026-08-19 (trident lane 282ad664 / PR #449): a lane worktree with no
+# installed dependencies ran this suite for ~14 minutes and produced 411 red
+# files out of 1,370 — every one of them an import error (`Cannot find package
+# 'react'`, `Cannot find module '@neutronai/persistence/index.ts'`), none of them
+# about the diff. The build could not honestly report `passed`, the full-suite
+# gate blocked it, and the failure was recorded against the branch. `node_modules`
+# is gitignored, so a bare `git worktree add` has none of it, and lane worktrees
+# are provisioned inconsistently — of the three newest on disk that day, one
+# resolved `react` and two had an empty `node_modules`.
+#
+# The suite cannot tell those two worlds apart, so it must not be asked to. This
+# costs ~50 ms and turns fourteen minutes of misleading evidence into one line
+# naming `bun install`.
+#
+# SCOPED TO A REAL RUN OF THIS REPO, deliberately — three exclusions, each of
+# which this script's own selftests proved necessary by going red:
+#
+#   NEUTRON_TEST_ROOT  points at scratch fixture dirs in the selftests. A tmpdir
+#                      holding one trivial test file has no `node_modules` and is
+#                      not supposed to; enforcing there reds the tests that prove
+#                      this runner works.
+#   PLAN_ONLY          never executes a test, and the shard planner invokes it
+#                      ~25 times against scratch roots.
+#   NEUTRON_BUN_BIN    is how the selftests substitute a FAKE bun that prints
+#                      canned output. Handing the verifier to a fake bun asks a
+#                      stub whether the tree is installed, and it answers with
+#                      whatever it was scripted to say — a check whose result is
+#                      dictated by the thing under test. Caught by the selftest
+#                      on the first run of this guard.
+#
+# So the verifier runs on the real `bun`, in the real checkout, only when a real
+# suite is about to run.
+if [ -z "${NEUTRON_TEST_ROOT:-}" ] && [ -z "${NEUTRON_BUN_BIN:-}" ] && [ "${NEUTRON_TEST_PLAN_ONLY:-0}" != "1" ]; then
+  if ! bun "${SCRIPT_DIR}/ci/verify-workspace-deps.ts" "$ROOT"; then
+    echo "run-tests: REFUSED — see verify-workspace-deps above. No tests were run." >&2
+    exit 3
+  fi
+fi
+
 CHUNK_SIZE="${NEUTRON_TEST_CHUNK_SIZE:-100}"
 CONCURRENCY="${NEUTRON_TEST_CONCURRENCY:-$(sysctl -n hw.physicalcpu 2>/dev/null || nproc 2>/dev/null || echo 4)}"
 TIMEOUT="${NEUTRON_TEST_TIMEOUT:-15000}"
