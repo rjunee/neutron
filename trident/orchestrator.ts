@@ -64,6 +64,7 @@ import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from '
 import { basename, dirname, isAbsolute, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
+import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { cleanupAfterMerge, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseInnerResult,
@@ -212,6 +213,18 @@ export interface BuildTridentOrchestratorOptions {
   resolve_phase_models?: () => Record<string, { model?: string; effort?: string }> | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
+  /**
+   * AS-BUILT ONE-WRITER (T2) — the post-merge fold pass. Invoked once after a
+   * SUCCESSFUL `cleanupAfterMerge` (both merge modes) with the merged (done) run and
+   * its resolved base branch; folds every entry staged under `.trident/as-built/`
+   * on the base into docs/AS_BUILT.md ON THE BASE, in one commit (see
+   * `trident/as-built-appender.ts`). Defaults to the real
+   * `foldStagedAsBuiltEntries` over `run_host`; injectable for tests. A failure —
+   * returned value OR throw — must NEVER fail the already-merged run: the merge
+   * landed and the staged entry is durable on the base, so the failure is
+   * surfaced in the advance note and the tick loop's bounded catch-up retries it.
+   */
+  fold_as_built?: (run: TridentRun, base: string) => Promise<FoldStagedAsBuiltEntriesResult>
   /**
    * Bounded Forge merge-conflict resolver (#342). Serves BOTH conflict paths:
    *   - LOCAL mode — threaded into the default `buildMergeCleanupDeps`, so a merge
@@ -1805,6 +1818,10 @@ export function buildTridentOrchestrator(
       opts.run_host,
       opts.resolve_conflict !== undefined ? { resolve_conflict: opts.resolve_conflict } : {},
     )
+  const foldAsBuilt =
+    opts.fold_as_built ??
+    ((run: TridentRun, base: string) =>
+      foldStagedAsBuiltEntries(opts.run_host, run.repo_path, run.merge_mode, base))
   const on_orphaned = opts.on_orphaned_session ?? 'redispatch'
   const mint = opts.mint_run_id ?? (() => crypto.randomUUID())
   const persistRefireReset = opts.persist_refire_reset ?? (async () => {})
@@ -3013,7 +3030,22 @@ export function buildTridentOrchestrator(
       }
       try {
         const res = await cleanupAfterMerge(doneRun, merge_deps)
-        return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}` }
+        // AS-BUILT ONE-WRITER (T2): the merge just landed and merging is the serialised
+        // point, so THIS is where the staged as-built entry folds into the log on the
+        // base. Own try/catch: a fold problem must never reach the outer catch below,
+        // which would misreport a LANDED merge as failed — the entry stays durably
+        // queued and the tick catch-up retries it. Reaching this point is the success
+        // gate; a throwing cleanup is caught below and therefore never runs the fold.
+        let foldNote = ''
+        try {
+          const base = await resolveBase(doneRun)
+          const folded = await foldAsBuilt(doneRun, base)
+          if (!folded.ok) foldNote = `; as-built fold deferred (entry stays queued): ${folded.reason}`
+          else if (folded.folded > 0) foldNote = `; as-built: folded ${folded.folded}`
+        } catch (err) {
+          foldNote = `; as-built fold deferred (entry stays queued): ${err instanceof Error ? err.message : String(err)}`
+        }
+        return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}${foldNote}` }
       } catch (err) {
         // #342 — a genuinely ambiguous merge conflict escalates a SPECIFIC
         // question to chat (not a raw "merge failed"): fail the run with the
