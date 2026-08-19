@@ -38,6 +38,7 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { TRIDENT_SALVAGE_MARKER, TRIDENT_STASH_PARKED_MARKER } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -147,8 +148,11 @@ function isToolsNotEnabled(reasonLower: string): boolean {
  * operator-authored cause. Classify only the cause; the recovery pointer is
  * rendered separately by `composeTerminalDelivery`. */
 function authoredFailureReason(reason: string): string {
+  const salvageMarker = TRIDENT_SALVAGE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
   const annotation = reason.match(
-    /(?:\s+—\s+(?:0 commits\b|\d+ commit\(s\),\s+build survived the failure\b|build survived the failure\b|\d+ uncommitted\b)|;\s+plus\s+(?:\d+ uncommitted\b|\d+ stash\b))/,
+    new RegExp(
+      `(?:\\s+—\\s+(?:0 commits\\b|\\d+ commit\\(s\\),\\s+${salvageMarker}\\b|${salvageMarker}\\b|\\d+ uncommitted\\b)|;\\s+plus\\s+(?:\\d+ uncommitted\\b|\\d+ stash\\b))`,
+    ),
   )
   return (annotation === null ? reason : reason.slice(0, annotation.index)).trim()
 }
@@ -157,7 +161,7 @@ function salvageRecoveryTrail(run: TridentRun): string {
   const reason = run.failure_reason ?? ''
   const snapshotRef = reason.match(/refs\/tags\/trident-salvage\/[^\s;—]+/)?.[0]
   if (snapshotRef !== undefined) return `\nRecovery snapshot: ${snapshotRef}.`
-  if (reason.includes('work parked in stash')) {
+  if (reason.includes(TRIDENT_STASH_PARKED_MARKER)) {
     return "\nRecovery note: work was detected in this run's stash window."
   }
   return ''

@@ -423,6 +423,11 @@ export interface StrandedFailureSweepDeps {
   ) => Promise<TridentRun | null>
 }
 
+function strandedWorktreeScope(run: TridentRun): string {
+  const branch = run.branch ?? `trident/${run.slug}`
+  return JSON.stringify([run.project_slug, resolve(run.repo_path), branch])
+}
+
 /** Best-effort boot reconciliation for failed PR-mode runs. A broken row, git
  *  checkout, or initial store read must never reject module initialisation. */
 export async function sweepStrandedFailures({
@@ -435,22 +440,18 @@ export async function sweepStrandedFailures({
   } catch {
     return
   }
-  let liveBranches: Set<string> | null = null
+  let liveWorktreeScopes: Set<string> | null = null
   try {
-    liveBranches = new Set(
-      store
-        .listNonTerminal(10_000)
-        .map((run) => run.branch ?? `trident/${run.slug}`),
-    )
+    liveWorktreeScopes = new Set(store.listNonTerminal(10_000).map(strandedWorktreeScope))
   } catch {
     // Failure to establish liveness fails CLOSED for checkout inspection while
     // still allowing the existing commit-only reconciliation below.
   }
   for (const row of rows) {
     try {
-      const branch = row.branch ?? `trident/${row.slug}`
       const salvaged = await reconcile(row, {
-        inspect_worktree: liveBranches !== null && !liveBranches.has(branch),
+        inspect_worktree:
+          liveWorktreeScopes !== null && !liveWorktreeScopes.has(strandedWorktreeScope(row)),
       })
       if (salvaged === null) continue
       await store.update(row.id, {
@@ -2202,9 +2203,31 @@ export function buildTridentOrchestrator(
       opts.run_host(['env', `GIT_INDEX_FILE=${index}`, 'git', '-C', worktree, ...args], worktree)
 
     try {
-      // Build a tree in a PRIVATE temporary index seeded from HEAD. Unlike
-      // `stash create`, this includes untracked files and never opens the live
-      // worktree's index or its index.lock.
+      // `stash create` is the read-only Git primitive that preserves BOTH the
+      // live index and the tracked working tree. Its second parent is the index
+      // snapshot. Retain that parent on our final commit so staged-only content
+      // remains recoverable even when the worktree copy is back at HEAD.
+      const hasTrackedChanges = statusEntries.some((entry) => !entry.startsWith('?? '))
+      let indexParent: string | null = null
+      if (hasTrackedChanges) {
+        const stashed = await opts.run_host(['git', '-C', worktree, 'stash', 'create'], worktree)
+        const stashOid = stashed.stdout.trim()
+        if (!stashed.ok || !/^[0-9a-f]{40}$/.test(stashOid)) {
+          return failedDisposition('snapshot stash-create failed', stashed)
+        }
+        const resolvedIndex = await opts.run_host(
+          ['git', '-C', worktree, 'rev-parse', '--verify', `${stashOid}^2^{commit}`],
+          worktree,
+        )
+        indexParent = resolvedIndex.stdout.trim()
+        if (!resolvedIndex.ok || !/^[0-9a-f]{40}$/.test(indexParent)) {
+          return failedDisposition('snapshot index-parent failed', resolvedIndex)
+        }
+      }
+
+      // Build the worktree-facing tree in a PRIVATE temporary index. This adds
+      // untracked files without opening or locking the live index; the optional
+      // index parent above preserves the distinct staged version.
       const seeded = await withSnapshotIndex(['read-tree', 'HEAD'])
       if (!seeded.ok) return failedDisposition('snapshot read-tree failed', seeded)
 
@@ -2217,47 +2240,51 @@ export function buildTridentOrchestrator(
         return failedDisposition('snapshot write-tree failed', tree)
       }
 
-      const committed = await opts.run_host(
-        [
-          'git',
-          '-C',
-          worktree,
-          '-c',
-          'user.name=Neutron Trident',
-          '-c',
-          'user.email=trident@neutron.local',
-          'commit-tree',
-          treeOid,
-          '-p',
-          'HEAD',
-          '-m',
-          `trident salvage snapshot ${run.id}`,
-        ],
+      const commitArgs = [
+        'git',
+        '-C',
         worktree,
-      )
+        '-c',
+        'user.name=Neutron Trident',
+        '-c',
+        'user.email=trident@neutron.local',
+        'commit-tree',
+        treeOid,
+        '-p',
+        'HEAD',
+      ]
+      if (indexParent !== null) commitArgs.push('-p', indexParent)
+      commitArgs.push('-m', `trident salvage snapshot ${run.id}`)
+      const committed = await opts.run_host(commitArgs, worktree)
       const oid = committed.stdout.trim()
       if (!committed.ok || !/^[0-9a-f]{40}$/.test(oid)) {
         return failedDisposition('snapshot commit-tree failed', committed)
       }
 
-      // File and line counts come from the SAME captured tree, including new
-      // files. A binary file contributes one file and zero text lines.
-      const numstat = await opts.run_host(
-        ['git', '-C', worktree, 'diff', '--numstat', 'HEAD', oid],
-        worktree,
-      )
-      if (!numstat.ok) return failedDisposition('snapshot numstat failed', numstat)
-      let files = 0
-      let lines = 0
-      for (const line of numstat.stdout.split(/\r?\n/)) {
-        if (line === '') continue
-        const [addedText = '', removedText = ''] = line.split('\t')
-        const addedLines = Number.parseInt(addedText, 10)
-        const removedLines = Number.parseInt(removedText, 10)
-        if (Number.isFinite(addedLines)) lines += addedLines
-        if (Number.isFinite(removedLines)) lines += removedLines
-        files++
+      // Count both captured versions. Taking the larger per-path delta avoids
+      // double-counting ordinary staged-then-edited files while ensuring an
+      // index-only path is not reported as zero work.
+      const linesByPath = new Map<string, number>()
+      for (const target of indexParent === null ? [oid] : [oid, indexParent]) {
+        const numstat = await opts.run_host(
+          ['git', '-C', worktree, 'diff', '--numstat', 'HEAD', target],
+          worktree,
+        )
+        if (!numstat.ok) return failedDisposition('snapshot numstat failed', numstat)
+        for (const line of numstat.stdout.split(/\r?\n/)) {
+          if (line === '') continue
+          const [addedText = '', removedText = '', ...pathParts] = line.split('\t')
+          const addedLines = Number.parseInt(addedText, 10)
+          const removedLines = Number.parseInt(removedText, 10)
+          const lineCount =
+            (Number.isFinite(addedLines) ? addedLines : 0) +
+            (Number.isFinite(removedLines) ? removedLines : 0)
+          const path = pathParts.join('\t') || line
+          linesByPath.set(path, Math.max(linesByPath.get(path) ?? 0, lineCount))
+        }
       }
+      const files = linesByPath.size
+      const lines = [...linesByPath.values()].reduce((sum, count) => sum + count, 0)
 
       const anchored = await opts.run_host(
         ['git', '-C', run.repo_path, 'update-ref', snapshotRef, oid],
@@ -2334,11 +2361,22 @@ export function buildTridentOrchestrator(
             // there. Prefer the durable run-owned path when one was recorded.
             if (candidate === primary || resolve(candidate) === resolve(run.repo_path)) continue
             if (recorded !== null && resolve(candidate) !== recorded) continue
+            // `worktree list` deliberately retains deleted linked worktrees as
+            // prunable admin entries. They are not capture failures and must
+            // not prevent the shared stash leg from running.
+            if (stanzaLines.some((line) => line.startsWith('prunable'))) continue
             // A linked worktree's `.git` pointer is created with that worktree
             // and is not rewritten by ordinary edits/commits. Its mtime is a
             // second ownership proof: a checkout created after this failed row
             // ended belongs to a later dispatch on the reused branch.
-            const createdAt = statSync(join(candidate, '.git')).mtimeMs
+            let createdAt: number
+            try {
+              createdAt = statSync(join(candidate, '.git')).mtimeMs
+            } catch {
+              // The checkout may disappear after the porcelain read. Treat it
+              // like a prunable entry and continue to stash inspection.
+              continue
+            }
             const inRunWindow =
               (!Number.isFinite(runStarted) || createdAt >= runStarted - 1_000) &&
               (!Number.isFinite(runEnded) || createdAt <= runEnded + 1_000)
@@ -2450,6 +2488,7 @@ export function buildTridentOrchestrator(
           }
         }
 
+        if (disposition.kind === 'failed') salvageFailureNotes.set(run, disposition.detail)
         const published = await publishBuiltCommit(run, null)
         const commitReason = failureReason.includes(TRIDENT_SALVAGE_MARKER)
           ? failureReason
@@ -3602,7 +3641,13 @@ export function buildTridentOrchestrator(
           publishedNow && salvaged.pr !== null
             ? `stranded build salvaged → PR #${salvaged.pr}`
             : 'stranded work recorded without a publish'
-        return { ...out, run: salvaged, note: `${out.note}; ${salvageNote}` }
+        const failureNote = salvageFailureNotes.get(out.run)
+        if (failureNote !== undefined) salvageFailureNotes.delete(out.run)
+        return {
+          ...out,
+          run: salvaged,
+          note: `${out.note}; ${salvageNote}${failureNote === undefined ? '' : `; stranded worktree capture failed: ${failureNote}`}`,
+        }
       }
       const failureNote = salvageFailureNotes.get(out.run)
       if (failureNote !== undefined) {

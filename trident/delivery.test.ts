@@ -16,6 +16,7 @@ import {
   type OutboundSink,
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { TRIDENT_SNAPSHOT_MARKER } from './orchestrator.ts'
 import type { OutgoingMessage } from '@neutronai/channels/types.ts'
 import type { TridentPhase, TridentRun } from './store.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
@@ -168,7 +169,7 @@ describe('composeTerminalDelivery', () => {
     const out = composeTerminalDelivery(
       runWith({
         phase: 'failed',
-        failure_reason: `${authored} — 0 commits; 292 uncommitted text line(s) across 3 file(s) (2 untracked) — uncommitted work survived the failure — recovery ref ${ref}`,
+        failure_reason: `${authored} — 0 commits; 292 uncommitted text line(s) across 3 file(s) (2 untracked) — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${ref}`,
       }),
     )
 
@@ -180,7 +181,7 @@ describe('composeTerminalDelivery', () => {
       runWith({
         phase: 'failed',
         pr: 7,
-        failure_reason: `${authored}; plus 12 uncommitted text line(s) across 2 file(s) — uncommitted work survived the failure — recovery ref ${ref}`,
+        failure_reason: `${authored}; plus 12 uncommitted text line(s) across 2 file(s) — ${TRIDENT_SNAPSHOT_MARKER} — recovery ref ${ref}`,
       }),
     )
     expect(alreadyPublished?.text).toContain(authored)

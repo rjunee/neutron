@@ -2242,6 +2242,45 @@ describe('sweepStrandedFailures', () => {
 
     expect(inspectWorktree).toBe(false)
   })
+
+  test('a failed branch with no live owner enables startup worktree inspection', async () => {
+    await failedPr('available-branch')
+    let inspectWorktree: boolean | undefined
+
+    await sweepStrandedFailures({
+      store,
+      reconcile: async (_run, options) => {
+        inspectWorktree = options?.inspect_worktree
+        return null
+      },
+    })
+
+    expect(inspectWorktree).toBe(true)
+  })
+
+  test('the same branch string in another project and repository is not a live owner', async () => {
+    const failed = await failedPr('cross-project-branch')
+    await store.create({
+      slug: 'unrelated-run',
+      project_slug: 't2',
+      repo_path: '/another-repo',
+      task: 'unrelated build',
+      phase: 'forge-init',
+      merge_mode: 'pr',
+      branch: failed.branch,
+    })
+    let inspectWorktree: boolean | undefined
+
+    await sweepStrandedFailures({
+      store,
+      reconcile: async (_run, options) => {
+        inspectWorktree = options?.inspect_worktree
+        return null
+      },
+    })
+
+    expect(inspectWorktree).toBe(true)
+  })
 })
 
 describe('orchestrator — ISSUES #563: a run whose PR is ALREADY merged', () => {

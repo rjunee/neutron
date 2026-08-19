@@ -5,7 +5,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -63,6 +63,7 @@ async function seedWorld(
     | 'missing'
     | 'not-ahead'
     | 'dirty'
+    | 'staged-only'
     | 'untracked-only'
     | 'stashed'
     | 'ahead-dirty'
@@ -131,6 +132,18 @@ async function seedWorld(
   if (kind === 'dirty') {
     writeFileSync(join(worktree, 'README.md'), 'base\nuncommitted work\n')
     writeFileSync(join(worktree, 'brand-new.txt'), 'untracked work\n')
+    return {
+      root,
+      origin,
+      checkout,
+      branchHead: await gitOut(worktree, 'rev-parse', 'HEAD'),
+      worktree,
+    }
+  }
+  if (kind === 'staged-only') {
+    writeFileSync(join(worktree, 'README.md'), 'base\nstaged work\n')
+    await git(worktree, 'add', 'README.md')
+    await git(worktree, 'restore', '--source=HEAD', '--worktree', 'README.md')
     return {
       root,
       origin,
@@ -371,6 +384,27 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     expect(later?.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
   }, 60_000)
 
+  test('index-only content is retained as the snapshot index parent', async () => {
+    const world = await seedWorld('staged-only')
+    if (world.worktree === null) throw new Error('staged fixture did not keep its worktree')
+    const harness = buildHybridHost()
+    const beforeStatus = await gitRaw(world.worktree, 'status', '--porcelain')
+    const beforeHead = await gitRaw(world.worktree, 'rev-parse', 'HEAD')
+
+    const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
+
+    const snapshotRef = 'refs/tags/trident-salvage/salvage-run'
+    expect(beforeStatus).toContain('MM README.md')
+    expect(out.run.failure_reason).toContain('1 uncommitted text line(s) across 1 file(s)')
+    expect(out.run.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(await gitOut(world.checkout, 'show', `${snapshotRef}:README.md`)).toBe('base')
+    expect(await gitOut(world.checkout, 'show', `${snapshotRef}^2:README.md`)).toBe(
+      'base\nstaged work',
+    )
+    expect(await gitRaw(world.worktree, 'status', '--porcelain')).toBe(beforeStatus)
+    expect(await gitRaw(world.worktree, 'rev-parse', 'HEAD')).toBe(beforeHead)
+  }, 60_000)
+
   test('untracked-only nested work is captured even when repository config hides it', async () => {
     const world = await seedWorld('untracked-only')
     if (world.worktree === null) throw new Error('untracked fixture did not keep its worktree')
@@ -445,6 +479,21 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     expect(out.run.failure_reason).not.toContain(TRIDENT_STASH_PARKED_MARKER)
   }, 60_000)
 
+  test('a deleted unpruned worktree does not prevent the stash leg', async () => {
+    const world = await seedWorld('stashed')
+    if (world.worktree === null) throw new Error('stashed fixture did not keep its worktree')
+    rmSync(world.worktree, { recursive: true, force: true })
+    const porcelain = await gitRaw(world.checkout, 'worktree', 'list', '--porcelain')
+    expect(porcelain).toContain('prunable')
+    const harness = buildHybridHost()
+
+    const out = await orchestrator(world, harness.run).step(makeRun(world.checkout))
+
+    expect(out.run.failure_reason).toContain(TRIDENT_STASH_PARKED_MARKER)
+    expect(out.note).not.toContain('worktree capture threw')
+    expect(harness.calls.some((cmd) => cmd.includes('stash') && cmd.includes('list'))).toBe(true)
+  }, 60_000)
+
   test("the operator's shared checkout is never selected as a salvage worktree", async () => {
     const world = await seedWorld('shared-dirty')
     const harness = buildHybridHost()
@@ -487,6 +536,26 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     ).toMatchObject({ ok: false })
   }, 60_000)
 
+  test('a worktree created inside the one-second ownership slack is captured', async () => {
+    const world = await seedWorld('dirty')
+    if (world.worktree === null) throw new Error('dirty fixture did not keep its worktree')
+    const createdAt = statSync(join(world.worktree, '.git')).mtimeMs
+    const run = makeRun(world.checkout, {
+      phase: 'failed',
+      failure_reason: FAILURE,
+      started_at: new Date(createdAt - 1_000).toISOString(),
+      last_advanced_at: new Date(createdAt - 500).toISOString(),
+    })
+    const harness = buildHybridHost()
+
+    const out = await orchestrator(world, harness.run).reconcile_stranded(run)
+
+    expect(out?.failure_reason).toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(await gitOut(world.checkout, 'rev-parse', 'refs/tags/trident-salvage/salvage-run')).toMatch(
+      /^[0-9a-f]{40}$/,
+    )
+  }, 60_000)
+
   test('a failed ref anchor records no success marker and does not block later commit salvage', async () => {
     const world = await seedWorld('dirty')
     if (world.worktree === null) throw new Error('dirty fixture did not keep its worktree')
@@ -514,6 +583,25 @@ describe('REAL git — stranded terminal-failure salvage', () => {
     const later = await orchestrator(world, harness.run).reconcile_stranded(first.run)
     expect(later?.pr).toBe(7)
     expect(later?.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
+  }, 60_000)
+
+  test('a failed dirty snapshot remains visible when committed work is published', async () => {
+    const world = await seedWorld('ahead-dirty')
+    const harness = buildHybridHost()
+    const failingAnchor: RunHostCommand = async (cmd, cwd) => {
+      if (cmd.includes('update-ref') && cmd.some((arg) => arg.includes('trident-salvage'))) {
+        return { ok: false, stdout: '', stderr: 'simulated ref refusal', exit_code: 1 }
+      }
+      return harness.run(cmd, cwd)
+    }
+
+    const out = await orchestrator(world, failingAnchor).step(makeRun(world.checkout))
+
+    expect(out.run.pr).toBe(7)
+    expect(out.run.failure_reason).toContain(TRIDENT_SALVAGE_MARKER)
+    expect(out.run.failure_reason).not.toContain(TRIDENT_SNAPSHOT_MARKER)
+    expect(out.note).toContain('stranded build salvaged → PR #7')
+    expect(out.note).toContain('stranded worktree capture failed: snapshot update-ref failed')
   }, 60_000)
 
   test('committed and uncommitted work are both reported while the commit is published', async () => {

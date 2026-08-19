@@ -6,17 +6,20 @@ Running log of what shipped, newest first. One entry per merged change.
 
 `reconcile_stranded` now checks both committed and uncommitted work before concluding that a
 failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
-tracked-and-untracked tree through a private temporary index, anchors the resulting commit at
+tracked-and-untracked tree through a private temporary index, retains the live index as a second
+parent so staged-only work remains recoverable, and anchors the resulting commit at
 `refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
 A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
 their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
-inspection when a live run owns a reused branch.
+inspection when a live run in the same project and repository owns a reused branch. Prunable
+worktree entries are skipped so they cannot suppress stash evidence.
 
 Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
 outcomes make no remote mutation, while a run with both committed and dirty work publishes the
-commit and records both dispositions. A failed capture writes no success marker, and a successful
-snapshot never blocks a commit that appears later. Real-git falsification tests prove untracked
-nested files are recoverable, the dirty worktree and HEAD remain byte-identical, stale/crafted
+commit and records both dispositions. A failed capture writes no success marker, remains explicit
+when committed work is still published, and never blocks a commit that appears later. Real-git
+falsification tests prove staged-only and untracked nested files are recoverable, the dirty
+worktree and HEAD remain byte-identical, stale/crafted
 stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
 cause while exposing the local recovery ref.
 
