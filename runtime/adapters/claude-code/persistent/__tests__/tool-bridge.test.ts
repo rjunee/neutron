@@ -148,7 +148,9 @@ function readMcpConfig(argv: string[]): { mcpServers: Record<string, { args: str
   return JSON.parse(readFileSync(p, 'utf8'))
 }
 
-function readSettings(argv: string[]): { hooks: { PreToolUse?: Array<{ matcher: string; hooks: Array<{ command: string }> }> } } {
+function readSettings(argv: string[]): {
+  hooks: { PreToolUse?: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }> }
+} {
   const path = argv[argv.indexOf('--settings') + 1]!
   return JSON.parse(readFileSync(path, 'utf8'))
 }
