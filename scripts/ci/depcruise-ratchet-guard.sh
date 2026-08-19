@@ -79,6 +79,12 @@ fi
 MAIN_BASELINE="$(mktemp)"
 trap 'rm -f "$MAIN_BASELINE"' EXIT
 if ! git show "$MAIN_REF:$BASELINE_REL" > "$MAIN_BASELINE" 2>/dev/null; then
+  # T3: name shallowness rather than leaving a true-but-useless message. An
+  # "unreachable" ref on a shallow clone is not a fork or an outage, it is the
+  # history simply not being present — the distinction cost hours to find once.
+  if [ -f "$(git rev-parse --git-dir)/shallow" ]; then
+    echo "depcruise-ratchet-guard: the checkout is SHALLOW (.git/shallow present), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
+  fi
   echo "depcruise-ratchet-guard: $MAIN_REF has no $BASELINE_REL (bootstrap) or is unreachable — skipping."
   exit 0
 fi
