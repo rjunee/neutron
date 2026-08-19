@@ -2,6 +2,109 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
+
+Follow-up to #410. `scripts/ci/ci-workflow.test.ts` ('bun install cache wiring') is rewritten
+as one pure predicate plus **executed** mutations, and `actions/checkout` + `oven-sh/setup-bun`
+are sha-pinned across both workflow files.
+
+**The guard was false-green, and its mutation list was prose.** It asserted the cache key
+CONTAINED the text `hashFiles('bun.lock')`. That is presence, not evaluation, and two edits
+walked through it while all 61 tests passed:
+
+- **Hoisting `actions/cache` above `actions/checkout`.** `hashFiles()` is evaluated against the
+  workspace, so with nothing checked out it returns the EMPTY STRING and the key collapses to
+  the `restore-keys` prefix — a single entry, frozen at whatever the first run stored, restored
+  on every later run whatever `bun.lock` says. No error, no warning. Exactly the silent-miss
+  the guard exists to prevent, reachable by moving one step up two lines.
+- **Broadening `restore-keys` to `bun-install-`.** That discards the bun-version isolation the
+  key carries deliberately (a bun upgrade can change the cache's on-disk layout), and the check
+  only asked `key.startsWith(prefix)` — which a SHORTER prefix satisfies better.
+
+Both are structural now: `checkout < cache < install` per job, and `restore-keys` must EQUAL
+the key with the lockfile-hash expression removed. And the docblock's claim that ten mutations
+had been run is replaced by eleven mutations that actually run, against this file's own text,
+**each asserting the reason it is caught FOR**. That assertion paid for itself on the first
+execution: the own-key mutation was tripping the restore-keys equality check rather than the
+shared-key check it named — a control passing for an unrelated reason, which is decoration
+that would keep passing after the check it exercises had been deleted. Two more controls sit
+either side of the list: a positive control (the walk must find exactly the five installing
+jobs) and an INVERSE control (a functionally identical edit must not red the suite — adding an
+unrelated env var above `BUN_INSTALL_CACHE_DIR` reddened the merged version with the wiring
+unchanged, and a guard that reds on nothing teaches people to edit the guard).
+
+**The pins contradicted the guard's own comment.** It justified sha-pinning `actions/cache`
+with "every other pin in this repo is a sha". False when written: `actions/checkout@v4` ×6 and
+`oven-sh/setup-bun@v2` ×5 were moving tags, on the two actions that run FIRST and with more
+access than the cache. Both pinned, and the claim is now a test over every workflow file with
+a non-empty-directory control, not a comment. There was no mechanical pin check in this repo
+before this entry — which is how five tag pins sat in a file whose own test said otherwise.
+
+**The 10 GB Actions cache ceiling is already exceeded — the merged entry's "far enough out"
+and "a slow leak, not a steady state" were estimates written without the measurement, and
+both were wrong on merge day.** Measured 2026-08-18: **11.22 GB across 47 entries**, so LRU
+eviction is running now, not eventually. The bun entries are not the cause — 9.76 GB of it is
+43 `codeql-overlay` entries from GitHub's default CodeQL setup, against 0.66 GB for all three
+`bun-install` entries. They survive because LRU evicts the least recently USED and twelve legs
+read them every run, but they are under that pressure from today, so a cold install after an
+eviction is an event to expect rather than a symptom of broken wiring. Reclaiming the space is
+a CodeQL-retention question and is deliberately not done here.
+
+**Fork PRs were documented wrong.** A `pull_request` run from a fork gets a read-only
+`GITHUB_TOKEN`: it can RESTORE main's entry but cannot SAVE one. So "a PR run warms that PR"
+is true of same-repository PRs only — for a fork it is all-or-nothing, warm from main's entry
+or cold for that PR's whole life.
+
+**Why the global download cache and not `node_modules`**, since the install is still not a
+no-op and this entry should not imply it should be. The download cache is what removes the
+network fetch, and it stays correct across lockfile changes because a `restore-keys` hit is a
+strict superset that `--frozen-lockfile` filters down to what `bun.lock` names. Caching
+`node_modules` would also save the link work, but it caches a RESOLVED tree, so a partial-key
+hit restores a tree the lockfile no longer describes and correctness starts depending on bun
+noticing.
+
+**The timings were re-measured against THIS key**, since #410's were quoted from runs on the
+key that preceded it — a measurement is only as good as the thing it was measured against. On
+#417's CI run all **12 legs** reported `Cache restored from key: bun-install-Linux-bun1.3.9-…`,
+an EXACT-key hit rather than a prefix one, which is the direct evidence that the cache HITS
+instead of silently missing. Warm restore 4-8 s (median 6 s), `bun install` 8-13 s (median
+9 s) — ~15 s of restore-plus-install per leg, which reproduces #410's stated trade rather than
+merely repeating it.
+
+Unchanged and restated so it stays recorded: vendoring `gbrain` remains the stronger fix — it
+removes the network dependency outright and closes the byte-verification gap by putting the
+content in the tree under review — and is still deliberately not done.
+
+## 2026-08-18 — lane_review.sh fails closed (T1–T4)
+tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
+
+Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
+
+The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
+
+Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+
+## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
+
+Migration repairs now have an explicit, loader-validated `reapply` kind. Unlike the existing
+suppress entries, an active reapply does not hide its named file: when the ledger records that
+name at the incident ordinal and the exact firing receipt is absent, the file joins the same
+tracked-tree guards and transactional apply path as pending work. Its SQL body and plain
+`_migration_repairs` receipt commit together; `_migrations` is never inserted, updated, or
+deleted. A body failure rolls both back, and the receipt makes every later boot a no-op.
+
+The shipped row-122 entry is intentionally inert during the deploy window before a file named
+`work_board_items_pr` exists, on fresh installs, and wherever that name is legitimately recorded
+at its tree ordinal. The live-replica harness pins the old silent-skip control, the repaired
+first boot, byte-identical scar row, second-boot idempotence, file-absent rollout order,
+fresh-install behavior, duplicate-column strictness, and untracked-file refusal. This change
+ships no migration SQL and does not change the schema snapshot.
+
+#269 must NOT merge until this is merged AND deployed; after it lands #269 must rebase and fix
+its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsified by 0130's
+rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
+`01M095E3F8YN3N9XV5AK4S9XJW`.
+
 ## 2026-08-18 — Continuation rounds hand Forge a bounded branch-state brief
 
 The `plan:probe` seat now also relays a byte-bounded branch log from
@@ -54,6 +157,28 @@ the branch-state brief rather than retaining an unproven optimisation.
 The deadline remains an operational removal gate; historical test runs do not
 change outcome based on the wall clock.
 
+## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
+
+Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Codex
+wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
+`_CORRUPT` refusal through the host checkpoint before retaining the same exit-3
+fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
+cannot leak the project database path or displace the refusal tag from the bounded
+wrapper-error tail; a short stable failure tag remains when recording itself fails.
+A missing run row is now a nonzero checkpoint result rather than a diagnostic-only
+exit 0, so a mis-threaded run id cannot lose the alert without a trace. Alert-only
+writes do not refresh `last_advanced_at`: recording evidence is not workflow progress.
+
+`deriveRunProgress` now carries the alert through the Work-board HTTP and live
+snapshot shape. Terminal reconciliation retains the run link on successful cards,
+so both web and mobile rows show the subdued alert while a recovered run continues
+and in completed history after it merges. Moving completed work back to an active
+lane clears the stale link. An actual terminal failure reason takes precedence as
+the card's outcome; an earlier alert never substitutes for an absent failure reason.
+The alert is explicitly workflow-owned, so stale `save()`/`saveIfActive()` snapshots
+cannot erase it. Tests cover all three persisted refusal paths, store/progress
+mapping, client parsing, recovery→done reconciliation, and both client renderers.
+
 ## 2026-08-18 — Pre-build latency gets a durable append-only stage ledger
 
 Migration 0133 adds `code_trident_stage_events`, an append-only SQLite ledger read
@@ -105,27 +230,6 @@ clean. The repository runner completed its 1,353-file coverage audit but reporte
 40 failing files; rerunning exactly those files from a detached `main` worktree
 reproduced failures in all 40 (59 failures in each of two 20-file batches), proving
 that full-suite red is pre-existing and not caused by this change.
-
-## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
-
-Migration repairs now have an explicit, loader-validated `reapply` kind. Unlike the existing
-suppress entries, an active reapply does not hide its named file: when the ledger records that
-name at the incident ordinal and the exact firing receipt is absent, the file joins the same
-tracked-tree guards and transactional apply path as pending work. Its SQL body and plain
-`_migration_repairs` receipt commit together; `_migrations` is never inserted, updated, or
-deleted. A body failure rolls both back, and the receipt makes every later boot a no-op.
-
-The shipped row-122 entry is intentionally inert during the deploy window before a file named
-`work_board_items_pr` exists, on fresh installs, and wherever that name is legitimately recorded
-at its tree ordinal. The live-replica harness pins the old silent-skip control, the repaired
-first boot, byte-identical scar row, second-boot idempotence, file-absent rollout order,
-fresh-install behavior, duplicate-column strictness, and untracked-file refusal. This change
-ships no migration SQL and does not change the schema snapshot.
-
-#269 must NOT merge until this is merged AND deployed; after it lands #269 must rebase and fix
-its `live-ledger-122-work-board-pr.test.ts` fixture (columns-present is falsified by 0130's
-rebuild). Cross-ref cards `01M00S2MW24QWP2N0M3W044N19` and
-`01M095E3F8YN3N9XV5AK4S9XJW`.
 
 ## 2026-08-18 — a cache miss is not an absence of deletion, and a refused receipt is not a sent one (#411-followup)
 
@@ -210,28 +314,6 @@ moment the socket opens" (28 pass / 1 fail). Restored: 29 pass / 0 fail on that
 suite, 208 pass / 0 fail across it plus `switch-render-cost` and `chat-core`,
 `bunx tsc --noEmit` 0 errors.
 
-## 2026-08-18 — brief-integrity refusals are durable and visible on the Work board
-
-Migration 0136 adds the nullable `code_trident_runs.brief_alert` field. The Codex
-wrapper writes the exact `_PART_MISSING`, `_PART_CORRUPT`, or whole-brief
-`_CORRUPT` refusal through the host checkpoint before retaining the same exit-3
-fail-closed behavior. Checkpoint diagnostics are suppressed so a SQLite error
-cannot leak the project database path or displace the refusal tag from the bounded
-wrapper-error tail; a short stable failure tag remains when recording itself fails.
-A missing run row is now a nonzero checkpoint result rather than a diagnostic-only
-exit 0, so a mis-threaded run id cannot lose the alert without a trace. Alert-only
-writes do not refresh `last_advanced_at`: recording evidence is not workflow progress.
-
-`deriveRunProgress` now carries the alert through the Work-board HTTP and live
-snapshot shape. Terminal reconciliation retains the run link on successful cards,
-so both web and mobile rows show the subdued alert while a recovered run continues
-and in completed history after it merges. Moving completed work back to an active
-lane clears the stale link. An actual terminal failure reason takes precedence as
-the card's outcome; an earlier alert never substitutes for an absent failure reason.
-The alert is explicitly workflow-owned, so stale `save()`/`saveIfActive()` snapshots
-cannot erase it. Tests cover all three persisted refusal paths, store/progress
-mapping, client parsing, recovery→done reconciliation, and both client renderers.
-
 ## 2026-08-18 — brief-part receipts now attest to persisted bytes
 
 `writeBriefParts` now encodes each task/reflection part once, writes it, reads the
@@ -247,88 +329,6 @@ short-write recovery, reflection-only refusal, unchanged happy-path receipts, an
 loud write failures. The production default remains the existing
 `trident/inner-loop.ts` caller; `trident/codex-build.sh` and
 `trident/inner-workflow.mjs` are unchanged.
-
-## 2026-08-18 — lane_review.sh fails closed (T1–T4)
-tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
-
-Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
-
-The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
-
-Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
-
-## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
-
-Follow-up to #410. `scripts/ci/ci-workflow.test.ts` ('bun install cache wiring') is rewritten
-as one pure predicate plus **executed** mutations, and `actions/checkout` + `oven-sh/setup-bun`
-are sha-pinned across both workflow files.
-
-**The guard was false-green, and its mutation list was prose.** It asserted the cache key
-CONTAINED the text `hashFiles('bun.lock')`. That is presence, not evaluation, and two edits
-walked through it while all 61 tests passed:
-
-- **Hoisting `actions/cache` above `actions/checkout`.** `hashFiles()` is evaluated against the
-  workspace, so with nothing checked out it returns the EMPTY STRING and the key collapses to
-  the `restore-keys` prefix — a single entry, frozen at whatever the first run stored, restored
-  on every later run whatever `bun.lock` says. No error, no warning. Exactly the silent-miss
-  the guard exists to prevent, reachable by moving one step up two lines.
-- **Broadening `restore-keys` to `bun-install-`.** That discards the bun-version isolation the
-  key carries deliberately (a bun upgrade can change the cache's on-disk layout), and the check
-  only asked `key.startsWith(prefix)` — which a SHORTER prefix satisfies better.
-
-Both are structural now: `checkout < cache < install` per job, and `restore-keys` must EQUAL
-the key with the lockfile-hash expression removed. And the docblock's claim that ten mutations
-had been run is replaced by eleven mutations that actually run, against this file's own text,
-**each asserting the reason it is caught FOR**. That assertion paid for itself on the first
-execution: the own-key mutation was tripping the restore-keys equality check rather than the
-shared-key check it named — a control passing for an unrelated reason, which is decoration
-that would keep passing after the check it exercises had been deleted. Two more controls sit
-either side of the list: a positive control (the walk must find exactly the five installing
-jobs) and an INVERSE control (a functionally identical edit must not red the suite — adding an
-unrelated env var above `BUN_INSTALL_CACHE_DIR` reddened the merged version with the wiring
-unchanged, and a guard that reds on nothing teaches people to edit the guard).
-
-**The pins contradicted the guard's own comment.** It justified sha-pinning `actions/cache`
-with "every other pin in this repo is a sha". False when written: `actions/checkout@v4` ×6 and
-`oven-sh/setup-bun@v2` ×5 were moving tags, on the two actions that run FIRST and with more
-access than the cache. Both pinned, and the claim is now a test over every workflow file with
-a non-empty-directory control, not a comment. There was no mechanical pin check in this repo
-before this entry — which is how five tag pins sat in a file whose own test said otherwise.
-
-**The 10 GB Actions cache ceiling is already exceeded — the merged entry's "far enough out"
-and "a slow leak, not a steady state" were estimates written without the measurement, and
-both were wrong on merge day.** Measured 2026-08-18: **11.22 GB across 47 entries**, so LRU
-eviction is running now, not eventually. The bun entries are not the cause — 9.76 GB of it is
-43 `codeql-overlay` entries from GitHub's default CodeQL setup, against 0.66 GB for all three
-`bun-install` entries. They survive because LRU evicts the least recently USED and twelve legs
-read them every run, but they are under that pressure from today, so a cold install after an
-eviction is an event to expect rather than a symptom of broken wiring. Reclaiming the space is
-a CodeQL-retention question and is deliberately not done here.
-
-**Fork PRs were documented wrong.** A `pull_request` run from a fork gets a read-only
-`GITHUB_TOKEN`: it can RESTORE main's entry but cannot SAVE one. So "a PR run warms that PR"
-is true of same-repository PRs only — for a fork it is all-or-nothing, warm from main's entry
-or cold for that PR's whole life.
-
-**Why the global download cache and not `node_modules`**, since the install is still not a
-no-op and this entry should not imply it should be. The download cache is what removes the
-network fetch, and it stays correct across lockfile changes because a `restore-keys` hit is a
-strict superset that `--frozen-lockfile` filters down to what `bun.lock` names. Caching
-`node_modules` would also save the link work, but it caches a RESOLVED tree, so a partial-key
-hit restores a tree the lockfile no longer describes and correctness starts depending on bun
-noticing.
-
-**The timings were re-measured against THIS key**, since #410's were quoted from runs on the
-key that preceded it — a measurement is only as good as the thing it was measured against. On
-#417's CI run all **12 legs** reported `Cache restored from key: bun-install-Linux-bun1.3.9-…`,
-an EXACT-key hit rather than a prefix one, which is the direct evidence that the cache HITS
-instead of silently missing. Warm restore 4-8 s (median 6 s), `bun install` 8-13 s (median
-9 s) — ~15 s of restore-plus-install per leg, which reproduces #410's stated trade rather than
-merely repeating it.
-
-Unchanged and restated so it stays recorded: vendoring `gbrain` remains the stronger fix — it
-removes the network dependency outright and closes the byte-verification gap by putting the
-content in the tree under review — and is still deliberately not done.
 
 ## 2026-08-18 — the web pane could destroy every Codex seat, and could only ever write the first one
 
@@ -2688,6 +2688,63 @@ display path rather than in anything an outsider dials, and bringing three shell
 files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
+
+## 2026-08-16 — the citation guard counted citations instead of covering them
+
+Landed via PR #353.
+
+A retroactive panel returned four findings against the citation guard after the
+PR carrying it had merged, so none were acted on. All four reproduce against the
+merged code and each is fixed here with a landed control.
+
+The floors were headcounts rather than coverage. Per-symbol mentions and one
+cluster-wide site total were both `>=` against a single number, so a valid
+citation added anywhere paid for a broken one lost anywhere else and the sum
+stayed conserved. Measured: mangle one of the installer's citations of its
+target path so no site matches it, which is red alone, then add one ordinary
+correct citation in a different cluster file — total restored, suite green,
+broken citation still present. The typo escaped the cited-path check too,
+because losing the separators leaves a word with no slash and that check judges
+a word as a path only when it carries one, so the blind spots lined up. The site
+floor is now keyed per file-and-target, and a second independent check reduces
+every backticked word to its letters and digits and reports one that equals a
+real citable path while not being it. Residual slack is confined to adding and
+breaking a citation of the same target in the same file in one edit, and that
+limit is written into the code rather than implied — the previous comment
+claimed a property the code did not have, which is the defect class this cluster
+exists to catch.
+
+The universality claim was false inside its own docblock. The test name promised
+that no line locator survived anywhere while the paragraph above it excluded the
+prose form deliberately, and five machine-readable forms escaped as well: the
+parenthesised, bare-L and at-sign spellings, the lowercase spelling of the
+permalink fragment, and a colon locator on an extensionless build file. Each was
+injected and left the suite green, with the plain colon form as a landed
+control; all six are red now and the name says machine-readable. Widening cost
+two measurements — the colon rule may not see a digit before the colon, or an
+ISO timestamp's seconds field parses as a locator, and the three path-shaped
+forms require a slash, or an ordinary exit-code assertion reads as a
+parenthesised locator.
+
+The comment strip could manufacture a definition. Its docblock claimed the strip
+could only remove text and so could never produce a false green; deleting a
+comment joins the line before it to the line after, which can splice a
+column-zero declaration the source never had. Measured: rename the real
+declaration and prepend a two-line block comment whose terminator is immediately
+followed by the old declaration, and the suite is green on a function that no
+longer exists under that name, while the same rename without the corpse is red.
+Comments are overwritten with spaces now, so line identity and column offsets
+survive and the claim is true.
+
+A mention needed no closing delimiter, so an unterminated span counted toward a
+floor made of counts. Spans must close on the same line now; every real citation
+already did, so no floor changed. The shadowed inner `words` helper is renamed
+to `spanWords`, which exposed a caller that had been silently binding to the
+shadow.
+
+The four installer items in the originating brief were re-verified against the
+merged code and were already fixed there, so this change does not touch the
+installer.
 
 ## 2026-08-16 — a deferral and a rejection no longer share a label
 
