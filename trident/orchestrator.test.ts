@@ -4189,3 +4189,29 @@ describe('hang watchdog — the stage-event reader is wired in production', () =
     expect(src).toContain('LIMIT 1')
   })
 })
+
+describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run f384460d)', () => {
+  test('an inner-error harvest carrying prNumber 0 keeps the known PR on the failed row', async () => {
+    // The f384460d trace: the run went terminal-failed with `checkpoint: 'inner-error'` and
+    // the wrapper's pr sentinel still attached. A failed run may lose its verdict — it may
+    // not lose its PR, or the recovery has nothing to point at.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: 'inner-error',
+          prNumber: 0,
+          branch: 'feat-x',
+          remainingTasks: 0,
+        },
+      }),
+      // `detectExistingPr` runs at FIRE time, so this is how the row comes to hold pr=267.
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.pr).toBe(267)
+  })
+})

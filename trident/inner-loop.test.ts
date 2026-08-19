@@ -150,6 +150,21 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       false,
     )
   })
+  // A NON-POSITIVE prNumber IS THE WRAPPER'S "NO PR" SENTINEL, NOT A PR (run f384460d,
+  // 2026-08-15). The codex build wrapper reports `PR_NUMBER=0` in pr mode BY DESIGN —
+  // the outer loop publishes after the build exits — and GitHub's numbers start at 1, so
+  // 0 can never be an answer. Decoding it as one is what ended a run whose row held
+  // pr=267 at pr=0: `result.pr_number ?? run.pr` keeps the 0, because 0 is not nullish.
+  // Mapping it to null here restores the known PR at every `?? run.pr` site at once.
+  test('a non-positive or non-integer prNumber decodes to null (the "no PR" sentinel)', () => {
+    const prOf = (prNumber: unknown) =>
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', prNumber }))?.pr_number
+    expect(prOf(0)).toBeNull()
+    expect(prOf(-1)).toBeNull()
+    expect(prOf(3.5)).toBeNull()
+    // A real PR number still decodes untouched.
+    expect(prOf(7)).toBe(7)
+  })
   // The deviation flag decides whether the NEXT Ralph iteration pays for the full
   // whole-repo survey (~287 s) or takes the cheap `plan:next` continuation. It is
   // fail-closed in the direction that costs money, not correctness: a truthy
