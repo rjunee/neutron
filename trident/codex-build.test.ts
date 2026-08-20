@@ -213,6 +213,20 @@ interface RunOpts {
    * are two different observable outcomes rather than two sides of a threshold.
    */
   spawnTimeoutMs?: number
+  /**
+   * Make the mock `codex` take this long on its BUILD invocation (it still answers
+   * `login status` instantly). This is what lets a test hold the REAL `codex exec`
+   * branch open — the one line of the wrapper that runs in production — instead of
+   * reaching for the `NEUTRON_CODEX_BUILD_EXEC_CMD` seam, whose own comment says it
+   * "does not exist in production".
+   */
+  codexExecSleepSecs?: number
+  /**
+   * Deliver this signal to the WRAPPER's own pid once the mock `codex` is running,
+   * and report what a supervisor of the shape inner-workflow.mjs uses would have
+   * RECORDED for it (see `supervisorStatus`).
+   */
+  killWrapperWith?: 'TERM' | 'INT'
 }
 
 const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n'
@@ -245,6 +259,15 @@ interface RunResult {
    * publish boundary made this call" is exactly what the tests below are asking.
    */
   ghCalls: string
+  /**
+   * What a supervisor of the EXACT shape inner-workflow.mjs wraps the wrapper in
+   * (`"$@"; rc=$?; printf "%s\n" "$rc" > "$status"`) recorded as the wrapper's exit
+   * code — '' unless `killWrapperWith` asked for one. THIS is the number the shipped
+   * build prompt discriminates on ("a signalled wrapper whose supervisor recorded 128
+   * or greater → codexStatus='deferred'"), so it is the number a signal test must
+   * assert, not the harness's own view of the process.
+   */
+  supervisorStatus: string
   /** the trailer parsed into a map, from the TRAILER FILE (never from stdout). */
   trailer: Record<string, string>
   /** everything that landed in the trailer file, verbatim. */
@@ -326,9 +349,16 @@ function run(opts: RunOpts = {}): RunResult {
 
   if (opts.codexLoginExit !== null && opts.codexLoginExit !== undefined) {
     const mock = join(bin, 'codex')
+    // The marker is written by the BUILD invocation only (the `login status` branch
+    // exits above it), so "the real `codex exec` line is running RIGHT NOW" is an
+    // observable fact about THIS fixture's own directory — not something inferred
+    // from a sleep, and not something read out of any shared global state.
+    const marker = `: > ${JSON.stringify(join(dir, 'codex-running'))}\n`
+    const slow =
+      opts.codexExecSleepSecs === undefined ? '' : `sleep ${opts.codexExecSleepSecs}\n`
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nenv > ${JSON.stringify(join(dir, 'codex-env.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\nexit 0\n`,
+      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nenv > ${JSON.stringify(join(dir, 'codex-env.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\n${marker}${slow}exit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -518,9 +548,44 @@ exit 1
       : opts.base === undefined
         ? [SCRIPT, branch]
         : [SCRIPT, branch, opts.base]
+  // THE SIGNAL FIXTURE. The wrapper has to be killed WHILE it is inside the real
+  // `codex exec`, and the thing under assertion is the number a SUPERVISOR records
+  // for it — so the supervisor is a real `sh` of the same shape inner-workflow.mjs
+  // uses (`"$@"; rc=$?; printf "%s\n" "$rc" > "$status"`), which also delivers the
+  // signal so the whole fixture stays synchronous under `spawnSync`. The signal goes
+  // to the WRAPPER's pid and not to the supervisor's, which is exactly the pattern
+  // kill inner-workflow.mjs records an incident for.
+  const supervisorStatusFile = join(dir, 'wrapper-exit-status.txt')
+  const [spawnCmd, spawnArgs] = ((): [string, string[]] => {
+    if (opts.killWrapperWith === undefined) return [BASH, argv]
+    const sup = join(dir, 'signal-supervisor.sh')
+    writeFileSync(
+      sup,
+      `#!/bin/sh
+"$@" &
+child=$!
+i=0
+while [ ! -e "$MARKER" ]; do
+  i=$((i+1))
+  [ "$i" -gt 1200 ] && break
+  sleep 0.05
+done
+sleep 0.3
+kill -"$KILLSIG" "$child" 2>/dev/null
+wait "$child"
+rc=$?
+printf '%s\\n' "$rc" > "$STATUSFILE"
+`,
+    )
+    chmodSync(sup, 0o755)
+    env['MARKER'] = join(dir, 'codex-running')
+    env['KILLSIG'] = opts.killWrapperWith
+    env['STATUSFILE'] = supervisorStatusFile
+    return ['/bin/sh', [sup, BASH, ...argv]]
+  })()
   const res = (() => {
     try {
-      return spawnSync(BASH, argv, {
+      return spawnSync(spawnCmd, spawnArgs, {
         cwd: dir,
         encoding: 'utf8',
         env,
@@ -550,6 +615,7 @@ exit 1
     codexStdin: readOr('codex-stdin.txt'),
     codexEnv: readOr('codex-env.txt'),
     ghCalls: readOr('gh-calls.txt'),
+    supervisorStatus: readOr('wrapper-exit-status.txt').trim(),
     trailer: parseTrailer(trailerRaw),
     trailerRaw,
     baseHead,
@@ -924,6 +990,91 @@ describe('the mid-exec liveness heartbeat', () => {
     expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
   }, 30_000)
 
+  test('PRODUCTION PATH: the real `codex exec` branch arms the ticker, not just the seam', () => {
+    // THE REASON THIS TEST EXISTS. `codex-build.sh` arms the heartbeat at TWO places:
+    // inside the `NEUTRON_CODEX_BUILD_EXEC_CMD` seam (whose own comment says it "does
+    // not exist in production"), and immediately before the real `codex exec`. Every
+    // other heartbeat test above passes NEUTRON_CODEX_BUILD_EXEC_CMD, so they all drive
+    // the seam: DELETING THE PRODUCTION ARMING LEFT THE WHOLE SUITE GREEN (measured:
+    // `bun test trident/` → 2431 pass, 0 fail). That is this repo's documented
+    // "merged green but unwired" shape, one level down — the load-bearing half of the
+    // fix could be reverted and nothing would notice.
+    //
+    // So this one hands over NO seam at all and lets the wrapper call the mock `codex`
+    // on PATH, exactly as the pre-existing 'durably brackets the exact execution
+    // window' test one screen up does.
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-production',
+        codexExecSleepSecs: 3.4,
+        env: { NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1' },
+      })
+      expect(r.status).toBe(0)
+      // POSITIVE CONTROL: the REAL branch is what ran. `codex-argv.txt` is written only
+      // by the mock's non-`login status` invocation, which the seam branch never
+      // reaches — so a non-empty argv is proof this is not the seam under another name.
+      expect(r.codexArgv).toContain('--sandbox')
+
+      const rows = read()
+      const stages = rows.map((row) => row.stage)
+      const alive = rows.filter((row) => row.stage === 'codex-exec-alive')
+      expect(alive.length).toBeGreaterThanOrEqual(2)
+      // Distinct moments, not one row written twice.
+      expect(new Set(alive.map((row) => row.at)).size).toBe(alive.length)
+      // Strictly INSIDE the production exec window.
+      expect(stages.indexOf('codex-exec-alive')).toBeGreaterThan(stages.indexOf('codex-exec-start'))
+      expect(stages.lastIndexOf('codex-exec-alive')).toBeLessThan(stages.indexOf('codex-exec-end'))
+    })
+  }, 60_000)
+
+  test('SIGNAL SAFETY: a SIGTERMed wrapper is still recorded as >= 128, not as a plain exit', () => {
+    // THE HAZARD THE TRAPS INTRODUCED. `trap '_rc=$?; stop_stage_heartbeat; exit $_rc'
+    // INT TERM` looks like it preserves the status, but in a trapped signal handler
+    // `$?` is the last COMPLETED command's status — so a killed wrapper exits with
+    // whatever ran last (usually 0). inner-workflow.mjs's supervisor
+    // (`"$@"; rc=$?; printf "%s\n" "$rc" > "$status"`) writes that number into the exit
+    // file, and the shipped build prompt discriminates on it: "including a signalled
+    // wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred'".
+    // Swallow the signal and that discriminator can never be observed again.
+    //
+    // The kill lands on the WRAPPER's pid while the real `codex exec` is running, and
+    // NOT on the supervisor — the shape inner-workflow.mjs:1186 records an incident for
+    // ("SIGTERM'd all ELEVEN lanes").
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      mergeMode: 'local',
+      codexExecSleepSecs: 6,
+      killWrapperWith: 'TERM',
+    })
+    // POSITIVE CONTROL: the wrapper really did reach the real `codex exec` before the
+    // signal — otherwise this would be pinning the exit code of some earlier refusal.
+    expect(existsSync(join(r.dir, 'codex-running'))).toBe(true)
+    // THE ASSERTION. 143 = 128 + SIGTERM, i.e. indistinguishable from an untrapped
+    // death, which is what `main` produced before the traps were added.
+    expect(r.supervisorStatus).toBe('143')
+    expect(Number(r.supervisorStatus)).toBeGreaterThanOrEqual(128)
+    // And it must never look like a completed build: no trailer, so the bridge cannot
+    // read a killed wrapper as a successful one on any path.
+    expect(r.trailerRaw).toBe('')
+  }, 60_000)
+
+  // NO SIGINT TWIN FOR THIS WRAPPER, DELIBERATELY. The production launch is
+  // `nohup setsid sh -c '... "$@" ...' ... &` (inner-workflow.mjs), and a shell with
+  // job control off sets SIGINT to IGNORE for an asynchronous job — an ignore its
+  // foreground descendants inherit across exec, and which cannot be trapped or reset.
+  // MEASURED by reading /proc/<pid>/status of a wrapper launched in exactly that
+  // shape: SigIgn=0x7 → SIGINT ignored, SIGTERM deliverable; a plain foreground
+  // launch gives SigIgn=0x4 → neither ignored. So a SIGINT test here would assert a
+  // path production cannot reach. `codex-review.sh` IS run in the foreground
+  // (`bash codex-review.sh <base> > out 2> err; echo "CODEX_EXIT=$?"`), so the SIGINT
+  // case is pinned there instead.
+
   test('ANTI-EMPTY-CHECK GUARD: the heartbeat is actually IN the shipped scripts', () => {
     // THIS REPO HAS SHIPPED CHECKS THAT MATCHED NOTHING AND READ AS GREEN at least four
     // times. The failure this guards is a heartbeat silently removed (or renamed) while
@@ -945,6 +1096,23 @@ describe('the mid-exec liveness heartbeat', () => {
     // Both tickers are killed on the way out, on every path.
     expect(countIn(SCRIPT_TEXT, 'stop_stage_heartbeat')).toBeGreaterThan(1)
     expect(countIn(reviewText, 'stop_stage_heartbeat')).toBeGreaterThan(1)
+
+    // …AND THE ARMING IS ON THE PRODUCTION LINE, NOT ONLY IN THE TEST SEAM. The
+    // file-wide counts above cannot tell those apart: with the production
+    // `start_stage_heartbeat` deleted, `codex-exec-alive` still appeared (ticker body
+    // + comments) and `stop_stage_heartbeat` still appeared six times, so this guard
+    // passed for exactly the case it was written for. Slice out the region between the
+    // END of the seam branch and the real invocation and require the arming there.
+    const seamEnd = SCRIPT_TEXT.indexOf('CODEX_BUILD_CALL_FAILED: the codex build call failed')
+    const realExec = SCRIPT_TEXT.indexOf('codex exec "$@" --sandbox danger-full-access')
+    expect(seamEnd).toBeGreaterThan(0)
+    expect(realExec).toBeGreaterThan(seamEnd)
+    const productionRegion = SCRIPT_TEXT.slice(seamEnd, realExec)
+    // The slice must be able to MISS — otherwise "found it here" says nothing about
+    // where it is.
+    expect(countIn(productionRegion, 'NEUTRON_CODEX_BUILD_EXEC_CMD')).toBe(0)
+    expect(countIn(productionRegion, 'stamp_stage codex-exec-start')).toBe(1)
+    expect(countIn(productionRegion, 'start_stage_heartbeat')).toBe(1)
   })
 })
 

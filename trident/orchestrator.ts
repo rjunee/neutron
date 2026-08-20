@@ -96,7 +96,7 @@ import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunStore, TridentRunUpdate } from './store.ts'
-import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+import { DEAD_LAUNCHER_OVERRIDE_MS, DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 
 const log = createLogger('trident')
 
@@ -3779,6 +3779,11 @@ export function buildTridentOrchestrator(
       const stageAgeMs =
         Number.isFinite(stageMs) && Number.isFinite(nowMs) ? Math.max(0, nowMs - stageMs) : null
       const stageFresh = stageAgeMs !== null && stageAgeMs <= noAdvanceHangMs
+      // A SECOND, TIGHTER WINDOW — the only evidence allowed to overturn a POSITIVE
+      // launcher death. See `DEAD_LAUNCHER_OVERRIDE_MS`: the probe answers about a
+      // SHARED launcher generation, the heartbeat about THIS run's own (detached)
+      // wrapper pid, and the ticker cannot outlive that pid by more than one cadence.
+      const stageBeatsDeath = stageAgeMs !== null && stageAgeMs <= DEAD_LAUNCHER_OVERRIDE_MS
       const staleMins = Math.round(elapsedSinceAdvance(run) / 60_000)
 
       // (1b-ii) THE SECOND SOURCE. The stage ledger is silent for up to 72 measured
@@ -3804,11 +3809,16 @@ export function buildTridentOrchestrator(
         }
       }
 
-      // WHAT WAS CHECKED AND WHAT IT FOUND — carried onto BOTH outcomes. A reap
-      // that says only "suspected agent hang" is unfalsifiable after the fact: the
-      // whole reason this watchdog killed healthy builds for weeks is that its
-      // terminal record disclosed nothing about the evidence it did or did not
-      // have. Concrete numbers, never a boolean.
+      // WHAT WAS CHECKED AND WHAT IT FOUND — carried onto BOTH outcomes, the reap
+      // `reason` and the stand-down `note` alike. A reap that says only "suspected
+      // agent hang" is unfalsifiable after the fact: the whole reason this watchdog
+      // killed healthy builds for weeks is that its terminal record disclosed nothing
+      // about the evidence it did or did not have. A STAND-DOWN needs the same
+      // treatment for the same reason — an earlier cut of this block used a separate
+      // `evidence` string on that branch that never reported what the probe answered,
+      // so a run spared on stage evidence left no record of the probe's verdict and
+      // the comment claiming "BOTH outcomes" was simply untrue. Concrete numbers,
+      // never a boolean.
       const disclosure =
         `liveness checked: newest stage event ` +
         `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min ago`}` +
@@ -3824,19 +3834,50 @@ export function buildTridentOrchestrator(
       const overCeiling = elapsedSinceAdvance(run) > maxInflightMs
 
       // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING.
-      if (!overCeiling && probe !== 'dead' && (stageFresh || probe === 'alive')) {
-        const evidence = stageFresh
-          ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — the run is advancing mid-phase`
-          : `the launcher probe positively observed the process ALIVE (stage evidence: ` +
-            `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min old`})`
-        // DISCLOSED, not silent. A watchdog that quietly declines to fire is as hard
-        // to trust as one that quietly fires; the note names both clocks so the
-        // reason this run survived is legible in the tick log.
+      //
+      // WHY `probe === 'dead'` NO LONGER OUTRANKS A LIVE PER-RUN HEARTBEAT. It used to
+      // read `probe !== 'dead' && (stageFresh || probe === 'alive')`, which made a
+      // shared, generation-scoped probe strictly stronger than per-run evidence — the
+      // exact inverse of what this file argues a few hundred lines up ("A DEAD LAUNCHER
+      // IS NOT A DEAD BUILD", from three measured gateway boots that reaped healthy
+      // builds). The build is DETACHED (`nohup setsid`, inner-workflow.mjs), so a dead
+      // launcher generation is not a statement about the wrapper; a `codex-exec-alive`
+      // row written minutes ago is, because the ticker re-checks its wrapper's pid
+      // before every stamp.
+      //
+      // THE OVERRIDE IS DELIBERATELY NARROW. A stage row may be up to 90 min old and
+      // still count for the ordinary stand-down; only a row inside
+      // `DEAD_LAUNCHER_OVERRIDE_MS` (3 heartbeat cadences) may overturn a POSITIVE
+      // death, because that is the window in which a ticker cannot have outlived its
+      // wrapper. A stale-but-under-threshold row with a dead launcher still reaps —
+      // "a heartbeat row proves a TICKER ran, not that the build did" remains true at
+      // every resolution coarser than this one.
+      const standDown = overCeiling
+        ? false
+        : probe === 'dead'
+          ? stageBeatsDeath
+          : stageFresh || probe === 'alive'
+      if (standDown) {
+        const evidence =
+          probe === 'dead'
+            ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — inside the ` +
+              `${Math.round(DEAD_LAUNCHER_OVERRIDE_MS / 60_000)} min window in which this run's OWN wrapper ` +
+              `must still have been alive, and a shared launcher generation's death does not answer for it`
+            : stageFresh
+              ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — the run is advancing mid-phase`
+              : `the launcher probe positively observed the process ALIVE (stage evidence: ` +
+                `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min old`})`
+        // DISCLOSED, not silent, and disclosed the SAME WAY the reap is. A watchdog
+        // that quietly declines to fire is as hard to trust as one that quietly fires;
+        // the note carries the full `disclosure` — both clocks AND the probe's answer —
+        // so a run that survived is as auditable as one that did not.
         return {
           run,
           changed: false,
           waiting: true,
-          note: `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but ${evidence}`,
+          note:
+            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but ${evidence}` +
+            ` — ${disclosure}`,
         }
       }
       fired.delete(run.id)

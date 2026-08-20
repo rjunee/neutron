@@ -494,10 +494,25 @@ stop_stage_heartbeat() {
   HEARTBEAT_PID=''
 }
 
-# `_rc` is captured and re-exited EXPLICITLY: the trap body's own commands must not
-# be what decides this wrapper's exit code, which the bridge maps to a build outcome.
+# `_rc` is captured and re-exited EXPLICITLY on the EXIT path: the trap body's own
+# commands must not be what decides this wrapper's exit code, which the bridge maps
+# to a build outcome.
+#
+# THE SIGNAL TRAPS RE-RAISE RATHER THAN `exit $?`. In a trapped signal handler `$?`
+# is the status of the last COMPLETED command, not a signal status, so
+# `trap '_rc=$?; ...; exit $_rc' TERM` turns a SIGTERM into whatever the previous
+# command returned — usually 0. inner-workflow.mjs's supervisor
+# (`sh -c '...; rc=$?; printf "%s\n" "$rc" > "$status"'`) writes that number into the
+# exit file, and the shipped prompt discriminates on it: "including a signalled
+# wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred'".
+# Swallowing the signal deletes that discriminator. The handler therefore cleans up,
+# restores the DEFAULT disposition and re-signals itself, so the recorded status is
+# identical to an untrapped death (143 for TERM, 130 for INT). EXIT is reset with it
+# so the EXIT trap cannot run afterwards and overwrite the status with a plain
+# number.
 trap '_rc=$?; stop_stage_heartbeat; exit $_rc' EXIT
-trap '_rc=$?; stop_stage_heartbeat; exit $_rc' INT TERM
+trap 'stop_stage_heartbeat; trap - INT EXIT; kill -INT "$$"' INT
+trap 'stop_stage_heartbeat; trap - TERM EXIT; kill -TERM "$$"' TERM
 
 BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the

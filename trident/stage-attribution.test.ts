@@ -271,6 +271,53 @@ describe('stage attribution pure reader', () => {
     expect(retryResult.notes).not.toContain('duplicate:codex-exec-alive')
   })
 
+  /**
+   * THE REVIEW BRACKETS REPEAT TOO, and only the `*-alive` heartbeats were excluded
+   * at first. A fire window is split at `launch-start` ONLY, which is stamped once per
+   * `launch()`, while `codex-review-start` / `codex-review-end` are stamped once per
+   * review ROUND — and `inner-workflow.mjs` builds BOTH the adversarial and the
+   * cross-model codex reviewer prompts from the same `reviewStageEnv`, so two
+   * reviewers stamp the same run id in a single round. That put a
+   * `duplicate:codex-review-start` note on every healthy multi-round run: exactly the
+   * anomaly-note pollution the exclusion exists to prevent.
+   */
+  test('review brackets repeat per round and per reviewer without raising a duplicate note', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-review', 'launch-start', 0),
+      event('run-review', 'codex-exec-start', 1_000),
+      event('run-review', 'codex-exec-end', 1_801_000),
+      // round 1: two codex reviewers, same run id, overlapping.
+      event('run-review', 'codex-review-start', 1_802_000),
+      event('run-review', 'codex-review-start', 1_803_000),
+      event('run-review', 'codex-review-alive', 2_103_000),
+      event('run-review', 'codex-review-end', 2_402_000),
+      event('run-review', 'codex-review-end', 2_405_000),
+      // round 2, same fire window — nothing re-stamps launch-start between rounds.
+      event('run-review', 'codex-review-start', 3_000_000),
+      event('run-review', 'codex-review-end', 3_600_000),
+    ])
+    const result = computeSegments(fireWindow!)
+    expect(result.notes).not.toContain('duplicate:codex-review-start')
+    expect(result.notes).not.toContain('duplicate:codex-review-end')
+    expect(result.notes).not.toContain('duplicate:codex-review-alive')
+    // The build window is still measured exactly, untouched by the review rows.
+    expect(result.codexBuildMs).toBe(1_800_000)
+
+    // POSITIVE CONTROL: the notes machinery is alive on this very window shape — a
+    // genuinely anomalous repeat still raises its note.
+    const [withRetry] = groupIntoFireWindows([
+      event('run-review-2', 'launch-start', 0),
+      event('run-review-2', 'codex-exec-start', 1_000),
+      event('run-review-2', 'codex-exec-start', 2_000),
+      event('run-review-2', 'codex-review-start', 3_000),
+      event('run-review-2', 'codex-review-start', 4_000),
+      event('run-review-2', 'codex-exec-end', 5_000),
+    ])
+    const retry = computeSegments(withRetry!)
+    expect(retry.notes).toContain('duplicate:codex-exec-start')
+    expect(retry.notes).not.toContain('duplicate:codex-review-start')
+  })
+
   test('an end timestamp before its start is non-monotonic, not a missing stamp', () => {
     const [fireWindow] = groupIntoFireWindows([
       event('run-regression', 'launch-start', 0),

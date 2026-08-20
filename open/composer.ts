@@ -6093,6 +6093,12 @@ export function buildOpenGraphComposer(
         return selectWakeupWork({
           items: workBoardStore.listAllActive(),
           lookupRun: (run_id: string) => boardRunStore.get(run_id),
+          // THE SAME LIVENESS LEDGER THE HANG WATCHDOG READS. Without it this
+          // sweep and the trident reaper disagree about the same run: since the
+          // wrappers gained a 5-minute mid-phase heartbeat the watchdog spares a
+          // healthy long build past 90 min, and a wakeup keyed only on
+          // `last_advanced_at` would then start driving that item at 100 min.
+          latestStageEventAt: (run_id: string) => boardRunStore.latestStageEventAt(run_id),
           owner_slug: project_slug,
           now_ms: Date.now(),
         })

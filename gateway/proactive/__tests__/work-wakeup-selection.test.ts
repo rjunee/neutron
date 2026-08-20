@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
 
-import { NO_ADVANCE_HANG_MS } from '@neutronai/trident/liveness.ts'
+import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from '@neutronai/trident/liveness.ts'
 import { WAKEUP_STAND_DOWN_MS } from '@neutronai/trident/run-driving.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
@@ -57,11 +59,16 @@ function select(input: {
   items: WorkBoardItem[]
   runs?: TridentRun[]
   now_ms?: number
+  /** `TridentRunStore.latestStageEventAt` by run id. Absent → the source is UNWIRED. */
+  stageEvents?: Record<string, string | null>
 }): ReturnType<typeof selectWakeupWork> {
   const byId = new Map((input.runs ?? []).map((r) => [r.id, r]))
   return selectWakeupWork({
     items: input.items,
     lookupRun: (id) => byId.get(id) ?? null,
+    ...(input.stageEvents === undefined
+      ? {}
+      : { latestStageEventAt: (id: string) => input.stageEvents?.[id] ?? null }),
     owner_slug: OWNER,
     now_ms: input.now_ms ?? T0 + 60_000,
   })
@@ -227,6 +234,104 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     expect(acme?.chat_scope).toBe('acme')
     expect(acme?.label).toBe('project "acme"')
     expect(acme?.items.map((i) => i.title)).toEqual(['one', 'two'])
+  })
+
+  // ── PROPERTY 4: THE TWO SCHEDULERS READ THE SAME EVIDENCE ───────────────────
+  //
+  // The run in these tests is the one the hang watchdog now SPARES: reaper-reachable
+  // (`subagent_run_id` set), `last_advanced_at` past the stand-down threshold, and a
+  // mid-phase `codex-exec-alive` heartbeat landing every 5 minutes. Before the
+  // heartbeat existed such a run had already been flipped `failed` at 90 min, so this
+  // module answered `terminal` at 100 min and waking the item was correct. Now it
+  // stays non-terminal — and a wakeup keyed only on `last_advanced_at` would drive an
+  // item whose build is alive, every WORK_WAKEUP_INTERVAL_MS, for the whole 100→120
+  // min window.
+  test('a run the WATCHDOG spares on fresh stage evidence is deferred here too', () => {
+    const now = T0 + WAKEUP_STAND_DOWN_MS + 1
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ phase: 'forge-init' })],
+      now_ms: now,
+      stageEvents: { 'run-1': new Date(now - 5 * 60_000).toISOString() },
+    })
+    expect(out).toHaveLength(1)
+    expect(out[0]?.items).toEqual([])
+    expect(out[0]?.deferred.map((d) => d.item_id)).toEqual(['item-1'])
+  })
+
+  test('CONTROL: the SAME run with no stage evidence is wakeable — the ledger is what moved it', () => {
+    // Identical fixture minus the one row. Without this the test above could be
+    // passing for any reason at all.
+    const now = T0 + WAKEUP_STAND_DOWN_MS + 1
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ phase: 'forge-init' })],
+      now_ms: now,
+      stageEvents: { 'run-1': null },
+    })
+    expect(out[0]?.items.map((i) => i.title)).toEqual(['Ship the importer'])
+    expect(out[0]?.deferred).toEqual([])
+  })
+
+  test('CONTROL: a STALE stage event does not defer — the ledger must be fresh, not merely present', () => {
+    const now = T0 + WAKEUP_STAND_DOWN_MS + 1
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ phase: 'forge-init' })],
+      now_ms: now,
+      // Older than the stand-down window: the ticker stopped long ago.
+      stageEvents: { 'run-1': new Date(now - WAKEUP_STAND_DOWN_MS - 60_000).toISOString() },
+    })
+    expect(out[0]?.items.map((i) => i.title)).toEqual(['Ship the importer'])
+    expect(out[0]?.deferred).toEqual([])
+  })
+
+  test('RETRACTION PATH: an endlessly-heartbeating run is released at the 2 h ceiling', () => {
+    // NEVER WIDEN A REFUSAL WITHOUT A RETRACTION PATH. A leaked ticker would otherwise
+    // hide its item from the only autonomy mechanism forever, with nothing but a human
+    // to clear it. The ceiling clears it instead, on the same clock the orchestrator
+    // uses to outrank its own reprieve — no operator action, no stored state.
+    const now = T0 + DEFAULT_MAX_INFLIGHT_MS + 60_000
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ phase: 'forge-init' })],
+      now_ms: now,
+      // As fresh as it gets: the ticker is still stamping this second.
+      stageEvents: { 'run-1': new Date(now - 1_000).toISOString() },
+    })
+    expect(out[0]?.items.map((i) => i.title)).toEqual(['Ship the importer'])
+    expect(out[0]?.deferred).toEqual([])
+  })
+
+  test('UNWIRED is not evidence: with no reader at all the pre-existing timer decides', () => {
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ phase: 'forge-init' })],
+      now_ms: T0 + WAKEUP_STAND_DOWN_MS + 1,
+    })
+    expect(out[0]?.items.map((i) => i.title)).toEqual(['Ship the importer'])
+    expect(out[0]?.deferred).toEqual([])
+  })
+
+  test('ANTI-UNWIRED GUARD: the composer really hands this module the stage-event reader', () => {
+    // NO COMPOSED TEST DRIVES `open/composer.ts`'s `listOutstanding` closure, so
+    // every injector this module takes is reachable only through a source read.
+    // This repo has shipped the "merged green but unwired" shape five times in one
+    // night — module + unit tests landed, the registration skipped — and an optional
+    // injector is the easiest possible instance of it: drop the one line in the
+    // composer and every test in this file still passes.
+    const composer = readFileSync(
+      fileURLToPath(new URL('../../../open/composer.ts', import.meta.url)),
+      'utf8',
+    )
+    // The extraction must be able to MISS, or "found it" says nothing.
+    expect(composer).not.toContain('latestStageEventAtThatDoesNotExist')
+    const call = composer.slice(
+      composer.indexOf('return selectWakeupWork({'),
+      composer.indexOf('return selectWakeupWork({') + 900,
+    )
+    expect(call).toContain('lookupRun:')
+    expect(call).toContain('latestStageEventAt: (run_id: string) => boardRunStore.latestStageEventAt(run_id)')
   })
 
   test('a project with ONLY deferred items still yields an entry, so the sweep can say why', () => {

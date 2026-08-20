@@ -107,10 +107,29 @@ stop_stage_heartbeat() {
 }
 
 # A ticker that outlives the review it speaks for would fabricate liveness for a
-# reviewer that is no longer running. `_rc` is preserved explicitly so the trap
-# cannot change the exit code the bridge maps to a review outcome.
+# reviewer that is no longer running, so the wrapper reaps it on its way out.
+#
+# ON THIS SCRIPT THE EXIT CODE **IS** THE VERDICT. inner-workflow.mjs runs
+# `bash codex-review.sh <base> > outFile; echo "CODEX_EXIT=$?"` and maps 0 →
+# "codexStatus='connected', parse the review in outFile"; an empty outFile that does
+# not end in REQUEST_CHANGES is then read as APPROVE. So ANY trap that lets this
+# script exit 0 when it did not actually review is a SILENT APPROVE for a diff no
+# reviewer ever read. A signalled wrapper must stay on the >= 128 side, which the
+# file's own contract (and the shipped prompt) map to DEFERRED.
+#
+# WHY THE SIGNAL TRAPS RE-RAISE INSTEAD OF `exit $?`. In a trapped signal handler
+# `$?` is the status of the last COMPLETED command, not a signal status — so
+# `trap '_rc=$?; ...; exit $_rc' TERM` exits 0 whenever the last command succeeded.
+# MEASURED on this script with a slow review and a SIGTERM to its pid:
+#   `exit $?` form  → exit 0, 0-byte stdout  (a silent APPROVE)
+#   re-raise form   → exit 143              (same as no trap at all, i.e. main)
+# The handler therefore does its cleanup, restores the DEFAULT disposition, and
+# kills itself with the same signal, so the wait status the supervisor records is
+# indistinguishable from an untrapped death. EXIT is reset alongside it so the
+# EXIT trap cannot run afterwards and overwrite the status with a plain number.
 trap '_rc=$?; stop_stage_heartbeat; exit $_rc' EXIT
-trap '_rc=$?; stop_stage_heartbeat; exit $_rc' INT TERM
+trap 'stop_stage_heartbeat; trap - INT EXIT; kill -INT "$$"' INT
+trap 'stop_stage_heartbeat; trap - TERM EXIT; kill -TERM "$$"' TERM
 
 # ── NOT CONNECTED: no per-project credential configured ───────────────────────
 if [ -z "$CODEX_HOME" ] || [ ! -f "$CODEX_HOME/auth.json" ]; then

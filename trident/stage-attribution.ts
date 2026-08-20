@@ -10,19 +10,37 @@ export const STAGE_SEGMENTS = [
 ] as const
 
 /**
- * Stages that repeat BY DESIGN — the mid-phase liveness heartbeats the build and
- * review wrappers emit every ~5 minutes so the hang watchdog has evidence during a
- * long `codex exec` (see THE MID-EXEC HEARTBEAT in `trident/codex-build.sh`).
+ * Stages that repeat BY DESIGN.
+ *
+ * TWO KINDS, and both had to be listed. The `*-alive` pair are the mid-phase liveness
+ * heartbeats the build and review wrappers emit every ~5 minutes so the hang watchdog
+ * has evidence during a long `codex exec` (see THE MID-EXEC HEARTBEAT in
+ * `trident/codex-build.sh`). The `codex-review-*` BRACKETS repeat for a different
+ * reason, and listing only the heartbeats was a real oversight: a fire window is split
+ * at `launch-start` ONLY (`groupIntoFireWindows` below), which `orchestrator.ts` stamps
+ * once per `launch()`, while a review is stamped once per ROUND — many rounds per
+ * window. Worse, `inner-workflow.mjs` builds BOTH the adversarial (`:5260`) and the
+ * cross-model (`:5285`) codex reviewer prompts from the SAME `reviewStageEnv`, so two
+ * reviewers stamp the same run id concurrently in a single round. Left in, every
+ * healthy multi-round run carried a `duplicate:codex-review-start` note.
  *
  * EXCLUDED FROM THE `duplicate:` NOTES, and only from those. A duplicate note exists
  * to flag an ANOMALY — a stage stamped twice in one fire window means a re-entry or a
- * double-launch worth looking at. A heartbeat is stamped 24 times in a two-hour build
- * because that is its job, so leaving it in would put an anomaly note on every healthy
- * run and teach the reader to ignore the notes column. No measured segment is affected:
- * every duration this file computes is between two EXPLICITLY named stages, and no
- * segment names a heartbeat.
+ * double-launch worth looking at. A stage that repeats because that is its job would
+ * put an anomaly note on every healthy run and teach the reader to ignore the notes
+ * column. No measured segment is affected: every duration this file computes is between
+ * two EXPLICITLY named stages (`STAGE_SEGMENTS` above), and no segment names any stage
+ * in this set.
  */
-export const HEARTBEAT_STAGES: ReadonlySet<string> = new Set(['codex-exec-alive', 'codex-review-alive'])
+export const REPEATING_STAGES: ReadonlySet<string> = new Set([
+  'codex-exec-alive',
+  'codex-review-alive',
+  'codex-review-start',
+  'codex-review-end',
+])
+
+/** @deprecated Prior name, kept so an out-of-tree importer does not break. */
+export const HEARTBEAT_STAGES: ReadonlySet<string> = REPEATING_STAGES
 
 export interface StageEvent {
   id?: number
@@ -150,7 +168,7 @@ function firstStages(events: readonly StageEvent[]): {
   const duplicates = new Set<string>()
   for (const event of events) {
     if (first.has(event.stage)) {
-      if (!HEARTBEAT_STAGES.has(event.stage)) duplicates.add(event.stage)
+      if (!REPEATING_STAGES.has(event.stage)) duplicates.add(event.stage)
     } else first.set(event.stage, event)
   }
   return {
