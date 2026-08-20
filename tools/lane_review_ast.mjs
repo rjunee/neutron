@@ -87,6 +87,9 @@ function isSource(file) {
 function isProductionSource(file) {
   return (
     isSource(file) &&
+    !file.startsWith('docs/') &&
+    !file.startsWith('plans/') &&
+    !/\.d\.[cm]?ts$/.test(file) &&
     !/(?:^|\/)(?:tests?|__tests__)(?:\/|$)|\.(?:test|spec)\./.test(file)
   )
 }
@@ -249,10 +252,23 @@ function unalias(checker, symbol) {
   return target.flags & ts.SymbolFlags.Unknown ? symbol : target
 }
 
+function isAmbientDeclaration(declaration) {
+  if (declaration.getSourceFile().isDeclarationFile) return true
+  for (let current = declaration; current && !ts.isSourceFile(current); current = current.parent) {
+    if (ts.getCombinedModifierFlags(current) & ts.ModifierFlags.Ambient) return true
+  }
+  return false
+}
+
 function isRuntimeExport(checker, symbol) {
   const target = unalias(checker, symbol)
-  if (target.flags & ts.SymbolFlags.Value) return true
-  return symbol.declarations?.some((declaration) => ts.isExportAssignment(declaration)) ?? false
+  const declarations = target.declarations ?? symbol.declarations ?? []
+  if (target.flags & ts.SymbolFlags.Value) {
+    return declarations.length === 0 || declarations.some((declaration) => !isAmbientDeclaration(declaration))
+  }
+  return symbol.declarations?.some(
+    (declaration) => ts.isExportAssignment(declaration) && !isAmbientDeclaration(declaration),
+  ) ?? false
 }
 
 function exportsOf(checker, sourceFile) {
@@ -262,11 +278,43 @@ function exportsOf(checker, sourceFile) {
   for (const symbol of checker.getExportsOfModule(moduleSymbol)) {
     if (isRuntimeExport(checker, symbol)) result.set(symbol.getName(), symbol)
   }
+  const exportEquals = moduleSymbol.exports?.get(ts.InternalSymbolName.ExportEquals)
+  if (exportEquals && isRuntimeExport(checker, exportEquals)) result.set('default', exportEquals)
   return result
 }
 
 function sourcePathOf(node) {
   return repoPath(node.getSourceFile().fileName)
+}
+
+function declarationIdentity(declaration) {
+  const name = 'name' in declaration ? declaration.name : undefined
+  if (name && ts.isIdentifier(name)) return `${declaration.kind}:${name.text}`
+  return undefined
+}
+
+function definitionWasPresent(base, modulePath, declaration) {
+  const identity = declarationIdentity(declaration)
+  const previousFile = base.sourceFiles.get(modulePath)
+  if (!identity || !previousFile) return false
+  let found = false
+  function visit(node) {
+    if (declarationIdentity(node) === identity) found = true
+    if (!found) ts.forEachChild(node, visit)
+  }
+  visit(previousFile)
+  return found
+}
+
+function recordDefinitions(base, branch, modulePath, symbol) {
+  const target = unalias(branch.checker, symbol)
+  return (target.declarations ?? []).filter(
+    (declaration) =>
+      sourcePathOf(declaration) === modulePath &&
+      !ts.isExportSpecifier(declaration) &&
+      !ts.isImportSpecifier(declaration) &&
+      !definitionWasPresent(base, modulePath, declaration),
+  )
 }
 
 function addedExports(base, branch, changedPaths) {
@@ -288,7 +336,14 @@ function addedExports(base, branch, changedPaths) {
           )
           if (namedDeclaration?.name) displayName = namedDeclaration.name.text
         }
-        added.push({ callers: new Set(), displayName, modulePath, name, symbol })
+        added.push({
+          callers: new Set(),
+          definitions: recordDefinitions(base, branch, modulePath, symbol),
+          displayName,
+          modulePath,
+          name,
+          symbol,
+        })
       }
     }
   }
@@ -347,6 +402,41 @@ function isRuntimeHeritageReference(identifier) {
   return false
 }
 
+function isCommonJsExportTarget(node) {
+  const target = unwrapExpression(node)
+  if (ts.isPropertyAccessExpression(target)) {
+    if (ts.isIdentifier(target.expression) && target.expression.text === 'module') {
+      return target.name.text === 'exports'
+    }
+    return (
+      (ts.isIdentifier(target.expression) && target.expression.text === 'exports') ||
+      isCommonJsExportTarget(target.expression)
+    )
+  }
+  if (ts.isElementAccessExpression(target)) {
+    return (
+      (ts.isIdentifier(target.expression) && target.expression.text === 'exports') ||
+      isCommonJsExportTarget(target.expression)
+    )
+  }
+  return false
+}
+
+function isCommonJsPublicationReference(identifier) {
+  for (let ancestor = identifier.parent; ancestor; ancestor = ancestor.parent) {
+    if (
+      ts.isBinaryExpression(ancestor) &&
+      ancestor.operatorToken.kind === ts.SyntaxKind.EqualsToken &&
+      isInside(identifier, ancestor.right) &&
+      isCommonJsExportTarget(ancestor.left)
+    ) {
+      return true
+    }
+    if (ts.isStatement(ancestor)) break
+  }
+  return false
+}
+
 function isRuntimeReference(identifier) {
   const parent = identifier.parent
   if (!parent) return false
@@ -376,51 +466,89 @@ function isRuntimeReference(identifier) {
     return false
   }
   if (isRuntimeHeritageReference(identifier)) return true
+  if (isCommonJsPublicationReference(identifier)) return false
   for (let ancestor = parent; ancestor && !ts.isStatement(ancestor); ancestor = ancestor.parent) {
     if (ts.isTypeNode(ancestor)) return false
   }
   return true
 }
 
-function insideAddedDefinition(node, definitions) {
-  for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
-    if (definitions.has(ancestor)) return true
-  }
-  return false
-}
-
-function definitionNodes(checker, records, changedPaths) {
-  const changed = new Set(changedPaths)
-  const definitions = new Set()
+function definitionOwners(records) {
+  const owners = new Map()
   for (const record of records) {
-    const target = unalias(checker, record.symbol)
-    for (const declaration of target.declarations ?? []) {
-      if (
-        changed.has(sourcePathOf(declaration)) &&
-        !ts.isExportSpecifier(declaration) &&
-        !ts.isImportSpecifier(declaration)
-      ) {
-        definitions.add(declaration)
+    for (const definition of record.definitions) {
+      let recordsForDefinition = owners.get(definition)
+      if (!recordsForDefinition) {
+        recordsForDefinition = new Set()
+        owners.set(definition, recordsForDefinition)
       }
+      recordsForDefinition.add(record)
     }
   }
-  return definitions
+  return owners
+}
+
+function enclosingDefinitionRecords(node, owners) {
+  for (let ancestor = node.parent; ancestor; ancestor = ancestor.parent) {
+    const records = owners.get(ancestor)
+    if (records) return records
+  }
+  return undefined
+}
+
+function addRouteRecords(routes, modulePath, name, records) {
+  if (!records || records.size === 0) return false
+  let moduleRecords = routes.get(modulePath)
+  if (!moduleRecords) {
+    moduleRecords = new Map()
+    routes.set(modulePath, moduleRecords)
+  }
+  let routeRecords = moduleRecords.get(name)
+  if (!routeRecords) {
+    routeRecords = new Set()
+    moduleRecords.set(name, routeRecords)
+  }
+  const before = routeRecords.size
+  for (const record of records) routeRecords.add(record)
+  return routeRecords.size !== before
 }
 
 function exportedRecordRoutes(branch, records) {
-  const recordsByTarget = new Map()
+  const routes = new Map()
   for (const record of records) {
-    addToSymbolMap(recordsByTarget, unalias(branch.checker, record.symbol), record)
+    addRouteRecords(routes, record.modulePath, record.name, new Set([record]))
   }
 
-  const routes = new Map()
-  for (const [modulePath, sourceFile] of branch.sourceFiles) {
-    const moduleRecords = new Map()
-    for (const [name, symbol] of exportsOf(branch.checker, sourceFile)) {
-      const matching = recordsByTarget.get(unalias(branch.checker, symbol))
-      if (matching) moduleRecords.set(name, matching)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const [modulePath, sourceFile] of branch.sourceFiles) {
+      for (const statement of sourceFile.statements) {
+        if (!ts.isExportDeclaration(statement) || !statement.moduleSpecifier) continue
+        const originPath = modulePathForSpecifier(branch, statement.moduleSpecifier)
+        const originRecords = originPath ? routes.get(originPath) : undefined
+        if (!originRecords) continue
+
+        if (!statement.exportClause) {
+          for (const [name, routeRecords] of originRecords) {
+            if (name !== 'default') {
+              changed = addRouteRecords(routes, modulePath, name, routeRecords) || changed
+            }
+          }
+        } else if (ts.isNamedExports(statement.exportClause)) {
+          for (const element of statement.exportClause.elements) {
+            if (element.isTypeOnly) continue
+            const importedName = (element.propertyName ?? element.name).text
+            changed = addRouteRecords(
+              routes,
+              modulePath,
+              element.name.text,
+              originRecords.get(importedName),
+            ) || changed
+          }
+        }
+      }
     }
-    if (moduleRecords.size > 0) routes.set(modulePath, moduleRecords)
   }
   return routes
 }
@@ -495,7 +623,7 @@ function bindObjectPattern(checker, directBindings, pattern, moduleRecords) {
   }
 }
 
-function collectCallers(branch, records, changedPaths) {
+function collectCallers(branch, records) {
   const routes = exportedRecordRoutes(branch, records)
   const directBindings = new Map()
   const namespaceBindings = new Map()
@@ -535,15 +663,30 @@ function collectCallers(branch, records, changedPaths) {
       ) {
         const moduleRecords = recordsForSpecifier(branch, routes, node.moduleReference.expression)
         const symbol = branch.checker.getSymbolAtLocation(node.name)
-        if (moduleRecords && symbol) namespaceBindings.set(symbol, moduleRecords)
+        if (moduleRecords && symbol) {
+          namespaceBindings.set(symbol, moduleRecords)
+          addRecordsToSymbolMap(directBindings, symbol, moduleRecords.get('default'))
+        }
       } else if (ts.isVariableDeclaration(node) && node.initializer) {
         const moduleRecords = recordsForLoader(branch, routes, node.initializer)
         if (moduleRecords) {
           if (ts.isIdentifier(node.name)) {
             const symbol = branch.checker.getSymbolAtLocation(node.name)
-            if (symbol) namespaceBindings.set(symbol, moduleRecords)
+            if (symbol) {
+              namespaceBindings.set(symbol, moduleRecords)
+              addRecordsToSymbolMap(directBindings, symbol, moduleRecords.get('default'))
+            }
           } else if (ts.isObjectBindingPattern(node.name)) {
             bindObjectPattern(branch.checker, directBindings, node.name, moduleRecords)
+          }
+        } else if (ts.isObjectBindingPattern(node.name)) {
+          const initializer = unwrapExpression(node.initializer)
+          const symbol = ts.isIdentifier(initializer)
+            ? branch.checker.getSymbolAtLocation(initializer)
+            : undefined
+          const namespaceRecords = symbol ? namespaceBindings.get(symbol) : undefined
+          if (namespaceRecords) {
+            bindObjectPattern(branch.checker, directBindings, node.name, namespaceRecords)
           }
         } else if (ts.isIdentifier(node.name)) {
           addRecordsToSymbolMap(
@@ -560,8 +703,9 @@ function collectCallers(branch, records, changedPaths) {
 
   const localTargets = new Map()
   for (const record of records) {
+    if (record.definitions.length === 0) continue
     addToSymbolMap(localTargets, unalias(branch.checker, record.symbol), record)
-    for (const declaration of record.symbol.declarations ?? []) {
+    for (const declaration of record.definitions) {
       const name = 'name' in declaration ? declaration.name : undefined
       if (name && ts.isIdentifier(name)) {
         const symbol = branch.checker.getSymbolAtLocation(name)
@@ -569,44 +713,71 @@ function collectCallers(branch, records, changedPaths) {
       }
     }
   }
-  const definitions = definitionNodes(branch.checker, records, changedPaths)
+  const owners = definitionOwners(records)
+  const dependencies = new Map()
+
+  function credit(node, usedRecords, callerPath) {
+    if (!usedRecords || usedRecords.size === 0) return
+    const enclosing = enclosingDefinitionRecords(node, owners)
+    if (!enclosing) {
+      for (const record of usedRecords) record.callers.add(callerPath)
+      return
+    }
+    for (const owner of enclosing) {
+      let ownerDependencies = dependencies.get(owner)
+      if (!ownerDependencies) {
+        ownerDependencies = new Map()
+        dependencies.set(owner, ownerDependencies)
+      }
+      for (const record of usedRecords) {
+        if (record !== owner) ownerDependencies.set(record, callerPath)
+      }
+    }
+  }
 
   for (const [callerPath, sourceFile] of branch.sourceFiles) {
     function visit(node) {
-      if (!insideAddedDefinition(node, definitions)) {
-        for (const record of recordsForLoaderAccess(branch, routes, node) ?? []) {
-          record.callers.add(callerPath)
-        }
-      }
-      if (ts.isIdentifier(node) && isRuntimeReference(node) && !insideAddedDefinition(node, definitions)) {
+      credit(node, recordsForLoaderAccess(branch, routes, node), callerPath)
+      if (ts.isIdentifier(node) && isRuntimeReference(node)) {
         const symbol = branch.checker.getSymbolAtLocation(node)
         if (symbol) {
-          for (const record of directBindings.get(symbol) ?? []) record.callers.add(callerPath)
+          credit(node, directBindings.get(symbol), callerPath)
           const target = unalias(branch.checker, symbol)
+          const localRecords = new Set()
           for (const record of localTargets.get(target) ?? []) {
-            if (record.modulePath === callerPath) record.callers.add(callerPath)
+            if (record.modulePath === callerPath) localRecords.add(record)
           }
+          credit(node, localRecords, callerPath)
 
           if (ts.isPropertyAccessExpression(node.parent) && node.parent.expression === node) {
             const moduleRecords = namespaceBindings.get(symbol)
-            for (const record of moduleRecords?.get(node.parent.name.text) ?? []) {
-              record.callers.add(callerPath)
-            }
+            credit(node, moduleRecords?.get(node.parent.name.text), callerPath)
           } else if (
             ts.isElementAccessExpression(node.parent) &&
             node.parent.expression === node &&
             ts.isStringLiteral(node.parent.argumentExpression)
           ) {
             const moduleRecords = namespaceBindings.get(symbol)
-            for (const record of moduleRecords?.get(node.parent.argumentExpression.text) ?? []) {
-              record.callers.add(callerPath)
-            }
+            credit(node, moduleRecords?.get(node.parent.argumentExpression.text), callerPath)
           }
         }
       }
       ts.forEachChild(node, visit)
     }
     visit(sourceFile)
+  }
+
+  let progressed = true
+  while (progressed) {
+    progressed = false
+    for (const [owner, ownerDependencies] of dependencies) {
+      if (owner.callers.size === 0) continue
+      for (const [record, callerPath] of ownerDependencies) {
+        if (record.callers.size > 0) continue
+        record.callers.add(callerPath)
+        progressed = true
+      }
+    }
   }
 }
 
@@ -621,16 +792,16 @@ function runAnalyze(baseRef, branchRef, changedPaths) {
     return
   }
 
-  collectCallers(branch, records, productionPaths)
+  collectCallers(branch, records)
   console.log(`--- new exported symbols: ${records.map((record) => record.displayName).join(' ')}`)
   let findings = 0
   for (const record of records) {
     const callers = [...record.callers].sort()
     if (callers.length === 0) {
-      console.log(`  FINDING: ${record.displayName} has NO non-test production caller — green-and-unwired.`)
+      console.log(`  FINDING: ${record.displayName} has NO non-test production caller — green-and-unwired. [exported from ${record.modulePath}]`)
       findings += 1
     } else {
-      console.log(`  ok: ${record.displayName} called by ${callers.join(' ')}`)
+      console.log(`  ok: ${record.displayName} called by ${callers.join(' ')} [exported from ${record.modulePath}]`)
     }
   }
   if (findings > 0) process.exitCode = FINDINGS_EXIT
