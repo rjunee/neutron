@@ -33,7 +33,7 @@ import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
-import { deriveCodexStatus } from '../codex-auth.ts'
+import { codexProbeSubject, deriveCodexStatus } from '../codex-auth.ts'
 import { CodexCredentialService, codexExecutorAvailability, SEAT_LIVENESS_TTL_MS } from '../codex-credential.ts'
 import { SqliteCodexRotationStore } from '../codex-rotation-store.ts'
 import { CODEX_STATUS_TOOL, registerCodexCredentialToolSurface } from '../codex-credential-tool.ts'
@@ -41,7 +41,12 @@ import { probeCodexSeat, redactToken, type CodexProbeOutcome } from '../codex-pr
 import { buildPhaseRunsOnCodex, codexDispatchPreflight } from '../codex-dispatch-preflight.ts'
 import { registerTridentBuildToolSurface, WORK_BOARD_DISPATCH_BUILD_TOOL, WORK_BOARD_START_TOOL } from '../work-board-build-tool.ts'
 import { TridentRunStore } from '../store.ts'
-import type { TridentBoardBinder } from '../board-dispatch.ts'
+import {
+  dispatchBoardBoundBuild,
+  type BoardBoundBuildDeps,
+  type TridentBoardBinder,
+} from '../board-dispatch.ts'
+import { executeCodeCommand } from '../code-command.ts'
 import type { GitModeProbe } from '../git-mode.ts'
 import { briefIntegrity } from '../brief-parts.ts'
 
@@ -64,20 +69,37 @@ interface Capture {
   body: { error: { code: string; message: string }; status: number }
 }
 
-function loadCapture(): Capture {
-  const raw = readFileSync(FIXTURE, 'utf8')
-  if (raw.trim().length === 0) throw new Error(`captured 401 fixture is EMPTY: ${FIXTURE}`)
+/**
+ * THE PATH IS AN ARGUMENT, and that is the entire point of this signature.
+ *
+ * The previous version took none — `FIXTURE` was hardcoded — which made it
+ * STRUCTURALLY IMPOSSIBLE to feed the guard a bad file, so the test that claimed
+ * to exercise it re-typed a COPY of the check inline and asserted the copy threw.
+ * Deleting all three guards from this function left that test green: it was
+ * testing five lines it had just written, not this function. Now every negative
+ * case below calls THIS function, so removing a guard reddens the suite.
+ */
+function loadCapture(path: string = FIXTURE): Capture {
+  const raw = readFileSync(path, 'utf8')
+  if (raw.trim().length === 0) throw new Error(`captured 401 fixture is EMPTY: ${path}`)
   const parsed = JSON.parse(raw) as Capture
   if (parsed.http_status !== 401) {
-    throw new Error(`captured fixture is not a 401 (got ${String(parsed.http_status)}): ${FIXTURE}`)
+    throw new Error(`captured fixture is not a 401 (got ${String(parsed.http_status)}): ${path}`)
   }
   if (typeof parsed.body?.error?.code !== 'string' || parsed.body.error.code.length === 0) {
-    throw new Error(`captured fixture has no error code: ${FIXTURE}`)
+    throw new Error(`captured fixture has no error code: ${path}`)
   }
   return parsed
 }
 
 describe('the captured 401 fixture is real and non-vacuous (P2)', () => {
+  /** Write `text` to a scratch file and hand THE REAL LOADER its path. */
+  function loadBad(text: string): () => Capture {
+    const bad = join(mkdtempSync(join(tmpdir(), 'codex-fx-')), 'x.json')
+    writeFileSync(bad, text)
+    return () => loadCapture(bad)
+  }
+
   test('it exists, is non-empty, and parses to HTTP 401 with an error code', () => {
     expect(statSync(FIXTURE).size).toBeGreaterThan(0)
     const capture = loadCapture()
@@ -85,14 +107,30 @@ describe('the captured 401 fixture is real and non-vacuous (P2)', () => {
     expect(capture.body.error.code).toBe('token_revoked')
   })
 
-  test('a fixture that stopped being a 401 FAILS LOUDLY rather than passing vacuously', () => {
-    // The guard itself, exercised. Without this, `loadCapture` is a comment.
-    const bad = join(mkdtempSync(join(tmpdir(), 'codex-fx-')), 'x.json')
-    writeFileSync(bad, '')
-    expect(() => {
-      const raw = readFileSync(bad, 'utf8')
-      if (raw.trim().length === 0) throw new Error('captured 401 fixture is EMPTY')
-    }).toThrow(/EMPTY/)
+  test('an EMPTIED fixture fails loudly — the guard itself, not a copy of it', () => {
+    expect(loadBad('')).toThrow(/EMPTY/)
+    expect(loadBad('   \n  ')).toThrow(/EMPTY/)
+  })
+
+  test('a fixture that stopped being a 401 fails loudly', () => {
+    expect(loadBad(JSON.stringify({ http_status: 200, body: { error: { code: 'x' } } }))).toThrow(
+      /not a 401 \(got 200\)/,
+    )
+  })
+
+  test('a fixture that lost its error code fails loudly', () => {
+    expect(loadBad(JSON.stringify({ http_status: 401, body: { error: {} } }))).toThrow(/no error code/)
+    expect(loadBad(JSON.stringify({ http_status: 401, body: { error: { code: '' } } }))).toThrow(
+      /no error code/,
+    )
+  })
+
+  test('POSITIVE CONTROL: a well-formed copy at another path loads clean', () => {
+    // Without this, every assertion above is satisfied by a loader that throws
+    // unconditionally — "it threw" would prove nothing about WHICH guard fired.
+    const good = join(mkdtempSync(join(tmpdir(), 'codex-fx-ok-')), 'x.json')
+    writeFileSync(good, readFileSync(FIXTURE, 'utf8'))
+    expect(loadCapture(good).http_status).toBe(401)
   })
 })
 
@@ -226,6 +264,23 @@ describe('probeCodexSeat — the one question a stored token cannot answer', () 
     expect(out.kind).toBe('rate_limited')
   })
 
+  test('403 is `rejected`, NEVER `revoked` — an edge/bot-management refusal is not a credential fact', async () => {
+    // chatgpt.com is edge-fronted and this request carries only Authorization +
+    // Accept, nothing like the real CLI's User-Agent/originator/account headers.
+    // A bot-management 403 hits EVERY seat in the same second; classifying it as
+    // `revoked` would cool an entire healthy pool off one edge rule.
+    for (const expInFuture of [true, false]) {
+      const out = await probeCodexSeat({ accessToken: FUTURE_TOKEN, expInFuture }, { fetch: stubFetch(403) })
+      expect(out.kind).toBe('rejected')
+      expect(out.kind).not.toBe('revoked')
+      expect(out.kind).not.toBe('expired')
+    }
+    // POSITIVE CONTROL: the SAME token and the SAME clock on a 401 still is.
+    expect((await probeCodexSeat({ accessToken: FUTURE_TOKEN, expInFuture: true }, { fetch: stubFetch(401) })).kind).toBe(
+      'revoked',
+    )
+  })
+
   test('a MOVED endpoint (404) is `rejected` — loud, and never a verdict on the credential', async () => {
     const out = await probeCodexSeat({ accessToken: FUTURE_TOKEN, expInFuture: true }, { fetch: stubFetch(404) })
     expect(out.kind).toBe('rejected')
@@ -268,6 +323,70 @@ describe('probeCodexSeat — the one question a stored token cannot answer', () 
     // POSITIVE CONTROL for the redactor: it must actually be capable of leaving
     // ordinary text alone, or "no token in the message" is trivially true.
     expect(redactToken('TLS handshake failed', FUTURE_TOKEN)).toBe('TLS handshake failed')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// THE DISCRIMINATOR. `codexProbeSubject` computes the ONE boolean that decides
+// `revoked` vs `expired`, and it had ZERO coverage in either direction: every
+// call site above hands `expInFuture` in as a LITERAL the test itself typed, and
+// every service test replaced the probe with a stub that discards its input. So
+// `expInFuture: expMs === null || expMs > now()` could be replaced with the
+// constant `false` (the fix goes inert, the measured defect returns verbatim) or
+// the constant `true` (an ordinary EXPIRED token earns the never-expiring
+// `unauthorized` cooldown) and 2450 tests stayed green.
+//
+// These assert the FUNCTION, not a literal.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('codexProbeSubject — the boolean that separates revoked from expired', () => {
+  const now = (): number => NOW
+
+  test('a JWT whose exp is in the FUTURE → expInFuture true (this is the `revoked` input)', () => {
+    const subject = codexProbeSubject(bundle(FUTURE_TOKEN), now)
+    expect(subject).not.toBeNull()
+    expect(subject?.accessToken).toBe(FUTURE_TOKEN)
+    expect(subject?.expInFuture).toBe(true)
+  })
+
+  test('a JWT whose exp is in the PAST → expInFuture false (this is the `expired` input)', () => {
+    const subject = codexProbeSubject(bundle(PAST_TOKEN), now)
+    expect(subject?.accessToken).toBe(PAST_TOKEN)
+    expect(subject?.expInFuture).toBe(false)
+  })
+
+  test('the boundary is exclusive: exp EXACTLY now counts as already expired', () => {
+    const atNow = jwtWithExp(Math.floor(NOW / 1000))
+    expect(codexProbeSubject(bundle(atNow), now)?.expInFuture).toBe(false)
+    // …and one second later it is not.
+    expect(codexProbeSubject(bundle(jwtWithExp(Math.floor(NOW / 1000) + 1)), now)?.expInFuture).toBe(true)
+  })
+
+  test('the CLOCK is read, not baked in — the same token flips as time passes', () => {
+    // A hardcoded constant would be indifferent to `now`; the real function is not.
+    const token = jwtWithExp(Math.floor(NOW / 1000) + 60)
+    expect(codexProbeSubject(bundle(token), () => NOW)?.expInFuture).toBe(true)
+    expect(codexProbeSubject(bundle(token), () => NOW + 61_000)?.expInFuture).toBe(false)
+  })
+
+  test('an OPAQUE (non-JWT) token → true: age cannot explain a 401 on a token with no stated expiry', () => {
+    const subject = codexProbeSubject(bundle('opaque-not-a-jwt'), now)
+    expect(subject?.accessToken).toBe('opaque-not-a-jwt')
+    expect(subject?.expInFuture).toBe(true)
+  })
+
+  test('a JWT with no `exp` claim → true, for the same reason', () => {
+    const noExp = `${Buffer.from(JSON.stringify({ alg: 'none' })).toString('base64url')}.${Buffer.from(
+      JSON.stringify({ sub: 'user' }),
+    ).toString('base64url')}.sig`
+    expect(codexProbeSubject(bundle(noExp), now)?.expInFuture).toBe(true)
+  })
+
+  test('NOTHING TO PROBE WITH → null, which is the signal never to make the request', () => {
+    expect(codexProbeSubject(null, now)).toBeNull()
+    expect(codexProbeSubject('', now)).toBeNull()
+    expect(codexProbeSubject('not json at all', now)).toBeNull()
+    expect(codexProbeSubject(JSON.stringify({ tokens: {} }), now)).toBeNull()
+    expect(codexProbeSubject(JSON.stringify({ tokens: { access_token: '' } }), now)).toBeNull()
   })
 })
 
@@ -456,17 +575,232 @@ describe('codex_status + CodexCredentialService consult the probe (P3 wiring)', 
   })
 
   test('codexExecutorAvailability names revocation — and stays usable without it', () => {
-    const env = { PATH: process.env['PATH'] ?? '' }
+    // A PATH THIS TEST OWNS. The previous version read the ambient PATH and put
+    // its real assertion inside `if (live.usable)`, so on a box without the codex
+    // CLI (any CI runner) the `else` arm asserted `dead.usable === false` — which
+    // is ALREADY true for the pre-existing `needs the codex CLI` reason and would
+    // pass with the revocation branch deleted. Two stub executables in a temp dir
+    // make the live arm true everywhere, unconditionally, and depend on nothing
+    // outside this test.
+    const bin = mkdtempSync(join(tmpdir(), 'codex-avail-bin-'))
+    for (const name of ['codex', 'perl']) {
+      const exe = join(bin, name)
+      writeFileSync(exe, '#!/bin/sh\nexit 0\n')
+      chmodSync(exe, 0o755)
+    }
+    const env = { PATH: bin }
     const live = codexExecutorAvailability({ codexHome, env, seatsRevoked: false })
     const dead = codexExecutorAvailability({ codexHome, env, seatsRevoked: true })
-    // The live arm depends on `codex`/`perl` being installed, which a CI box may
-    // not have — so assert the DIFFERENCE the flag makes, not an absolute.
-    if (live.usable) {
-      expect(dead.usable).toBe(false)
-      expect(dead.usable === false ? dead.reason.toLowerCase() : '').toContain('revoked')
-    } else {
-      expect(dead.usable).toBe(false)
+    // POSITIVE CONTROL, now an assertion rather than a branch: with the same
+    // codexHome and the same PATH, the ONLY difference is the flag.
+    expect(live.usable).toBe(true)
+    expect(dead.usable).toBe(false)
+    expect(dead.usable === false ? dead.reason.toLowerCase() : '').toContain('revoked')
+    rmSync(bin, { recursive: true, force: true })
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE DISCRIMINATOR, THROUGH THE PRODUCTION PATH.
+  //
+  // The tests above pin `codexProbeSubject` directly; these drive the REAL
+  // service with a probe that runs the REAL `probeCodexSeat` classification over
+  // a stubbed transport, so the boolean under test is the one production
+  // computes from the stored bytes — never one a test typed. Both mutations of
+  // `codex-auth.ts`'s `expInFuture` (to the constant `false` and to the constant
+  // `true`) redden here, in opposite tests.
+  // ───────────────────────────────────────────────────────────────────────────
+  /** A service whose probe is the REAL classifier over a stubbed HTTP status. */
+  function realProbeService(
+    status: number,
+    seen?: Array<{ accessToken: string; expInFuture: boolean }>,
+  ): CodexCredentialService {
+    return new CodexCredentialService({
+      store,
+      codexHome,
+      rotation: new SqliteCodexRotationStore(db),
+      now: () => clock,
+      probe: async (subject) => {
+        seen?.push({ accessToken: subject.accessToken, expInFuture: subject.expInFuture })
+        return probeCodexSeat(subject, { fetch: stubFetch(status) })
+      },
+    })
+  }
+
+  test('END-TO-END: a 401 on a stored token whose exp is in the FUTURE cools the seat `unauthorized`', async () => {
+    const seen: Array<{ accessToken: string; expInFuture: boolean }> = []
+    const svc = realProbeService(401, seen)
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    // The input the SERVICE computed — not one this test handed in.
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.accessToken).toBe(FUTURE_TOKEN)
+    expect(seen[0]?.expInFuture).toBe(true)
+    expect(svc.status(OWNER).status).toBe('revoked')
+    expect(svc.everySeatRevoked(OWNER)).toBe(true)
+  })
+
+  test('END-TO-END: the SAME 401 on a stored token whose exp has PASSED cools NOTHING', async () => {
+    const seen: Array<{ accessToken: string; expInFuture: boolean }> = []
+    const svc = realProbeService(401, seen)
+    await svc.connect(OWNER, bundle(PAST_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.expInFuture).toBe(false)
+    // An aged-out access token is refreshed by the CLI from `refresh_token`. It
+    // must never earn the never-expiring `unauthorized` state, and it must never
+    // be reported with the `revoked` remedy.
+    expect(svc.status(OWNER).status).toBe('expired')
+    expect(svc.status(OWNER).status).not.toBe('revoked')
+    expect(svc.everySeatRevoked(OWNER)).toBe(false)
+    expect(svc.listAccounts(OWNER)[0]?.cooling_reason ?? null).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE RETRACTION. A verdict only a human can withdraw is a brick, and this one
+  // is reachable from a PASSIVE settings poll: `refreshSeatLiveness` runs with no
+  // build in flight. One anomalous 401 — an edge rule, a half-rolled deploy, a
+  // token superseded in a race — must not refuse every build until someone pastes
+  // a fresh auth.json.
+  // ───────────────────────────────────────────────────────────────────────────
+  test('RETRACTION: a later `ok` probe withdraws the revocation and re-opens dispatch', async () => {
+    let outcome: CodexProbeOutcome = { kind: 'revoked', httpStatus: 401 }
+    const svc = service(() => outcome)
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    // Bricked, as measured.
+    expect(svc.status(OWNER).status).toBe('revoked')
+    expect(svc.everySeatRevoked(OWNER)).toBe(true)
+    expect(svc.listAccounts(OWNER)[0]?.cooling_reason).toBe('unauthorized')
+
+    // The server starts answering 200. Ten TTL-expired polls, exactly the
+    // reviewer's reproduction.
+    outcome = { kind: 'ok', httpStatus: 200 }
+    for (let i = 0; i < 10; i++) {
+      clock += SEAT_LIVENESS_TTL_MS + 1
+      await svc.refreshSeatLiveness(OWNER)
     }
+    expect(svc.status(OWNER).status).toBe('connected')
+    expect(svc.everySeatRevoked(OWNER)).toBe(false)
+    expect(svc.listAccounts(OWNER)[0]?.cooling_reason ?? null).toBeNull()
+    expect(svc.listAccounts(OWNER)[0]?.cooling).toBe(false)
+
+    // …and the DISPATCH GATE re-opens. This is the assertion that matters: the
+    // status pane recovering while builds stay refused would be the same outage
+    // with a friendlier label.
+    const gate = await codexDispatchPreflight({
+      phaseModels: () => ({ build: { model: 'sol' } }),
+      refreshLiveness: () => svc.refreshSeatLiveness(OWNER),
+      everySeatRevoked: () => svc.everySeatRevoked(OWNER),
+      reason: () => 'the connected Codex seat was REVOKED server-side — reconnect it',
+    })
+    expect(gate.ok).toBe(true)
+  })
+
+  test('RETRACTION SURVIVES A RESTART: the durable row itself is cleared, not a cache', async () => {
+    let outcome: CodexProbeOutcome = { kind: 'revoked', httpStatus: 401 }
+    const svc = service(() => outcome)
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    outcome = { kind: 'ok', httpStatus: 200 }
+    clock += SEAT_LIVENESS_TTL_MS + 1
+    await svc.refreshSeatLiveness(OWNER)
+    // A brand-new service object = a restarted gateway with an empty cache, and
+    // one that cannot reach the network at all.
+    const restarted = new CodexCredentialService({
+      store,
+      codexHome,
+      rotation: new SqliteCodexRotationStore(db),
+      now: () => clock,
+      probe: async () => ({ kind: 'unreachable', message: 'no network after restart' }),
+    })
+    expect(restarted.everySeatRevoked(OWNER)).toBe(false)
+    expect(restarted.status(OWNER).status).toBe('connected')
+  })
+
+  test('N (ANTI-OVERRETRACT): a non-verdict does NOT withdraw a revocation', async () => {
+    // The retraction must key on POSITIVE evidence — the server saying yes — not
+    // merely on the absence of another 401. An unreachable endpoint after a
+    // measured revocation leaves the seat cooled.
+    let outcome: CodexProbeOutcome = { kind: 'revoked', httpStatus: 401 }
+    const svc = service(() => outcome)
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    for (const later of [
+      { kind: 'unreachable', message: 'ECONNREFUSED' },
+      { kind: 'rate_limited', httpStatus: 429 },
+      { kind: 'rejected', httpStatus: 404 },
+      { kind: 'expired', httpStatus: 401 },
+    ] as CodexProbeOutcome[]) {
+      outcome = later
+      clock += SEAT_LIVENESS_TTL_MS + 1
+      await svc.refreshSeatLiveness(OWNER)
+      expect(svc.everySeatRevoked(OWNER)).toBe(true)
+      expect(svc.listAccounts(OWNER)[0]?.cooling_reason).toBe('unauthorized')
+    }
+  })
+
+  test('N (ANTI-OVERRETRACT): an `ok` probe never clears a RATE-LIMIT cooldown', async () => {
+    // A quota cooldown is a rotation decision with its own timer and its own
+    // evidence. A liveness probe knows nothing about quota, and clearing it would
+    // rotate a capped seat straight back into service.
+    const svc = service(() => ({ kind: 'ok', httpStatus: 200 }))
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    // Force the slot row into existence first — `setCooldown` is an UPDATE and
+    // would silently no-op against a seat the service has not synced yet, which
+    // would make this test pass with the retraction clearing everything.
+    expect(svc.listAccounts(OWNER)).toHaveLength(1)
+    const rotation = new SqliteCodexRotationStore(db)
+    rotation.setCooldown(OWNER, 'default', {
+      cooling_until: clock + 3_600_000,
+      cooling_reason: 'rate-limited',
+    })
+    await svc.refreshSeatLiveness(OWNER)
+    expect(svc.listAccounts(OWNER)[0]?.cooling_reason).toBe('rate-limited')
+    expect(svc.listAccounts(OWNER)[0]?.cooling).toBe(true)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // 403 IS NOT A CREDENTIAL VERDICT. chatgpt.com is edge-fronted and this probe
+  // sends only Authorization + Accept; a bot-management 403 arrives on every seat
+  // at once and says nothing about the token.
+  // ───────────────────────────────────────────────────────────────────────────
+  test('a 403 leaves the seat CONNECTED and cools nothing', async () => {
+    const svc = realProbeService(403)
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    expect(svc.status(OWNER).status).toBe('connected')
+    expect(svc.everySeatRevoked(OWNER)).toBe(false)
+    expect(svc.listAccounts(OWNER)[0]?.cooling_reason ?? null).toBeNull()
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // WHICH COPY IS PROBED. The CLI rewrites CODEX_HOME/auth.json on every refresh
+  // and harvest-back into the store is fire-and-forget, so the store copy is
+  // routinely days stale. A SUPERSEDED access token has an exp in the future —
+  // exactly the input that yields `revoked`.
+  // ───────────────────────────────────────────────────────────────────────────
+  test('the MATERIALIZED auth.json is probed, not the staler store copy', async () => {
+    const seen: Array<{ accessToken: string; expInFuture: boolean }> = []
+    const svc = realProbeService(200, seen)
+    const STORE_TOKEN = jwtWithExp(Math.floor(NOW / 1000) + 3600)
+    const DISK_TOKEN = jwtWithExp(Math.floor(NOW / 1000) + 999_999)
+    await svc.connect(OWNER, bundle(STORE_TOKEN))
+    // The CLI refreshes mid-run: the file on disk moves on, the store does not.
+    writeFileSync(join(codexHome, 'auth.json'), bundle(DISK_TOKEN))
+    await svc.refreshSeatLiveness(OWNER)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.accessToken).toBe(DISK_TOKEN)
+    expect(seen[0]?.accessToken).not.toBe(STORE_TOKEN)
+  })
+
+  test('…and falls back to the store copy when nothing is materialized', async () => {
+    const seen: Array<{ accessToken: string; expInFuture: boolean }> = []
+    const svc = realProbeService(200, seen)
+    await svc.connect(OWNER, bundle(FUTURE_TOKEN))
+    rmSync(join(codexHome, 'auth.json'), { force: true })
+    await svc.refreshSeatLiveness(OWNER)
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.accessToken).toBe(FUTURE_TOKEN)
   })
 })
 
@@ -560,6 +894,148 @@ describe('dispatch preflight (P4)', () => {
     const out = (await tool.handler({ board_item_id: 'ready', task: READY }, CTX)) as { ok: boolean }
     expect(out.ok).toBe(true)
     expect(runCount()).toBe(1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE GATE LIVES AT THE CHOKEPOINT, NOT AT ONE CALLER.
+  //
+  // `dispatchBoardBoundBuild` has THREE production callers — the agent tools, the
+  // app's ▶ start/retry closure (`open/composer.ts` `boardStartBuild`, consumed by
+  // `gateway/http/work-board-surface.ts`), and `/code`
+  // (`trident/code-command.ts`). Wiring the preflight into the tool handler gated
+  // ONE of them; the owner's primary dispatch paths kept the old behaviour
+  // verbatim. These drive the chokepoint and the `/code` executor directly.
+  // ───────────────────────────────────────────────────────────────────────────
+  const REFUSAL =
+    'Refusing to start this build: the Build phase runs on Codex and the connected Codex seat was REVOKED server-side. No run was created.'
+
+  function chokepointDeps(
+    preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>,
+  ): BoardBoundBuildDeps {
+    return {
+      store: runs,
+      board: board(),
+      project_slug: 'proj-1',
+      repo_path: '/repo',
+      resolveBuildRepo: async (home) => home,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+      ...(preflight !== undefined ? { preflight } : {}),
+    }
+  }
+
+  test('CHOKEPOINT: a refusing preflight rejects with `executor_unavailable` and creates NO run', async () => {
+    const before = runCount()
+    const out = await dispatchBoardBoundBuild(
+      { board_item_id: 'ready', task: READY },
+      chokepointDeps(async () => ({ ok: false, reason: REFUSAL })),
+    )
+    expect(out.ok).toBe(false)
+    expect(out.ok === false ? out.code : '').toBe('executor_unavailable')
+    expect(out.ok === false ? out.message : '').toBe(REFUSAL)
+    expect(runCount()).toBe(before)
+  })
+
+  test('CHOKEPOINT N (ANTI-OUTAGE): the same dispatch with a PASSING preflight runs', async () => {
+    const out = await dispatchBoardBoundBuild(
+      { board_item_id: 'ready', task: READY },
+      chokepointDeps(async () => ({ ok: true })),
+    )
+    expect(out.ok).toBe(true)
+    expect(runCount()).toBe(1)
+  })
+
+  test('CHOKEPOINT N: with NO preflight wired the chokepoint is unchanged', async () => {
+    const out = await dispatchBoardBoundBuild({ board_item_id: 'ready', task: READY }, chokepointDeps())
+    expect(out.ok).toBe(true)
+    expect(runCount()).toBe(1)
+  })
+
+  test('a bound_pr REVIEW round is NOT refused with a sentence about the Build phase', async () => {
+    // The refusal names the BUILD phase's executor. A `bound_pr` round does not
+    // run that phase, so refusing one here would misattribute the cause — and the
+    // preflight ran BEFORE `bound_pr` was consulted, so it did exactly that.
+    let called = 0
+    const out = await dispatchBoardBoundBuild(
+      { board_item_id: 'ready', task: 'review PR #123', bound_pr: 123 },
+      chokepointDeps(async () => {
+        called += 1
+        return { ok: false, reason: REFUSAL }
+      }),
+    )
+    expect(called).toBe(0)
+    expect(out.ok).toBe(true)
+    expect(out.ok === true ? out.run.bound_pr : null).toBe(123)
+  })
+
+  test('/code (the chat command) is refused by the SAME gate — and creates no run', async () => {
+    const before = runCount()
+    const refused = await executeCodeCommand(
+      { kind: 'dispatch', task: READY, board_item_id: 'ready' },
+      {
+        store: runs,
+        work_board: board(),
+        project_slug: 'proj-1',
+        repo_path: '/repo',
+        resolveBuildRepo: async (home) => home,
+        resolveMergeMode: async () => 'local',
+        resolveRalph: async () => false,
+        preflight: async () => ({ ok: false, reason: REFUSAL }),
+      },
+    )
+    expect(refused.error?.code).toBe('backend_error')
+    expect(refused.text).toContain('No run was created')
+    expect(runCount()).toBe(before)
+
+    // POSITIVE CONTROL: the identical `/code` with a passing gate DOES build, so
+    // the refusal above is the gate and not some unrelated malformed context.
+    const allowed = await executeCodeCommand(
+      { kind: 'dispatch', task: READY, board_item_id: 'ready' },
+      {
+        store: runs,
+        work_board: board(),
+        project_slug: 'proj-1',
+        repo_path: '/repo',
+        resolveBuildRepo: async (home) => home,
+        resolveMergeMode: async () => 'local',
+        resolveRalph: async () => false,
+        preflight: async () => ({ ok: true }),
+      },
+    )
+    expect(allowed.error).toBeUndefined()
+    expect(runCount()).toBe(before + 1)
+  })
+
+  test('EVERY production caller of the chokepoint hands it a preflight (wiring guard)', () => {
+    // The ▶ closure lives inside `buildOpenComposition` and cannot be imported by
+    // a unit test (it needs a whole gateway). What CAN be checked, and what the
+    // last round got wrong, is that no dispatch entry is left unwired: every
+    // non-test file that calls `dispatchBoardBoundBuild` must pass `preflight`.
+    // An EMPTY extraction FAILS rather than reading as a pass.
+    const grep = spawnSync(
+      'git',
+      ['grep', '-l', '--untracked', 'dispatchBoardBoundBuild(', '--', 'open', 'trident', 'gateway'],
+      { cwd: REPO, encoding: 'utf8' },
+    )
+    const callers = (grep.stdout ?? '')
+      .split('\n')
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0 && !l.includes('.test.') && !l.includes('__tests__'))
+      .filter((f) => f !== 'trident/board-dispatch.ts') // the definition is not a caller
+    // The three known production entries, named — a caller that disappears from
+    // this list is as interesting as one that forgets the gate.
+    expect(callers.sort()).toEqual([
+      'open/composer.ts',
+      'trident/code-command.ts',
+      'trident/work-board-build-tool.ts',
+    ])
+    for (const file of callers) {
+      expect(`${file}: ${readFileSync(join(REPO, file), 'utf8')}`).toContain('preflight')
+    }
+    // …and the ▶ closure specifically: the same shared object, by name, inside
+    // the `boardStartBuild` dispatch call.
+    const composer = readFileSync(join(REPO, 'open', 'composer.ts'), 'utf8')
+    expect((composer.match(/preflight: tridentCodexBuildPreflight/g) ?? []).length).toBe(3)
   })
 })
 
@@ -745,5 +1221,133 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
     const out = await runWrapper(null)
     expect(seen.length).toBe(0)
     expect(out.stderr).not.toContain('CODEX_BUILD_AUTH_EXPIRED')
+  })
+
+  // ───────────────────────────────────────────────────────────────────────────
+  // THE CLOCK, IN THE SHELL. `codex-probe.ts` calls the exp check "THE WHOLE
+  // CLASSIFICATION"; the wrapper had no clock at all and treated every 401/403 as
+  // fatal. An access token whose `exp` has passed but whose refresh_token is live
+  // is a NORMAL, SELF-HEALING state here — the CLI refreshes auth.json at exec
+  // time, which is the entire premise of the harvest-back path — and a seat that
+  // has been idle or rotated away is routinely in it. Deferring that build (and
+  // calling it REVOKED) is the same misleading-cause defect this card exists to
+  // remove, one layer down.
+  // ───────────────────────────────────────────────────────────────────────────
+  test('P5b: an EXPIRED access token + 401 does NOT fail the precheck (the CLI refreshes it)', async () => {
+    seen.length = 0
+    httpStatus = 401
+    const out = await runWrapper(PAST_TOKEN)
+    // POSITIVE CONTROL: the probe really ran with this token — otherwise "no
+    // AUTH_EXPIRED" would be satisfied by a wrapper that skipped the probe
+    // entirely (no curl, unreadable token) and this would assert nothing.
+    expect(seen.length).toBeGreaterThanOrEqual(1)
+    expect(seen[0]?.auth).toBe(`Bearer ${PAST_TOKEN}`)
+    expect(out.stderr).not.toContain('CODEX_BUILD_AUTH_EXPIRED')
+    expect(out.stderr).not.toContain('REVOKED')
+  })
+
+  test('P5c: the discriminator is the TOKEN, not the endpoint — same 401, future exp, DEFERRED', async () => {
+    // The pair. Same server, same status, same second: only the token's own `exp`
+    // differs, and that alone decides. Without this, P5b passes against a wrapper
+    // that simply stopped checking auth.
+    seen.length = 0
+    httpStatus = 401
+    const out = await runWrapper(FUTURE_TOKEN)
+    expect(out.status).toBe(3)
+    expect(out.stderr).toContain('CODEX_BUILD_AUTH_EXPIRED')
+    expect(out.stderr).toContain('REVOKED')
+  })
+
+  test('N: a 403 does NOT fail the precheck — an edge refusal is not a credential fact', async () => {
+    seen.length = 0
+    httpStatus = 403
+    const out = await runWrapper(FUTURE_TOKEN)
+    expect(seen.length).toBeGreaterThanOrEqual(1)
+    expect(out.stderr).not.toContain('CODEX_BUILD_AUTH_EXPIRED')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// P5R — THE REVIEW WRAPPER. `codex-review.sh` carries a COPY of the precheck
+// (deliberately duplicated: the two wrappers are copied to other repos
+// independently), so it carries the defect independently too. A DEFERRED review
+// is never treated as an approval, which makes a false one a stalled PR.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('codex-review.sh auth precheck applies the same clock (P5R)', () => {
+  const seen: Array<{ path: string; auth: string }> = []
+  let httpStatus = 401
+  const server = Bun.serve({
+    port: 0,
+    fetch(req) {
+      const url = new URL(req.url)
+      seen.push({ path: `${url.pathname}${url.search}`, auth: req.headers.get('Authorization') ?? '' })
+      return new Response(JSON.stringify(loadCapture().body), { status: httpStatus })
+    },
+  })
+  const stubUrl = `http://127.0.0.1:${server.port}/backend-api/codex/models?client_version=0.147.0`
+
+  afterAll(() => {
+    server.stop(true)
+  })
+
+  async function runReviewWrapper(access: string): Promise<{ status: number | null; stderr: string }> {
+    const dir = mkdtempSync(join(tmpdir(), 'codex-probe-review-'))
+    const codexHome = join(dir, 'codexhome')
+    mkdirSync(codexHome, { recursive: true })
+    writeFileSync(
+      join(codexHome, 'auth.json'),
+      JSON.stringify({ tokens: { access_token: access, refresh_token: 'r' } }),
+    )
+    const bin = join(dir, 'bin')
+    mkdirSync(bin, { recursive: true })
+    // The same measured false green: `login status` exits 0 on a dead seat.
+    const mock = join(bin, 'codex')
+    writeFileSync(mock, '#!/bin/sh\nexit 0\n')
+    chmodSync(mock, 0o755)
+    const child = Bun.spawn(['bash', join(REPO, 'trident', 'codex-review.sh'), 'main'], {
+      cwd: dir,
+      stdout: 'pipe',
+      stderr: 'pipe',
+      env: {
+        ...(process.env as Record<string, string>),
+        PATH: `${bin}${delimiter}/usr/bin${delimiter}/bin`,
+        CODEX_HOME: codexHome,
+        NEUTRON_CODEX_AUTH_PROBE_URL: stubUrl,
+        NEUTRON_CODEX_AUTH_RETRY_DELAY: '0',
+        NEUTRON_CODEX_AUTH_PROBE_TIMEOUT: '5',
+      },
+    })
+    const stderr = await new Response(child.stderr).text()
+    const status = await child.exited
+    rmSync(dir, { recursive: true, force: true })
+    return { status, stderr }
+  }
+
+  test('P5R: 401 on a token whose exp is in the FUTURE → DEFERRED, named REVOKED', async () => {
+    seen.length = 0
+    httpStatus = 401
+    const out = await runReviewWrapper(FUTURE_TOKEN)
+    expect(seen.length).toBeGreaterThanOrEqual(1)
+    expect(seen[0]?.auth).toBe(`Bearer ${FUTURE_TOKEN}`)
+    expect(out.status).toBe(3)
+    expect(out.stderr).toContain('CODEX_REVIEW_AUTH_EXPIRED')
+    expect(out.stderr).toContain('REVOKED')
+  })
+
+  test('P5R b: the SAME 401 on an already-EXPIRED token does NOT fail the precheck', async () => {
+    seen.length = 0
+    httpStatus = 401
+    const out = await runReviewWrapper(PAST_TOKEN)
+    expect(seen.length).toBeGreaterThanOrEqual(1)
+    expect(seen[0]?.auth).toBe(`Bearer ${PAST_TOKEN}`)
+    expect(out.stderr).not.toContain('CODEX_REVIEW_AUTH_EXPIRED')
+  })
+
+  test('P5R c: a 200 does not fail the precheck either (the anti-hardcode control)', async () => {
+    seen.length = 0
+    httpStatus = 200
+    const out = await runReviewWrapper(FUTURE_TOKEN)
+    expect(seen.length).toBeGreaterThanOrEqual(1)
+    expect(out.stderr).not.toContain('CODEX_REVIEW_AUTH_EXPIRED')
   })
 })

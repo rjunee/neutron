@@ -23,10 +23,11 @@
  *
  * ── AND WHY IT ONLY EVER REFUSES ON A POSITIVE VERDICT ──────────────────────
  * The only fact that blocks is `everySeatRevoked` — every connected seat cooled
- * `unauthorized`, a state written ONLY from an HTTP 401/403 on a token that has
- * not expired. An unreachable endpoint, a 5xx, a 429 and a moved endpoint all
+ * `unauthorized`, a state written ONLY from an HTTP 401 on a token that has not
+ * expired. An unreachable endpoint, a 5xx, a 429, a 403 and a moved endpoint all
  * leave it false. A box with no egress to chatgpt.com dispatches builds forever,
- * unchanged.
+ * unchanged. And the state RETRACTS: a later `ok` probe clears the cooldown, so
+ * the gate re-opens without a human.
  */
 
 import { modelTier } from './model-tiers.ts'

@@ -487,8 +487,9 @@ export class CodexCredentialService {
    * `trident/orchestrator.ts` and is the one change in this area that could take
    * down every build. So the probe is a SIDE CHANNEL: it runs async, and the fact
    * it discovers is written into the `unauthorized` cooldown — an EXISTING state
-   * that never expires on a timer and is cleared only by a reconnect — which
-   * every synchronous path can already read.
+   * that never expires on a TIMER and which every synchronous path can already
+   * read. It is withdrawn by evidence, not by the clock: a reconnect clears it,
+   * and so does a later `ok` from this same probe (see `retractRevocation`).
    *
    * NEVER THROWS and never rejects: it is awaited on a read-only status path and
    * fired-and-forgotten elsewhere.
@@ -501,15 +502,51 @@ export class CodexCredentialService {
       // Only a REAL override is a separate seat; a fallback to the global default
       // is the `default` slot, probed by the loop below.
       if (resolved !== null && resolved.scope === 'project') {
-        jobs.push(this.probeSeat(owner_slug, projectSeatKey(project_id), resolved.plaintext, null))
+        const home = codexProjectHome(this.codexHome, project_id)
+        jobs.push(
+          this.probeSeat(owner_slug, projectSeatKey(project_id), this.liveAuthFor(home, resolved.plaintext), null),
+        )
       }
     }
     for (const seat of this.syncSlots(owner_slug)) {
       const stored = this.store.resolve(owner_slug, undefined, codexSlotService(seat.slot))
       if (stored === null) continue
-      jobs.push(this.probeSeat(owner_slug, seat.slot, stored.plaintext, seat.slot))
+      jobs.push(
+        this.probeSeat(
+          owner_slug,
+          seat.slot,
+          this.liveAuthFor(this.slotHome(seat.slot), stored.plaintext),
+          seat.slot,
+        ),
+      )
     }
     await Promise.all(jobs)
+  }
+
+  /**
+   * WHICH COPY OF THE BUNDLE TO PROBE: the MATERIALIZED one, the file the CLI
+   * actually execs against — never the encrypted store copy, when both exist.
+   *
+   * The two diverge, by design and for days at a time. The CLI rewrites
+   * `CODEX_HOME/auth.json` every time it refreshes, and harvest-back into the
+   * store is fire-and-forget from inside `resolveActiveCodexHome` (this file's own
+   * docblock: the store copy "drifts staler every time the CLI refreshes"). So a
+   * seat that is perfectly healthy on disk can hold a SUPERSEDED access token in
+   * the store — and a superseded token is exactly the input that yields `revoked`:
+   * its `exp` is still in the future, so the clock cannot explain the 401.
+   * Probing the store copy would therefore manufacture the one verdict this
+   * module must never manufacture.
+   *
+   * Falls back to the store copy when nothing is materialized (a fresh box that
+   * has connected but not yet resolved a CODEX_HOME), which is the only case where
+   * the store copy IS the live copy.
+   */
+  private liveAuthFor(home: string, storedPlaintext: string): string {
+    try {
+      return readMaterializedAuth(home) ?? storedPlaintext
+    } catch {
+      return storedPlaintext
+    }
   }
 
   /**
@@ -549,15 +586,30 @@ export class CodexCredentialService {
       const at = this.now()
       if (outcome.kind === 'ok') {
         this.liveness.set(key, { verdict: 'ok', at })
+        // THE RETRACTION. Without this line the verdict below is a BRICK: the
+        // `unauthorized` cooldown ignores `cooling_until` forever and, before
+        // this, was cleared only by a human pasting a fresh auth.json. That was
+        // survivable while `unauthorized` could only be written by a code path
+        // that already required a human; it is not survivable now that a PASSIVE
+        // SETTINGS POLL can write it. A single anomalous 401 — an edge rule, a
+        // half-rolled deploy, a token superseded in a race — would otherwise
+        // refuse every build on a seat the server is answering 200 for.
+        //
+        // A verdict that only a human can withdraw is not a safety property, it
+        // is an outage with a good excuse. The server just said yes; that is
+        // strictly better evidence than a 401 we recorded a minute ago.
+        this.retractRevocation(owner_slug, coolSlot, at)
         return
       }
       if (outcome.kind === 'revoked') {
         this.liveness.set(key, { verdict: 'revoked', at })
         if (coolSlot !== null) {
           // THE DURABLE HALF. `unauthorized` is the one cooling reason that
-          // ignores `cooling_until` forever and is cleared only by
-          // `markConnected` (a reconnect) — precisely the semantics of a revoked
-          // refresh token, already implemented, reused rather than rebuilt.
+          // ignores `cooling_until` forever — precisely the semantics of a
+          // revoked refresh token, already implemented, reused rather than
+          // rebuilt. It is cleared by a reconnect (`markConnected`) OR by the
+          // `ok` branch above, which is what keeps this a verdict rather than a
+          // brick.
           this.rotation.setCooldown(owner_slug, coolSlot, {
             cooling_until: at,
             cooling_reason: 'unauthorized',
@@ -595,6 +647,33 @@ export class CodexCredentialService {
     } finally {
       this.livenessInflight.delete(key)
     }
+  }
+
+  /**
+   * WITHDRAW a probe-written revocation after the server has answered `ok`.
+   *
+   * ── ONLY THE STATE THIS MODULE WROTE ────────────────────────────────────────
+   * Clears the cooldown ONLY when the current reason is `unauthorized`. A
+   * `usage`/`error` cooldown is a rotation decision with its own timer and its own
+   * evidence, and a liveness probe knows nothing about quota — clearing those
+   * would rotate a capped seat straight back into service. This is deliberately
+   * the narrowest possible retraction: same state, same seat, better evidence.
+   *
+   * `cooling_until` is set to `null` rather than a past timestamp because
+   * `isCooling` short-circuits on the REASON: an `unauthorized` row with an
+   * ancient `cooling_until` still cools forever, so the reason itself is what has
+   * to go.
+   */
+  private retractRevocation(owner_slug: OwnerHandle, coolSlot: string | null, at: number): void {
+    if (coolSlot === null) return
+    const slot = this.rotation.listSlots(owner_slug).find((s) => s.slot === coolSlot)
+    if (slot === undefined || slot.cooling_reason !== 'unauthorized') return
+    this.rotation.setCooldown(owner_slug, coolSlot, null)
+    this.log('codex_seat_unrevoked', {
+      slot: coolSlot,
+      at,
+      detail: 'ChatGPT accepted this seat’s token again; the unauthorized cooldown was withdrawn',
+    })
   }
 
   /** The cached probe verdict for a seat, or `unknown` when the cache is cold/stale. */

@@ -898,11 +898,51 @@ rm -f "$TRAILER_TMP" "$TRAILER_FILE"
 # and then died on `refresh_token_invalidated`, blaming the CLI. One authenticated
 # GET closes it, costs no quota, and answers in ~200ms.
 #
-# ONLY A 401/403 FAILS THE PRECHECK. No curl, no readable token, a timeout, a 5xx,
-# a 429 or an unexpected 4xx all leave the local check in charge — this step used
-# to be offline-safe and must not become a new way for a network blip to stop a
-# build. And the failure stays exit 3 (DEFERRED), never a hard fail.
+# ONLY A 401 ON A TOKEN THAT HAS *NOT* EXPIRED FAILS THE PRECHECK. That second
+# clause is the whole classification and it is NOT optional — `codex-probe.ts`
+# names it "THE WHOLE CLASSIFICATION" for the same reason:
+#
+#   401 + exp in the FUTURE  → the server disowned a credential that looks fine
+#                              locally. REVOKED. Waiting cannot fix it. DEFER.
+#   401 + exp in the PAST    → an ordinary aged-out access token. The CLI refreshes
+#                              it from `refresh_token` at exec time — this is a
+#                              NORMAL, SELF-HEALING state (see the harvest-back
+#                              path in `codex-credential.ts`, which exists because
+#                              "the CLI refreshes auth.json during a run"). A seat
+#                              idle for a week is routinely in exactly this state.
+#                              DEFERRING it would stop a build that would have
+#                              worked, and label it REVOKED, which is the exact
+#                              misleading-cause defect this precheck exists to
+#                              remove — relocated one layer down.
+#
+# No curl, no readable token, no decodeable exp, a 403, a timeout, a 5xx, a 429 or
+# an unexpected 4xx all leave the local check in charge — this step used to be
+# offline-safe and must not become a new way for a network blip to stop a build.
+# (403 is excluded for the same reason `codex-probe.ts` excludes it: chatgpt.com is
+# edge-fronted and a bot-management 403 is not a fact about the credential.)
+# And the failure stays exit 3 (DEFERRED), never a hard fail.
 CODEX_AUTH_PROBE_URL="${NEUTRON_CODEX_AUTH_PROBE_URL:-https://chatgpt.com/backend-api/codex/models?client_version=0.147.0}"
+# Exit 0 when the local access token's own `exp` claim is ALREADY IN THE PAST.
+# Exit 1 on anything else — no token, not a JWT, no `exp`, or an exp in the future
+# — because "unknown age" must never be read as "expired": that direction turns a
+# genuine revocation into a build that runs and dies 15 minutes later, while the
+# other direction bricks a healthy seat. Mirrors `decodeJwtExpMs` in
+# `trident/codex-auth.ts` (base64url payload, numeric `exp`, seconds).
+codex_auth_token_expired() {
+  perl -0777 -MMIME::Base64 -ne '
+    my ($tok) = /"access_token"\s*:\s*"([^"]+)"/;
+    exit 1 unless defined $tok;
+    my @p = split /\./, $tok, -1;
+    exit 1 unless @p >= 2;
+    my $b = $p[1];
+    $b =~ tr{-_}{+/};
+    $b .= "=" x ((4 - length($b) % 4) % 4);
+    my $payload = decode_base64($b);
+    my ($exp) = $payload =~ /"exp"\s*:\s*(\d+)/;
+    exit 1 unless defined $exp;
+    exit(($exp <= time) ? 0 : 1);
+  ' "$CODEX_HOME/auth.json" 2>/dev/null
+}
 codex_auth_probe_status() {
   command -v curl >/dev/null 2>&1 || { printf 'skip\n'; return 0; }
   local token cfg code
@@ -928,7 +968,16 @@ for attempt in 1 2 3; do
   if bounded /dev/null 6 codex login status; then
     codex_auth_probe_code="$(codex_auth_probe_status)"
     case "$codex_auth_probe_code" in
-      401 | 403) : ;; # the server refused the seat — retry, then DEFER below
+      401)
+        # THE CLOCK, not just the status. An already-expired access token is
+        # refreshed by the CLI at exec time; only a 401 on a token that should
+        # still be good is a revocation.
+        if codex_auth_token_expired; then
+          codex_auth_ok=1
+          break
+        fi
+        : # revoked — retry (a transient blip recovers), then DEFER below
+        ;;
       *)
         codex_auth_ok=1
         break
@@ -939,8 +988,8 @@ for attempt in 1 2 3; do
 done
 if [ "$codex_auth_ok" -ne 1 ]; then
   case "$codex_auth_probe_code" in
-    401 | 403)
-      echo "CODEX_BUILD_AUTH_EXPIRED: codex auth is REVOKED — 'codex login status' passes (it only reads the local file) but the ChatGPT backend answered HTTP $codex_auth_probe_code for this token (CODEX_HOME=$CODEX_HOME). DEFERRED — waiting will not fix it: re-auth with 'codex login' and reconnect the seat." >&2
+    401)
+      echo "CODEX_BUILD_AUTH_EXPIRED: codex auth is REVOKED — 'codex login status' passes (it only reads the local file) but the ChatGPT backend answered HTTP $codex_auth_probe_code for this token, whose own exp is still in the future (CODEX_HOME=$CODEX_HOME). DEFERRED — waiting will not fix it: re-auth with 'codex login' and reconnect the seat." >&2
       ;;
     *)
       echo "CODEX_BUILD_AUTH_EXPIRED: codex auth invalid/unreachable after 3 attempts (CODEX_HOME=$CODEX_HOME). DEFERRED — re-auth with 'codex login'." >&2

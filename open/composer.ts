@@ -2137,6 +2137,52 @@ export function buildOpenGraphComposer(
     const tridentMergeModeProbe = defaultGitModeProbe(tridentPublisherCredential)
     const resolveTridentMergeMode = (repoPath: string) =>
       detectMergeMode(repoPath, tridentMergeModeProbe)
+    /**
+     * EXECUTOR LIVENESS BEFORE THE LANE EXISTS — ONE closure, handed to ALL
+     * THREE production entries into `dispatchBoardBoundBuild`.
+     *
+     * Defined here, above the first of them, precisely because wiring it
+     * per-entry is how the previous round shipped a gate on the agent tools only
+     * while the owner's PRIMARY dispatch paths — the app's ▶ button
+     * (`boardStartBuild`, below) and `/code` (`resolve_context`, immediately
+     * below) — kept spawning the doomed lane. Sharing one object also lets a
+     * wiring test assert the three sites hold the SAME preflight by identity
+     * rather than by shape.
+     *
+     * Refuses ONLY when the owner's BUILD phase actually dispatches to codex AND
+     * every seat has been probed and positively refused by the ChatGPT backend.
+     * A Claude build, or a codex build on a box that simply cannot reach
+     * chatgpt.com, is unaffected — the fix must not be a bigger outage than the
+     * defect. And the refusal RETRACTS itself: the next `ok` probe withdraws the
+     * cooldown that drives it.
+     */
+    const tridentCodexBuildPreflight = (): Promise<
+      { ok: true } | { ok: false; reason: string }
+    > =>
+      codexDispatchPreflight({
+        phaseModels: () => {
+          try {
+            return readTridentPhaseModels(db, owner_handle)
+          } catch {
+            return {}
+          }
+        },
+        refreshLiveness: () => codexCredentialService.refreshSeatLiveness(asOwnerHandle(owner_handle)),
+        everySeatRevoked: () => codexCredentialService.everySeatRevoked(asOwnerHandle(owner_handle)),
+        // The SAME sentence the settings pane greys the codex tiers with, from
+        // the same function, so the two can never disagree about why a build
+        // cannot run.
+        reason: () => {
+          const availability = codexExecutorAvailability({
+            codexHome: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)),
+            env,
+            seatsRevoked: true,
+          })
+          return availability.usable
+            ? 'the connected Codex seat was revoked — reconnect it'
+            : `Refusing to start this build: the Build phase runs on Codex and ${availability.reason}. No run was created.`
+        },
+      })
     const tridentCodeChatCommandFilter = buildTridentCodeChatCommandFilter({
       resolve_context: (input) => {
         // No credential → no substrate → the tick loop can never advance a run
@@ -2159,6 +2205,7 @@ export function buildOpenGraphComposer(
           repo_path: owner_home,
           resolveMergeMode: resolveTridentMergeMode,
           landedProbe: tridentLandedProbe,
+          preflight: tridentCodexBuildPreflight,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -4258,6 +4305,9 @@ export function buildOpenGraphComposer(
                 thread_id: null,
                 resolveMergeMode: resolveTridentMergeMode,
                 landedProbe: tridentLandedProbe,
+                // The ▶ button is the owner's primary dispatch path and was the
+                // one this gate originally missed.
+                preflight: tridentCodexBuildPreflight,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -6747,35 +6797,9 @@ export function buildOpenGraphComposer(
               // ChatGPT backend. A Claude build, or a codex build on a box that
               // simply cannot reach chatgpt.com, is unaffected — the fix must not
               // be a bigger outage than the defect.
-              preflight: () =>
-                codexDispatchPreflight({
-                  phaseModels: () => {
-                    try {
-                      return readTridentPhaseModels(db, owner_handle)
-                    } catch {
-                      return {}
-                    }
-                  },
-                  refreshLiveness: () =>
-                    codexCredentialService.refreshSeatLiveness(asOwnerHandle(owner_handle)),
-                  everySeatRevoked: () =>
-                    codexCredentialService.everySeatRevoked(asOwnerHandle(owner_handle)),
-                  // The SAME sentence the settings pane greys the codex tiers
-                  // with, from the same function, so the two can never disagree
-                  // about why a build cannot run.
-                  reason: () => {
-                    const availability = codexExecutorAvailability({
-                      codexHome: codexCredentialService.resolveActiveCodexHome(
-                        asOwnerHandle(owner_handle),
-                      ),
-                      env,
-                      seatsRevoked: true,
-                    })
-                    return availability.usable
-                      ? 'the connected Codex seat was revoked — reconnect it'
-                      : `Refusing to start this build: the Build phase runs on Codex and ${availability.reason}. No run was created.`
-                  },
-                }),
+              // THE SAME closure the ▶ route and `/code` are handed — not a
+              // second copy. Three entries, one gate.
+              preflight: tridentCodexBuildPreflight,
             },
           }
         : {}),

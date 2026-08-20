@@ -170,6 +170,15 @@ export interface TridentCodeContext {
   /** Round caps (else the store defaults: 8 / 20). */
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * Executor-liveness preflight, forwarded to the dispatch chokepoint.
+   *
+   * `/code` is one of THREE production entries into `dispatchBoardBoundBuild`,
+   * and a gate wired at only one of them is not a gate: the agent tools were
+   * refusing a doomed lane while this command still spawned it. Absent →
+   * unchanged behaviour.
+   */
+  preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 }
 
 /** Dispatch the parsed command. */
@@ -230,6 +239,7 @@ async function executeDispatch(
     ...(ctx.channel_kind !== undefined ? { channel_kind: ctx.channel_kind } : {}),
     ...(ctx.max_rounds !== undefined ? { max_rounds: ctx.max_rounds } : {}),
     ...(ctx.max_ralph_rounds !== undefined ? { max_ralph_rounds: ctx.max_ralph_rounds } : {}),
+    ...(ctx.preflight !== undefined ? { preflight: ctx.preflight } : {}),
   }
   const result = await dispatchBoardBoundBuild({ task: cmd.task, board_item_id: cmd.board_item_id }, deps)
 

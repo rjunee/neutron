@@ -98,6 +98,11 @@ export type WorkBoardStartResult =
         | 'review_needs_bound_pr'
         | 'underspecified'
         | 'already_landed'
+        // The executor this build needs is positively known-dead (the Codex seat
+        // was probed and refused server-side). Falls through to the 409 arm, so
+        // the ▶ route answers with the refusal sentence rather than spawning a
+        // lane that would die ~15 minutes later blaming the CLI.
+        | 'executor_unavailable'
         | 'backend_error'
       message: string
     }

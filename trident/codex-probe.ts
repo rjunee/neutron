@@ -29,13 +29,19 @@
  *
  * ── EVERY UNCERTAIN ANSWER IS TRANSIENT, ON PURPOSE ─────────────────────────
  * The caller turns `revoked` into the `unauthorized` cooldown, which NEVER
- * expires on a timer and is cleared only by a reconnect. That makes a false
- * `revoked` the worst outcome this module can produce: it would brick a healthy
- * seat on a box that merely lost its network for a second. So a timeout, a
- * transport failure, a 5xx, a 429 and an unexpected 4xx are ALL distinct
- * non-verdicts, and none of them is `revoked`. A network-isolated self-hosted box
- * probes forever, always gets `unreachable`, and keeps working exactly as it does
- * today.
+ * expires on a timer. That makes a false `revoked` the worst outcome this module
+ * can produce: it would take a healthy seat out of service on a box that merely
+ * lost its network for a second. So a timeout, a transport failure, a 5xx, a 429,
+ * a 403 and an unexpected 4xx are ALL distinct non-verdicts, and none of them is
+ * `revoked`. A network-isolated self-hosted box probes forever, always gets
+ * `unreachable`, and keeps working exactly as it does today.
+ *
+ * ── AND THE VERDICT IS RETRACTABLE ──────────────────────────────────────────
+ * The other half of that rule: `revoked` must never be a state only a human can
+ * leave. `CodexCredentialService.probeSeat` WITHDRAWS the `unauthorized` cooldown
+ * the moment this probe next answers `ok`, so a seat cooled by an anomalous 401
+ * heals on the next poll instead of waiting for someone to paste a fresh
+ * auth.json. A refusal with no retraction path is an outage, not a safeguard.
  */
 
 /** The endpoint the codex CLI authenticates against first. */
@@ -65,13 +71,16 @@ export type CodexProbeOutcome =
   /** The endpoint accepted the token. The seat is alive. */
   | { kind: 'ok'; httpStatus: number }
   /**
-   * 401/403 while the token's own `exp` is STILL IN THE FUTURE — the server has
-   * disowned a credential that looks perfectly good locally. PERMANENT: a revoked
-   * refresh token does not heal by waiting, only by reconnecting.
+   * A 401 while the token's own `exp` is STILL IN THE FUTURE — the server has
+   * disowned a credential that looks perfectly good locally. A revoked refresh
+   * token does not heal by waiting; it heals by reconnecting, OR by this same
+   * probe later answering `ok` (see `CodexCredentialService.probeSeat`, which
+   * RETRACTS the cooldown on a subsequent success — a verdict with no retraction
+   * path is a brick, not a fix).
    */
   | { kind: 'revoked'; httpStatus: number }
   /**
-   * 401/403 on a token that had ALREADY expired by the caller's clock. Not a new
+   * A 401 on a token that had ALREADY expired by the caller's clock. Not a new
    * fact — the stored bytes say this — and deliberately NOT `revoked`, so the two
    * can never collapse into one owner-facing message.
    */
@@ -79,10 +88,20 @@ export type CodexProbeOutcome =
   /** 429/408 — the seat is capped or throttled, which is cooling, not dead. */
   | { kind: 'rate_limited'; httpStatus: number }
   /**
-   * Any OTHER 4xx (400/404/410/422). This endpoint is undocumented ChatGPT-backend
-   * surface: if OpenAI moves it, EVERY seat starts 404ing at once, and folding that
-   * into `revoked` would disconnect an entire install in one deploy. Loud and
-   * separate, never a verdict on the credential.
+   * 403, and any OTHER 4xx (400/404/410/422). This endpoint is undocumented
+   * ChatGPT-backend surface: if OpenAI moves it, EVERY seat starts 404ing at once,
+   * and folding that into `revoked` would disconnect an entire install in one
+   * deploy. Loud and separate, never a verdict on the credential.
+   *
+   * 403 SITS HERE ON PURPOSE, and it did not always. chatgpt.com is
+   * edge/bot-management fronted and this request carries only `Authorization` +
+   * `Accept` — nothing like the real CLI's `User-Agent: codex_cli_rs/…`,
+   * `originator`, `chatgpt-account-id`. A bot-management 403 arrives on EVERY
+   * seat in the same second and says nothing whatever about the credential, so
+   * classifying it as `revoked` would cool an entire healthy pool off one edge
+   * rule. 401 is the status the endpoint was OBSERVED returning for a genuinely
+   * revoked token (`__fixtures__/codex-models-401-token-revoked.json`); it is the
+   * only status allowed to produce a credential verdict.
    */
   | { kind: 'rejected'; httpStatus: number }
   /** Timeout, transport failure, 5xx, or no token to send. Transient. Never a verdict. */
@@ -171,11 +190,11 @@ export async function probeCodexSeat(
     return { kind: 'unreachable', message: redactToken(raw, token) }
   }
   const status = res.status
-  if (status === 401 || status === 403) {
+  if (status === 401) {
     // THE WHOLE CLASSIFICATION, in one line: the server said no, and the token's
     // own clock says it should have said yes. Deliberately NOT keyed on the body's
     // `code` field, which was measured returning two different strings for the
-    // same condition two hours apart.
+    // same condition two hours apart. And deliberately 401 ONLY — see `rejected`.
     return input.expInFuture ? { kind: 'revoked', httpStatus: status } : { kind: 'expired', httpStatus: status }
   }
   if (status === 429 || status === 408) return { kind: 'rate_limited', httpStatus: status }

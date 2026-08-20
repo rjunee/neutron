@@ -220,6 +220,23 @@ export interface BoardBoundBuildDeps {
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * EXECUTOR LIVENESS, at the CHOKEPOINT — not at one caller.
+   *
+   * A build dispatched onto a positively-revoked Codex seat spends ~15 minutes
+   * resolving a workspace and assembling a brief for a `codex exec` that cannot
+   * start. The refusal has to live HERE because `dispatchBoardBoundBuild` has
+   * THREE production callers and wiring it per-caller covered exactly one of
+   * them: the agent tools were gated while the app's ▶ button
+   * (`open/composer.ts` `boardStartBuild`) and `/code`
+   * (`trident/code-command.ts`) — the owner's primary dispatch paths — kept the
+   * old behaviour verbatim.
+   *
+   * Optional, and every unwired or failing case dispatches: an absent preflight
+   * (a direct/test caller) is `{ok:true}`, and the implementation itself is
+   * required never to throw and to refuse only on a POSITIVE verdict.
+   */
+  preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 }
 
 export type BoardBoundBuildRejectionCode =
@@ -229,6 +246,7 @@ export type BoardBoundBuildRejectionCode =
   | 'review_needs_bound_pr'
   | 'underspecified'
   | 'already_landed'
+  | 'executor_unavailable'
   | 'backend_error'
 
 export type BoardBoundBuildResult =
@@ -320,6 +338,17 @@ export async function dispatchBoardBoundBuild(
     const readiness = assessDispatchReadiness(item)
     if (!readiness.ready) {
       return { ok: false, code: 'underspecified', message: readiness.reason ?? 'Plan item is underspecified.' }
+    }
+
+    // (3b) EXECUTOR LIVENESS — the last gate before anything is created, and
+    // deliberately INSIDE the not-a-review branch. The preflight's refusal is a
+    // sentence about the BUILD phase's executor; a `bound_pr` round does not run
+    // that phase, so refusing one with "the Build phase runs on Codex and …"
+    // would misattribute the cause. (Bound rounds are separately refused by the
+    // orchestrator; that is a different refusal, with its own reason.)
+    if (deps.preflight !== undefined) {
+      const gate = await deps.preflight()
+      if (!gate.ok) return { ok: false, code: 'executor_unavailable', message: gate.reason }
     }
   }
 

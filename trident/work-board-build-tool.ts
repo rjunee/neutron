@@ -160,9 +160,13 @@ export interface TridentBuildToolDeps {
    * every existing caller and every test that does not care about credentials
    * working.
    *
-   * IT RUNS BEFORE `dispatchBoardBoundBuild`, not inside it: the chokepoint's
-   * rules are about the ITEM (bound, specified, not a review in disguise), and a
-   * credential is not a property of the item.
+   * IT IS HANDED TO `dispatchBoardBoundBuild` RATHER THAN CALLED HERE, and that
+   * is the fix for a measured gap: called here it gated the two agent tools and
+   * nothing else, while the app's ▶ button and `/code` — which reach the same
+   * chokepoint by other routes — spawned the doomed lane exactly as before. The
+   * chokepoint also knows something this handler does not, namely whether the
+   * dispatch is a `bound_pr` REVIEW round, which must not be refused with a
+   * sentence about the Build phase's executor.
    */
   preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 }
@@ -229,11 +233,6 @@ export function registerTridentBuildToolSurface(
       // while chatting in project X lands on X's board (not General). Mirrors the
       // HTTP ▶ route (`work-board-surface.ts`), which scope-keys from the URL.
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
-      // EXECUTOR LIVENESS, before anything is created. A lane dispatched onto a
-      // revoked Codex seat spends ~15 minutes assembling a brief for a build that
-      // cannot start, then reports the CLI as the cause.
-      const preflight = await (deps.preflight?.() ?? Promise.resolve({ ok: true as const }))
-      if (!preflight.ok) return { ok: false, error: preflight.reason }
       // #339 — stamp the originating chat topic (resolved from the turn's
       // project_id) so the build's terminal result announces back to its chat.
       const delivery = deps.resolve_delivery?.(ctx.project_id)
@@ -250,6 +249,9 @@ export function registerTridentBuildToolSurface(
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
+        // shares (see BoardBoundBuildDeps.preflight).
+        ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
       }
       const result = await dispatchBoardBoundBuild(
         { board_item_id, task, ...(bound_pr !== undefined ? { bound_pr } : {}) },
@@ -343,10 +345,6 @@ export function registerTridentBuildToolSurface(
           }
         }
       }
-      // The SAME executor-liveness preflight as `work_board_dispatch_build` — a
-      // retry off a saved spec reaches the same dead seat as a fresh dispatch.
-      const startPreflight = await (deps.preflight?.() ?? Promise.resolve({ ok: true as const }))
-      if (!startPreflight.ok) return { ok: false, error: startPreflight.reason }
       const task =
         deps.resolve_task !== undefined
           ? await deps.resolve_task(scope, {
@@ -369,6 +367,9 @@ export function registerTridentBuildToolSurface(
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
+        // shares (see BoardBoundBuildDeps.preflight).
+        ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
       }
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {
