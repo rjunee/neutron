@@ -224,6 +224,23 @@ async function runWorkflow(
   return { captured, result, logs }
 }
 
+/**
+ * WHAT THE TRANSPORT BLOCKS ACTUALLY CARRY. Since 2026-08-19 the segments travel
+ * base64 (run `4908cbf7`: the agent deleted a phrase out of a prose heredoc, twice),
+ * so `prompt.toContain('<task text>')` can no longer see the payload — and a test that
+ * only asserted ABSENCE would have passed for the wrong reason forever after. These
+ * assertions decode first, so "the task is not in the prompt" stays falsifiable.
+ */
+function decodeTransport(prompt: string): string {
+  const re = /base64 -d >>? '[^']*' <<'(NEUTRON_CODEX_B64_EOF_P\d+)'\n([\s\S]*?)\n\1/g
+  let m: RegExpExecArray | null
+  let out = ''
+  while ((m = re.exec(prompt)) !== null) {
+    out += Buffer.from(String(m[2]).replace(/\n/g, ''), 'base64').toString('utf8')
+  }
+  return out
+}
+
 const LARGE_TASK = [
   ...Array.from({ length: 400 }, (_, i) => `${String(i).padStart(4, '0')} ${'task contract bytes '.repeat(4)}`),
   `${'é'.repeat(5000)} TASKBYTES_MARKER_Q9`,
@@ -384,7 +401,11 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
   test('a >30 KB task travels by path and is absent from every agent prompt', async () => {
     expect(new TextEncoder().encode(LARGE_TASK).length).toBeGreaterThan(30_000)
     const { captured } = await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: taskParts() })
-    for (const call of captured) expect(call.prompt).not.toContain('TASKBYTES_MARKER_Q9')
+    for (const call of captured) {
+      expect(call.prompt).not.toContain('TASKBYTES_MARKER_Q9')
+      // …and not hidden inside the encoded payload either.
+      expect(decodeTransport(call.prompt)).not.toContain('TASKBYTES_MARKER_Q9')
+    }
     const prompt = forgeBuildPrompt(captured)
     expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
     expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
@@ -403,7 +424,9 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     expect(byPath).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
     expect(byPath).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
     expect(fallback).toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
-    expect(fallback).toContain('TASKBYTES_MARKER_Q9')
+    // In fallback the task DOES transit the agent — encoded, so decode to see it.
+    // Paired with the by-path test above, which decodes and finds nothing.
+    expect(decodeTransport(fallback)).toContain('TASKBYTES_MARKER_Q9')
     expect(fallback).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
   })
 
@@ -527,7 +550,10 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
     )
     expect(blocks.length).toBeGreaterThanOrEqual(2)
     for (const block of blocks) {
-      expect(block.startsWith('cat ') || block.startsWith('printf ')).toBe(true)
+      // The transport is base64 since 2026-08-19 (run 4908cbf7: the agent deleted a
+      // phrase out of a prose heredoc, twice). Asserting the verb keeps this test
+      // honest about WHICH transport it just executed.
+      expect(block.startsWith('base64 -d ')).toBe(true)
     }
 
     for (const block of blocks) {

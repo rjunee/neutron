@@ -78,6 +78,8 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     'NO_PATTERN_KILL_RULE',
     [
       grabFunction('shSingleQuote'),
+      grabFunction('base64Encode'),
+      grabFunction('renderBriefChunks'),
       grabFunction('wrapperErrTailInstruction'),
       grabFunction('workflowStageStampCommand'),
       grabFunction('codexBuildPrompt'),
