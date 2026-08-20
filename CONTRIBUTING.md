@@ -112,46 +112,29 @@ you publish it:
 LEAK_GATE_PR_BODY="$(cat pr-body.md)" bash scripts/ci/leak-gate.sh --messages-only
 ```
 
-### Merge driver for the AS_BUILT log (anyone)
+### The as-built log has ONE writer (anyone)
 
-```sh
-bash scripts/install-merge-drivers.sh            # install
-bash scripts/install-merge-drivers.sh --check    # is THE CURRENT driver installed?
-bash scripts/install-merge-drivers.sh --uninstall
-```
+`docs/AS_BUILT.md` is the canonical, newest-first build log and the **only**
+place to read it. It has one entry per merged change, headed
+`## YYYY-MM-DD — title`.
 
-`--check` compares the command your clone actually has against the one the
-installer writes today, so a clone that ran an older version of this script is
-reported `STALE` rather than `installed`. The remedy it prints is the install
-command above — it is idempotent, so re-running it is always safe.
+Do not edit `docs/AS_BUILT.md` on a branch or PR, ever. Every build prepending
+at the same offset made any two open PRs conflict by construction, and GitHub
+never runs merge drivers server-side, so no local driver could fix the
+mergeability check. CI fails any PR whose diff touches the file.
 
-`docs/AS_BUILT.md` is newest-first, so every change prepends its entry at the
-same offset under the same header lines. Two branches doing that conflict by
-construction rather than by bad luck — on 2026-08-15 three concurrent builds
-failed to publish on that file and nothing else. This installs an **entry-aware**
-merge driver: it unions whole entries, so two branches that each added one get
-both, newest first, with neither spliced into the other. Anything it will not
-merge cleanly (both sides editing the same entry, a changed header) falls back
-to `git merge-file` and the ordinary conflict markers.
+Instead, stage exactly one entry as `.trident/as-built/<branch>.md`, mirroring
+the branch name as directories under `.trident/as-built/` just as
+`.trident/plans/` does. That gives every branch a unique path, so concurrent PRs
+cannot collide. The first non-blank line must be a single
+`## YYYY-MM-DD — title` heading (with spaces around the em dash), followed by
+the body. Put nothing above the heading and exactly one entry in the file.
 
-Unlike the hook above, this needs no secret and is useful to anyone who rebases
-a branch that touches the log. It is optional: **the attribute that binds the
-driver to the path is written to `.git/info/attributes`, not to a tracked
-`.gitattributes`**, so a clone that never runs this behaves exactly as it does
-today. That is deliberate. `docs/AS_BUILT.md merge=union` is the tracked floor
-every clone gets; committing `merge=as-built-log` on top would override it with
-a driver nobody has configured, and — measured on git 2.50.1 — a clone with no
-`merge.as-built-log.*` config falls back to the ordinary text merge, so the log
-would quietly go back to conflicting for everyone who had not run the installer.
-(A half-install, `merge.<name>.name` with no `.driver`, is the case that really
-is `fatal: … lacks command line`, exit 128.) The attribute and its driver arrive
-together or neither does: the installer checks every write, writes `.driver`
-before `.name` — measured on git 2.50.1, `.driver` alone merges fine while
-`.name` alone is the exit-128 abort — and rolls the pair back and exits non-zero
-rather than reporting success over a partial install.
-
-Trident's publisher runs this itself before replaying a branch, so builds get it
-without anyone remembering.
+After the merge lands, the outer loop folds every staged entry directly into
+`docs/AS_BUILT.md` on main, oldest-landed first so the newest ends topmost, and
+deletes each consumed staging file in the same commit. A colliding heading is
+retitled with the first free ` (n)` suffix. The staging directory is a consumed
+queue, never a second place to read the log.
 
 ## Pull requests
 

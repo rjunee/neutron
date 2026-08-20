@@ -664,6 +664,31 @@ export class TridentRunStore {
   }
 
   /**
+   * Distinct repositories across ALL runs — TERMINAL INCLUDED — newest activity
+   * first, using each repository's most recent run to choose its merge mode. The
+   * as-built catch-up must attempt each repo at most once per tick, and a fold the
+   * post-merge pass missed belongs to a run that is already `done`, so
+   * `listNonTerminal` cannot provide this inventory.
+   */
+  listDistinctRepos(): { repo_path: string; merge_mode: MergeMode }[] {
+    return this.db
+      .prepare<{ repo_path: string; merge_mode: string }, []>(
+        `SELECT run.repo_path, run.merge_mode
+           FROM code_trident_runs AS run
+          WHERE run.id = (
+            SELECT recent.id
+              FROM code_trident_runs AS recent
+             WHERE recent.repo_path = run.repo_path
+             ORDER BY recent.last_advanced_at DESC, recent.id DESC
+             LIMIT 1
+          )
+          ORDER BY run.last_advanced_at DESC, run.id DESC`,
+      )
+      .all()
+      .map((row) => ({ repo_path: row.repo_path, merge_mode: row.merge_mode === 'pr' ? 'pr' : 'local' }))
+  }
+
+  /**
    * A signature of "did anything a tick would care about change?" — the
    * wake-on-change watcher's ONE query, and the thing the sweep's own settle
    * compares against. One `<last_advanced_at>\t<id>` line per NON-TERMINAL run,

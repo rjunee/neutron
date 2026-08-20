@@ -7,6 +7,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
+import { interpretFailure } from './delivery.ts'
 import {
   buildTridentOrchestrator,
   isTridentHarvestTerminal,
@@ -91,6 +92,11 @@ function buildHarness(opts: {
   resolve_active_runs?: () => number
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
+  fold_as_built?: (
+    run: TridentRun,
+    base: string,
+  ) => Promise<import('./as-built-appender.ts').FoldStagedAsBuiltEntriesResult>
+  merge_deps?: import('./git-mode.ts').MergeCleanupDeps
   on_terminal?: TridentTerminalHook
   /** null exercises production base detection instead of the usual deterministic test base. */
   base_branch?: string | null
@@ -161,6 +167,10 @@ function buildHarness(opts: {
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
   if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
+  // Keep unrelated orchestrator tests hermetic: production defaults to the real
+  // appender, while the focused wiring tests below inject their own observable seam.
+  o.fold_as_built = opts.fold_as_built ?? (async () => ({ ok: true, folded: 0 }))
+  if (opts.merge_deps !== undefined) o.merge_deps = opts.merge_deps
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
     store,
@@ -2150,6 +2160,129 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   })
 })
 
+describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {
+  test('a performed pr-mode merge runs the fold once with the merged run and its resolved base', async () => {
+    const calls: { run: TridentRun; base: string }[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      fold_as_built: async (run, base) => {
+        calls.push({ run, base })
+        return { ok: true, folded: 1 }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' })
+
+    const final = await runToTerminal(h, run.id)
+
+    expect(final.phase).toBe('done')
+    expect(final.failure_reason).toBeNull()
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.base).toBe('main')
+    expect(calls[0]?.run.repo_path).toBe('/repo')
+    expect(calls[0]?.run.phase).toBe('done')
+    expect(calls[0]?.run.merge_mode).toBe('pr')
+  })
+
+  test('local mode folds too', async () => {
+    const calls: { run: TridentRun; base: string }[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      fold_as_built: async (run, base) => {
+        calls.push({ run, base })
+        return { ok: true, folded: 1 }
+      },
+    })
+    const run = await createRun()
+
+    expect((await runToTerminal(h, run.id)).phase).toBe('done')
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.base).toBe('main')
+    expect(calls[0]?.run.merge_mode).toBe('local')
+  })
+
+  test('a fold FAILURE VALUE leaves the merged run done and surfaces in the note', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
+      fold_as_built: async () => ({
+        ok: false,
+        folded: 0,
+        reason: 'could not land folded as-built entries: non-fast-forward',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' })
+
+    await h.loop.runOnce()
+    await h.complete()
+    const outcome = await h.step(store.get(run.id)!)
+
+    expect(outcome.run.phase).toBe('done')
+    expect(outcome.note).toContain('as-built fold deferred')
+    expect(outcome.note).toContain('non-fast-forward')
+    expect(await store.saveIfActive(outcome.run)).toBe(true)
+    expect(store.get(run.id)).toMatchObject({ phase: 'done', failure_reason: null })
+  })
+
+  test('a THROWING fold seam still leaves the run done', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      fold_as_built: async () => {
+        throw new Error('scratch worktree exploded')
+      },
+    })
+    const run = await createRun()
+
+    await h.loop.runOnce()
+    await h.complete()
+    const outcome = await h.step(store.get(run.id)!)
+
+    expect(outcome.run.phase).toBe('done')
+    expect(outcome.run.failure_reason).toBeNull()
+    expect(outcome.note).toContain('as-built fold deferred')
+    expect(outcome.note).toContain('scratch worktree exploded')
+    expect(await store.saveIfActive(outcome.run)).toBe(true)
+    expect(store.get(run.id)).toMatchObject({ phase: 'done', failure_reason: null })
+  })
+
+  test('every successful cleanup call folds, even when a stub reports performed=false', async () => {
+    const calls: TridentRun[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      fold_as_built: async (run) => {
+        calls.push(run)
+        return { ok: true, folded: 1 }
+      },
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(calls).toHaveLength(1)
+  })
+
+  test('a failed cleanup never runs the fold', async () => {
+    const calls: TridentRun[] = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {
+        mergeLocal: async () => {
+          throw new Error('cleanup failed before fold')
+        },
+      },
+      fold_as_built: async (run) => {
+        calls.push(run)
+        return { ok: true, folded: 1 }
+      },
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('cleanup failed before fold')
+    expect(calls).toHaveLength(0)
+  })
+})
+
 describe('sweepStrandedFailures', () => {
   async function failedPr(slug: string): Promise<TridentRun> {
     const run = await store.create({
@@ -2210,12 +2343,76 @@ describe('sweepStrandedFailures', () => {
       listFailedPrRuns: (): TridentRun[] => {
         throw new Error('database unavailable')
       },
+      listNonTerminal: (): TridentRun[] => [],
       update: async () => null,
     }
 
     await expect(
       sweepStrandedFailures({ store: brokenStore, reconcile: async () => null }),
     ).resolves.toBeUndefined()
+  })
+
+  test('a reused branch owned by a live run disables only worktree inspection', async () => {
+    const failed = await failedPr('reused-branch')
+    await store.create({
+      slug: 'replacement-run',
+      project_slug: 't1',
+      repo_path: '/repo',
+      task: 'replacement build',
+      phase: 'forge-init',
+      merge_mode: 'pr',
+      branch: failed.branch,
+    })
+    let inspectWorktree: boolean | undefined
+
+    await sweepStrandedFailures({
+      store,
+      reconcile: async (_run, options) => {
+        inspectWorktree = options?.inspect_worktree
+        return null
+      },
+    })
+
+    expect(inspectWorktree).toBe(false)
+  })
+
+  test('a failed branch with no live owner enables startup worktree inspection', async () => {
+    await failedPr('available-branch')
+    let inspectWorktree: boolean | undefined
+
+    await sweepStrandedFailures({
+      store,
+      reconcile: async (_run, options) => {
+        inspectWorktree = options?.inspect_worktree
+        return null
+      },
+    })
+
+    expect(inspectWorktree).toBe(true)
+  })
+
+  test('the same branch string in another project and repository is not a live owner', async () => {
+    const failed = await failedPr('cross-project-branch')
+    await store.create({
+      slug: 'unrelated-run',
+      project_slug: 't2',
+      repo_path: '/another-repo',
+      task: 'unrelated build',
+      phase: 'forge-init',
+      merge_mode: 'pr',
+      branch: failed.branch,
+    })
+    let inspectWorktree: boolean | undefined
+
+    await sweepStrandedFailures({
+      store,
+      reconcile: async (_run, options) => {
+        inspectWorktree = options?.inspect_worktree
+        return null
+      },
+    })
+
+    expect(inspectWorktree).toBe(true)
   })
 })
 
@@ -4187,5 +4384,88 @@ describe('hang watchdog — the stage-event reader is wired in production', () =
     // ONE row, not the whole history — this runs per in-flight run per tick.
     expect(src).toContain('ORDER BY id DESC')
     expect(src).toContain('LIMIT 1')
+  })
+})
+
+describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run f384460d)', () => {
+  test('an inner-error harvest carrying prNumber 0 keeps the known PR on the failed row', async () => {
+    // The f384460d trace: the run went terminal-failed with `checkpoint: 'inner-error'` and
+    // the wrapper's pr sentinel still attached. A failed run may lose its verdict — it may
+    // not lose its PR, or the recovery has nothing to point at.
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: 'inner-error',
+          prNumber: 0,
+          branch: 'feat-x',
+          remainingTasks: 0,
+        },
+      }),
+      // `detectExistingPr` runs at FIRE time, so this is how the row comes to hold pr=267.
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.pr).toBe(267)
+  })
+})
+
+/**
+ * T4 — RUN `f384460d` REPLAYED: AN INFRASTRUCTURE DEATH MUST NOT BE REPORTED AS A VERDICT.
+ *
+ * The build finished, then the inner workflow threw and its catch path wrote
+ * `{ ok:false, verdict:'REQUEST_CHANGES', checkpoint:'inner-error', findings: [] }`. That
+ * verdict is the wrapper's — no reviewer ever ran — so the harvested row must carry null.
+ */
+describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f384460d)', () => {
+  test('the replayed inner-error harvest fails with a null verdict, the PR intact, and an infra reason', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          ok: false,
+          prNumber: 0,
+          branch: 'feat-x',
+          verdict: 'REQUEST_CHANGES',
+          round: 1,
+          checkpoint: 'inner-error',
+          remainingTasks: 0,
+        },
+      }),
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBeNull()
+    expect(final.pr).toBe(267)
+    expect(final.failure_reason).toContain('build infrastructure failed')
+    expect(final.failure_reason).not.toContain('without Argus APPROVE')
+    expect(interpretFailure(final).klass).toBe('infra')
+  })
+
+  test('a genuine review exhaustion still reports REQUEST_CHANGES with review copy', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          round: 8,
+          checkpoint: 'argus-request-changes',
+          blockKind: 'code',
+          findings: [{ severity: 'blocker', title: 'null deref in a.ts' }],
+        },
+      }),
+      hostResponder: (cmd) => (cmd.join(' ').includes('gh pr list') ? ok('267') : ok()),
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.failure_reason).toContain('without Argus APPROVE')
+    expect(interpretFailure(final).klass).not.toBe('infra')
   })
 })

@@ -322,6 +322,25 @@ const briefCalls = (cmd: string): BriefCall[] => {
     // The block runs to the next CALL header, or to the run command that follows the
     // last one.
     const body = String(parts[i + 2]).split('\n\nTHEN run this ONE command:')[0]!.replace(/\n+$/, '')
+    // BASE64 SINCE 2026-08-19 (run `4908cbf7`): the agent deleted a phrase out of the
+    // middle of a prose heredoc, and did it again on the contractual retry. Decoding
+    // here keeps every assertion below speaking about the FILE, which is what the
+    // receipt covers, rather than about the transport.
+    const b64 = /^base64 -d (>>?) '([^']*)' <<'([^']+)'\n/.exec(body)
+    if (b64 !== null) {
+      const marker = b64[3]!
+      const rest = body.slice(b64[0].length)
+      if (!rest.endsWith(`\n${marker}`) && rest !== marker) {
+        throw new Error(`chunk ${(i + 2) / 3} does not close on its marker`)
+      }
+      const encoded = rest === marker ? '' : rest.slice(0, rest.length - marker.length)
+      calls.push({
+        redirect: b64[1] as '>' | '>>',
+        payload: Buffer.from(encoded.replace(/\n/g, ''), 'base64').toString('utf8'),
+        marker,
+      })
+      continue
+    }
     const here = /^cat (>>?) '([^']*)' <<'([^']+)'\n/.exec(body)
     if (here !== null) {
       const marker = here[3]!
@@ -876,8 +895,9 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(cmd).not.toContain('CODEX_REVIEW_MODEL=')
     // And the BRIEF travels with it — the same Forge contract the Claude builder
     // gets, so the two executors cannot be building to different rules.
-    expect(cmd).toContain('You are FORGE')
-    expect(cmd).toContain('do the thing')
+    // The brief is in the transport, not the prose: assert it on the ASSEMBLED file.
+    expect(assembledBrief(cmd)).toContain('You are FORGE')
+    expect(assembledBrief(cmd)).toContain('do the thing')
   })
 
   test('NO Anthropic model is requested for the build phase — with a positive control', async () => {
@@ -1140,7 +1160,7 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(fix!.prompt).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}'`)
     expect(fix!.opts['model'] ?? null).toBeNull()
     // …and it is still a FIX: the findings and the re-entry contract reached codex.
-    expect(fix!.prompt).toContain('You are FIXING')
+    expect(assembledBrief(fix!.prompt)).toContain('You are FIXING')
   })
 
   test('a fix round that LANDED but produced no diff stops instead of opening a panel', async () => {
@@ -1282,11 +1302,11 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     const prompt = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
     const measured = '/tmp/trident-codex-build-run-1.diff'
     expect(prompt).toContain(`NEUTRON_CODEX_BUILD_DIFF_FILE='${measured}'`)
-    expect(prompt).toContain(`this REPLACES it: write the branch diff to EXACTLY ${measured}`)
+    expect(assembledBrief(prompt)).toContain(`this REPLACES it: write the branch diff to EXACTLY ${measured}`)
     // Step 5's own example is still in the brief (both builders read one text), so the
     // coda has to say out loud that it supersedes it — which the line above does.
-    expect(prompt).toContain('/tmp/trident-a-run.diff')
-    expect(prompt).toContain('REPLACES steps 5 and 6 above')
+    expect(assembledBrief(prompt)).toContain('/tmp/trident-a-run.diff')
+    expect(assembledBrief(prompt)).toContain('REPLACES steps 5 and 6 above')
   })
 
   test('every pr-mode Forge brief stands down publishing for the outer loop', async () => {
@@ -1300,9 +1320,9 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // outer loop publishes and the brief says so.
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const codexPr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
-    expect(codexPr).toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
-    expect(codexPr).toContain('COMMIT LOCALLY')
-    expect(codexPr).toContain('Do NOT run `git push`')
+    expect(assembledBrief(codexPr)).toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
+    expect(assembledBrief(codexPr)).toContain('COMMIT LOCALLY')
+    expect(assembledBrief(codexPr)).toContain('Do NOT run `git push`')
 
     // The Claude builder obeys the same boundary; credentials must be absent from
     // every inner executor, not merely from codex.
@@ -1313,12 +1333,13 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     expect(claudePr).toContain('durable outer loop publishes')
     expect(claudePr).not.toContain('open a PR with `gh pr create`')
     expect(claudePr).not.toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
-    expect(codexPr).not.toContain('open a PR with `gh pr create`')
+    // Decoded, so this ABSENCE stays falsifiable — against the raw prompt it could not fail.
+    expect(assembledBrief(codexPr)).not.toContain('open a PR with `gh pr create`')
 
     // LOCAL MODE STANDS NOTHING DOWN, because there was never anything to publish:
     // step 4 already says "commit on the branch, do NOT push".
     const codexLocal = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
-    expect(codexLocal).toContain('do NOT push or run `gh pr create`')
+    expect(assembledBrief(codexLocal)).toContain('do NOT push or run `gh pr create`')
     expect(codexLocal).not.toContain("STEP 4'S PUSH AND PR ARE NOT YOURS")
   })
 
