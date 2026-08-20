@@ -813,10 +813,21 @@ export default function IntegrationsScreen() {
                     ? 'Connected — cross-model review is on'
                     : codexStatus.status === 'expired'
                       ? 'Expired — paste a fresh auth.json to reconnect'
-                      : 'Not connected — reviews run without a second model family'}
+                      : // REVOKED IS ITS OWN LINE, not a quieter "expired". The token
+                        // has NOT run out; ChatGPT has disowned it (the same account
+                        // signed in elsewhere), so "wait for a refresh" is the one
+                        // thing that cannot work.
+                        codexStatus.status === 'revoked'
+                        ? 'Session revoked — reconnect (re-run `codex login` and paste the fresh auth.json)'
+                        : 'Not connected — reviews run without a second model family'}
               </Text>
             </View>
-            {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+            {/* A REVOKED SEAT MUST KEEP ITS DISCONNECT BUTTON. Without this arm the
+                one state that most needs removing from the phone is the one state
+                with no affordance to remove it. */}
+            {codexStatus?.status === 'connected' ||
+            codexStatus?.status === 'expired' ||
+            codexStatus?.status === 'revoked' ? (
               <Pressable
                 accessibilityRole="button"
                 accessibilityLabel="Disconnect Codex"

@@ -245,7 +245,27 @@ export function removeCodexAuth(codexHome: string): void {
   if (existsSync(target)) rmSync(target)
 }
 
-export type CodexConnectionStatus = 'connected' | 'expired' | 'not_connected'
+/**
+ * `revoked` is NOT a quieter `expired`, and collapsing the two is the bug this
+ * union exists to prevent. `expired` is a fact the stored bytes state (the JWT's
+ * own `exp` is in the past) and it heals on a refresh; `revoked` is a fact only
+ * the SERVER knows (the refresh token was invalidated because the same ChatGPT
+ * account was logged in elsewhere), it cannot be read locally at all, and nothing
+ * but pasting a fresh bundle fixes it. Telling an owner with a revoked seat to
+ * "wait for a refresh" is the misdirection that cost measured hours.
+ */
+export type CodexConnectionStatus = 'connected' | 'expired' | 'revoked' | 'not_connected'
+
+/**
+ * What a LIVE probe of the seat found, if one has run.
+ *
+ * `unknown` is the default and means exactly that — no probe result is available
+ * (never probed, probe unreachable, rate-limited, or the endpoint answered
+ * something unexpected). It is deliberately indistinguishable from "not probed":
+ * every non-verdict must leave the stored-bytes reading in charge, because the
+ * alternative is a dropped packet disconnecting a healthy subscription.
+ */
+export type CodexProbeVerdict = 'ok' | 'revoked' | 'unknown'
 
 export interface CodexStatusDetail {
   status: CodexConnectionStatus
@@ -261,7 +281,7 @@ export interface CodexStatusDetail {
  * Returns null if the token isn't a decodeable JWT (the CLI still refreshes via
  * refresh_token, so a non-JWT opaque token is treated as non-expiring here).
  */
-function decodeJwtExpMs(accessToken: string): number | null {
+export function decodeJwtExpMs(accessToken: string): number | null {
   const parts = accessToken.split('.')
   if (parts.length < 2) return null
   try {
@@ -274,15 +294,53 @@ function decodeJwtExpMs(accessToken: string): number | null {
 }
 
 /**
- * Derive connection status from a stored/normalized auth.json string.
- * `connected` = valid subscription tokens whose access token has NOT expired;
+ * The access token to PROBE WITH, and whether its own clock says it should still
+ * work — the two inputs `probeCodexSeat` needs, read here so there is exactly ONE
+ * JWT parser in the repo.
+ *
+ * Returns null when there is nothing to probe (no/invalid auth, no access token),
+ * which is also the signal never to make a network call for this seat: probing an
+ * unconnected seat is a request that can only produce a misleading answer.
+ */
+export function codexProbeSubject(
+  authJson: string | null,
+  now: () => number = Date.now,
+): { accessToken: string; expInFuture: boolean } | null {
+  if (authJson === null || authJson.trim().length === 0) return null
+  let file: CodexAuthFile
+  try {
+    file = JSON.parse(authJson) as CodexAuthFile
+  } catch {
+    return null
+  }
+  const access = file.tokens?.access_token
+  if (typeof access !== 'string' || access.length === 0) return null
+  const expMs = decodeJwtExpMs(access)
+  // An OPAQUE token has no stated expiry, so age cannot explain a 401 on one —
+  // `true` is the reading that keeps a revoked opaque token classifiable.
+  return { accessToken: access, expInFuture: expMs === null || expMs > now() }
+}
+
+/**
+ * Derive connection status from a stored/normalized auth.json string, plus (when
+ * one is available) what a LIVE probe of the seat found.
+ *
+ * `connected` = valid subscription tokens whose access token has NOT expired and
+ * which no probe has contradicted;
  * `expired` = tokens present but the access-token JWT `exp` is in the past
  * (still recoverable via `codex login`/refresh, so we surface it distinctly);
+ * `revoked` = the bytes look fine and are not expired, but the server REFUSED
+ * them — invisible locally, so this can only ever come from `probe`;
  * `not_connected` = no/invalid auth.
+ *
+ * THE ORDER OF THE LAST TWO IS LOAD-BEARING. The expiry branch is checked FIRST
+ * and is unchanged, so a probe verdict can never turn an expired token into a
+ * `revoked` one: the two states have different remedies and an owner who is told
+ * the wrong one does the wrong thing.
  */
 export function deriveCodexStatus(
   authJson: string | null,
-  opts: { materialized: boolean; now?: () => number },
+  opts: { materialized: boolean; now?: () => number; probe?: CodexProbeVerdict },
 ): CodexStatusDetail {
   const now = opts.now ?? Date.now
   if (authJson === null || authJson.trim().length === 0) {
@@ -305,6 +363,18 @@ export function deriveCodexStatus(
       materialized: opts.materialized,
       expires_at: new Date(expMs).toISOString(),
       detail: 'Codex subscription token expired — re-run `codex login` and paste the fresh auth.json.',
+    }
+  }
+  if (opts.probe === 'revoked') {
+    return {
+      status: 'revoked',
+      materialized: opts.materialized,
+      ...(expMs !== null ? { expires_at: new Date(expMs).toISOString() } : {}),
+      detail:
+        'Codex subscription REVOKED server-side — the stored token still looks valid locally but ' +
+        'ChatGPT refuses it (the same account was almost certainly logged in elsewhere, which ' +
+        'rotates the refresh token). Waiting will not fix it: re-run `codex login` and reconnect ' +
+        'with the fresh auth.json.',
     }
   }
   return {

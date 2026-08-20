@@ -28,6 +28,7 @@ import type { CredentialScope } from '@neutronai/project-credentials/store.ts'
 import type { OwnerHandle } from '@neutronai/persistence/index.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import {
+  codexProbeSubject,
   codexProjectHome,
   deriveCodexStatus,
   materializeCodexAuth,
@@ -35,8 +36,10 @@ import {
   readMaterializedAuth,
   removeCodexAuth,
   validateCodexSubscriptionAuth,
+  type CodexProbeVerdict,
   type CodexStatusDetail,
 } from './codex-auth.ts'
+import { probeCodexSeat, type CodexProbeDeps, type CodexProbeOutcome } from './codex-probe.ts'
 import {
   DEFAULT_SLOT,
   isCooling,
@@ -67,6 +70,18 @@ export const CODEX_ACCOUNT_SERVICE_PREFIX = 'codex-acct-'
 /** The `project_credentials.service` name backing a slot. */
 export function codexSlotService(slot: string): string {
   return slot === DEFAULT_SLOT ? CODEX_CREDENTIAL_SERVICE : `${CODEX_ACCOUNT_SERVICE_PREFIX}${slot}`
+}
+
+/**
+ * The liveness-cache key for a PER-PROJECT override.
+ *
+ * Prefixed so it can never collide with a slot id: slot ids are slugs
+ * (`[a-z0-9][a-z0-9-]*`) and cannot contain `:`, so no project can be mistaken
+ * for a seat in the rotation pool — which matters because an override is
+ * deliberately out of rotation and must never be cooled by seat bookkeeping.
+ */
+export function projectSeatKey(project_id: string): string {
+  return `project:${project_id}`
 }
 
 /** The slot a service name belongs to, or null when it is not a codex seat. */
@@ -167,6 +182,21 @@ export function codexExecutorAvailability(opts: {
   codexHome: string | null
   /** The environment the BUILD will be launched with — its PATH is the one that counts. */
   env: Record<string, string | undefined>
+  /**
+   * Whether EVERY connected seat has been probed and refused server-side
+   * (`CodexCredentialService.everySeatRevoked`). Optional and defaulting to
+   * false, so a caller that cannot answer the question behaves exactly as before.
+   *
+   * A FOURTH CONDITION, not a rewrite of the first: `codexHome` being non-null
+   * says a credential EXISTS, which is a different fact from the credential
+   * WORKING — and the gap between those two is measured at ~15 minutes of a
+   * lane's life, spent assembling a brief for a build that cannot start.
+   *
+   * ONLY EVER SET FROM A POSITIVE PROBE VERDICT. An unreachable endpoint, a 5xx
+   * and a 429 all leave it false, because greying every codex tier on a box that
+   * briefly lost its network would be a worse outage than the one this fixes.
+   */
+  seatsRevoked?: boolean
 }): CodexAvailability {
   if (opts.codexHome === null) return { usable: false, reason: 'needs a Codex connection' }
   if (!codexCliOnPath(opts.env)) {
@@ -174,6 +204,14 @@ export function codexExecutorAvailability(opts: {
   }
   if (!codexBuildPerlOnPath(opts.env)) {
     return { usable: false, reason: 'needs perl installed on this machine' }
+  }
+  if (opts.seatsRevoked === true) {
+    return {
+      usable: false,
+      reason:
+        'the connected Codex seat was REVOKED server-side — reconnect it (re-run `codex login` ' +
+        'and paste the fresh auth.json); waiting will not fix it',
+    }
   }
   return { usable: true }
 }
@@ -230,6 +268,14 @@ export interface CodexCredentialServiceDeps {
    *  without its cross-model seat. Values are scalars only, matching the logger's
    *  own field type, so nothing here can ever serialize a credential object. */
   log?: (event: string, fields: Record<string, string | number | boolean | null | undefined>) => void
+  /**
+   * The LIVE seat probe. Injected in tests; production uses `probeCodexSeat`.
+   *
+   * Injected as a whole function rather than as a `fetch` so a test can assert on
+   * CALL COUNT (the TTL cache is only real if two status reads make one request)
+   * without standing up an HTTP server for every case.
+   */
+  probe?: (input: { accessToken: string; expInFuture: boolean }, deps?: CodexProbeDeps) => Promise<CodexProbeOutcome>
 }
 
 /**
@@ -241,6 +287,23 @@ export interface CodexCredentialServiceDeps {
  * only re-read the same bytes.
  */
 export const HARVEST_MIN_INTERVAL_MS = 60_000
+
+/**
+ * Shortest gap between two LIVE probes of the same seat.
+ *
+ * Same reasoning as {@link HARVEST_MIN_INTERVAL_MS} and the same number, but the
+ * cost being throttled is a NETWORK round-trip rather than a directory walk. The
+ * settings pane polls codex status; without this, every poll would put one
+ * request per seat on chatgpt.com — which is both rude and a way to earn the 429
+ * the probe is supposed to be able to distinguish.
+ */
+export const SEAT_LIVENESS_TTL_MS = 60_000
+
+/** A cached probe verdict and when it was taken. */
+interface LivenessEntry {
+  verdict: CodexProbeVerdict
+  at: number
+}
 
 /** One seat as the owner sees it. Never carries token material. */
 export interface CodexAccountSummary {
@@ -286,12 +349,36 @@ export class CodexCredentialService {
     fields: Record<string, string | number | boolean | null | undefined>,
   ) => void
 
+  private readonly probe: (
+    input: { accessToken: string; expInFuture: boolean },
+    deps?: CodexProbeDeps,
+  ) => Promise<CodexProbeOutcome>
+  /**
+   * The last probe verdict per seat, keyed `<owner>|<seat key>`.
+   *
+   * IN-PROCESS AND DELIBERATELY NOT PERSISTED. The durable half of a `revoked`
+   * verdict is the `unauthorized` cooldown this writes into the rotation store —
+   * a state that already exists, already survives a restart, and is already
+   * cleared only by a reconnect. Persisting the cache too would be a second
+   * source of truth for the same fact, and the two would disagree the first time
+   * one was written without the other.
+   */
+  private readonly liveness = new Map<string, LivenessEntry>()
+  /**
+   * One in-flight probe per seat. Two concurrent readers (the polled pane and an
+   * agent's `codex_status`) must not both put a request on the wire for the same
+   * token — the TTL check alone cannot stop that, because neither has written a
+   * verdict yet when the second one checks.
+   */
+  private readonly livenessInflight = new Map<string, Promise<void>>()
+
   constructor(deps: CodexCredentialServiceDeps) {
     this.store = deps.store
     this.codexHome = deps.codexHome
     this.rotation = deps.rotation
     this.now = deps.now ?? Date.now
     this.log = deps.log ?? (() => {})
+    this.probe = deps.probe ?? probeCodexSeat
   }
 
   /** The CODEX_HOME dir for a given scope/project (global default or override). */
@@ -364,16 +451,175 @@ export class CodexCredentialService {
     const scope = resolved?.scope ?? null
     const home = scope === 'project' ? codexProjectHome(this.codexHome, project_id) : this.codexHome
     const materialized = readMaterializedAuth(home) !== null
+    // WHICH SEAT THIS READING IS ABOUT. A project override is its own seat and is
+    // out of rotation entirely; the global default IS the `default` slot's row
+    // (`codexSlotService(DEFAULT_SLOT) === CODEX_CREDENTIAL_SERVICE`), so the two
+    // paths share one cache entry rather than probing the same token twice.
+    const seat = scope === 'project' ? projectSeatKey(project_id) : DEFAULT_SLOT
+    // The in-process cache OR the durable cooldown. The cooldown is what survives
+    // a gateway restart, so a seat probed dead an hour ago still reads `revoked`
+    // instead of quietly reverting to `connected` the moment the TTL lapses.
+    const cooledUnauthorized =
+      scope !== 'project' &&
+      this.rotation.listSlots(owner_slug).some((s) => s.slot === seat && s.cooling_reason === 'unauthorized')
+    const cached = this.cachedVerdict(owner_slug, seat)
+    const probe: CodexProbeVerdict = cooledUnauthorized ? 'revoked' : cached
     // A project-override ROW (expired or not) — so the UI can always remove a
     // stale override even when the resolver has fallen back to the global default.
     const override_present =
       project_id.length > 0 &&
       this.store.getMeta(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE) !== null
     return {
-      ...deriveCodexStatus(stored, { materialized, now: this.now }),
+      ...deriveCodexStatus(stored, { materialized, now: this.now, probe }),
       scope,
       ...(project_id.length > 0 ? { override_present } : {}),
     }
+  }
+
+  /**
+   * ASK THE SERVER whether each connected seat's token still works, and remember
+   * the answer for {@link SEAT_LIVENESS_TTL_MS}.
+   *
+   * ── WHY THIS IS ASYNC AND EVERYTHING THAT READS IT IS NOT ───────────────────
+   * `resolveActiveCodexHome` is SYNCHRONOUS BY CONTRACT — the orchestrator calls
+   * it at fire time and `buildRunCodexHomeResolver` returns `string | null`, not a
+   * promise. Awaiting a network call there would ripple into
+   * `trident/orchestrator.ts` and is the one change in this area that could take
+   * down every build. So the probe is a SIDE CHANNEL: it runs async, and the fact
+   * it discovers is written into the `unauthorized` cooldown — an EXISTING state
+   * that never expires on a timer and is cleared only by a reconnect — which
+   * every synchronous path can already read.
+   *
+   * NEVER THROWS and never rejects: it is awaited on a read-only status path and
+   * fired-and-forgotten elsewhere.
+   */
+  async refreshSeatLiveness(owner_slug: OwnerHandle, target?: CodexTarget): Promise<void> {
+    const jobs: Array<Promise<void>> = []
+    const project_id = (target?.project_id ?? '').trim()
+    if (project_id.length > 0) {
+      const resolved = this.store.resolve(owner_slug, project_id, CODEX_CREDENTIAL_SERVICE)
+      // Only a REAL override is a separate seat; a fallback to the global default
+      // is the `default` slot, probed by the loop below.
+      if (resolved !== null && resolved.scope === 'project') {
+        jobs.push(this.probeSeat(owner_slug, projectSeatKey(project_id), resolved.plaintext, null))
+      }
+    }
+    for (const seat of this.syncSlots(owner_slug)) {
+      const stored = this.store.resolve(owner_slug, undefined, codexSlotService(seat.slot))
+      if (stored === null) continue
+      jobs.push(this.probeSeat(owner_slug, seat.slot, stored.plaintext, seat.slot))
+    }
+    await Promise.all(jobs)
+  }
+
+  /**
+   * The same refresh, for a SYNCHRONOUS caller (the settings pane's availability
+   * closure). Starts the probe, returns immediately, and can never surface as an
+   * unhandled rejection.
+   */
+  kickSeatLiveness(owner_slug: OwnerHandle, target?: CodexTarget): void {
+    fireAndForget('codex_seat_liveness', this.refreshSeatLiveness(owner_slug, target))
+  }
+
+  /**
+   * One seat's probe, TTL-throttled and in-flight-deduplicated.
+   *
+   * EVERY NON-VERDICT IS STAMPED TOO ('unknown'), which is what stops a wedged or
+   * unreachable endpoint from earning one request per poll forever.
+   */
+  private async probeSeat(
+    owner_slug: OwnerHandle,
+    seat: string,
+    plaintext: string,
+    coolSlot: string | null,
+  ): Promise<void> {
+    const key = `${owner_slug}|${seat}`
+    const cached = this.liveness.get(key)
+    if (cached !== undefined && this.now() - cached.at < SEAT_LIVENESS_TTL_MS) return
+    const running = this.livenessInflight.get(key)
+    if (running !== undefined) return running
+    // NEVER PROBE A SEAT WITH NOTHING TO PROBE. An unreadable bundle or a missing
+    // access token is already `not_connected` from the stored bytes, and a request
+    // with no credential could only ever come back 401 — which is exactly the
+    // answer that must not be manufactured.
+    const subject = codexProbeSubject(plaintext, this.now)
+    if (subject === null) return
+    const job = (async (): Promise<void> => {
+      const outcome = await this.probe(subject)
+      const at = this.now()
+      if (outcome.kind === 'ok') {
+        this.liveness.set(key, { verdict: 'ok', at })
+        return
+      }
+      if (outcome.kind === 'revoked') {
+        this.liveness.set(key, { verdict: 'revoked', at })
+        if (coolSlot !== null) {
+          // THE DURABLE HALF. `unauthorized` is the one cooling reason that
+          // ignores `cooling_until` forever and is cleared only by
+          // `markConnected` (a reconnect) — precisely the semantics of a revoked
+          // refresh token, already implemented, reused rather than rebuilt.
+          this.rotation.setCooldown(owner_slug, coolSlot, {
+            cooling_until: at,
+            cooling_reason: 'unauthorized',
+          })
+        }
+        this.log('codex_seat_revoked', {
+          slot: coolSlot ?? seat,
+          http_status: outcome.httpStatus,
+          detail: 'ChatGPT refused this seat’s token though it is not expired; reconnect it',
+        })
+        return
+      }
+      // 'unreachable' | 'rate_limited' | 'rejected' | 'expired' — NOT VERDICTS.
+      // A dropped packet, a 5xx, a capped seat or a moved endpoint must never
+      // disconnect a live subscription, so the stored-bytes reading stays in
+      // charge and NOTHING is cooled.
+      this.liveness.set(key, { verdict: 'unknown', at })
+      if (outcome.kind !== 'expired') {
+        this.log('codex_seat_probe_inconclusive', {
+          slot: coolSlot ?? seat,
+          outcome: outcome.kind,
+          ...(outcome.kind === 'unreachable'
+            ? { detail: outcome.message }
+            : { http_status: outcome.httpStatus }),
+        })
+      }
+    })().catch(() => {
+      // The probe is documented never to throw; this is the belt on the braces,
+      // because a status read that rejects reports nothing at all.
+      this.liveness.set(key, { verdict: 'unknown', at: this.now() })
+    })
+    this.livenessInflight.set(key, job)
+    try {
+      await job
+    } finally {
+      this.livenessInflight.delete(key)
+    }
+  }
+
+  /** The cached probe verdict for a seat, or `unknown` when the cache is cold/stale. */
+  private cachedVerdict(owner_slug: OwnerHandle, seat: string): CodexProbeVerdict {
+    const cached = this.liveness.get(`${owner_slug}|${seat}`)
+    if (cached === undefined) return 'unknown'
+    // A verdict is only as good as its TTL — past it, fall back to the stored
+    // bytes rather than reporting a fact that may be hours old.
+    if (this.now() - cached.at >= SEAT_LIVENESS_TTL_MS) return 'unknown'
+    return cached.verdict
+  }
+
+  /**
+   * Is this owner's ACTIVE codex seat known-dead? Synchronous, and the whole
+   * point of writing the probe verdict into the cooldown.
+   *
+   * Reads the DURABLE state (the `unauthorized` cooldown), not the in-process
+   * cache, so a gateway that restarted still refuses to spawn a doomed lane.
+   * Returns true only when EVERY connected seat is cooled `unauthorized`: one
+   * healthy seat in a pool means rotation has somewhere to go.
+   */
+  everySeatRevoked(owner_slug: OwnerHandle): boolean {
+    const slots = this.syncSlots(owner_slug)
+    if (slots.length === 0) return false
+    return slots.every((s) => s.cooling_reason === 'unauthorized')
   }
 
   /**
@@ -813,7 +1059,17 @@ export class CodexCredentialService {
       const home = this.slotHome(s.slot)
       const stored = this.store.resolve(owner_slug, undefined, codexSlotService(s.slot))
       const materialized = readMaterializedAuth(home) !== null
-      const derived = deriveCodexStatus(stored?.plaintext ?? null, { materialized, now: this.now })
+      const derived = deriveCodexStatus(stored?.plaintext ?? null, {
+        materialized,
+        now: this.now,
+        // A seat cooled `unauthorized` is reported REVOKED even after the
+        // in-process cache has aged out: the cooldown is the durable record of
+        // the probe, and it outlives both the TTL and the process.
+        probe:
+          this.cachedVerdict(owner_slug, s.slot) === 'revoked' || s.cooling_reason === 'unauthorized'
+            ? 'revoked'
+            : this.cachedVerdict(owner_slug, s.slot),
+      })
       return {
         slot: s.slot,
         label: s.label,

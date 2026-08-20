@@ -479,6 +479,7 @@ import {
   CodexCredentialService,
   codexExecutorAvailability,
 } from '@neutronai/trident/codex-credential.ts'
+import { codexDispatchPreflight } from '@neutronai/trident/codex-dispatch-preflight.ts'
 import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import {
   defaultGitModeProbe,
@@ -3696,13 +3697,23 @@ export function buildOpenGraphComposer(
       // override, and it is a different subprocess). A future caller that DID override
       // it would have to update this answer with it — hence the note rather than a
       // silent assumption.
-      connections: () => ({
-        codex: codexExecutorAvailability({
-          codexHome: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)),
-          env,
-        }),
-        kimi: kimiConfigured(),
-      }),
+      connections: () => {
+        // START a probe and read the DURABLE verdict. The pane's answer must stay
+        // synchronous (`resolveActiveCodexHome` is synchronous by contract), so
+        // this cannot await: it kicks the TTL-throttled probe fire-and-forget and
+        // reads the `unauthorized` cooldown the previous one wrote. The pane
+        // polls, so the second load carries the answer — and the answer survives
+        // a restart, unlike an in-process cache.
+        codexCredentialService.kickSeatLiveness(asOwnerHandle(owner_handle))
+        return {
+          codex: codexExecutorAvailability({
+            codexHome: codexCredentialService.resolveActiveCodexHome(asOwnerHandle(owner_handle)),
+            env,
+            seatsRevoked: codexCredentialService.everySeatRevoked(asOwnerHandle(owner_handle)),
+          }),
+          kimi: kimiConfigured(),
+        }
+      },
     })
     const voiceTranscriptionSurface = createVoiceTranscriptionSurface({
       auth: appOwnerAuth,
@@ -6730,6 +6741,41 @@ export function buildOpenGraphComposer(
               // build dispatch/start confirms in the chat immediately (the
               // terminal result still announces later via resolve_delivery/#339).
               chat_ack: workBoardChatAck,
+              // EXECUTOR LIVENESS BEFORE THE LANE EXISTS. Refuses the dispatch
+              // ONLY when the owner's BUILD phase actually dispatches to codex
+              // AND every seat has been probed and positively refused by the
+              // ChatGPT backend. A Claude build, or a codex build on a box that
+              // simply cannot reach chatgpt.com, is unaffected — the fix must not
+              // be a bigger outage than the defect.
+              preflight: () =>
+                codexDispatchPreflight({
+                  phaseModels: () => {
+                    try {
+                      return readTridentPhaseModels(db, owner_handle)
+                    } catch {
+                      return {}
+                    }
+                  },
+                  refreshLiveness: () =>
+                    codexCredentialService.refreshSeatLiveness(asOwnerHandle(owner_handle)),
+                  everySeatRevoked: () =>
+                    codexCredentialService.everySeatRevoked(asOwnerHandle(owner_handle)),
+                  // The SAME sentence the settings pane greys the codex tiers
+                  // with, from the same function, so the two can never disagree
+                  // about why a build cannot run.
+                  reason: () => {
+                    const availability = codexExecutorAvailability({
+                      codexHome: codexCredentialService.resolveActiveCodexHome(
+                        asOwnerHandle(owner_handle),
+                      ),
+                      env,
+                      seatsRevoked: true,
+                    })
+                    return availability.usable
+                      ? 'the connected Codex seat was revoked — reconnect it'
+                      : `Refusing to start this build: the Build phase runs on Codex and ${availability.reason}. No run was created.`
+                  },
+                }),
             },
           }
         : {}),

@@ -886,17 +886,66 @@ rm -f "$TRAILER_TMP" "$TRAILER_FILE"
 # ── DEFERRED precheck: auth must be live. 3× retry, 6s per-attempt wall cap ────
 # Ported from the review wrapper: a genuine expiry fails every attempt; a transient
 # blip recovers on attempt 2/3, so a flaky network is not a failed build.
+#
+# `codex login status` IS A LOCAL FILE READ AND IT PASSES ON A DEAD SEAT. Measured
+# 2026-08-20, both commands in one shell, one second apart, one credential:
+#
+#     $ codex login status          → "Logged in using ChatGPT"   exit 0
+#     $ GET …/backend-api/codex/models → 401 {"code":"token_revoked"}
+#
+# That gap is where ~15 minutes of a lane's life go: nothing between the status
+# tool and the model call was capable of noticing, so the build assembled a brief
+# and then died on `refresh_token_invalidated`, blaming the CLI. One authenticated
+# GET closes it, costs no quota, and answers in ~200ms.
+#
+# ONLY A 401/403 FAILS THE PRECHECK. No curl, no readable token, a timeout, a 5xx,
+# a 429 or an unexpected 4xx all leave the local check in charge — this step used
+# to be offline-safe and must not become a new way for a network blip to stop a
+# build. And the failure stays exit 3 (DEFERRED), never a hard fail.
+CODEX_AUTH_PROBE_URL="${NEUTRON_CODEX_AUTH_PROBE_URL:-https://chatgpt.com/backend-api/codex/models?client_version=0.147.0}"
+codex_auth_probe_status() {
+  command -v curl >/dev/null 2>&1 || { printf 'skip\n'; return 0; }
+  local token cfg code
+  token=$(perl -0777 -ne 'print $1 if /"access_token"\s*:\s*"([^"]+)"/' "$CODEX_HOME/auth.json" 2>/dev/null)
+  [ -n "${token:-}" ] || { printf 'skip\n'; return 0; }
+  cfg=$(mktemp "${TMPDIR:-/tmp}/codex-auth-probe.XXXXXX" 2>/dev/null) || { printf 'skip\n'; return 0; }
+  chmod 600 "$cfg" 2>/dev/null || true
+  # THE TOKEN NEVER ENTERS ARGV. `ps` publishes every process's command line to
+  # every local user, so `-H "Authorization: Bearer …"` would leak the credential
+  # for the life of the request; curl reads the header from this 0600 file.
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$cfg"
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    --max-time "${NEUTRON_CODEX_AUTH_PROBE_TIMEOUT:-6}" \
+    -K "$cfg" -H 'Accept: application/json' "$CODEX_AUTH_PROBE_URL" 2>/dev/null)
+  rm -f "$cfg"
+  [ -n "${code:-}" ] || code=000
+  printf '%s\n' "$code"
+}
 AUTH_RETRY_DELAY="${NEUTRON_CODEX_AUTH_RETRY_DELAY:-2}"
 codex_auth_ok=0
+codex_auth_probe_code=''
 for attempt in 1 2 3; do
   if bounded /dev/null 6 codex login status; then
-    codex_auth_ok=1
-    break
+    codex_auth_probe_code="$(codex_auth_probe_status)"
+    case "$codex_auth_probe_code" in
+      401 | 403) : ;; # the server refused the seat — retry, then DEFER below
+      *)
+        codex_auth_ok=1
+        break
+        ;;
+    esac
   fi
   [ "$attempt" -lt 3 ] && sleep "$AUTH_RETRY_DELAY"
 done
 if [ "$codex_auth_ok" -ne 1 ]; then
-  echo "CODEX_BUILD_AUTH_EXPIRED: codex auth invalid/unreachable after 3 attempts (CODEX_HOME=$CODEX_HOME). DEFERRED — re-auth with 'codex login'." >&2
+  case "$codex_auth_probe_code" in
+    401 | 403)
+      echo "CODEX_BUILD_AUTH_EXPIRED: codex auth is REVOKED — 'codex login status' passes (it only reads the local file) but the ChatGPT backend answered HTTP $codex_auth_probe_code for this token (CODEX_HOME=$CODEX_HOME). DEFERRED — waiting will not fix it: re-auth with 'codex login' and reconnect the seat." >&2
+      ;;
+    *)
+      echo "CODEX_BUILD_AUTH_EXPIRED: codex auth invalid/unreachable after 3 attempts (CODEX_HOME=$CODEX_HOME). DEFERRED — re-auth with 'codex login'." >&2
+      ;;
+  esac
   exit 3
 fi
 

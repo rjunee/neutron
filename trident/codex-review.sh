@@ -76,16 +76,56 @@ fi
 # ── DEFERRED precheck: auth must be live. 3× retry, 6s per-attempt wall cap ────
 # A genuine expiry fails every attempt (detected → DEFERRED); a transient blip
 # recovers on attempt 2/3 (no false DEFERRED). Ported verbatim from the legacy harness.
+#
+# …AND `codex login status` ONLY READS A LOCAL FILE, so it passes on a seat the
+# server has revoked (measured 2026-08-20: `Logged in using ChatGPT`, exit 0, one
+# second before the same credential got 401 `token_revoked` from the models
+# endpoint). A precheck that cannot tell those apart lets the review spend its
+# whole budget before failing. The authenticated GET below can. Duplicated rather
+# than sourced from `codex-build.sh`: these two wrappers are copied to other repos
+# independently, and a missing sibling would fail in a way that reads as an auth
+# error. ONLY 401/403 fails — every other answer leaves the local check in charge.
+CODEX_AUTH_PROBE_URL="${NEUTRON_CODEX_AUTH_PROBE_URL:-https://chatgpt.com/backend-api/codex/models?client_version=0.147.0}"
+codex_auth_probe_status() {
+  command -v curl >/dev/null 2>&1 || { printf 'skip\n'; return 0; }
+  local token cfg code
+  token=$(perl -0777 -ne 'print $1 if /"access_token"\s*:\s*"([^"]+)"/' "$CODEX_HOME/auth.json" 2>/dev/null)
+  [ -n "${token:-}" ] || { printf 'skip\n'; return 0; }
+  cfg=$(mktemp "${TMPDIR:-/tmp}/codex-auth-probe.XXXXXX" 2>/dev/null) || { printf 'skip\n'; return 0; }
+  chmod 600 "$cfg" 2>/dev/null || true
+  # The token never enters argv — `ps` would publish it to every local user.
+  printf 'header = "Authorization: Bearer %s"\n' "$token" > "$cfg"
+  code=$(curl -s -o /dev/null -w '%{http_code}' \
+    --max-time "${NEUTRON_CODEX_AUTH_PROBE_TIMEOUT:-6}" \
+    -K "$cfg" -H 'Accept: application/json' "$CODEX_AUTH_PROBE_URL" 2>/dev/null)
+  rm -f "$cfg"
+  [ -n "${code:-}" ] || code=000
+  printf '%s\n' "$code"
+}
 codex_auth_ok=0
+codex_auth_probe_code=''
 for attempt in 1 2 3; do
   if perl -e 'alarm 6; exec @ARGV or exit 1' codex login status >/dev/null 2>&1; then
-    codex_auth_ok=1
-    break
+    codex_auth_probe_code="$(codex_auth_probe_status)"
+    case "$codex_auth_probe_code" in
+      401 | 403) : ;; # the server refused the seat — retry, then DEFER below
+      *)
+        codex_auth_ok=1
+        break
+        ;;
+    esac
   fi
   [ "$attempt" -lt 3 ] && sleep "$AUTH_RETRY_DELAY"
 done
 if [ "$codex_auth_ok" -ne 1 ]; then
-  echo "CODEX_REVIEW_AUTH_EXPIRED: codex auth invalid/unreachable after 3 attempts (CODEX_HOME=$CODEX_HOME). DEFERRED — the review must NOT be treated as an approval. Re-auth with 'codex login'." >&2
+  case "$codex_auth_probe_code" in
+    401 | 403)
+      echo "CODEX_REVIEW_AUTH_EXPIRED: codex auth is REVOKED — 'codex login status' passes (it only reads the local file) but the ChatGPT backend answered HTTP $codex_auth_probe_code for this token (CODEX_HOME=$CODEX_HOME). DEFERRED — the review must NOT be treated as an approval. Waiting will not fix it: re-auth with 'codex login'." >&2
+      ;;
+    *)
+      echo "CODEX_REVIEW_AUTH_EXPIRED: codex auth invalid/unreachable after 3 attempts (CODEX_HOME=$CODEX_HOME). DEFERRED — the review must NOT be treated as an approval. Re-auth with 'codex login'." >&2
+      ;;
+  esac
   exit 3
 fi
 

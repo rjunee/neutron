@@ -150,6 +150,21 @@ export interface TridentBuildToolDeps {
    * path). Absent → unchanged pre-task-4 behaviour (no post).
    */
   chat_ack?: WorkBoardChatAck
+  /**
+   * LIVENESS PREFLIGHT for the executor this build would run on. When it refuses,
+   * NO RUN ROW IS CREATED and the reason is returned to the agent verbatim.
+   *
+   * Wired to `codexDispatchPreflight`, which refuses only when the owner's BUILD
+   * phase dispatches to codex AND every connected seat has been positively probed
+   * and refused server-side. Absent → unchanged behaviour, which is what keeps
+   * every existing caller and every test that does not care about credentials
+   * working.
+   *
+   * IT RUNS BEFORE `dispatchBoardBoundBuild`, not inside it: the chokepoint's
+   * rules are about the ITEM (bound, specified, not a review in disguise), and a
+   * credential is not a property of the item.
+   */
+  preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 }
 
 /** First non-empty line of a task, truncated — the ack title when a board item
@@ -214,6 +229,11 @@ export function registerTridentBuildToolSurface(
       // while chatting in project X lands on X's board (not General). Mirrors the
       // HTTP ▶ route (`work-board-surface.ts`), which scope-keys from the URL.
       const scope = workBoardScopeKey(ctx.project_slug, ctx.project_id)
+      // EXECUTOR LIVENESS, before anything is created. A lane dispatched onto a
+      // revoked Codex seat spends ~15 minutes assembling a brief for a build that
+      // cannot start, then reports the CLI as the cause.
+      const preflight = await (deps.preflight?.() ?? Promise.resolve({ ok: true as const }))
+      if (!preflight.ok) return { ok: false, error: preflight.reason }
       // #339 — stamp the originating chat topic (resolved from the turn's
       // project_id) so the build's terminal result announces back to its chat.
       const delivery = deps.resolve_delivery?.(ctx.project_id)
@@ -323,6 +343,10 @@ export function registerTridentBuildToolSurface(
           }
         }
       }
+      // The SAME executor-liveness preflight as `work_board_dispatch_build` — a
+      // retry off a saved spec reaches the same dead seat as a fresh dispatch.
+      const startPreflight = await (deps.preflight?.() ?? Promise.resolve({ ok: true as const }))
+      if (!startPreflight.ok) return { ok: false, error: startPreflight.reason }
       const task =
         deps.resolve_task !== undefined
           ? await deps.resolve_task(scope, {

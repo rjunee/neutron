@@ -1,0 +1,13 @@
+{
+  "captured_at": "2026-08-20T21:29:00Z",
+  "url": "https://chatgpt.com/backend-api/codex/models?client_version=0.147.0",
+  "http_status": 401,
+  "body": {
+    "error": {
+      "message": "Encountered invalidated oauth token for user, failing request",
+      "code": "token_revoked"
+    },
+    "status": 401
+  },
+  "note": "REAL bytes from the revoked seat on this box. An INDEPENDENT capture 2h20m earlier on the same URL and the same credential returned code 'token_invalidated' for the identical condition — which is exactly why classification keys on the HTTP status plus the JWT exp, and NEVER on this string."
+}
