@@ -26,7 +26,7 @@
  *    than assumed.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawn, spawnSync } from 'node:child_process'
 import {
@@ -42,7 +42,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join, relative } from 'node:path'
+import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -76,6 +76,51 @@ const briefIntegrity = loadBriefIntegrity()
 // Spawn bash by ABSOLUTE path: the CLI-absent case runs with a PATH containing only
 // the mock bin, so `bash` could not be resolved from it.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
+
+// ── FIXTURE REAPING — every temp dir this file makes dies with the case that made it ──
+//
+// Each `run()` below builds a REAL fixture: a `git init` repo, a symlink farm of the
+// host's tools, sometimes a second worktree. That is ~270K and ~65 inodes apiece, and
+// this file makes ~87 of them per full run. Nothing on this box reaps them
+// (systemd-tmpfiles ran 21h before the measurement and 18,682 day-old dirs survived
+// it), so before this registry existed the suite had left 24,946 orphans / 7.8G in
+// /tmp — about 1.6M inodes, ~18% of the host's total.
+//
+// REGISTERED, NEVER GLOBBED. The tempting implementation is `rm -rf
+// /tmp/trident-codex-build-*`, and it is wrong: several trident lanes run this very
+// suite concurrently on this host, so a glob would delete a SIBLING lane's in-flight
+// fixture and produce an unattributable mid-build failure in an unrelated PR. Only
+// paths this process created are ever removed. `leak control D` is the guard on that
+// and must not be dropped as redundant.
+//
+// REAPED IN `afterEach`, NEVER INSIDE `run()`. Tests read `r.dir` after run() returns
+// — the RECLAIM case walks the holder worktree and reads its preserved
+// post-mortem.txt — so a dir must outlive the call that made it and die with the case.
+//
+// The 'exit' hook covers what afterEach cannot: a throw during collection, or a normal
+// abort, either of which ends the process with entries still registered. rmSync is
+// synchronous, so it is valid work for an exit handler. SIGKILL is untrappable and
+// WILL still leak; that residue is why an operator-side, age-guarded sweep stays a
+// separate thing and is deliberately not wired into this suite.
+const FIXTURE_DIRS: string[] = []
+/** Register a temp dir for reaping and return it, so it can wrap `mkdtempSync` inline. */
+function fixtureDir(path: string): string {
+  FIXTURE_DIRS.push(path)
+  return path
+}
+function reapFixtures(): void {
+  while (FIXTURE_DIRS.length > 0) {
+    const dir = FIXTURE_DIRS.pop() as string
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Best effort and SILENT on purpose: a fixture that cannot be removed is a leak,
+      // not a test failure, and must not turn a passing case red.
+    }
+  }
+}
+afterEach(reapFixtures)
+process.on('exit', reapFixtures)
 
 interface RunOpts {
   /** Branch used by `git init -b`; defaults to the wrapper argv branch. */
@@ -298,7 +343,7 @@ function toolFarm(dir: string): string {
 }
 
 function run(opts: RunOpts = {}): RunResult {
-  const dir = mkdtempSync(join(tmpdir(), 'trident-codex-build-'))
+  const dir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
   const codexHome = join(dir, 'codexhome')
   mkdirSync(codexHome, { recursive: true })
   if (opts.authed === true) writeFileSync(join(codexHome, 'auth.json'), '{"token":"x"}\n')
@@ -713,7 +758,7 @@ describe('durable pre-build stage stamps', () => {
   })
 
   test('the real wrapper → stage-stamp.sh → sqlite chain appends a row', () => {
-    const migrated = mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-'))
+    const migrated = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-')))
     const stageDb = join(migrated, 'project.db')
     seedMigratedDb(stageDb)
     const migratedDb = new Database(stageDb)
@@ -1050,7 +1095,7 @@ describe('trident/codex-build.sh — exit-code contract', () => {
   })
 
   test('a corrupt whole brief records the exact refusal sentence on the run row', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
     const dbPath = join(alertDir, 'project.db')
     const runId = 'run-corrupt-whole-alert'
     seedMigratedDb(dbPath)
@@ -1229,7 +1274,7 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
   })
 
   test('a corrupt part records the exact refusal sentence on the run row and still exits 3', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
     const dbPath = join(alertDir, 'project.db')
     const runId = 'run-corrupt-part-alert'
     seedMigratedDb(dbPath)
@@ -1271,7 +1316,7 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
   })
 
   test('a missing part also records its exact refusal sentence on the run row', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
     const dbPath = join(alertDir, 'project.db')
     const runId = 'run-missing-part-alert'
     seedMigratedDb(dbPath)
@@ -1334,7 +1379,7 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
   })
 
   test('a checkpoint aimed at a missing run reports alert recording failure', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-')))
     const dbPath = join(alertDir, 'project.db')
     seedMigratedDb(dbPath)
     const db = new Database(dbPath)
@@ -1587,7 +1632,7 @@ describe('the BRIEF is what codex is asked to build', () => {
   test.skipIf(!haveRealCodex)(
     'the `shell_environment_policy` fields are REAL on the installed CLI, not plausible strings',
     () => {
-      const home = mkdtempSync(join(tmpdir(), 'trident-codex-strict-'))
+      const home = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-strict-')))
       const ask = (...cfg: string[]): string => {
         const res = spawnSync(
           'codex',
@@ -2199,5 +2244,119 @@ describe('atomic trailer publication', () => {
     expect(SCRIPT_TEXT).toContain('mv -f "$TRAILER_TMP" "$TRAILER_FILE"')
     expect(SCRIPT_TEXT).not.toContain('> "$TRAILER_FILE"')
     expect(SCRIPT_TEXT).toContain('rm -f "$TRAILER_TMP" "$TRAILER_FILE"')
+  })
+})
+
+describe('fixture reaping — the suite must not leak its own temp dirs', () => {
+  // The regex the counters below use. It is deliberately the BARE mkdtemp shape
+  // (`trident-codex-build-` + exactly 6 mkdtemp characters) — the same shape that
+  // accounted for all 24,946 orphans measured on this host, and NOT the
+  // `-stage-db-` / `-alert-db-` variants, which are longer.
+  const FIXTURE_NAME = /^trident-codex-build-[A-Za-z0-9]{6}$/
+  const fixtureNames = (): Set<string> =>
+    new Set(readdirSync(tmpdir()).filter((name) => FIXTURE_NAME.test(name)))
+  const cheapRun = (): RunResult =>
+    run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+
+  // A case cannot watch its own reap — afterEach runs after the body returns — so the
+  // observation is split across two cases, A recording and B checking.
+  let priorDir = ''
+
+  test('control A: a fixture dir is ALIVE for the whole of the case that made it', () => {
+    const r = cheapRun()
+    // NEGATIVE CONTROL on placement: proves the reaper does NOT fire inside run(). If
+    // anyone "simplifies" the cleanup into run(), this fails — and so does every case
+    // that reads r.dir afterwards, e.g. the RECLAIM case that walks the holder
+    // worktree and reads its preserved post-mortem.txt.
+    expect(existsSync(r.dir)).toBe(true)
+    expect(readdirSync(r.dir).length).toBeGreaterThan(0)
+    priorDir = r.dir
+  })
+
+  test('control B: the PREVIOUS case\'s fixture dir is GONE', () => {
+    // ANTI-VACUITY GUARD, and it is load-bearing, not decorative: with no fixture
+    // recorded, `existsSync('')` is false and the real assertion below would pass
+    // while observing nothing at all. An empty check reading as a passing check is
+    // this repo's recurring failure mode; this line makes the empty case fail loudly.
+    //
+    // It also makes B ORDER-DEPENDENT on purpose: `bun test -t 'control B'` filters A
+    // out and B then fails, loudly and correctly, because it was given nothing to
+    // observe. Run the pair with the file, not with -t alone.
+    expect(priorDir).not.toBe('')
+    expect(existsSync(priorDir)).toBe(false)
+  })
+
+  test('control C: N runs net ZERO new fixture dirs in /tmp', () => {
+    const before = fixtureNames()
+    const r1 = cheapRun()
+    const r2 = cheapRun()
+    const mine = [basename(r1.dir), basename(r2.dir)]
+    const during = fixtureNames()
+
+    // POSITIVE CONTROL ON THE COUNTER. The two dirs that certainly exist right now
+    // must be VISIBLE to the readdir+regex the assertions below count with. If the
+    // mkdtemp prefix or suffix length ever changes, this fails loudly here instead of
+    // letting the after-count report a serene 0 == 0 over a regex matching nothing.
+    expect(mine.filter((name) => during.has(name))).toEqual(mine)
+    expect(before.has(mine[0] as string)).toBe(false)
+    expect(before.has(mine[1] as string)).toBe(false)
+
+    reapFixtures()
+
+    const after = fixtureNames()
+    // THE CLAIM: counted over the same path, both are gone — net zero.
+    expect(mine.filter((name) => after.has(name))).toEqual([])
+    // …and the reap did not take the rest of /tmp with it. Counted as a DELTA, never
+    // as an absolute: sibling trident lanes run this same suite concurrently on this
+    // host and create and destroy their own fixtures mid-case, so an absolute count
+    // would be flaky in a way that says nothing about this reaper.
+    expect([...before].filter((name) => !after.has(name))).toEqual([])
+  })
+
+  test('control D: the reaper removes ONLY dirs it registered', () => {
+    // The most important control in this set. A glob reaper (`rm -rf
+    // /tmp/trident-codex-build-*`) would pass A, B and C and silently delete a
+    // concurrent lane's in-flight fixture. `foreign` stands in for that lane: same
+    // prefix, same parent, NOT registered here.
+    const foreign = mkdtempSync(join(tmpdir(), 'trident-codex-build-'))
+    writeFileSync(join(foreign, 'a-sibling-lane-is-building-in-here.txt'), 'live\n')
+    try {
+      // Registered alongside it, so the reap under test is REAL work and not a no-op:
+      // without this, a reaper that did nothing at all would also leave `foreign`
+      // standing and pass vacuously.
+      const ours = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
+      reapFixtures()
+      expect(existsSync(ours)).toBe(false)
+      expect(existsSync(foreign)).toBe(true)
+      expect(readFileSync(join(foreign, 'a-sibling-lane-is-building-in-here.txt'), 'utf8')).toBe(
+        'live\n',
+      )
+    } finally {
+      rmSync(foreign, { recursive: true, force: true })
+    }
+  })
+
+  test('control E: an entry that CANNOT be removed is a leak, not a red suite', () => {
+    // Reaping is best-effort by design: an entry rmSync throws on must neither turn a
+    // passing case red nor abandon the rest of the registry.
+    //
+    // A merely-absent path would NOT exercise this — `force: true` makes that a silent
+    // no-op — so the entry has to be one rmSync genuinely refuses. A NUL in the path is
+    // refused deterministically (ERR_INVALID_ARG_VALUE) for every user, including root,
+    // which a chmod-based lock would not be.
+    const unremovable = `${join(tmpdir(), 'trident-codex-build-refused')}${String.fromCharCode(0)}x`
+    // POSITIVE CONTROL ON THE FIXTURE: prove the entry really does throw. Without it an
+    // rmSync that quietly tolerated the path would make the assertions below pass while
+    // the catch under test was never entered.
+    expect(() => rmSync(unremovable, { recursive: true, force: true })).toThrow()
+
+    // Pushed so the BAD entry is popped FIRST (the reaper pops from the end): the
+    // survivor is only reached if the loop continues past the throw.
+    const survivor = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
+    FIXTURE_DIRS.push(unremovable)
+
+    expect(() => reapFixtures()).not.toThrow()
+    expect(existsSync(survivor)).toBe(false)
+    expect(FIXTURE_DIRS.length).toBe(0)
   })
 })
