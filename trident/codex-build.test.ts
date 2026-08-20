@@ -2306,11 +2306,28 @@ describe('fixture reaping — the suite must not leak its own temp dirs', () => 
     const after = fixtureNames()
     // THE CLAIM: counted over the same path, both are gone — net zero.
     expect(mine.filter((name) => after.has(name))).toEqual([])
-    // …and the reap did not take the rest of /tmp with it. Counted as a DELTA, never
-    // as an absolute: sibling trident lanes run this same suite concurrently on this
-    // host and create and destroy their own fixtures mid-case, so an absolute count
-    // would be flaky in a way that says nothing about this reaper.
-    expect([...before].filter((name) => !after.has(name))).toEqual([])
+
+    // "…AND THE REAP DID NOT TAKE THE REST OF /tmp WITH IT" DELIBERATELY IS NOT
+    // ASSERTED HERE, AND THAT IS THE POINT OF THIS COMMENT.
+    //
+    // The obvious way to write it —
+    //     expect([...before].filter((name) => !after.has(name))).toEqual([])
+    // — asks whether ANY pre-existing `trident-codex-build-*` dir in the shared /tmp
+    // namespace vanished during this case's ~190ms window. That is not a fact about
+    // this reaper. It is a fact about every OTHER process on the box, and it goes red
+    // when any of them removes one of its own dirs: a sibling lane running this very
+    // suite (i.e. this fix, once it propagates), control D's own `rmSync(foreign)` in
+    // a sibling process, or an operator drain of stale fixtures.
+    //
+    // Worse, it is a guard that gets STRICTER as the leak it guards gets fixed — it
+    // was only ever quiet because siblings LEAKED. A test that passes only while the
+    // bug is present is not a control, and this repo has already lost days to a flaky
+    // test reddening main and blaming whichever diff was in flight.
+    //
+    // The claim is real and worth keeping, so it lives in `control D`, which makes it
+    // HERMETICALLY: D creates its own unregistered `foreign` dir, registers one beside
+    // it so the reap is genuine work rather than a vacuous no-op, and asserts `foreign`
+    // survives with its contents intact. Nothing another process does can perturb that.
   })
 
   test('control D: the reaper removes ONLY dirs it registered', () => {
