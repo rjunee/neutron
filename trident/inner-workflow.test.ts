@@ -737,6 +737,12 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       // truncation readback is a tail of that same command line, so a prefix that
       // shifted or broke its quoting has to be able to fail this.
       'CODEX_ENV_PREFIX',
+      // The review-phase liveness heartbeat's coordinates, gated on `dbPath && runId`
+      // exactly as `checkpointEnv` is. Real values here, so the readback tail below is
+      // taken from a command that CARRIES the heartbeat env — a prefix that broke its
+      // quoting has to be able to fail these tests.
+      'dbPath',
+      'stageStampSh',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
     return factory(
@@ -750,6 +756,8 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       '',
       '',
       "CODEX_REVIEW_MODEL='gpt-5.6-sol' ",
+      '/harness/project.db',
+      '/harness/trident/stage-stamp.sh',
     )('/tmp/some-diff.diff')
   }
 

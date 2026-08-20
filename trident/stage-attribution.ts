@@ -9,6 +9,21 @@ export const STAGE_SEGMENTS = [
   ['wrapper-start', 'codex-exec-start'],
 ] as const
 
+/**
+ * Stages that repeat BY DESIGN — the mid-phase liveness heartbeats the build and
+ * review wrappers emit every ~5 minutes so the hang watchdog has evidence during a
+ * long `codex exec` (see THE MID-EXEC HEARTBEAT in `trident/codex-build.sh`).
+ *
+ * EXCLUDED FROM THE `duplicate:` NOTES, and only from those. A duplicate note exists
+ * to flag an ANOMALY — a stage stamped twice in one fire window means a re-entry or a
+ * double-launch worth looking at. A heartbeat is stamped 24 times in a two-hour build
+ * because that is its job, so leaving it in would put an anomaly note on every healthy
+ * run and teach the reader to ignore the notes column. No measured segment is affected:
+ * every duration this file computes is between two EXPLICITLY named stages, and no
+ * segment names a heartbeat.
+ */
+export const HEARTBEAT_STAGES: ReadonlySet<string> = new Set(['codex-exec-alive', 'codex-review-alive'])
+
 export interface StageEvent {
   id?: number
   run_id: string
@@ -134,8 +149,9 @@ function firstStages(events: readonly StageEvent[]): {
   const first = new Map<string, StageEvent>()
   const duplicates = new Set<string>()
   for (const event of events) {
-    if (first.has(event.stage)) duplicates.add(event.stage)
-    else first.set(event.stage, event)
+    if (first.has(event.stage)) {
+      if (!HEARTBEAT_STAGES.has(event.stage)) duplicates.add(event.stage)
+    } else first.set(event.stage, event)
   }
   return {
     first,

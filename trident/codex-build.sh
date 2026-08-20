@@ -422,6 +422,83 @@ stamp_stage() {
 
 stamp_stage wrapper-start
 
+# =============================================================================
+# THE MID-EXEC HEARTBEAT — `codex-exec-alive`
+# =============================================================================
+# THE LEDGER USED TO GO SILENT DURING EXACTLY THE WORK THE WATCHDOG KILLS. The two
+# stamps around `codex exec` below (`codex-exec-start`, `codex-exec-end`) bracket
+# the build; NOTHING is written between them. MEASURED against the live ledger
+# (808 events, 37 completed exec windows): max 72.0 min, avg 20.7 min from start to
+# end. The orchestrator's hang watchdog reaps at 90 min and stands down only on a
+# stage event newer than that — so the evidence it needs was, by construction,
+# absent for up to 72 of those 90 minutes and the margin was 18 minutes, not a
+# liveness signal. Three lanes were measured 57-85 min "stale" while writing log
+# files that same second.
+#
+# This ticker makes the ledger say "still working" WHILE the model is thinking. It
+# reuses `stamp_stage` (and thus the hardened, always-exit-0 stage-stamp.sh) rather
+# than inventing a second writer, so a stamp failure still cannot change whether a
+# build runs or how it exits.
+#
+# IT MUST NEVER OUTLIVE THE EXEC IT SPEAKS FOR. A leaked ticker would keep writing
+# `codex-exec-alive` after its build died and fabricate liveness for a corpse —
+# converting the false kill this fixes into a lane that never frees. Three guards,
+# because one process cannot be trusted to clean itself up:
+#   1. `stop_stage_heartbeat` after the exec returns, on BOTH the ok and failed
+#      paths, beside the `codex-exec-end` stamp.
+#   2. an EXIT/INT/TERM trap, so an interrupted or `exit`-ing wrapper takes the
+#      ticker with it (the trap preserves the wrapper's exit status explicitly).
+#   3. the ticker itself re-checks that the wrapper's pid is still alive before
+#      every stamp, which is the only guard that survives a SIGKILL of the parent
+#      (a killed shell runs no trap at all). Worst case it writes one more stamp,
+#      then exits on the next tick.
+#
+# The cadence is 5 min by default: frequent enough that the gap between two
+# heartbeats is a small fraction of the 90-min threshold, rare enough that a 2-hour
+# build adds ~24 rows to an append-only ledger.
+MAIN_PID="$$"
+STAGE_HEARTBEAT_SECS="${NEUTRON_CODEX_BUILD_HEARTBEAT_SECS:-300}"
+HEARTBEAT_PID=''
+
+start_stage_heartbeat() {
+  HEARTBEAT_PID=''
+  # No ledger coordinates → no ticker. The SAME three-variable guard `stamp_stage`
+  # applies, checked here too so an unconfigured wrapper does not spawn a process
+  # whose every tick is a no-op.
+  [ -n "${NEUTRON_CODEX_BUILD_STAGE_SCRIPT:-}" ] || return 0
+  [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_DB:-}" ] || return 0
+  [ -n "${NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID:-}" ] || return 0
+  # A non-numeric or non-positive cadence DISABLES the ticker rather than spinning:
+  # `sleep 0` in a loop would hammer sqlite for the whole build.
+  case "$STAGE_HEARTBEAT_SECS" in
+    '' | *[!0-9]*) return 0 ;;
+    0) return 0 ;;
+  esac
+  # STDOUT IS CLOSED OFF TO /dev/null. This wrapper's stdout carries the trailer the
+  # bridge parses (`NEUTRON_CODEX_BUILD_HEAD=` and friends); a stray line from the
+  # ticker would be read as part of that measurement. Stderr is kept so a failing
+  # stamp is still diagnosable.
+  (
+    while sleep "$STAGE_HEARTBEAT_SECS"; do
+      kill -0 "$MAIN_PID" 2>/dev/null || exit 0
+      stamp_stage codex-exec-alive
+    done
+  ) >/dev/null &
+  HEARTBEAT_PID=$!
+}
+
+stop_stage_heartbeat() {
+  [ -n "$HEARTBEAT_PID" ] || return 0
+  kill "$HEARTBEAT_PID" 2>/dev/null || true
+  wait "$HEARTBEAT_PID" 2>/dev/null || true
+  HEARTBEAT_PID=''
+}
+
+# `_rc` is captured and re-exited EXPLICITLY: the trap body's own commands must not
+# be what decides this wrapper's exit code, which the bridge maps to a build outcome.
+trap '_rc=$?; stop_stage_heartbeat; exit $_rc' EXIT
+trap '_rc=$?; stop_stage_heartbeat; exit $_rc' INT TERM
+
 BUILD_DATA_HOME="${WORKTREE}/.neutron-home"
 # Every sha that ALREADY EXISTED when codex was launched — the worktree HEAD, the
 # local branch tip, and the remote branch tip — one per line. Populated just before
@@ -1074,11 +1151,14 @@ fi
 # that does not exist in production.
 if [ -n "${NEUTRON_CODEX_BUILD_EXEC_CMD:-}" ]; then
   stamp_stage codex-exec-start
+  start_stage_heartbeat
   if <"$BRIEF_FILE" run_build_child sh -c "$NEUTRON_CODEX_BUILD_EXEC_CMD"; then
+    stop_stage_heartbeat
     stamp_stage codex-exec-end
     emit_trailer ok
     exit 0
   fi
+  stop_stage_heartbeat
   stamp_stage codex-exec-end
   emit_trailer failed
   echo "CODEX_BUILD_CALL_FAILED: the codex build call failed. DEFERRED — no build happened." >&2
@@ -1153,15 +1233,20 @@ fi
 # reading its own `/proc/self/environ`. Both, because the exclude covers the whole
 # family (`GH_ENTERPRISE_TOKEN`, anything added later) and this covers the two that
 # matter absolutely.
-# Codex duration is the exact durable codex-exec-start→codex-exec-end pair.
+# Codex duration is the exact durable codex-exec-start→codex-exec-end pair, and the
+# `codex-exec-alive` heartbeat between them is what keeps the ledger from going
+# silent for the whole of it (see THE MID-EXEC HEARTBEAT above).
 stamp_stage codex-exec-start
+start_stage_heartbeat
 
 if <"$BRIEF_FILE" run_build_child \
   codex exec "$@" --sandbox danger-full-access --cd "$WORKTREE" -; then
+  stop_stage_heartbeat
   stamp_stage codex-exec-end
   emit_trailer ok
   exit 0
 fi
+stop_stage_heartbeat
 stamp_stage codex-exec-end
 emit_trailer failed
 echo "CODEX_BUILD_CALL_FAILED: 'codex exec' returned non-zero. DEFERRED — the build did not complete." >&2

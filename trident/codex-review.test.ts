@@ -14,11 +14,14 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
@@ -569,4 +572,136 @@ describe('trident/codex-review.sh — the review MODEL is pinned', () => {
     expect(codexStdin).not.toContain('giving an INDEPENDENT second opinion')
     expect(codexStdin).toContain(DEFAULT_DIFF.trim())
   })
+})
+
+/**
+ * THE REVIEW-PHASE LIVENESS HEARTBEAT — `codex-review-alive`.
+ *
+ * THE COVERAGE HOLE THIS CLOSES. `grep -c stamp_stage trident/codex-review.sh` was 0
+ * while the build wrapper's was 7: the review phase emitted NO stage events at all, so
+ * for the whole of review the newest event in the ledger was the BUILD's
+ * `codex-exec-end` and the orchestrator's hang watchdog — which stands down only on an
+ * event newer than its 90-minute threshold — could only ever go stale on it. A watchdog
+ * whose evidence is structurally absent during a phase cannot tell a working reviewer
+ * from a hung one, so it kills both.
+ *
+ * Driven against the REAL sqlite through the shipped `stage-stamp.sh`, with a review
+ * seam that genuinely sleeps: a mocked clock would prove the arithmetic, not that a
+ * background process really writes rows while the model is thinking.
+ */
+describe('trident/codex-review.sh — the review-phase liveness heartbeat', () => {
+  const STAGE_STAMP = join(HERE, 'stage-stamp.sh')
+
+  const withStageDb = <T>(body: (stageDb: string, read: () => string[]) => T): T => {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-codex-review-stage-db-'))
+    const stageDb = join(dir, 'project.db')
+    seedMigratedDb(stageDb)
+    const migrated = new Database(stageDb)
+    applyMigrations(migrated)
+    migrated.close()
+    const read = (): string[] => {
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query<{ stage: string }, []>('SELECT stage FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      return rows.map((row) => row.stage)
+    }
+    try {
+      return body(stageDb, read)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  const stageEnv = (stageDb: string, runId: string, secs: string): Record<string, string> => ({
+    NEUTRON_CODEX_REVIEW_STAGE_SCRIPT: STAGE_STAMP,
+    NEUTRON_CODEX_REVIEW_STAGE_DB: stageDb,
+    NEUTRON_CODEX_REVIEW_STAGE_RUN_ID: runId,
+    NEUTRON_CODEX_REVIEW_HEARTBEAT_SECS: secs,
+  })
+
+  test('REAL BEHAVIOUR: a long review beats mid-phase, bracketed by start/end', () => {
+    withStageDb((stageDb, read) => {
+      const { status, stdout } = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: {
+          ...stageEnv(stageDb, 'run-review-heartbeat', '1'),
+          NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; sleep 3.4; echo "VERDICT: APPROVE"',
+        },
+      })
+      expect(status).toBe(0)
+      const stages = read()
+      expect(stages.filter((s) => s === 'codex-review-alive').length).toBeGreaterThanOrEqual(2)
+      // Strictly INSIDE the window — evidence during the silence, not at its edges.
+      expect(stages.indexOf('codex-review-alive')).toBeGreaterThan(stages.indexOf('codex-review-start'))
+      expect(stages.lastIndexOf('codex-review-alive')).toBeLessThan(stages.indexOf('codex-review-end'))
+      // AND THE REVIEW TEXT IS UNTOUCHED. This script's stdout IS the verdict the bridge
+      // parses; a ticker that leaked one line onto it would corrupt every review.
+      expect(stdout).toContain('VERDICT: APPROVE')
+      expect(stdout).not.toContain('codex-review-alive')
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: the ticker does NOT outlive the review it speaks for', () => {
+    withStageDb((stageDb, read) => {
+      const { status } = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: {
+          ...stageEnv(stageDb, 'run-review-heartbeat-leak', '1'),
+          NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; sleep 2.4; echo "VERDICT: APPROVE"',
+        },
+      })
+      expect(status).toBe(0)
+      const atExit = read()
+      // Positive control for the negative one: it really was ticking.
+      expect(atExit.filter((s) => s === 'codex-review-alive').length).toBeGreaterThanOrEqual(1)
+      spawnSync('sleep', ['3'])
+      expect(read().length).toBe(atExit.length)
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: a fast review emits no alive rows, and no stage env emits nothing', () => {
+    withStageDb((stageDb, read) => {
+      const { status } = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: stageEnv(stageDb, 'run-review-heartbeat-fast', '30'),
+      })
+      expect(status).toBe(0)
+      // The brackets landed, so an empty ledger is not what makes this pass…
+      expect(read()).toEqual(['codex-review-start', 'codex-review-end'])
+
+      // …and with the SCRIPT coordinate removed — same database, same run id — the
+      // wrapper writes NOTHING MORE, exactly as it did before the heartbeat existed.
+      // Asserted against the SAME ledger that just proved it can be written to, so
+      // "no new rows" is an observation and not an empty check against an empty db.
+      const before = read().length
+      const second = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: {
+          NEUTRON_CODEX_REVIEW_STAGE_DB: stageDb,
+          NEUTRON_CODEX_REVIEW_STAGE_RUN_ID: 'run-review-heartbeat-fast',
+        },
+      })
+      expect(second.status).toBe(0)
+      expect(read().length).toBe(before)
+    })
+  }, 30_000)
+
+  test('a broken stage recorder cannot change the review exit code or its verdict', () => {
+    const { status, stdout } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        ...stageEnv('/nonexistent-dir/does-not-exist.db', 'run-review-heartbeat-broken', '1'),
+        NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; sleep 2.4; echo "VERDICT: APPROVE"',
+      },
+    })
+    expect(status).toBe(0)
+    expect(stdout).toContain('VERDICT: APPROVE')
+  }, 30_000)
 })

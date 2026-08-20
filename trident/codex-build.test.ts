@@ -750,6 +750,204 @@ describe('durable pre-build stage stamps', () => {
   })
 })
 
+/**
+ * THE MID-EXEC HEARTBEAT — `codex-exec-alive`.
+ *
+ * WHY IT EXISTS. The three stamps above bracket the build and say nothing during it.
+ * MEASURED against the live ledger (808 events, 37 completed exec windows): max 72.0
+ * min, avg 20.7 min from `codex-exec-start` to `codex-exec-end`. The orchestrator's
+ * hang watchdog reaps at 90 min and stands down only on a stage event NEWER than that,
+ * so its evidence was, by construction, absent for up to 72 of those 90 minutes. Three
+ * lanes were measured 57-85 min "stale" while writing log files that same second.
+ *
+ * THESE TESTS DRIVE THE REAL SCRIPT AND THE REAL SQLITE, never a mocked clock: the
+ * wrapper runs against a migrated temp database through the shipped `stage-stamp.sh`,
+ * with a build seam that genuinely sleeps past two heartbeat intervals. Asserting on a
+ * fake timer would prove the arithmetic and not the thing that has to happen, which is
+ * that a background process really emits rows while the model is thinking.
+ */
+describe('the mid-exec liveness heartbeat', () => {
+  const STAGE_STAMP = fileURLToPath(new URL('./stage-stamp.sh', import.meta.url))
+
+  /** A migrated temp db + the rows the wrapper wrote into it, in order. */
+  const withStageDb = <T>(body: (stageDb: string, read: () => { stage: string; at: string }[]) => T): T => {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-codex-build-heartbeat-db-'))
+    const stageDb = join(dir, 'project.db')
+    seedMigratedDb(stageDb)
+    const migrated = new Database(stageDb)
+    applyMigrations(migrated)
+    migrated.close()
+    const read = (): { stage: string; at: string }[] => {
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query<{ stage: string; at: string }, []>('SELECT stage, at FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      return rows
+    }
+    try {
+      return body(stageDb, read)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  /** A build seam that does what a real one does, but takes `secs` about it. */
+  const SLOW_BUILD = (secs: number): string =>
+    `cat >/dev/null; sleep ${secs}; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'; ${WRITE_DIFF}`
+
+  test('REAL BEHAVIOUR: a build that outlives two intervals lands >=2 alive rows, at distinct times', () => {
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(3.4),
+        },
+      })
+      expect(r.status).toBe(0)
+
+      const rows = read()
+      const stages = rows.map((row) => row.stage)
+      const alive = rows.filter((row) => row.stage === 'codex-exec-alive')
+      // The heartbeat really beat, more than once…
+      expect(alive.length).toBeGreaterThanOrEqual(2)
+      // …at DIFFERENT moments. One row duplicated by a retry would satisfy a bare count
+      // while proving nothing about liveness over time.
+      expect(new Set(alive.map((row) => row.at)).size).toBe(alive.length)
+      // …strictly INSIDE the exec window, which is the whole claim: evidence exists
+      // during the silence, not just at its edges.
+      expect(stages.indexOf('codex-exec-alive')).toBeGreaterThan(stages.indexOf('codex-exec-start'))
+      expect(stages.lastIndexOf('codex-exec-alive')).toBeLessThan(stages.indexOf('codex-exec-end'))
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: the ticker does NOT outlive the exec it speaks for', () => {
+    // THE RISK THIS CHANGE CARRIES. A leaked ticker would keep writing `codex-exec-alive`
+    // after its build died and fabricate liveness for a corpse — turning a false kill
+    // into a lane that never frees, which is worse. Count the rows the moment the
+    // wrapper exits, wait several MORE intervals, and count again: any growth is a leak.
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-leak',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(2.4),
+        },
+      })
+      expect(r.status).toBe(0)
+      const atExit = read()
+      // POSITIVE CONTROL FOR THIS NEGATIVE ONE: the ticker was genuinely running, so
+      // "it stopped" is a real observation and not an empty check that never started.
+      expect(atExit.filter((row) => row.stage === 'codex-exec-alive').length).toBeGreaterThanOrEqual(1)
+
+      spawnSync('sleep', ['3'])
+      expect(read().length).toBe(atExit.length)
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: a build that finishes fast emits NO alive rows at all', () => {
+    // The ticker must be evidence of a LONG exec, not a constant. If it stamped
+    // regardless, `codex-exec-alive` would be noise and the watchdog would stand down
+    // for every run forever — the immortality failure, one layer down.
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-fast',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '30',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD,
+        },
+      })
+      expect(r.status).toBe(0)
+      const rows = read().map((row) => row.stage)
+      // The bracket stamps still landed — so an empty ledger cannot be what makes this
+      // assertion pass.
+      expect(rows).toEqual(['wrapper-start', 'codex-exec-start', 'codex-exec-end'])
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: a zero or non-numeric cadence disables the ticker instead of spinning', () => {
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-off',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '0',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(2.2),
+        },
+      })
+      expect(r.status).toBe(0)
+      expect(read().map((row) => row.stage)).toEqual([
+        'wrapper-start',
+        'codex-exec-start',
+        'codex-exec-end',
+      ])
+    })
+  }, 30_000)
+
+  test('a heartbeat cannot change the wrapper exit code, even when every stamp fails', () => {
+    // Same contract the bracket stamps have: `stage-stamp.sh` always exits 0 and the
+    // wrapper `|| true`s it anyway. A recorder pointed at a database that does not
+    // exist must not turn a successful build into a failed one.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      mergeMode: 'local',
+      stageScript: STAGE_STAMP,
+      stageDb: '/nonexistent-dir/does-not-exist.db',
+      stageRunId: 'run-heartbeat-broken',
+      env: {
+        NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1',
+        NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(2.4),
+      },
+    })
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+  }, 30_000)
+
+  test('ANTI-EMPTY-CHECK GUARD: the heartbeat is actually IN the shipped scripts', () => {
+    // THIS REPO HAS SHIPPED CHECKS THAT MATCHED NOTHING AND READ AS GREEN at least four
+    // times. The failure this guards is a heartbeat silently removed (or renamed) while
+    // the orchestrator keeps waiting for evidence that no longer exists — a watchdog
+    // reading an ever-empty ledger reaps every healthy build and no test notices.
+    const countIn = (text: string, needle: string): number => text.split(needle).length - 1
+    const reviewText = readFileSync(join(HERE, 'codex-review.sh'), 'utf8')
+
+    // The counter must be able to return 0, or "> 0" below proves nothing about it.
+    expect(countIn('nothing to see here', 'stamp_stage')).toBe(0)
+
+    expect(countIn(SCRIPT_TEXT, 'codex-exec-alive')).toBeGreaterThan(0)
+    expect(countIn(SCRIPT_TEXT, 'stamp_stage')).toBeGreaterThan(0)
+    // The review wrapper stamped NOTHING before this change (`grep -c stamp_stage
+    // trident/codex-review.sh` was 0 while the build wrapper's was 7), so the review
+    // phase had no mid-phase evidence of any kind.
+    expect(countIn(reviewText, 'stamp_stage')).toBeGreaterThan(0)
+    expect(countIn(reviewText, 'codex-review-alive')).toBeGreaterThan(0)
+    // Both tickers are killed on the way out, on every path.
+    expect(countIn(SCRIPT_TEXT, 'stop_stage_heartbeat')).toBeGreaterThan(1)
+    expect(countIn(reviewText, 'stop_stage_heartbeat')).toBeGreaterThan(1)
+  })
+})
+
 describe('build-child environment — a build can migrate only its own worktree home', () => {
   const inherited = {
     NEUTRON_HOME: '/fake/live/home',

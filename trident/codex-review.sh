@@ -47,6 +47,71 @@ BASE_REF="${1:-main}"
 DIFF_LINE_LIMIT="${NEUTRON_CODEX_DIFF_LINE_LIMIT:-3000}"
 AUTH_RETRY_DELAY="${NEUTRON_CODEX_AUTH_RETRY_DELAY:-2}"
 
+# =============================================================================
+# THE REVIEW-PHASE HEARTBEAT — `codex-review-alive`
+# =============================================================================
+# BEFORE THIS, THE REVIEW PHASE EMITTED NO STAGE EVENTS AT ALL. `grep -c stamp_stage
+# trident/codex-review.sh` was 0 while the build wrapper's was 7 — so for the whole
+# of review the newest event in the ledger was the BUILD's `codex-exec-end`, and the
+# orchestrator's hang watchdog (which stands down only on an event newer than its
+# 90-minute threshold) could only ever go stale on a review that ran long. A
+# watchdog whose evidence source is structurally absent during a phase cannot tell a
+# working reviewer from a hung one, so it kills both.
+#
+# SEPARATE VARIABLE NAMES FROM THE BUILD WRAPPER'S, deliberately — the same reason
+# `NEUTRON_CODEX_EXEC_CMD` is not `NEUTRON_CODEX_BUILD_EXEC_CMD`: one shared name
+# across both wrappers means a value exported to arm or stub one silently arms the
+# other. Unset → no ticker, and this script behaves exactly as it did.
+REVIEW_STAGE_SCRIPT="${NEUTRON_CODEX_REVIEW_STAGE_SCRIPT:-}"
+REVIEW_STAGE_DB="${NEUTRON_CODEX_REVIEW_STAGE_DB:-}"
+REVIEW_STAGE_RUN_ID="${NEUTRON_CODEX_REVIEW_STAGE_RUN_ID:-}"
+REVIEW_HEARTBEAT_SECS="${NEUTRON_CODEX_REVIEW_HEARTBEAT_SECS:-300}"
+REVIEW_MAIN_PID="$$"
+REVIEW_HEARTBEAT_PID=''
+
+# Best-effort by contract, exactly as the build wrapper's is: stage-stamp.sh always
+# exits 0, and `|| true` protects this script from a replacement recorder too. A
+# review must never fail because a timing row could not be written.
+stamp_stage() {
+  if [ -n "$REVIEW_STAGE_SCRIPT" ] && [ -n "$REVIEW_STAGE_DB" ] && [ -n "$REVIEW_STAGE_RUN_ID" ]; then
+    bash "$REVIEW_STAGE_SCRIPT" "$REVIEW_STAGE_DB" "$REVIEW_STAGE_RUN_ID" "$1" || true
+  fi
+}
+
+start_stage_heartbeat() {
+  REVIEW_HEARTBEAT_PID=''
+  [ -n "$REVIEW_STAGE_SCRIPT" ] || return 0
+  [ -n "$REVIEW_STAGE_DB" ] || return 0
+  [ -n "$REVIEW_STAGE_RUN_ID" ] || return 0
+  case "$REVIEW_HEARTBEAT_SECS" in
+    '' | *[!0-9]*) return 0 ;;
+    0) return 0 ;;
+  esac
+  # STDOUT IS CLOSED OFF TO /dev/null. This script's stdout IS the review text the
+  # bridge parses; a single stray line from the ticker would be read as part of the
+  # verdict. Stderr is kept so a failing stamp is still diagnosable.
+  (
+    while sleep "$REVIEW_HEARTBEAT_SECS"; do
+      kill -0 "$REVIEW_MAIN_PID" 2>/dev/null || exit 0
+      stamp_stage codex-review-alive
+    done
+  ) >/dev/null &
+  REVIEW_HEARTBEAT_PID=$!
+}
+
+stop_stage_heartbeat() {
+  [ -n "$REVIEW_HEARTBEAT_PID" ] || return 0
+  kill "$REVIEW_HEARTBEAT_PID" 2>/dev/null || true
+  wait "$REVIEW_HEARTBEAT_PID" 2>/dev/null || true
+  REVIEW_HEARTBEAT_PID=''
+}
+
+# A ticker that outlives the review it speaks for would fabricate liveness for a
+# reviewer that is no longer running. `_rc` is preserved explicitly so the trap
+# cannot change the exit code the bridge maps to a review outcome.
+trap '_rc=$?; stop_stage_heartbeat; exit $_rc' EXIT
+trap '_rc=$?; stop_stage_heartbeat; exit $_rc' INT TERM
+
 # ── NOT CONNECTED: no per-project credential configured ───────────────────────
 if [ -z "$CODEX_HOME" ] || [ ! -f "$CODEX_HOME/auth.json" ]; then
   if [ -z "$CODEX_HOME" ]; then
@@ -187,6 +252,8 @@ ${DIFF}"
 CODEX_STDERR_FILE=$(mktemp "${TMPDIR:-/tmp}/trident-codex-review-stderr.XXXXXX") || CODEX_STDERR_FILE=/dev/null
 # With the /dev/null fallback the refusal DIAGNOSIS degrades to the generic
 # empty-output message, but the fail-closed gate itself never degrades.
+stamp_stage codex-review-start
+start_stage_heartbeat
 if [ -n "${NEUTRON_CODEX_EXEC_CMD:-}" ]; then
   REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | sh -c "$NEUTRON_CODEX_EXEC_CMD" 2>"$CODEX_STDERR_FILE")
   CALL_EXIT=$?
@@ -213,6 +280,8 @@ else
   REVIEW_OUTPUT=$(printf '%s' "$PROMPT" | codex exec "$@" - 2>"$CODEX_STDERR_FILE")
   CALL_EXIT=$?
 fi
+stop_stage_heartbeat
+stamp_stage codex-review-end
 
 # Replay the tool's own stderr so the operator/bridge errFile still sees it
 # (refusal text included).

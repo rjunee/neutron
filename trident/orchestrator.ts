@@ -104,6 +104,17 @@ export interface TridentStep {
   (run: TridentRun): Promise<AdvanceOutcome>
 }
 
+/**
+ * The answer to "is this run's launcher generation still a live process?" — the
+ * hang watchdog's second positive-liveness source (`probe_run_alive`).
+ *
+ * DELIBERATELY DECLARED HERE rather than imported from `tick.ts` (whose
+ * `LauncherLiveness` is the identical union): `tick.ts` imports this module, so
+ * importing back would close a cycle. The two are structurally compatible, which
+ * is what lets the composer pass the existing probe straight in.
+ */
+export type RunLiveness = 'alive' | 'dead' | 'unknown'
+
 export interface BuildTridentOrchestratorOptions {
   /** The inner-workflow FIRER (Phase 2a). Fires the inner CC Dynamic Workflow on
    *  a warm substrate + settles the launching turn; see `buildWorkflowFirer`. */
@@ -360,6 +371,54 @@ export interface BuildTridentOrchestratorOptions {
    * behaviour exactly as it was: absence is never read as liveness.
    */
   latest_stage_event_at?: (run_id: string) => string | null
+  /**
+   * THE SECOND POSITIVE-LIVENESS SOURCE for the hang watchdog: is this run's
+   * recorded launcher generation still a LIVE PROCESS?
+   *
+   * WHY A SECOND SOURCE. `latest_stage_event_at` reads the stage ledger, and the
+   * ledger goes SILENT during exactly the work the watchdog interrupts: the build
+   * wrapper stamps `codex-exec-start` immediately before `codex exec` and
+   * `codex-exec-end` after it, with nothing in between. MEASURED against the live
+   * ledger (808 events, 37 completed exec windows): max 72.0 min, avg 20.7 min
+   * between those two stamps — against a 90-minute threshold, an 18-minute margin
+   * rather than a liveness signal. The `codex-exec-alive` heartbeat added to
+   * `codex-build.sh` closes most of that hole; this seam covers the rest (the
+   * review phase, a wrapper too old to emit the heartbeat, a ledger write that
+   * failed) with the answer that does not depend on the run cooperating.
+   *
+   * THREE-VALUED, and that is the whole point (mirrors `LauncherLiveness` in
+   * `tick.ts`, which this is wired to in production):
+   *
+   *   • `'alive'`   — POSITIVELY observed running → the watchdog stands down,
+   *                   bounded by `max_inflight_ms` (see below).
+   *   • `'dead'`    — POSITIVELY observed gone → the watchdog reaps THIS TICK and
+   *                   no reprieve of any kind applies, not even fresh stage
+   *                   evidence. Death beats liveness: a heartbeat row written by a
+   *                   ticker that outlived its exec is not proof of work.
+   *   • `'unknown'` — no evidence either way (probe outage, unrecognised
+   *                   generation) → changes NOTHING. Absence is not evidence, in
+   *                   either direction.
+   *
+   * 'alive' IS NOT IMMORTALITY. A launcher is shared infrastructure, not proof
+   * that the detached build it fired is working (`tick.ts` says so explicitly), so
+   * an alive answer is the WEAKER of the two sources and is capped by the
+   * `max_inflight_ms` ceiling, which is checked FIRST and which no reprieve can
+   * cross. Without that cap this fix would trade a false kill for a lane that
+   * never frees — strictly worse, since there are only ~6.
+   *
+   * THE CONSEQUENCE, STATED PLAINLY. The probe answers about the launcher GENERATION,
+   * which several runs can share. On a box whose launcher REPL is long-lived, a
+   * genuinely wedged build can be answered `'alive'` and stand down — so for those runs
+   * this raises the effective reap from the 90-minute threshold to the 2-hour ceiling.
+   * That is the deliberate trade: up to 30 extra minutes before a wedge is reaped, in
+   * exchange for not killing builds that are working. It is BOUNDED, it is the
+   * direction the card asks for, and the per-RUN `codex-exec-alive` heartbeat (checked
+   * FIRST, and written by the build itself) is the stronger signal this seam is only
+   * the fallback for.
+   *
+   * Omitted → the watchdog behaves exactly as it did before this seam existed.
+   */
+  probe_run_alive?: (run: TridentRun) => RunLiveness | Promise<RunLiveness>
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
@@ -1919,6 +1978,7 @@ export function buildTridentOrchestrator(
   const maxInflightMs = opts.max_inflight_ms ?? DEFAULT_MAX_INFLIGHT_MS
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
   const latestStageEventAt = opts.latest_stage_event_at ?? null
+  const probeRunAlive = opts.probe_run_alive ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
@@ -3694,7 +3754,7 @@ export function buildTridentOrchestrator(
     //     than waiting on the 2h `maxInflightMs` ceiling below. Checked BEFORE
     //     orphan recovery so a wedged orphan is reaped instead of redispatched.
     if (run.subagent_run_id !== null && elapsedSinceAdvance(run) > noAdvanceHangMs) {
-      // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING. The clock
+      // (1b-0) GATHER THE EVIDENCE BEFORE KILLING ANYTHING. The clock
       //     above measures phase boundaries, not work; a run mid-Forge is stale on
       //     that field however hard it is working. Stage events are written
       //     MID-phase, so one that is NEWER than the hang threshold is proof the run
@@ -3716,9 +3776,59 @@ export function buildTridentOrchestrator(
       const stageAt = latestStageEventAt === null ? null : latestStageEventAt(run.id)
       const stageMs = stageAt === null ? NaN : Date.parse(stageAt)
       const nowMs = Date.parse(now())
-      if (Number.isFinite(stageMs) && Number.isFinite(nowMs) && nowMs - stageMs <= noAdvanceHangMs) {
-        const staleMins = Math.round(elapsedSinceAdvance(run) / 60_000)
-        const evidenceMins = Math.round(Math.max(0, nowMs - stageMs) / 60_000)
+      const stageAgeMs =
+        Number.isFinite(stageMs) && Number.isFinite(nowMs) ? Math.max(0, nowMs - stageMs) : null
+      const stageFresh = stageAgeMs !== null && stageAgeMs <= noAdvanceHangMs
+      const staleMins = Math.round(elapsedSinceAdvance(run) / 60_000)
+
+      // (1b-ii) THE SECOND SOURCE. The stage ledger is silent for up to 72 measured
+      //     minutes during one `codex exec`, and emits NOTHING AT ALL during review
+      //     — so on its own it cannot answer for the whole window it is meant to
+      //     cover. Ask the launcher-liveness probe too.
+      //
+      //     ASKED ON EVERY PATH, including the one the ledger would already have
+      //     saved, because a POSITIVE DEATH must be able to beat positive life and
+      //     that comparison cannot be made without the answer. The probe is only
+      //     ever reached by a run already past the hang threshold — a handful of
+      //     pid checks, at most once per run per tick, on a lane that is about to
+      //     be killed.
+      //
+      //     A PROBE OUTAGE IS NOT A DEATH (`tick.ts` livenessBody makes the same
+      //     call): a throw is 'unknown', which neither saves nor kills.
+      let probe: RunLiveness | 'not-wired' = 'not-wired'
+      if (probeRunAlive !== null) {
+        try {
+          probe = await probeRunAlive(run)
+        } catch {
+          probe = 'unknown'
+        }
+      }
+
+      // WHAT WAS CHECKED AND WHAT IT FOUND — carried onto BOTH outcomes. A reap
+      // that says only "suspected agent hang" is unfalsifiable after the fact: the
+      // whole reason this watchdog killed healthy builds for weeks is that its
+      // terminal record disclosed nothing about the evidence it did or did not
+      // have. Concrete numbers, never a boolean.
+      const disclosure =
+        `liveness checked: newest stage event ` +
+        `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min ago`}` +
+        `, launcher probe=${probe === 'not-wired' ? 'not wired' : probe}`
+
+      // (1b-iii) THE CEILING OUTRANKS EVERY REPRIEVE, and is checked FIRST so no
+      //     evidence path can skip it. `maxInflightMs` (2 h) is the absolute
+      //     lifetime bound; the stand-downs below return `waiting` and therefore
+      //     never reach the section-(4) ceiling check further down, so without this
+      //     an endlessly-heartbeating ticker or a launcher that outlives its build
+      //     would hold one of ~6 lanes forever. That is a WORSE failure than the
+      //     false kill this card fixes, not a quieter one.
+      const overCeiling = elapsedSinceAdvance(run) > maxInflightMs
+
+      // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING.
+      if (!overCeiling && probe !== 'dead' && (stageFresh || probe === 'alive')) {
+        const evidence = stageFresh
+          ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — the run is advancing mid-phase`
+          : `the launcher probe positively observed the process ALIVE (stage evidence: ` +
+            `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min old`})`
         // DISCLOSED, not silent. A watchdog that quietly declines to fire is as hard
         // to trust as one that quietly fires; the note names both clocks so the
         // reason this run survived is legible in the tick log.
@@ -3726,20 +3836,32 @@ export function buildTridentOrchestrator(
           run,
           changed: false,
           waiting: true,
-          note:
-            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but a stage ` +
-            `event landed ${evidenceMins} min ago — the run is advancing mid-phase`,
+          note: `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but ${evidence}`,
         }
       }
       fired.delete(run.id)
       redispatched.delete(run.id)
       const mins = Math.round(noAdvanceHangMs / 60_000)
-      const reaped = failedRun(
-        run,
-        `no progress for ${mins} min — suspected agent hang (inner workflow stopped advancing)`,
-        false,
-      )
-      return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (suspected hang)` }
+      // THE REASON PREFIXES ARE UNCHANGED BYTE-FOR-BYTE up to the disclosure suffix.
+      // `delivery.ts` routes the terminal notification by substring
+      // ('suspected agent hang' / 'no progress for' / 'stalled'), and its comment
+      // says the two halves must move together — so the disclosure is APPENDED,
+      // never substituted.
+      const reason = overCeiling
+        ? `inner workflow stalled (no terminal result within ${Math.round(maxInflightMs / 60_000)} min)` +
+          ` — ${disclosure}; the 2 h ceiling outranks any liveness reprieve`
+        : probe === 'dead'
+          ? `no progress for ${mins} min and the inner workflow launcher is positively dead` +
+            ` — ${disclosure}`
+          : `no progress for ${mins} min — suspected agent hang (inner workflow stopped advancing)` +
+            ` — ${disclosure}`
+      const reaped = failedRun(run, reason, false)
+      return {
+        run: reaped,
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (${overCeiling ? 'inflight ceiling' : probe === 'dead' ? 'launcher dead' : 'suspected hang'})`,
+      }
     }
 
     // (2) ORPHAN RECOVERY. A persisted dispatch id this process never fired AND no

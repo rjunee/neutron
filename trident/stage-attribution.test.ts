@@ -233,6 +233,44 @@ describe('stage attribution pure reader', () => {
     expect(result.notes).toContain('duplicate:codex-exec-end')
   })
 
+  /**
+   * THE MID-EXEC HEARTBEAT lands `codex-exec-alive` rows every ~5 minutes so the hang
+   * watchdog has evidence during a long `codex exec` — a two-hour build stamps it ~24
+   * times. It must not be reported as an anomaly, and it must not move any measured
+   * duration: the notes column exists to flag re-entries, and a note on every healthy
+   * run is a note nobody reads.
+   */
+  test('heartbeat rows neither skew the build window nor raise a duplicate note', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-heartbeat', 'launch-start', 0),
+      event('run-heartbeat', 'codex-exec-start', 1_000),
+      event('run-heartbeat', 'codex-exec-alive', 301_000),
+      event('run-heartbeat', 'codex-exec-alive', 601_000),
+      event('run-heartbeat', 'codex-exec-alive', 901_000),
+      event('run-heartbeat', 'codex-exec-end', 1_801_000),
+    ])
+    const result = computeSegments(fireWindow!)
+
+    // The window is measured start→end, untouched by anything stamped between them.
+    expect(result.codexBuildMs).toBe(1_800_000)
+    expect(result.codexBuildStatus).toBeNull()
+    expect(result.notes).not.toContain('duplicate:codex-exec-alive')
+    // POSITIVE CONTROL: the same reader on the same window still reports a REAL
+    // duplicate, so "no note" above is the exclusion working and not the notes
+    // machinery having gone silent.
+    const [withRetry] = groupIntoFireWindows([
+      event('run-heartbeat-2', 'launch-start', 0),
+      event('run-heartbeat-2', 'codex-exec-start', 1_000),
+      event('run-heartbeat-2', 'codex-exec-alive', 301_000),
+      event('run-heartbeat-2', 'codex-exec-start', 601_000),
+      event('run-heartbeat-2', 'codex-exec-alive', 901_000),
+      event('run-heartbeat-2', 'codex-exec-end', 1_801_000),
+    ])
+    const retryResult = computeSegments(withRetry!)
+    expect(retryResult.notes).toContain('duplicate:codex-exec-start')
+    expect(retryResult.notes).not.toContain('duplicate:codex-exec-alive')
+  })
+
   test('an end timestamp before its start is non-monotonic, not a missing stamp', () => {
     const [fireWindow] = groupIntoFireWindows([
       event('run-regression', 'launch-start', 0),
