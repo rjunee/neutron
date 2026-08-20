@@ -103,6 +103,16 @@ describe('makeCredentialedHostRunner', () => {
     expect(res.stdout.endsWith('/tmp')).toBe(true)
   })
 
+  it('merges a command-scoped env over the baked credential env', async () => {
+    const run = makeCredentialedHostRunner({ NEUTRON_TEST_MARKER: 'credential' })
+    const res = await run(
+      ['sh', '-c', 'echo "$NEUTRON_TEST_MARKER:$NEUTRON_COMMAND_MARKER"'],
+      undefined,
+      { NEUTRON_COMMAND_MARKER: 'private-index' },
+    )
+    expect(res.stdout).toBe('credential:private-index')
+  })
+
   it('with an EMPTY env behaves exactly like plain spawnCapture', async () => {
     // Same HOME reasoning as above — the unconnected instance still inherits a
     // real environment.
@@ -146,6 +156,18 @@ describe('makeLazyCredentialedHostRunner — resolved per command', () => {
     await run(['printenv', 'NEUTRON_TEST_MARKER'])
     await run(['printenv', 'NEUTRON_TEST_MARKER'])
     expect(calls).toBe(3)
+  })
+
+  it('merges command-scoped env without dropping the lazily loaded credential', async () => {
+    const run = makeLazyCredentialedHostRunner(async () => ({
+      NEUTRON_TEST_MARKER: 'credential',
+    }))
+    const res = await run(
+      ['sh', '-c', 'echo "$NEUTRON_TEST_MARKER:$NEUTRON_COMMAND_MARKER"'],
+      undefined,
+      { NEUTRON_COMMAND_MARKER: 'private-index' },
+    )
+    expect(res.stdout).toBe('credential:private-index')
   })
 
   it('still merges over the inherited env', async () => {

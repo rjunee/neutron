@@ -508,6 +508,193 @@ describe('governed-repo attributes gate is wired into ci.yml', () => {
 })
 
 /**
+ * THE AS-BUILT WRITE GUARD, AND WHY IT IS NOT WIRED IN ci.yml.
+ *
+ * The rule's first design was an eleven-line step in the `purity` job carrying
+ * an event filter and a `GUARD_BASE_SHA`/`GUARD_HEAD_SHA` mapping. It could not
+ * be built. No agent in this system can write `.github/workflows/`: the GitHub
+ * token is scoped `repo read:org`, the absence of `workflow` scope is asserted
+ * by test elsewhere in this repo, and a push touching that directory is rejected
+ * by GitHub itself — "refusing to allow an OAuth App to create or update
+ * workflow `.github/workflows/ci.yml` without `workflow` scope". Measured, not
+ * assumed: the probe push was made and refused.
+ *
+ * So the rule is expressed in files the repo owns. `as-built-write-guard.sh`
+ * reads its own event filter and its own base/head shas from the Actions event
+ * payload, and `check-governed-repo-attributes.ts` — which the `layering` job
+ * already runs unconditionally, with `fetch-depth: 0`, and which the describe
+ * ABOVE already pins as exit-code-honouring — invokes it first and propagates
+ * its status.
+ *
+ * That relocation trades one bypass surface for another, so this describe walks
+ * BOTH new surfaces with the same mutation battery the yml walk used. The three
+ * invariants that survive the move unchanged are the ones that matter: the guard
+ * runs for pull requests and merge-group commits, push-to-main is excluded
+ * because the outer-loop appender is the log's one legitimate writer, and the
+ * exit code is never discarded.
+ *
+ * The one genuinely NEW risk is the opposite of a bypass: a guard that now
+ * decides its own applicability can decide "not applicable" over a guarded
+ * event and report clean. That is pinned hardest — inside Actions, a guarded
+ * event with no readable shas must exit 2.
+ */
+describe('as-built write guard is wired into a gate the repo can own', () => {
+  const GUARD_PATH = 'scripts/ci/as-built-write-guard.sh'
+  const GATE_PATH = 'scripts/ci/check-governed-repo-attributes.ts'
+  const guard = readFileSync(join(REPO_ROOT, GUARD_PATH), 'utf8')
+  const gate = readFileSync(join(REPO_ROOT, GATE_PATH), 'utf8')
+
+  /**
+   * Why the gate would not enforce the guard, or `null` when it would. Read off
+   * the gate's SOURCE, the same way the yml walk read the workflow: the guard
+   * must be spawned, its exit code must reach `process.exit`, and nothing may
+   * stand between the two.
+   */
+  function whyNotEnforcing(source: string): string | null {
+    const spawnAt = source.indexOf('as-built-write-guard.sh')
+    if (spawnAt === -1) return 'the gate never names the guard'
+    if (!/Bun\.spawnSync\(\[\s*'bash'/.test(source)) return 'the gate does not spawn the guard'
+
+    // The status must propagate VERBATIM. `exitCode !== 0 → process.exit(1)`
+    // would collapse the guard's 2 (could not tell) into its 1 (wrote the log),
+    // and every other spelling here discards it outright.
+    if (!/if \(guard\.exitCode !== 0\) process\.exit\(guard\.exitCode\)/.test(source)) {
+      return 'the gate does not propagate the guard exit code verbatim'
+    }
+
+    // Called, not merely declared. A function defined and never invoked is the
+    // exact shape of the merged-green-but-unwired defect this repo keeps hitting.
+    if (!/^guardBranchWritesOfCanonicalLog\(\)$/m.test(source)) {
+      return 'the guard invocation is declared but never called at top level'
+    }
+
+    // It must run BEFORE the attribute verdict's early exits, or a repo with no
+    // log on disk returns 0 without the diff ever being read.
+    const firstExit = source.indexOf('process.exit(0)')
+    const callAt = source.search(/^guardBranchWritesOfCanonicalLog\(\)$/m)
+    if (firstExit !== -1 && callAt > firstExit) return 'the guard runs after an early exit 0'
+
+    return null
+  }
+
+  /** Why the guard would fail to guard a real PR, or `null` when it would. */
+  function whyNotGuarding(source: string): string | null {
+    // Both guarded events, each with the payload keys GitHub actually sends.
+    if (!/pull_request \| pull_request_target\)/.test(source)) return 'pull_request is not a guarded event'
+    if (!/merge_group\)/.test(source)) return 'the merge queue is not a guarded event'
+    if (!source.includes('pull_request.base.sha') || !source.includes('pull_request.head.sha')) {
+      return 'the pull_request payload mapping is incomplete'
+    }
+    if (!source.includes('merge_group.base_sha') || !source.includes('merge_group.head_sha')) {
+      return 'the merge_group payload mapping is incomplete'
+    }
+
+    // The strict branch: inside Actions, a guarded event that yielded no sha is
+    // exit 2. Without this, relocating the event filter into the script turns
+    // every unreadable payload into a silent pass.
+    if (!/GITHUB_ACTIONS:-\}" = "true"/.test(source)) return 'the guard is never strict inside Actions'
+    // Bound the window to the strict `if` block ITSELF, up to its own `fi`. A
+    // fixed 500-character window overlapped the GUARD_BASE_SHA checks that follow,
+    // which carry the same "REFUSES to skip" text and `exit 2` — so a mutation
+    // that gutted the strict branch entirely still read as intact. Caught by this
+    // describe's own mutation battery, which is what it is for.
+    const strictAt = source.search(/if \[ "\$\{GITHUB_ACTIONS:-\}" = "true"/)
+    if (strictAt === -1) return 'the strict branch is not an if on GITHUB_ACTIONS'
+    const strictEnd = source.indexOf('\nfi\n', strictAt)
+    if (strictEnd === -1) return 'the strict branch is unterminated'
+    const strictBlock = source.slice(strictAt, strictEnd)
+    if (!/REFUSES to skip/.test(strictBlock) || !/exit 2/.test(strictBlock)) {
+      return 'the strict branch does not exit 2'
+    }
+
+    // An explicit pair must stay strict — that is the contract the guard's own
+    // unit tests drive, and the escape hatch for the outer loop.
+    if (!/if \[ -z "\$\{GUARD_BASE_SHA:-\}" \] && \[ -z "\$\{GUARD_HEAD_SHA:-\}" \]/.test(source)) {
+      return 'an explicit GUARD_BASE_SHA/GUARD_HEAD_SHA pair no longer wins'
+    }
+
+    return null
+  }
+
+  test('the layering gate enforces the guard and propagates its status', () => {
+    expect(whyNotEnforcing(gate)).toBeNull()
+  })
+
+  test('the guard covers pull requests and merge-group commits, strictly', () => {
+    expect(whyNotGuarding(guard)).toBeNull()
+  })
+
+  test('the gate that carries the guard is the one ci.yml runs unconditionally', () => {
+    // The describe above owns this assertion for the gate itself; repeating the
+    // command here is what ties the guard's reachability to it. If the layering
+    // step is ever renamed or made conditional, this fails beside that one
+    // rather than leaving the guard silently unreachable.
+    expect(yml).toContain('- run: bun scripts/ci/check-governed-repo-attributes.ts .')
+  })
+
+  const gateMutations: Array<[string, (source: string) => string]> = [
+    [
+      'the invocation is deleted',
+      (source) => source.split('\n').filter((line) => !/^guardBranchWritesOfCanonicalLog\(\)$/.test(line)).join('\n'),
+    ],
+    [
+      'the guard is declared but never called',
+      (source) => source.replace(/^guardBranchWritesOfCanonicalLog\(\)$/m, '// guardBranchWritesOfCanonicalLog()'),
+    ],
+    [
+      'the exit code is collapsed to 1',
+      (source) =>
+        source.replace(
+          'if (guard.exitCode !== 0) process.exit(guard.exitCode)',
+          'if (guard.exitCode !== 0) process.exit(1)',
+        ),
+    ],
+    [
+      'the exit code is discarded',
+      (source) => source.replace('if (guard.exitCode !== 0) process.exit(guard.exitCode)', ''),
+    ],
+    ['the guard is no longer named', (source) => source.replace(/as-built-write-guard\.sh/g, 'nothing.sh')],
+  ]
+
+  for (const [name, mutate] of gateMutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(gate)
+      expect(mutated).not.toBe(gate)
+      expect(whyNotEnforcing(mutated)).not.toBeNull()
+    })
+  }
+
+  const guardMutations: Array<[string, (source: string) => string]> = [
+    ['the merge queue is dropped', (source) => source.replace('    merge_group)', '    never_group)')],
+    [
+      'the strict branch is removed',
+      (source) => source.replace(/if \[ "\$\{GITHUB_ACTIONS:-\}" = "true" \][\s\S]*?\nfi\n/, ''),
+    ],
+    [
+      'the strict branch passes instead of refusing',
+      (source) =>
+        source.replace(
+          "echo \"as-built-write-guard: event '${GITHUB_EVENT_NAME:-<none>}' is guarded but GITHUB_EVENT_PATH yielded no base/head sha; the guard REFUSES to skip.\" >&2\n  exit 2",
+          'exit 0',
+        ),
+    ],
+    ['the pull_request head mapping is dropped', (source) => source.replace('pull_request.head.sha', '')],
+    ['the explicit override stops winning', (source) => source.replace('if [ -z "${GUARD_BASE_SHA:-}" ] && [ -z "${GUARD_HEAD_SHA:-}" ]', 'if true')],
+  ]
+
+  for (const [name, mutate] of guardMutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(guard)
+      expect(mutated).not.toBe(guard)
+      expect(whyNotGuarding(mutated)).not.toBeNull()
+    })
+  }
+
+  test('the guard script it names exists on disk', () => {
+    expect(existsSync(join(REPO_ROOT, GUARD_PATH))).toBe(true)
+  })
+})
+/**
  * 2026-08-17 — the bun install cache is TEN UNLINKED LITERALS, so it needs a guard.
  *
  * `bun.lock` takes `gbrain` as a git dependency, so `bun install --frozen-lockfile`

@@ -68,71 +68,14 @@
  */
 
 /**
- * An entry begins at a `## ` heading. `#` (the file title) and `### ` (subsections) do not.
+ * THE PARSER IS INLINED HERE, AND THAT IS DELIBERATE — DO NOT HOIST IT INTO A WORKSPACE MODULE.
  *
- * THE DELIMITER AFTER THE `##` IS REQUIRED, AND THE FIRST CUT OF THIS ONLY REQUIRED IT NOT TO BE A
- * `#`. `/^##[^#]/` accepted `##foo`, which CommonMark 4.2 does not read as a heading at all — there
- * the run of `#` must be followed by a space, a tab, or the end of the line. So an ordinary BODY line
- * beginning `##` (a shell comment, a C preprocessor line, an `##` in prose) parsed as an entry of
- * its own, and the consequence was not cosmetic: the split changed the entry KEYS either side of
- * it, so an edit to that entry's body read as an entry missing from one side and this file
- * returned `wouldLoseEntries: true` — a hard conflict a human must resolve, fabricated out of a
- * body edit. Measured on a two-entry base carrying one `##not-a-heading` body line: THREE entries
- * parsed, and an ours-side edit of that line came back `ok: false, wouldLoseEntries: true` —
- * "the ours side is missing an entry the other still has … `##not-a-heading 1`" — because the edit
- * renamed a key. With the delimiter required the same base parses to two and the same merge is
- * `ok: true`. It fails LOUD rather than lossy, which is why it survived review, and there are zero
- * live occurrences in the tracked markdown (`git grep -cE '^##[^# ]' -- '*.md'` → none, against a
- * control of 308 for `^## ` in this log) — so this is a latent trap being closed, not an outage.
- *
- * THE TAB IS DELIBERATE AND IT IS NOT THE SAME AS `/^## /`. CommonMark accepts `##\ttitle`, and
- * `as-built-heading-uniqueness.ts` — which shares this parser precisely so a gate and a driver can
- * never disagree about where an entry begins — pins that case in its own test file. Narrowing to a
- * literal space would have counted a real heading as body text, which is the SILENT direction:
- * measured on that fixture, the gate parses ZERO entries and reports the log clean, so a genuine
- * collision goes unreported rather than being reported wrongly.
- *
- * A TITLE IS REQUIRED, WHICH IS THIS LOG'S CONTRACT AND NOT CommonMark'S. `docs/AS_BUILT.md` line 3
- * says "One entry per merged change"; an entry with no title is not one, and a line that heads
- * nothing is safer as body text than as an entry whose identity is a stray keystroke. This is
- * deliberately NARROWER than CommonMark, which reads every one of the rejected forms as a valid
- * EMPTY heading and additionally allows up to three leading spaces and an end-of-line straight
- * after the hashes.
- *
- * IT TOOK THREE PASSES TO STATE THAT RULE CORRECTLY, AND EVERY MISS WAS THE SAME DEFECT WEARING A
- * SHORTER NAME — a cross-model reviewer found each one, and each was reproduced before it was
- * fixed. `/^##[ \t]/` rejects a bare `##` but ACCEPTS `## ` and `##\t`, the same empty heading with
- * trailing whitespace. `/^##[ \t]+\S/` closed those and still accepted `## #`, `## ##`,
- * `## ###   `: in CommonMark a run of `#` at the END of an ATX heading is an optional CLOSING
- * sequence, so those render empty too (the spec's own example is `### ###`). Spelling the closing
- * sequence out as `(?![ \t]*#*[ \t]*\r?$)` closed THOSE and still accepted `## #\r\r`, and — worse,
- * because it was a REGRESSION rather than a leftover — `## ` followed by a non-breaking space,
- * a vertical tab or a form feed, all of which the `\S` cut had rejected. Every one reproduces
- * identically: a base carrying one such body line parses to THREE entries, and an ours-side edit of
- * that line alone (`## ` → `##`, `## #` → `## ##`) returns `ok: false, wouldLoseEntries: true` —
- * the refusal reserved for history loss, fabricated by editing whitespace or punctuation.
- *
- * SO THE RULE IS STATED ONCE, AS A CLASS RATHER THAN AS A SHAPE: after the delimiter there must be
- * a character that is neither whitespace nor a hash. That is one lookahead, it needs no cases, and
- * it cannot be defeated by a spelling nobody enumerated — which is what the previous two attempts
- * were, and why each of them needed another round. Two consequences are deliberate:
- *
- *   - A title may BEGIN with a hash. `## #303 landed` is a heading with content, because a closing
- *     sequence only counts at the END, and it has its own guard test — over-narrowing here would
- *     DROP an entry, which is worse than fabricating a conflict.
- *   - A title made ENTIRELY of hashes and whitespace (`## # #`, whose CommonMark content is `#`) is
- *     body text. This is the one place the rule is narrower than the spec by choice: line 3 of the
- *     log says "One entry per merged change", `#` is not a change, and admitting it would put an
- *     entry key on a line whose whole content is punctuation.
- *
- * ONE LIMIT REMAINS AND IS NAMED RATHER THAN PAPERED OVER. CommonMark counts a lone `\r` as a line
- * ending; this file splits on `\n` only, so `## \r2026-01-01 — x` is one line here and two there,
- * and this reads it as a dated heading where a renderer reads an empty heading followed by a
- * paragraph. Closing it means changing the line model the whole file rests on, including the
- * byte-exact round-trip `serializeLog(parseLog(t)) === t` that every other guarantee is checked
- * against. Nothing is LOST by it — the line is intact and both sides parse it the same way — and no
- * generator writes a bare `\r` mid-line, so it is recorded here rather than fixed.
+ * git execs the driver as `bun --config=/dev/null scripts/git/as-built-merge-driver.ts ...`
+ * from a TEMPORARY MERGE WORKTREE. A `@neutronai/...` specifier resolves through node_modules,
+ * which that worktree does not have, so the driver dies and `git merge` returns non-zero.
+ * This file has zero imports and that is a contract, not untidiness.
  */
+
 const HEADING = /^##[ \t]+(?![\s#]*$)/
 /** `## 2026-08-15 — title`. Ten historical sections carry no date; see `effectiveDates`. */
 const DATE_IN_HEADING = /^##\s+(\d{4}-\d{2}-\d{2})\b/

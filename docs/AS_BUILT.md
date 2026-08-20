@@ -2,19 +2,53 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-19 — an infrastructure death is never a verdict (ported from #282)
+
+Run f384460d exposed a wrapper catch path that self-asserted `REQUEST_CHANGES` after an
+infrastructure throw, making the owner see a rejection for work no reviewer judged.
+`findings_present` now decodes fail-closed from only a non-empty findings array, and both
+terminal failed transitions null the verdict when `isInfraDeath` identifies that measured
+shape. `infraDeathSentence` authors the stored wording that `interpretFailure` routes back to
+infrastructure copy, keeping the writer and reader from drifting. `isInfraDeath` deliberately
+answers verdict honesty separately from `classifyInnerFailure`, whose stricter question is
+whether a measured failure is safe to auto-retry.
+
+## 2026-08-19 — a prNumber of 0 is a sentinel, never a PR number (ported from #282)
+
+The inner wrapper emits `PR_NUMBER=0` when no PR exists. `parseInnerResult` now decodes any
+non-positive or non-integer `prNumber` to `null` instead of letting 0 flow onward as a real
+PR number, and `inner-workflow.mjs` writes or adopts a PR number only when it is a positive
+integer — at the checkpoint, the terminal result, and forge adoption alike. A failed round
+reporting `prNumber` 0 therefore keeps the known PR on the row instead of overwriting it
+with the sentinel. The wrapper's `PR_NUMBER=0` trailer contract itself is byte-identical.
+
 ## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
 
 `reconcile_stranded` now checks both committed and uncommitted work before concluding that a
-failed PR-mode run built nothing. It locates the linked worktree for the run's branch, records
-dirty tracked work with a non-mutating `stash create`, anchors the resulting object at
-`refs/tags/trident-salvage/<run_id>`, and reports file, line, and untracked-name counts on the
-terminal row. A clean branch with matching shared-stash entries is reported as parked work.
+failed PR-mode run built nothing. It excludes the primary/shared checkout, builds a complete
+tracked-and-untracked tree through a private temporary index, retains the live index as a second
+parent when `stash create` can read it, and anchors the resulting commit at
+`refs/tags/trident-salvage/<run_id>`, and reports file and text-line counts from that same object.
+A live index lock or unmerged index can make that optional index-parent probe fail; capture then
+continues through the private index, preserves the working-tree version plus untracked files, and
+records the omitted-parent warning instead of abandoning the entire snapshot.
+A clean branch consults both the stash list and reflog, accepting exact-branch entries only when
+their timestamps fall inside the run's lifetime; boot reconciliation suppresses checkout
+inspection when a live run in the same project and repository owns a reused branch. Prunable
+worktree entries are skipped so they cannot suppress stash evidence.
 
 Commit publication remains the existing outer-loop operation. Snapshot-only and stash-only
 outcomes make no remote mutation, while a run with both committed and dirty work publishes the
-commit and records both dispositions. Real-git falsification tests prove the dirty worktree and
-HEAD remain byte-identical, the snapshot is addressable from the shared store, raw stash text is
-not persisted, and all added annotations preserve the underlying delivery classification.
+commit and records both dispositions. Recovery refs are create-only: reconciliation consults the
+run-scoped ref even when a prior store write lost its marker, reconstructs the original counts from
+the anchored commit, and never moves that ref to a later worktree state. A failed capture writes no
+success marker but persists its bounded diagnostic in `failure_reason`, so both live terminal
+delivery and the boot sweep expose it; it never blocks a commit that appears later. Real-git
+falsification tests prove staged-only, untracked nested, and tracked work behind a live index lock
+are recoverable, the dirty worktree and HEAD remain byte-identical, retry after a lost store write
+keeps the first snapshot, stale/crafted
+stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
+cause while exposing the local recovery ref.
 
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 
@@ -92,11 +126,11 @@ content in the tree under review — and is still deliberately not done.
 ## 2026-08-18 — lane_review.sh fails closed (T1–T4)
 tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
 
-Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
+Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, route-specific aliases, anonymous defaults and CommonJS `module.exports`, cannot disappear; ambient declarations are not runtime exports. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports (including namespace destructuring), TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows, publication assignments and a re-export by itself do not qualify, while aliases, namespace access, new same-module runtime use and class `extends` remain valid callers. A direct production caller proves a new definition is wired, then a fixpoint proves the new helpers that definition references. Recursion, mutual references and class self-construction with no independently proven entry point remain unwired.
 
-The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
+The result proves a direct runtime reference exists in some non-test, non-prose production source; `docs/` and `plans/` prototypes cannot manufacture a caller. It does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer fails closed if any included production source cannot be parsed. Its direct `typescript` runtime dependency is declared by the tools workspace. Its enforced command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
 
-Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+Pinned by tools/lane_review.test.ts: 36 tests / 114 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
 
 ## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
 
@@ -8515,6 +8549,37 @@ Mutation checks (each production guard was removed independently and restored):
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-19 — `suiteOutcome='deferred'` separates an instructed Ralph deferral from a missing suite
+
+Two independent salvage lanes exposed the same two-meanings defect: every intermediate
+Ralph brief instructed `suiteOutcome='not-run'`, while the unoverridable full-suite gate
+correctly treats `not-run` as a suite that should have run but did not. The gate therefore
+blocked the very intermediate rounds whose own contract deferred stage 2 to the terminal
+task, without any relationship to the code in those lanes.
+
+The repair has four coordinated pieces. `FORGE_SCHEMA` now accepts `deferred` (and its
+property spread covers the Codex route); every intermediate instruction site teaches that
+value, and all three Codex EXIT-0 transcription paths preserve it, while the terminal
+vocabulary and Codex lane-failure rules retain `not-run`; the round-1 dispatch scope is
+threaded into `fullSuiteFindings`; and only an instructed `deferred` report from a
+subset-scoped dispatch yields no suite finding. The default scope remains full-suite,
+including fix rounds, so the exemption cannot become "no proof needed."
+
+| Report and dispatch | Expected gate result | Pinned result |
+| --- | --- | --- |
+| `testsPassed=false`, `deferred`, intermediate Ralph subset | No suite finding; checkpoint records `[]` | GREEN |
+| `testsPassed=false`, `not-run`, the same subset | `FULL SUITE NOT PROVEN` blocker | GREEN |
+| `testsPassed=false`, `deferred`, terminal Ralph full suite | Unoverridable blocker | GREEN |
+| `testsPassed=false`, `deferred`, non-Ralph full suite | Unoverridable blocker | GREEN |
+| `testsPassed=true`, `deferred`, any scope | `CONTRADICTORY SUITE CLAIM` blocker | GREEN |
+
+Mutation controls prove both directions: deleting only the subset exemption reds the
+intermediate-deferred test (67 pass / 1 fail), while bypassing the whole not-passed tail
+reds both the intermediate `not-run` case and the full-scope blocker table (55 pass /
+13 fail). At implementation commit `e24912c3`, with production code restored, the focused
+two-file run measured 152 pass / 0 fail, and `bun test trident/` measured 2321 pass / 0 fail
+across 86 files.
 
 ## 2026-08-14 — launcher-held build brief segments travel by path
 

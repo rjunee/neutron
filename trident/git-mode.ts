@@ -1231,24 +1231,20 @@ export async function spawnCapture(
 }
 
 /**
- * A `RunHostCommand` with an environment baked in.
- *
- * WHY A FACTORY RATHER THAN AN EXTRA PARAMETER ON `RunHostCommand`. That type is
- * `(cmd, cwd?) => Promise<HostCommandResult>` and is implemented by a dozen test
- * doubles and threaded through the orchestrator, merge, and probe paths. Adding a
- * third parameter would ripple through all of them and — worse — would make
- * carrying the credential the CALLER's job at every single call site, which is
- * exactly how one of them ends up forgetting. Baking it in at the composition
- * seam means every host command a run makes is credentialed by construction, and
- * the type nobody else has to change.
+ * An `EnvCapableHostRunner` with an environment baked in. A caller may also add
+ * command-scoped variables (the salvage path uses this for its private index);
+ * those merge over the credential environment without replacing inherited env.
+ * Baking the credential in at the composition seam still means every host
+ * command a run makes is credentialed by construction.
  *
  * With an empty env this is `spawnCapture` verbatim, so an instance with no
  * GitHub connection behaves precisely as it does today.
  */
 export function makeCredentialedHostRunner(
   extraEnv: Record<string, string>,
-): (cmd: string[], cwd?: string) => Promise<HostCommandResult> {
-  return (cmd, cwd) => spawnCapture(cmd, cwd, extraEnv)
+): EnvCapableHostRunner {
+  return (cmd, cwd, commandEnv, timeoutMs) =>
+    spawnCapture(cmd, cwd, { ...extraEnv, ...commandEnv }, timeoutMs)
 }
 
 /**
@@ -1275,8 +1271,9 @@ export function makeCredentialedHostRunner(
  */
 export function makeLazyCredentialedHostRunner(
   loadEnv: () => Promise<Record<string, string>>,
-): (cmd: string[], cwd?: string) => Promise<HostCommandResult> {
-  return async (cmd, cwd) => spawnCapture(cmd, cwd, await loadEnv())
+): EnvCapableHostRunner {
+  return async (cmd, cwd, commandEnv, timeoutMs) =>
+    spawnCapture(cmd, cwd, { ...(await loadEnv()), ...commandEnv }, timeoutMs)
 }
 
 /**

@@ -224,6 +224,13 @@ export interface InnerResult {
    * `block_kind` only to choose which sentence frames it.
    */
   terminal_cause: string | null
+  /**
+   * True iff the raw terminal result carried a NON-EMPTY `findings` array.
+   * Fail-closed: absent / non-array / empty decodes false. Distinguishes an
+   * infrastructure death (inner-error, findings []) from a terminal result
+   * that carries real review findings (e.g. the round-lost shapes).
+   */
+  findings_present: boolean
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
   /**
@@ -624,8 +631,17 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
   return {
     ok: p.ok === true,
     verdict: normalizeVerdict(p.verdict),
+    // A NON-POSITIVE (or fractional) prNumber IS THE "NO PR" SENTINEL, NOT AN ANSWER.
+    // The codex build wrapper reports `PR_NUMBER=0` in pr mode by design — the outer
+    // loop publishes after the build exits — and GitHub numbers PRs from 1. Decoding
+    // the sentinel as a number is what ended run f384460d (2026-08-15) at pr=0 on a
+    // row that held pr=267: every `result.pr_number ?? run.pr` site in orchestrator.ts
+    // keeps a 0, because 0 is not nullish. Mapping it to null HERE restores the known
+    // PR at every `?? run.pr` site at once.
     pr_number:
-      typeof p.prNumber === 'number' && Number.isFinite(p.prNumber) ? p.prNumber : null,
+      typeof p.prNumber === 'number' && Number.isInteger(p.prNumber) && p.prNumber > 0
+        ? p.prNumber
+        : null,
     branch: typeof p.branch === 'string' ? p.branch : null,
     round: typeof p.round === 'number' && Number.isFinite(p.round) ? p.round : 0,
     checkpoint: typeof p.checkpoint === 'string' ? p.checkpoint : null,
@@ -662,6 +678,12 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
       typeof p.terminalCause === 'string' && p.terminalCause.trim() !== ''
         ? p.terminalCause.trim().slice(0, TERMINAL_CAUSE_MAX)
         : null,
+    // T4 — DID A REVIEWER ACTUALLY SAY ANYTHING? Decoded FAIL-CLOSED: only a non-empty
+    // array counts, so absent/garbled/`[]` all read false. The orchestrator uses this to
+    // tell an infrastructure death (`inner-error` with `findings: []` — run f384460d, the
+    // wrapper's catch path) apart from a terminal result that carries real review findings;
+    // a false positive here would report an infra death as a review verdict again.
+    findings_present: Array.isArray(p.findings) && p.findings.length > 0,
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)
