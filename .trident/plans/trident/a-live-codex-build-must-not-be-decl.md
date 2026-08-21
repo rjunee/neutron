@@ -9,3 +9,10 @@ The mechanism, named (spec work item 1): the wait is the bridge agent's polling 
 - [ ] RESUME COLLECTS A LATE TRAILER: teach `classifyResume`/`resumeOnUnchangedHead` (inner-workflow.mjs:2568–2633) a new `awaiting-trailer` branch — handled BEFORE the recorded-head gate (like `pr-merged`), since no head was measured — that probes the trailer file at resume; when it holds a `NEUTRON_CODEX_BUILD_HEAD`, the run reuses that existing commit (collect → forge-done path → publish handoff/review) instead of rebuilding; when still absent, it rebuilds. A test proves a resumed run reuses the commit and never dispatches a second build.
 - [ ] OUTER-LOOP HONESTY FOR `awaiting-trailer`: `trident/orchestrator.ts` `innerTerminalFailureReason` (and terminal-failure-reason.test.ts) must give `awaiting-trailer` its own sentence — a bounded wait, resumable when the trailer lands — never the generic "ended at checkpoint 'inner-error'" wording; the slug-retry/relaunch path must accept an `awaiting-trailer` row for resume with its preserved worktree.
 - [ ] DOCS: update docs/SYSTEM-OVERVIEW.md:3026 ("an empty or missing trailer is a hard DEFERRED" — no longer true without the liveness probe) and add the docs/AS_BUILT.md entry recording the 2026-08-17 four-lane incident (runs 7a2d1fec, 3953261a, 68b1026b) and this repair.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/a-live-codex-build-must-not-be-declared-deferred-the-trailer-reer87.md`. Do not paraphrase this section._
+
+- Do not simply raise the timeout. A larger number moves the cliff; it does not remove it.
+- Do not fall back to Claude when the codex trailer is late — that is the quota leak the deferral path exists to prevent.

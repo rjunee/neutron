@@ -150,6 +150,25 @@ export interface TridentBuildToolDeps {
    * path). Absent → unchanged pre-task-4 behaviour (no post).
    */
   chat_ack?: WorkBoardChatAck
+  /**
+   * LIVENESS PREFLIGHT for the executor this build would run on. When it refuses,
+   * NO RUN ROW IS CREATED and the reason is returned to the agent verbatim.
+   *
+   * Wired to `codexDispatchPreflight`, which refuses only when the owner's BUILD
+   * phase dispatches to codex AND every connected seat has been positively probed
+   * and refused server-side. Absent → unchanged behaviour, which is what keeps
+   * every existing caller and every test that does not care about credentials
+   * working.
+   *
+   * IT IS HANDED TO `dispatchBoardBoundBuild` RATHER THAN CALLED HERE, and that
+   * is the fix for a measured gap: called here it gated the two agent tools and
+   * nothing else, while the app's ▶ button and `/code` — which reach the same
+   * chokepoint by other routes — spawned the doomed lane exactly as before. The
+   * chokepoint also knows something this handler does not, namely whether the
+   * dispatch is a `bound_pr` REVIEW round, which must not be refused with a
+   * sentence about the Build phase's executor.
+   */
+  preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
 }
 
 /** First non-empty line of a task, truncated — the ack title when a board item
@@ -230,6 +249,9 @@ export function registerTridentBuildToolSurface(
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
+        // shares (see BoardBoundBuildDeps.preflight).
+        ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
       }
       const result = await dispatchBoardBoundBuild(
         { board_item_id, task, ...(bound_pr !== undefined ? { bound_pr } : {}) },
@@ -345,6 +367,9 @@ export function registerTridentBuildToolSurface(
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
         ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
         ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+        // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
+        // shares (see BoardBoundBuildDeps.preflight).
+        ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
       }
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {

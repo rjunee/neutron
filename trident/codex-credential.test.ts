@@ -313,6 +313,17 @@ describe('connect → codex-review.sh sees CONNECTED (exit 0)', () => {
         CODEX_HOME: codexHome,
         NEUTRON_CODEX_AUTH_RETRY_DELAY: '0',
         NEUTRON_CODEX_DIFF_FILE: diffFile,
+        // THE LIVE AUTH PROBE IS POINTED AT A DEAD PORT ON PURPOSE. The wrapper
+        // now asks the ChatGPT backend whether the stored token really works
+        // (`codex login status` only reads a local file and passes on a revoked
+        // seat). Left on its default this unit test would put a request on the
+        // public internet with a placeholder token and correctly get a 401.
+        // Connection-refused is the `unreachable` arm — which must NOT block the
+        // review, and asserting exit 0 here is exactly that guarantee.
+        // The 401 / 200 / 500 arms are exercised against a real local endpoint in
+        // `trident/__tests__/codex-seat-probe.test.ts`.
+        NEUTRON_CODEX_AUTH_PROBE_URL: 'http://127.0.0.1:1/codex/models',
+        NEUTRON_CODEX_AUTH_PROBE_TIMEOUT: '2',
       },
     })
     // exit 0 = CONNECTED (NOT the exit-10 no-auth.json branch).

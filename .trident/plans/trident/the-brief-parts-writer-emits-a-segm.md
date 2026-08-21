@@ -13,3 +13,11 @@ PLANNER SURVEY CORRECTION (2026-08-18, read from main): `r1.brief.a1` (`/tmp/tri
 - [x] 4. Board visibility of `brief_alert`: thread it through `RunProgress` (`trident/run-progress.ts` `deriveRunProgress`), the work-board surface/wire types, and render on `landing/chat-react/WorkBoardTab.tsx` + `app/lib/work-board-helpers.ts` so a run whose brief part failed its receipt shows the reason on the card even when the run proceeded; tests at derive + render layers. AS_BUILT entry per task; INVARIANTS line for "brief-part receipts are measured from persisted bytes" with task 1.
 - [x] 5. Argus round-4 terminal-boundary hardening: successful reconciliation keeps the terminal run binding so the SURVIVED alert remains derivable in completed history; both web and mobile completed rows render it, with a device-harness test pinning mobile tone/style selection. Reopening a completed card clears the stale link. `brief_alert` is explicitly workflow-owned and protected from stale `save()`/`saveIfActive()` snapshots. Alert-only checkpoints do not re-stamp the hang-watchdog heartbeat, and a missing run id exits nonzero so `codex-build.sh` emits `CODEX_BUILD_BRIEF_ALERT_FAILED` instead of losing the alert silently. A failed run with no `failure_reason` does not mislabel an earlier recovered alert as its outcome.
 - Commit .trident/plans/trident/the-brief-parts-writer-emits-a-segm.md together with your code + tests.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/the-brief-parts-writer-emits-a-segment-569-bytes-shorter-tha-pxpjq2.md`. Do not paraphrase this section._
+
+- Do not weaken or bypass the receipt verification — it worked.
+- Do not fold this into `01M0274598` or `01M07AMS6Z`; they are different stages of the same pipeline.
+- Do not claim the false-success terminal state as fixed work — it was not observed on this run.

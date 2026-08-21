@@ -108,6 +108,14 @@ export function createCodexCredentialSurface(
           // credential for this project); global route reports the global default.
           // The legacy top-level fields are kept verbatim so existing clients keep
           // working; `accounts` / `active` / `next` are additive.
+          // ASK THE SERVER FIRST. Everything below is a read of stored bytes, and
+          // stored bytes cannot show a token that was revoked server-side — the
+          // state this route reported as `connected` for days while every build
+          // died on `refresh_token_invalidated`. The probe is TTL-cached per seat
+          // (so a polling pane makes at most one request a minute), bounded at 3s,
+          // and never throws: an unreachable endpoint leaves this answer exactly
+          // as it was before.
+          await service.refreshSeatLiveness(owner_slug, target)
           const status = service.status(owner_slug, target)
           if (!isGlobal) return jsonOk({ ...status })
           const accounts = service.listAccounts(owner_slug)

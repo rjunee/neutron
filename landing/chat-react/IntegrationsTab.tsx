@@ -228,8 +228,18 @@ export function IntegrationsTab({
    * it.
    */
   const codexPool = codexStatus?.accounts ?? []
+  /** Seats the probe positively found revoked (`unauthorized` is that cooldown). */
+  const codexRevokedSeats = codexPool.filter((s) => s.cooling_reason === 'unauthorized').length
+  // `revoked` is USABLE for the purposes of this flag, exactly as `expired` is:
+  // the flag decides whether the pane shows the seat-management controls, and a
+  // seat the server has disowned is precisely the one the owner has come here to
+  // replace. Dropping it would hide the Disconnect/Reconnect affordances on the
+  // only status that requires them.
   const codexUsable =
-    codexPool.length > 0 || codexStatus?.status === 'connected' || codexStatus?.status === 'expired'
+    codexPool.length > 0 ||
+    codexStatus?.status === 'connected' ||
+    codexStatus?.status === 'expired' ||
+    codexStatus?.status === 'revoked'
 
   const loadCodex = useCallback((): void => {
     void codexClient
@@ -1179,12 +1189,26 @@ export function IntegrationsTab({
               </p>
               <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
                 {codexPool.length > 0
-                  ? `✓ ${codexPool.length} seat${codexPool.length === 1 ? '' : 's'} connected`
+                  ? // REVOKED SEATS ARE COUNTED, not folded into "connected". A pool
+                    // whose seats the server has disowned rendered as
+                    // "✓ N seats connected" here — the same class of lie the probe
+                    // exists to end, one surface further out. Counted from the pool
+                    // rather than keyed on the top-level `status` so a 3-seat pool
+                    // with one dead seat says so instead of condemning all three.
+                    codexRevokedSeats === codexPool.length
+                    ? `⚠ ${codexPool.length} seat${codexPool.length === 1 ? '' : 's'} REVOKED server-side — re-connect (waiting will not fix it)`
+                    : codexRevokedSeats > 0
+                      ? `✓ ${codexPool.length - codexRevokedSeats}/${codexPool.length} seats connected — ${codexRevokedSeats} REVOKED, re-connect`
+                      : `✓ ${codexPool.length} seat${codexPool.length === 1 ? '' : 's'} connected`
                   : codexStatus?.status === 'connected'
                     ? '✓ Connected'
                     : codexStatus?.status === 'expired'
                       ? '⚠ Token expired — re-connect'
-                      : '○ Not connected'}
+                      : codexStatus?.status === 'revoked'
+                        ? // NOT the `expired` sentence: the token has not run out, the
+                          // server has disowned it, and only a fresh login fixes it.
+                          '⚠ Session REVOKED server-side — re-connect (waiting will not fix it)'
+                        : '○ Not connected'}
                 {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
               </p>
               {codexError !== null ? <div className="cdoc-comments-error">{codexError}</div> : null}
