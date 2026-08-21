@@ -16,8 +16,10 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
+import { LIVE_AGENT_TOOL_NAMES } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
 import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import type { Event } from '@neutronai/runtime/events.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -38,12 +40,24 @@ const SAVED_ENV_KEYS = [
 
 let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
+const wakeDispatches: Array<{
+  instance_id: string
+  tool_bridge: boolean
+  tool_names: string[]
+}> = []
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
-function recordingSubstrate(): Substrate {
+function recordingSubstrate(opts: ClaudeCodeSubstrateOptions): Substrate {
   return {
     start(spec: AgentSpec): SessionHandle {
+      if (spec.prompt.includes('[TERMINAL BUILD WAKE]')) {
+        wakeDispatches.push({
+          instance_id: opts.substrate_instance_id,
+          tool_bridge: opts.enableToolBridge === true,
+          tool_names: spec.tools.map((tool) => tool.name),
+        })
+      }
       async function* events(): AsyncGenerator<Event> {
         yield { kind: 'token', text: spec.prompt.includes('[TERMINAL BUILD WAKE]') ? 'WAKE-ACT-1' : 'ok' }
         yield {
@@ -77,6 +91,7 @@ interface OpenSocket {
 let harness: Harness | null = null
 
 beforeEach(() => {
+  wakeDispatches.length = 0
   savedEnv = {}
   for (const key of SAVED_ENV_KEYS) savedEnv[key] = process.env[key]
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-terminal-build-wake-'))
@@ -109,8 +124,7 @@ async function startHarness(): Promise<Harness> {
   const composer = buildOpenGraphComposer({
     env: process.env,
     ownerBearer: OWNER_BEARER,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    substrateFactory: (() => recordingSubstrate()) as any,
+    substrateFactory: (opts: ClaudeCodeSubstrateOptions) => recordingSubstrate(opts),
   })
   const composition = await composer({ db, project_slug: 'owner' })
   const graph = await composeProductionGraph(composition)
@@ -223,6 +237,10 @@ describe('Open terminal-build wake observer wiring', () => {
     )
     expect(wakeFrames(sock.frames)).toHaveLength(1)
     expect(readWakeClaim()).toBe(firstClaim)
+    expect(wakeDispatches).toHaveLength(1)
+    expect(wakeDispatches[0]!.instance_id.startsWith('cc-nudge-')).toBe(true)
+    expect(wakeDispatches[0]!.tool_bridge).toBe(true)
+    expect(wakeDispatches[0]!.tool_names).toEqual([...LIVE_AGENT_TOOL_NAMES])
 
     sock.close()
     await sleep(50)

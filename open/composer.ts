@@ -4273,6 +4273,8 @@ export function buildOpenGraphComposer(
     // detached `linked_run_id`, so the prompt's "Board item id" is commonly
     // "none" (a module-supported shape) — the wake turn still carries run id /
     // branch / task and has board tools to locate the item. Accepted tradeoff.
+    // The wake observer must stay on a tool-bridge-enabled substrate with
+    // channel-turn grants; `open-terminal-build-wake-wiring.test.ts` pins it.
     const terminalBuildWake = buildTerminalBuildWakeObserver({
       claimWake: (id) => boardRunStore.claimAgentWake(id),
       boardItemIdForRun: async (run) => workBoardStore.getByRunId(run.project_slug, run.id)?.id ?? null,
