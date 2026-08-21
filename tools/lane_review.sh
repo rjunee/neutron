@@ -25,6 +25,11 @@
 
 set -uo pipefail
 
+if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) )); then
+  echo "lane_review: Bash 4.4 or newer is required — refusing to answer"
+  exit 2
+fi
+
 if [ $# -lt 1 ]; then
   echo "usage: lane_review.sh <branch-or-ref> [base]"
   exit 2
@@ -111,7 +116,7 @@ if [ "${#prod[@]}" -eq 0 ]; then
   exit 1
 fi
 
-echo "--- production files changed:"
+echo "--- non-prose, non-test files changed:"
 printf '  %s\n' "${prod[@]}"
 
 # --- class 3: unwired --------------------------------------------------------
@@ -122,10 +127,14 @@ printf '  %s\n' "${prod[@]}"
 # A CALLER is a reference in a non-test production file that is not the export
 # site itself. Two rules the analyzer must keep, both paid for in production:
 # a re-export (`export { s } from`) is NOT a caller — that is exactly what #400
-# did and it shipped unwired; and the DEFINING FILE is NOT skipped — only the
-# definition itself is. A symbol defined and USED inside its own module is
-# wired: #395 (verified live in the deployed tree) does exactly that, and an
-# earlier version that skipped the definer reported it as unwired.
+# did and it shipped unwired; and the DEFINING FILE is NOT skipped. A symbol
+# defined and USED at top level inside its own module is wired: #395 (verified
+# live in the deployed tree) does exactly that, and an earlier version that
+# skipped the definer reported it as unwired. A reference from INSIDE a new
+# definition is deferred rather than discarded: a direct caller proves its new
+# definition is wired, then a fixpoint proves the new helpers that definition
+# references. Recursion and mutually-referential islands with no independently
+# proven entry point remain unwired.
 bun "$ANALYZER" analyze "$MB" "$BR" "${prod[@]}"
 analysis_status=$?
 # The analyzer reserves 10 for a completed analysis with findings. Bun itself

@@ -86,6 +86,18 @@ beforeAll(() => {
     join(repo, 'src', 'star-source.ts'),
     'export function starOnly(): number { return 1 }\n',
   )
+  writeFileSync(
+    join(repo, 'src', 'existing-route.ts'),
+    'export function existingRoute(): number { return 1 }\n',
+  )
+  writeFileSync(
+    join(repo, 'src', 'existing-route-caller.ts'),
+    "import { existingRoute } from './existing-route.ts'\nconsole.log(existingRoute())\n",
+  )
+  writeFileSync(
+    join(repo, 'src', 'existing-default.ts'),
+    'function alreadyUsed(): number { return 1 }\nconsole.log(alreadyUsed())\n',
+  )
   git('add', '-A')
   git('commit', '-q', '-m', 'base')
   // The script's default base is origin/main; model it without a network remote.
@@ -225,6 +237,71 @@ beforeAll(() => {
       'export function alpha(): number { return beta() }',
       'export function beta(): number { return alpha() }',
       'export class Widget { static make(): Widget { return new Widget() } }',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('wired-definition-chain', {
+    'src/chained-api.ts': [
+      'export function chainedHelper(): number { return 1 }',
+      'export function chainedEntry(): number { return chainedHelper() }',
+      '',
+    ].join('\n'),
+    'src/chained-caller.ts': [
+      "import { chainedEntry } from './chained-api.ts'",
+      'console.log(chainedEntry())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('new-alias-route', {
+    'src/existing-route.ts': [
+      'export function existingRoute(): number { return 1 }',
+      'export { existingRoute as newlyExposed }',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('commonjs-default', {
+    'src/plugin.cjs': 'module.exports = function newPlugin() { return 1 }\n',
+  })
+
+  fixtureBranch('namespace-destructure', {
+    'src/destructure-api.ts': 'export function throughDestructure(): number { return 1 }\n',
+    'src/destructure-caller.ts': [
+      "import * as api from './destructure-api.ts'",
+      'const { throughDestructure } = api',
+      'console.log(throughDestructure())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('ambient-only', {
+    'src/ambient.ts': 'export declare function ambientOnly(): number\n',
+  })
+
+  fixtureBranch('docs-caller', {
+    'src/docs-orphan.ts': 'export function calledOnlyFromDocs(): number { return 1 }\n',
+    'docs/research/prototype.mjs': [
+      "import { calledOnlyFromDocs } from '../../src/docs-orphan.ts'",
+      'console.log(calledOnlyFromDocs())',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('commonjs-publication', {
+    'src/publication.cjs': [
+      'function publicationOnly() { return 1 }',
+      'module.exports.publicationOnly = publicationOnly',
+      '',
+    ].join('\n'),
+  })
+
+  fixtureBranch('default-existing-use', {
+    'src/existing-default.ts': [
+      'function alreadyUsed(): number { return 1 }',
+      'console.log(alreadyUsed())',
+      'export default alreadyUsed',
       '',
     ].join('\n'),
   })
@@ -530,6 +607,62 @@ describe('lane_review.sh fail-closed contract', () => {
     expect(out).toContain('FINDING: beta')
     expect(out).toContain('FINDING: Widget')
     expect(out).not.toContain('ok:')
+  })
+
+  test('a proven-wired new entry point also wires the new helper it calls', () => {
+    const { code, out } = review('wired-definition-chain')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: chainedEntry called by src/chained-caller.ts')
+    expect(out).toContain('ok: chainedHelper called by src/chained-api.ts')
+    expect(out).not.toContain('FINDING: chainedHelper')
+  })
+
+  test('a new alias route cannot inherit callers of the existing route', () => {
+    const { code, out } = review('new-alias-route')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: newlyExposed has NO non-test production caller')
+    expect(out).not.toContain('ok: newlyExposed')
+  })
+
+  test('a CommonJS module.exports default is a runtime export', () => {
+    const { code, out } = review('commonjs-default')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: default has NO non-test production caller')
+    expect(out).not.toContain('no new exported symbols')
+  })
+
+  test('destructuring a namespace import retains the exported route', () => {
+    const { code, out } = review('namespace-destructure')
+    expect(code).toBe(0)
+    expect(out).toContain('ok: throughDestructure called by src/destructure-caller.ts')
+  })
+
+  test('ambient declarations are not reported as runtime exports', () => {
+    const { code, out } = review('ambient-only')
+    expect(code).toBe(0)
+    expect(out).toContain('no new exported symbols — nothing to verify')
+    expect(out).not.toContain('ambientOnly has NO non-test production caller')
+  })
+
+  test('a docs prototype cannot manufacture a production caller', () => {
+    const { code, out } = review('docs-caller')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: calledOnlyFromDocs has NO non-test production caller')
+    expect(out).not.toContain('ok: calledOnlyFromDocs')
+  })
+
+  test('publishing a CommonJS named export is not its own caller', () => {
+    const { code, out } = review('commonjs-publication')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: publicationOnly has NO non-test production caller')
+    expect(out).not.toContain('ok: publicationOnly')
+  })
+
+  test('adding a default route cannot inherit a pre-existing local call', () => {
+    const { code, out } = review('default-existing-use')
+    expect(code).toBe(1)
+    expect(out).toContain('FINDING: default has NO non-test production caller')
+    expect(out).not.toContain('ok: default')
   })
 
   test('comments and strings are not production callers', () => {

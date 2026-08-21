@@ -74,6 +74,45 @@ describe('buildAppWsApprovalNotifier', () => {
     expect(reg.sent[0]!.env.body).toBe('Approval requested [appr-1]: ritual:morning-brief')
   })
 
+  // T5 — the TTL guard. This banner is a one-shot frame with no retraction, so
+  // one born pointing at an already-dead grant can only be cleared by reloading
+  // the page. It must never be born.
+  test('a row already past ttl_ms broadcasts to nobody', async () => {
+    const reg = recordingRegistry(['app:owner', 'app:owner:proj-1'])
+    const now = 10_000_000
+    const notifier = buildAppWsApprovalNotifier({
+      registry: reg,
+      ttl_ms: 5 * 60_000,
+      now: () => now,
+    })
+    // `requested_at` is SECONDS — six minutes ago against a five-minute TTL.
+    await notifier.notify(row({ requested_at: (now - 6 * 60_000) / 1000 }))
+
+    expect(reg.sent).toEqual([])
+  })
+
+  test('a fresh row still broadcasts under the same guard', async () => {
+    const reg = recordingRegistry(['app:owner'])
+    const now = 10_000_000
+    const notifier = buildAppWsApprovalNotifier({
+      registry: reg,
+      ttl_ms: 5 * 60_000,
+      now: () => now,
+    })
+    await notifier.notify(row({ requested_at: (now - 60_000) / 1000 }))
+
+    expect(reg.sent).toHaveLength(1)
+  })
+
+  test('omitting ttl_ms keeps the legacy always-broadcast behaviour', async () => {
+    const reg = recordingRegistry(['app:owner'])
+    const notifier = buildAppWsApprovalNotifier({ registry: reg })
+    // A row from 1970 — ancient by any clock, and still announced.
+    await notifier.notify(row({ requested_at: 1_000 }))
+
+    expect(reg.sent).toHaveLength(1)
+  })
+
   // 15. a throwing topic does not stop the rest, and notify never throws
   test('a dead socket on topic 1 still delivers topic 2; notify resolves', async () => {
     const reg = recordingRegistry(['dead', 'alive'], (t) => t === 'dead')

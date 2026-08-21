@@ -610,6 +610,7 @@ describe('renderTestStrategy', () => {
     expect(knobBranch).toContain('failed-preexisting')
     expect(knobBranch).toContain('failed-new')
     expect(knobBranch).toContain('not-run')
+    expect(knobBranch).not.toContain('deferred')
     // The evidence, and the consequence of not having it.
     expect(knobBranch).toContain('re-run the failing files at the base branch')
     expect(knobBranch).toContain('the outcome is failed-new')
@@ -667,6 +668,8 @@ describe('per-plan suite scope (subset render)', () => {
     expect(subsetBlock).toContain(STAGE_1_REJECT_ONLY)
     expect(subsetBlock).toContain('STAGE 2 — DEFERRED (do NOT run the full suite this iteration).')
     expect(subsetBlock).toContain(INTERMEDIATE_REPORT_RULE)
+    expect(subsetBlock).toContain("suiteOutcome='deferred'")
+    expect(subsetBlock).not.toContain("suiteOutcome='not-run'")
     expect(subsetBlock).toContain('the tail — never let raw test output flood your context.')
     expect(subsetBlock).not.toContain(FULL_SUITE_REQUIRED)
     expect(subsetBlock).not.toContain('Full suite (stage 2), run exactly this')
