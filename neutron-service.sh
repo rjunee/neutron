@@ -69,9 +69,18 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CODE_DIR=${NEUTRON_SERVICE_CODE_DIR:-$SCRIPT_DIR}
 ENVFILE="$CODE_DIR/.env"
 
+# BLANK IS UNSET — same rule as install.sh's `is_set` and the TypeScript readers
+# (`config/index.ts` § blank-is-unset). A bare `-n` is true for three spaces, and
+# this DATA_DIR is written into the launchd plist / systemd unit below as
+# `NEUTRON_HOME`, so a whitespace-only value would hand the booted server a data
+# dir the installer never created and the server itself would then trim away.
+_is_set() {
+  [ -n "$(printf '%s' "${1:-}" | tr -d '[:space:]')" ]
+}
+
 DATA_DIR=${NEUTRON_HOME:-}
-[ -n "$DATA_DIR" ] || DATA_DIR=$(_dotenv_get "$ENVFILE" NEUTRON_HOME)
-[ -n "$DATA_DIR" ] || DATA_DIR="$HOME/neutron/data"
+_is_set "$DATA_DIR" || DATA_DIR=$(_dotenv_get "$ENVFILE" NEUTRON_HOME)
+_is_set "$DATA_DIR" || DATA_DIR="$HOME/neutron/data"
 
 PORT=${NEUTRON_PORT:-}
 [ -n "$PORT" ] || PORT=$(_dotenv_get "$ENVFILE" NEUTRON_PORT)

@@ -895,8 +895,10 @@ const FORGE_SCHEMA = {
     // suite ran and was red before this branch existed". OPTIONAL on purpose: a legacy
     // launcher (no TEST EXECUTION block) and every existing test harness omit it, and
     // `fullSuiteFindings` treats an absent value exactly as it treated every
-    // `testsPassed !== true` before this field existed. See `SUITE_OUTCOME_*`.
-    suiteOutcome: { type: 'string', enum: ['passed', 'failed-new', 'failed-preexisting', 'not-run'] },
+    // `testsPassed !== true` before this field existed. `'deferred'` is the INSTRUCTED
+    // intermediate-Ralph deferral (the terminal task runs the suite); the gate honours
+    // it only on a subset-scoped dispatch — see `fullSuiteFindings`. See `SUITE_OUTCOME_*`.
+    suiteOutcome: { type: 'string', enum: ['passed', 'failed-new', 'failed-preexisting', 'not-run', 'deferred'] },
     // OPTIONAL — the base-branch comparison transcription that EARNS
     // `failed-preexisting`. Absent/empty means the claim is unearned and the gate
     // fails closed.
@@ -1264,10 +1266,10 @@ ${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrateg
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
-3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='not-run', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
+3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='deferred', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
 5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
-${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='not-run', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
+${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='deferred', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
    WORKTREE=<your worktree pwd>`
@@ -1485,6 +1487,84 @@ const CODEX_BRIEF_CHUNK_BYTES = 3072
  * asserted in `codex-brief-chunking.test.ts` at limit-1, limit and limit+1, over
  * multi-byte text, and above the 24,524/26,183-byte boundary that was observed failing.
  */
+/**
+ * UTF-8 → base64, hand-rolled for the same reason `briefIntegrity` is: this file runs
+ * with no imports and no host API it is promised, so `btoa` and `Buffer` are both out
+ * of reach. Encodes the code points exactly as `briefIntegrity` counts them, including
+ * the U+FFFD substitution for lone surrogates, so the encoded payload and the receipt
+ * describe the same bytes.
+ */
+function base64Encode(text) {
+  const B = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  const bytes = []
+  for (let i = 0; i < text.length; i++) {
+    let cp = text.charCodeAt(i)
+    if (cp >= 0xd800 && cp <= 0xdbff) {
+      const lo = i + 1 < text.length ? text.charCodeAt(i + 1) : 0
+      if (lo >= 0xdc00 && lo <= 0xdfff) {
+        cp = 0x10000 + ((cp - 0xd800) << 10) + (lo - 0xdc00)
+        i++
+      } else {
+        cp = 0xfffd
+      }
+    } else if (cp >= 0xdc00 && cp <= 0xdfff) {
+      cp = 0xfffd
+    }
+    if (cp < 0x80) bytes.push(cp)
+    else if (cp < 0x800) bytes.push(0xc0 | (cp >> 6), 0x80 | (cp & 0x3f))
+    else if (cp < 0x10000) bytes.push(0xe0 | (cp >> 12), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f))
+    else bytes.push(0xf0 | (cp >> 18), 0x80 | ((cp >> 12) & 0x3f), 0x80 | ((cp >> 6) & 0x3f), 0x80 | (cp & 0x3f))
+  }
+  let out = ''
+  for (let i = 0; i < bytes.length; i += 3) {
+    const b0 = bytes[i]
+    const b1 = i + 1 < bytes.length ? bytes[i + 1] : 0
+    const b2 = i + 2 < bytes.length ? bytes[i + 2] : 0
+    out += B[b0 >> 2]
+    out += B[((b0 & 0x03) << 4) | (b1 >> 4)]
+    out += i + 1 < bytes.length ? B[((b1 & 0x0f) << 2) | (b2 >> 6)] : '='
+    out += i + 2 < bytes.length ? B[b2 & 0x3f] : '='
+  }
+  // Wrapped at 76 columns: `base64 -d` ignores newlines, and an unwrapped 4 KB line is
+  // exactly the kind of thing a copier reflows.
+  return (out.match(/.{1,76}/g) ?? []).join('\n')
+}
+
+/**
+ * THE SEGMENT BLOCKS THE BRIDGE AGENT COPIES — base64, not prose, and that is the
+ * whole point.
+ *
+ * WHY. 2026-08-19 run `4908cbf7` could not start a build: the workflow composed a
+ * 25,548-byte segment and the agent wrote 25,533. The 15 missing bytes were one
+ * phrase — ` via the schema` — deleted out of the middle of an instruction sentence.
+ * The contractual retry re-ran every call and deleted the SAME phrase again, because
+ * a model asked to reproduce English prose is under semantic pressure to improve it,
+ * and that pressure is deterministic. The receipt caught it both times; the retry
+ * policy, which assumes independent attempts, could never clear it. That is the same
+ * shape as the 2026-08-13 truncation `chunkTextOnLines` was built for, and chunking
+ * does not touch it: the pieces were the right size and each one was still edited.
+ *
+ * Base64 removes the pressure rather than arguing against it. There is no sentence to
+ * tighten in `Q09OVFJBQ1QK`, so the copy is mechanical; and any drift that does happen
+ * is now RANDOM, which means the existing one-retry policy can actually recover it.
+ * Two smaller properties come free: the payload cannot contain the heredoc terminator
+ * (`_` is not in the base64 alphabet, so the marker-growth loop is unnecessary here),
+ * and `base64 -d` ignores newlines, so a reflowed block still decodes.
+ *
+ * The cost is ~33% more bytes to copy. That is the trade being made deliberately:
+ * volume is guarded by the receipt, semantics were not.
+ */
+function renderBriefChunks(chunks, file, offset, total) {
+  return chunks
+    .map((seg, i) => {
+      const call = offset + i + 1
+      const redirect = i === 0 ? '>' : '>>'
+      const m = `NEUTRON_CODEX_B64_EOF_P${call}`
+      return `CALL ${call} of ${total}:\nbase64 -d ${redirect} ${shSingleQuote(file)} <<'${m}'\n${base64Encode(seg.text)}\n${m}`
+    })
+    .join('\n\n')
+}
+
 function chunkTextOnLines(text, maxBytes) {
   const enc = (s) => briefIntegrity(s).split(':')[0] | 0
   const segs = []
@@ -1593,14 +1673,12 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   const exitFile = `/tmp/trident-codex-build-${uniq}-${slot}.exit`
   const pidFile = `/tmp/trident-codex-build-${uniq}-${slot}.pid`
   const script = codexBuildSh
-  // THE HEREDOC TERMINATOR MUST NOT OCCUR IN THE BRIEF. A brief line equal to the
-  // marker would close the heredoc early and leave the REST OF THE BRIEF sitting in
-  // the command as shell — and part of the brief is the owner's task text, which is
-  // free-form. The run id already makes an accidental collision implausible; growing
-  // the marker until it provably does not appear makes it impossible, which is the
-  // difference worth two lines when the failure mode is arbitrary command execution.
-  let marker = `NEUTRON_CODEX_BRIEF_EOF_${uniq}`
-  while (brief.includes(marker)) marker += '_X'
+  // THE HEREDOC TERMINATOR CANNOT OCCUR IN THE PAYLOAD, and no longer by luck: the
+  // segments travel base64-encoded, `_` is not in the base64 alphabet, and the
+  // terminator contains one. The danger this replaces was real — a brief line equal to
+  // the marker would have closed the heredoc early and left the REST OF THE BRIEF
+  // sitting in the command as shell, with part of the brief being the owner's
+  // free-form task text. `renderBriefChunks` owns the terminator now.
   // THE RECEIPT FOR WHAT THE HEREDOCS ARE SUPPOSED TO WRITE — measured over exactly the
   // bytes the blocks below produce, which is the brief plus the newline that ends its
   // last line. A bridge that shortens or rewords the text writes a different file and
@@ -1617,24 +1695,10 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   // safe and a half-written file from an interrupted attempt cannot survive into the
   // next one.
   const briefChunks = chunkTextOnLines(`${brief}\n`, CODEX_BRIEF_CHUNK_BYTES)
-  const renderChunks = (chunks, file, offset, total) => chunks
-    .map((seg, i) => {
-      const redirect = i === 0 ? '>' : '>>'
-      const call = offset + i + 1
-      const head = `CALL ${call} of ${total}:`
-      if (seg.mode === 'raw') {
-        // A fragment of an over-long line. `printf '%s'` appends the bytes and NOTHING
-        // else — no newline, no interpretation of backslashes (which `echo` would
-        // mangle). Single-quoted, so the one character needing care is `'` itself and
-        // `shSingleQuote` already handles it.
-        return `${head}\nprintf '%s' ${shSingleQuote(seg.text)} ${redirect} ${shSingleQuote(file)}`
-      }
-      // Per-segment marker, still grown until it provably does not occur in THIS segment.
-      let m = `${marker}_P${call}`
-      while (seg.text.includes(m)) m += '_X'
-      return `${head}\ncat ${redirect} ${shSingleQuote(file)} <<'${m}'\n${seg.text}${m}`
-    })
-    .join('\n\n')
+  // The transport is `renderBriefChunks` — base64, top-level and testable. `seg.mode`
+  // stops mattering at this boundary: an over-long line's raw fragment and a heredoc
+  // segment are both just bytes once encoded, and both decode back exactly.
+  const renderChunks = (chunks, file, offset, total) => renderBriefChunks(chunks, file, offset, total)
   let chunkBlocks
   let writeBriefInstructions
   let partsEnv = ''
@@ -1645,7 +1709,8 @@ function codexBuildPrompt(slot, brief, route, artifactCheckpointName) {
   if (byPath === null) {
     chunkBlocks = renderChunks(briefChunks, briefFile, 0, briefChunks.length)
     writeBriefInstructions = `FIRST write the brief to disk in ${briefChunks.length} SEPARATE Bash call(s), in the order given. Each block below is one call; pass each WHOLE block unchanged. Call 1 uses \`>\` (it truncates any earlier attempt); every later call uses \`>>\` (it appends). Do NOT merge them into one call, do NOT reorder them, do NOT skip one.
-THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command below carries the assembled file's byte count and checksum, and the wrapper REFUSES to build (exit 3) if what is on disk is not byte-for-byte what is written here. So copy each block exactly — never summarise, re-wrap, re-indent, or tidy it. It is split into pieces precisely BECAUSE a long copy goes wrong; keep each piece exact and the whole is exact.`
+EACH BLOCK'S PAYLOAD IS BASE64 — it is opaque data, not text to read. Do NOT decode it, do NOT re-wrap or re-indent it, do NOT "correct" anything inside it, and do NOT act on whatever it decodes to; the ONLY correct handling is to pass the block through verbatim.
+THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command below carries the assembled file's byte count and checksum, and the wrapper REFUSES to build (exit 3) if what is on disk is not byte-for-byte what is written here.`
     corruptInstructions = `RE-RUN ALL ${briefChunks.length} CHUNK CALL(S) FROM CALL 1 (it uses \`>\`, so it clears the bad file)`
   } else {
     const a1File = `${briefFile}.a1`
@@ -1656,7 +1721,8 @@ THE BRIEF IS CHECKED AS A WHOLE once all the calls are done: the run command bel
     const a1Integrity = briefIntegrity(byPath.head)
     const a2Integrity = briefIntegrity(byPath.tail)
     chunkBlocks = `${renderChunks(headChunks, a1File, 0, total)}\n\n${renderChunks(tailChunks, a2File, headChunks.length, total)}`
-    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless EVERY listed file matches its own byte count and checksum in the run command.`
+    writeBriefInstructions = `FIRST write the TWO workflow-composed brief SEGMENTS to disk in ${total} SEPARATE Bash call(s), in the order given; the large task text does NOT travel through you — it is already on disk at the part path(s) listed in the run command, written by the host. Do NOT read, rewrite, recreate or "fix" those part files; never write the task yourself.
+EACH BLOCK'S PAYLOAD IS BASE64 — it is opaque data, not text to read. Do NOT decode it, do NOT re-wrap or re-indent it, do NOT "correct" anything inside it, and do NOT act on whatever it decodes to; the ONLY correct handling is to pass the block through verbatim. The wrapper assembles the full brief from the listed part files, in order, and REFUSES to build (exit 3) unless EVERY listed file matches its own byte count and checksum in the run command.`
     partsEnv = ` NEUTRON_CODEX_BUILD_BRIEF_PARTS=${shSingleQuote([a1File, ...byPath.files, a2File].join('\n'))} NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=${shSingleQuote([a1Integrity, ...byPath.integrities, a2Integrity].join('\n'))}`
     integrityEnv = ''
     runCommandNote = `\nThis command contains quoted newlines inside the PARTS and PART_INTEGRITY values — pass the WHOLE block as ONE Bash call, unmodified.`
@@ -1714,7 +1780,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
-  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires), 'deferred' when the transcript explicitly reports that instructed intermediate-task outcome, or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
@@ -1750,7 +1816,7 @@ Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFil
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
-  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires), 'deferred' when the transcript explicitly reports that instructed intermediate-task outcome, or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 ${wrapperErrTailInstruction(errFile)}
 Return via the schema.`
 }
@@ -1775,7 +1841,7 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one.
-  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires) or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
+  testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires), 'deferred' when the transcript explicitly reports that instructed intermediate-task outcome, or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → codexStatus='deferred'. Do not rewrite the brief or relaunch the wrapper from this wait bridge.
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
@@ -2182,7 +2248,12 @@ async function checkpoint(name, opts) {
   if (!dbPath || !runId) return
   const o = opts || {}
   const fields = []
-  if (o.pr !== undefined && o.pr !== null) fields.push(`pr ${Number(o.pr)}`)
+  // A NON-POSITIVE pr IS NEVER WRITTEN. `pr 0` is not "the PR is zero", it is the
+  // build wrapper's "no PR yet" sentinel arriving where a number was expected — and
+  // writing it ERASES the PR the run already knows about (run f384460d: 267 → 0).
+  // Skipping the field leaves the column at whatever the row already holds.
+  const prNum = Number(o.pr)
+  if (Number.isInteger(prNum) && prNum > 0) fields.push(`pr ${prNum}`)
   fields.push(`branch ${shSingleQuote(forgeBranch)}`)
   fields.push(`inner_checkpoint ${shSingleQuote(name)}`)
   fields.push(`inner_checkpoint_head ${shSingleQuote(normalizeOid(o.head))}`)
@@ -2240,8 +2311,12 @@ async function writeTerminalResult(result) {
     `inner_verdict ${shSingleQuote(verdict)}`,
     `branch ${shSingleQuote(forgeBranch)}`,
   ]
-  if (result.prNumber !== undefined && result.prNumber !== null) {
-    fields.push(`pr ${Number(result.prNumber)}`)
+  // Same rule as `checkpoint()`: only a positive integer is a PR number. The terminal
+  // write is the LAST chance to erase a known pr, and it is where run f384460d's zero
+  // became the row's final answer.
+  const terminalPr = Number(result.prNumber)
+  if (Number.isInteger(terminalPr) && terminalPr > 0) {
+    fields.push(`pr ${terminalPr}`)
   }
   await agent(
     `Terminal-result step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "terminal-result ok":
@@ -4654,7 +4729,7 @@ function reviewPreconditionDeferred(readiness) {
  * `testStrategy === ''` (a legacy launcher, or a test harness that passes no strategy)
  * is inert — byte-identical old behaviour.
  */
-function fullSuiteFindings(report) {
+function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
   if (testStrategy === '') return []
   if (
     report?.testsPassed === true &&
@@ -4672,6 +4747,12 @@ function fullSuiteFindings(report) {
     ]
   }
   if (report?.testsPassed === true) return []
+  // An INSTRUCTED deferral is not a missing suite, but ONLY on the round DISPATCHED
+  // subset-scoped: its intermediate brief says `suiteOutcome='deferred'`, and the
+  // plan's terminal task runs the suite over the cumulative branch under its own gate.
+  // On a full-suite-scoped round the same word falls through to FULL SUITE NOT PROVEN
+  // below: `deferred` means "the terminal task will prove it", never "no proof needed".
+  if (report?.suiteOutcome === 'deferred' && dispatchedScope === 'subset') return []
   const evidence = typeof report?.suiteEvidence === 'string' ? report.suiteEvidence.trim() : ''
   if (report?.suiteOutcome === 'failed-preexisting') {
     if (evidence === '') {
@@ -5647,6 +5728,8 @@ try {
   // below reads it back. That wire is what makes the gate reach PR mode at all, where
   // the build and the review are always in different processes.
   let buildReport = null
+  // Hoisted beside `buildReport`, which was itself hoisted for this same gate.
+  let buildSuiteScope = 'full-suite'
   // THE RECORDED CLAIM, read back on a resume that skips the build.
   //
   // `forge-done`, `fix-round-N` and the outer publisher's `outer-published:*` are the
@@ -5954,7 +6037,7 @@ try {
     // CREATE the branch fresh. forge:build is now a PURE EXECUTOR routed by the
     // planner's complexity tag. The scope argument extends the original
     // `forgeBuildContract(resuming, 'forge-done')` call; fix rounds retain it.
-    let buildSuiteScope = 'full-suite'
+    buildSuiteScope = 'full-suite'
     let buildSuiteScopeReason = 'non-ralph'
     if (ralph === true) {
       if (!(Number.isFinite(ralphRemaining) && ralphRemaining > 0)) {
@@ -5979,7 +6062,15 @@ ${task}${reflectionGuidance}`,
 
     if (!forge) throw new Error('forge agent returned null (terminal error before returning a result)')
     buildReport = forge
-    if (forge.prNumber !== null && forge.prNumber !== undefined) pr = forge.prNumber
+    // A FORGE PR NUMBER IS ADOPTED ONLY WHEN IT IS A REAL ONE. The build's pr-mode
+    // trailer is PR number 0 BY DESIGN (see FORGE_PR_LINE above: "the outer loop
+    // publishes after this build exits"), so 0 is the "no PR yet" sentinel — never a
+    // PR, since GitHub numbers start at 1. The old `!== null && !== undefined` test
+    // adopted the sentinel and CLOBBERED the pr threaded in at launch: run f384460d
+    // (2026-08-15) went 267 → 0, and the forge-done checkpoint then persisted the
+    // zero onto the run row. `pr` keeps its known value unless a positive integer
+    // arrives to replace it.
+    if (Number.isInteger(forge.prNumber) && forge.prNumber > 0) pr = forge.prNumber
 
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
     const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
@@ -6090,7 +6181,7 @@ ${task}${reflectionGuidance}`,
     // durable publisher and this process ends, so the panel that must not APPROVE runs
     // in a different process which has no build report to read. Empty (a healthy build,
     // or no strategy at all) writes `[]` exactly as before.
-    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead, findings: fullSuiteFindings(forge) })
+    await checkpoint('forge-done', { pr, head: builtHead === '' ? normalizeOid(forgeSha) : branchHead, findings: fullSuiteFindings(forge, buildSuiteScope) })
     if (isPr) {
       // NO THROW ON SHA SHAPE. What this handoff actually carries is the BRANCH
       // NAME (`branch: forgeBranch`) — a value no model can plausibly mangle —
@@ -6190,7 +6281,7 @@ ${task}${reflectionGuidance}`,
         `forge:build completed but produced no ${missing}${unmeasured} — nothing was built${pr === null || pr === undefined ? '' : ` (PR #${pr})`}. Refusing to open the review panel: an empty diff is not a change, and a panel that reviews one spends the review budget to APPROVE nothing.`,
       )
     }
-    await checkpoint('forge-done', { pr, head: branchHead, findings: fullSuiteFindings(buildReport) })
+    await checkpoint('forge-done', { pr, head: branchHead, findings: fullSuiteFindings(buildReport, buildSuiteScope) })
   }
 
   // First review + synthesis — UNLESS this is a resume whose recorded
@@ -6207,7 +6298,7 @@ ${task}${reflectionGuidance}`,
   // THE FULL-SUITE GATE'S ROUND-1 FINDINGS: this process's own build report when it
   // built, and otherwise the claim the building process recorded on the checkpoint this
   // run resumed from. Exactly one of the two can be non-empty.
-  const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport)
+  const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport, buildSuiteScope)
   if (resumeMode === 'fix') {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
     const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }

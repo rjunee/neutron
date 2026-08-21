@@ -629,6 +629,22 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Failed PR-mode rows eligible for startup git-truth reconciliation,
+   *  newest-advanced first and bounded so boot work stays finite. */
+  listFailedPrRuns(limit: number = 50): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, [number]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE phase = 'failed'
+            AND merge_mode = 'pr'
+          ORDER BY last_advanced_at DESC
+          LIMIT ?`,
+      )
+      .all(limit)
+      .map(rowToRun)
+  }
+
   /** Every actively running row with an external launcher generation.
    * Unbounded deliberately: liveness must not inherit the expensive sweep's
    * per-tick cap or leave newer lanes invisible behind older rows. */
@@ -645,6 +661,31 @@ export class TridentRunStore {
       )
       .all()
       .map(rowToRun)
+  }
+
+  /**
+   * Distinct repositories across ALL runs — TERMINAL INCLUDED — newest activity
+   * first, using each repository's most recent run to choose its merge mode. The
+   * as-built catch-up must attempt each repo at most once per tick, and a fold the
+   * post-merge pass missed belongs to a run that is already `done`, so
+   * `listNonTerminal` cannot provide this inventory.
+   */
+  listDistinctRepos(): { repo_path: string; merge_mode: MergeMode }[] {
+    return this.db
+      .prepare<{ repo_path: string; merge_mode: string }, []>(
+        `SELECT run.repo_path, run.merge_mode
+           FROM code_trident_runs AS run
+          WHERE run.id = (
+            SELECT recent.id
+              FROM code_trident_runs AS recent
+             WHERE recent.repo_path = run.repo_path
+             ORDER BY recent.last_advanced_at DESC, recent.id DESC
+             LIMIT 1
+          )
+          ORDER BY run.last_advanced_at DESC, run.id DESC`,
+      )
+      .all()
+      .map((row) => ({ repo_path: row.repo_path, merge_mode: row.merge_mode === 'pr' ? 'pr' : 'local' }))
   }
 
   /**

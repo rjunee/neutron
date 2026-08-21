@@ -64,6 +64,32 @@ describe('TridentRunStore', () => {
     expect(row?.name).toBe('code_trident_runs')
   })
 
+  test('listDistinctRepos dedupes by repo, includes terminal runs, and uses the latest merge mode', async () => {
+    let second = 0
+    const store = new TridentRunStore(
+      db,
+      () => new Date(Date.UTC(2026, 7, 18, 0, 0, second++)).toISOString(),
+    )
+    const r1PrDone = await store.create({
+      slug: 'repo-r1-pr-done', project_slug: 't1', repo_path: '/r1', task: 't', merge_mode: 'pr',
+    })
+    await store.create({
+      slug: 'repo-r1-pr-active', project_slug: 't1', repo_path: '/r1', task: 't', merge_mode: 'pr',
+    })
+    await store.update(r1PrDone.id, { phase: 'done' })
+    await store.create({
+      slug: 'repo-r1-local', project_slug: 't1', repo_path: '/r1', task: 't', merge_mode: 'local',
+    })
+    await store.create({
+      slug: 'repo-r2-pr', project_slug: 't1', repo_path: '/r2', task: 't', merge_mode: 'pr',
+    })
+
+    expect(store.listDistinctRepos()).toEqual([
+      { repo_path: '/r2', merge_mode: 'pr' },
+      { repo_path: '/r1', merge_mode: 'local' },
+    ])
+  })
+
   test('recordStageEvent + stageEvents round-trip nullable meta in insertion order', async () => {
     const times = [
       '2026-08-18T10:00:00.100Z',
@@ -366,6 +392,32 @@ describe('TridentRunStore', () => {
     // A 'stopped' run is also excluded.
     await store.save({ ...c, phase: 'stopped' })
     expect(store.listNonTerminal()).toEqual([])
+  })
+
+  test('listFailedPrRuns filters exactly, orders newest first, and respects the limit', async () => {
+    let clock = '2026-08-17T00:00:00.000Z'
+    const store = new TridentRunStore(db, () => clock)
+    await store.create({
+      slug: 'failed-pr-old', project_slug: 't1', repo_path: '/r', task: 't', phase: 'failed', merge_mode: 'pr',
+    })
+    clock = '2026-08-17T00:01:00.000Z'
+    await store.create({
+      slug: 'failed-local', project_slug: 't1', repo_path: '/r', task: 't', phase: 'failed', merge_mode: 'local',
+    })
+    clock = '2026-08-17T00:02:00.000Z'
+    await store.create({
+      slug: 'done-pr', project_slug: 't1', repo_path: '/r', task: 't', phase: 'done', merge_mode: 'pr',
+    })
+    clock = '2026-08-17T00:03:00.000Z'
+    await store.create({
+      slug: 'failed-pr-new', project_slug: 't1', repo_path: '/r', task: 't', phase: 'failed', merge_mode: 'pr',
+    })
+
+    expect(store.listFailedPrRuns().map((run) => run.slug)).toEqual([
+      'failed-pr-new',
+      'failed-pr-old',
+    ])
+    expect(store.listFailedPrRuns(1).map((run) => run.slug)).toEqual(['failed-pr-new'])
   })
 
   test('latestByProjectScope returns the most-recently-advanced run, scoped', async () => {

@@ -63,6 +63,7 @@ import { ReminderStore } from '@neutronai/reminders/store.ts'
 import { ReminderTickLoop } from '@neutronai/reminders/tick.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
 import {
+  buildAsBuiltCatchup,
   TridentTickLoop,
   type TridentDeadLauncherLatch,
   type TridentLivenessProbe,
@@ -70,7 +71,10 @@ import {
   type TridentTransitionHook,
 } from '@neutronai/trident/tick.ts'
 import { stubAdvanceDeps } from '@neutronai/trident/state-machine.ts'
-import { buildTridentOrchestrator } from '@neutronai/trident/orchestrator.ts'
+import {
+  buildTridentOrchestrator,
+  sweepStrandedFailures,
+} from '@neutronai/trident/orchestrator.ts'
 import { buildWorkflowFirer } from '@neutronai/trident/inner-loop.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
@@ -151,7 +155,12 @@ export interface CoreModules {
   mcpModule: GatewayModule<McpServer>
   replToolBridgeModule: GatewayModule<{ wired: boolean }>
   remindersModule: GatewayModule<{ store: ReminderStore; loop: ReminderTickLoop }>
-  tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop; drain?: () => Promise<void> }>
+  tridentModule: GatewayModule<{
+    store: TridentRunStore
+    loop: TridentTickLoop
+    drain?: () => Promise<void>
+    stranded_sweep?: Promise<void>
+  }>
   cronModule: GatewayModule<{
     jobs: CronJobRegistry
     handlers: CronHandlerRegistry
@@ -492,7 +501,12 @@ export function buildCoreModules(
   // live + restart-safe but advances nothing — unchanged Open behaviour.
   // Started here, stopped on shutdown.
   const tridentWiring = input.trident
-  const tridentModule: GatewayModule<{ store: TridentRunStore; loop: TridentTickLoop; drain?: () => Promise<void> }> = {
+  const tridentModule: GatewayModule<{
+    store: TridentRunStore
+    loop: TridentTickLoop
+    drain?: () => Promise<void>
+    stranded_sweep?: Promise<void>
+  }> = {
     name: 'trident',
     // Depend on `channels` so the SAME `ChannelRouter` instance the gateway
     // routes inbound events through is the one Trident delivers terminal
@@ -575,7 +589,9 @@ export function buildCoreModules(
       // never called) settles every in-flight FIRE turn on shutdown. Captured
       // here and wired into `shutdown` so a clean teardown quiesces trident too.
       let drain: (() => Promise<void>) | undefined
+      let reconcileStranded: ((run: TridentRun) => Promise<TridentRun | null>) | undefined
       if (tridentWiring !== undefined) {
+        const runHost = tridentWiring.run_host ?? spawnCapture
         // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
         // loop is one native CC Dynamic Workflow. The FIRER (`fire_inner_workflow`)
         // invokes the `Workflow` tool on a WARM substrate and SETTLES the
@@ -588,7 +604,7 @@ export function buildCoreModules(
         const orchestratorOpts: Parameters<typeof buildTridentOrchestrator>[0] = {
           fire_workflow,
           db_path: input.db.path,
-          run_host: tridentWiring.run_host ?? spawnCapture,
+          run_host: runHost,
           // The hang watchdog's positive-liveness reader (see `latest_stage_event_at`
           // in orchestrator.ts). UNCONDITIONAL, and deliberately not behind a
           // `tridentWiring` flag: the orchestrator already treats a null answer as
@@ -687,11 +703,17 @@ export function buildCoreModules(
           store,
           step: orchestrator.step,
           on_terminal,
+          // AS-BUILT ONE-WRITER (T2) self-heal — the bounded per-repo catch-up folds
+          // staged entries whose landing the post-merge pass missed (delayed merge-queue
+          // landings, credential blinks, restarts). Wired ONLY here: the stub branch
+          // runs no builds, so it has nothing staged to fold.
+          fold_staged_as_built: buildAsBuiltCatchup(runHost),
           ...transitionOpt,
           ...watchOpt,
           ...livenessOpt,
         })
         drain = orchestrator.drain
+        reconcileStranded = orchestrator.reconcile_stranded
       } else {
         loop = new TridentTickLoop({
           store,
@@ -708,6 +730,16 @@ export function buildCoreModules(
       // unregistered timer is one the inventory reports as healthy by never mentioning it.
       for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
       loop.start()
+      if (reconcileStranded !== undefined) {
+        const stranded_sweep = sweepStrandedFailures({ store, reconcile: reconcileStranded })
+        // `drain` is spread conditionally, matching the line below: under
+        // exactOptionalPropertyTypes an explicit `drain: undefined` is NOT
+        // assignable to `drain?: () => Promise<void>`, which is what reddened
+        // typecheck here while every test stayed green.
+        return drain !== undefined
+          ? { store, loop, drain, stranded_sweep }
+          : { store, loop, stranded_sweep }
+      }
       return drain !== undefined ? { store, loop, drain } : { store, loop }
     },
     shutdown: async (instance) => {

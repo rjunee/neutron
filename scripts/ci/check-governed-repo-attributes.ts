@@ -37,6 +37,8 @@
  * both are legitimately nothing to enforce), exit 1 otherwise.
  */
 
+import { join, resolve } from 'node:path'
+
 import {
   BUILT_IN_MERGE_DRIVERS,
   clonedTreeContains,
@@ -53,6 +55,53 @@ import {
 } from '@neutronai/trident/as-built-union-attribute.ts'
 
 const root = process.argv[2] ?? process.cwd()
+
+/**
+ * THE LOG IS PROTECTED TWO WAYS, AND BOTH ARE GATED HERE.
+ *
+ * The rest of this file gates the tracked MERGE FLOOR — that a fresh clone
+ * resolves `merge=union` over the log. That floor is what makes concurrent
+ * appends resolvable; it is not what stops them. GitHub never runs merge drivers
+ * server-side, so two branches that both prepend still arrive as a text conflict
+ * on the PR. The second half of the rule is that no BRANCH writes the canonical
+ * log at all — entries are staged under `.trident/as-built/` and the outer loop
+ * folds them onto main after the merge lands.
+ *
+ * That second half lives in `as-built-write-guard.sh` and is invoked from here
+ * because here is somewhere the repo can reach. The rule's first home was an
+ * eleven-line step in `.github/workflows/ci.yml`, and no agent in this system can
+ * write that file — the token is scoped `repo read:org`, `workflow` scope is
+ * asserted ABSENT by test, and GitHub rejects the push outright. The `layering`
+ * job already runs this gate unconditionally with `fetch-depth: 0`, which is
+ * exactly what the guard needs: a required check with real history. The guard
+ * reads its own event filter and base/head shas from the Actions payload, so the
+ * whole rule is expressed in files the repo owns.
+ *
+ * A branch writing the log is a hard stop, so it is checked FIRST and the exit
+ * code propagates verbatim (1 = wrote the log, 2 = the guard could not tell).
+ * There is no value in also reporting the attribute verdict over a diff that is
+ * already disqualified.
+ *
+ * SCOPED TO THIS REPO ON PURPOSE. This gate is also pointed at fixture repos by
+ * its own tests. Inside Actions those runs would inherit the REAL PR's shas and
+ * ask a fixture to resolve them — an exit 2 that says nothing about the fixture.
+ * So the guard runs only when this gate is reading the repo it lives in.
+ */
+function guardBranchWritesOfCanonicalLog(): void {
+  const here = import.meta.dir
+  const ownRepoRoot = resolve(here, '../..')
+  if (resolve(root) !== ownRepoRoot) return
+
+  const guard = Bun.spawnSync(['bash', join(here, 'as-built-write-guard.sh')], {
+    cwd: ownRepoRoot,
+    env: { ...process.env, AS_BUILT_GUARD_ROOT: ownRepoRoot },
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  if (guard.exitCode !== 0) process.exit(guard.exitCode)
+}
+
+guardBranchWritesOfCanonicalLog()
 
 /** Is `SPEC.md` in the tree a fresh clone would get, even if not checked out? */
 function specIsCommitted(dir: string): boolean {
