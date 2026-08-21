@@ -220,7 +220,7 @@ describe('AppWsAdapter — author-only authorization + agent parity', () => {
 })
 
 describe('AppWsAdapter — edit resume replay', () => {
-  it('replays one edit_update per edited/deleted message after a cursor', async () => {
+  it('replays one edit_update per edited/deleted message in the topic', async () => {
     const { adapter } = setup(['devA'])
     const a = await adapter.ingestUserMessage({ channel_topic_id: CHANNEL_TOPIC, user_id: 'sam', body: 'q1', client_msg_id: 'c1' }) // seq 1
     await sendAgent(adapter, 'a1') // seq 2
@@ -231,9 +231,42 @@ describe('AppWsAdapter — edit resume replay', () => {
     const all = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
     expect(all.map((e) => e.seq).sort((x, y) => (x ?? 0) - (y ?? 0))).toEqual([1, 3])
 
-    const tail = await adapter.replayEditsAfter(CHANNEL_TOPIC, 1)
-    expect(tail.map((e) => e.seq)).toEqual([3])
-    expect(tail[0]?.deleted).toBe(true)
+    // The unedited message in the middle contributes nothing — the replay is one
+    // frame per EDITED message, not one per message.
+    expect(all).toHaveLength(2)
+  })
+
+  it('replays a tombstone for a message BELOW the reconnecting cursor', async () => {
+    // The delete that never reached an offline device. This replay used to take the
+    // client's resume cursor as a lower bound on the MESSAGE's seq, so a delete of
+    // an already-seen message was filed below the cursor and excluded — the device
+    // reconnected and kept rendering content the owner had deleted.
+    //
+    // THE CURSOR IS A REAL CURSOR HERE (3, the device's high-water mark), not 0 — a
+    // 0 cursor would exercise the page half and say nothing about the range below,
+    // which is the range the bug lived in.
+    //
+    // MUTATION-PROVED: drop the `aggregatesAtOrBelow` sweep from
+    // `AppWsAdapter.replayEditsAfter`, so the replay is the page above the cursor
+    // only (which is what shipped), and this list is empty. The end-to-end form of
+    // the same property (offline device, delete below its cursor, reconnect, content
+    // gone) is in `gateway/__tests__/app-ws-resume.test.ts`.
+    const { adapter } = setup(['devA'])
+    const a = await adapter.ingestUserMessage({ channel_topic_id: CHANNEL_TOPIC, user_id: 'sam', body: 'q1', client_msg_id: 'c1' }) // seq 1
+    await sendAgent(adapter, 'a1') // seq 2
+    await adapter.ingestUserMessage({ channel_topic_id: CHANNEL_TOPIC, user_id: 'sam', body: 'q2', client_msg_id: 'c2' }) // seq 3
+    // The device has seen everything (cursor 3); NOW seq 1 is deleted.
+    await adapter.recordEdit({ channel_topic_id: CHANNEL_TOPIC, message_id: a.message_id, editor_device_id: 'devA', action: 'delete' })
+
+    const replay = await adapter.replayEditsAfter(CHANNEL_TOPIC, 3)
+    expect(replay.map((e) => e.seq)).toEqual([1])
+    expect(replay[0]).toMatchObject({ deleted: true, body: '' })
+
+    // And a BACKWARDS request (`after_seq: 0`, bounded above) still carries the
+    // tombstone for the page it is fetching, from the page half — the sweep is empty
+    // there, so this is the assertion that the two halves cover between them.
+    const backwards = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0, 3)
+    expect(backwards.map((e) => e.seq)).toEqual([1])
   })
 
   it('legacy (no edit_log) replays nothing', async () => {

@@ -161,6 +161,106 @@ const SCHEMA_FTS = [
  *  to a fixed working set rather than loading the whole match set into JS. */
 const SEARCH_CANDIDATE_CAP = 1000;
 
+/**
+ * `Store.contiguousFloorSeq` on the device — the floor of the NEWEST UNBROKEN RUN,
+ * NOT `MIN(seq)`. See `chat-core/store.ts` for why the difference is a class of
+ * permanent data loss rather than a refinement.
+ *
+ * Read it as "the highest RUN START": a held seq whose predecessor is absent begins
+ * a run, and the highest such seq begins the run containing the high-water mark.
+ * `ORDER BY m.seq DESC LIMIT 1` walks `idx_chat_messages_topic_seq` backwards and
+ * stops at the first row that satisfies the predicate, so the walk is bounded by the
+ * NEWEST RUN's length rather than the topic's size — a holey store is cheap and a
+ * contiguous one pays a full index walk of point probes (no table access, no sort).
+ *
+ * EXPORTED so a test can EXPLAIN QUERY PLAN the very string this store prepares,
+ * rather than a hand-copied paraphrase of it that could drift into a table scan
+ * while the assertion stayed green (the pattern `AppChatEventLogCore.rowReplaySql`
+ * already sets for the server-side replay window).
+ *
+ * `m.seq > 0` and not merely NOT NULL: an un-acked row carries no server seq and must
+ * never become the backwards cursor, or the walk would ask for everything below 0
+ * forever.
+ *
+ * THE INNER PREDICATE IS AN EQUALITY AND NOTHING ELSE, and that is a measured
+ * constraint rather than a stylistic one. Adding a seemingly free defensive `AND
+ * p.seq > 0` to the subquery made SQLite choose the RANGE constraint over the
+ * equality — the probe went from `(topic_id=? AND seq=?)` to `(topic_id=? AND
+ * seq>?)`, i.e. from one point lookup per outer row to a walk of the topic's rows per
+ * outer row, which is quadratic on the transcript this read exists to repair. Verified
+ * by EXPLAIN QUERY PLAN on both forms. The guard it would have bought is not needed
+ * either: a stray `seq = 0` row can only stop seq 1 from counting as a run start, and
+ * "floor 1" and "no run start at all" both mean `backfillFrom` returns null, so the
+ * two answers are behaviourally identical.
+ */
+const CONTIGUOUS_FLOOR_SQL = `SELECT m.seq AS floor_seq FROM ${TABLE} m
+   WHERE m.topic_id = ? AND m.seq IS NOT NULL AND m.seq > 0
+     AND NOT EXISTS (
+       SELECT 1 FROM ${TABLE} p
+        WHERE p.topic_id = m.topic_id AND p.seq = m.seq - 1
+     )
+   ORDER BY m.seq DESC
+   LIMIT 1`;
+
+/**
+ * The CHEAP PRE-FILTER that keeps the HEALTHY store off the probe walk above.
+ *
+ * A hole-free topic is the common case and it is the expensive one for
+ * {@link CONTIGUOUS_FLOOR_SQL}: the descending walk finds no run start until it
+ * reaches seq 1, so it pays one point probe per row in the topic. This answers the
+ * same question for that case in a single index-only pass — `COUNT(*)` equals
+ * `MAX - MIN + 1` exactly when nothing between them is missing, and then the floor
+ * IS `MIN`. The probe walk runs only when the counts disagree, i.e. only on a store
+ * that actually has a hole to find, where the walk is also cheap (it stops at the
+ * first run start, which is at most one hole down from the high-water mark).
+ *
+ * THE COST, MEASURED rather than asserted, on a 1,130-row hole-free topic (the size
+ * the owner reported), `bun:sqlite` in memory, per call:
+ *
+ *   pre-filter, `COUNT(DISTINCT seq)` … ~1.9 ms   ← what this runs
+ *   pre-filter, `COUNT(*)`            … ~0.95 ms  ← unsafe, see below
+ *   descending probe walk             … ~4.2 ms   ← what it replaces
+ *
+ * So the shortcut is worth roughly 2x against the walk, not the order of magnitude an
+ * "index-only, no table access" phrasing would suggest: `COUNT(DISTINCT …)` cannot be
+ * answered from an ordered index scan alone, so SQLite adds a temp B-tree to dedupe.
+ * Both legs stay index-only (no table access on either), and the walk leg's plan has no
+ * sort — `ORDER BY seq DESC` is served by reading the index backwards.
+ *
+ * None of it is per-message: the sessions call this once per forward resume. The holey
+ * shape pays the pre-filter plus a walk of the newest run only, which stops at the
+ * first run start — at most one hole below the high-water mark.
+ *
+ * The three aggregates come from ONE statement rather than three so the answer
+ * cannot be assembled from two different snapshots.
+ *
+ * `COUNT(DISTINCT seq)`, NOT `COUNT(*)`, and the difference is the whole safety of the
+ * shortcut. The primary key is `(topic_id, identity)` and the seq index is NOT unique
+ * (see the schema above), so two rows can structurally carry one seq. Under `COUNT(*)`
+ * a single duplicate inflates `held` by exactly the amount a one-row hole deducts, the
+ * equality holds, and the shortcut returns MIN — reporting a holey topic as contiguous
+ * and stranding the hole permanently, which is the exact failure class this read
+ * exists to end. Counting distinct seqs makes the equality mean what it says. The
+ * upsert path reconciles by identity and then `client_msg_id`, so no reachable
+ * duplicate is known today; this keeps the shortcut correct without depending on that
+ * remaining true, and `InMemoryStore` (which is keyed by seq) cannot diverge from it.
+ */
+const CONTIGUOUS_PREFILTER_SQL = `SELECT COUNT(DISTINCT seq) AS held, MIN(seq) AS min_seq, MAX(seq) AS max_seq
+   FROM ${TABLE}
+  WHERE topic_id = ? AND seq IS NOT NULL AND seq > 0`;
+
+/** The SQL {@link SqliteChatStore.contiguousFloorSeq} prepares, for the query-plan
+ *  assertion in `app/__tests__/chat-core-mobile-session.test.ts`. */
+export function contiguousFloorSql(): string {
+  return CONTIGUOUS_FLOOR_SQL;
+}
+
+/** The pre-filter SQL {@link SqliteChatStore.contiguousFloorSeq} tries first, for the
+ *  same query-plan assertion. */
+export function contiguousPrefilterSql(): string {
+  return CONTIGUOUS_PREFILTER_SQL;
+}
+
 export class SqliteChatStore implements Store {
   private readonly db: SqliteExecutor;
 
@@ -324,15 +424,17 @@ export class SqliteChatStore implements Store {
     return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
   }
 
-  async earliestSeenSeq(topic_id: string): Promise<number> {
-    // `seq > 0` and not merely NOT NULL: a row that arrived without a server seq
-    // must not become the backwards cursor, or the walk would ask for everything
-    // below 0 forever.
-    const { rows } = await this.db.execute(
-      `SELECT MIN(seq) AS min_seq FROM ${TABLE} WHERE topic_id = ? AND seq IS NOT NULL AND seq > 0`,
-      [topic_id],
-    );
-    const raw = rows[0]?.['min_seq'];
+  async contiguousFloorSeq(topic_id: string): Promise<number> {
+    // The healthy path first — see CONTIGUOUS_PREFILTER_SQL. `held === 0` also
+    // short-circuits an empty topic without preparing the walk at all.
+    const pre = (await this.db.execute(CONTIGUOUS_PREFILTER_SQL, [topic_id])).rows[0];
+    const held = numberOrZero(pre?.['held']);
+    if (held === 0) return 0;
+    const min = numberOrZero(pre?.['min_seq']);
+    const max = numberOrZero(pre?.['max_seq']);
+    if (min > 0 && held === max - min + 1) return min;
+    const { rows } = await this.db.execute(CONTIGUOUS_FLOOR_SQL, [topic_id]);
+    const raw = rows[0]?.['floor_seq'];
     return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
   }
 
@@ -486,6 +588,12 @@ export class SqliteChatStore implements Store {
       ],
     );
   }
+}
+
+/** A SQL aggregate read as a number, 0 for NULL / non-numeric (an empty topic's
+ *  `MIN`/`MAX` are NULL, and `COUNT` never is). */
+function numberOrZero(raw: SqlValue | undefined): number {
+  return typeof raw === 'number' && Number.isFinite(raw) ? raw : 0;
 }
 
 /** Map a raw SQL row back into the canonical {@link ChatMessage}. */

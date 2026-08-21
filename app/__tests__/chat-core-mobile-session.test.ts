@@ -22,6 +22,8 @@ import { parseDevTokenUserId } from '../lib/auth-helpers';
 import { MobileChatSession } from '../lib/chat-core/mobile-session';
 import {
   SqliteChatStore,
+  contiguousFloorSql,
+  contiguousPrefilterSql,
   type SqlRow,
   type SqliteExecutor,
   type SqlValue,
@@ -41,6 +43,28 @@ function bunExecutor(db: Database): SqliteExecutor {
   };
 }
 
+/**
+ * {@link bunExecutor} plus a log of every statement it was asked to run.
+ *
+ * Counting the statements is the only way to tell the one-pass shortcut in
+ * `contiguousFloorSeq` from the probe walk it exists to avoid: BOTH return the same
+ * floor, so a test that reads the return value cannot distinguish them, and a query
+ * plan proves only what ONE statement costs, not how many ran.
+ */
+function countingExecutor(db: Database): { exec: SqliteExecutor; ran: string[] } {
+  const inner = bunExecutor(db);
+  const ran: string[] = [];
+  return {
+    ran,
+    exec: {
+      async execute(sql: string, params: readonly SqlValue[] = []): Promise<{ rows: SqlRow[] }> {
+        ran.push(sql);
+        return inner.execute(sql, params);
+      },
+    },
+  };
+}
+
 /** A controllable fake socket implementing chat-core's SocketLike. */
 class FakeSocket implements SocketLike {
   onopen: ((ev?: unknown) => void) | null = null;
@@ -50,9 +74,24 @@ class FakeSocket implements SocketLike {
   readonly sent: string[] = [];
   closed = false;
 
+  /**
+   * Answer the NEXT `resume` from inside `send`, then forget the hook. This is the
+   * earliest a server can possibly reply, and it is how a loopback one behaves; it
+   * exists so a test can put the client's reaction to a page INSIDE the send that
+   * asked for it, which is where the ordering bugs live. Fires once so a backwards
+   * resume driven by that reaction cannot recurse into it.
+   */
+  answerNextResumeInsideSend: ((frame: Record<string, unknown>) => void) | null = null;
+
   send(data: string): void {
     if (this.closed) throw new Error('socket closed');
     this.sent.push(data);
+    const hook = this.answerNextResumeInsideSend;
+    if (hook === null) return;
+    const env = JSON.parse(data) as Record<string, unknown>;
+    if (env['type'] !== 'resume') return;
+    this.answerNextResumeInsideSend = null;
+    hook(env);
   }
   close(): void {
     this.closed = true;
@@ -900,7 +939,9 @@ describe('MobileChatSession — the backwards history walk', () => {
 
   it('walks a capped replay back to seq 1 on this device', async () => {
     // The mobile store is the real on-device SQLite one, so this also pins that
-    // `earliestSeenSeq` is answerable from it — the read the walk restarts from.
+    // `contiguousFloorSeq` is answerable from it — the read the walk restarts from,
+    // and the one place its SQL (a correlated `NOT EXISTS` over the `(topic_id, seq)`
+    // index) runs against a real op-sqlite database rather than the in-memory store.
     const store = await freshStore();
     const { session, sockets } = makeSession(store);
     session.start();
@@ -947,5 +988,365 @@ describe('MobileChatSession — the backwards history walk', () => {
     const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
     expect(seqs).toEqual(Array.from({ length: 45 }, (_, i) => i + 1));
     expect(sockets[0]!.backwardsResumes().at(-1)).toMatchObject({ after_seq: 0, before_seq: 6 });
+  });
+
+  it('does NOT buy a page it already holds when the server reports a full page', async () => {
+    // The server sets `older_than` whenever its page came back FULL, which is a claim
+    // about the SERVER's page and not about this device. A device already holding the
+    // range below the page used to answer that frame by re-downloading it — 500 rows
+    // on the real limits, on every foreground, since `catchUp` re-resumes over an
+    // already-open socket.
+    //
+    // MUTATION-PROVED: drop the `historyWholeAtResume` term from the `history_gap`
+    // guard in `MobileChatSession.handleInbound`, so the guard is the cursor test
+    // alone, and the last assertion fails — one backwards resume goes out asking for
+    // seqs this device is holding. (Named the real field: an earlier draft of this
+    // comment cited a `historyComplete` guard in `requestHistoryBackfill`, which does
+    // not exist and never did, so the recipe could not be run.)
+    const store = await freshStore();
+    for (const seq of Array.from({ length: 10 }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `h${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    // Whole down to seq 1 — the precondition, measured rather than assumed.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+    expect(sockets[0]!.forwardResumes().at(-1)).toMatchObject({ after_seq: 10 });
+
+    // The server answers with a FULL page above the cursor and, truthfully for itself,
+    // says there is history below the page floor.
+    for (const seq of Array.from({ length: 10 }, (_, i) => i + 11)) {
+      sockets[0]!.deliver({
+        v: 1, type: 'agent_message', message_id: `m${seq}`, seq, body: `msg-${seq}`, ts: seq,
+      });
+    }
+    sockets[0]!.deliver({ v: 1, type: 'history_gap', older_than: 11, ts: 0 });
+    await tick();
+
+    // It applied the page...
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: 20 }, (_, i) => i + 1));
+    // ...and asked for nothing below it.
+    expect(sockets[0]!.backwardsResumes()).toEqual([]);
+  });
+
+  it('sees an INTERIOR hole in the on-device SQLite store, not just a missing prefix', async () => {
+    // `SqliteChatStore.contiguousFloorSeq` is a SECOND implementation of the
+    // contiguity read — a correlated `NOT EXISTS` walked backwards off the
+    // `(topic_id, seq)` index — so it needs its own hole fixture rather than
+    // inheriting the in-memory store's coverage. Two implementations of one
+    // predicate is exactly where a divergence hides.
+    //
+    // MUTATION-PROVED: revert the SQL to `SELECT MIN(seq)` and this returns 1, so
+    // the mobile client asks for nothing and the hole is permanent on device.
+    const store = await freshStore();
+    const rows = [
+      ...Array.from({ length: 5 }, (_, i) => i + 1), // an old prefix: 1..5
+      ...Array.from({ length: 10 }, (_, i) => i + 20), // and a recent run: 20..29
+    ];
+    for (const seq of rows) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+
+    // The forward cursor is above the hole, and seq 1 IS held — the exact shape that
+    // made the old `MIN(seq) > 1` test answer "nothing is missing".
+    expect(await store.lastSeenSeq(TOPIC)).toBe(29);
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(20);
+
+    // Filling the hole makes it silent again, so a healthy device stops asking.
+    for (const seq of Array.from({ length: 14 }, (_, i) => i + 6)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+  });
+
+  it('answers contiguity off the (topic_id, seq) index — no table access, no sort', async () => {
+    // THE COST CLAIM, MEASURED. `Store.contiguousFloorSeq` documents the device read
+    // as an index walk bounded by the newest run's length. The shape that makes that
+    // true is a covering-index walk on the outer row plus an EQUALITY point probe on
+    // the predecessor; the shape that quietly destroys it is a RANGE probe, which
+    // turns the subquery into a per-row walk of the topic and the whole read into
+    // O(rows^2) on exactly the long transcript it exists to repair.
+    //
+    // That is not hypothetical. Adding a defensive `AND p.seq > 0` to the subquery
+    // during this build made SQLite prefer the range constraint over the equality,
+    // and only the plan showed it — every behavioural assertion above stayed green.
+    // So the plan is pinned, over the very string the store prepares.
+    //
+    // WHAT THIS IS AND IS NOT A MEASUREMENT OF. The engine here is `bun:sqlite`; the
+    // device runs `@op-engineering/op-sqlite` (`app/lib/chat-core/op-sqlite-store.ts`).
+    // Both are SQLite and the planner reads the same index definition, so a plan that
+    // is index-only here will be index-only there — but this is a guard on the QUERY,
+    // not a measurement on the DEVICE, and it should not be cited as one. It is worth
+    // keeping anyway because it discriminates: the `AND p.seq > 0` variant reds it.
+    // The assertions are coupled to the planner's wording, so a bun upgrade that
+    // rephrases a plan line can break them without anything being wrong.
+    const db = new Database(':memory:');
+    dbs.push(db);
+    await SqliteChatStore.open(bunExecutor(db));
+    const details = (
+      db.prepare(`EXPLAIN QUERY PLAN ${contiguousFloorSql()}`).all() as Array<
+        Record<string, unknown>
+      >
+    ).map((r) => String(r['detail']));
+
+    const outer = details.find((d) => d.includes(' m USING'));
+    const inner = details.find((d) => d.includes(' p USING'));
+    // The outer walk: covered by the index, bounded above by the ORDER BY + LIMIT.
+    expect(outer).toContain('COVERING INDEX idx_chat_messages_topic_seq');
+    // The predecessor probe: an EQUALITY, which is the whole measurement. A range
+    // here (`seq>?`) is the regression described above.
+    expect(inner).toContain('COVERING INDEX idx_chat_messages_topic_seq');
+    expect(inner).toContain('seq=?');
+    // No sort (`ORDER BY seq DESC` is served by walking the index backwards) and no
+    // table access on either leg.
+    const joined = details.join(' | ');
+    expect(joined).not.toContain('TEMP B-TREE');
+    expect(joined).not.toContain('SCAN');
+  });
+
+  it('STILL walks when the page it was just sent is what opened the hole', async () => {
+    // The trap in the guard above, and the reason it is not a bare "was I whole?" test.
+    // A device that WAS contiguous can acquire an interior hole from the very page it is
+    // reacting to: holding an old prefix of a topic that has since grown by more than
+    // one page, its forward resume returns the NEWEST page, which does not join on.
+    // `historyWholeAtResume` is true — it was true, before the page — so a guard without
+    // the cursor term would refuse the walk and defer the hole to the next open.
+    //
+    // The web half of this is `chat-core/__tests__/history-backfill.test.ts`. It is
+    // asserted separately HERE because `MobileChatSession` is a second implementation of
+    // the same handler over the real on-device SQLite store, and a claim that both
+    // surfaces are proved has to be paid for on both surfaces.
+    //
+    // MUTATION-PROVED: drop the `historyGap <= this.resumeCursor + 1` term from
+    // `MobileChatSession`'s `history_gap` guard, so the guard is `historyWholeAtResume`
+    // alone, and the walk never starts — the first `backwardsResumes()` assertion goes
+    // from 3 to 0 and the store is left holding the prefix plus the newest page.
+    const store = await freshStore();
+    const total = 50;
+    for (const seq of [1, 2, 3]) {
+      await store.upsert({
+        topic_id: TOPIC,
+        // The SERVER's ids, because this device really did receive these rows from this
+        // topic — a private id would make the re-delivery a second row and the assertion
+        // would fail on duplicates rather than on the property.
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    // Contiguous down to 1 at resume time — the precondition the guard keys on.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+
+    const { session, sockets } = makeSession(store);
+    session.start();
+    sockets[0]!.open();
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+    // The forward resume asked from THIS device's cursor, not from zero.
+    expect(sockets[0]!.forwardResumes().at(-1)).toMatchObject({ after_seq: 3 });
+
+    await pump(sockets[0]!, total, 10);
+
+    // It DID walk, on THIS open, and spent its whole round budget doing it rather than
+    // stopping at the forward page's floor.
+    expect(sockets[0]!.backwardsResumes().length).toBe(3);
+    const afterFirst = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    // The prefix it held, plus four pages: 41..50 forward and 11..40 walked.
+    expect(afterFirst).toEqual([1, 2, 3, ...Array.from({ length: 40 }, (_, i) => i + 11)]);
+
+    // And it CONVERGES: a foreground catch-up resets the budget and the remaining hole
+    // (4..10) closes, which is only possible because the store-side contiguity read
+    // still sees it after the walk ran out of rounds.
+    await session.catchUp();
+    await tick();
+    await pump(sockets[0]!, total, 10);
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: total }, (_, i) => i + 1));
+  });
+
+  it('decides the guard on the store as the resume left it, not as the answer finds it', async () => {
+    // THE ORDERING, PINNED, on the mobile session too. `ws.send(resume)` is the instant
+    // the server may begin answering, and chat-core's `socket.onmessage` calls the frame
+    // handler WITHOUT awaiting it, so a `history_gap` handler can run inside any `await`
+    // that follows the send. An operand read after the send is read from a store the
+    // page is already landing in.
+    //
+    // This socket answers from INSIDE `send` — the earliest a server can, and the shape
+    // of a loopback one. The device is whole (1..10 of a 20-row topic), so the correct
+    // behaviour is to apply the forward page and buy nothing below it.
+    //
+    // MUTATION-PROVED: move `this.historyWholeAtResume = ...` in
+    // `MobileChatSession.resumeAndFlush` back below `this.ws.send(resume)`, which is
+    // where it was, and the final assertion fails — the handler reads the field's
+    // `false` initial value and buys a backwards page for 10 rows the store holds.
+    const store = await freshStore();
+    const total = 20;
+    for (const seq of Array.from({ length: 10 }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1);
+
+    const { session, sockets } = makeSession(store);
+    session.start();
+    const socket = sockets[0]!;
+    socket.answerNextResumeInsideSend = (frame) => {
+      for (const out of answer(total, 10, frame)) socket.deliver(out);
+    };
+    socket.open();
+    socket.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 1 });
+    await tick();
+
+    // The answer really did arrive inside the send — otherwise this is the ordinary case
+    // wearing a costume, and the mutation above would not turn it red.
+    expect(socket.answerNextResumeInsideSend).toBeNull();
+    const seqs = (await session.messages()).map((m) => m.seq ?? 0).sort((a, b) => a - b);
+    expect(seqs).toEqual(Array.from({ length: total }, (_, i) => i + 1));
+    expect(socket.backwardsResumes()).toEqual([]);
+  });
+
+  it('answers a HOLE-FREE store from one index-only aggregate pass, not the probe walk', async () => {
+    // The healthy store is the common case and it was the expensive one: with no run
+    // start above seq 1 the descending walk probes every row in the topic. The
+    // pre-filter answers it in one pass — `COUNT(*) == MAX - MIN + 1` means nothing
+    // between them is missing, and then the floor IS `MIN`.
+    //
+    // Pinned on THREE legs, because a pre-filter that is merely FAST is worthless: the
+    // behavioural assertions in the interior-hole test above prove it still returns the
+    // right answer (20 with a hole, 1 without); the STATEMENT COUNT below proves the
+    // walk did not run at all; and the plan proves the one statement that did run is
+    // index-only. The count is the leg that was missing — the shortcut and the walk
+    // return the same floor, so no assertion on the return value can tell them apart,
+    // and a query plan describes one statement rather than how many were issued.
+    const db = new Database(':memory:');
+    dbs.push(db);
+    const { exec, ran } = countingExecutor(db);
+    const store = await SqliteChatStore.open(exec);
+
+    // The equality holds for a contiguous run that does NOT start at 1 either, so the
+    // pre-filter must return MIN rather than 1. (Returning 1 would look right on every
+    // fixture that happens to start at seq 1 and silently stop a real walk.)
+    for (const seq of [7, 8, 9]) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `p${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      });
+    }
+    // ONE statement for the whole answer, and it is the pre-filter — the probe walk
+    // never ran. MUTATION-PROVED: change the shortcut's guard at
+    // `sqlite-store.ts` `contiguousFloorSeq` from `held === max - min + 1` to
+    // `held === max - min + 2` so the equality can never hold, and this length becomes
+    // 2 with the walk's SQL as the second entry.
+    ran.length = 0;
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(7);
+    expect(ran.length).toBe(1);
+    expect(ran[0]).toBe(contiguousPrefilterSql());
+
+    // And an empty topic is 0 without the walk being prepared at all.
+    ran.length = 0;
+    expect(await store.contiguousFloorSeq('app:nobody')).toBe(0);
+    expect(ran.length).toBe(1);
+
+    // THE CONTROL FOR THAT COUNT: a store with a real hole DOES pay the second
+    // statement, so `1` above is the shortcut being taken and not this test failing to
+    // observe a query. Without this leg, a `contiguousFloorSeq` that never issued the
+    // walk under ANY input would pass the assertions above.
+    await store.upsert({
+      topic_id: TOPIC,
+      client_msg_id: '',
+      message_id: 'p20',
+      seq: 20,
+      role: 'agent',
+      body: 'msg-20',
+      project_id: null,
+      attachments: null,
+      created_at: 20,
+      status: 'acked',
+    });
+    ran.length = 0;
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(20);
+    expect(ran.length).toBe(2);
+    expect(ran[1]).toBe(contiguousFloorSql());
+
+    const details = (
+      db.prepare(`EXPLAIN QUERY PLAN ${contiguousPrefilterSql()}`).all() as Array<
+        Record<string, unknown>
+      >
+    ).map((r) => String(r['detail']));
+    const joined = details.join(' | ');
+    // Index-only, and NO TABLE ACCESS — the property that matters, since the row body
+    // is never needed to answer "is this contiguous".
+    expect(joined).toContain('COVERING INDEX idx_chat_messages_topic_seq');
+    expect(joined).not.toContain('SCAN');
+    // The one temp B-tree here is `COUNT(DISTINCT seq)`'s dedupe, which an ordered
+    // index scan cannot supply, and it is the price of the shortcut being SAFE against
+    // a duplicated seq (see CONTIGUOUS_PREFILTER_SQL — under `COUNT(*)` one duplicate
+    // masks a one-row hole as contiguous and strands it forever). Asserted by NAME
+    // rather than waived, so a temp B-tree appearing for a SORT — the regression this
+    // assertion originally existed to catch — still turns it red.
+    expect(joined).toContain('USE TEMP B-TREE FOR count(DISTINCT)');
+    expect(joined.match(/TEMP B-TREE/g)?.length).toBe(1);
   });
 });

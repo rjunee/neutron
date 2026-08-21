@@ -94,6 +94,66 @@ export function rowReplaySql(table: string, columns: string, bounded = false): s
 }
 
 /**
+ * The `row`-shaped SWEEP statement: EVERY row at or below `max_seq`, ascending.
+ * Exported for the same reason {@link rowReplaySql} is — the EXPLAIN QUERY PLAN
+ * assertion has to see the string this code runs.
+ *
+ * DELIBERATELY UNBOUNDED IN COUNT, and that is the whole point of it rather than an
+ * oversight, so the reasoning belongs here where the `LIMIT` visibly isn't.
+ *
+ * {@link rowReplaySql} answers "the newest page", which is the right shape for a
+ * range the caller does not yet hold. It is the WRONG shape for a range the caller
+ * ALREADY HOLDS AND IS RENDERING, because every row it drops is a row whose state
+ * the caller keeps showing from its own store. Cap this and the cap is a starvation
+ * budget: the newest `limit` rows win, an OLD row loses every time, and losing every
+ * time is permanent. That is not a hypothetical — it is exactly how a tombstone for a
+ * low-seq message stayed unsent to a device that had the message on screen, which is
+ * a delete that did not happen.
+ *
+ * SO THE COST IS STATED INSTEAD OF BOUNDED. Rows returned = rows in `table` for this
+ * topic at or below `max_seq` — for the edits table, one per message the owner has
+ * ever edited or deleted inside the range the device holds.
+ *
+ * It is an index range scan on `(topic_id, seq)` with NO SORT, PLUS ONE TABLE ROW FETCH
+ * PER MATCHED ROW. Not a covering scan, and an earlier version of this paragraph
+ * claimed it was: `idx_app_chat_edits_topic_seq` indexes `(topic_id, seq)` only
+ * (`migrations/0087_app_chat_edits.sql`) while the sweep selects `message_id`, `rev`,
+ * `body`, `deleted` and `edited_at`, so SQLite must visit the table for every row.
+ * Measured, with a control that can tell the two apart: the real projection plans as
+ * `SEARCH … USING INDEX`, and the same query narrowed to `seq` alone plans as `USING
+ * COVERING INDEX`. Making it covering would mean indexing the body, which is the
+ * largest column in the table, to save a lookup on a query whose row count is already
+ * proportional to real edits — so the fetch stays and the claim is corrected instead.
+ *
+ * The count is proportional to real edits, not to the transcript. On the longest topic
+ * the owner has reported (1,130 rows) a handful of deletes is a handful of rows. A topic
+ * with thousands of edited messages pays thousands of rows per forward resume — and that
+ * is the honest trade, because the only way to send fewer is to send an incomplete
+ * answer, and an incomplete answer here is content the owner deleted staying readable.
+ *
+ * AND `max_seq` COMES FROM THE CLIENT, so the worst case is not merely eventual — it is
+ * reachable on demand. A resume frame carries its own `after_seq`
+ * (`channels/adapters/app-ws/envelope.ts`), so any socket can ask for a sweep of the
+ * WHOLE topic by naming a cursor above the high-water mark, and pay the full edit count
+ * rather than the count below what it actually holds. That is bounded — by this topic's
+ * own edit rows, never by the transcript — and the socket is authenticated to a single
+ * owner's own topic, so the party who can drive the maximum is the party whose data it
+ * is. Worth knowing rather than worth gating: a limit here is the starvation budget the
+ * paragraphs above exist to reject.
+ *
+ * ASCENDING here rather than DESC-then-reverse: with no `LIMIT` there is no page to
+ * reverse, and the index already yields this order, so the plan has no sort either
+ * way.
+ *
+ * Parameters, in order: `topic_id`, `max_seq`.
+ */
+export function rowSweepSql(table: string, columns: string): string {
+  return `SELECT ${columns} FROM ${table}
+            WHERE topic_id = ? AND seq > 0 AND seq <= ?
+            ORDER BY seq ASC`
+}
+
+/**
  * A message-identity continuation cursor for {@link AppChatEventLogCore.aggregatesAfterPage}.
  *
  * The cursor is the composite `(seq, message_id)` — the same shape the SQL orders
@@ -405,6 +465,47 @@ export class AppChatEventLogCore<SqlRow, Agg> {
       .reverse()
   }
 
+  /**
+   * The SWEEP counterpart to {@link rowsAfter}: EVERY row at or below `max_seq`,
+   * ascending, with no page limit. `row`-shaped logs only — see
+   * {@link aggregatesAtOrBelow}.
+   */
+  private rowsAtOrBelow(topic_id: string, max_seq: number): SqlRow[] {
+    return this.db
+      .prepare<SqlRow, [string, number]>(rowSweepSql(this.table, this.columns))
+      .all(topic_id, clampAfterSeq(max_seq))
+  }
+
+  /**
+   * Aggregates for EVERY event at or below `max_seq`, ascending — the complete
+   * answer for a seq range, as opposed to {@link aggregatesAfter}'s newest page.
+   *
+   * WHICH ONE A CALLER WANTS IS DECIDED BY WHO HOLDS THE MESSAGES, not by taste.
+   * A page is correct for a range the client does not have yet: it is going to
+   * receive those messages in a page too, and the pair is aligned. A page is WRONG
+   * for the range the client already holds, because there the omitted rows are
+   * state the client keeps rendering from its own store, and a newest-first page
+   * omits the same OLD rows on every single resume. See {@link rowSweepSql} for the
+   * cost this trades for that completeness, and why no `limit` parameter exists here
+   * to be tuned.
+   *
+   * `row`-shaped logs only. A `message-group` log's `limit` bounds DISTINCT
+   * MESSAGES over many rows and its page boundary is the composite
+   * `(seq, message_id)` ({@link ReplayCursor}); an unbounded sweep of one is a
+   * different query with different failure modes, and no caller needs it — the
+   * receipt/reaction replays are the message-group ones and their omissions cost a
+   * missing tick or a missing reaction, never content the owner deleted staying
+   * readable. It throws rather than silently returning a page, so a future caller
+   * cannot get a bounded answer from a method whose contract says complete.
+   */
+  aggregatesAtOrBelow(topic_id: string, max_seq: number): Agg[] {
+    if (this.replay.kind !== 'row') {
+      throw new Error(`aggregatesAtOrBelow is row-shaped only (${this.table} is message-group)`)
+    }
+    const { toAggregate } = this.replay
+    return this.rowsAtOrBelow(topic_id, max_seq).map((r) => toAggregate(r))
+  }
+
   /** Replay: aggregates for events after the cursor, seq-ascending, bounded by
    *  `limit` (rows or distinct messages per the replay shape) and optionally by an
    *  exclusive `before_seq` upper bound. A `row`-shaped log returns the NEWEST
@@ -439,8 +540,17 @@ export class AppChatEventLogCore<SqlRow, Agg> {
    * carries no information at all — see the exception spelled out on
    * {@link AggregatesPage.next_cursor}. Their result is the NEWEST `limit` rows
    * after the cursor ({@link rowsAfter}), so a capped one has dropped its older
-   * rows and no cursor could fetch them back; do not read a null cursor off a row
-   * log as proof of completeness.
+   * rows; do not read a null cursor off a row log as proof of completeness.
+   *
+   * THE OLDER ROWS ARE REACHABLE, by the OTHER bound. This said "no cursor could
+   * fetch them back", which was true of the shape before `before_seq` existed and
+   * false the moment it did — the whole point of that parameter is that a caller
+   * which received a capped page asks again with `before_seq` set to the page's
+   * lowest seq and receives the page below (see {@link rowsAfter}). What remains
+   * true is the narrow claim: `next_cursor` is not the thing that fetches them, so
+   * a row-log caller that watches only the cursor learns nothing. Left uncorrected
+   * this reads as documentation that the backwards walk is impossible, which is
+   * the reasoning that produced the permanent hole in the first place.
    *
    * `message-group` logs are where the cursor matters: many rows can share one
    * message, so `limit` bounds DISTINCT MESSAGES, not rows. Crucially the page

@@ -52,12 +52,39 @@ export interface Store {
    *  the FORWARD resume cursor. */
   lastSeenSeq(topic_id: string): Promise<number>
   /**
-   * Lowest `seq` applied for a topic; 0 when the topic holds no sequenced row.
-   * The BACKWARDS cursor: server seqs run 1..N with no gaps, so a value above 1
-   * means this device is missing older history and can ask for it
-   * (`SyncEngine.backfillFrom`). Optimistic rows have no seq and are ignored.
+   * The lowest `seq` of the NEWEST UNBROKEN RUN this device holds — i.e. the
+   * smallest `s` such that every seq in `[s, lastSeenSeq]` is present locally.
+   * 0 when the topic holds no sequenced row. This is the BACKWARDS cursor
+   * (`SyncEngine.backfillFrom`); optimistic rows have no seq and are ignored.
+   *
+   * IT IS DELIBERATELY NOT "the lowest seq I hold", which is what this used to
+   * be, and the difference is a whole class of permanent data loss. Server seqs
+   * do run 1..N with no deletes, but THE CLIENT'S COPY OF THEM DOES NOT: a
+   * device that held 1..100, went away while the topic grew to 700, and then
+   * resumed onto a capped newest-window page comes back holding 1..100 AND
+   * 201..700. Its lowest seq is 1, so "my oldest is above 1" answered NO — and
+   * 101..200 was stranded for good, because the forward cursor is already at 700
+   * and the server only reports a gap for a page it just sent. "Where does my
+   * history start" and "is my history contiguous" are different questions, and
+   * only the second one is the one the walk needs to ask.
+   *
+   * COST, stated per implementation rather than in general, because the two
+   * differ and the difference is the whole reason this is a store method and not
+   * a helper over `list()`:
+   *   - {@link InMemoryStore}: O(rows in the topic), ALWAYS — one pass to collect
+   *     the sequenced set, then a descending walk. Same order as the `MIN(seq)`
+   *     it replaces, one extra Set of numbers. On the longest topic the owner has
+   *     reported (1,130 rows) that is ~1k integer inserts per catch-up, not per
+   *     message.
+   *   - a durable store: O(length of the NEWEST RUN), not of the topic — the SQL
+   *     walks `(topic_id, seq)` DESC and stops at the first row whose predecessor
+   *     is absent, so a holey store is genuinely cheaper and a hole-free one pays
+   *     a full index walk. A store that cannot do better than a whole-topic scan
+   *     should say so here rather than let a caller assume the index form.
+   * It is NOT free, and it must not be called per applied message — the sessions
+   * call it once per forward resume (`SyncEngine.backfillFrom`).
    */
-  earliestSeenSeq(topic_id: string): Promise<number>
+  contiguousFloorSeq(topic_id: string): Promise<number>
   /** Messages still `queued` (not yet handed to the socket), oldest first. */
   pendingSends(topic_id: string): Promise<ChatMessage[]>
   /** Drop all messages for a topic (e.g. account switch). */
@@ -446,14 +473,27 @@ export class InMemoryStore implements Store {
     return max
   }
 
-  async earliestSeenSeq(topic_id: string): Promise<number> {
+  async contiguousFloorSeq(topic_id: string): Promise<number> {
     const topic = this.byTopic.get(topic_id)
     if (topic === undefined) return 0
-    let min = 0
+    // One pass to collect the sequenced set and its high-water mark, then walk
+    // DOWN from that mark while the predecessor is present. `seq > 0` and not
+    // merely non-null: an un-acked row carries no server seq and must never
+    // become the backwards cursor.
+    const seqs = new Set<number>()
+    let max = 0
     for (const m of topic.values()) {
-      if (m.seq !== null && m.seq > 0 && (min === 0 || m.seq < min)) min = m.seq
+      if (m.seq !== null && m.seq > 0) {
+        seqs.add(m.seq)
+        if (m.seq > max) max = m.seq
+      }
     }
-    return min
+    if (max === 0) return 0
+    let floor = max
+    // Terminates at 1 without a special case: `has(0)` is false for any store,
+    // because seq 0 is not a server seq.
+    while (seqs.has(floor - 1)) floor -= 1
+    return floor
   }
 
   async pendingSends(topic_id: string): Promise<ChatMessage[]> {

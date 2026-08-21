@@ -34,9 +34,23 @@ class FakeSocket implements SocketLike {
   onerror: ((ev?: unknown) => void) | null = null
   readonly sent: string[] = []
   closed = false
+  /**
+   * Answer the NEXT `resume` from inside `send`, then forget the hook. This is the
+   * earliest a server can possibly reply, and it is how a loopback one behaves; it
+   * exists so a test can put the client's own reaction to a page INSIDE the send that
+   * asked for it, which is where the ordering bugs live. Fires once so a backwards
+   * resume driven by that reaction cannot recurse into it.
+   */
+  answerNextResumeInsideSend: ((frame: Record<string, unknown>) => void) | null = null
   send(data: string): void {
     if (this.closed) throw new Error('closed')
     this.sent.push(data)
+    const hook = this.answerNextResumeInsideSend
+    if (hook === null) return
+    const env = JSON.parse(data) as Record<string, unknown>
+    if (env['type'] !== 'resume') return
+    this.answerNextResumeInsideSend = null
+    hook(env)
   }
   close(): void {
     this.closed = true
@@ -235,6 +249,78 @@ describe('history backfill — a capped replay converges on the whole transcript
     expect(sockets[0]!.backwards().map((f) => f['before_seq'])).toEqual([40])
   })
 
+  it('converges on a transcript with an INTERIOR hole, across repeated opens', async () => {
+    // THE ACCEPTANCE PROPERTY for the hole a client cannot be told about. The two
+    // mechanisms above are both server-driven: `history_gap` only ever describes a
+    // page the server just sent, so neither can mention a range the client lost
+    // BETWEEN opens. Only the client's own store can notice that, and the test it
+    // used to apply ("is my oldest seq above 1") is blind to a hole that sits ABOVE
+    // seq 1.
+    //
+    // The fixture builds exactly that store: the device holds an old prefix 1..5 from
+    // an earlier, shorter version of the topic, and the topic has since grown to
+    // `total`. The forward resume delivers the newest page, the round budget runs
+    // out partway down, and the device is left holding 1..5 plus a recent run — an
+    // interior hole, with seq 1 present and the forward cursor above the hole.
+    //
+    // MUTATION-PROVED: restore `backfillFrom` to read the store's MINIMUM seq and
+    // the loop below never completes — it exits on the "made no progress" guard with
+    // the hole still there, because from open 2 onwards the client asks for nothing
+    // at all. That is the permanent stranding, reproduced.
+    const total = 65
+    const { session, sockets, store } = setup()
+    // The old prefix, applied before the session ever opens.
+    for (let seq = 1; seq <= 5; seq++) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+
+    const complete = Array.from({ length: total }, (_, i) => i + 1)
+    let opens = 0
+    let holeSeenAboveSeqOne = false
+    for (; opens < 10; opens++) {
+      if (opens === 0) {
+        session.start()
+      } else {
+        // A reconnect: close and re-open, which is what re-drives the forward resume
+        // and therefore the walk's fresh round budget.
+        sockets.at(-1)!.fireClose()
+        session.setActive(false)
+        session.setActive(true)
+      }
+      const socket = sockets.at(-1)!
+      socket.open()
+      socket.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+      await tick()
+      const before = await seqsIn(store)
+      await pump(socket, total)
+      const after = await seqsIn(store)
+
+      // The precondition that made the shipped test answer wrongly: seq 1 is held
+      // AND the transcript is not contiguous. Recorded rather than assumed, so this
+      // test cannot silently stop exercising the interior-hole case.
+      if (after[0] === 1 && after.length < total) holeSeenAboveSeqOne = true
+      if (after.length === total) break
+      // Liveness: every open must recover at least one row, or the walk is stuck.
+      expect(after.length).toBeGreaterThan(before.length)
+    }
+
+    expect(holeSeenAboveSeqOne).toBe(true)
+    expect(await seqsIn(store)).toEqual(complete)
+    // Convergent AND bounded: a handful of opens, not one per message.
+    expect(opens).toBeLessThanOrEqual(3)
+  })
+
   it('never asks below seq 1, which is where the transcript starts', async () => {
     // Seqs are assigned from 1, so `before_seq: 1` could only ever return nothing.
     // Asking anyway would put one dead round trip on every catch-up of a COMPLETE
@@ -248,5 +334,161 @@ describe('history backfill — a capped replay converges on the whole transcript
     await tick()
 
     expect(sockets[0]!.backwards()).toEqual([])
+  })
+
+  it('does not buy a page it already holds when the server calls its page full', async () => {
+    // `history_gap` means the SERVER's page came back full. That is not the same claim
+    // as "rows remain below it" for THIS device: one already holding the range below
+    // the page used to answer the frame by re-downloading it, every open.
+    //
+    // MUTATION-PROVED: drop the `historyWholeAtResume` term from the `history_gap`
+    // guard in `WebChatSession.handleInbound`, so the guard is the cursor test alone,
+    // and the last assertion fails — a backwards resume goes out for seqs the store is
+    // holding. (Named the real field: an earlier draft of this comment cited a
+    // `historyComplete` guard in `requestHistoryBackfill`, which does not exist and
+    // never did, so the recipe could not be run.)
+    const { session, sockets, store } = setup()
+    for (const seq of Array.from({ length: PAGE }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: `h${seq}`,
+        message_id: `h${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+    // The precondition, measured: whole down to seq 1.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1)
+
+    session.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+    // A FULL page above the cursor, then the truthful-for-the-server gap.
+    await pump(sockets[0]!, PAGE * 2)
+
+    expect(await seqsIn(store)).toEqual(Array.from({ length: PAGE * 2 }, (_, i) => i + 1))
+    expect(sockets[0]!.backwards()).toEqual([])
+  })
+
+  it('STILL walks when the page it was just sent is what opened the hole', async () => {
+    // The trap in the guard above, and the reason it is not a bare "was I whole?"
+    // test. A device that WAS contiguous can acquire an interior hole from the very
+    // page it is reacting to: holding an old prefix of a topic that has since grown
+    // by more than one page, its forward resume returns the NEWEST page, which does
+    // not join on. `historyWholeAtResume` is true — it was true, before the page —
+    // so a guard without the cursor term would refuse the walk and defer the hole to
+    // the next open.
+    //
+    // MUTATION-PROVED: drop the `historyGap <= this.resumeCursor + 1` term from
+    // `WebChatSession`'s gap handler, so the guard is `historyWholeAtResume` alone,
+    // and the store is left holding the prefix plus the newest page with the middle
+    // missing.
+    const { session, sockets, store } = setup()
+    const total = PAGE * 5
+    for (const seq of [1, 2, 3]) {
+      await store.upsert({
+        topic_id: TOPIC,
+        // The SERVER's ids, because this device really did receive these rows from
+        // this topic — seeding a private id would make the re-delivery a second row
+        // and the assertion would fail on duplicates rather than on the property.
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+    // Contiguous down to 1 at resume time — the precondition the guard keys on.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1)
+
+    session.start()
+    sockets[0]!.open()
+    sockets[0]!.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+    await pump(sockets[0]!, total)
+
+    // It DID walk, on THIS open, and the walk reached below the forward page's floor
+    // rather than stopping at it. (The round budget still bounds one open, so the
+    // oldest slice is left for the next one — that is the pre-existing convergence
+    // contract, not this guard.)
+    expect(sockets[0]!.backwards().length).toBeGreaterThan(0)
+    const afterFirst = await seqsIn(store)
+    expect(afterFirst.length).toBeGreaterThan(3 + PAGE)
+    expect(afterFirst).toContain(total - PAGE * 3)
+
+    // And it converges: a second open closes the remainder, which is only possible
+    // because the store-side contiguity test sees the hole.
+    sockets.at(-1)!.fireClose()
+    session.setActive(false)
+    session.setActive(true)
+    const next = sockets.at(-1)!
+    next.open()
+    next.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+    await pump(next, total)
+    expect(await seqsIn(store)).toEqual(Array.from({ length: total }, (_, i) => i + 1))
+  })
+
+  it('decides the guard on the store as the resume left it, not as the answer finds it', async () => {
+    // THE ORDERING, PINNED. `ws.send(resume)` is the instant the server may begin
+    // answering, and `../ws-client.ts`'s `socket.onmessage` calls the frame handler
+    // WITHOUT awaiting it, so a `history_gap` handler can run inside any `await` that
+    // follows the send. An operand read after the send is therefore read from a store
+    // the page is already landing in, and the guard decides on a mixture of before and
+    // after.
+    //
+    // This socket answers from INSIDE `send`, which is the earliest a server can and
+    // the shape of a loopback one. The device is whole (1..PAGE of a topic of PAGE*2),
+    // so the correct answer is to apply the forward page and buy nothing below it.
+    //
+    // MUTATION-PROVED: move `this.historyWholeAtResume = ...` in
+    // `WebChatSession.resumeAndFlush` back below `this.ws.send(resume)`, which is where
+    // it was, and the final assertion fails — the handler reads the field's `false`
+    // initial value and buys a backwards page for PAGE rows the store already holds.
+    const { session, sockets, store } = setup()
+    const total = PAGE * 2
+    for (const seq of Array.from({ length: PAGE }, (_, i) => i + 1)) {
+      await store.upsert({
+        topic_id: TOPIC,
+        client_msg_id: '',
+        message_id: `m${seq}`,
+        seq,
+        role: 'agent',
+        body: `msg-${seq}`,
+        project_id: null,
+        attachments: null,
+        created_at: seq,
+        status: 'acked',
+      })
+    }
+    // Whole down to seq 1 — the precondition the guard keys on, measured.
+    expect(await store.contiguousFloorSeq(TOPIC)).toBe(1)
+
+    session.start()
+    const socket = sockets[0]!
+    socket.answerNextResumeInsideSend = (frame) => {
+      for (const out of answerResume(total, frame)) socket.deliver(out)
+    }
+    socket.open()
+    socket.deliver({ v: 1, type: 'session_ready', user_id: 'sam', topic_id: TOPIC, ts: 0 })
+    await tick()
+
+    // The answer really did arrive inside the send — otherwise this test is the
+    // ordinary case wearing a costume, and the mutation above would not turn it red.
+    expect(socket.answerNextResumeInsideSend).toBeNull()
+    // The forward page applied...
+    expect(await seqsIn(store)).toEqual(Array.from({ length: total }, (_, i) => i + 1))
+    // ...and nothing was re-bought below it.
+    expect(socket.backwards()).toEqual([])
   })
 })

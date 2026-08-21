@@ -25,6 +25,68 @@ describe('decodeAppWsResume — resume control frame', () => {
     expect(decodeAppWsResume({ v: 1, type: 'user_message', body: 'hi' })).toBeNull()
   })
 
+  // The BACKWARDS bound. Every assertion above predates it, so the branch that
+  // decodes it shipped unpinned: the decoder could have dropped `before_seq`
+  // entirely and this file would still have been green, which would have made the
+  // backwards walk inert while the whole client-side walk kept "working" (it would
+  // just be answered with the same newest page forever).
+  describe('before_seq — the backwards bound', () => {
+    it('decodes a backwards resume, carrying the bound through', () => {
+      // MUTATION-PROVED: delete the `before_seq` block in `decodeAppWsResume` and
+      // this fails on a missing key rather than a wrong value.
+      expect(decodeAppWsResume({ v: 1, type: 'resume', after_seq: 0, before_seq: 631 })).toEqual({
+        v: 1,
+        type: 'resume',
+        after_seq: 0,
+        before_seq: 631,
+      })
+    })
+
+    it('truncates a fractional bound, and DROPS a negative one', () => {
+      // An untruncated bound reaches SQL as the upper end of a range query.
+      expect(
+        decodeAppWsResume({ v: 1, type: 'resume', after_seq: 0, before_seq: 12.7 })?.before_seq,
+      ).toBe(12)
+
+      // A negative bound is dropped, NOT clamped to 0, which is the posture the
+      // malformed-bound case below states. The bound reaches SQL as `AND seq < ?`, so a
+      // clamp to 0 turns garbage into a well-formed request for an EMPTY page — the
+      // client asked to walk backwards, received nothing, and cannot tell that from
+      // "there is nothing below". Dropping it leaves the frame as the plain forward
+      // resume it otherwise is, exactly as a non-numeric bound already behaved.
+      //
+      // MUTATION-PROVED: restore `Math.max(0, Math.trunc(raw_before))` and both
+      // assertions here fail — the key is present and 0.
+      const negative = decodeAppWsResume({ v: 1, type: 'resume', after_seq: 5, before_seq: -9 })
+      expect(negative).toEqual({ v: 1, type: 'resume', after_seq: 5 })
+      expect('before_seq' in (negative ?? {})).toBe(false)
+    })
+
+    it('DROPS a malformed bound instead of rejecting the frame', () => {
+      // The compatibility posture that matters: a garbage `before_seq` must not cost
+      // the client its FORWARD resume, or one bad frame stops the transcript syncing
+      // at all rather than merely failing to walk backwards.
+      const decoded = decodeAppWsResume({ v: 1, type: 'resume', after_seq: 5, before_seq: 'x' })
+      expect(decoded).toEqual({ v: 1, type: 'resume', after_seq: 5 })
+      expect(decodeAppWsResume({ v: 1, type: 'resume', after_seq: 5, before_seq: null })).toEqual({
+        v: 1,
+        type: 'resume',
+        after_seq: 5,
+      })
+      expect(
+        decodeAppWsResume({ v: 1, type: 'resume', after_seq: 5, before_seq: Number.NaN }),
+      ).toEqual({ v: 1, type: 'resume', after_seq: 5 })
+    })
+
+    it('omits the key entirely on a plain forward resume', () => {
+      // An older client's forward resume must stay byte-identical — `before_seq`
+      // absent, not present-and-zero, because zero is a real bound meaning "nothing".
+      const decoded = decodeAppWsResume({ v: 1, type: 'resume', after_seq: 3 })
+      expect(decoded).not.toBeNull()
+      expect('before_seq' in (decoded ?? {})).toBe(false)
+    })
+  })
+
   it('decodeAppWsInbound still ignores resume frames (separation of concerns)', () => {
     expect(decodeAppWsInbound({ v: 1, type: 'resume', after_seq: 2 })).toBeNull()
     expect(

@@ -987,20 +987,62 @@ export class AppWsAdapter implements ChannelAdapter {
   /**
    * Track B Phase 4 (message edit/delete) — replay edit state to a reconnecting
    * device after the message replay. Returns one `edit_update` per edited/deleted
-   * message (with seq > after_seq), ascending by seq. `[]` when the edit log
-   * isn't wired.
+   * message in the topic, ascending by seq. `[]` when the edit log isn't wired.
    *
-   * ONE bounded query, the NEWEST `DEFAULT_EDIT_REPLAY_LIMIT` edit rows after the
-   * cursor — the same shape and the same limit {@link replayAfter} uses, and that
-   * equality is load-bearing rather than incidental. An edit row carries its
-   * MESSAGE's seq, so the two windows cover the same messages: at most `limit`
-   * messages sit at or above the message window's lowest seq, hence at most
+   * TWO QUERIES SPLIT ON WHO ALREADY HOLDS THE MESSAGE, and that split is the fix
+   * for a delete that never propagated:
+   *
+   *   ABOVE the cursor — messages the client is about to RECEIVE — is a PAGE:
+   *   the newest `DEFAULT_EDIT_REPLAY_LIMIT` edit rows in `(after_seq, before_seq)`,
+   *   aligned with the message page (see below). A page is right here because the
+   *   messages themselves arrive as a page and the two are paired.
+   *
+   *   AT OR BELOW the cursor — messages the client ALREADY HOLDS AND IS RENDERING —
+   *   is a COMPLETE SWEEP with no limit: `aggregatesAtOrBelow`. A page is WRONG here,
+   *   and not by a little. An edit row carries its MESSAGE's seq, so a delete of an
+   *   OLD message is a NEW event filed at a LOW seq — and a newest-first page drops
+   *   the LOWEST seqs, which is precisely the set of tombstones an already-caught-up
+   *   device is missing. Whatever it drops it drops on every resume, forever, so
+   *   "capped" is "never".
+   *
+   * WHAT WENT WRONG TWICE, because the second attempt is instructive. The shipped
+   * code took the client's cursor as a LOWER bound on the page, so a device holding
+   * 1..100 that went offline, had seq 1 deleted, and reconnected at `after_seq: 100`
+   * was sent no `edit_update` at all: the tombstone sat below its cursor. Dropping
+   * that bound (`after_seq: 0`) fixed the small case and left the mechanism intact —
+   * with 500 newer edits in the topic, the newest-500 window still evicted the seq-1
+   * tombstone, and the device still never learned. Only ordering could decide which
+   * rows survived, and ordering cannot be made to favour a row that is oldest by
+   * construction. So the range the client holds is answered COMPLETELY instead of
+   * ordered better. A message the owner deleted cannot remain readable on a device
+   * that holds it — that is the property, and a budget cannot express it.
+   *
+   * This is the MIRROR of the leak this subsystem was last fixed for (deleted content
+   * replaying), and privacy-relevant in the same way: a delete that fails to
+   * propagate is a delete that did not happen.
+   *
+   * ALIGNMENT of the page half — the same shape and the same limit {@link replayAfter}
+   * uses, and that equality is load-bearing rather than incidental. An edit row
+   * carries its MESSAGE's seq, so the two windows cover the same messages: at most
+   * `limit` messages sit at or above the message window's lowest seq, hence at most
    * `limit` edit rows do, hence the newest `limit` edit rows contain every one of
    * them. A message that arrives in a capped replay therefore arrives with its
    * tombstone and its current body — never with a body an edit or delete has
    * since replaced.
    *
-   * That alignment is why neither replay is drained. A bounded message window
+   * `before_seq` is threaded into the page half for the same reason: a BACKWARDS
+   * message page must be paired with the edit state of THAT page. Bound the
+   * messages and not the edits and the client gets an old page of messages against
+   * the newest page of edit state, so every deleted message in it arrives with its
+   * original body. The sweep half needs no `before_seq`: a backwards request carries
+   * `after_seq: 0`, so the sweep's range is empty and the page half answers alone,
+   * which is correct — a backwards page is entirely messages the client does not hold.
+   *
+   * THE TWO RESULTS ARE DISJOINT BY CONSTRUCTION — sweep is `seq <= after_seq`, page
+   * is `seq > after_seq` — so they concatenate in that order into one ascending run
+   * with no de-duplication step to get wrong. Concatenation, not a merge.
+   *
+   * That alignment is why the page half is not drained. A bounded message window
    * paired with an un-drained OLDEST-first edit window is the combination that
    * genuinely loses data: it would deliver a recent deleted message with its
    * original body and no tombstone, while spending the edit budget on
@@ -1023,12 +1065,19 @@ export class AppWsAdapter implements ChannelAdapter {
     before_seq?: number,
   ): Promise<AppWsOutboundEditUpdate[]> {
     if (this.edit_log === undefined) return []
-    const aggregates = await this.edit_log.aggregatesAfter(
+    // The range the client already holds, answered completely. Empty when
+    // `after_seq` is 0 (a cold or backwards resume holds nothing below it), so the
+    // two-query shape costs nothing on those paths.
+    const held = await this.edit_log.aggregatesAtOrBelow(channel_topic_id, after_seq)
+    // The range the client is about to receive, answered as the page that pairs
+    // with the message page.
+    const arriving = await this.edit_log.aggregatesAfter(
       channel_topic_id,
       after_seq,
       DEFAULT_EDIT_REPLAY_LIMIT,
       before_seq,
     )
+    const aggregates = [...held, ...arriving]
     const ts = this.now()
     return aggregates.map((agg) => {
       const env: AppWsOutboundEditUpdate = {
@@ -1071,11 +1120,18 @@ export class AppWsAdapter implements ChannelAdapter {
    * terminates because the bound strictly descends and the last page comes back
    * short.
    *
-   * A FULL PAGE IS A HEURISTIC, deliberately. It does not prove older rows exist —
-   * a topic holding exactly one page reports the same thing as one holding a page
-   * and a half — and the cost of being wrong is one empty round trip at the exact
-   * boundary. The alternative is an existence query on every resume, which costs
-   * more, every time, to save that one.
+   * A FULL PAGE IS A HEURISTIC, deliberately. It does not prove older rows exist — a
+   * topic holding exactly one page reports the same thing as one holding a page and a
+   * half. The alternative is an existence query on every resume, which costs more, every
+   * time, to save that.
+   *
+   * AND BEING WRONG AT THE BOUNDARY COSTS NOTHING, which is not what this used to say:
+   * it costed the false positive as "one empty round trip". There is no round trip. A
+   * topic of exactly one page reports `older_than: 1`, and both sessions drop a bound of
+   * 1 or less (`requestHistoryBackfill` returns early), so the client never asks. The
+   * cost that DID exist was elsewhere and larger — a device re-buying a page it already
+   * held on every foreground — and it is the client-side gate, not this heuristic, that
+   * removed it (`gateway/http/app-ws-surface.ts` at the emit site has the full account).
    *
    * STILL NOT DRAINED. Nothing here pages on the server's own initiative (the shape
    * {@link replayReceiptsAfter} and {@link replayReactionsAfter} use): that would
@@ -1085,15 +1141,25 @@ export class AppWsAdapter implements ChannelAdapter {
    * server-side ceiling. The CLIENT asks for each page, so the per-response ceiling
    * survives while the transcript still converges.
    *
-   * ALIGNED WITH THE EDIT REPLAY, which is what stops a bounded window leaking
-   * stale bodies: {@link replayEditsAfter} reads the same newest-window SQL with an
-   * equal limit AND THE SAME `before_seq`, and an edit row carries its MESSAGE's
-   * seq, so every message in this window has its edit/tombstone state in that one.
-   * Proof is by counting — at most `limit` messages sit at or above this window's
-   * lowest seq, so at most `limit` edit rows do, and the newest `limit` edit rows
-   * therefore include all of them. Pass the bound to one and not the other and the
-   * argument collapses: an old message page against a recent edit page delivers a
-   * deleted message with its original body.
+   * ALIGNED WITH THE EDIT REPLAY on the UPPER bound, which is what stops a bounded
+   * window leaking stale bodies: {@link replayEditsAfter} reads the same
+   * newest-window SQL with an equal limit AND THE SAME `before_seq`, and an edit row
+   * carries its MESSAGE's seq, so every message in this window has its edit/tombstone
+   * state in that one. Proof is by counting — at most `limit` messages sit at or
+   * above this window's lowest seq, so at most `limit` edit rows do, and the newest
+   * `limit` edit rows therefore include all of them. Pass the UPPER bound to one and
+   * not the other and the argument collapses: an old message page against a recent
+   * edit page delivers a deleted message with its original body.
+   *
+   * THE EDIT REPLAY ALSO ANSWERS BELOW THE CURSOR, and this one does not, and the
+   * asymmetry is the point. Messages below the cursor are messages the client already
+   * has, so re-sending them is pure waste; their EDIT STATE below the cursor is not,
+   * because an edit row's seq is its MESSAGE's seq and says nothing about when the
+   * edit happened, so a delete of an old message is a new event at a low seq. Bounding
+   * edits by the client's cursor is what hid a delete from every device that had
+   * already read the message; {@link replayEditsAfter} therefore sweeps `seq <=
+   * after_seq` completely and pages only above it. The counting proof above is about
+   * the page half and survives untouched.
    */
   async replayAfter(
     channel_topic_id: string,

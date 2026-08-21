@@ -274,12 +274,30 @@ describe('AppWsAdapter — the edit window covers the message window', () => {
     })
   })
 
-  it('keeps the two windows the same size, which is what makes the coverage total', async () => {
-    // The counting argument in one assertion: at most DEFAULT_REPLAY_LIMIT messages
-    // sit at or above the message window's lowest seq, so an edit window at least
-    // that wide holds every edit row for them. Shrinking the edit limit below the
-    // message limit silently reintroduces the leak above.
-    expect(DEFAULT_EDIT_REPLAY_LIMIT).toBeGreaterThanOrEqual(DEFAULT_REPLAY_LIMIT)
+  it('covers the message window even when EVERY message in the topic is edited', async () => {
+    // This replaces an assertion that read `expect(DEFAULT_EDIT_REPLAY_LIMIT)
+    // .toBeGreaterThanOrEqual(DEFAULT_REPLAY_LIMIT)` — arithmetic over two
+    // constants, which is true in a build where the replay is broken in every way
+    // that does not happen to change a constant. The relation between the two limits
+    // is not the property; "no message in the window arrives without its tombstone"
+    // is, and it is observable.
+    //
+    // The adversarial fixture the constant-comparison could not express: every
+    // message in the topic is deleted, so the edit log holds BACKLOG rows and the
+    // window has to choose. It must choose the ones that align with the message page
+    // it is paired with.
+    seedRows(BACKLOG)
+    const deleted = tombstone(1, BACKLOG)
+    expect(deleted.size).toBe(BACKLOG)
+    expect(BACKLOG).toBeGreaterThan(DEFAULT_EDIT_REPLAY_LIMIT) // the budget really does bind
+
+    const adapter = adapterOn(new AppChatStore({ db }), true)
+    const messages = (await adapter.replayAfter(CHANNEL_TOPIC, 0)).envelopes
+    const edits = await adapter.replayEditsAfter(CHANNEL_TOPIC, 0)
+
+    const tombstoned = new Set(edits.filter((e) => e.deleted).map((e) => e.message_id))
+    const leaked = idsOf(messages).filter((id) => !tombstoned.has(id))
+    expect(leaked).toEqual([])
   })
 })
 
