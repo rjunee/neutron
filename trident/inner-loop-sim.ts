@@ -29,8 +29,9 @@ export interface SimResult {
   prNumber?: number | null
   branch?: string | null
   verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
-  blockKind?: 'none' | 'code' | 'infra-only' | 'round-lost' | null
-  findings?: unknown[]
+  // `blockKind` and `findings` are declared further down, where they arrived with
+  // #240/T4 — re-declaring them here is a duplicate the test runner cannot see and
+  // only `tsc` reports.
   round?: number
   /** The `checkpoint` field inside the result JSON (self-asserted). */
   checkpoint?: string | null
