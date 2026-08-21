@@ -793,6 +793,33 @@ describe('buildSubstrateWorkflowFire — fire + settle on a warm substrate', () 
     expect(cancelled).toBe(true)
   })
 
+  test('a fire stream that never yields and ignores cancel still settles failed at the budget', async () => {
+    // Red mutation: reverting the unconditional race makes this hang until the
+    // test runner times out because cancel deliberately cannot end the stream.
+    let cancelled = false
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            await new Promise<void>(() => {})
+          })(),
+          async respondToTool() {},
+          async cancel() {
+            cancelled = true
+          },
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+
+    expect(await fire(fireInput({ settle_timeout_ms: 20 }))).toEqual({
+      status: 'failed',
+      error: 'fire turn did not settle within the budget',
+    })
+    expect(cancelled).toBe(true)
+  })
+
   test('a substrate whose start() throws → failed (crashed launcher)', async () => {
     const substrate: Substrate = {
       start(): SessionHandle {

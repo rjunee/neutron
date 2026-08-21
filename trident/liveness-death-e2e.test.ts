@@ -8,12 +8,19 @@ import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/aut
 import { createWorkBoardSurface } from '@neutronai/gateway/http/work-board-surface.ts'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
+import type { Event } from '@neutronai/runtime/events.ts'
+import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
+import type { Substrate } from '@neutronai/runtime/substrate.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 import {
   WorkBoardRunStillLiveError,
   WorkBoardStore,
 } from '@neutronai/work-board/store.ts'
-import type { InnerLoopInput } from './inner-loop.ts'
+import {
+  buildSubstrateWorkflowFire,
+  buildWorkflowFirer,
+  type InnerLoopInput,
+} from './inner-loop.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
@@ -177,11 +184,15 @@ describe('external launcher death reaches the real orchestrator without killing 
     expect(board.get('p', item.id)?.status).toBe('in_progress')
   })
 
-  test('a positively dead generation is latched then cannot remain latched after six sweeps', async () => {
+  test('a positively dead generation gets a NEW builder launch — relaunch REQUESTED, not merely counted', async () => {
     await seedRunning('spent', 'generation-dead')
+    const fires: InnerLoopInput[] = []
     const loop = harness(
       'dead',
-      async () => ({ status: 'fired', error: null, launcher_session_key: 'generation-live' }),
+      async (input) => {
+        fires.push(input)
+        return { status: 'fired', error: null, launcher_session_key: 'generation-live' }
+      },
       { maxCrashRecoveries: 3 },
     )
 
@@ -194,13 +205,18 @@ describe('external launcher death reaches the real orchestrator without killing 
 
     for (let sweep = 0; sweep < 6; sweep++) await loop.runOnce()
     const continued = store.get('spent')!
-    const recoveredOnNewGeneration =
-      !isTerminalPhase(continued.phase) &&
-      continued.subagent_status === 'running' &&
-      continued.workflow_run_id === 'generation-live' &&
-      continued.crash_recoveries >= 1
-    expect(recoveredOnNewGeneration || isTerminalPhase(continued.phase)).toBe(true)
-    expect(!isTerminalPhase(continued.phase) && continued.subagent_status === 'crashed').toBe(false)
+    // Red mutation verified by hand: deleting the §1a-crash `launch(claimed)`
+    // branch reaps the row terminal with zero fires, making these assertions fail.
+    expect(fires.length).toBeGreaterThanOrEqual(1)
+    expect(fires[0]!.resume_checkpoint).toBe('ralph-task-built')
+    expect(fires[0]!.run.branch).toBe('trident/existing')
+    expect(fires[0]!.run.pr).toBe(312)
+    expect(isTerminalPhase(continued.phase)).toBe(false)
+    expect(continued.subagent_status).toBe('running')
+    expect(continued.workflow_run_id).toBe('generation-live')
+    expect(continued.crash_recoveries).toBe(1)
+    expect(continued.round).toBe(1)
+    expect(continued.ralph_round).toBe(0)
   })
 
   test('persistent launch throws terminate the latched run within six sweeps with work preserved', async () => {
@@ -256,5 +272,121 @@ describe('external launcher death reaches the real orchestrator without killing 
     await loop.runOnce()
 
     expect(store.get('slow-alive')).toEqual(before)
+  })
+})
+
+describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
+  test('a never-settling lane fails boundedly and the next crashed lane relaunches', async () => {
+    const laneAStore = new TridentRunStore(db, () => '2026-08-17T19:42:56.000Z')
+    const laneBStore = new TridentRunStore(db, () => '2026-08-17T19:42:57.000Z')
+    await laneAStore.create({
+      id: 'lane-a',
+      slug: 'lane-a',
+      project_slug: 'p',
+      repo_path: '/repo-a',
+      task: 'build A',
+    })
+    await laneAStore.update('lane-a', {
+      phase: 'ralph-task',
+      branch: 'trident/existing-a',
+      pr: 312,
+      inner_checkpoint: 'ralph-task-built',
+      subagent_run_id: 'workflow-a',
+      subagent_status: 'running',
+      workflow_run_id: 'generation-dead-a',
+    })
+    await laneBStore.create({
+      id: 'lane-b',
+      slug: 'lane-b',
+      project_slug: 'p',
+      repo_path: '/repo-b',
+      task: 'build B',
+    })
+    await laneBStore.update('lane-b', {
+      phase: 'ralph-task',
+      branch: 'trident/existing-b',
+      pr: 313,
+      inner_checkpoint: 'ralph-task-built',
+      subagent_run_id: 'workflow-b',
+      subagent_status: 'running',
+      workflow_run_id: 'generation-dead-b',
+    })
+    const crashReason = 'inner workflow child crashed: pooled child exited'
+    await laneAStore.crashRunningByLauncher('generation-dead-a', crashReason)
+    await laneBStore.crashRunningByLauncher('generation-dead-b', crashReason)
+
+    const hangingSubstrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            await new Promise<void>(() => {})
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const completed: Event = {
+      kind: 'completion',
+      usage: { input_tokens: 1, output_tokens: 1 } as never,
+      substrate_instance_id: 'cc-trident-fire-lane-b',
+      launcher_session_key: 'generation-live-b',
+    }
+    const settlingSubstrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            yield completed
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fireWorkflow = buildWorkflowFirer({
+      fire: buildSubstrateWorkflowFire({
+        build_substrate: (cwd) =>
+          cwd === '/repo-a' ? hangingSubstrate : settlingSubstrate,
+      }),
+      settle_timeout_ms: 50,
+      write_brief_parts: () => null,
+    })
+    const orchestrator = buildTridentOrchestrator({
+      fire_workflow: fireWorkflow,
+      db_path: join(scratchpad, 'project.db'),
+      run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+      base_branch: 'main',
+      on_orphaned_session: 'wait',
+      begin_crash_recovery: (id) => store.beginCrashRecovery(id),
+    })
+    const loop = new TridentTickLoop({
+      store,
+      step: (run) => orchestrator.step(run),
+    })
+
+    // Red mutation: without the unconditional fire race this first sweep hangs
+    // on lane A, so lane B is never claimed or relaunched.
+    const first = await loop.runOnce()
+    expect(first.skipped_due_to_overlap).toBe(false)
+
+    const laneB = store.get('lane-b')!
+    expect(isTerminalPhase(laneB.phase)).toBe(false)
+    expect(laneB.subagent_status).toBe('running')
+    expect(laneB.workflow_run_id).toBe('generation-live-b')
+    expect(laneB.crash_recoveries).toBe(1)
+    expect(laneB.subagent_status).not.toBe('crashed')
+
+    const laneA = store.get('lane-a')!
+    expect(laneA.phase).toBe('failed')
+    expect(laneA.failure_reason).toContain('inner workflow fire failed')
+    expect(laneA.failure_reason).toContain('did not settle within the budget')
+    expect(laneA.failure_reason ?? '').not.toContain('exhausted')
+    expect(laneA.crash_recoveries).toBe(1)
+    expect(laneA.branch).toBe('trident/existing-a')
+    expect(laneA.inner_checkpoint).toBe('ralph-task-built')
+
+    expect((await loop.runOnce()).skipped_due_to_overlap).toBe(false)
   })
 })
