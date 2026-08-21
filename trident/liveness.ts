@@ -78,6 +78,40 @@ export const NO_ADVANCE_HANG_MS = 90 * 60_000
 export const DEFAULT_MAX_INFLIGHT_MS = 2 * 60 * 60_000
 
 /**
+ * Cadence of the wrappers' mid-phase liveness heartbeat — the `codex-exec-alive` /
+ * `codex-review-alive` ticker in `trident/codex-build.sh` and `trident/codex-review.sh`
+ * (`NEUTRON_CODEX_BUILD_HEARTBEAT_SECS` / `NEUTRON_CODEX_REVIEW_HEARTBEAT_SECS`,
+ * default 300 s). Mirrored here so the orchestrator can reason about how OLD a stage
+ * row may be and still mean "that process was alive".
+ */
+export const STAGE_HEARTBEAT_CADENCE_MS = 5 * 60_000
+
+/**
+ * How fresh a per-run stage event must be to outrank a POSITIVE launcher death.
+ *
+ * WHY A SECOND, TIGHTER WINDOW EXISTS. The ordinary stand-down accepts any stage
+ * event newer than `NO_ADVANCE_HANG_MS` (90 min), which is generous on purpose. That
+ * is far too generous to overturn a probe that positively observed the launcher gone:
+ * an 89-minute-old row says nothing about now.
+ *
+ * WHY IT OUTRANKS THE PROBE AT ALL. The two answer about DIFFERENT PROCESSES. The
+ * probe answers about `workflow_run_id`, a launcher GENERATION several runs can share
+ * (`tick.ts`), and the build is deliberately detached from it (`nohup setsid` in
+ * `inner-workflow.mjs`) — this file already states, from three measured gateway boots,
+ * that A DEAD LAUNCHER IS NOT A DEAD BUILD. The heartbeat answers about THIS run's
+ * wrapper: its ticker re-checks `kill -0 "$MAIN_PID"` before every stamp, so it cannot
+ * outlive its wrapper by more than ONE cadence even when the wrapper is SIGKILLed and
+ * runs no trap at all. A row inside three cadences is therefore positive evidence that
+ * the wrapper process itself was alive, which a shared generation's death cannot
+ * contradict.
+ *
+ * Three cadences (15 min), not one: a stamp can be delayed by sqlite contention or a
+ * slow sweep, and the cost of being generous here is bounded by the 2 h ceiling, which
+ * outranks every reprieve.
+ */
+export const DEAD_LAUNCHER_OVERRIDE_MS = 3 * STAGE_HEARTBEAT_CADENCE_MS
+
+/**
  * Cadence of the trident-liveness probe loop (`trident/tick.ts`). Every
  * `LIVENESS_PROBE_INTERVAL_MS` the loop asks, for each in-flight run, whether the
  * launcher generation recorded on its row is still a LIVE PROCESS. It matches the

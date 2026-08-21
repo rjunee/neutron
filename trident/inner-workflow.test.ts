@@ -719,7 +719,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
    */
   const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
-  const codexBridgeCommand = (runId: string): string => {
+  const codexBridgeCommand = (runId: string, dbPath = '/harness/project.db'): string => {
     // Instantiate the real prompt builder with stub closure values; `shSingleQuote`
     // comes from the same source so the quoting under test is the shipped quoting.
     const factory = new Function(
@@ -737,6 +737,12 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       // truncation readback is a tail of that same command line, so a prefix that
       // shifted or broke its quoting has to be able to fail this.
       'CODEX_ENV_PREFIX',
+      // The review-phase liveness heartbeat's coordinates, gated on `dbPath && runId`
+      // exactly as `checkpointEnv` is. Real values here, so the readback tail below is
+      // taken from a command that CARRIES the heartbeat env — a prefix that broke its
+      // quoting has to be able to fail these tests.
+      'dbPath',
+      'stageStampSh',
       [grabFunction('shSingleQuote'), grabFunction('codexReviewerPrompt'), 'return codexReviewerPrompt'].join('\n'),
     ) as (...args: string[]) => (diffFile: string) => string
     return factory(
@@ -750,6 +756,8 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       '',
       '',
       "CODEX_REVIEW_MODEL='gpt-5.6-sol' ",
+      dbPath,
+      '/harness/trident/stage-stamp.sh',
     )('/tmp/some-diff.diff')
   }
 
@@ -770,6 +778,37 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     rmSync(errFile, { force: true })
     return out
   }
+
+  /**
+   * THE REVIEW WRAPPER'S HEARTBEAT COORDINATES REACH IT, or the ticker inside
+   * `codex-review.sh` never arms and the review phase goes on emitting no mid-phase
+   * evidence at all — a module shipped, tested and unwired, which this repo has done.
+   */
+  test('the bridge command carries the review heartbeat coordinates', () => {
+    const command = codexBridgeCommand('heartbeat-env-pin')
+    expect(command).toContain("NEUTRON_CODEX_REVIEW_STAGE_SCRIPT='/harness/trident/stage-stamp.sh'")
+    expect(command).toContain("NEUTRON_CODEX_REVIEW_STAGE_DB='/harness/project.db'")
+    expect(command).toContain("NEUTRON_CODEX_REVIEW_STAGE_RUN_ID='heartbeat-env-pin'")
+    // …spliced AHEAD of the existing env block without displacing any of it, and with
+    // its own quoting intact (a broken prefix would swallow the rest of the line).
+    expect(command).toContain(
+      "NEUTRON_CODEX_REVIEW_STAGE_RUN_ID='heartbeat-env-pin' CODEX_HOME='/codex-home' " +
+        "NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' bash '/harness/trident/codex-review.sh' 'main'",
+    )
+  })
+
+  test('NEGATIVE: a caller with no dbPath gets the byte-identical pre-heartbeat command', () => {
+    // Gated on the same coordinates as `checkpointEnv`, so a legacy or dry caller is
+    // unchanged — and the assertion above cannot be passing because the string is
+    // always present.
+    const command = codexBridgeCommand('heartbeat-env-pin', '')
+    expect(command).not.toContain('NEUTRON_CODEX_REVIEW_STAGE_SCRIPT')
+    expect(command).not.toContain('NEUTRON_CODEX_REVIEW_STAGE_DB')
+    expect(command).toContain(
+      "CODEX_HOME='/codex-home' NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' " +
+        "bash '/harness/trident/codex-review.sh' 'main'",
+    )
+  })
 
   test('BEHAVIOR: wrapper stderr carrying the marker makes the bridge report CODEX_TRUNCATED=1', () => {
     const out = runReadback(

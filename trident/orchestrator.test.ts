@@ -86,6 +86,7 @@ function buildHarness(opts: {
   max_inflight_ms?: number
   no_advance_hang_ms?: number
   latest_stage_event_at?: (run_id: string) => string | null
+  probe_run_alive?: (run: TridentRun) => 'alive' | 'dead' | 'unknown' | Promise<'alive' | 'dead' | 'unknown'>
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
@@ -160,6 +161,7 @@ function buildHarness(opts: {
   if (opts.max_inflight_ms !== undefined) o.max_inflight_ms = opts.max_inflight_ms
   if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
   if (opts.latest_stage_event_at !== undefined) o.latest_stage_event_at = opts.latest_stage_event_at
+  if (opts.probe_run_alive !== undefined) o.probe_run_alive = opts.probe_run_alive
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
@@ -3134,6 +3136,386 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.failure_reason).toContain('suspected agent hang')
+  })
+
+  /**
+   * THE STAGE LEDGER IS NOT ENOUGH, and these pin the second source.
+   *
+   * `codex-build.sh` used to stamp `codex-exec-start` immediately before `codex exec`
+   * and `codex-exec-end` after it, with NOTHING in between. MEASURED against the live
+   * ledger (808 events, 37 completed exec windows): max 72.0 min, avg 20.7 min between
+   * those two stamps — so against a 90-minute threshold the reader above was blind for
+   * up to 72 of the 90 minutes it was supposed to cover, and the review phase stamped
+   * nothing at all. MEASURED over 17 real runs, the newest stage event was OLDER than
+   * `last_advanced_at` for 11 of them: for two runs in three the stand-down could not
+   * fire even in principle.
+   *
+   * The launcher-liveness probe already existed and already ran every 15 s — and
+   * `tick.ts` threw its POSITIVE answer away (`if (verdict !== 'dead') continue`). These
+   * tests are about reading it for the opposite verdict.
+   */
+  const HANG_MS = 60_000
+  /** Evidence far older than the threshold — #442's stand-down CANNOT save a run on it. */
+  const ANCIENT_STAGE = () => new Date(0).toISOString()
+
+  test('POSITIVE: an alive launcher spares a run the stage ledger cannot vouch for', async () => {
+    // THE ASSERTION THAT FAILS WITHOUT THIS FIX. Stage evidence is 90 s old against a
+    // 60 s threshold, so the stage path is exhausted; the probe positively observes the
+    // process running. Before this change the run was reaped here — which is the
+    // 9bece714 incident (pid 286859 alive, stderr written seconds earlier).
+    let t = 0
+    let probed = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: ANCIENT_STAGE,
+      probe_run_alive: () => {
+        probed += 1
+        return 'alive'
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).not.toBe('failed')
+    expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
+    // The probe was actually CONSULTED — a stand-down that happened for some other
+    // reason would pass the assertion above while proving nothing.
+    expect(probed).toBeGreaterThan(0)
+    // NOTHING WAS WRITTEN, same property as the stage-event reprieve: the clock stays
+    // where it was, so the reprieve is recomputed from evidence on the next tick.
+    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+  })
+
+  test('POSITIVE: a reap that DOES fire discloses what was checked and what it found', async () => {
+    // The card's second ask, and the half that was entirely unimplemented: every one of
+    // the 13 reaped rows in the live DB carried the bare "suspected agent hang" string,
+    // which says nothing about the evidence the watchdog did or did not have.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: ANCIENT_STAGE,
+      probe_run_alive: () => 'unknown',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    t = 20 * 60_000 // 20 minutes in, so the stage age is a round, checkable number
+    await h.loop.runOnce()
+
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(store.get(run.id)?.phase).toBe('failed')
+    // ON THE REAL STRING, not a boolean, and with the CONCRETE numbers — a disclosure
+    // that says only "liveness checked" would be as unfalsifiable as saying nothing.
+    expect(reason).toMatch(/liveness checked:/)
+    expect(reason).toContain('newest stage event 20 min ago')
+    expect(reason).toContain('launcher probe=unknown')
+  })
+
+  test('NEGATIVE (N1): an UNKNOWN probe still reaps, on the byte-identical reason prefix', async () => {
+    // Absence of evidence is not evidence of life. A probe outage, an unrecognised
+    // generation, a registry that could not be read — none of them may buy a reprieve,
+    // and the reason class `delivery.ts` routes on must not shift under it.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: ANCIENT_STAGE,
+      probe_run_alive: () => 'unknown',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toStartWith(
+      'no progress for 1 min — suspected agent hang (inner workflow stopped advancing)',
+    )
+  })
+
+  test('NEGATIVE (N1b): a THROWING probe is an outage, not a life sign — it still reaps', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: ANCIENT_STAGE,
+      probe_run_alive: () => {
+        throw new Error('registry unreadable')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('launcher probe=unknown')
+  })
+
+  // ── N2: WHICH EVIDENCE OUTRANKS WHICH ────────────────────────────────────────
+  //
+  // AN EARLIER CUT MADE `probe === 'dead'` STRICTLY STRONGER THAN ANY STAGE EVENT.
+  // That is the inverse of this file's own position a few hundred lines up — "A DEAD
+  // LAUNCHER IS NOT A DEAD BUILD", written from three measured gateway boots that
+  // reaped healthy builds — because the probe answers about a launcher GENERATION
+  // several runs SHARE while the build is detached from it (`nohup setsid`), and the
+  // heartbeat answers about THIS run's own wrapper pid.
+  //
+  // BOTH HALVES ARE PINNED, because each without the other is a different bug:
+  //   N2  — a stage row too OLD to prove the wrapper is alive does NOT save a run
+  //         whose launcher is positively dead. ("A heartbeat row proves a TICKER ran,
+  //         not that the build did.")
+  //   N2c — a stage row inside `DEAD_LAUNCHER_OVERRIDE_MS` DOES, because the ticker
+  //         re-checks `kill -0 "$MAIN_PID"` before every stamp and so cannot outlive
+  //         its wrapper by more than one cadence.
+  // These run on the REAL 90-minute threshold rather than the 1-minute `HANG_MS` the
+  // tests above use: the two windows only differ at real scale, and a fixture that
+  // collapses them would make one of the two assertions vacuous.
+  const REAL_HANG_MS = 90 * 60_000
+
+  test('NEGATIVE (N2): a dead launcher reaps through a STALE stage row (a ticker is not a build)', async () => {
+    let t = 0
+    // 30 min old at the tick below: well inside the 90-min stand-down window, and well
+    // OUTSIDE the 15-min window in which a ticker must still have had a live wrapper.
+    const stageAt = 60 * 60_000
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: REAL_HANG_MS,
+      max_inflight_ms: 4 * 60 * 60_000,
+      latest_stage_event_at: () => new Date(stageAt).toISOString(),
+      probe_run_alive: () => 'dead',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 90 * 60_000 + 1_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('launcher is positively dead')
+    // Still routed to delivery.ts's `hang` class — the copy changed, the class did not.
+    expect(after?.failure_reason ?? '').toContain('no progress for')
+    // CONTROL: the stage row really was inside the ordinary stand-down window, so this
+    // reap is the DEAD probe overriding it and not the row having expired.
+    expect(90 * 60_000 + 1_000 - stageAt).toBeLessThan(REAL_HANG_MS)
+  })
+
+  test('NEGATIVE (N2c): a dead launcher does NOT reap through a row inside the override window', async () => {
+    // THE MEASURED INCIDENT THIS PROTECTS: a gateway restart kills the launcher
+    // generation while the detached wrapper keeps building and keeps stamping. Under
+    // the old precedence that run was terminally reaped while writing rows that second.
+    let t = 0
+    const stageAt = 90 * 60_000 // 1 min old at the tick below
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: REAL_HANG_MS,
+      max_inflight_ms: 4 * 60 * 60_000,
+      latest_stage_event_at: () => new Date(stageAt).toISOString(),
+      probe_run_alive: () => 'dead',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 90 * 60_000 + 60_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).not.toBe('failed')
+    // NOTHING WAS WRITTEN — the reprieve is recomputed from evidence every tick.
+    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+  })
+
+  test('NEGATIVE (N2d): the override window is BOUNDED — the 2 h ceiling still reaps through it', async () => {
+    // NEVER WIDEN A REFUSAL — or a REPRIEVE — WITHOUT A RETRACTION PATH. A ticker that
+    // somehow never stopped must not hold a lane forever; the ceiling clears it with no
+    // operator action and no stored state.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: REAL_HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      // Stamping THIS SECOND, forever.
+      latest_stage_event_at: () => new Date(t).toISOString(),
+      probe_run_alive: () => 'dead',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 2 * 60 * 60_000 + 60_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('the 2 h ceiling outranks any liveness reprieve')
+  })
+
+  test('NEGATIVE (N2b): the same FRESH evidence with a non-dead probe DOES stand the run down', async () => {
+    // The control for N2. Without it, N2 would pass even if the code reaped every run
+    // past the threshold regardless of evidence — which is the bug, not the fix.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: () => new Date(80_000).toISOString(),
+      probe_run_alive: () => 'unknown',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('DISCLOSURE ON BOTH OUTCOMES: a STAND-DOWN reports what the probe answered too', async () => {
+    // The comment on this block claimed the disclosure was "carried onto BOTH
+    // outcomes". It was not: the reap `reason` interpolated it and the stand-down
+    // `note` used a separate string that never named the probe — so a run SPARED left
+    // no record of what the probe said, and only the kills were auditable. A watchdog
+    // that quietly declines to fire is as hard to trust as one that quietly fires.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      // Fresh stage evidence carries the stand-down; the probe is CONSULTED anyway and
+      // its answer is exactly what used to go unrecorded on this branch.
+      latest_stage_event_at: () => new Date(19 * 60_000).toISOString(),
+      probe_run_alive: () => 'unknown',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 20 * 60_000
+
+    const outcome = await h.step(store.get(run.id)!)
+    expect(outcome.changed).toBe(false)
+    expect(outcome.note ?? '').toContain('hang watchdog STOOD DOWN')
+    // THE SAME CONCRETE DISCLOSURE THE REAP CARRIES — both clocks and the probe's
+    // answer, never a boolean.
+    expect(outcome.note ?? '').toMatch(/liveness checked:/)
+    expect(outcome.note ?? '').toContain('newest stage event 1 min ago')
+    expect(outcome.note ?? '').toContain('launcher probe=unknown')
+    // CONTROL: the run really was spared, so this is a stand-down note and not a reap.
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('NEGATIVE (N3): with NO probe wired at all, behaviour is unchanged from before the seam', async () => {
+    // Extends the ABSENCE IS NOT EVIDENCE test above to the new seam. An un-wired
+    // deployment must reap exactly as it always did.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    t = 90_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toStartWith(
+      'no progress for 1 min — suspected agent hang (inner workflow stopped advancing)',
+    )
+    // And it says so: no evidence of either kind was available.
+    expect(after?.failure_reason ?? '').toContain('newest stage event none, launcher probe=not wired')
+  })
+
+  test('NEGATIVE (N4) IMMORTALITY GUARD: a forever-alive probe still dies at the inflight ceiling', async () => {
+    // THE RISK THIS FIX CARRIES, pinned. A launcher is SHARED INFRASTRUCTURE, not proof
+    // that the detached build it fired is working — so if 'alive' conferred an unbounded
+    // reprieve, one genuinely wedged run whose launcher survives would hold one of ~6
+    // lanes forever. That is strictly worse than the false kill being fixed here.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 600_000, // the 2h ceiling, scaled
+      probe_run_alive: () => 'alive',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    // Deep past the hang threshold, under the ceiling: alive, so spared — repeatedly.
+    for (const at of [90_000, 300_000, 599_000]) {
+      t = at
+      await h.loop.runOnce()
+      expect(store.get(run.id)?.phase).not.toBe('failed')
+    }
+
+    // One tick past the ceiling: the lane is freed even though the probe still says
+    // ALIVE and never stopped saying so.
+    t = 601_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('inner workflow stalled (no terminal result within 10 min)')
+    // Disclosed there too, and it names the probe answer it OVERRODE.
+    expect(after?.failure_reason ?? '').toContain('launcher probe=alive')
+    expect(after?.failure_reason ?? '').toContain('ceiling outranks any liveness reprieve')
+  })
+
+  test('NEGATIVE (N5): when the heartbeat STOPS, the reprieve expires from the LAST beat', async () => {
+    // The sibling of "the reprieve EXPIRES on its own", for the ticker case: a heartbeat
+    // that dies while the exec hangs must not leave the run un-reapable. The probe is
+    // pinned 'unknown' so ONLY the heartbeat is under test — a live-launcher answer
+    // would rescue the run for an unrelated reason and hide a broken expiry.
+    let t = 0
+    let lastBeat: string | null = null
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      latest_stage_event_at: () => lastBeat,
+      probe_run_alive: () => 'unknown',
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    // The ticker beats twice, 30 s apart, each one sparing the run.
+    for (const beat of [70_000, 100_000]) {
+      lastBeat = new Date(beat).toISOString()
+      t = beat + 1_000
+      await h.loop.runOnce()
+      expect(store.get(run.id)?.phase).not.toBe('failed')
+    }
+
+    // Then it dies. 59 s after the last beat: still spared, measured from THAT moment.
+    t = 159_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    // Past the threshold measured from the last beat: reaped, on schedule.
+    t = 161_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('suspected agent hang')
+    expect(after?.failure_reason ?? '').toContain('newest stage event 1 min ago')
   })
 
   test('a stale orphan past the hang threshold is reaped, not redispatched', async () => {
