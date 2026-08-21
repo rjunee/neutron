@@ -27,7 +27,11 @@ import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 import { buildTridentTerminator } from './terminate.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
-import { dispatchBoardBoundBuild, type TridentBoardBinder } from './board-dispatch.ts'
+import {
+  dispatchBoardBoundBuild,
+  type DispatchLandedProbe,
+  type TridentBoardBinder,
+} from './board-dispatch.ts'
 
 export type CodeCommand =
   | { kind: 'dispatch'; task: string; board_item_id?: string }
@@ -145,6 +149,8 @@ export interface TridentCodeContext {
    * Tests inject a deterministic resolver.
    */
   resolveMergeMode: (repo_path: string) => Promise<MergeMode>
+  /** Outer-loop merged-PR guard shared by all production dispatch surfaces. */
+  landedProbe?: DispatchLandedProbe
   /**
    * Resolve whether this build is governed (Ralph one-task-per-context
    * loop). Defaults to `detectRalphMode` (see board-dispatch.ts) — a
@@ -217,6 +223,7 @@ async function executeDispatch(
     repo_path: ctx.repo_path,
     ...(ctx.resolveBuildRepo !== undefined ? { resolveBuildRepo: ctx.resolveBuildRepo } : {}),
     resolveMergeMode: ctx.resolveMergeMode,
+    ...(ctx.landedProbe !== undefined ? { landedProbe: ctx.landedProbe } : {}),
     ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
     ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
     ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),

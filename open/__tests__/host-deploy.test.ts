@@ -24,7 +24,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { uuidToToken } from '@neutronai/reminders/index.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ApprovalManager, type ApprovalRow } from '@neutronai/tools/approval.ts'
@@ -76,8 +76,8 @@ let nowMs: number
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-host-deploy-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   nowMs = Date.now()
   approvals = new ApprovalManager(db, { notify: async () => undefined }, { now: () => nowMs })
 })

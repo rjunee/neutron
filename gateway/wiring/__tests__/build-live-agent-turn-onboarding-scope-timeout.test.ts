@@ -27,7 +27,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ChatOutbound } from '@neutronai/landing/server.ts'
@@ -42,8 +42,7 @@ import type { LiveAgentTurnRequest } from '../../http/chat-bridge.ts'
 
 // Mirrors the production constants (build-live-agent-turn.ts): the activity-based
 // inactivity windows + the absolute-ceiling backstop.
-const TURN_INACTIVITY_MS = 90_000
-const COLD_TURN_INACTIVITY_MS = 180_000
+const TURN_INACTIVITY_MS = 30 * 60_000
 const TURN_ABSOLUTE_CEILING_MS = 45 * 60_000
 
 let tmp: string
@@ -53,8 +52,8 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-lat-scope-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })
@@ -182,7 +181,7 @@ describe('FIX 2 — activity-based per-turn budgets', () => {
     const sent: ChatOutbound[] = []
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }) })
     await run(makeTurn({ sent }))
-    expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_INACTIVITY_MS)
+    expect(specs[0]!.turn_timeout_ms).toBe(TURN_INACTIVITY_MS)
     expect(specs[0]!.turn_absolute_ceiling_ms).toBe(TURN_ABSOLUTE_CEILING_MS)
   })
 
@@ -194,7 +193,7 @@ describe('FIX 2 — activity-based per-turn budgets', () => {
     await run(makeTurn({ sent }))
     await run(makeTurn({ sent }))
     // The warm onboarding turn STILL carries the larger idle window (onboarding load).
-    expect(specs[1]!.turn_timeout_ms).toBe(COLD_TURN_INACTIVITY_MS)
+    expect(specs[1]!.turn_timeout_ms).toBe(TURN_INACTIVITY_MS)
   })
 
   test('a WARM steady-state turn drops to the snappy inactivity window (ceiling unchanged)', async () => {
@@ -203,7 +202,7 @@ describe('FIX 2 — activity-based per-turn budgets', () => {
     const run = makeRunner({ substrate: makeStubSubstrate({ reply: 'ok', specs }) })
     await run(makeTurn({ sent })) // cold
     await run(makeTurn({ sent })) // warm
-    expect(specs[0]!.turn_timeout_ms).toBe(COLD_TURN_INACTIVITY_MS)
+    expect(specs[0]!.turn_timeout_ms).toBe(TURN_INACTIVITY_MS)
     expect(specs[1]!.turn_timeout_ms).toBe(TURN_INACTIVITY_MS)
     // The absolute-ceiling backstop is on EVERY turn — a long-but-active turn is
     // bounded only by this, never by the (activity-reset) idle window.

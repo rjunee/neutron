@@ -23,7 +23,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -41,15 +40,13 @@ import {
   type AgentSettingsTelegram,
 } from '@neutronai/agent-settings'
 import { PersonaPromptLoader } from '@neutronai/gateway/wiring/persona-loader.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 /** Open a migrated per-instance ProjectDb on disk (the agent-settings test pattern). */
 function openMigratedDb(dir: string): ProjectDb {
   const dbPath = join(dir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   return ProjectDb.open(dbPath)
 }
 

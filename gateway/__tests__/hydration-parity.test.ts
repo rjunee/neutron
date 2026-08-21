@@ -84,7 +84,7 @@ import type {
   AppWsOutboundAgentMessage,
 } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import type { OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { webTopicId } from '../http/web-topic-id.ts'
@@ -160,8 +160,8 @@ async function startHarness(): Promise<Harness> {
   // ONE real database, one canonical migration chain — the button-prompt
   // store, the app-chat log, and the served history surface all read from
   // it, so this is genuinely one conversation over three read paths.
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   const store = new ButtonStore({ db })
 

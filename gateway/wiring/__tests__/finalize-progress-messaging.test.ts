@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { SqliteOnboardingStateStore } from '@neutronai/onboarding/interview/sqlite-state-store.ts'
 import { slugifyProjectId } from '@neutronai/onboarding/wow-moment/project-identity.ts'
 import { buildScaffoldMaterializer, ensureProjectRow } from '../project-create.ts'
@@ -68,8 +68,8 @@ function fakePersonaComposer(fail = false): PersonaComposerLike {
 
 function makeHarness(opts: { personaFails?: boolean } = {}): Harness {
   const dir = mkdtempSync(join(tmpdir(), 'finalize-msg-'))
+  seedMigratedDb(join(dir, 'project.db'))
   const db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
   const ownerHome = mkdtempSync(join(tmpdir(), 'finalize-msg-home-'))
   const stateStore = new SqliteOnboardingStateStore({ db, now: () => NOW })
   const emitted: Emitted[] = []

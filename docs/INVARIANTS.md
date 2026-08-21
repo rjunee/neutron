@@ -154,6 +154,7 @@ with cross-references noted inline.
     longer contains, and refusing on them would take down the oldest instances in the fleet over
     evidence that is a NULL. A recorded hash is never used to REFUSE a file — only ever to mark one
     as already applied (see the README's "recorded and reported, not enforced").
+    Reapply repairs leave the scar row immutable and transact the SQL body with its firing receipt; `migrations/__tests__/live-ledger-122-reapply.test.ts` pins the live row-122 path, rollout window, strict failure, fresh-install inertness, and second-boot no-op.
     The untracked refusal takes PRECEDENCE over the collision check when the tree can tell a stray
     from a real file, and that is a diagnosis rule, not a weakening: all six still throw before any
     write. A stray landing beside a tracked file at the same ordinal reads as a duplicate ordinal,
@@ -731,6 +732,7 @@ with cross-references noted inline.
     is never treated as proof that its detached build died. The 90-minute no-advance and 2-hour
     max-inflight backstops remain unchanged.
     `trident/tick.ts`, `trident/liveness.ts`, `trident/liveness-death-e2e.test.ts`.
+117. Brief-part receipts are measured from persisted bytes before a manifest can be returned. `trident/brief-parts.ts` (`writeVerified`), protected by the persistent-truncation regression in `trident/brief-parts.test.ts`.
 
 ## 10. Naming & vocabulary (`critic-naming-vocab.md` §6)
 

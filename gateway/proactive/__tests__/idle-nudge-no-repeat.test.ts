@@ -38,7 +38,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { appWsTopicId } from '@neutronai/channels/adapters/app-ws/envelope.ts'
@@ -88,8 +88,8 @@ interface Harness {
 
 function open(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-nudge-no-repeat-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   let clock = DAY_START
   const buttons = new ButtonStore({ db, now: () => clock })
   const tasks = new TaskStore(db)

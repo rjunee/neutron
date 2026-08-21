@@ -10,7 +10,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { AppChatReactionStore } from './app-chat-reactions.ts'
 import { AppChatStore } from './app-chat-store.ts'
 import { ProjectDb } from './db.ts'
@@ -28,8 +28,8 @@ async function appendMessage(message_id: string): Promise<number> {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-chat-reactions-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   messages = new AppChatStore({ db })
   reactions = new AppChatReactionStore({ db })
 })

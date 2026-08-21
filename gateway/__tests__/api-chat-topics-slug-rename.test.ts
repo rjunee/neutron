@@ -34,7 +34,7 @@ import { join } from 'node:path'
 
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { signSessionCookie } from '@neutronai/landing/session-cookie.ts'
 import type { CookieClaimRegistry } from '../http/cookie-user-claim.ts'
@@ -144,8 +144,8 @@ async function startRenamedOwnerGateway(): Promise<Harness> {
   if (!renamed) throw new Error('test setup: registry rename failed')
 
   // --- per-instance button store with live project rows ---
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = new ButtonStore({ db })
 
   // --- cookie→claim + instance-identity resolver: the REAL production

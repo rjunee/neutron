@@ -15,9 +15,8 @@ import { afterEach, beforeEach, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { SecretsStore, SHARED_KEY_ENCRYPTED_TABLES } from '../secrets-store.ts'
 import {
   CREDENTIAL_SCOPE_COLUMNS,
@@ -35,9 +34,7 @@ beforeEach(() => {
   dataDir = join(workdir, 'project')
   mkdirSync(dataDir, { recursive: true })
   const dbPath = join(workdir, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   db = ProjectDb.open(dbPath)
 })
 

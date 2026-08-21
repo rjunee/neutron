@@ -124,6 +124,8 @@ export default function IntegrationsScreen() {
   // ── Model providers (Codex subscription + Kimi K3 key) ──
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
   const [codexAuth, setCodexAuth] = useState('');
+  /** Optional seat name. Empty means the first seat, which is the legacy path. */
+  const [codexAccount, setCodexAccount] = useState('');
   const [codexBusy, setCodexBusy] = useState(false);
   const [codexError, setCodexError] = useState<string | null>(null);
   const [kimiKey, setKimiKey] = useState('');
@@ -273,11 +275,16 @@ export default function IntegrationsScreen() {
     if (codexClient === null) return;
     const auth = codexAuth.trim();
     if (auth.length === 0 || codexBusy) return;
+    const account = codexAccount.trim().toLowerCase();
     setCodexBusy(true);
     setCodexError(null);
     try {
-      const next = await codexClient.connect(auth);
-      setCodexStatus(next);
+      await codexClient.connect(auth, account.length === 0 ? undefined : account);
+      // Re-read rather than trusting the POST reply: connecting a seat changes the
+      // whole pool's shape (which seat runs next, whether anything is cooling),
+      // and only the GET reports that.
+      await fetchCodex();
+      setCodexAccount('');
       // Cleared on SUCCESS only. Keeping the paste on failure means the owner can
       // read the error and retry without going back to their terminal for the file.
       setCodexAuth('');
@@ -289,11 +296,39 @@ export default function IntegrationsScreen() {
     } finally {
       setCodexBusy(false);
     }
-  }, [codexClient, codexAuth, codexBusy]);
+  }, [codexClient, codexAuth, codexAccount, codexBusy, fetchCodex]);
+
+  /** Disconnect ONE seat, leaving the rest of the pool connected. */
+  const handleDisconnectSeat = useCallback(
+    (slot: string) => {
+      if (codexClient === null) return;
+      Alert.alert(
+        `Disconnect '${slot}'?`,
+        'This seat stops being used. Your other Codex seats keep working.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Disconnect',
+            style: 'destructive',
+            onPress: () => {
+              setCodexBusy(true);
+              setCodexError(null);
+              void codexClient
+                .disconnectAccount(slot)
+                .then(() => fetchCodex())
+                .catch((err: unknown) => setCodexError(formatErr(err)))
+                .finally(() => setCodexBusy(false));
+            },
+          },
+        ],
+      );
+    },
+    [codexClient, fetchCodex],
+  );
 
   const handleDisconnectCodex = useCallback(() => {
     if (codexClient === null) return;
-    Alert.alert('Disconnect Codex?', 'Cross-model review will stop until you reconnect.', [
+    Alert.alert('Disconnect Codex?', 'EVERY connected seat is removed. Cross-model review stops until you reconnect.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Disconnect',
@@ -803,13 +838,77 @@ export default function IntegrationsScreen() {
               {codexError}
             </Text>
           ) : null}
-          {codexStatus?.status !== 'connected' ? (
-            <View style={styles.keyBlock}>
+
+          {/* THE SEAT LIST. Rotation is only a feature if the owner can see which
+              seats exist, which one runs next, and which are cooling — otherwise a
+              second subscription he is paying for is invisible and unmanageable.
+              Rendered whenever the server reports seats; a pre-rotation server
+              omits `accounts` and this collapses to nothing. */}
+          {(codexStatus?.accounts ?? []).length > 0 ? (
+            <View style={styles.keyBlock} testID="codex-accounts">
+              {(codexStatus?.accounts ?? []).map((acct) => (
+                <View style={styles.row} key={acct.slot}>
+                  <View style={styles.rowText}>
+                    <Text style={styles.rowTitle}>
+                      {acct.label ?? acct.slot}
+                      {acct.active ? ' · next' : ''}
+                    </Text>
+                    <Text style={styles.rowStatus} testID={`codex-seat-${acct.slot}`}>
+                      {acct.cooling
+                        ? acct.cooling_reason === 'unauthorized'
+                          ? 'Needs reconnecting — paste a fresh auth.json'
+                          : `Cooling — ${describeCooldown(acct.cooling_until)}`
+                        : acct.used_percent === null
+                          ? 'Ready — no usage recorded yet'
+                          : `Ready — ${Math.round(acct.used_percent)}% of its window used`}
+                    </Text>
+                  </View>
+                  <Pressable
+                    accessibilityRole="button"
+                    accessibilityLabel={`Disconnect ${acct.slot}`}
+                    testID={`codex-seat-disconnect-${acct.slot}`}
+                    disabled={codexBusy}
+                    onPress={() => handleDisconnectSeat(acct.slot)}
+                    style={({ pressed }) => [
+                      styles.dangerBtn,
+                      codexBusy && styles.btnDisabled,
+                      pressed && styles.pressed,
+                    ]}
+                  >
+                    <Text style={styles.dangerBtnText}>Remove</Text>
+                  </Pressable>
+                </View>
+              ))}
+              {codexStatus?.exhausted === true ? (
+                <Text style={styles.bannerError} testID="codex-exhausted">
+                  Every seat is cooling. Runs continue on a capped seat — they will fail with a
+                  quota error rather than silently dropping cross-model review.
+                </Text>
+              ) : null}
+            </View>
+          ) : null}
+
+          {/* The paste box stays available even when a seat is already connected,
+              because ADDING a second seat is the whole point. Hiding it after the
+              first connection is what made a second subscription unreachable. */}
+          <View style={styles.keyBlock}>
               <Text style={styles.muted}>
                 Run <Text style={styles.mono}>codex login</Text> on any machine, then paste that
                 account&apos;s <Text style={styles.mono}>~/.codex/auth.json</Text> here. A metered
-                API key will be rejected — this needs the subscription bundle.
+                API key will be rejected — this needs the subscription bundle. Name a seat to add
+                another subscription; leave it blank for your first one.
               </Text>
+              <TextInput
+                style={styles.keyInput}
+                testID="codex-account-input"
+                placeholder="Seat name (optional, e.g. work)"
+                placeholderTextColor={THEME.text_muted}
+                autoCapitalize="none"
+                autoCorrect={false}
+                editable={!codexBusy}
+                value={codexAccount}
+                onChangeText={setCodexAccount}
+              />
               <TextInput
                 style={styles.keyInput}
                 testID="codex-auth-input"
@@ -835,10 +934,25 @@ export default function IntegrationsScreen() {
                   pressed && styles.pressed,
                 ]}
               >
-                <Text style={styles.primaryBtnText}>{codexBusy ? 'Connecting…' : 'Connect'}</Text>
+                {/* THE LABEL NAMES WHAT WILL ACTUALLY HAPPEN. A blank seat name
+                    means the FIRST seat, so with seats already connected a paste
+                    REPLACES that seat rather than adding one — and a button that
+                    said "Add seat" while overwriting a working credential would be
+                    the footgun that justified hiding this box in the first place.
+                    Reconnecting seat one is still legitimate (it is how an expired
+                    or revoked first seat is fixed), so the control stays enabled
+                    and simply tells the truth about which it is doing. */}
+                <Text style={styles.primaryBtnText}>
+                  {codexBusy
+                    ? 'Connecting…'
+                    : codexAccount.trim().length > 0
+                      ? 'Add seat'
+                      : (codexStatus?.accounts ?? []).length > 0
+                        ? 'Replace first seat'
+                        : 'Connect'}
+                </Text>
               </Pressable>
-            </View>
-          ) : null}
+          </View>
 
           <View style={styles.row}>
             <View style={styles.rowText}>
@@ -989,6 +1103,23 @@ export default function IntegrationsScreen() {
       </ScrollView>
     </View>
   );
+}
+
+/**
+ * When a cooling seat comes back, in words.
+ *
+ * Deliberately coarse. The exact minute is not actionable — the only decisions
+ * this drives are "wait" or "connect another seat" — and an over-precise
+ * countdown on a value harvested from the last run would read as more current
+ * than it is.
+ */
+function describeCooldown(until: number | null): string {
+  if (until === null) return 'until its window resets';
+  const ms = until - Date.now();
+  if (ms <= 0) return 'ready on the next run';
+  const hours = Math.ceil(ms / 3_600_000);
+  if (hours < 24) return `about ${hours}h left`;
+  return `about ${Math.ceil(hours / 24)}d left`;
 }
 
 function formatErr(err: unknown): string {

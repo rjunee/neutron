@@ -21,7 +21,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { AppChatEventLogCore, rowReplaySql } from './app-chat-event-core.ts'
 import { ProjectDb } from './db.ts'
 
@@ -38,8 +38,8 @@ let core: AppChatEventLogCore<Row, Row>
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'app-chat-core-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   core = new AppChatEventLogCore<Row, Row>({
     db,
     table: 'app_chat_messages',

@@ -46,7 +46,7 @@ import {
   AUTH_RECONNECT_BODY,
   RECONNECT_AUTH_VALUE,
 } from '@neutronai/gateway/wiring/build-live-agent-turn.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
@@ -174,8 +174,8 @@ beforeEach(() => {
   delete process.env['ANTHROPIC_API_KEY']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'])
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
   anthropicResponse = null
   installFetchStub()
 })

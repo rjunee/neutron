@@ -39,7 +39,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ReminderStore } from '@neutronai/reminders/store.ts'
 import {
@@ -382,8 +382,8 @@ describe('the PRODUCTION dispatcher composes on the background REPL', () => {
     delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
     process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
     delete process.env['NOTIFY_SOCKET']
+    seedMigratedDb(process.env['NEUTRON_DB_PATH'])
     db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-    applyMigrations(db.raw())
   })
 
   afterEach(() => {

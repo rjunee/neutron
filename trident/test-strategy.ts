@@ -594,7 +594,11 @@ export interface TestStrategyInput {
   /** The in-process interleaving budget that goes with `jobs`. Absent → not set. */
   concurrency?: number
   base_branch: string
+  /** Absent defaults to the terminal/non-Ralph full-suite contract. */
+  scope?: SuiteScope
 }
+
+export type SuiteScope = 'full-suite' | 'subset'
 
 /**
  * The one line a knob-less project gets. It is a LOG LINE, not an error: the suite
@@ -638,6 +642,12 @@ export const STAGE_1_REJECT_ONLY = 'Stage 1 can only reject early; it can never 
 /** Acceptance criterion 5's proof point. Pinned verbatim. */
 export const FULL_SUITE_REQUIRED =
   "You may NOT report testsPassed=true on a stage-1 pass alone — testsPassed=true requires the FULL suite run to complete and pass, including the runner's own coverage-audit/summary line in your log tail."
+
+export const INTERMEDIATE_SUITE_DEFERRED =
+  'INTERMEDIATE TASK of a multi-task plan — the FULL suite is DEFERRED, not waived: tasks remain after this one, and the full suite runs ONCE, on this plan\'s TERMINAL task, over the whole cumulative branch.'
+
+export const INTERMEDIATE_REPORT_RULE =
+  "Report testsPassed=false and suiteOutcome='deferred' — the deferral is INSTRUCTED (this plan's terminal task runs the full suite over the whole cumulative branch and is gated on it); 'not-run' stays reserved for a suite that was supposed to run and did not, so do NOT report it here. testsPassed=true still means exactly one thing — the FULL suite completed and passed — and you are not running the full suite this iteration, so a stage-1 pass may NEVER be reported as testsPassed=true. Put the stage-1 result (files run, pass/fail) in your final text instead."
 
 /**
  * THE THREE WAYS A SUITE CAN FAIL TO PASS, AND WHY THE GATE HAS TO TELL THEM APART.
@@ -691,11 +701,73 @@ export const SUITE_OUTCOME_VOCABULARY = [
 export const NO_TIMEOUT_WRAPPER =
   'Do NOT wrap the suite in a timeout wrapper (a 590 s cap has killed complete runs mid-flight and read them as failures). Start the full suite in the background redirected to a log file and poll the log tail until the runner prints its final summary line; budget up to 25 minutes before declaring a hang — your whole round has a 45-minute ceiling and the suite is not the only thing in it. If the budget runs out, report testsPassed=false and say the suite did not complete; never report a pass you did not observe.'
 
+function stage1Lines(baseBranch: string): string[] {
+  return [
+    'STAGE 1 — fail fast (minutes, not tens of minutes).',
+    // THE DIFF RANGE IS base..WORKING TREE, NOT base..HEAD. Step 3 runs the tests and
+    // step 4 commits, so at stage-1 time there is usually NOTHING committed yet and
+    // `base..HEAD` prints an empty list (on a fix round it prints the PREVIOUS round's
+    // files, which is worse than empty). `git diff --name-only <base>` compares the base
+    // against the WORKING TREE; the second command catches files git has never seen.
+    `After your edits, list what you changed — WORKING TREE included, because you have not`,
+    `committed yet: \`git diff --name-only ${baseBranch}\` plus \`git ls-files --others --exclude-standard\`.`,
+    'The stage-1 set is: (a) the changed files that are themselves test files, (b) the test files',
+    "in each changed file's own directory or its adjacent `__tests__/`, and (c) test files that",
+    "name a changed module's basename (`grep -l <basename> <test files>`).",
+    // THE CAP BOUNDS THE WHOLE SET, and the first version of this block got that wrong:
+    // it capped tier (c) only, so (a)+(b) were unbounded — 54 files for a one-file edit,
+    // 589 (46% of the suite) for this card's own diff, and GROWING every fix round,
+    // because `git diff --name-only <base>` is the branch's CUMULATIVE diff, not this
+    // round's. Stage 1 that costs ten minutes is not fail-fast; it is the full suite
+    // wearing a hat. Tier (c) on a generic basename ("index", "store", "utils") is the
+    // worst offender, so it is still the first tier dropped, but the budget is now the
+    // TOTAL. A file-scoped invocation is also ONE un-chunked process, which is the
+    // single-process OOM and the cross-file lane contamination the project's own chunked
+    // runner exists to prevent. Stage 1 is a fast REJECT, so it is allowed to be
+    // incomplete; stage 2 is the authority, and it runs everything.
+    `Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files, in priority order: take (a), then add (b), then`,
+    `add (c), stopping at ${STAGE_1_FILE_CAP} — DROP (c) entirely rather than trimming it, then drop (b) the`,
+    `same way, and if (a) alone is over budget run its first ${STAGE_1_FILE_CAP} files. On a fix round that`,
+    "diff is the branch's CUMULATIVE one, so prefer the files THIS round touched when the cap",
+    'forces a choice. Run the set in batches of at most 20 per invocation. Stage 1 is a fast',
+    'reject and is ALLOWED to be incomplete.',
+    "Run that set with the project's file-scoped test invocation (e.g. `bun test <file> …`). A",
+    'stage-1 failure is fixed IMMEDIATELY, before anything else — do not start the full suite on a',
+    `red stage 1. ${STAGE_1_REJECT_ONLY}`,
+    'A file-scoped run does NOT reproduce the isolation lanes the project runner sets up, so a',
+    'stage-1 red your own diff cannot explain is NOT chased here — leave it to stage 2, which runs',
+    'the suite the way the project intends.',
+  ]
+}
+
+const REDIRECT_DISCIPLINE_LINES = [
+  'Keep the redirect discipline for both stages: send stdout+stderr to a log file and read only',
+  'the tail — never let raw test output flood your context.',
+] as const
+
 export function renderTestStrategy(input: TestStrategyInput): string {
   const { resolution, knobs, jobs, base_branch } = input
+  const baseBranch = typeof base_branch === 'string' && base_branch.trim().length > 0 ? base_branch.trim() : 'main'
+  const scope: SuiteScope = input.scope === 'subset' ? 'subset' : 'full-suite'
+
+  if (scope === 'subset') {
+    return [
+      'TEST EXECUTION',
+      '',
+      INTERMEDIATE_SUITE_DEFERRED,
+      '',
+      ...stage1Lines(baseBranch),
+      '',
+      'STAGE 2 — DEFERRED (do NOT run the full suite this iteration).',
+      INTERMEDIATE_REPORT_RULE,
+      "A red stage 1 is fixed before you hand back; a green stage 1 is this iteration's gate.",
+      '',
+      ...REDIRECT_DISCIPLINE_LINES,
+    ].join('\n')
+  }
+
   const command = typeof resolution?.command === 'string' && resolution.command.trim().length > 0 ? resolution.command.trim() : null
   const hasKnob = command !== null && typeof knobs?.jobs_env === 'string' && knobs.jobs_env.length > 0
-  const baseBranch = typeof base_branch === 'string' && base_branch.trim().length > 0 ? base_branch.trim() : 'main'
   const jobCount = isPositive(jobs) ? Math.floor(jobs) : 1
   const concurrency = isPositive(input.concurrency) ? Math.floor(input.concurrency) : null
 
@@ -746,40 +818,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     '',
     ...commandLines,
     '',
-    'STAGE 1 — fail fast (minutes, not tens of minutes).',
-    // THE DIFF RANGE IS base..WORKING TREE, NOT base..HEAD. Step 3 runs the tests and
-    // step 4 commits, so at stage-1 time there is usually NOTHING committed yet and
-    // `base..HEAD` prints an empty list (on a fix round it prints the PREVIOUS round's
-    // files, which is worse than empty). `git diff --name-only <base>` compares the base
-    // against the WORKING TREE; the second command catches files git has never seen.
-    `After your edits, list what you changed — WORKING TREE included, because you have not`,
-    `committed yet: \`git diff --name-only ${baseBranch}\` plus \`git ls-files --others --exclude-standard\`.`,
-    'The stage-1 set is: (a) the changed files that are themselves test files, (b) the test files',
-    "in each changed file's own directory or its adjacent `__tests__/`, and (c) test files that",
-    "name a changed module's basename (`grep -l <basename> <test files>`).",
-    // THE CAP BOUNDS THE WHOLE SET, and the first version of this block got that wrong:
-    // it capped tier (c) only, so (a)+(b) were unbounded — 54 files for a one-file edit,
-    // 589 (46% of the suite) for this card's own diff, and GROWING every fix round,
-    // because `git diff --name-only <base>` is the branch's CUMULATIVE diff, not this
-    // round's. Stage 1 that costs ten minutes is not fail-fast; it is the full suite
-    // wearing a hat. Tier (c) on a generic basename ("index", "store", "utils") is the
-    // worst offender, so it is still the first tier dropped, but the budget is now the
-    // TOTAL. A file-scoped invocation is also ONE un-chunked process, which is the
-    // single-process OOM and the cross-file lane contamination the project's own chunked
-    // runner exists to prevent. Stage 1 is a fast REJECT, so it is allowed to be
-    // incomplete; stage 2 is the authority, and it runs everything.
-    `Bound the WHOLE stage-1 set at ${STAGE_1_FILE_CAP} files, in priority order: take (a), then add (b), then`,
-    `add (c), stopping at ${STAGE_1_FILE_CAP} — DROP (c) entirely rather than trimming it, then drop (b) the`,
-    `same way, and if (a) alone is over budget run its first ${STAGE_1_FILE_CAP} files. On a fix round that`,
-    "diff is the branch's CUMULATIVE one, so prefer the files THIS round touched when the cap",
-    'forces a choice. Run the set in batches of at most 20 per invocation. Stage 1 is a fast',
-    'reject and is ALLOWED to be incomplete.',
-    "Run that set with the project's file-scoped test invocation (e.g. `bun test <file> …`). A",
-    'stage-1 failure is fixed IMMEDIATELY, before anything else — do not start the full suite on a',
-    `red stage 1. ${STAGE_1_REJECT_ONLY}`,
-    'A file-scoped run does NOT reproduce the isolation lanes the project runner sets up, so a',
-    'stage-1 red your own diff cannot explain is NOT chased here — leave it to stage 2, which runs',
-    'the suite the way the project intends.',
+    ...stage1Lines(baseBranch),
     '',
     'STAGE 2 — the full suite, REQUIRED.',
     `${FULL_SUITE_REQUIRED}`,
@@ -789,8 +828,7 @@ export function renderTestStrategy(input: TestStrategyInput): string {
     'TIMEOUT.',
     NO_TIMEOUT_WRAPPER,
     '',
-    'Keep the redirect discipline for both stages: send stdout+stderr to a log file and read only',
-    'the tail — never let raw test output flood your context.',
+    ...REDIRECT_DISCIPLINE_LINES,
   ].join('\n')
 }
 
@@ -801,6 +839,8 @@ export function renderTestStrategy(input: TestStrategyInput): string {
 export interface TestStrategyDetail {
   /** The rendered TEST EXECUTION block — what the launcher threads to the workflow. */
   block: string
+  /** The subset-scope render for INTERMEDIATE Ralph iterations; consumed by the launcher in a later task. */
+  intermediate_block: string
   /** A one-line, log-safe summary of the numbers behind the block. */
   summary: string
 }
@@ -818,6 +858,7 @@ export function buildTestStrategyDetail(
   env: { cores: number; active_runs: number; mem_available_bytes: number; base_branch: string },
 ): TestStrategyDetail {
   const block = buildTestStrategy(repoRoot, env)
+  const intermediate_block = buildTestStrategy(repoRoot, env, 'subset')
   let summary = 'test-strategy: unavailable'
   try {
     const resolution = resolveTestCommand(repoRoot)
@@ -838,7 +879,7 @@ export function buildTestStrategyDetail(
   } catch {
     summary = 'test-strategy: unavailable'
   }
-  return { block, summary }
+  return { block, intermediate_block, summary }
 }
 
 /**
@@ -850,6 +891,7 @@ export function buildTestStrategyDetail(
 export function buildTestStrategy(
   repoRoot: string,
   env: { cores: number; active_runs: number; mem_available_bytes: number; base_branch: string },
+  scope: SuiteScope = 'full-suite',
 ): string {
   try {
     const resolution = resolveTestCommand(repoRoot)
@@ -860,13 +902,14 @@ export function buildTestStrategy(
       mem_available_bytes: env?.mem_available_bytes,
     })
     const concurrency = computeTestConcurrency(env?.cores, jobs)
-    return renderTestStrategy({ resolution, knobs, jobs, concurrency, base_branch: env?.base_branch })
+    return renderTestStrategy({ resolution, knobs, jobs, concurrency, base_branch: env?.base_branch, scope })
   } catch {
     return renderTestStrategy({
       resolution: UNRESOLVED,
       knobs: NO_KNOBS,
       jobs: 1,
       base_branch: typeof env?.base_branch === 'string' ? env.base_branch : 'main',
+      scope,
     })
   }
 }

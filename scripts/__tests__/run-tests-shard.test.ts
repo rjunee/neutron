@@ -18,6 +18,8 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { spawnSync } from 'node:child_process'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -56,6 +58,34 @@ function filesOf(out: string): string[] {
   return lines.slice(start + 1, end).filter((l) => l.length > 0)
 }
 
+/**
+ * The per-shard estimated general-lane cost, as the runner reports it.
+ *
+ * Every shard prints the WHOLE table (its own line marked), because the packing is
+ * computed identically and independently on each runner — so any one shard's
+ * output is enough, and seeing the same table from all of them is itself evidence
+ * that they agree. Parsed out of the log rather than recomputed here on purpose: a
+ * reimplementation of the cost model in the test would pass while the script's own
+ * model was broken, which is the one failure this is supposed to catch.
+ */
+function weightsOf(out: string, n: number): number[] {
+  const byShard = new Map<number, number>()
+  for (const l of out.split('\n')) {
+    const m = l.match(/run-tests: shard (\d+) general est (\d+)ms over (\d+) files/)
+    if (m) byShard.set(Number(m[1]), Number(m[2]))
+  }
+  const weights: number[] = []
+  for (let i = 1; i <= n; i++) {
+    const w = byShard.get(i)
+    // A missing line means the runner stopped printing the table — the balance
+    // would then be unverifiable, and silently passing on an empty array is how a
+    // regression to round-robin would sail through.
+    expect(w).toBeDefined()
+    weights.push(w as number)
+  }
+  return weights
+}
+
 describe('run-tests.sh shard partition', () => {
   const full = shardPlan(null)
   const all = filesOf(full.out)
@@ -76,9 +106,11 @@ describe('run-tests.sh shard partition', () => {
   for (const n of [2, 4]) {
     test(`${n} shards partition the set exactly — no gaps, no overlap`, () => {
       const slices: string[][] = []
+      const plans: { code: number; out: string }[] = []
       for (let i = 1; i <= n; i++) {
         const r = shardPlan(`${i}/${n}`)
         expect(r.code).toBe(0)
+        plans.push(r)
         slices.push(filesOf(r.out))
         if (n === 4) {
           const m = r.out.match(/executing \d+ general \+ (\d+) PGLite/)
@@ -95,9 +127,29 @@ describe('run-tests.sh shard partition', () => {
       // the sharded coverage guarantee depends on.
       expect(union.slice().sort()).toEqual(all.slice().sort())
 
-      // Balanced within one file, so no runner becomes the long pole.
-      const sizes = slices.map((s) => s.length)
-      expect(Math.max(...sizes) - Math.min(...sizes)).toBeLessThanOrEqual(1)
+      // BALANCED BY COST, NOT BY COUNT. This assertion used to require the file
+      // counts to be within one of each other, which is the right check only if
+      // every file costs the same — and they do not: 334 test call sites replay
+      // the whole migration tree at ~137ms each, so a file can cost multiple
+      // seconds or almost nothing. Balancing the count while ignoring the cost is
+      // how one runner ends up the long pole, and a PR waits on the long pole.
+      //
+      // So the runner now bin-packs the general lane by estimated cost and prints
+      // what each shard drew; this asserts on THAT. Counts are deliberately NOT
+      // asserted — an uneven count is the expected shape of a cost-balanced split
+      // and pinning it would forbid the fix.
+      const weights = weightsOf(
+        slices.map((_, i) => plans[i]!.out).join('\n'),
+        n,
+      )
+      expect(weights).toHaveLength(n)
+      const spread = Math.max(...weights) - Math.min(...weights)
+      // 2% of the heaviest shard. Generous on purpose: the exact figure depends on
+      // the tree's file mix, and the property worth pinning is "no shard is the
+      // long pole", not a specific packing. On this tree the real spread is ~0.3%,
+      // so a regression to round-robin (measured 12.9% at eight legs) fails loudly
+      // while an ordinary change in the file mix does not.
+      expect(spread).toBeLessThanOrEqual(Math.max(...weights) * 0.02)
     }, PLAN_BUDGET_MS)
   }
 
@@ -113,6 +165,46 @@ describe('run-tests.sh shard partition', () => {
     const total = laneCounts.reduce((a, b) => a + b, 0)
     expect(total).toBeGreaterThan(0)
     expect(Math.max(...laneCounts)).toBeLessThan(total)
+  })
+
+  test('a ONE-FILE general lane still plans that file — the cost packer must keep its path', () => {
+    // A cross-model review of the packing change caught this and it is worth a
+    // permanent test, because the failure was invisible: `grep -c` over exactly ONE
+    // file prints the bare count with no path at all, so the weight parser read the
+    // count AS the path, nothing matched a discovered file, and the runner planned
+    // ZERO tests and exited 0. A green run that executed nothing is the worst
+    // outcome this script has, and one file is a REACHABLE lane size — a
+    // `NEUTRON_TEST_ROOT`-scoped run at shard 1/1 gets there.
+    //
+    // Written against a scratch root rather than the repo so it costs milliseconds
+    // instead of the ~15s a real discovery pass takes.
+    const root = mkdtempSync(join(tmpdir(), 'neutron-onefile-'))
+    try {
+      const dir = join(root, 'pkg', '__tests__')
+      mkdirSync(dir, { recursive: true })
+      writeFileSync(
+        join(dir, 'solo.test.ts'),
+        "import { test, expect } from 'bun:test'\ntest('solo', () => { expect(1).toBe(1) })\n",
+      )
+      const r = spawnSync('bash', [RUN_TESTS], {
+        encoding: 'utf8',
+        cwd: ROOT,
+        env: {
+          ...(process.env as Record<string, string>),
+          NEUTRON_TEST_ROOT: root,
+          NEUTRON_TEST_PLAN_ONLY: '1',
+          NEUTRON_TEST_SHARD: '1/1',
+          // The scratch root has no bun project, so bun's discovery probe reports
+          // nothing; this is the documented opt-in that downgrades that to a warning.
+          NEUTRON_TEST_ALLOW_EMPTY_BUN_DISC: '1',
+        },
+      })
+      const out = `${r.stdout}${r.stderr}`
+      expect(r.status).toBe(0)
+      expect(filesOf(out)).toEqual(['./pkg/__tests__/solo.test.ts'])
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
   })
 
   for (const bad of ['0/4', '5/4', '1/0', 'x/4', '4', '1/y', '-1/4']) {

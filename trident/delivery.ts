@@ -38,6 +38,11 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import {
+  TRIDENT_SALVAGE_MARKER,
+  TRIDENT_SNAPSHOT_FAILURE_MARKER,
+  TRIDENT_STASH_PARKED_MARKER,
+} from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -143,6 +148,48 @@ function isToolsNotEnabled(reasonLower: string): boolean {
   )
 }
 
+/** Salvage metadata is machine-authored and can be much longer than the
+ * operator-authored cause. Classify only the cause; the recovery pointer is
+ * rendered separately by `composeTerminalDelivery`. */
+function authoredFailureReason(reason: string): string {
+  const salvageMarker = TRIDENT_SALVAGE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+  const captureFailureMarker = TRIDENT_SNAPSHOT_FAILURE_MARKER.replace(
+    /[.*+?^${}()|[\]\\]/g,
+    '\\$&',
+  )
+  const annotation = reason.match(
+    new RegExp(
+      `(?:\\s+—\\s+(?:0 commits\\b|\\d+ commit\\(s\\),\\s+${salvageMarker}\\b|${salvageMarker}\\b|\\d+ uncommitted\\b)|;\\s+plus\\s+(?:\\d+ uncommitted\\b|\\d+ stash\\b|${captureFailureMarker}\\b))`,
+    ),
+  )
+  return (annotation === null ? reason : reason.slice(0, annotation.index)).trim()
+}
+
+function salvageRecoveryTrail(run: TridentRun): string {
+  const reason = run.failure_reason ?? ''
+  const trails: string[] = []
+  const snapshotRef = reason.match(/refs\/tags\/trident-salvage\/[^\s;—]+/)?.[0]
+  if (snapshotRef !== undefined) trails.push(`Recovery snapshot: ${snapshotRef}.`)
+  if (reason.includes(TRIDENT_STASH_PARKED_MARKER)) {
+    trails.push("Recovery note: work was detected in this run's stash window.")
+  }
+  const captureFailure = reason.match(
+    new RegExp(
+      `${TRIDENT_SNAPSHOT_FAILURE_MARKER.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}:\\s*(.*?)(?:\\s+—\\s+\\d+ commit\\(s\\),|$)`,
+    ),
+  )?.[1]
+  if (captureFailure !== undefined) {
+    trails.push(`Recovery warning: ${captureFailure.replace(/\.+$/, '')}.`)
+  }
+  const captureWarning = reason.match(
+    /capture warning:\s*(.*?)(?:\s+—\s+\d+ commit\(s\),|$)/,
+  )?.[1]
+  if (captureWarning !== undefined) {
+    trails.push(`Recovery warning: ${captureWarning.replace(/\.+$/, '')}.`)
+  }
+  return trails.length === 0 ? '' : `\n${trails.join('\n')}`
+}
+
 /**
  * #352 — INTERPRET a terminal failure into a plain-language summary + the specific
  * input needed, NEVER a raw error paste. Pure + deterministic (a bounded classifier
@@ -164,7 +211,7 @@ function isToolsNotEnabled(reasonLower: string): boolean {
  * keyword, and a deferral must never be told as a rejection.
  */
 export function interpretFailure(run: TridentRun): FailureInterpretation {
-  const reason = (run.failure_reason ?? '').trim()
+  const reason = authoredFailureReason((run.failure_reason ?? '').trim())
   const r = reason.toLowerCase()
   const retry = 'Reply to retry the build, or take it from here manually.'
   const saved = 'Your progress is saved.'
@@ -221,6 +268,33 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       summary:
         'The build supervisor died repeatedly, and I stopped relaunching after ' +
         'the recovery budget ran out. The work so far is saved on its branch.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
+  // T4 — AN INFRASTRUCTURE DEATH IS NOT A VERDICT (run `f384460d`, 2026-08-15).
+  // The inner workflow THREW; its catch path writes `checkpoint:'inner-error'` with no
+  // findings, and the owner was told "REQUEST_CHANGES" for work no reviewer ever judged.
+  // Same for an `infra-only` block: no review seat ran.
+  //
+  // THE MATCHED STRINGS ARE AUTHORED IN EXACTLY TWO PLACES — `infraDeathSentence`
+  // (below, this file) and `innerTerminalFailureReason` (`orchestrator.ts`), which also
+  // composes the two measured-cause sentences. THE TWO HALVES MUST MOVE TOGETHER: a
+  // reworded reason that stops matching here silently restores review-flavoured crash copy.
+  //
+  // CHECKED EARLY, and that placement is load-bearing. Two reasons EMBED the probe's or
+  // lane's measured words, so causes containing 'stalled', 'exhausted', or 'git ' would
+  // otherwise be misrouted as hang, review, or merge mechanics. `inner workflow failed at
+  // round` is main's 2026-08-15 thrown-with-cause sentence, which the old branch predates.
+  if (
+    r.includes('build infrastructure failed') ||
+    r.includes('review never ran (infra-only)') ||
+    r.includes('inner workflow failed at round')
+  ) {
+    return {
+      klass: 'infra',
+      summary:
+        'The build hit an internal error and stopped without a review verdict — this is not a rejection of the work.',
       input_needed: `${saved} ${retry}`,
     }
   }
@@ -344,6 +418,21 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
 }
 
 /**
+ * T4's one infra-death sentence now lives in `infra-block.ts`, and is re-exported
+ * here so this module's existing importers keep working unchanged.
+ *
+ * WHY IT MOVED. It is WRITTEN by the orchestrator and READ BACK by
+ * `interpretFailure` in this file, so both ends need it — and `delivery.ts`
+ * already imports `orchestrator.ts`. Declaring it here made the orchestrator
+ * import back, which is a real `delivery → orchestrator → delivery` cycle. CI's
+ * `no-cycles` rule caught it the moment this branch was brought up to a main
+ * that already carried the first edge; on the branch's own stale base neither
+ * PR could see it. A symbol both ends of an edge need belongs at neither end,
+ * so it sits in the infra-classification leaf, which imports neither of them.
+ */
+export { infraDeathSentence } from './infra-block.ts'
+
+/**
  * The human-readable name for the work — the `work_board_items.title` the run
  * was dispatched from (the board build-tool persists the item's linked design
  * doc, else its title, verbatim as `run.task`). Every result message LEADS with
@@ -385,10 +474,12 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       // already auto-recovered upstream (stale merge state, the #342 conflict
       // resolver), so a run reaching here is genuinely unrecoverable.
       const interp = interpretFailure(run)
-      const trail =
+      const recoveryTrail = salvageRecoveryTrail(run)
+      const prTrail =
         run.merge_mode === 'pr' && run.pr !== null && run.pr > 0
           ? `\nPR #${run.pr} left open for review.`
           : ''
+      const trail = `${recoveryTrail}${prTrail}`
       // A DEFERRAL IS NOT A REJECTION. An infra-only block never reached a reviewer, so
       // it must not wear ❌ + rejection language: it leads with 🚧 and says "deferred".
       // Every other class keeps the ❌ line byte-identical.

@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { detectRalphMode, defaultRalphModeProbe, type HostCommandResult } from './git-mode.ts'
 import { buildSimFirer } from './inner-loop-sim.ts'
@@ -63,8 +63,8 @@ describe('Ralph mode threads through to the inner loop', () => {
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-ralph-'))
+    seedMigratedDb(join(tmp, 'project.db'))
     db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
     store = new TridentRunStore(db)
   })
   afterEach(() => {
@@ -80,7 +80,8 @@ describe('Ralph mode threads through to the inner loop', () => {
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async () => ok(),
+      run_host: async (cmd) =>
+        cmd.includes('refs/remotes/origin/main^{commit}') ? ok('a'.repeat(40)) : ok(),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })

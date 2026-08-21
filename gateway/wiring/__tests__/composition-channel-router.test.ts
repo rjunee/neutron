@@ -16,7 +16,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ChannelRouter } from '@neutronai/channels/router.ts'
 import type { IncomingEvent, Topic } from '@neutronai/channels/types.ts'
@@ -37,8 +37,8 @@ function makeTempDb(): { db: ProjectDb; root: string } {
   const root = mkdtempSync(join(tmpdir(), 'neutron-comp-channel-router-'))
   cleanups.push(root)
   const path = join(root, 'owner.db')
+  seedMigratedDb(path)
   const db = ProjectDb.open(path)
-  applyMigrations(db.raw())
   return { db, root }
 }
 

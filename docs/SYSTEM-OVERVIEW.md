@@ -2313,7 +2313,7 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 > One guard, one code path, no flag.
 
 > **Turn timeout is ACTIVITY-BASED, not a fixed wall clock; freezes auto-retry +
-> get a Retry affordance (2026-07-01, Ryan live-test).** The `COLD_TURN_TIMEOUT_MS`
+> get a Retry affordance (updated 2026-08-14).** The `COLD_TURN_TIMEOUT_MS`
 > (600s) / `DEFAULT_TURN_TIMEOUT_MS` (180s) fixed budgets above were themselves the
 > next bug: a chat turn that ran a long-but-ACTIVE build (a "weave timer+tracker
 > together then do full e2e testing" request) hard-failed at exactly 180s
@@ -2328,13 +2328,16 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >   resets the idle clock and runs as long as it needs. Only a GENUINELY frozen turn
 >   goes silent long enough to trip. The liveness keepalive pushes `status` events
 >   but does NOT touch `lastDataAt`, so an alive-but-frozen child is still correctly
->   detected as frozen. `DEFAULT_TURN_INACTIVITY_MS` is 90s; a new
->   `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min, additive `AgentSpec.turn_absolute_
->   ceiling_ms`) is a hard backstop so a live-but-livelocked child can't run forever.
+>   detected as frozen. Chat and warm-fire turns use the same 30-minute inactivity
+>   window, deliberately below `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min, additive
+>   `AgentSpec.turn_absolute_ceiling_ms`), which remains the hard backstop so a
+>   live-but-livelocked child can't run forever. A delayed Retry tap is suppressed
+>   once the original turn completed and receives an explicit acknowledgement, so
+>   widening freeze detection cannot redo finished work or create a dead control.
+>   Profile-less internal calls retain the 90-second substrate default.
 >   `AgentSpec.turn_timeout_ms` is REPURPOSED from "wall-clock budget" to "inactivity
 >   window" (the substrate reads it exactly the same way; only the semantics of the
->   number changed). The composer sends the snappy 90s window for a warm turn and a
->   larger 180s window for a cold/onboarding turn (heavier initial processing); its
+>   number changed). The composer sends the 30-minute window for every chat turn; its
 >   own AbortController is now a pure absolute-ceiling backstop (45min) that also
 >   covers the cold-SPAWN phase, which runs before the substrate's per-turn watchdog
 >   starts — that is where the cold path's "generous window" now lives (folded into
@@ -2352,6 +2355,12 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >   distinguished from a real credential/connection fault (`isFreezeTimeout`): only
 >   the latter keeps the actionable `FAILURE_BODY`, so a slow turn is never
 >   misdiagnosed as a broken setup again.
+> - **Chat pipelines cannot hide activity.** The conversational REPL's generated
+>   settings wire a Bash `PreToolUse` guard. A command that pipes into a
+>   full-buffering consumer is refused with the offending consumer named; streaming
+>   pipelines, including `tail -f`, remain allowed. Long output must be redirected to a log and inspected by a separate
+>   call, so a full-buffering consumer cannot conceal child activity from the
+>   inactivity watchdog.
 
 > **Onboarding reliability — opening recovery, empty-project loader, deterministic
 > archetype step, larger cold budget (#136+#138 fresh-install verify, 2026-06-30).**
@@ -2791,6 +2800,109 @@ account) once, then paste the contents of `~/.codex/auth.json`.
   global-scoped: the tool context carries only the owner boundary), all dispatching
   the ONE `CodexCredentialService`. The per-project override UI is in that project's
   Settings tab (`SettingsTab.tsx`), clearly labelled optional.
+
+### More than one Codex seat — rotation at the CODEX_HOME resolver
+
+One ChatGPT subscription can run out before its window resets. The owner may
+therefore connect several seats, and trident picks one per run.
+
+- **A seat is a SLOT with its own directory, for its whole life.** The first seat
+  keeps the bare service name `codex` and the bare `<owner_home>/.codex` — so a
+  one-seat install is unchanged and nothing migrates, which is also why there is no
+  feature flag: rotation always runs and with a single slot it trivially selects the
+  credential that was always there. Additional seats are service
+  `codex-acct-<slot>` (the store's service grammar admits dashes,
+  `project-credentials/store.ts:164`) materialized to
+  `<owner_home>/.codex/accounts/<slot>/`, which cannot collide with the override
+  tree at `.codex/projects/<id>/`.
+- **Selection is a POINTER, never a copy.** The codex CLI rewrites `auth.json` when
+  it refreshes and that refresh ROTATES the refresh token, so two live directories
+  holding one account revoke each other — whichever refreshed later wins. Rotation
+  therefore changes only WHICH directory is handed to a run, and the
+  re-materialize guard stays only-if-missing. Copying a stored bundle over a
+  CLI-refreshed file would install a token the server already invalidated.
+- **Harvest-back keeps the stored copy honest.** When a seat's on-disk
+  `last_refresh` is newer than the stored row's, the disk bundle is re-encrypted
+  back into the store. Without it the store drifts staler with every refresh and the
+  self-heal path eventually restores a dead token over a live login — a hazard that
+  predates rotation.
+- **The exhaustion signal is harvested, not probed.** There is no free usage-gauge
+  endpoint. Every `codex` session appends a rollout JSONL under
+  `<CODEX_HOME>/sessions/YYYY/MM/DD/` whose `token_count` events carry
+  `rate_limits` — `used_percent`, `window_minutes`, `resets_at` (epoch SECONDS,
+  converted once at the parse boundary), `plan_type`. That the rollout follows
+  `CODEX_HOME` was verified live: pointing `CODEX_HOME` at an empty directory and
+  running `codex exec` produced the whole state root, `sessions/` included, even
+  though the run never authenticated.
+- **The threshold is keyed on `window_minutes`, not on `primary`/`secondary`.**
+  Measured across 12,582 real `token_count` samples from 600 rollout files
+  (codex-cli 0.147.0), `primary.window_minutes` was 10080 — a WEEK — in every
+  sample and `secondary` was null in every sample. A policy that read `primary` as
+  "the 5-hour window" would apply the session threshold and a session-length
+  cooldown to a weekly cap and rotate a still-capped seat back into service. A
+  window at or under 1440 minutes cools at 98%, longer windows at 99%, and the
+  fallback cooldown is the window's own declared length, CLAMPED to 32 days — the
+  same binary also declares `daily-limit`, `monthly-limit` and `annual-limit`, so an
+  unclamped length would bench a paid seat for a year and an absurd value would reach
+  `Infinity`, which SQLite stores as a REAL that no clock comparison can clear.
+- **A `resets_at` already in the PAST means the reading is stale, not that there is
+  no reset.** The window has since rolled over and the quota with it, so that sample
+  is ignored rather than cooling the seat for a fresh full window. Collapsing
+  "expired" into "absent" would bench a healthy seat off a days-old rollout — and
+  because the seat is then skipped, it might never run to produce a newer one.
+- **Only a real usage event counts as evidence.** `rate_limits` is read only from the
+  node whose own `type` is `token_count`, which is the shape a real rollout line has
+  (`event_msg` → `token_count` → `rate_limits`); a same-named object nested anywhere
+  else is ignored. `window_duration_mins` is accepted alongside `window_minutes`,
+  since both names ship in the same binary and a miss would default to 0, which
+  classes as a long window.
+- **The scan is bounded.** A positioned tail read rather than a whole-file read, the
+  newest date partition visited first, a cap on files collected, and at most one scan
+  a minute per seat. The resolver is reached by a read-only status request as well as
+  by a run launch, and the CLI never prunes `sessions/`.
+- **Two rules are load-bearing and inherited from the Anthropic rotator.** A
+  harvest that ERRORS or finds nothing cools nothing — a transient read failure must
+  never retire a seat the owner is paying for. And when EVERY seat is cooling the
+  current one is KEPT, never dropped: a capped seat returns a legible retryable
+  error, whereas no seat silently removes codex from the review. That case logs
+  `codex_rotation_exhausted`.
+- **A seat with no usable credential is not a quota problem.** A slot whose stored
+  bundle is missing or expired cools as `unauthorized`, which ignores the clock and
+  stays ineligible until the owner reconnects that seat — waiting does not fix it —
+  and selection SKIPS it rather than returning no credential, because dropping codex
+  out of the review is worse than any capped seat.
+  **THERE IS NO STDERR CLASSIFIER, deliberately.** An earlier revision shipped one and
+  it could not have worked: its two window discriminators, `weekly limit` and
+  `session limit`, return ZERO hits against the literals in codex-cli 0.147.0, while
+  `usage limit` returns 23 and the controls `codex-cli` and `rate_limit_reached_type`
+  return 9 and 17 — the search works, the discriminators are absent, and the CLI's real
+  messages never name the window. It also had no production caller, since codex
+  failures surface only in the shell wrappers and the `.mjs` inner workflow. The window
+  class comes instead from `rate_limit_reached_type`, which the CLI sets itself and
+  which rides the same `token_count` event the harvest already reads. The rollout
+  harvest is the ONE signal that cools a seat.
+- **Per-project overrides are OUTSIDE rotation** and resolve first, verbatim: an
+  override exists to pin one project to one subscription.
+- **Adding a seat, from the app.** Settings → Integrations → Model providers lists
+  every seat with its state, marks the one that runs next, and gives each its own
+  Remove. The paste box stays on screen after the first connection — hiding it is what
+  made a second seat unreachable — and takes an optional seat name.
+- **Adding a seat, from chat or HTTP.** `codex_connect` with `account: "work"` plus
+  the pasted `auth.json`. HTTP: `POST /api/app/codex-auth` with
+  `{ auth, account: "work" }`. `GET /api/app/codex-auth` lists every seat with its
+  cooldown and last usage while keeping all of its original top-level fields.
+  `DELETE /api/app/codex-auth?account=work` removes ONE seat; an unqualified
+  `DELETE /api/app/codex-auth` removes them ALL, which is what the single
+  "Disconnect Codex" control means — leaving named seats stored and selectable behind
+  it would keep using a credential the owner had been told was gone. Omitting
+  `account` on connect means the first seat, so pre-rotation clients are unaffected.
+- **Operator rule.** Once a seat is connected to Neutron, stop using that same
+  ChatGPT login for codex anywhere else. One seat, one live store — otherwise the
+  CLI's refresh rotation revokes whichever copy refreshed earlier.
+
+Code: `trident/codex-rotation.ts` (pure policy), `trident/codex-rotation-io.ts`
+(rollout harvest), `trident/codex-rotation-store.ts` (bookkeeping),
+`migrations/0134_codex_rotation.sql`.
 
 ### Connect GitHub — the device flow, and the control that finally starts it (#551)
 
@@ -6882,16 +6994,21 @@ and getting them confused produced a user-visible P1.
   the record or moves it to the crash queue via `markCrashed` — both of which
   drop the live record wholesale, so a dead child leaves nothing busy.
 
-  **Scope — `stuck_agent` is a narrow backstop, not broad protection.** The
-  per-turn driver watchdog in the pool catches most wedges an order of magnitude
-  faster: `failFrozen` abandons a turn after 90 s of PTY silence
-  (`TURN_INACTIVITY_MS`, `gateway/wiring/build-live-agent-turn.ts:95`; 180 s for
-  cold/onboarding turns at `:107`) and enforces a 45-minute absolute ceiling
-  (`TURN_ABSOLUTE_CEILING_MS`, `:117`). With `stuck_agent`'s 15-minute threshold
-  (`detectors.ts`), the band it uniquely covers is a turn that keeps emitting
-  output continuously — so the 90 s silence timer never trips — without settling,
-  for 15 to 45 minutes. Real, but narrow. Do not treat a quiet `stuck_agent` as
-  evidence that turns are healthy; the driver watchdog is the primary guard.
+  **Scope — `stuck_agent` is a narrow backstop, not broad protection.** For CHAT
+  turns, `failFrozen` abandons a turn after `CHAT_TURN_INACTIVITY_MS` (30 minutes)
+  of PTY silence and enforces the 45-minute `TURN_ABSOLUTE_CEILING_MS`, both in
+  `gateway/wiring/build-live-agent-turn.ts`; profile-less internal calls whose spec
+  has no `turn_timeout_ms` retain the substrate's `DEFAULT_TURN_INACTIVITY_MS`
+  (90 s). The ordering depends on the regime. For profile-less internal calls the
+  driver watchdog remains an order of magnitude faster, while `stuck_agent`'s
+  15-minute in-flight default in `watchdog/detectors.ts` uniquely covers a turn
+  that emits continuously without settling between 15 and 45 minutes. For CHAT
+  turns the ordering INVERTS: a wedged turn, silent or emitting, reaches
+  `stuck_agent` at 15 minutes before the 30-minute silence trip or 45-minute
+  ceiling. It may also flag a legitimately long healthy chat turn; this is an
+  alert, not an abandonment, and the turn keeps running. A quiet `stuck_agent` is
+  still not evidence that turns are healthy; the driver watchdog remains the
+  primary fast guard on the 90 s profile-less path.
 
   **Not covered: the pre-turn phase.** `markTurnStarted` fires only once the
   driver assigns `session.activeTurn`, which is *after* `getOrSpawnSession` and

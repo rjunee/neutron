@@ -25,6 +25,7 @@ import {
   buildSubstrateWorkflowFire,
   CODEX_BUILD_SCRIPT_PATH,
   CODEX_REVIEW_SCRIPT_PATH,
+  STAGE_STAMP_SCRIPT_PATH,
   parseCheckpointFindings,
   parseInnerResult,
   GH_AUTHED_SCRIPT_PATH,
@@ -128,7 +129,24 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       publish_head: null,
       block_kind: null,
       terminal_cause: null,
+      findings_present: false,
     })
+  })
+  // T4 (run f384460d) — DID A REVIEWER SAY ANYTHING AT ALL? This is the field that tells an
+  // infrastructure death (the wrapper's catch path: `checkpoint:'inner-error'`, `findings: []`)
+  // apart from a terminal result carrying real review findings. Decoded FAIL-CLOSED, because a
+  // false positive re-creates the defect: a crash delivered to the owner as REQUEST_CHANGES.
+  test('decodes findings_present — only a NON-EMPTY array counts', () => {
+    const presence = (raw: Record<string, unknown>) =>
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', ...raw }))?.findings_present
+    // The measured f384460d shape: the catch path does not write the field at all.
+    expect(presence({})).toBe(false)
+    // The reviewed-nothing shape: written, and empty.
+    expect(presence({ findings: [] })).toBe(false)
+    // A real review finding behind the stop → NOT an infra death.
+    expect(presence({ findings: [{ severity: 'blocker', title: 'it is broken' }] })).toBe(true)
+    // Garbled/foreign shapes decode false rather than reading truthy.
+    for (const bogus of ['garbled', 1, true, {}, null]) expect(presence({ findings: bogus })).toBe(false)
   })
   // A MERGE IS TERMINAL (#563). The flag the OUTER loop reads to finish a run
   // WITHOUT running a second `gh pr merge`, so only the exact boolean counts: every
@@ -148,6 +166,21 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(JSON.stringify({ verdict: 'APPROVE', prMerged: false }))?.pr_merged).toBe(
       false,
     )
+  })
+  // A NON-POSITIVE prNumber IS THE WRAPPER'S "NO PR" SENTINEL, NOT A PR (run f384460d,
+  // 2026-08-15). The codex build wrapper reports `PR_NUMBER=0` in pr mode BY DESIGN —
+  // the outer loop publishes after the build exits — and GitHub's numbers start at 1, so
+  // 0 can never be an answer. Decoding it as one is what ended a run whose row held
+  // pr=267 at pr=0: `result.pr_number ?? run.pr` keeps the 0, because 0 is not nullish.
+  // Mapping it to null here restores the known PR at every `?? run.pr` site at once.
+  test('a non-positive or non-integer prNumber decodes to null (the "no PR" sentinel)', () => {
+    const prOf = (prNumber: unknown) =>
+      parseInnerResult(JSON.stringify({ verdict: 'REQUEST_CHANGES', prNumber }))?.pr_number
+    expect(prOf(0)).toBeNull()
+    expect(prOf(-1)).toBeNull()
+    expect(prOf(3.5)).toBeNull()
+    // A real PR number still decodes untouched.
+    expect(prOf(7)).toBe(7)
   })
   // The deviation flag decides whether the NEXT Ralph iteration pays for the full
   // whole-repo survey (~287 s) or takes the cheap `plan:next` continuation. It is
@@ -291,6 +324,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       publish_head: null,
       block_kind: null,
       terminal_cause: null,
+      findings_present: false,
     })
   })
 })
@@ -475,6 +509,13 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(threaded.startsWith('/')).toBe(true)
   })
 
+  test('buildWorkflowArgs carries the harness stage-stamp writer path', () => {
+    const threaded = buildWorkflowArgs(input()).stageStampScript
+    expect(threaded).toBe(STAGE_STAMP_SCRIPT_PATH)
+    expect(String(threaded)).toEndWith('/trident/stage-stamp.sh')
+    expect(existsSync(String(threaded))).toBe(true)
+  })
+
   test('args thread the harness codexBuildScript abs path (the target repo need not contain trident/)', async () => {
     const { fire, calls } = fakeFire(() => ({ status: 'fired', error: null }))
     const firer = buildWorkflowFirer({ fire })
@@ -618,6 +659,17 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     // whether to splice, and an absent arg must reproduce the pre-existing prompt.
     expect(buildWorkflowArgs(input()).testStrategy).toBe('')
     expect(buildWorkflowArgs(input({ test_strategy: null })).testStrategy).toBe('')
+  })
+
+  test('args carry the orchestrator-composed testStrategyIntermediate verbatim', () => {
+    const marker = 'TEST EXECUTION\nTASK-2-INTERMEDIATE-MARKER'
+    const args = buildWorkflowArgs(input({ test_strategy_intermediate: marker }))
+    expect(args['testStrategyIntermediate']).toBe(marker)
+  })
+
+  test('args carry an EMPTY testStrategyIntermediate when none was composed', () => {
+    expect(buildWorkflowArgs(input()).testStrategyIntermediate).toBe('')
+    expect(buildWorkflowArgs(input({ test_strategy_intermediate: null })).testStrategyIntermediate).toBe('')
   })
 
   test('a fire seam that REJECTS → failed (crashed launcher, never a silent advance)', async () => {

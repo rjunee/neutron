@@ -8,8 +8,161 @@ name: ci
 # machine became the fast-feedback path by default. The gates are now INDEPENDENT
 # JOBS that run concurrently, and the suite is SHARDED across runners. Each gate
 # reinstalls deps — that is deliberate: a shared-artifact handoff would couple the
-# gates back together and reintroduce the serialisation this change removes, and
-# `bun install --frozen-lockfile` is cheap next to what each gate then does.
+# gates back together and reintroduce the serialisation this change removes. A
+# CACHE is not a handoff: a cache MISS still installs and still passes, so every
+# job below stays independently runnable on its own.
+#
+# THE INSTALL IS NOT CHEAP, and this comment used to claim it was — a sentence
+# written when the install was assumed to be local work. It is not. `bun.lock`
+# takes `gbrain` as a GIT dependency (`github:garrytan/gbrain#<sha>`), so a cold
+# `bun install --frozen-lockfile` fetches a tarball from api.github.com, and the
+# split above means that now happens TWELVE times per PR — 8 shards plus
+# typecheck, lint, purity and layering. That made a third party's availability a
+# gate on this repo's PRs: on 2026-08-17 that URL answered 504 and redded SIX
+# jobs at once on a PR whose only real defect was a single type error, costing a
+# full review round to work out that the code was never the problem.
+#
+# So each job restores bun's global install cache, keyed on `bun.lock` and on the
+# pinned bun version. The lockfile is what determines the content; the bun version
+# is in the key because a bun upgrade may change the cache's on-disk layout, and
+# restoring an older layout under a newer bun is a miss you pay for twice.
+# `BUN_INSTALL_CACHE_DIR` is set explicitly at each install rather than leaning on
+# bun's default location, so the directory actions/cache saves and the directory
+# bun writes are the same string.
+#
+# WHAT IS CACHED IS BUN'S GLOBAL DOWNLOAD CACHE, NOT `node_modules`, and that is a
+# choice rather than an oversight. The download cache is what removes the network
+# fetch — the thing this change exists to remove — and it stays correct across
+# lockfile changes because a `restore-keys` hit is a strict superset that
+# `--frozen-lockfile` then filters down to exactly what `bun.lock` names. Caching
+# `node_modules` instead would go further (the install would be closer to a no-op,
+# ~9.5s of link work saved) but it caches a RESOLVED tree, so a partial-key hit
+# would restore a tree the lockfile no longer describes and the correctness of the
+# install would depend on bun noticing. The install is not a no-op here and is not
+# claimed to be: it still runs, still resolves against the lockfile, and still
+# links — it just does so without asking a third party for anything.
+#
+# NOTHING IN YAML MAKES THAT IDENTITY TRUE — it is ten separate literals across
+# five jobs with no link between them, and a cache that silently misses every run
+# is indistinguishable from no cache while looking fixed. So it is ASSERTED, not
+# asserted-by-construction: `scripts/ci/ci-workflow.test.ts` ('bun install cache
+# wiring') walks every job in this file, and for each one that installs, checks
+# that the CHECKOUT precedes the cache step, that the cache step precedes the
+# install, that its `path` is the SAME STRING as that install's
+# `BUN_INSTALL_CACHE_DIR`, that the key carries the lockfile hash and this job's
+# own `bun-version`, that `restore-keys` is exactly the key MINUS the lockfile
+# hash, and that the action is pinned to a 40-hex sha. Change one of the ten
+# literals without the other nine and that test fails.
+#
+# CHECKOUT-BEFORE-CACHE IS LOAD-BEARING and is the reason that check is named
+# first. `hashFiles('bun.lock')` is evaluated against the workspace, so before a
+# checkout it reads an empty tree and returns the EMPTY STRING. Hoist the cache
+# step above the checkout and the key silently collapses to the `restore-keys`
+# prefix — one entry, permanently frozen at whatever the first run stored,
+# restored on every subsequent run no matter what `bun.lock` says. Nothing errors.
+# That is why the guard is executable rather than prose: each of those mutations
+# is applied to this file's own text in the test and must red the suite.
+#
+# THIS BUYS RELIABILITY, NOT WALL-CLOCK, and the numbers should say so rather than
+# flatter the change. Measured across all 12 legs, PR #410's cold run vs its warm
+# one: `bun install` itself drops from a ~13s median to ~9.5s, but restoring a
+# 237 MB cache costs 5-10s that a cold run does not pay, so the median leg goes
+# from ~14s to ~17.5s. On a GitHub-hosted runner the network is fast enough that
+# downloading the packages beats restoring them. That is a ~3.5s regression per
+# leg, paid in parallel, and it is worth it: the comparison that matters is not
+# 14s vs 17.5s, it is 17.5s vs a job that FAILS, which is what a cold install got
+# on 2026-08-17. Locally, where the network is ordinary, the same install is 118s
+# cold and 36s warm — so the cold path is only cheap while a third party is
+# healthy and close.
+#
+# RE-MEASURED ON #417 against THIS key, because the numbers above were first
+# quoted from runs on the key that preceded it and a measurement is only as good
+# as the thing it was measured against. All 12 legs reported
+# `Cache restored from key: bun-install-Linux-bun1.3.9-<hash>` — an EXACT-key hit,
+# not a prefix one, which is the direct evidence that the cache hits rather than
+# silently missing. Warm restore ran 4-8s (median 6s) and `bun install` 8-13s
+# (median 9s), so ~15s of restore+install per leg. That reproduces the trade this
+# comment describes rather than merely repeating it.
+#
+# The property being bought is provable directly: locally, a warm cache installs
+# all 2501 packages in 22s with ALL outbound HTTP blackholed, while the same
+# blackhole against an empty cache installed nothing at all in ten minutes. A warm
+# cache needs no network whatsoever. That is the whole point of the change.
+#
+# `restore-keys` gives the lockfile-changed case a partial hit: every package the
+# change did NOT touch still comes from the cache, so a one-line dependency bump
+# costs one download rather than 2500. It is safe for the same reason the cache
+# itself is safe — a stale entry that `bun.lock` no longer names is simply never
+# asked for.
+#
+# Its COST is that the entry only grows. actions/cache saves whenever the exact
+# key missed, so a prefix hit restores the old superset and then saves that
+# superset plus whatever the new lockfile added; nothing prunes what a dependency
+# left behind.
+#
+# AND THE 10 GB CEILING IS NOT A FUTURE PROBLEM — IT IS ALREADY EXCEEDED. Measured
+# 2026-08-18 (`gh api repos/<owner>/<repo>/actions/cache/usage`): 11.22 GB across
+# 47 entries against a 10 GB ceiling, so GitHub's LRU eviction is running RIGHT
+# NOW, not eventually. The earlier version of this comment called it "a slow leak,
+# not a steady state" and said the ceiling was far enough out to ignore; that was
+# an estimate written without the measurement and it was wrong on merge day. What
+# the measurement also shows is that the bun entries are not the cause: 9.76 GB of
+# it is 43 `codeql-overlay` entries written by GitHub's default CodeQL setup, and
+# all `bun-install` entries together are 0.66 GB (3 entries at ~237 MB). The bun
+# entries survive because LRU evicts the least recently USED and they are read by
+# twelve legs on every run — but they are subject to that pressure from today, so
+# a cold install after an eviction is a normal event to expect rather than a
+# symptom of broken wiring. Reclaiming the space is a CodeQL-retention question,
+# not a bun one, and it is deliberately not fixed here. The fix for growth on the
+# bun side remains bumping a salt in the key rather than dropping `restore-keys`.
+#
+# WHERE THE BENEFIT ACTUALLY LANDS, because the scoping is not obvious and it is
+# the difference between this working and merely looking like it works. Actions
+# caches are readable from the branch that wrote them and from the DEFAULT branch,
+# and nowhere else. A cache written by a SAME-REPOSITORY PR run is therefore
+# scoped to that PR: it warms that PR's later pushes and no one else's. The
+# cross-PR win starts when a `push` run on `main` writes the main-scoped entry,
+# which every PR can then read. So expect the first run of a same-repo PR after a
+# `bun.lock` change to be cold, and everything else to be warm — not "every run is
+# warm from day one".
+#
+# A FORK PR IS THE EXCEPTION and the earlier version of this paragraph did not say
+# so. `pull_request` runs from a fork get a READ-ONLY `GITHUB_TOKEN`, so a fork leg
+# can RESTORE the main-scoped entry but cannot SAVE one. For a fork PR the
+# "one cold leg pays, eleven warm legs benefit" arithmetic does not apply: if
+# main's entry is present every leg is warm and nothing is written, and if it is
+# absent every leg is cold and stays cold for that PR's whole life. Restores are
+# still the common case because `main` writes the entry on every push, but a fork
+# PR opened while main's entry is evicted gets no warming at all from itself.
+#
+# EXPECTED NOISE, so nobody re-debugs it: on a cold run all twelve legs miss and
+# all twelve try to save the same key, so exactly ONE wins and the other eleven
+# log `Failed to save: Unable to reserve cache with key ..., another job may be
+# creating this cache`. That is benign and non-fatal — the cache exists after the
+# first winner, and those jobs pass. It is alarming to read and means nothing.
+#
+# A CACHE MUST NEVER MAKE A BUILD WRONG — and this is the claim to state
+# NARROWLY, because the obvious version of it is not true. What
+# `--frozen-lockfile` guarantees is RESOLUTION: bun refuses to re-resolve or
+# rewrite `bun.lock`, so the exact set of package identities — every name@version,
+# and the git dep's exact commit — is decided by the committed lockfile and cannot
+# be changed by anything sitting in the cache. A cache entry naming a package the
+# lockfile does not name is simply never asked for; a `package.json` that has
+# drifted from the lockfile fails the install outright.
+#
+# What it does NOT do is re-verify the BYTES of a restored entry. For registry
+# packages the lockfile carries an integrity hash (`bun.lock` line for `zod`:
+# `sha512-…`), but the `gbrain` git dependency carries none — its lockfile tuple
+# ends in the cache folder name `garrytan-gbrain-<sha>`, not a content hash — and
+# bun does not document per-restore content verification either way. So "the
+# cache can only change how long an install takes" is the intent, not a property
+# `--frozen-lockfile` proves.
+#
+# What actually bounds the residual risk is SCOPE, not verification: an Actions
+# cache entry is writable only from runs on this repo's own branches, so poisoning
+# one already requires the ability to run workflow code here — the same privilege
+# as pushing to the repo. Vendoring `gbrain` is what would close it properly, by
+# putting the content in the tree under review instead of behind a fetch.
 #
 # THE `test` JOB IS LOAD-BEARING AND MUST KEEP THAT EXACT NAME. `test` and
 # `CodeQL` are REQUIRED status checks on `main` with a strict up-to-date policy.
@@ -77,13 +230,21 @@ jobs:
     name: typecheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       # Install BEFORE tsc so the @neutronai/* workspace symlinks exist; a bare
       # checkout reports phantom TS2307s.
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # G5 — typecheck completeness: `tsc -p` for EVERY tsconfig.json in the repo,
       # not just the root config. Discovery is dynamic, so a new package with a
       # tsconfig is covered automatically; ci-workflow.test.ts guards that.
@@ -93,11 +254,19 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # L5 — relative cross-workspace import guard (eslint import/no-relative-packages
       # + a companion type-query check for the `import('...').Foo` form ESLint can't lint).
       - run: bash scripts/ci/lint.sh
@@ -110,13 +279,21 @@ jobs:
       # to GHArchive permanently and cannot be redacted afterwards), which needs
       # real history — a depth-1 checkout has neither the PR base sha nor
       # origin/main, and the gate hard-fails rather than skipping that half.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # Fails the build if multi-instance vocabulary, owner PII or a Managed
       # module ever regresses into this public tree.
       - name: leak gate
@@ -147,13 +324,21 @@ jobs:
     steps:
       # G8's ratchet-growth guard diffs the committed baseline against main's, so
       # it needs main's history — a depth-1 checkout has no origin/main to compare.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
-      - uses: oven-sh/setup-bun@v2
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
+        env:
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
       # G4 — dependency-cruiser layering ratchet (fails on any NEW cross-band
       # import or cycle; the grandfathered baseline may only shrink).
       - run: bash scripts/ci/depcruise.sh
@@ -194,7 +379,7 @@ jobs:
 
   # ---- the suite, sharded across runners ---------------------------------------
   shard:
-    name: shard ${{ matrix.shard }}/4
+    name: shard ${{ matrix.shard }}/8
     runs-on: ubuntu-latest
     strategy:
       # fail-fast: false — one shard failing must not cancel the others. Cancelling
@@ -203,21 +388,50 @@ jobs:
       # round-trip per remaining failure.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        # EIGHT legs, not four. A PR waits on the SLOWEST shard, so the only thing
+        # that shortens the wait is less work on that one runner — and these are
+        # GitHub-hosted runners, so the extra legs cost CI minutes and nothing on
+        # any developer machine. Measured against the cost model in run-tests.sh
+        # §2c over the 1296 general-lane files on this tree: the slowest shard's
+        # estimated test time falls from 70.4s at four legs to 35.2s at eight.
+        #
+        # Eight rather than twelve because each leg pays a fixed toll — checkout,
+        # `bun install`, and the ~15s full discovery + bun cross-check that EVERY
+        # shard runs (deliberately: that is what keeps a coverage drift visible on
+        # every runner). Past eight, that toll starts to dominate the shrinking
+        # test slice, and each additional leg is one more chance for a transient
+        # failure to red a PR that has nothing wrong with it.
+        #
+        # If you change this list you MUST change the /N in NEUTRON_TEST_SHARD
+        # below to match. That pairing is asserted by
+        # scripts/ci/ci-workflow.test.ts ('the shard matrix size MATCHES the /N'),
+        # because widening the matrix while leaving the denominator behind makes
+        # the extra shards run NOTHING while reporting green — a silent coverage
+        # hole that looks exactly like a faster suite.
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: 1.3.9
+      # Bun's install cache — keeps the `gbrain` git fetch off api.github.com (header).
+      # This is the leg that multiplies: eight shards, eight identical installs.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/bun-install-cache
+          key: bun-install-${{ runner.os }}-bun1.3.9-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-install-${{ runner.os }}-bun1.3.9-
       - run: bun install --frozen-lockfile
-      - name: Test (shard ${{ matrix.shard }} of 4)
         env:
-          NEUTRON_TEST_SHARD: ${{ matrix.shard }}/4
-          # Each shard now carries ~1/4 of the files on its own 7 GB runner, so the
-          # OOM pressure that forced concurrency 4→2 and chunk 100→75 (#193) is
-          # divided too. Restored to the documented defaults; peak RSS per runner
-          # is well below where it tipped, because the file COUNT per runner is a
-          # quarter of what it was.
+          BUN_INSTALL_CACHE_DIR: ${{ runner.temp }}/bun-install-cache
+      - name: Test (shard ${{ matrix.shard }} of 8)
+        env:
+          NEUTRON_TEST_SHARD: ${{ matrix.shard }}/8
+          # Each shard carries ~1/8 of the files on its own 7 GB runner, so the OOM
+          # pressure that forced concurrency 4→2 and chunk 100→75 (#193) is divided
+          # further still. The documented defaults stay; peak RSS per runner is well
+          # below where it tipped, because the file COUNT per runner is now an
+          # eighth of what it was when it tipped.
           NEUTRON_TEST_CONCURRENCY: "4"
           NEUTRON_TEST_CHUNK_SIZE: "100"
         run: bash scripts/run-tests.sh
@@ -240,7 +454,7 @@ jobs:
           echo "layering  : ${{ needs.layering.result }}"
           echo "shards    : ${{ needs.shard.result }}"
           # A matrix job's aggregate result is 'success' only when EVERY leg
-          # succeeded, so this covers all four shards. 'skipped' is treated as a
+          # succeeded, so this covers every shard leg. 'skipped' is treated as a
           # failure on purpose: a shard that never ran means files that never ran,
           # which is a coverage hole, not a pass.
           for r in "${{ needs.typecheck.result }}" "${{ needs.lint.result }}" \
@@ -251,4 +465,4 @@ jobs:
               exit 1
             fi
           done
-          echo "All gates green across 4 shards."
+          echo "All gates green across every shard leg."

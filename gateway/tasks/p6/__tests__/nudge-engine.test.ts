@@ -12,7 +12,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import { PersonaPromptLoader } from '../../../wiring/persona-loader.ts'
@@ -39,8 +39,8 @@ interface Harness {
 
 function openHarness(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-nudge-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const tasks = new TaskStore(db)
   return {
     db,

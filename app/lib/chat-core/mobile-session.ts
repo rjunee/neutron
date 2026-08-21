@@ -298,12 +298,26 @@ export class MobileChatSession {
    * — an id only enters {@link readSent} once a frame is actually accepted, so
    * a receipt dropped while offline is re-sent on the next view after reconnect.
    */
-  markRead(messageIds: readonly string[]): void {
+  markRead(messageIds: readonly string[]): readonly string[] {
+    // RETURNS THE IDS ACTUALLY SENT, matching the web session. A caller keeping
+    // its own "already reported" ledger must fill it from this return and not
+    // from the argument: filling it from the argument marks a FAILED send as done
+    // and removes the id from every later call, cancelling the retry the
+    // `readSent` guard above exists to provide.
+    const accepted: string[] = [];
     for (const message_id of messageIds) {
-      if (message_id.length === 0 || this.readSent.has(message_id)) continue;
+      if (message_id.length === 0) continue;
+      if (this.readSent.has(message_id)) {
+        accepted.push(message_id);
+        continue;
+      }
       const env: OutboundReceipt = { v: 1, type: 'receipt', message_id, state: 'read' };
-      if (this.ws.send(env)) this.readSent.add(message_id);
+      if (this.ws.send(env)) {
+        this.readSent.add(message_id);
+        accepted.push(message_id);
+      }
     }
+    return accepted;
   }
 
   /**

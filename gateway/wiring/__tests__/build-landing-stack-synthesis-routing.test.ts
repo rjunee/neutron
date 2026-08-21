@@ -12,12 +12,11 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdtempSync, mkdirSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOnboardingEnginePieces } from '../build-landing-stack.ts'
 import type { Substrate, AgentSpec } from '@neutronai/runtime/substrate.ts'
@@ -35,9 +34,7 @@ beforeEach(() => {
   ownerHome = join(workdir, 'project-home')
   mkdirSync(ownerHome, { recursive: true })
   const dbPath = join(workdir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   db = ProjectDb.open(dbPath)
 })
 
