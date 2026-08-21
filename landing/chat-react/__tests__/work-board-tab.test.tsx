@@ -256,6 +256,139 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('shows a brief corruption alert while the recovered run continues', async () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: measured bytes disagree. DEFERRED.'
+    const rows = [
+      item({
+        id: 'alerted',
+        title: 'Recovered build',
+        status: 'in_progress',
+        linked_run_id: 'run_alerted',
+        run_progress: {
+          run_id: 'run_alerted',
+          phase_label: 'building',
+          step_label: 'building',
+          round: 1,
+          started_at: '2026-08-18T00:00:00Z',
+          last_advanced_at: '2026-08-18T00:01:00Z',
+          elapsed_ms: 60000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+          brief_alert: alert,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-tag')?.textContent).toBe('Building')
+    expect(container.querySelector('.cwb-brief-alert')?.textContent).toBe(alert)
+    expect(container.querySelector('.cwb-fail-reason')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
+  it('keeps a recovered brief alert visible after the run succeeds and moves to Done', async () => {
+    const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered after one bridge retry. DEFERRED.'
+    const rows = [
+      item({
+        id: 'survived-alert',
+        title: 'Recovered and merged build',
+        status: 'done',
+        completed_at: '2026-08-18T00:03:00Z',
+        linked_run_id: 'run_survived_alert',
+        run_progress: {
+          run_id: 'run_survived_alert',
+          phase_label: 'merged',
+          step_label: 'done',
+          round: 1,
+          started_at: '2026-08-18T00:00:00Z',
+          last_advanced_at: '2026-08-18T00:03:00Z',
+          elapsed_ms: 180000,
+          stalled: false,
+          stalled_ms: null,
+          pr: 519,
+          verdict: 'APPROVE',
+          failure_reason: null,
+          brief_alert: alert,
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const toggle = container.querySelector('.cwb-completed-toggle') as HTMLButtonElement
+    await act(async () => {
+      toggle.click()
+      await tick()
+    })
+    expect(container.querySelector('.cwb-completed-ul .cwb-brief-alert')?.textContent).toBe(alert)
+    expect(container.textContent).toContain('Merged · Aug 18')
+
+    await act(async () => root.unmount())
+  })
+
+  it('shows the terminal failure instead of an earlier recovered brief alert', async () => {
+    const rows = [
+      item({
+        id: 'failed-after-alert',
+        title: 'Publish failure',
+        status: 'failed',
+        linked_run_id: 'run_failed_after_alert',
+        run_progress: {
+          run_id: 'run_failed_after_alert',
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 1,
+          started_at: '2026-08-18T00:00:00Z',
+          last_advanced_at: '2026-08-18T00:02:00Z',
+          elapsed_ms: 120000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: 'REQUEST_CHANGES',
+          failure_reason: 'publish failed: outer publisher could not open a PR',
+          brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered. DEFERRED.',
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-fail-reason')?.textContent).toBe(
+      'publish failed: outer publisher could not open a PR',
+    )
+    expect(container.querySelector('.cwb-brief-alert')).toBeNull()
+    expect(container.textContent).not.toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+    await act(async () => root.unmount())
+  })
+
+  it('does not present an earlier recovered alert as an unreasoned failure outcome', async () => {
+    const rows = [
+      item({
+        id: 'failed-without-reason',
+        status: 'failed',
+        linked_run_id: 'run_failed_without_reason',
+        run_progress: {
+          run_id: 'run_failed_without_reason',
+          phase_label: 'failed',
+          step_label: 'failed',
+          round: 1,
+          started_at: '2026-08-18T00:00:00Z',
+          last_advanced_at: '2026-08-18T00:02:00Z',
+          elapsed_ms: 120000,
+          stalled: false,
+          stalled_ms: null,
+          pr: null,
+          verdict: null,
+          failure_reason: null,
+          brief_alert: 'CODEX_BUILD_BRIEF_PART_CORRUPT: recovered earlier. DEFERRED.',
+        },
+      }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+    expect(container.querySelector('.cwb-fail-reason')).toBeNull()
+    expect(container.querySelector('.cwb-brief-alert')).toBeNull()
+    await act(async () => root.unmount())
+  })
+
   it('renders a derived tag for a LEGACY run_progress missing step_label (no crash)', async () => {
     // A rolling-deploy / legacy gateway HTTP GET can return run_progress with only
     // phase_label (no step_label). The row must derive the tag from phase_label

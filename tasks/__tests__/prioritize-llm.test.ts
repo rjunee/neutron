@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { LlmCallFn } from '@neutronai/onboarding/interview/phase-spec-resolver.ts'
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
@@ -25,8 +25,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-prioritize-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

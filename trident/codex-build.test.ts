@@ -26,7 +26,8 @@
  *    than assumed.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { spawn, spawnSync } from 'node:child_process'
 import {
   chmodSync,
@@ -41,11 +42,14 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-build.sh')
+const CHECKPOINT_SCRIPT = join(HERE, 'checkpoint.sh')
 const SCRIPT_TEXT = readFileSync(SCRIPT, 'utf8')
 
 /**
@@ -73,6 +77,51 @@ const briefIntegrity = loadBriefIntegrity()
 // the mock bin, so `bash` could not be resolved from it.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
 
+// ── FIXTURE REAPING — every temp dir this file makes dies with the case that made it ──
+//
+// Each `run()` below builds a REAL fixture: a `git init` repo, a symlink farm of the
+// host's tools, sometimes a second worktree. That is ~270K and ~65 inodes apiece, and
+// this file makes ~87 of them per full run. Nothing on this box reaps them
+// (systemd-tmpfiles ran 21h before the measurement and 18,682 day-old dirs survived
+// it), so before this registry existed the suite had left 24,946 orphans / 7.8G in
+// /tmp — about 1.6M inodes, ~18% of the host's total.
+//
+// REGISTERED, NEVER GLOBBED. The tempting implementation is `rm -rf
+// /tmp/trident-codex-build-*`, and it is wrong: several trident lanes run this very
+// suite concurrently on this host, so a glob would delete a SIBLING lane's in-flight
+// fixture and produce an unattributable mid-build failure in an unrelated PR. Only
+// paths this process created are ever removed. `leak control D` is the guard on that
+// and must not be dropped as redundant.
+//
+// REAPED IN `afterEach`, NEVER INSIDE `run()`. Tests read `r.dir` after run() returns
+// — the RECLAIM case walks the holder worktree and reads its preserved
+// post-mortem.txt — so a dir must outlive the call that made it and die with the case.
+//
+// The 'exit' hook covers what afterEach cannot: a throw during collection, or a normal
+// abort, either of which ends the process with entries still registered. rmSync is
+// synchronous, so it is valid work for an exit handler. SIGKILL is untrappable and
+// WILL still leak; that residue is why an operator-side, age-guarded sweep stays a
+// separate thing and is deliberately not wired into this suite.
+const FIXTURE_DIRS: string[] = []
+/** Register a temp dir for reaping and return it, so it can wrap `mkdtempSync` inline. */
+function fixtureDir(path: string): string {
+  FIXTURE_DIRS.push(path)
+  return path
+}
+function reapFixtures(): void {
+  while (FIXTURE_DIRS.length > 0) {
+    const dir = FIXTURE_DIRS.pop() as string
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Best effort and SILENT on purpose: a fixture that cannot be removed is a leak,
+      // not a test failure, and must not turn a passing case red.
+    }
+  }
+}
+afterEach(reapFixtures)
+process.on('exit', reapFixtures)
+
 interface RunOpts {
   /** Branch used by `git init -b`; defaults to the wrapper argv branch. */
   initBranch?: string
@@ -88,6 +137,16 @@ interface RunOpts {
   holderDirt?: boolean
   /** Install an artifact-checkpoint recorder; its exit status exercises best effort. */
   checkpointExit?: number
+  /** Stderr emitted by that recorder; the wrapper must never pass it through. */
+  checkpointStderr?: string
+  /** Install a stage-event argv recorder; its exit status exercises best effort. */
+  stageExit?: number
+  /** Use this stage writer instead of the argv recorder. */
+  stageScript?: string
+  /** Database coordinate handed to the stage writer. */
+  stageDb?: string
+  /** Run coordinate handed to the stage writer. */
+  stageRunId?: string
   /** Write an auth.json into CODEX_HOME (the "configured" case). */
   authed?: boolean
   /** Don't set CODEX_HOME at all. */
@@ -205,6 +264,7 @@ const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n
 
 interface RunResult {
   checkpointArgs: string
+  stageCalls: string
   status: number | null
   /** The signal the harness killed the wrapper with, or null if it exited by itself. */
   signal: NodeJS.Signals | null
@@ -283,7 +343,7 @@ function toolFarm(dir: string): string {
 }
 
 function run(opts: RunOpts = {}): RunResult {
-  const dir = mkdtempSync(join(tmpdir(), 'trident-codex-build-'))
+  const dir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
   const codexHome = join(dir, 'codexhome')
   mkdirSync(codexHome, { recursive: true })
   if (opts.authed === true) writeFileSync(join(codexHome, 'auth.json'), '{"token":"x"}\n')
@@ -424,12 +484,30 @@ exit 1
   }
   if (opts.checkpointExit !== undefined) {
     const checkpoint = join(dir, 'checkpoint-stub.sh')
-    writeFileSync(checkpoint, `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\nexit ${opts.checkpointExit}\n`)
+    const checkpointStderr = opts.checkpointStderr === undefined
+      ? ''
+      : `printf '%s\\n' ${JSON.stringify(opts.checkpointStderr)} >&2\n`
+    writeFileSync(
+      checkpoint,
+      `#!/bin/sh\nprintf '%s\\n' "$@" > "$HOME/checkpoint-args.txt"\n${checkpointStderr}exit ${opts.checkpointExit}\n`,
+    )
     chmodSync(checkpoint, 0o755)
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT'] = checkpoint
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = '/tmp/run.db'
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = 'run-123'
     env['NEUTRON_CODEX_BUILD_CHECKPOINT_NAME'] = 'forge-done'
+  }
+  if (opts.stageExit !== undefined) {
+    const stage = join(dir, 'stage-stub.sh')
+    writeFileSync(stage, `#!/bin/sh\nprintf '%s\n' "$*" >> "$HOME/stage-args.txt"\nexit ${opts.stageExit}\n`)
+    chmodSync(stage, 0o755)
+    env['NEUTRON_CODEX_BUILD_STAGE_SCRIPT'] = stage
+  } else if (opts.stageScript !== undefined) {
+    env['NEUTRON_CODEX_BUILD_STAGE_SCRIPT'] = opts.stageScript
+  }
+  if (opts.stageExit !== undefined || opts.stageScript !== undefined) {
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_DB'] = opts.stageDb ?? '/tmp/stage-run.db'
+    env['NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID'] = opts.stageRunId ?? 'run-stage'
   }
   Object.assign(env, opts.env ?? {})
   if (opts.noCodexHome !== true) env['CODEX_HOME'] = codexHome
@@ -507,6 +585,7 @@ exit 1
   const trailerRaw = readOr('build.trailer')
   return {
     checkpointArgs: readOr('checkpoint-args.txt'),
+    stageCalls: readOr('stage-args.txt'),
     status: res.status,
     /** Non-null when the harness had to KILL the wrapper — i.e. it did not finish. */
     signal: res.signal ?? null,
@@ -635,6 +714,149 @@ describe('artifact-time checkpoint', () => {
     const r = run({ authed: true, codexLoginExit: 0, checkpointExit: 1, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
     expect(r.status).toBe(0)
     expect(r.stderr).toContain('CODEX_BUILD_CHECKPOINT_FAILED')
+  })
+})
+
+describe('durable pre-build stage stamps', () => {
+  test('wrapper-start is recorded before a not-connected refusal', () => {
+    const r = run({ authed: false, codexLoginExit: 0, stageExit: 0 })
+    expect(r.status).toBe(10)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+    ])
+  })
+
+  test('a successful Codex path durably brackets the exact execution window', () => {
+    const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 0 })
+    expect(r.status).toBe(0)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+
+  test('a failed Codex path still records codex-exec-end', () => {
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      stageExit: 0,
+      env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_FAIL },
+    })
+    expect(r.status).toBe(5)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+
+  test('without the stage env the wrapper keeps its exit behaviour and calls no recorder', () => {
+    const r = run({ authed: false, codexLoginExit: 0 })
+    expect(r.status).toBe(10)
+    expect(r.stageCalls).toBe('')
+  })
+
+  test('the real wrapper → stage-stamp.sh → sqlite chain appends a row', () => {
+    const migrated = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-')))
+    const stageDb = join(migrated, 'project.db')
+    seedMigratedDb(stageDb)
+    const migratedDb = new Database(stageDb)
+    applyMigrations(migratedDb)
+    migratedDb.close()
+    try {
+      const r = run({
+        authed: false,
+        codexLoginExit: 0,
+        stageScript: fileURLToPath(new URL('./stage-stamp.sh', import.meta.url)),
+        stageDb,
+        stageRunId: 'run-real-stage',
+      })
+      expect(r.status).toBe(10)
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query('SELECT run_id, stage FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      expect(rows).toEqual([{ run_id: 'run-real-stage', stage: 'wrapper-start' }])
+    } finally {
+      rmSync(migrated, { recursive: true, force: true })
+    }
+  })
+
+  test('a non-zero stage script cannot change the wrapper exit code', () => {
+    const r = run({ authed: true, codexLoginExit: 0, mergeMode: 'local', stageExit: 19 })
+    expect(r.status).toBe(0)
+    expect(r.stageCalls.trim().split('\n')).toEqual([
+      '/tmp/stage-run.db run-stage wrapper-start',
+      '/tmp/stage-run.db run-stage codex-exec-start',
+      '/tmp/stage-run.db run-stage codex-exec-end',
+    ])
+  })
+})
+
+describe('build-child environment — a build can migrate only its own worktree home', () => {
+  const inherited = {
+    NEUTRON_HOME: '/fake/live/home',
+    OWNER_HOME: '/fake/owner',
+    NEUTRON_DB_PATH: '/fake/live.db',
+    NEUTRON_BUILD_CHILD_ENV_PROBE: 'inherited',
+  }
+
+  function parsedEnv(raw: string): Record<string, string> {
+    const out: Record<string, string> = {}
+    for (const line of raw.trim().split('\n')) {
+      const split = line.indexOf('=')
+      if (split > 0) out[line.slice(0, split)] = line.slice(split + 1)
+    }
+    return out
+  }
+
+  test.each([
+    ['the fake-build composition site', true],
+    ['the real codex composition site', false],
+  ])('%s scopes inherited live selectors to the isolated worktree', (_label, fakeBuild) => {
+    const parentEnv = { ...inherited }
+    const parentBefore = { ...parentEnv }
+    const processBefore = {
+      NEUTRON_HOME: process.env['NEUTRON_HOME'],
+      OWNER_HOME: process.env['OWNER_HOME'],
+      NEUTRON_DB_PATH: process.env['NEUTRON_DB_PATH'],
+    }
+    const captured = 'build-child-env.txt'
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        ...parentEnv,
+        ...(fakeBuild
+          ? { NEUTRON_CODEX_BUILD_EXEC_CMD: `env > "$HOME/${captured}"; ${FAKE_BUILD}` }
+          : {}),
+      },
+    })
+
+    expect(r.status).toBe(0)
+    const childEnv = parsedEnv(
+      fakeBuild ? readFileSync(join(r.dir, captured), 'utf8') : r.codexEnv,
+    )
+    const worktree = r.trailer['NEUTRON_CODEX_BUILD_WORKTREE']!
+    const childHome = join(worktree, '.neutron-home')
+    expect(childEnv['NEUTRON_HOME']).toBe(childHome)
+    expect(relative(worktree, childEnv['NEUTRON_HOME']!)).toBe('.neutron-home')
+    expect(existsSync(childHome)).toBe(true)
+    expect(readFileSync(join(childHome, '.gitignore'), 'utf8')).toBe('*\n')
+    expect(
+      spawnSync('git', ['check-ignore', join(childHome, 'project.db')], { cwd: worktree }).status,
+    ).toBe(0)
+    expect('OWNER_HOME' in childEnv).toBe(false)
+    expect('NEUTRON_DB_PATH' in childEnv).toBe(false)
+    expect(childEnv['NEUTRON_BUILD_CHILD_ENV_PROBE']).toBe('inherited')
+    expect(parentEnv).toEqual(parentBefore)
+    expect({
+      NEUTRON_HOME: process.env['NEUTRON_HOME'],
+      OWNER_HOME: process.env['OWNER_HOME'],
+      NEUTRON_DB_PATH: process.env['NEUTRON_DB_PATH'],
+    }).toEqual(processBefore)
   })
 })
 /**
@@ -872,6 +1094,49 @@ describe('trident/codex-build.sh — exit-code contract', () => {
     expect(codexStdin).toBe('')
   })
 
+  test('a corrupt whole brief records the exact refusal sentence on the run row', () => {
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-corrupt-whole-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'corrupt-whole-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const whole = `${DEFAULT_BRIEF}Then run the tests, commit, and open a PR.\n`
+      const res = run({
+        authed: true,
+        codexLoginExit: 0,
+        brief: DEFAULT_BRIEF,
+        integrity: briefIntegrity(whole),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_CORRUPT: the brief in ${join(res.dir, 'build.brief')} measures ${briefIntegrity(DEFAULT_BRIEF)} but the workflow composed ${briefIntegrity(whole)} (<bytes>:<fnv32>) — it was truncated or altered on the way here. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
   test('a brief REWORDED to the same length is still refused', () => {
     // The byte count alone would pass this one. The checksum is what makes "the same
     // size" and "the same text" different questions.
@@ -997,15 +1262,148 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
     expect(res.codexStdin).toBe(parts.join(''))
   })
 
-  test('a part altered after its receipt was taken is refused', () => {
+  test('a part altered after its receipt was taken is refused with byte-identical stderr when checkpoint env is absent', () => {
     const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
     const corrupted = [...intended]
     corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
     const res = success(corrupted, { partIntegrity: intended.map(briefIntegrity) })
+    const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
     expect(res.status).toBe(3)
-    expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
-    expect(res.stderr).toContain('brief-part-1.txt')
+    expect(res.stderr).toBe(`${sentence}\n`)
     expect(res.codexArgv).toBe('')
+  })
+
+  test('a corrupt part records the exact refusal sentence on the run row and still exits 3', () => {
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-corrupt-part-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'corrupt-part-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const intended = ['contract\n', `${'middle'.repeat(400)}${'z'.repeat(1_660)}`, '\ncoda\n']
+      const corrupted = [...intended]
+      corrupted[1] = `${intended[1]!.slice(0, 900)}${intended[1]!.slice(2_560)}`
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a missing part also records its exact refusal sentence on the run row', () => {
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
+    const dbPath = join(alertDir, 'project.db')
+    const runId = 'run-missing-part-alert'
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      [runId, 'missing-part-alert', 'test-project', '/repo', 'test task', '2026-08-18T00:00:00Z', '2026-08-18T00:00:00Z'],
+    )
+    db.close()
+    try {
+      const res = success(['head\n', 'middle\n', 'coda\n'], {
+        missingBriefPartIndex: 1,
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: runId,
+        },
+      })
+      const sentence = `CODEX_BUILD_BRIEF_PART_MISSING: brief part ${join(res.dir, 'missing-brief-part-1.txt')} is missing or empty — the assembled brief would not be the one the workflow composed. DEFERRED.`
+      const readDb = new Database(dbPath, { readonly: true })
+      const row = readDb.query<{ brief_alert: string | null }, [string]>(
+        'SELECT brief_alert FROM code_trident_runs WHERE id = ?',
+      ).get(runId)
+      readDb.close()
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toBe(`${sentence}\n`)
+      expect(row?.brief_alert).toBe(sentence)
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
+  })
+
+  test('a failed alert write is swallowed and the corrupt-part refusal still exits 3', () => {
+    const intended = ['contract\n', 'middle\n']
+    const corrupted = ['contract\n', 'mangled\n']
+    const res = success(corrupted, {
+      partIntegrity: intended.map(briefIntegrity),
+      checkpointExit: 19,
+      checkpointStderr: 'sqlite: unable to open /sensitive/project.db',
+    })
+    const sentence = `CODEX_BUILD_BRIEF_PART_CORRUPT: brief part ${join(res.dir, 'brief-part-1.txt')} measures ${briefIntegrity(corrupted[1]!)} but its receipt is ${briefIntegrity(intended[1]!)} (<bytes>:<fnv32>) — the file on disk is not the segment that was composed. DEFERRED: building against an approximation of the brief produces a real commit for a task nobody wrote.`
+
+    expect(res.status).toBe(3)
+    expect(res.stderr).toBe(
+      `CODEX_BUILD_BRIEF_ALERT_FAILED\n${sentence}\n`,
+    )
+    expect(res.checkpointArgs.trim().split('\n')).toEqual([
+      '/tmp/run.db', 'run-123', 'brief_alert', sentence,
+    ])
+    expect(res.stderr).not.toContain('/sensitive/project.db')
+    expect(Buffer.from(res.stderr).subarray(-400).toString()).toContain(
+      'CODEX_BUILD_BRIEF_PART_CORRUPT',
+    )
+    expect(res.codexArgv).toBe('')
+  })
+
+  test('a checkpoint aimed at a missing run reports alert recording failure', () => {
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-')))
+    const dbPath = join(alertDir, 'project.db')
+    seedMigratedDb(dbPath)
+    const db = new Database(dbPath)
+    applyMigrations(db)
+    db.close()
+    try {
+      const intended = ['contract\n', 'middle\n']
+      const corrupted = ['contract\n', 'mangled\n']
+      const res = success(corrupted, {
+        partIntegrity: intended.map(briefIntegrity),
+        env: {
+          NEUTRON_CODEX_BUILD_CHECKPOINT_SCRIPT: CHECKPOINT_SCRIPT,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_DB: dbPath,
+          NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID: 'no-such-run',
+        },
+      })
+
+      expect(res.status).toBe(3)
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_ALERT_FAILED')
+      expect(res.stderr).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
+      expect(res.codexArgv).toBe('')
+    } finally {
+      rmSync(alertDir, { recursive: true, force: true })
+    }
   })
 
   test('a missing part refuses before codex is invoked', () => {
@@ -1234,7 +1632,7 @@ describe('the BRIEF is what codex is asked to build', () => {
   test.skipIf(!haveRealCodex)(
     'the `shell_environment_policy` fields are REAL on the installed CLI, not plausible strings',
     () => {
-      const home = mkdtempSync(join(tmpdir(), 'trident-codex-strict-'))
+      const home = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-strict-')))
       const ask = (...cfg: string[]): string => {
         const res = spawnSync(
           'codex',
@@ -1846,5 +2244,136 @@ describe('atomic trailer publication', () => {
     expect(SCRIPT_TEXT).toContain('mv -f "$TRAILER_TMP" "$TRAILER_FILE"')
     expect(SCRIPT_TEXT).not.toContain('> "$TRAILER_FILE"')
     expect(SCRIPT_TEXT).toContain('rm -f "$TRAILER_TMP" "$TRAILER_FILE"')
+  })
+})
+
+describe('fixture reaping — the suite must not leak its own temp dirs', () => {
+  // The regex the counters below use. It is deliberately the BARE mkdtemp shape
+  // (`trident-codex-build-` + exactly 6 mkdtemp characters) — the same shape that
+  // accounted for all 24,946 orphans measured on this host, and NOT the
+  // `-stage-db-` / `-alert-db-` variants, which are longer.
+  const FIXTURE_NAME = /^trident-codex-build-[A-Za-z0-9]{6}$/
+  const fixtureNames = (): Set<string> =>
+    new Set(readdirSync(tmpdir()).filter((name) => FIXTURE_NAME.test(name)))
+  const cheapRun = (): RunResult =>
+    run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+
+  // A case cannot watch its own reap — afterEach runs after the body returns — so the
+  // observation is split across two cases, A recording and B checking.
+  let priorDir = ''
+
+  test('control A: a fixture dir is ALIVE for the whole of the case that made it', () => {
+    const r = cheapRun()
+    // NEGATIVE CONTROL on placement: proves the reaper does NOT fire inside run(). If
+    // anyone "simplifies" the cleanup into run(), this fails — and so does every case
+    // that reads r.dir afterwards, e.g. the RECLAIM case that walks the holder
+    // worktree and reads its preserved post-mortem.txt.
+    expect(existsSync(r.dir)).toBe(true)
+    expect(readdirSync(r.dir).length).toBeGreaterThan(0)
+    priorDir = r.dir
+  })
+
+  test('control B: the PREVIOUS case\'s fixture dir is GONE', () => {
+    // ANTI-VACUITY GUARD, and it is load-bearing, not decorative: with no fixture
+    // recorded, `existsSync('')` is false and the real assertion below would pass
+    // while observing nothing at all. An empty check reading as a passing check is
+    // this repo's recurring failure mode; this line makes the empty case fail loudly.
+    //
+    // It also makes B ORDER-DEPENDENT on purpose: `bun test -t 'control B'` filters A
+    // out and B then fails, loudly and correctly, because it was given nothing to
+    // observe. Run the pair with the file, not with -t alone.
+    expect(priorDir).not.toBe('')
+    expect(existsSync(priorDir)).toBe(false)
+  })
+
+  test('control C: N runs net ZERO new fixture dirs in /tmp', () => {
+    const before = fixtureNames()
+    const r1 = cheapRun()
+    const r2 = cheapRun()
+    const mine = [basename(r1.dir), basename(r2.dir)]
+    const during = fixtureNames()
+
+    // POSITIVE CONTROL ON THE COUNTER. The two dirs that certainly exist right now
+    // must be VISIBLE to the readdir+regex the assertions below count with. If the
+    // mkdtemp prefix or suffix length ever changes, this fails loudly here instead of
+    // letting the after-count report a serene 0 == 0 over a regex matching nothing.
+    expect(mine.filter((name) => during.has(name))).toEqual(mine)
+    expect(before.has(mine[0] as string)).toBe(false)
+    expect(before.has(mine[1] as string)).toBe(false)
+
+    reapFixtures()
+
+    const after = fixtureNames()
+    // THE CLAIM: counted over the same path, both are gone — net zero.
+    expect(mine.filter((name) => after.has(name))).toEqual([])
+
+    // "…AND THE REAP DID NOT TAKE THE REST OF /tmp WITH IT" DELIBERATELY IS NOT
+    // ASSERTED HERE, AND THAT IS THE POINT OF THIS COMMENT.
+    //
+    // The obvious way to write it —
+    //     expect([...before].filter((name) => !after.has(name))).toEqual([])
+    // — asks whether ANY pre-existing `trident-codex-build-*` dir in the shared /tmp
+    // namespace vanished during this case's ~190ms window. That is not a fact about
+    // this reaper. It is a fact about every OTHER process on the box, and it goes red
+    // when any of them removes one of its own dirs: a sibling lane running this very
+    // suite (i.e. this fix, once it propagates), control D's own `rmSync(foreign)` in
+    // a sibling process, or an operator drain of stale fixtures.
+    //
+    // Worse, it is a guard that gets STRICTER as the leak it guards gets fixed — it
+    // was only ever quiet because siblings LEAKED. A test that passes only while the
+    // bug is present is not a control, and this repo has already lost days to a flaky
+    // test reddening main and blaming whichever diff was in flight.
+    //
+    // The claim is real and worth keeping, so it lives in `control D`, which makes it
+    // HERMETICALLY: D creates its own unregistered `foreign` dir, registers one beside
+    // it so the reap is genuine work rather than a vacuous no-op, and asserts `foreign`
+    // survives with its contents intact. Nothing another process does can perturb that.
+  })
+
+  test('control D: the reaper removes ONLY dirs it registered', () => {
+    // The most important control in this set. A glob reaper (`rm -rf
+    // /tmp/trident-codex-build-*`) would pass A, B and C and silently delete a
+    // concurrent lane's in-flight fixture. `foreign` stands in for that lane: same
+    // prefix, same parent, NOT registered here.
+    const foreign = mkdtempSync(join(tmpdir(), 'trident-codex-build-'))
+    writeFileSync(join(foreign, 'a-sibling-lane-is-building-in-here.txt'), 'live\n')
+    try {
+      // Registered alongside it, so the reap under test is REAL work and not a no-op:
+      // without this, a reaper that did nothing at all would also leave `foreign`
+      // standing and pass vacuously.
+      const ours = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
+      reapFixtures()
+      expect(existsSync(ours)).toBe(false)
+      expect(existsSync(foreign)).toBe(true)
+      expect(readFileSync(join(foreign, 'a-sibling-lane-is-building-in-here.txt'), 'utf8')).toBe(
+        'live\n',
+      )
+    } finally {
+      rmSync(foreign, { recursive: true, force: true })
+    }
+  })
+
+  test('control E: an entry that CANNOT be removed is a leak, not a red suite', () => {
+    // Reaping is best-effort by design: an entry rmSync throws on must neither turn a
+    // passing case red nor abandon the rest of the registry.
+    //
+    // A merely-absent path would NOT exercise this — `force: true` makes that a silent
+    // no-op — so the entry has to be one rmSync genuinely refuses. A NUL in the path is
+    // refused deterministically (ERR_INVALID_ARG_VALUE) for every user, including root,
+    // which a chmod-based lock would not be.
+    const unremovable = `${join(tmpdir(), 'trident-codex-build-refused')}${String.fromCharCode(0)}x`
+    // POSITIVE CONTROL ON THE FIXTURE: prove the entry really does throw. Without it an
+    // rmSync that quietly tolerated the path would make the assertions below pass while
+    // the catch under test was never entered.
+    expect(() => rmSync(unremovable, { recursive: true, force: true })).toThrow()
+
+    // Pushed so the BAD entry is popped FIRST (the reaper pops from the end): the
+    // survivor is only reached if the loop continues past the throw.
+    const survivor = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
+    FIXTURE_DIRS.push(unremovable)
+
+    expect(() => reapFixtures()).not.toThrow()
+    expect(existsSync(survivor)).toBe(false)
+    expect(FIXTURE_DIRS.length).toBe(0)
   })
 })

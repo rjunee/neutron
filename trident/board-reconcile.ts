@@ -7,13 +7,12 @@
  * composes it alongside delivery via `withTerminalObserver`), so it fires
  * exactly once per run as the loop transitions it terminal.
  *
- * Reconcile sets the lane from the outcome: a `done` run CLEARS the run binding
- * (the fork `⑂` icon goes dark) and COMPLETES the item (datestamped history); a
- * `failed`/`stopped` run marks the item FAILED and KEEPS its run binding (#340)
- * so the client shows the red dot + "Failed" tag + the run's `failure_reason`
- * one-liner and the ▶/↻ retry re-dispatches against the same card. Keyed off
- * `linked_run_id` via the store's `detachRun`, so it is idempotent and a NO-OP
- * for an unbound run.
+ * Reconcile sets the lane from the outcome and KEEPS the terminal run binding
+ * on both: a `done` run completes the item (datestamped history) while retaining
+ * any recovered alert, and a `failed`/`stopped` run marks the item FAILED so the
+ * client shows the red dot + `failure_reason` and can retry. Moving a terminal
+ * card back to an active lane clears the stale link. Reconcile is keyed off
+ * `linked_run_id`, so it is idempotent and a NO-OP for an unbound run.
  */
 
 import type { TridentRun } from './store.ts'

@@ -2,9 +2,8 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { Database } from 'bun:sqlite'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 
 import {
@@ -26,9 +25,7 @@ const FIXED_NOW = new Date('2026-04-15T16:00:00Z')
 function freshDb(): { tmp: string; projectDb: ProjectDb; close: () => void } {
   const tmp = mkdtempSync(join(tmpdir(), 'reminders-chat-'))
   const dbPath = join(tmp, 'project.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const projectDb = ProjectDb.open(dbPath)
   return {
     tmp,

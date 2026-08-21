@@ -20,7 +20,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { runDrivingVerdict, WAKEUP_STAND_DOWN_MS } from '@neutronai/trident/run-driving.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
@@ -33,8 +33,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), 'neutron-wb-live-run-'))
+  seedMigratedDb(join(dir, 'project.db'))
   db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
 })
 afterEach(() => {
   db.close()

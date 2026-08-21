@@ -9,7 +9,7 @@
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -46,8 +46,8 @@ export interface TestFixture {
 
 export function makeFixture(): TestFixture {
   const dir = mkdtempSync(join(tmpdir(), 'wow-action-'))
+  seedMigratedDb(join(dir, 'project.db'))
   const db = ProjectDb.open(join(dir, 'project.db'))
-  applyMigrations(db.raw())
   const reminders = new ReminderStore(db)
   const cron_jobs = new CronJobRegistry()
   const cron_state = new CronStateStore(db)

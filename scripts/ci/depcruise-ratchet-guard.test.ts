@@ -18,7 +18,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -140,8 +140,8 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
 
-/** Run the guard shell script rooted at `repo`, MAIN_REF=main; return { code, out }. */
-function runGuard(repo: string): { code: number; out: string } {
+/** Run the guard shell script rooted at `repo`; return { code, out }. */
+function runGuard(repo: string, mainRef = 'main'): { code: number; out: string } {
   try {
     const out = execFileSync('bash', [GUARD_SH], {
       encoding: 'utf8',
@@ -149,7 +149,8 @@ function runGuard(repo: string): { code: number; out: string } {
       env: {
         ...process.env,
         DEPCRUISE_RATCHET_ROOT: repo,
-        DEPCRUISE_RATCHET_MAIN_REF: 'main',
+        DEPCRUISE_RATCHET_MAIN_REF: mainRef,
+        NEUTRON_BUN_BIN: process.env.NEUTRON_BUN_BIN ?? 'bun',
       },
     })
     return { code: 0, out }
@@ -157,6 +158,31 @@ function runGuard(repo: string): { code: number; out: string } {
     const err = e as { status?: number; stdout?: string; stderr?: string }
     return { code: err.status ?? -1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` }
   }
+}
+
+/** A bare origin with three main commits and the real baseline shape. */
+function originWithBaseline(): { root: string; origin: string } {
+  const root = mkdtempSync(join(tmpdir(), 'depcruise-ratchet-origin-'))
+  const origin = join(root, 'origin.git')
+  const seed = join(root, 'seed')
+  git(root, 'init', '--bare', '-q', origin)
+  mkdirSync(seed)
+  git(seed, 'init', '-q', '-b', 'main')
+  git(seed, 'config', 'user.email', 'g8@test.local')
+  git(seed, 'config', 'user.name', 'G8 Test')
+  writeFileSync(join(seed, BASELINE_NAME), JSON.stringify([V_A, V_B], null, 2))
+  git(seed, 'add', BASELINE_NAME)
+  git(seed, 'commit', '-q', '-m', 'baseline')
+  for (const n of [2, 3]) {
+    const history = `history-${n}.txt`
+    writeFileSync(join(seed, history), `commit ${n}\n`)
+    git(seed, 'add', history)
+    git(seed, 'commit', '-q', '-m', `history ${n}`)
+  }
+  git(seed, 'remote', 'add', 'origin', `file://${origin}`)
+  git(seed, 'push', '-q', '-u', 'origin', 'main')
+  git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  return { root, origin }
 }
 
 const BASELINE_NAME = '.dependency-cruiser-known-violations.json'
@@ -189,6 +215,66 @@ function featureBranchWithBaseline(repo: string, baseline: DepcruiseViolation[] 
 }
 
 describe('G8 depcruise ratchet guard (git integration)', () => {
+  test('the freshen never shallows a full clone', () => {
+    const { root, origin } = originWithBaseline()
+    const work = join(root, 'work')
+    try {
+      git(root, 'clone', '-q', `file://${origin}`, work)
+      const shallowFile = join(work, '.git', 'shallow')
+      expect(existsSync(shallowFile)).toBe(false)
+      expect(git(work, 'rev-parse', '--is-shallow-repository')).toBe('false')
+      const mainCommitCount = Number(git(work, 'rev-list', '--count', 'origin/main'))
+      expect(mainCommitCount).toBeGreaterThanOrEqual(3)
+
+      git(work, 'config', 'user.email', 'g8@test.local')
+      git(work, 'config', 'user.name', 'G8 Test')
+      git(work, 'checkout', '-q', '-b', 'pr')
+      writeFileSync(join(work, 'unrelated.txt'), 'feature work\n')
+      git(work, 'add', 'unrelated.txt')
+      git(work, 'commit', '-q', '-m', 'unrelated feature work')
+
+      const result = runGuard(work, 'origin/main')
+      expect(result.code).toBe(0)
+      // Before the fix, `fetch --depth=1` into this full clone wrote
+      // `.git/shallow` and truncated origin/main to 1 (measured 2026-08-19).
+      expect({
+        shallowFilePresent: existsSync(shallowFile),
+        shallowRepository: git(work, 'rev-parse', '--is-shallow-repository'),
+        originMainCommitCount: Number(git(work, 'rev-list', '--count', 'origin/main')),
+      }).toEqual({
+        shallowFilePresent: false,
+        shallowRepository: 'false',
+        originMainCommitCount: mainCommitCount,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('an already-shallow checkout still gets origin/main', () => {
+    const { root, origin } = originWithBaseline()
+    const work = join(root, 'shallow-work')
+    try {
+      git(root, 'clone', '-q', '--depth=1', `file://${origin}`, work)
+      const shallowFile = join(work, '.git', 'shallow')
+      // Anti-fake: a transport that ignored --depth must fail this test loudly.
+      expect(existsSync(shallowFile)).toBe(true)
+      git(work, 'update-ref', '-d', 'refs/remotes/origin/main')
+      git(work, 'config', 'user.email', 'g8@test.local')
+      git(work, 'config', 'user.name', 'G8 Test')
+      git(work, 'checkout', '-q', '-b', 'pr')
+      writeFileSync(join(work, 'unrelated.txt'), 'feature work\n')
+      git(work, 'add', 'unrelated.txt')
+      git(work, 'commit', '-q', '-m', 'unrelated feature work')
+
+      const result = runGuard(work, 'origin/main')
+      expect(result.code).toBe(0)
+      expect(git(work, 'rev-parse', '--verify', 'origin/main')).not.toBe('')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   test('a feature branch that GROWS the baseline → guard FAILS', () => {
     const repo = repoOnMainWithBaseline()
     try {
@@ -264,4 +350,31 @@ describe('G8 depcruise ratchet guard (git integration)', () => {
       rmSync(repo, { recursive: true, force: true })
     }
   })
+})
+
+/**
+ * T4 (card 01M0CJ0TT0RA7YZ2ZJ0DQK2CDF) — THE SHALLOW CASE IS THE DEFECT, so it is
+ * asserted directly. A test on a full clone proves nothing: that is the state in
+ * which the bug cannot occur.
+ *
+ * Two things are pinned. First, the guard must not SHALLOW a full clone — the
+ * unconditional `git fetch --depth=1` this branch removed truncated the shared
+ * checkout and produced three unrelated-looking failures in one night. Second, on
+ * a checkout that IS shallow, the guard must NAME that rather than reporting an
+ * unreachable ref; all three of those failures were true statements that pointed
+ * nowhere.
+ */
+describe('G8 depcruise ratchet guard — shallow checkouts', () => {
+  test('a FULL clone stays full after the guard runs (it used to be truncated)', () => {
+    const repo = repoOnMainWithBaseline()
+    try {
+      expect(existsSync(join(repo, '.git', 'shallow'))).toBe(false)
+      runGuard(repo)
+      // The regression: --depth=1 against a full clone writes .git/shallow.
+      expect(existsSync(join(repo, '.git', 'shallow'))).toBe(false)
+    } finally {
+      rmSync(repo, { recursive: true, force: true })
+    }
+  })
+
 })

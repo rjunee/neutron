@@ -24,7 +24,7 @@ import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import type { ChatOutbound } from '@neutronai/landing/chat-protocol.ts'
 import type { AppWsOutbound } from '@neutronai/channels/adapters/app-ws/envelope.ts'
 import { InMemoryAppWsSessionRegistry } from '@neutronai/channels/adapters/app-ws/session-registry.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { ChatMessagePushSink } from '../../push/chat-message-push.ts'
 import { InMemoryWebChatSenderRegistry } from '../chat-sender-registry.ts'
@@ -612,8 +612,8 @@ describe('an idempotent re-emit does not buzz twice — real ButtonStore', () =>
 
   beforeEach(() => {
     tmp = mkdtempSync(join(tmpdir(), 'neutron-deliver-'))
+    seedMigratedDb(join(tmp, 'project.db'))
     db = ProjectDb.open(join(tmp, 'project.db'))
-    applyMigrations(db.raw())
     store = new ButtonStore({ db })
   })
 

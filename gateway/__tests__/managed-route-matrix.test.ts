@@ -26,7 +26,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Server, WebSocketHandler } from 'bun'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { composeProductionGraph } from '../composition.ts'
@@ -94,8 +94,8 @@ interface GraphHarness {
  */
 async function bootManagedGraph(): Promise<GraphHarness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-managed-route-matrix-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   const auth_gate: CompositionInput['auth_gate'] = {
     project_slug: OWNER,
@@ -228,8 +228,8 @@ describe('G1 — Managed-contract: connect_api is the field that mounts the cros
     seed?: (db: ProjectDb) => void,
   ): Promise<void> {
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-managed-connect-'))
+    seedMigratedDb(join(tmp, 'owner.db'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
     seed?.(db)
     const connect_api = buildConnectApi?.(db)
     const graph = await composeProductionGraph({

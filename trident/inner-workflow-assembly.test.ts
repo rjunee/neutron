@@ -64,6 +64,10 @@ interface RunOpts {
    * the legacy-contract case (the workflow defaults it to '').
    */
   testStrategy?: string
+  /** The rendered subset-scoped TEST EXECUTION block used by intermediate Ralph rounds. */
+  testStrategyIntermediate?: string
+  /** Planner claim used to select terminal (0) versus intermediate (>0) Ralph scope. */
+  planRemainingTasks?: number
   /**
    * What every forge build/fix round reports for `testsPassed`. Defaults to `true`
    * (a healthy build). `false` is the case criterion 5 is about: the build says the
@@ -86,6 +90,10 @@ interface RunOpts {
    * wants the checkpoint steps silent.
    */
   recordCheckpoints?: boolean
+  /** Explicit coordinates let stage-stamp gating cover either half missing. */
+  dbPath?: string | null
+  runId?: string | null
+  stageStampScript?: string | null
   /** `'pr'` stops the run at the durable publisher handoff, which is where the build's
    *  claim and the review panel end up in DIFFERENT PROCESSES. */
   mergeMode?: 'pr' | 'local'
@@ -124,14 +132,14 @@ async function runWorkflow(
       return { verdict: opts.approveAll === true ? 'APPROVE' : 'REQUEST_CHANGES', findings: [] }
     }
     if (label === 'plan:fable') {
-      // `remainingTasks: 0` so the run does NOT hand back to the outer loop for a
-      // re-fire — it continues into forge:build + the full review panel.
+      // `remainingTasks: 0` by default so the run does NOT hand back to the outer loop
+      // for a re-fire — it continues into forge:build + the full review panel.
       return {
         implementationPlan: '- [ ] the one task',
         topTask: 'the one task',
         executionSpec: 'TARGET FILES: x.ts',
         complexity: 'reasoning',
-        remainingTasks: 0,
+        remainingTasks: opts.planRemainingTasks ?? 0,
       }
     }
     if ((label === 'argus:kimi' || label === 'argus:kimi-retry' || label === 'argus:codex' || label === 'argus:codex-retry') && prompt.includes('KIMI K3 CROSS-MODEL REVIEW')) {
@@ -173,9 +181,16 @@ async function runWorkflow(
     prNumber: null,
     branch: null,
     // dbPath null → checkpoint()/writeTerminalResult() no-op (no bash agent steps).
-    dbPath: opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
-    runId: opts.recordCheckpoints === true ? 'run-assembly-1' : null,
+    dbPath: opts.dbPath !== undefined
+      ? opts.dbPath
+      : opts.recordCheckpoints === true ? '/tmp/does-not-exist.db' : null,
+    runId: opts.runId !== undefined
+      ? opts.runId
+      : opts.recordCheckpoints === true ? 'run-assembly-1' : null,
     checkpointScript: opts.recordCheckpoints === true ? '/repo/trident/checkpoint.sh' : null,
+    stageStampScript: opts.stageStampScript === undefined
+      ? '/harness/trident/stage-stamp.sh'
+      : opts.stageStampScript,
     codexBuildScript: '/harness/trident/codex-build.sh',
     codexReviewScript: '/harness/trident/codex-review.sh',
     resumeCheckpoint: null,
@@ -191,6 +206,7 @@ async function runWorkflow(
     },
   }
   if (opts.testStrategy !== undefined) args.testStrategy = opts.testStrategy
+  if (opts.testStrategyIntermediate !== undefined) args.testStrategyIntermediate = opts.testStrategyIntermediate
   if (opts.briefParts !== undefined) args.briefParts = opts.briefParts
   if (opts.codexBuild) {
     args.phaseModels = { build: { model: 'gpt' } }
@@ -208,6 +224,23 @@ async function runWorkflow(
   return { captured, result, logs }
 }
 
+/**
+ * WHAT THE TRANSPORT BLOCKS ACTUALLY CARRY. Since 2026-08-19 the segments travel
+ * base64 (run `4908cbf7`: the agent deleted a phrase out of a prose heredoc, twice),
+ * so `prompt.toContain('<task text>')` can no longer see the payload — and a test that
+ * only asserted ABSENCE would have passed for the wrong reason forever after. These
+ * assertions decode first, so "the task is not in the prompt" stays falsifiable.
+ */
+function decodeTransport(prompt: string): string {
+  const re = /base64 -d >>? '[^']*' <<'(NEUTRON_CODEX_B64_EOF_P\d+)'\n([\s\S]*?)\n\1/g
+  let m: RegExpExecArray | null
+  let out = ''
+  while ((m = re.exec(prompt)) !== null) {
+    out += Buffer.from(String(m[2]).replace(/\n/g, ''), 'base64').toString('utf8')
+  }
+  return out
+}
+
 const LARGE_TASK = [
   ...Array.from({ length: 400 }, (_, i) => `${String(i).padStart(4, '0')} ${'task contract bytes '.repeat(4)}`),
   `${'é'.repeat(5000)} TASKBYTES_MARKER_Q9`,
@@ -215,6 +248,62 @@ const LARGE_TASK = [
 
 const forgeBuildPrompt = (captured: Captured[]): string =>
   captured.find((c) => c.label === 'forge:build')?.prompt ?? ''
+
+const STAGE_DB = '/tmp/stage-events.db'
+const STAGE_RUN = 'run-stage-events'
+const STAGE_SCRIPT = '/harness/trident/stage-stamp.sh'
+const stageCommand = (stage: string): string =>
+  `bash '${STAGE_SCRIPT}' '${STAGE_DB}' '${STAGE_RUN}' '${stage}'`
+
+describe('inner-workflow.mjs — workflow-side stage stamps on existing turns', () => {
+  test('plan:fable and Claude Forge lead with their gated stage calls without adding a stage seat', async () => {
+    const { captured } = await runWorkflow('', {
+      ralph: true,
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+    })
+
+    const fable = captured.find((c) => c.label === 'plan:fable')?.prompt ?? ''
+    expect(fable).toStartWith(
+      `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stageCommand('plan-start')}\`\n\n`,
+    )
+
+    const forgePrompts = captured.filter(
+      (c) => c.label === 'forge:build' || String(c.label).startsWith('forge:fix-round-'),
+    )
+    expect(forgePrompts.length).toBeGreaterThan(0)
+    for (const forge of forgePrompts) {
+      expect(forge.prompt).toStartWith(
+        `FIRST run exactly this one Bash command, then proceed; never let it affect your work:\n\`${stageCommand('build-agent-start')}\`\n\n`,
+      )
+    }
+
+    expect(captured.some((c) => String(c.label).includes('stage'))).toBe(false)
+  })
+
+  test.each([
+    { name: 'dbPath missing', dbPath: null, runId: STAGE_RUN },
+    { name: 'runId missing', dbPath: STAGE_DB, runId: null },
+  ])('$name leaves plan:fable and Claude Forge byte-identical to the unstamped output', async ({ dbPath, runId }) => {
+    const common = { ralph: true, dbPath, runId }
+    const withConfiguredScript = (await runWorkflow('', {
+      ...common,
+      stageStampScript: STAGE_SCRIPT,
+    })).captured
+    const withFallbackScript = (await runWorkflow('', {
+      ...common,
+      stageStampScript: null,
+    })).captured
+
+    for (const label of ['plan:fable', 'forge:build', 'forge:fix-round-2']) {
+      const configured = withConfiguredScript.find((c) => c.label === label)?.prompt ?? ''
+      const fallback = withFallbackScript.find((c) => c.label === label)?.prompt ?? ''
+      expect(configured).toBe(fallback)
+      expect(configured).not.toContain('plan-start')
+      expect(configured).not.toContain('build-agent-start')
+    }
+  })
+})
 
 describe('inner-workflow.mjs — artifact-time durability checkpoint', () => {
   test('threads the semantic checkpoint names into round-one and fix-round contracts', async () => {
@@ -235,10 +324,88 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     reflectionIntegrity: null,
   })
 
+  test('threads the stage writer beside checkpoint coordinates and omits it without them', async () => {
+    const withCoordinates = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      recordCheckpoints: true,
+    })).captured)
+    expect(withCoordinates).toContain(
+      "NEUTRON_CODEX_BUILD_CHECKPOINT_DB='/tmp/does-not-exist.db' NEUTRON_CODEX_BUILD_CHECKPOINT_RUN_ID='run-assembly-1' NEUTRON_CODEX_BUILD_CHECKPOINT_NAME='forge-done' NEUTRON_CODEX_BUILD_STAGE_SCRIPT='/harness/trident/stage-stamp.sh'",
+    )
+
+    const withoutCoordinates = forgeBuildPrompt((await runWorkflow('', { codexBuild: true })).captured)
+    expect(withoutCoordinates).not.toContain('NEUTRON_CODEX_BUILD_STAGE_SCRIPT=')
+  })
+
+  test('stamps build-agent-start as a standalone call before CALL 1 with never-merge wording', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+    })).captured)
+    const stamp = stageCommand('build-agent-start')
+    const stampIndex = prompt.indexOf(`\`${stamp}\``)
+    const callOneIndex = prompt.indexOf('CALL 1 of ')
+
+    expect(stampIndex).toBeGreaterThan(-1)
+    expect(callOneIndex).toBeGreaterThan(stampIndex)
+    expect(prompt.slice(stampIndex, callOneIndex)).toContain(
+      'This is its own separate Bash call. NEVER merge or combine it with CALL 1 or any chunk write.',
+    )
+  })
+
+  test('prefixes the detached launch line with wrapper-invoke before the unchanged rm/nohup sequence', async () => {
+    const prompt = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      dbPath: STAGE_DB,
+      runId: STAGE_RUN,
+    })).captured)
+    const unstampedPrompt = forgeBuildPrompt((await runWorkflow('', {
+      codexBuild: true,
+      dbPath: null,
+      runId: STAGE_RUN,
+    })).captured)
+    const prefix = `${stageCommand('wrapper-invoke')}; rm -f `
+    const launchIndex = prompt.indexOf(prefix)
+    const launchLine = prompt.slice(launchIndex, prompt.indexOf('\n', launchIndex))
+    const unstampedLaunchLine = unstampedPrompt.split('\n').find((line) => line.startsWith('rm -f '))
+    if (unstampedLaunchLine === undefined) throw new Error('unstamped detached launch line missing')
+
+    expect(launchIndex).toBeGreaterThan(-1)
+    expect(prompt.indexOf('nohup setsid ', launchIndex)).toBeGreaterThan(launchIndex + prefix.length)
+    expect(launchLine).toMatch(
+      /^bash .* 'wrapper-invoke'; rm -f .*; nohup setsid /,
+    )
+    expect(launchLine.slice(stageCommand('wrapper-invoke').length + 2)).toBe(unstampedLaunchLine)
+  })
+
+  test.each([
+    { name: 'dbPath missing', dbPath: null, runId: STAGE_RUN },
+    { name: 'runId missing', dbPath: STAGE_DB, runId: null },
+  ])('$name leaves both Codex insertion points byte-identical to the unstamped output', async ({ dbPath, runId }) => {
+    const common = { codexBuild: true, dbPath, runId }
+    const configured = forgeBuildPrompt((await runWorkflow('', {
+      ...common,
+      stageStampScript: STAGE_SCRIPT,
+    })).captured)
+    const fallback = forgeBuildPrompt((await runWorkflow('', {
+      ...common,
+      stageStampScript: null,
+    })).captured)
+
+    expect(configured).toBe(fallback)
+    expect(configured).not.toContain('build-agent-start')
+    expect(configured).not.toContain('wrapper-invoke')
+  })
+
   test('a >30 KB task travels by path and is absent from every agent prompt', async () => {
     expect(new TextEncoder().encode(LARGE_TASK).length).toBeGreaterThan(30_000)
     const { captured } = await runWorkflow('', { codexBuild: true, task: LARGE_TASK, briefParts: taskParts() })
-    for (const call of captured) expect(call.prompt).not.toContain('TASKBYTES_MARKER_Q9')
+    for (const call of captured) {
+      expect(call.prompt).not.toContain('TASKBYTES_MARKER_Q9')
+      // …and not hidden inside the encoded payload either.
+      expect(decodeTransport(call.prompt)).not.toContain('TASKBYTES_MARKER_Q9')
+    }
     const prompt = forgeBuildPrompt(captured)
     expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
     expect(prompt).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
@@ -257,7 +424,9 @@ describe('inner-workflow.mjs — Codex build brief by-path transport', () => {
     expect(byPath).toContain('NEUTRON_CODEX_BUILD_BRIEF_PART_INTEGRITY=')
     expect(byPath).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
     expect(fallback).toContain('NEUTRON_CODEX_BUILD_BRIEF_INTEGRITY=')
-    expect(fallback).toContain('TASKBYTES_MARKER_Q9')
+    // In fallback the task DOES transit the agent — encoded, so decode to see it.
+    // Paired with the by-path test above, which decodes and finds nothing.
+    expect(decodeTransport(fallback)).toContain('TASKBYTES_MARKER_Q9')
     expect(fallback).not.toContain('NEUTRON_CODEX_BUILD_BRIEF_PARTS=')
   })
 
@@ -381,7 +550,10 @@ describe('inner-workflow.mjs — by-path transport lockstep (emitted blocks run 
     )
     expect(blocks.length).toBeGreaterThanOrEqual(2)
     for (const block of blocks) {
-      expect(block.startsWith('cat ') || block.startsWith('printf ')).toBe(true)
+      // The transport is base64 since 2026-08-19 (run 4908cbf7: the agent deleted a
+      // phrase out of a prose heredoc, twice). Asserting the verb keeps this test
+      // honest about WHICH transport it just executed.
+      expect(block.startsWith('base64 -d ')).toBe(true)
     }
 
     for (const block of blocks) {
@@ -955,6 +1127,51 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       })
       expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
     })
+
+    test('deferred on an intermediate Ralph round records no suite finding', async () => {
+      const { captured, result } = await runWorkflow('', {
+        ralph: true,
+        planRemainingTasks: 2,
+        testStrategy: STRATEGY,
+        testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
+        testsPassed: false,
+        suiteOutcome: 'deferred',
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      expect(result.publishRequested).toBe(true)
+      expect(result.remainingTasks).toBe(2)
+      expect(checkpointPrompt(captured, 'forge-done')).toContain("printf '%s' '[]'")
+      expect(checkpointPrompt(captured, 'forge-done')).not.toContain('FULL SUITE NOT PROVEN')
+      expect(forgeBuildPrompt(captured)).toContain("suiteOutcome='deferred'")
+      expect(forgeBuildPrompt(captured)).not.toContain("suiteOutcome='not-run'")
+    })
+
+    test('not-run on the same intermediate Ralph round still records the blocker', async () => {
+      const { captured } = await runWorkflow('', {
+        ralph: true,
+        planRemainingTasks: 2,
+        testStrategy: STRATEGY,
+        testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
+        testsPassed: false,
+        suiteOutcome: 'not-run',
+        mergeMode: 'pr',
+        recordCheckpoints: true,
+      })
+      expect(checkpointPrompt(captured, 'forge-done')).toContain('FULL SUITE NOT PROVEN')
+    })
+  })
+
+  test('deferred on the terminal Ralph round still blocks', async () => {
+    const { result } = await runWorkflow('', {
+      ralph: true,
+      testStrategy: STRATEGY,
+      testStrategyIntermediate: 'TEST EXECUTION\n\nintermediate subset rules',
+      testsPassed: false,
+      suiteOutcome: 'deferred',
+      approveAll: true,
+    })
+    expect(result.verdict).toBe('REQUEST_CHANGES')
   })
 
   /**
@@ -1040,7 +1257,7 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       expect(result.verdict).toBe('REQUEST_CHANGES')
     })
 
-    test.each(['failed-new', 'not-run', 'failed-preexisting'])(
+    test.each(['failed-new', 'not-run', 'failed-preexisting', 'deferred'])(
       'testsPassed=true with %s is contradictory and fails closed',
       async (outcome) => {
         const { captured, result } = await runWorkflow('', {
@@ -1056,7 +1273,7 @@ describe('AS-BUILT: the full-suite gate gives testsPassed teeth', () => {
       },
     )
 
-    test.each(['failed-new', 'not-run'])('%s is still a BLOCKER — the hatch is narrow', async (outcome) => {
+    test.each(['failed-new', 'not-run', 'deferred'])('%s is still a BLOCKER — the hatch is narrow', async (outcome) => {
       const { result } = await runWorkflow('', {
         testStrategy: STRATEGY,
         testsPassed: false,

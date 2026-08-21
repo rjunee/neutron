@@ -32,7 +32,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { writeOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
@@ -197,8 +197,8 @@ beforeEach(async () => {
   delete process.env['CLAUDE_CODE_OAUTH_TOKEN']
   process.env['NEUTRON_DISABLE_AMBIENT_CLAUDE_AUTH'] = '1'
   delete process.env['NOTIFY_SOCKET']
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'])
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
   // A stored zone, so the cron resolution exercises the real
   // `instance_metadata.timezone` read rather than only its fallback.
   await writeOwnerTimezone(db, 'owner', 'America/Los_Angeles')

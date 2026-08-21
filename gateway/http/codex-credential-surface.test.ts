@@ -12,13 +12,14 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { ProjectCredentialStore } from '@neutronai/project-credentials/store.ts'
 import { createAppWsAuthResolver } from '@neutronai/channels/adapters/app-ws/auth.ts'
 import { codexAuthPath, codexProjectHome } from '@neutronai/trident/codex-auth.ts'
 import { CodexCredentialService } from '@neutronai/trident/codex-credential.ts'
+import { SqliteCodexRotationStore } from '@neutronai/trident/codex-rotation-store.ts'
 import { createCodexCredentialSurface, type CodexCredentialSurface } from './codex-credential-surface.ts'
 
 const SLUG = 'owner'
@@ -48,12 +49,12 @@ function req(method: string, path: string, body?: unknown, withAuth = true): Req
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'codex-surface-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')
-  const service = new CodexCredentialService({ store, codexHome })
+  const service = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db) })
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
   surface = createCodexCredentialSurface({ service, auth })
 })
@@ -171,5 +172,117 @@ describe('codex-auth HTTP surface — PROJECT OVERRIDE', () => {
     expect(res?.status).toBe(400)
     const body = (await res!.json()) as { code: string }
     expect(body.code).toBe('invalid_project_id')
+  })
+})
+
+describe('codex-auth HTTP surface — MULTIPLE SEATS', () => {
+  // MUTATION: drop the slug validation in `connectAccount`.
+  test('POST with a malformed account name → 400, and nothing is stored', async () => {
+    const res = await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'Work Seat' }))
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { ok: boolean; code: string }
+    expect(body.ok).toBe(false)
+    expect(body.code).toBe('invalid_account')
+    expect(existsSync(join(codexHome, 'accounts'))).toBe(false)
+  })
+
+  test('POST with an account name → 201, materialized to that seat OWN dir', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() }))
+    const res = await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    expect(res?.status).toBe(201)
+    const body = (await res!.json()) as { status: string; account: string }
+    expect(body.status).toBe('connected')
+    expect(body.account).toBe('work')
+    expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(true)
+    // The first seat is a separate directory and is untouched.
+    expect(existsSync(codexAuthPath(codexHome))).toBe(true)
+  })
+
+  // MUTATION: rename or drop any of the legacy top-level fields on GET.
+  test('GET keeps every legacy top-level field and ADDS the seat list', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() }))
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    const res = await surface.handler(req('GET', GLOBAL))
+    const body = (await res!.json()) as {
+      ok: boolean
+      status: string
+      materialized: boolean
+      scope: string
+      detail: string
+      accounts: { slot: string; active: boolean; cooling: boolean }[]
+      active: string
+      next: string
+      exhausted: boolean
+    }
+    // A client written before rotation existed must still read what it always read.
+    expect(body.ok).toBe(true)
+    expect(body.status).toBe('connected')
+    expect(body.materialized).toBe(true)
+    expect(body.scope).toBe('global')
+    expect(typeof body.detail).toBe('string')
+    // …and the additive fields.
+    expect(body.accounts.map((a) => a.slot).sort()).toEqual(['default', 'work'])
+    expect(body.active).toBe('default')
+    expect(body.next).toBe('default')
+    expect(body.exhausted).toBe(false)
+    expect(body.accounts.find((a) => a.slot === 'default')?.active).toBe(true)
+  })
+
+  test('GET never leaks token material in the seat list', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    const res = await surface.handler(req('GET', GLOBAL))
+    const raw = await res!.text()
+    for (const secret of ['access_token', 'refresh_token', '"acc"', '"ref"']) {
+      expect(raw).not.toContain(secret)
+    }
+  })
+
+  test('DELETE ?account=<slot> removes ONE seat and leaves the other connected', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() }))
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    const res = await surface.handler(req('DELETE', `${GLOBAL}?account=work`))
+    expect(res?.status).toBe(200)
+    expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(false)
+    expect(existsSync(codexAuthPath(codexHome))).toBe(true)
+  })
+
+  test('DELETE for an unknown seat → 404', async () => {
+    const res = await surface.handler(req('DELETE', `${GLOBAL}?account=ghost`))
+    expect(res?.status).toBe(404)
+  })
+
+  test('DELETE with no account still removes the first seat, as it always did', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() }))
+    const res = await surface.handler(req('DELETE', GLOBAL))
+    expect(res?.status).toBe(200)
+    expect(existsSync(codexAuthPath(codexHome))).toBe(false)
+  })
+
+  // MUTATION: route the unqualified DELETE to `disconnect` (first seat only)
+  // instead of `disconnectAllAccounts`.
+  //
+  // This is the shipped "Disconnect Codex" button, which sends no account. If it
+  // removed only the first seat, every named seat would stay stored, materialized
+  // and SELECTABLE BY TRIDENT while the owner had been told Codex was
+  // disconnected — a credential still in use that the UI no longer shows.
+  test('DELETE with no account removes EVERY seat, which is what the button says', async () => {
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth() }))
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'spare' }))
+
+    const res = await surface.handler(req('DELETE', GLOBAL))
+    expect(res?.status).toBe(200)
+    const body = (await res!.json()) as { accounts: string[] }
+    expect(body.accounts.sort()).toEqual(['default', 'spare', 'work'])
+
+    // Nothing is left on disk for any seat…
+    expect(existsSync(codexAuthPath(codexHome))).toBe(false)
+    expect(existsSync(join(codexHome, 'accounts', 'work', 'auth.json'))).toBe(false)
+    expect(existsSync(join(codexHome, 'accounts', 'spare', 'auth.json'))).toBe(false)
+    // …and the surface agrees nothing is connected.
+    const after = await surface.handler(req('GET', GLOBAL))
+    const status = (await after!.json()) as { status: string; accounts: unknown[] }
+    expect(status.status).toBe('not_connected')
+    expect(status.accounts).toEqual([])
   })
 })

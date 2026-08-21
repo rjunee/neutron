@@ -40,6 +40,7 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     thread_id: null,
     channel_kind: 'telegram',
     failure_reason: null,
+    brief_alert: null,
     workflow_run_id: null,
     inner_checkpoint: null,
     inner_checkpoint_head: null,
@@ -54,6 +55,8 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     reviewed_head: null,
     bound_pr: null,
     fenced_paths: null,
+    parent_run_id: null,
+    wave_task_id: null,
     ...over,
   }
 }

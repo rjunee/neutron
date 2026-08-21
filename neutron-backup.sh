@@ -78,9 +78,18 @@ SELF=${NEUTRON_BACKUP_SELF:-$SCRIPT_DIR/neutron-backup.sh}
 CODE_DIR=${NEUTRON_SERVICE_CODE_DIR:-$SCRIPT_DIR}
 ENVFILE="$CODE_DIR/.env"
 
+# BLANK IS UNSET — same rule as install.sh's `is_set` and the TypeScript readers
+# (`config/index.ts` § blank-is-unset). A bare `-n` is true for three spaces, and
+# this DATA_DIR is what gets committed and pushed: a whitespace-only NEUTRON_HOME
+# would back up a directory named three spaces (relative to whatever CWD the
+# timer started in) instead of the data dir the server actually writes.
+_is_set() {
+  [ -n "$(printf '%s' "${1:-}" | tr -d '[:space:]')" ]
+}
+
 DATA_DIR=${NEUTRON_HOME:-}
-[ -n "$DATA_DIR" ] || DATA_DIR=$(_dotenv_get "$ENVFILE" NEUTRON_HOME)
-[ -n "$DATA_DIR" ] || DATA_DIR="$HOME/neutron/data"
+_is_set "$DATA_DIR" || DATA_DIR=$(_dotenv_get "$ENVFILE" NEUTRON_HOME)
+_is_set "$DATA_DIR" || DATA_DIR="$HOME/neutron/data"
 
 REMOTE=${NEUTRON_BACKUP_REMOTE:-}
 [ -n "$REMOTE" ] || REMOTE=$(_dotenv_get "$ENVFILE" NEUTRON_BACKUP_REMOTE)

@@ -22,7 +22,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { ButtonStore } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
@@ -47,8 +47,8 @@ let now = 1_000_000
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-lat-timeout-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   now = 1_000_000
   store = new ButtonStore({ db, now: () => now })
 })
@@ -186,12 +186,15 @@ describe('build-live-agent-turn — freeze-timeout auto-retry + Retry affordance
     expect(msg.options ?? []).toHaveLength(0)
   })
 
-  test('tapping Retry recovers the last real user message and re-runs on it', async () => {
+  test('tapping Retry after a failed long turn recovers the last real user message and re-runs on it', async () => {
     const specs: AgentSpec[] = []
     const sent: ChatOutbound[] = []
-    // Turn 1 (the real question) succeeds and records lastUserText; the Retry tap
-    // (turn carrying RETRY_TURN_VALUE) must re-run on the recovered question.
-    const run = makeRunner(makeSeqSubstrate([{ reply: 'first answer' }, { reply: 'second answer' }], specs))
+    // Turn 1 exhausts its automatic retry; the Retry tap then succeeds.
+    const run = makeRunner(makeSeqSubstrate([
+      { error: TURN_TIMEOUT_ERR },
+      { error: TURN_TIMEOUT_ERR },
+      { reply: 'second answer' },
+    ], specs))
     const original = 'weave timer+tracker together then do full e2e testing'
     await run(makeTurn({ sent, user_text: original }))
 
@@ -199,9 +202,23 @@ describe('build-live-agent-turn — freeze-timeout auto-retry + Retry affordance
     const result = await run(makeTurn({ sent, user_text: RETRY_TURN_VALUE }))
     expect(result.outcome).toBe('replied')
     // The SECOND dispatch's prompt carries the recovered original text, not the sentinel.
-    expect(specs).toHaveLength(2)
-    expect(specs[1]!.prompt).toContain(original)
-    expect(specs[1]!.prompt).not.toContain(RETRY_TURN_VALUE)
+    expect(specs).toHaveLength(3)
+    expect(specs[2]!.prompt).toContain(original)
+    expect(specs[2]!.prompt).not.toContain(RETRY_TURN_VALUE)
+  })
+
+  test('a delayed Retry after a completed long turn does not redo completed work', async () => {
+    const specs: AgentSpec[] = []
+    const sent: ChatOutbound[] = []
+    const run = makeRunner(makeSeqSubstrate([{ reply: 'completed once' }], specs))
+    await run(makeTurn({ sent, user_text: 'finish the build' }))
+
+    const result = await run(makeTurn({ sent, user_text: RETRY_TURN_VALUE, button_prompt_id: 'stale-retry' }))
+
+    expect(result.outcome).toBe('replied')
+    expect(specs).toHaveLength(1)
+    expect(sent.filter((e) => e.type === 'agent_message')).toHaveLength(2)
+    expect(sent.at(-1)).toMatchObject({ type: 'agent_message', body: 'That turn already finished.' })
   })
 
   test('a Retry tap with no recorded message falls back to a gentle re-prompt (never echoes the sentinel)', async () => {

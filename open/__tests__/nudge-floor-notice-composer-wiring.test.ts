@@ -41,7 +41,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb, SystemEventsStore, pushSystemEventSink } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import { drainRealmodeCleanups } from '@neutronai/gateway/index.ts'
@@ -158,8 +158,8 @@ async function waitFor(pred: () => boolean, timeoutMs = 40_000): Promise<void> {
 }
 
 async function startHarness(): Promise<Harness> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   // The ambient journal sink the real boot pushes (`gateway/index.ts`). Without it
   // every `emitSystemEventSafe` is a documented no-op, so this is what the harness
   // has to supply for the journal half to be observable at all.

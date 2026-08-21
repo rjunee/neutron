@@ -201,12 +201,41 @@ describe('Codex — reachable from a phone at all', () => {
     );
   });
 
-  it('offers Disconnect only once connected, and hides the paste box', async () => {
-    codexStatus = { status: 'connected', materialized: true };
+  it('offers Disconnect once connected, and KEEPS the paste box for a second seat', async () => {
+    codexStatus = {
+      status: 'connected',
+      materialized: true,
+      accounts: [
+        {
+          slot: 'default',
+          label: null,
+          status: 'connected',
+          cooling: false,
+          cooling_until: null,
+          cooling_reason: null,
+          used_percent: 10,
+          window_minutes: 10080,
+          plan_type: 'pro',
+          active: true,
+        },
+      ],
+      next: 'default',
+    };
     await mountIntegrations();
     expect(byTestId('codex-disconnect')).not.toBeNull();
-    // A paste box beside a working connection is an invitation to break it.
-    expect(byTestId('codex-auth-input')).toBeNull();
+
+    // THIS ASSERTION IS INVERTED FROM WHAT IT ONCE WAS, deliberately. It used to
+    // require the paste box to DISAPPEAR once connected, on the reasoning that a
+    // paste box beside a working connection invites breaking it. That reasoning
+    // held while a Codex subscription was one account for the whole instance; now
+    // the owner can run several seats, and hiding the box is precisely what made
+    // the second one unreachable.
+    expect(byTestId('codex-auth-input')).not.toBeNull();
+
+    // The original concern is answered by the LABEL rather than by hiding the
+    // control: with no seat name typed, a paste replaces the first seat, and the
+    // button says so instead of calling it an addition.
+    expect(byTestId('codex-connect')?.textContent ?? '').toContain('Replace first seat');
   });
 
   it('an EXPIRED credential still offers the paste box AND Disconnect', async () => {

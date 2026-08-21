@@ -17,7 +17,7 @@ import { join } from 'node:path'
 
 import { ButtonStore, type ChatHistoryTurn } from '@neutronai/channels/button-store.ts'
 import { buildButtonPrompt } from '@neutronai/channels/button-primitive.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import {
@@ -45,8 +45,8 @@ const USER_ID = 'user-test'
 
 async function startGateway(): Promise<Harness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-chat-history-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   const store = new ButtonStore({ db })
 
   // Stub the claim via a closure-captured ref so individual tests can

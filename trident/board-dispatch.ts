@@ -10,7 +10,7 @@
  *     N of these for N parallel builds — `work-board-build-tool.ts`), and
  *   - the human `/code --item <id> <task>` chat command (`code-command.ts`).
  *
- * The chokepoint enforces three rules in order, BEFORE any `code_trident_runs`
+ * The chokepoint enforces four rules in order, BEFORE any `code_trident_runs`
  * row is written (so a rejected dispatch leaves zero state):
  *
  *   1. REQUIRED board_item_id — a dispatch with none is REJECTED (`missing_board_item`).
@@ -19,6 +19,9 @@
  *      (`assessDispatchReadiness`: a design_doc_ref OR a detailed title), else
  *      the dispatch is REJECTED (`underspecified`) and the caller's contract is
  *      to ask the owner a clarifying question rather than proceed on guesses.
+ *   4. ALREADY-LANDED work refuses (`already_landed`) — the three 2026-08-17
+ *      rebuild occurrences proved a reusable card branch must be checked for a
+ *      merged PR before another run can claim it.
  *
  * Before creating the run it resolves THIS project's own git-initialized build
  * workspace (`<owner_home>/Projects/<project_slug>/code`, `ensureProjectBuildWorkspace`)
@@ -31,8 +34,8 @@
  * (`store.attachRun` → `linked_run_id` + status=in_progress), so the board
  * lights the fork `⑂` icon the moment the build starts. The durable
  * `TridentTickLoop` then fires the inner Workflow + harvests by runId; the
- * terminal-reconcile path (`build-core-modules` on_terminal) clears the binding
- * and sets the lane (done / back-to-upcoming) when the run lands terminal.
+ * terminal-reconcile path (`build-core-modules` on_terminal) keeps the terminal
+ * evidence binding and sets the lane (done / failed) when the run lands.
  *
  * Layering: depends only on the run store (`TridentRunStore`), the git-mode /
  * ralph detection helpers, and a STRUCTURAL board binder interface (satisfied
@@ -59,8 +62,82 @@ import {
   type PublisherCredentialSource,
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
+import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+
+export interface AlreadyLandedFinding {
+  pr: number
+  merged_at: string | null
+  head_on_base: boolean | null
+  base: string
+}
+
+export type DispatchLandedProbe = (
+  repo_path: string,
+  branch: string,
+) => Promise<AlreadyLandedFinding | null>
+
+/** Build the outer-loop merged-PR probe used by every production dispatch. */
+export function makeDispatchLandedProbe(run: EnvCapableHostRunner): DispatchLandedProbe {
+  return async (repo_path, branch) => {
+    try {
+      const res = await run(
+        [
+          'gh',
+          'pr',
+          'list',
+          '--head',
+          branch,
+          '--state',
+          'merged',
+          '--json',
+          'number,headRefOid,mergedAt',
+          '--jq',
+          '.[0] // empty',
+        ],
+        repo_path,
+      )
+      if (!res.ok || res.stdout.trim().length === 0) return null
+
+      const parsed = JSON.parse(res.stdout) as Record<string, unknown>
+      const pr = parsed['number']
+      if (typeof pr !== 'number' || !Number.isFinite(pr) || !Number.isInteger(pr) || pr <= 0) {
+        return null
+      }
+
+      const base = await detectBaseBranch(run, repo_path)
+      let head_on_base: boolean | null = null
+      const headRefOid =
+        typeof parsed['headRefOid'] === 'string' ? parsed['headRefOid'].trim() : ''
+      if (headRefOid.length >= 40) {
+        await run(['git', '-C', repo_path, 'fetch', '--no-tags', 'origin', base], repo_path)
+        const ancestor = await run(
+          [
+            'git',
+            '-C',
+            repo_path,
+            'merge-base',
+            '--is-ancestor',
+            headRefOid,
+            `refs/remotes/origin/${base}`,
+          ],
+          repo_path,
+        )
+        head_on_base = ancestor.ok ? true : ancestor.exit_code === 1 ? false : null
+      }
+
+      return {
+        pr,
+        merged_at: typeof parsed['mergedAt'] === 'string' ? parsed['mergedAt'] : null,
+        head_on_base,
+        base,
+      }
+    } catch {
+      return null
+    }
+  }
+}
 
 /**
  * The minimal board surface the chokepoint needs: read an item (for the
@@ -87,6 +164,19 @@ export interface BoardBoundBuildInput {
   task: string
   /** The Work Board item this build is bound to. REQUIRED (the hard rule). */
   board_item_id: string | undefined
+  /**
+   * The EXISTING PR this run is bound to; set ⇒ REVIEW-ONLY round against that
+   * PR — the run must never create a branch, commit, or open a PR; populated onto
+   * `code_trident_runs.bound_pr`.
+   *
+   * Cross-lane hazard: the fix-round-contract lane
+   * (.trident/plans/trident/a-fix-round-that-abandons-the-revie.md, tasks 2/4
+   * unbuilt) planned `bound_pr` as a fix-round publish-target pin; THIS card's
+   * semantic (set ⇒ never publishes, enforced fail-closed at launch) governs
+   * now, and that lane must add its own discriminator before shipping
+   * commit-capable bound runs.
+   */
+  bound_pr?: number | null
 }
 
 export interface BoardBoundBuildDeps {
@@ -114,6 +204,8 @@ export interface BoardBoundBuildDeps {
    * probes with the same per-command credential environment as the publisher.
    */
   resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
+  /** Outer-loop evidence that this card branch already has a merged PR. */
+  landedProbe?: DispatchLandedProbe
   /** Credential source for direct callers that do not inject a merge-mode resolver. */
   secretsStore?: Pick<SecretsStore, 'get'>
   owner_handle?: string
@@ -133,12 +225,42 @@ export interface BoardBoundBuildDeps {
 export type BoardBoundBuildRejectionCode =
   | 'missing_board_item'
   | 'unknown_board_item'
+  | 'invalid_bound_pr'
+  | 'review_needs_bound_pr'
   | 'underspecified'
+  | 'already_landed'
   | 'backend_error'
 
 export type BoardBoundBuildResult =
   | { ok: true; run: TridentRun; merge_mode: MergeMode; ralph: boolean }
   | { ok: false; code: BoardBoundBuildRejectionCode; message: string }
+
+/**
+ * Detect a request for a review ROUND OF AN EXISTING PR. Over-refusal is CHEAP:
+ * the refusal tells the caller exactly how to re-dispatch. Silent conversion
+ * into a build is the measured defect: PRs #542/#541/#530 were docs PRs ABOUT
+ * reviewing while the target's review-gate stayed red. Therefore this matcher
+ * deliberately errs toward refusing.
+ */
+export function detectReviewIntent(task: string): number | null {
+  // CodeQL js/polynomial-redos: `PR\s*#?\s*` is AMBIGUOUS — when `#?` matches
+  // empty the engine sees `\s*\s*`, so a task string with a long run of spaces
+  // backtracks polynomially. `task` is caller-supplied text, so that input is
+  // reachable. `(?:\s*#)?\s*` accepts exactly the same forms — `PR5`, `PR 5`,
+  // `PR#5`, `PR # 5` — with only one way to match each, so there is nothing to
+  // backtrack over.
+  const patterns = [
+    /\bre-?review\s+(?:of\s+)?PR(?:\s*#)?\s*(\d{1,7})\b/i,
+    /\breview\s+(?:round|pass|sweep)\s+(?:on|of|for|against)\s+PR(?:\s*#)?\s*(\d{1,7})\b/i,
+    /\b(?:run|do|perform|start|dispatch)\b[^\n.]{0,40}?\breview\b[^\n.]{0,40}?\bPR(?:\s*#)?\s*(\d{1,7})\b/i,
+    /\breview\s+PR(?:\s*#)?\s*(\d{1,7})\b/i,
+  ] as const
+  for (const pattern of patterns) {
+    const match = task.match(pattern)
+    if (match?.[1] !== undefined) return Number.parseInt(match[1], 10)
+  }
+  return null
+}
 
 /**
  * Create a board-bound trident run, enforcing the required-item + ask-gate
@@ -171,10 +293,34 @@ export async function dispatchBoardBoundBuild(
     }
   }
 
+  // (2b) A bound review target is a positive integer PR number.
+  const bound_pr = input.bound_pr
+  if (bound_pr !== undefined && bound_pr !== null && (!Number.isInteger(bound_pr) || bound_pr <= 0)) {
+    return {
+      ok: false,
+      code: 'invalid_bound_pr',
+      message: `bound_pr must be a positive integer PR number; got ${JSON.stringify(bound_pr)}. No run was created.`,
+    }
+  }
+
+  // (2c) Review-shaped free text must never fall through into the build path.
+  const wantsReview = detectReviewIntent(input.task)
+  if (wantsReview !== null && (bound_pr === undefined || bound_pr === null)) {
+    return {
+      ok: false,
+      code: 'review_needs_bound_pr',
+      message: `This task asks for a review round of an existing PR (#${wantsReview}), but no bound_pr was supplied. A review dispatch must set bound_pr to the PR number it reviews — free-text "review PR #N" is refused rather than silently converted into a build (a build would open a NEW PR and never touch #${wantsReview}). Re-dispatch with bound_pr: ${wantsReview}.`,
+    }
+  }
+
   // (3) ASK-BEFORE-ACTING — block an underspecified item; the caller must ask.
-  const readiness = assessDispatchReadiness(item)
-  if (!readiness.ready) {
-    return { ok: false, code: 'underspecified', message: readiness.reason ?? 'Plan item is underspecified.' }
+  // The ask-before-acting gate protects underspecified BUILDS; a bound review
+  // round is fully specified by the PR it reviews plus the task text.
+  if (bound_pr === undefined || bound_pr === null) {
+    const readiness = assessDispatchReadiness(item)
+    if (!readiness.ready) {
+      return { ok: false, code: 'underspecified', message: readiness.reason ?? 'Plan item is underspecified.' }
+    }
   }
 
   // Resolve THIS project's own git-initialized build workspace from the owner
@@ -186,6 +332,7 @@ export async function dispatchBoardBoundBuild(
   let repo_path: string
   let merge_mode: MergeMode
   let ralph: boolean
+  let credentialedRunner: EnvCapableHostRunner | undefined
   try {
     repo_path = await (deps.resolveBuildRepo ??
       ((home, slug) => ensureProjectBuildWorkspace(home, slug).then((r) => r.build_repo_path)))(
@@ -193,7 +340,7 @@ export async function dispatchBoardBoundBuild(
       deps.project_slug,
     )
     let mergeModeFn = deps.resolveMergeMode
-    if (mergeModeFn === undefined && deps.secretsStore !== undefined && deps.owner_handle !== undefined) {
+    if (deps.secretsStore !== undefined && deps.owner_handle !== undefined) {
       const loadEnv = async (): Promise<Record<string, string>> => {
         try {
           return githubProcessEnv(await readGitHubToken(deps.secretsStore!, asOwnerHandle(deps.owner_handle!)))
@@ -208,11 +355,13 @@ export async function dispatchBoardBoundBuild(
         load: loadEnv,
       }
       const lazyRunner = makeLazyCredentialedHostRunner(loadEnv)
-      const credentialedRunner: EnvCapableHostRunner = (command, cwd, extraEnv) =>
+      credentialedRunner = (command, cwd, extraEnv) =>
         extraEnv === undefined
           ? lazyRunner(command, cwd)
           : makeCredentialedHostRunner(extraEnv)(command, cwd)
-      mergeModeFn = (path) => detectMergeMode(path, defaultGitModeProbe(credential, credentialedRunner))
+      if (mergeModeFn === undefined) {
+        mergeModeFn = (path) => detectMergeMode(path, defaultGitModeProbe(credential, credentialedRunner!))
+      }
     }
     if (mergeModeFn === undefined) {
       throw new Error('resolveMergeMode or a credentialed secretsStore + owner_handle is required')
@@ -235,8 +384,25 @@ export async function dispatchBoardBoundBuild(
     }
   }
 
+  const slug = slugifyTask(input.task)
+  const branch = `trident/${slug}`
+
+  // A gh outage or malformed response is no evidence and therefore degrades
+  // open, matching detectMergedPr's rule that absence of evidence is not a merge.
+  if (merge_mode === 'pr') {
+    const probe =
+      deps.landedProbe ??
+      (credentialedRunner !== undefined ? makeDispatchLandedProbe(credentialedRunner) : undefined)
+    const landed = probe === undefined ? null : await probe(repo_path, branch).catch(() => null)
+    if (landed !== null) {
+      // A MERGED PR is enough to refuse even when ancestry is false/unknown:
+      // squash merges make the original head un-ancestral while the work is landed.
+      const message = `Refused: this card's work already merged as #${landed.pr} — branch ${branch} has a MERGED PR${landed.merged_at ? ` (merged ${landed.merged_at})` : ''}${landed.head_on_base === true ? ` and its head is contained in origin/${landed.base}` : ''}. Please verify the card instead of rebuilding: check what #${landed.pr} shipped; mark the Plan item done if complete, or put the unshipped half on a NEW Plan item with its own title. Nothing was dispatched.`
+      return { ok: false, code: 'already_landed', message }
+    }
+  }
+
   try {
-    const slug = slugifyTask(input.task)
     const run = await deps.store.create({
       slug,
       project_slug: deps.project_slug,
@@ -244,7 +410,8 @@ export async function dispatchBoardBoundBuild(
       task: input.task,
       merge_mode,
       ralph,
-      branch: `trident/${slug}`,
+      branch,
+      ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
       ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),

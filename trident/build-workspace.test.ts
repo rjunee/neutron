@@ -13,7 +13,7 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { existsSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { dispatchBoardBoundBuild } from './board-dispatch.ts'
@@ -159,8 +159,8 @@ describe('dispatchBoardBoundBuild resolves a per-project git workspace', () => {
   let store: TridentRunStore
   let board: WorkBoardStore
   beforeEach(() => {
+    seedMigratedDb(join(home, 'project.db'))
     db = ProjectDb.open(join(home, 'project.db'))
-    applyMigrations(db.raw())
     store = new TridentRunStore(db)
     board = new WorkBoardStore(db)
   })
