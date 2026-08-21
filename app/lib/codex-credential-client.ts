@@ -33,7 +33,13 @@
  * free of any gateway dependency.
  */
 
-export type CodexConnectionStatus = 'connected' | 'expired' | 'not_connected';
+/**
+ * `revoked` — the server refused a token that has NOT expired (the same ChatGPT
+ * account signed in elsewhere and rotated the refresh token). It is deliberately
+ * distinct from `expired`: only a reconnect clears it, so a pane that folded the
+ * two together would tell the owner to wait for a refresh that can never come.
+ */
+export type CodexConnectionStatus = 'connected' | 'expired' | 'revoked' | 'not_connected';
 
 /** One connected seat, as the owner sees it. Never carries token material. */
 export interface CodexAccount {

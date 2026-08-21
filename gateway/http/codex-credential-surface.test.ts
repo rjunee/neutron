@@ -54,7 +54,19 @@ beforeEach(() => {
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')
-  const service = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db) })
+  // THE LIVE SEAT PROBE IS INJECTED, NOT LEFT ON ITS PRODUCTION DEFAULT. This
+  // route now asks the ChatGPT backend whether the stored token still works
+  // (stored bytes cannot show a server-side revocation), so the default would put
+  // a real request on the public internet from a unit test — with the placeholder
+  // bundle below, which a real endpoint correctly refuses. These tests are about
+  // the HTTP shape; the probe's own behaviour and the fact that this route
+  // consults it are asserted in `trident/__tests__/codex-seat-probe.test.ts`.
+  const service = new CodexCredentialService({
+    store,
+    codexHome,
+    rotation: new SqliteCodexRotationStore(db),
+    probe: async () => ({ kind: 'ok', httpStatus: 200 }),
+  })
   const auth = createAppWsAuthResolver({ project_slug: SLUG, bypass: true })
   surface = createCodexCredentialSurface({ service, auth })
 })

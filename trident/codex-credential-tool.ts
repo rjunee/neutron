@@ -25,7 +25,13 @@ const statusInputSchema: JsonSchemaDocument = { type: 'object', properties: {}, 
 const statusOutputSchema: JsonSchemaDocument = {
   type: 'object',
   properties: {
-    status: { type: 'string', description: "'connected' | 'expired' | 'not_connected'" },
+    status: {
+      type: 'string',
+      description:
+        "'connected' | 'expired' | 'revoked' | 'not_connected'. 'revoked' means a LIVE probe of " +
+        'the ChatGPT backend refused the stored token even though it has not expired — the seat ' +
+        'is dead until the owner reconnects it, and no local field can show that.',
+    },
     materialized: { type: 'boolean', description: 'Whether an auth.json is present at the owner CODEX_HOME.' },
     expires_at: { type: 'string' },
     detail: { type: 'string' },
@@ -93,13 +99,22 @@ export function registerCodexCredentialToolSurface(
     name: CODEX_STATUS_TOOL,
     description:
       'Report whether the Codex cross-model reviewer is connected (a ChatGPT subscription auth). ' +
-      'Returns connected / expired / not_connected. Call this before telling the owner about codex review status.',
+      'Returns connected / expired / revoked / not_connected — `revoked` comes from a LIVE probe ' +
+      'of the ChatGPT backend, so a seat whose token was invalidated server-side is reported dead ' +
+      'instead of connected. Call this before telling the owner about codex review status.',
     input_schema: statusInputSchema,
     output_schema: statusOutputSchema,
     capability_required: 'read:project_data',
     approval_policy: 'auto',
     handler: async (_args, ctx) => {
       const owner = asOwnerHandle(ctx.project_slug)
+      // PROBE BEFORE READING. Everything below this line is a read of stored
+      // bytes, and stored bytes cannot show a token the server revoked — which is
+      // exactly the state this tool reported as `connected` while every build
+      // died on `refresh_token_invalidated`. The probe is TTL-cached per seat and
+      // bounded at 3s, and it never throws: an unreachable endpoint leaves the
+      // reading precisely as it was before this call.
+      await deps.service.refreshSeatLiveness(owner)
       const next = deps.service.nextSlot(owner)
       return {
         ...deps.service.status(owner),

@@ -421,6 +421,18 @@ export interface MiscCompositionInput {
      * Rejected dispatches post nothing. Omitted → no post.
      */
     chat_ack?: import('@neutronai/work-board/chat-ack.ts').WorkBoardChatAck
+    /**
+     * EXECUTOR LIVENESS PREFLIGHT. When supplied, it runs BEFORE the chokepoint
+     * and a refusal means NO RUN ROW IS CREATED and the reason is returned to the
+     * agent verbatim.
+     *
+     * Wired to `codexDispatchPreflight`, which refuses only when the owner's
+     * BUILD phase actually dispatches to codex AND every connected seat has been
+     * positively probed and refused by the ChatGPT backend — a lane launched onto
+     * a revoked seat otherwise spends ~15 minutes assembling a brief for a build
+     * that cannot start, and blames the CLI. Omitted → unchanged behaviour.
+     */
+    preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

@@ -44,7 +44,19 @@ beforeEach(() => {
   const crypto = new SecretsStore({ data_dir: tmp, db })
   const store = new ProjectCredentialStore(db, { crypto })
   codexHome = join(tmp, '.codex')
-  service = new CodexCredentialService({ store, codexHome, rotation: new SqliteCodexRotationStore(db) })
+  // THE PROBE IS INJECTED, NOT LEFT ON THE DEFAULT. `codex_status` now asks the
+  // ChatGPT backend whether the stored token still works, so the production
+  // default here would put a real request on the wire from a unit test — and this
+  // file's fixtures use a placeholder token, which a real endpoint would refuse.
+  // These tests are about the tool surface; the probe's own behaviour (and the
+  // fact that the tool consults it AT ALL) is asserted in
+  // `__tests__/codex-seat-probe.test.ts`.
+  service = new CodexCredentialService({
+    store,
+    codexHome,
+    rotation: new SqliteCodexRotationStore(db),
+    probe: async () => ({ kind: 'ok', httpStatus: 200 }),
+  })
   registry = new ToolRegistry()
   registerCodexCredentialToolSurface(registry, { service })
 })

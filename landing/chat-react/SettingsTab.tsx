@@ -987,7 +987,11 @@ export function SettingsTab({
                 : '✓ Connected (using the global default)'
             : codexStatus?.status === 'expired'
               ? '⚠ Token expired — re-connect'
-              : codexStatus?.override_present === true
+              : // NOT the same sentence as `expired`: the token has not run out, the
+                // server has disowned it, and only a fresh `codex login` fixes it.
+                codexStatus?.status === 'revoked'
+                ? '⚠ Session REVOKED server-side — re-connect (waiting will not fix it)'
+                : codexStatus?.override_present === true
                 ? '○ Override set but not usable — using the global default'
                 : '○ Not connected'}
           {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}

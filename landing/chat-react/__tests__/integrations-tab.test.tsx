@@ -886,6 +886,82 @@ describe('Codex seats — the web pane can destroy them, so it must say so', () 
     root.unmount()
   })
 
+  /**
+   * A POOL WHOSE SEATS THE SERVER HAS DISOWNED.
+   *
+   * `unauthorized` is the cooldown the liveness probe writes on a positively
+   * measured revocation. This pane read the pool COUNT and nothing else, so it
+   * printed "✓ 2 seats connected" over two dead seats — the same lie the probe
+   * exists to end, one surface further out. `SettingsTab.tsx` and
+   * `app/app/integrations.tsx` learned `revoked`; this file was missed.
+   */
+  const revokedSeat = (slot: string, active: boolean): unknown => ({
+    slot,
+    label: null,
+    status: 'revoked',
+    cooling: true,
+    cooling_until: 1,
+    cooling_reason: 'unauthorized',
+    used_percent: null,
+    window_minutes: null,
+    plan_type: null,
+    active,
+  })
+
+  const poolHandler =
+    (pool: unknown): Handler =>
+    (url, init) => {
+      if (url.endsWith('/api/cores/integrations')) return json(STATUS)
+      if (url.endsWith('/api/app/projects/archived')) return json({ archived: [] })
+      if (url.includes('/api/app/codex-auth') && (init?.method ?? 'GET') === 'GET') return json(pool)
+      return null
+    }
+
+  it('a pool of REVOKED seats is never reported as "connected"', async () => {
+    const { container, root } = await mount(
+      poolHandler({
+        ok: true,
+        status: 'revoked',
+        scope: 'global',
+        next: 'default',
+        accounts: [revokedSeat('default', true), revokedSeat('work', false)],
+      }),
+    )
+    const line = container.querySelector('.cset-codex-status')?.textContent ?? ''
+    expect(line).toContain('REVOKED')
+    expect(line).toContain('re-connect')
+    // THE ASSERTION THAT MATTERS: the measured lie is gone.
+    expect(line).not.toContain('2 seats connected')
+    root.unmount()
+  })
+
+  it('a MIXED pool counts the dead seats instead of condemning the live ones', async () => {
+    const healthy = { ...(TWO_SEATS.accounts[0] as Record<string, unknown>) }
+    const { container, root } = await mount(
+      poolHandler({
+        ok: true,
+        status: 'connected',
+        scope: 'global',
+        next: 'default',
+        accounts: [healthy, revokedSeat('work', false)],
+      }),
+    )
+    const line = container.querySelector('.cset-codex-status')?.textContent ?? ''
+    expect(line).toContain('1/2 seats connected')
+    expect(line).toContain('1 REVOKED')
+    root.unmount()
+  })
+
+  it('N (ANTI-HARDCODE): an all-healthy pool still reads plainly connected', async () => {
+    // Without this, the two tests above are satisfied by a pane that shouts
+    // REVOKED at every pool it is ever shown.
+    const { container, root } = await mount(seatHandler(() => {}))
+    const line = container.querySelector('.cset-codex-status')?.textContent ?? ''
+    expect(line).toContain('2 seats connected')
+    expect(line).not.toContain('REVOKED')
+    root.unmount()
+  })
+
   it('DISCONNECT-ALL confirms first, names the count, and sends NOTHING when declined', async () => {
     // This button became destructive without changing: before rotation it removed
     // one credential, and a bare DELETE now maps to disconnectAllAccounts. An owner
