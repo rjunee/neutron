@@ -7,3 +7,10 @@ Card: `codex-build.sh` is resolved inside the repo being BUILT (`trident/inner-w
 - [ ] T2 — **codex-review.sh has the identical defect** (`inner-workflow.mjs:4679`: `const script = \`${repoPath}/trident/codex-review.sh\``) and NO symlink covers it anywhere — a configured codex review seat in any non-Open project fails today. Apply the same pattern: `CODEX_REVIEW_SCRIPT_PATH` exported from `inner-loop.ts`, threaded as `codexReviewScript`, consumed with no repoPath fallback, harness-path assertions in the review-dispatch tests.
 - [ ] T3 — **kimi-review-cli.ts has the identical defect** (`inner-workflow.mjs:4715`: `const cli = \`${repoPath}/trident/kimi-review-cli.ts\``). Same pattern: `KIMI_REVIEW_CLI_PATH` threaded as `kimiReviewCliScript`; note `bunBin` is already threaded for exactly this class of reason.
 - [ ] T4 — **Retire the legacy repoPath fallbacks for `checkpointScript` and `worktreeCleanupScript`** (`inner-workflow.mjs:274,278`) so NO dispatch path can ever resolve a harness script from the target repo; update the SRC-pinning tests that encode the fallback shape (`trident/inner-workflow.test.ts:244-245,1277-1279`) and any hand-built-args tests that rely on it (`inner-workflow-resume.test.ts:173-174`, `inner-workflow-built-head.test.ts:66`).
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/the-build-script-is-resolved-inside-the-target-repo-one-harn-q36czv.md`. Do not paraphrase this section._
+
+- Do not "fix" this by copying the script into each repo, or by scripting the symlink creation. Both keep two sources of truth and reintroduce the drift in (4).
+- Do not make the target repo's copy win when it happens to exist — that is exactly how Open and Enterprise diverged. The harness copy must be authoritative for all projects INCLUDING Open.

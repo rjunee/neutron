@@ -52,3 +52,17 @@ VERIFICATION MAP (card falsification criteria → tasks): (1) concurrent-wave te
 (2) chain ordering → T1 unit + T5 integration; (3) loud cycle refusal → T1 parse + T4
 re-fire; (4) default-independence → T1; (5) wall-clock quote → T6; (6) production callers
 (orchestrator imports plan-graph at T4) + lane_review exit 0 → T4/T6.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/c-ralph-plans-are-a-flat-checklist-with-no-dependency-edges-gtc68g.md`. Do not paraphrase this section._
+
+- Do not fan out a wave onto the SAME FILES. Two concurrent tasks editing one file is the
+  collision this board already carries three cards about. Wave membership must additionally
+  require disjoint declared surfaces — and if the planner cannot declare surfaces, the wave
+  is size 1 and that is the correct conservative answer.
+- Do not raise the global lane cap to accommodate waves.
+- SURFACE: `trident/orchestrator.ts` (`refireNextRalphTask`), the plan parser, the planner
+  prompt. COLLIDES with cards `01M09HZBTPR`, `01M09GDR0S`, `01M09EW0Y3`.
+</spec>
+<parameter name="status">upcoming

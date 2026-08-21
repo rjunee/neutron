@@ -8,3 +8,11 @@ Regenerated 2026-08-18 against main (89de7523). Card: every trident round burns 
 - [ ] 4. **The cut — design GATED on task 3's measured attribution; do not start until the dominant contributor is named with a percentage.** Candidates from the card, none yet justified: cache/skip re-planning on a fix round, shrink the brief, parallelise compose with worktree setup, start the wrapper before non-essential planning completes. DONE when mean brief→build drops on ≥5 fresh runs per project, before/after quoted from the task-1 ledger (criterion 4).
 
 Guardrails (binding, from the card): do NOT optimise against brief size before it is measured; do NOT derive latency from `/tmp` `.part` mtimes ever again; do NOT add a lock/queue/concurrency cap for the retracted contention theory; do NOT re-investigate repo size, `infra_retries`, `DEFAULT_SETTLE_TIMEOUT_MS`, or `MAX_CONCURRENT_SUBAGENTS`. Instrumentation must never fail a build or a launch, and must add zero LLM turns.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/latency-every-lane-burns-10-16-min-of-pre-build-overhead-per-mwja1m.md`. Do not paraphrase this section._
+
+- Do not optimise against "brief size" until it is measured. It is a hypothesis.
+- Do not re-derive latency from `/tmp` `.part` mtimes — that is the broken method.
+- Do not add a lock, queue or concurrency cap to "fix" contention that was retracted.

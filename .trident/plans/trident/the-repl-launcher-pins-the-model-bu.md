@@ -7,3 +7,10 @@ Governing doc: the Plan-card spec "The REPL launcher pins the model but never th
 - [ ] T2 — Echo the RESOLVED settings at launch: from the SAME `resolveReplEffort` binding that fed argv, (a) stamp `effort` onto the `ReplRegistryRecord` row `spawn.ts` already writes (next to `model` — readable without a database, it is a JSON file), (b) write a per-session launch record `${cfgBase}-launch.json` (0600, in the 0700 cfgDir) carrying resolved model, effort, sessionId, tool surface, settingsPath and spawn time, added to `session.configPaths` for teardown, and (c) print a one-line stderr launch banner `[repl-launch] session=<id8> model=<model> effort=<effort> tools=<n> settings=<path>` the way codex's banner reads back its settings.
 - [ ] T3 — Make it answerable from inside: replace the shared `--append-system-prompt-file` pass-through with a per-session generated prompt file (`${cfgBase}-prompt.md` = base-prompt bytes + a "Launch record" stanza stating the resolved model and effort and the absolute path of the T2 launch JSON), so the agent answers "what model/effort are you running at" from a READ (the stanza and/or the file), not an inference; unlink with the other session configs.
 - [ ] T4 — Red-on-pin-drop test: assert the resolved effort actually lands in the LAUNCH RECORD (the registry row and `${cfgBase}-launch.json` written by a spawn through the real `spawnSession` wiring, or its extracted pure helper), pinned to a concrete member of the CLI-accepted set — so deleting the T1 pin (or the T2 stamp) turns a test red instead of silently reverting to a harness default; mirror the `codex-build.test.ts` pinned-and-overridable shape for `NEUTRON_REPL_EFFORT`.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/the-repl-launcher-pins-the-model-but-never-the-reasoning-eff-b0wm92.md`. Do not paraphrase this section._
+
+- Do not remove or weaken the `--model` pin.
+- Do not set effort by editing a file on the box by hand; it must come from the launcher so every future session inherits it.
