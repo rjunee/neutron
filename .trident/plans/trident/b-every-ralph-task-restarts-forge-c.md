@@ -7,3 +7,15 @@ Regenerated 2026-08-18 against main (567dbb52). Card: every Ralph task restarts 
 - [x] T3 — Argus round-1 hardening: authorize `branchBrief` only when `usePlanNext` selected the continuation producer (with a non-vacuous full-planner sentinel test); clamp relayed `branchLog` again in code at 12,288 UTF-8 bytes with exact/over/multibyte coverage; read `origin/<base>` in both merge modes; fence commit material as untrusted data; derive the brief marker from its constant; add durable `codex-exec-end` instrumentation and stage attribution; record the honest pending AFTER plus a Trident-owner removal deadline of 2026-08-25 instead of claiming an unmeasurable result.
 - [x] T4 — Argus round-2 hardening: neutralize closing fence tokens in commit bodies; gate Forge brief transport on non-empty branch material with adversarial missing-log tests; split Forge/base fetches and execute the missing-remote-branch regression against a real Git remote; preserve valid UTF-8 at the shell truncation boundary; pair retry timing from the latest start before the first end; make the 2026-08-25 removal gate executable; and document that the historical 30m01 proxy is not instrument-matched to the new exact pair.
 - Commit .trident/plans/trident/b-every-ralph-task-restarts-forge-c.md together with your code + tests.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/b-every-ralph-task-restarts-forge-cold-the-continuation-plan-fv6745.md`. Do not paraphrase this section._
+
+- Do not carry the raw transcript across tasks. That is the thing the discipline forbids
+  and it is right to forbid it.
+- Do not let the brief grow monotonically.
+- SURFACE: `trident/inner-workflow.mjs` (continuation planner seat). COLLIDES with card
+  `01M09HVMZ9` — build these two in sequence on the same branch, or land A first.
+</spec>
+<parameter name="status">upcoming

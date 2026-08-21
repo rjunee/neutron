@@ -12,3 +12,14 @@ Regenerated 2026-08-19 against main @ 89de7523. Card: `.git/shallow` was recreat
 - [ ] **T3(loud diagnosis):** in trident/merge.ts, when an ancestry-bearing host step fails (the local `git merge`/checkout/fetch steps flowing through `must()` at merge.ts:221), probe shallowness and append a one-line diagnosis to the `TridentMergeError` message — "the checkout is SHALLOW (`.git/shallow` exists); ancestry results are invalid — run `git fetch --unshallow`" — so tonight's failure (1) ("refusing to merge unrelated histories") names its cause; realgit test: shallow fixture, drive the local-merge failure, assert the message contains "SHALLOW"; full-clone control asserts no such suffix.
 
 Guard rails: do NOT loosen any guard (a guard that skips on an unresolvable sha is the rubber-stamp failure of 01M09YXYZA9CVE9ZC4RDNJ4V12); do NOT touch `.github/workflows/` (no workflow scope — CI self-heals from inside scripts, as ec6832e2 does); do NOT touch `scripts/ci/as-built-write-guard.sh` (PR #401's lane owns it); do NOT re-shallow anything in tests outside fixture-local scratch repos; keep every fetch in the guards best-effort (`|| true`) so offline/fork runs still skip rather than block.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/the-shallow-clone-is-back-and-it-bit-three-different-places-qk2cdf.md`. Do not paraphrase this section._
+
+- Do not "fix" this by making guards lenient. `as-built-write-guard.sh` refusing was CORRECT;
+  the checkout was wrong. A guard that skips when it cannot resolve a sha is the rubber-stamp
+  failure this board already carries a card about (`01M09YXYZA9CVE9ZC4RDNJ4V12`).
+- Do not assume CI and this box need the same fix. `actions/checkout` depth is set in
+  `.github/workflows/`, which no agent here can write (no `workflow` scope, tested); the CI
+  side must self-heal from inside the script, as `ec6832e2` does.

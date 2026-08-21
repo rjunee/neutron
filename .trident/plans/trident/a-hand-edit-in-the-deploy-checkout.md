@@ -38,3 +38,10 @@ lands on this repo's own `host_deploy_*` surfaces. No competing plan doc — SPE
       warning listing the paths — absent/omitted field degrades to today's behavior so an
       older control plane still works. Test: a preview answer carrying `dirty_paths` shows up
       in `host_deploy_status`; one without it changes nothing. Covers work item 4.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/a-hand-edit-in-the-deploy-checkout-silently-blocks-every-dep-vts6ex.md`. Do not paraphrase this section._
+
+- Do not simply add a force flag that skips the precondition. The guard exists because an in-place checkout destroys uncommitted work; the fix is to make it accurate, not to let callers bypass it.
+- Do not auto-discard divergent local changes. Redundant-with-target is the only safe case.
