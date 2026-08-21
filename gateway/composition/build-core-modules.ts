@@ -612,6 +612,20 @@ export function buildCoreModules(
           // be how this fix ships green, tested, and inert in production.
           latest_stage_event_at: (run_id) => store.latestStageEventAt(run_id),
         }
+        // The hang watchdog's SECOND positive-liveness source: the same launcher
+        // pid probe the 'trident-liveness' tick loop uses. The loop acts only on a
+        // POSITIVE 'dead' and throws the 'alive' answer away (`tick.ts`: "if
+        // (verdict !== 'dead') continue"), so the one fact that could have spared a
+        // working build was being computed every 15 s and discarded. Same probe,
+        // read for the opposite verdict.
+        //
+        // Wired only when the composer supplied a probe — absent, the watchdog
+        // behaves exactly as it did before, which is what makes this safe to wire
+        // unconditionally beside the reader above.
+        if (tridentWiring.probe_launcher_alive !== undefined) {
+          const launcherProbe = tridentWiring.probe_launcher_alive
+          orchestratorOpts.probe_run_alive = (run) => launcherProbe(run)
+        }
         if (tridentWiring.on_orphaned_session !== undefined) {
           orchestratorOpts.on_orphaned_session = tridentWiring.on_orphaned_session
         }

@@ -26,7 +26,7 @@
  *    than assumed.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
 import { spawn, spawnSync } from 'node:child_process'
 import {
@@ -42,7 +42,7 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { delimiter, dirname, join, relative } from 'node:path'
+import { basename, delimiter, dirname, join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
@@ -76,6 +76,51 @@ const briefIntegrity = loadBriefIntegrity()
 // Spawn bash by ABSOLUTE path: the CLI-absent case runs with a PATH containing only
 // the mock bin, so `bash` could not be resolved from it.
 const BASH = existsSync('/bin/bash') ? '/bin/bash' : '/usr/bin/bash'
+
+// ── FIXTURE REAPING — every temp dir this file makes dies with the case that made it ──
+//
+// Each `run()` below builds a REAL fixture: a `git init` repo, a symlink farm of the
+// host's tools, sometimes a second worktree. That is ~270K and ~65 inodes apiece, and
+// this file makes ~87 of them per full run. Nothing on this box reaps them
+// (systemd-tmpfiles ran 21h before the measurement and 18,682 day-old dirs survived
+// it), so before this registry existed the suite had left 24,946 orphans / 7.8G in
+// /tmp — about 1.6M inodes, ~18% of the host's total.
+//
+// REGISTERED, NEVER GLOBBED. The tempting implementation is `rm -rf
+// /tmp/trident-codex-build-*`, and it is wrong: several trident lanes run this very
+// suite concurrently on this host, so a glob would delete a SIBLING lane's in-flight
+// fixture and produce an unattributable mid-build failure in an unrelated PR. Only
+// paths this process created are ever removed. `leak control D` is the guard on that
+// and must not be dropped as redundant.
+//
+// REAPED IN `afterEach`, NEVER INSIDE `run()`. Tests read `r.dir` after run() returns
+// — the RECLAIM case walks the holder worktree and reads its preserved
+// post-mortem.txt — so a dir must outlive the call that made it and die with the case.
+//
+// The 'exit' hook covers what afterEach cannot: a throw during collection, or a normal
+// abort, either of which ends the process with entries still registered. rmSync is
+// synchronous, so it is valid work for an exit handler. SIGKILL is untrappable and
+// WILL still leak; that residue is why an operator-side, age-guarded sweep stays a
+// separate thing and is deliberately not wired into this suite.
+const FIXTURE_DIRS: string[] = []
+/** Register a temp dir for reaping and return it, so it can wrap `mkdtempSync` inline. */
+function fixtureDir(path: string): string {
+  FIXTURE_DIRS.push(path)
+  return path
+}
+function reapFixtures(): void {
+  while (FIXTURE_DIRS.length > 0) {
+    const dir = FIXTURE_DIRS.pop() as string
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {
+      // Best effort and SILENT on purpose: a fixture that cannot be removed is a leak,
+      // not a test failure, and must not turn a passing case red.
+    }
+  }
+}
+afterEach(reapFixtures)
+process.on('exit', reapFixtures)
 
 interface RunOpts {
   /** Branch used by `git init -b`; defaults to the wrapper argv branch. */
@@ -213,6 +258,20 @@ interface RunOpts {
    * are two different observable outcomes rather than two sides of a threshold.
    */
   spawnTimeoutMs?: number
+  /**
+   * Make the mock `codex` take this long on its BUILD invocation (it still answers
+   * `login status` instantly). This is what lets a test hold the REAL `codex exec`
+   * branch open — the one line of the wrapper that runs in production — instead of
+   * reaching for the `NEUTRON_CODEX_BUILD_EXEC_CMD` seam, whose own comment says it
+   * "does not exist in production".
+   */
+  codexExecSleepSecs?: number
+  /**
+   * Deliver this signal to the WRAPPER's own pid once the mock `codex` is running,
+   * and report what a supervisor of the shape inner-workflow.mjs uses would have
+   * RECORDED for it (see `supervisorStatus`).
+   */
+  killWrapperWith?: 'TERM' | 'INT'
 }
 
 const DEFAULT_BRIEF = 'You are FORGE. Build the thing on branch trident/a-run.\n'
@@ -245,6 +304,15 @@ interface RunResult {
    * publish boundary made this call" is exactly what the tests below are asking.
    */
   ghCalls: string
+  /**
+   * What a supervisor of the EXACT shape inner-workflow.mjs wraps the wrapper in
+   * (`"$@"; rc=$?; printf "%s\n" "$rc" > "$status"`) recorded as the wrapper's exit
+   * code — '' unless `killWrapperWith` asked for one. THIS is the number the shipped
+   * build prompt discriminates on ("a signalled wrapper whose supervisor recorded 128
+   * or greater → codexStatus='deferred'"), so it is the number a signal test must
+   * assert, not the harness's own view of the process.
+   */
+  supervisorStatus: string
   /** the trailer parsed into a map, from the TRAILER FILE (never from stdout). */
   trailer: Record<string, string>
   /** everything that landed in the trailer file, verbatim. */
@@ -298,7 +366,7 @@ function toolFarm(dir: string): string {
 }
 
 function run(opts: RunOpts = {}): RunResult {
-  const dir = mkdtempSync(join(tmpdir(), 'trident-codex-build-'))
+  const dir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
   const codexHome = join(dir, 'codexhome')
   mkdirSync(codexHome, { recursive: true })
   if (opts.authed === true) writeFileSync(join(codexHome, 'auth.json'), '{"token":"x"}\n')
@@ -326,9 +394,16 @@ function run(opts: RunOpts = {}): RunResult {
 
   if (opts.codexLoginExit !== null && opts.codexLoginExit !== undefined) {
     const mock = join(bin, 'codex')
+    // The marker is written by the BUILD invocation only (the `login status` branch
+    // exits above it), so "the real `codex exec` line is running RIGHT NOW" is an
+    // observable fact about THIS fixture's own directory — not something inferred
+    // from a sleep, and not something read out of any shared global state.
+    const marker = `: > ${JSON.stringify(join(dir, 'codex-running'))}\n`
+    const slow =
+      opts.codexExecSleepSecs === undefined ? '' : `sleep ${opts.codexExecSleepSecs}\n`
     writeFileSync(
       mock,
-      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nenv > ${JSON.stringify(join(dir, 'codex-env.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\nexit 0\n`,
+      `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit ${opts.codexLoginExit}; fi\nprintf '%s\\n' "$@" > ${JSON.stringify(join(dir, 'codex-argv.txt'))}\nenv > ${JSON.stringify(join(dir, 'codex-env.txt'))}\ncat > ${JSON.stringify(join(dir, 'codex-stdin.txt'))}\n${marker}${slow}exit 0\n`,
     )
     chmodSync(mock, 0o755)
   }
@@ -518,9 +593,44 @@ exit 1
       : opts.base === undefined
         ? [SCRIPT, branch]
         : [SCRIPT, branch, opts.base]
+  // THE SIGNAL FIXTURE. The wrapper has to be killed WHILE it is inside the real
+  // `codex exec`, and the thing under assertion is the number a SUPERVISOR records
+  // for it — so the supervisor is a real `sh` of the same shape inner-workflow.mjs
+  // uses (`"$@"; rc=$?; printf "%s\n" "$rc" > "$status"`), which also delivers the
+  // signal so the whole fixture stays synchronous under `spawnSync`. The signal goes
+  // to the WRAPPER's pid and not to the supervisor's, which is exactly the pattern
+  // kill inner-workflow.mjs records an incident for.
+  const supervisorStatusFile = join(dir, 'wrapper-exit-status.txt')
+  const [spawnCmd, spawnArgs] = ((): [string, string[]] => {
+    if (opts.killWrapperWith === undefined) return [BASH, argv]
+    const sup = join(dir, 'signal-supervisor.sh')
+    writeFileSync(
+      sup,
+      `#!/bin/sh
+"$@" &
+child=$!
+i=0
+while [ ! -e "$MARKER" ]; do
+  i=$((i+1))
+  [ "$i" -gt 1200 ] && break
+  sleep 0.05
+done
+sleep 0.3
+kill -"$KILLSIG" "$child" 2>/dev/null
+wait "$child"
+rc=$?
+printf '%s\\n' "$rc" > "$STATUSFILE"
+`,
+    )
+    chmodSync(sup, 0o755)
+    env['MARKER'] = join(dir, 'codex-running')
+    env['KILLSIG'] = opts.killWrapperWith
+    env['STATUSFILE'] = supervisorStatusFile
+    return ['/bin/sh', [sup, BASH, ...argv]]
+  })()
   const res = (() => {
     try {
-      return spawnSync(BASH, argv, {
+      return spawnSync(spawnCmd, spawnArgs, {
         cwd: dir,
         encoding: 'utf8',
         env,
@@ -550,6 +660,7 @@ exit 1
     codexStdin: readOr('codex-stdin.txt'),
     codexEnv: readOr('codex-env.txt'),
     ghCalls: readOr('gh-calls.txt'),
+    supervisorStatus: readOr('wrapper-exit-status.txt').trim(),
     trailer: parseTrailer(trailerRaw),
     trailerRaw,
     baseHead,
@@ -713,7 +824,7 @@ describe('durable pre-build stage stamps', () => {
   })
 
   test('the real wrapper → stage-stamp.sh → sqlite chain appends a row', () => {
-    const migrated = mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-'))
+    const migrated = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-stage-db-')))
     const stageDb = join(migrated, 'project.db')
     seedMigratedDb(stageDb)
     const migratedDb = new Database(stageDb)
@@ -747,6 +858,306 @@ describe('durable pre-build stage stamps', () => {
       '/tmp/stage-run.db run-stage codex-exec-start',
       '/tmp/stage-run.db run-stage codex-exec-end',
     ])
+  })
+})
+
+/**
+ * THE MID-EXEC HEARTBEAT — `codex-exec-alive`.
+ *
+ * WHY IT EXISTS. The three stamps above bracket the build and say nothing during it.
+ * MEASURED against the live ledger (808 events, 37 completed exec windows): max 72.0
+ * min, avg 20.7 min from `codex-exec-start` to `codex-exec-end`. The orchestrator's
+ * hang watchdog reaps at 90 min and stands down only on a stage event NEWER than that,
+ * so its evidence was, by construction, absent for up to 72 of those 90 minutes. Three
+ * lanes were measured 57-85 min "stale" while writing log files that same second.
+ *
+ * THESE TESTS DRIVE THE REAL SCRIPT AND THE REAL SQLITE, never a mocked clock: the
+ * wrapper runs against a migrated temp database through the shipped `stage-stamp.sh`,
+ * with a build seam that genuinely sleeps past two heartbeat intervals. Asserting on a
+ * fake timer would prove the arithmetic and not the thing that has to happen, which is
+ * that a background process really emits rows while the model is thinking.
+ */
+describe('the mid-exec liveness heartbeat', () => {
+  const STAGE_STAMP = fileURLToPath(new URL('./stage-stamp.sh', import.meta.url))
+
+  /** A migrated temp db + the rows the wrapper wrote into it, in order. */
+  const withStageDb = <T>(body: (stageDb: string, read: () => { stage: string; at: string }[]) => T): T => {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-codex-build-heartbeat-db-'))
+    const stageDb = join(dir, 'project.db')
+    seedMigratedDb(stageDb)
+    const migrated = new Database(stageDb)
+    applyMigrations(migrated)
+    migrated.close()
+    const read = (): { stage: string; at: string }[] => {
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query<{ stage: string; at: string }, []>('SELECT stage, at FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      return rows
+    }
+    try {
+      return body(stageDb, read)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  /** A build seam that does what a real one does, but takes `secs` about it. */
+  const SLOW_BUILD = (secs: number): string =>
+    `cat >/dev/null; sleep ${secs}; ${NARRATE}; echo built >> built.txt; git add built.txt; git commit -q -m 'the codex build'; ${WRITE_DIFF}`
+
+  test('REAL BEHAVIOUR: a build that outlives two intervals lands >=2 alive rows, at distinct times', () => {
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(3.4),
+        },
+      })
+      expect(r.status).toBe(0)
+
+      const rows = read()
+      const stages = rows.map((row) => row.stage)
+      const alive = rows.filter((row) => row.stage === 'codex-exec-alive')
+      // The heartbeat really beat, more than once…
+      expect(alive.length).toBeGreaterThanOrEqual(2)
+      // …at DIFFERENT moments. One row duplicated by a retry would satisfy a bare count
+      // while proving nothing about liveness over time.
+      expect(new Set(alive.map((row) => row.at)).size).toBe(alive.length)
+      // …strictly INSIDE the exec window, which is the whole claim: evidence exists
+      // during the silence, not just at its edges.
+      expect(stages.indexOf('codex-exec-alive')).toBeGreaterThan(stages.indexOf('codex-exec-start'))
+      expect(stages.lastIndexOf('codex-exec-alive')).toBeLessThan(stages.indexOf('codex-exec-end'))
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: the ticker does NOT outlive the exec it speaks for', () => {
+    // THE RISK THIS CHANGE CARRIES. A leaked ticker would keep writing `codex-exec-alive`
+    // after its build died and fabricate liveness for a corpse — turning a false kill
+    // into a lane that never frees, which is worse. Count the rows the moment the
+    // wrapper exits, wait several MORE intervals, and count again: any growth is a leak.
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-leak',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(2.4),
+        },
+      })
+      expect(r.status).toBe(0)
+      const atExit = read()
+      // POSITIVE CONTROL FOR THIS NEGATIVE ONE: the ticker was genuinely running, so
+      // "it stopped" is a real observation and not an empty check that never started.
+      expect(atExit.filter((row) => row.stage === 'codex-exec-alive').length).toBeGreaterThanOrEqual(1)
+
+      spawnSync('sleep', ['3'])
+      expect(read().length).toBe(atExit.length)
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: a build that finishes fast emits NO alive rows at all', () => {
+    // The ticker must be evidence of a LONG exec, not a constant. If it stamped
+    // regardless, `codex-exec-alive` would be noise and the watchdog would stand down
+    // for every run forever — the immortality failure, one layer down.
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-fast',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '30',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD,
+        },
+      })
+      expect(r.status).toBe(0)
+      const rows = read().map((row) => row.stage)
+      // The bracket stamps still landed — so an empty ledger cannot be what makes this
+      // assertion pass.
+      expect(rows).toEqual(['wrapper-start', 'codex-exec-start', 'codex-exec-end'])
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: a zero or non-numeric cadence disables the ticker instead of spinning', () => {
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-off',
+        env: {
+          NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '0',
+          NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(2.2),
+        },
+      })
+      expect(r.status).toBe(0)
+      expect(read().map((row) => row.stage)).toEqual([
+        'wrapper-start',
+        'codex-exec-start',
+        'codex-exec-end',
+      ])
+    })
+  }, 30_000)
+
+  test('a heartbeat cannot change the wrapper exit code, even when every stamp fails', () => {
+    // Same contract the bracket stamps have: `stage-stamp.sh` always exits 0 and the
+    // wrapper `|| true`s it anyway. A recorder pointed at a database that does not
+    // exist must not turn a successful build into a failed one.
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      mergeMode: 'local',
+      stageScript: STAGE_STAMP,
+      stageDb: '/nonexistent-dir/does-not-exist.db',
+      stageRunId: 'run-heartbeat-broken',
+      env: {
+        NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1',
+        NEUTRON_CODEX_BUILD_EXEC_CMD: SLOW_BUILD(2.4),
+      },
+    })
+    expect(r.status).toBe(0)
+    expect(r.trailer['NEUTRON_CODEX_BUILD_HEAD']).toHaveLength(40)
+  }, 30_000)
+
+  test('PRODUCTION PATH: the real `codex exec` branch arms the ticker, not just the seam', () => {
+    // THE REASON THIS TEST EXISTS. `codex-build.sh` arms the heartbeat at TWO places:
+    // inside the `NEUTRON_CODEX_BUILD_EXEC_CMD` seam (whose own comment says it "does
+    // not exist in production"), and immediately before the real `codex exec`. Every
+    // other heartbeat test above passes NEUTRON_CODEX_BUILD_EXEC_CMD, so they all drive
+    // the seam: DELETING THE PRODUCTION ARMING LEFT THE WHOLE SUITE GREEN (measured:
+    // `bun test trident/` → 2431 pass, 0 fail). That is this repo's documented
+    // "merged green but unwired" shape, one level down — the load-bearing half of the
+    // fix could be reverted and nothing would notice.
+    //
+    // So this one hands over NO seam at all and lets the wrapper call the mock `codex`
+    // on PATH, exactly as the pre-existing 'durably brackets the exact execution
+    // window' test one screen up does.
+    withStageDb((stageDb, read) => {
+      const r = run({
+        authed: true,
+        codexLoginExit: 0,
+        mergeMode: 'local',
+        stageScript: STAGE_STAMP,
+        stageDb,
+        stageRunId: 'run-heartbeat-production',
+        codexExecSleepSecs: 3.4,
+        env: { NEUTRON_CODEX_BUILD_HEARTBEAT_SECS: '1' },
+      })
+      expect(r.status).toBe(0)
+      // POSITIVE CONTROL: the REAL branch is what ran. `codex-argv.txt` is written only
+      // by the mock's non-`login status` invocation, which the seam branch never
+      // reaches — so a non-empty argv is proof this is not the seam under another name.
+      expect(r.codexArgv).toContain('--sandbox')
+
+      const rows = read()
+      const stages = rows.map((row) => row.stage)
+      const alive = rows.filter((row) => row.stage === 'codex-exec-alive')
+      expect(alive.length).toBeGreaterThanOrEqual(2)
+      // Distinct moments, not one row written twice.
+      expect(new Set(alive.map((row) => row.at)).size).toBe(alive.length)
+      // Strictly INSIDE the production exec window.
+      expect(stages.indexOf('codex-exec-alive')).toBeGreaterThan(stages.indexOf('codex-exec-start'))
+      expect(stages.lastIndexOf('codex-exec-alive')).toBeLessThan(stages.indexOf('codex-exec-end'))
+    })
+  }, 60_000)
+
+  test('SIGNAL SAFETY: a SIGTERMed wrapper is still recorded as >= 128, not as a plain exit', () => {
+    // THE HAZARD THE TRAPS INTRODUCED. `trap '_rc=$?; stop_stage_heartbeat; exit $_rc'
+    // INT TERM` looks like it preserves the status, but in a trapped signal handler
+    // `$?` is the last COMPLETED command's status — so a killed wrapper exits with
+    // whatever ran last (usually 0). inner-workflow.mjs's supervisor
+    // (`"$@"; rc=$?; printf "%s\n" "$rc" > "$status"`) writes that number into the exit
+    // file, and the shipped build prompt discriminates on it: "including a signalled
+    // wrapper whose supervisor recorded 128 or greater — set codexStatus='deferred'".
+    // Swallow the signal and that discriminator can never be observed again.
+    //
+    // The kill lands on the WRAPPER's pid while the real `codex exec` is running, and
+    // NOT on the supervisor — the shape inner-workflow.mjs:1186 records an incident for
+    // ("SIGTERM'd all ELEVEN lanes").
+    const r = run({
+      authed: true,
+      codexLoginExit: 0,
+      mergeMode: 'local',
+      codexExecSleepSecs: 6,
+      killWrapperWith: 'TERM',
+    })
+    // POSITIVE CONTROL: the wrapper really did reach the real `codex exec` before the
+    // signal — otherwise this would be pinning the exit code of some earlier refusal.
+    expect(existsSync(join(r.dir, 'codex-running'))).toBe(true)
+    // THE ASSERTION. 143 = 128 + SIGTERM, i.e. indistinguishable from an untrapped
+    // death, which is what `main` produced before the traps were added.
+    expect(r.supervisorStatus).toBe('143')
+    expect(Number(r.supervisorStatus)).toBeGreaterThanOrEqual(128)
+    // And it must never look like a completed build: no trailer, so the bridge cannot
+    // read a killed wrapper as a successful one on any path.
+    expect(r.trailerRaw).toBe('')
+  }, 60_000)
+
+  // NO SIGINT TWIN FOR THIS WRAPPER, DELIBERATELY. The production launch is
+  // `nohup setsid sh -c '... "$@" ...' ... &` (inner-workflow.mjs), and a shell with
+  // job control off sets SIGINT to IGNORE for an asynchronous job — an ignore its
+  // foreground descendants inherit across exec, and which cannot be trapped or reset.
+  // MEASURED by reading /proc/<pid>/status of a wrapper launched in exactly that
+  // shape: SigIgn=0x7 → SIGINT ignored, SIGTERM deliverable; a plain foreground
+  // launch gives SigIgn=0x4 → neither ignored. So a SIGINT test here would assert a
+  // path production cannot reach. `codex-review.sh` IS run in the foreground
+  // (`bash codex-review.sh <base> > out 2> err; echo "CODEX_EXIT=$?"`), so the SIGINT
+  // case is pinned there instead.
+
+  test('ANTI-EMPTY-CHECK GUARD: the heartbeat is actually IN the shipped scripts', () => {
+    // THIS REPO HAS SHIPPED CHECKS THAT MATCHED NOTHING AND READ AS GREEN at least four
+    // times. The failure this guards is a heartbeat silently removed (or renamed) while
+    // the orchestrator keeps waiting for evidence that no longer exists — a watchdog
+    // reading an ever-empty ledger reaps every healthy build and no test notices.
+    const countIn = (text: string, needle: string): number => text.split(needle).length - 1
+    const reviewText = readFileSync(join(HERE, 'codex-review.sh'), 'utf8')
+
+    // The counter must be able to return 0, or "> 0" below proves nothing about it.
+    expect(countIn('nothing to see here', 'stamp_stage')).toBe(0)
+
+    expect(countIn(SCRIPT_TEXT, 'codex-exec-alive')).toBeGreaterThan(0)
+    expect(countIn(SCRIPT_TEXT, 'stamp_stage')).toBeGreaterThan(0)
+    // The review wrapper stamped NOTHING before this change (`grep -c stamp_stage
+    // trident/codex-review.sh` was 0 while the build wrapper's was 7), so the review
+    // phase had no mid-phase evidence of any kind.
+    expect(countIn(reviewText, 'stamp_stage')).toBeGreaterThan(0)
+    expect(countIn(reviewText, 'codex-review-alive')).toBeGreaterThan(0)
+    // Both tickers are killed on the way out, on every path.
+    expect(countIn(SCRIPT_TEXT, 'stop_stage_heartbeat')).toBeGreaterThan(1)
+    expect(countIn(reviewText, 'stop_stage_heartbeat')).toBeGreaterThan(1)
+
+    // …AND THE ARMING IS ON THE PRODUCTION LINE, NOT ONLY IN THE TEST SEAM. The
+    // file-wide counts above cannot tell those apart: with the production
+    // `start_stage_heartbeat` deleted, `codex-exec-alive` still appeared (ticker body
+    // + comments) and `stop_stage_heartbeat` still appeared six times, so this guard
+    // passed for exactly the case it was written for. Slice out the region between the
+    // END of the seam branch and the real invocation and require the arming there.
+    const seamEnd = SCRIPT_TEXT.indexOf('CODEX_BUILD_CALL_FAILED: the codex build call failed')
+    const realExec = SCRIPT_TEXT.indexOf('codex exec "$@" --sandbox danger-full-access')
+    expect(seamEnd).toBeGreaterThan(0)
+    expect(realExec).toBeGreaterThan(seamEnd)
+    const productionRegion = SCRIPT_TEXT.slice(seamEnd, realExec)
+    // The slice must be able to MISS — otherwise "found it here" says nothing about
+    // where it is.
+    expect(countIn(productionRegion, 'NEUTRON_CODEX_BUILD_EXEC_CMD')).toBe(0)
+    expect(countIn(productionRegion, 'stamp_stage codex-exec-start')).toBe(1)
+    expect(countIn(productionRegion, 'start_stage_heartbeat')).toBe(1)
   })
 })
 
@@ -1050,7 +1461,7 @@ describe('trident/codex-build.sh — exit-code contract', () => {
   })
 
   test('a corrupt whole brief records the exact refusal sentence on the run row', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
     const dbPath = join(alertDir, 'project.db')
     const runId = 'run-corrupt-whole-alert'
     seedMigratedDb(dbPath)
@@ -1229,7 +1640,7 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
   })
 
   test('a corrupt part records the exact refusal sentence on the run row and still exits 3', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
     const dbPath = join(alertDir, 'project.db')
     const runId = 'run-corrupt-part-alert'
     seedMigratedDb(dbPath)
@@ -1271,7 +1682,7 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
   })
 
   test('a missing part also records its exact refusal sentence on the run row', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-alert-db-')))
     const dbPath = join(alertDir, 'project.db')
     const runId = 'run-missing-part-alert'
     seedMigratedDb(dbPath)
@@ -1334,7 +1745,7 @@ describe('codex build brief — assembled from parts on disk (by-path transport)
   })
 
   test('a checkpoint aimed at a missing run reports alert recording failure', () => {
-    const alertDir = mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-'))
+    const alertDir = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-missing-alert-row-')))
     const dbPath = join(alertDir, 'project.db')
     seedMigratedDb(dbPath)
     const db = new Database(dbPath)
@@ -1587,7 +1998,7 @@ describe('the BRIEF is what codex is asked to build', () => {
   test.skipIf(!haveRealCodex)(
     'the `shell_environment_policy` fields are REAL on the installed CLI, not plausible strings',
     () => {
-      const home = mkdtempSync(join(tmpdir(), 'trident-codex-strict-'))
+      const home = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-strict-')))
       const ask = (...cfg: string[]): string => {
         const res = spawnSync(
           'codex',
@@ -2199,5 +2610,136 @@ describe('atomic trailer publication', () => {
     expect(SCRIPT_TEXT).toContain('mv -f "$TRAILER_TMP" "$TRAILER_FILE"')
     expect(SCRIPT_TEXT).not.toContain('> "$TRAILER_FILE"')
     expect(SCRIPT_TEXT).toContain('rm -f "$TRAILER_TMP" "$TRAILER_FILE"')
+  })
+})
+
+describe('fixture reaping — the suite must not leak its own temp dirs', () => {
+  // The regex the counters below use. It is deliberately the BARE mkdtemp shape
+  // (`trident-codex-build-` + exactly 6 mkdtemp characters) — the same shape that
+  // accounted for all 24,946 orphans measured on this host, and NOT the
+  // `-stage-db-` / `-alert-db-` variants, which are longer.
+  const FIXTURE_NAME = /^trident-codex-build-[A-Za-z0-9]{6}$/
+  const fixtureNames = (): Set<string> =>
+    new Set(readdirSync(tmpdir()).filter((name) => FIXTURE_NAME.test(name)))
+  const cheapRun = (): RunResult =>
+    run({ authed: true, codexLoginExit: 0, env: { NEUTRON_CODEX_BUILD_EXEC_CMD: FAKE_BUILD } })
+
+  // A case cannot watch its own reap — afterEach runs after the body returns — so the
+  // observation is split across two cases, A recording and B checking.
+  let priorDir = ''
+
+  test('control A: a fixture dir is ALIVE for the whole of the case that made it', () => {
+    const r = cheapRun()
+    // NEGATIVE CONTROL on placement: proves the reaper does NOT fire inside run(). If
+    // anyone "simplifies" the cleanup into run(), this fails — and so does every case
+    // that reads r.dir afterwards, e.g. the RECLAIM case that walks the holder
+    // worktree and reads its preserved post-mortem.txt.
+    expect(existsSync(r.dir)).toBe(true)
+    expect(readdirSync(r.dir).length).toBeGreaterThan(0)
+    priorDir = r.dir
+  })
+
+  test('control B: the PREVIOUS case\'s fixture dir is GONE', () => {
+    // ANTI-VACUITY GUARD, and it is load-bearing, not decorative: with no fixture
+    // recorded, `existsSync('')` is false and the real assertion below would pass
+    // while observing nothing at all. An empty check reading as a passing check is
+    // this repo's recurring failure mode; this line makes the empty case fail loudly.
+    //
+    // It also makes B ORDER-DEPENDENT on purpose: `bun test -t 'control B'` filters A
+    // out and B then fails, loudly and correctly, because it was given nothing to
+    // observe. Run the pair with the file, not with -t alone.
+    expect(priorDir).not.toBe('')
+    expect(existsSync(priorDir)).toBe(false)
+  })
+
+  test('control C: N runs net ZERO new fixture dirs in /tmp', () => {
+    const before = fixtureNames()
+    const r1 = cheapRun()
+    const r2 = cheapRun()
+    const mine = [basename(r1.dir), basename(r2.dir)]
+    const during = fixtureNames()
+
+    // POSITIVE CONTROL ON THE COUNTER. The two dirs that certainly exist right now
+    // must be VISIBLE to the readdir+regex the assertions below count with. If the
+    // mkdtemp prefix or suffix length ever changes, this fails loudly here instead of
+    // letting the after-count report a serene 0 == 0 over a regex matching nothing.
+    expect(mine.filter((name) => during.has(name))).toEqual(mine)
+    expect(before.has(mine[0] as string)).toBe(false)
+    expect(before.has(mine[1] as string)).toBe(false)
+
+    reapFixtures()
+
+    const after = fixtureNames()
+    // THE CLAIM: counted over the same path, both are gone — net zero.
+    expect(mine.filter((name) => after.has(name))).toEqual([])
+
+    // "…AND THE REAP DID NOT TAKE THE REST OF /tmp WITH IT" DELIBERATELY IS NOT
+    // ASSERTED HERE, AND THAT IS THE POINT OF THIS COMMENT.
+    //
+    // The obvious way to write it —
+    //     expect([...before].filter((name) => !after.has(name))).toEqual([])
+    // — asks whether ANY pre-existing `trident-codex-build-*` dir in the shared /tmp
+    // namespace vanished during this case's ~190ms window. That is not a fact about
+    // this reaper. It is a fact about every OTHER process on the box, and it goes red
+    // when any of them removes one of its own dirs: a sibling lane running this very
+    // suite (i.e. this fix, once it propagates), control D's own `rmSync(foreign)` in
+    // a sibling process, or an operator drain of stale fixtures.
+    //
+    // Worse, it is a guard that gets STRICTER as the leak it guards gets fixed — it
+    // was only ever quiet because siblings LEAKED. A test that passes only while the
+    // bug is present is not a control, and this repo has already lost days to a flaky
+    // test reddening main and blaming whichever diff was in flight.
+    //
+    // The claim is real and worth keeping, so it lives in `control D`, which makes it
+    // HERMETICALLY: D creates its own unregistered `foreign` dir, registers one beside
+    // it so the reap is genuine work rather than a vacuous no-op, and asserts `foreign`
+    // survives with its contents intact. Nothing another process does can perturb that.
+  })
+
+  test('control D: the reaper removes ONLY dirs it registered', () => {
+    // The most important control in this set. A glob reaper (`rm -rf
+    // /tmp/trident-codex-build-*`) would pass A, B and C and silently delete a
+    // concurrent lane's in-flight fixture. `foreign` stands in for that lane: same
+    // prefix, same parent, NOT registered here.
+    const foreign = mkdtempSync(join(tmpdir(), 'trident-codex-build-'))
+    writeFileSync(join(foreign, 'a-sibling-lane-is-building-in-here.txt'), 'live\n')
+    try {
+      // Registered alongside it, so the reap under test is REAL work and not a no-op:
+      // without this, a reaper that did nothing at all would also leave `foreign`
+      // standing and pass vacuously.
+      const ours = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
+      reapFixtures()
+      expect(existsSync(ours)).toBe(false)
+      expect(existsSync(foreign)).toBe(true)
+      expect(readFileSync(join(foreign, 'a-sibling-lane-is-building-in-here.txt'), 'utf8')).toBe(
+        'live\n',
+      )
+    } finally {
+      rmSync(foreign, { recursive: true, force: true })
+    }
+  })
+
+  test('control E: an entry that CANNOT be removed is a leak, not a red suite', () => {
+    // Reaping is best-effort by design: an entry rmSync throws on must neither turn a
+    // passing case red nor abandon the rest of the registry.
+    //
+    // A merely-absent path would NOT exercise this — `force: true` makes that a silent
+    // no-op — so the entry has to be one rmSync genuinely refuses. A NUL in the path is
+    // refused deterministically (ERR_INVALID_ARG_VALUE) for every user, including root,
+    // which a chmod-based lock would not be.
+    const unremovable = `${join(tmpdir(), 'trident-codex-build-refused')}${String.fromCharCode(0)}x`
+    // POSITIVE CONTROL ON THE FIXTURE: prove the entry really does throw. Without it an
+    // rmSync that quietly tolerated the path would make the assertions below pass while
+    // the catch under test was never entered.
+    expect(() => rmSync(unremovable, { recursive: true, force: true })).toThrow()
+
+    // Pushed so the BAD entry is popped FIRST (the reaper pops from the end): the
+    // survivor is only reached if the loop continues past the throw.
+    const survivor = fixtureDir(mkdtempSync(join(tmpdir(), 'trident-codex-build-')))
+    FIXTURE_DIRS.push(unremovable)
+
+    expect(() => reapFixtures()).not.toThrow()
+    expect(existsSync(survivor)).toBe(false)
+    expect(FIXTURE_DIRS.length).toBe(0)
   })
 })

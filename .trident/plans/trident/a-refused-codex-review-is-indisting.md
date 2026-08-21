@@ -9,3 +9,10 @@ Card: a content-policy refusal from `codex exec` (exit 0, EMPTY final message, r
 - [x] THE CARD: in `trident/codex-review.sh`, capture stdout+stderr of the review call (both the real `codex exec` invocation AND the `NEUTRON_CODEX_EXEC_CMD` test seam); on exit 0 with an empty/whitespace-only final message, exit 5 DEFERRED — grep captured stderr for the refusal signature `flagged for possible cybersecurity risk` and emit `CODEX_REVIEW_REFUSED` (names the content-policy refusal), else `CODEX_REVIEW_EMPTY_OUTPUT` — both distinct from `CODEX_REVIEW_CALL_FAILED`. Replay the tool's stderr and stdout to the caller so the bridge's out/err files still carry the evidence. NO automatic retry-with-rephrasing. Update the test mock (it currently exits 0 with no stdout) and add tests: empty-output → 5, refusal → 5 with the refusal named, whitespace-only output → 5, refusal-warning-plus-real-review → 0 (gate keys on empty output, not stderr content), happy APPROVE and REQUEST_CHANGES paths unaffected, real-invocation (non-seam) path gated too. Tighten `extractAnswerText` in kimi-review.ts to skip whitespace-only text blocks (+ test). Update the header exit-code doc and the three inner-workflow.mjs deferred-cause strings (4611/4661/4718) to name the refusal as a possible cause.
 
 remaining after top task: 0 — this is a single-card, single-iteration change.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/a-refused-codex-review-is-indistinguishable-from-a-clean-one-7h5d2d.md`. Do not paraphrase this section._
+
+- Do not retry-with-rephrasing automatically to dodge the refusal. The operator must learn the review did not run; silently rewording a security review into one the API accepts is a worse failure than deferring.
+- Do not treat this as the same condition as a non-zero exit — it needs its own message, or the diagnosis is lost again.

@@ -78,17 +78,50 @@
  * direction or the other, and releasing after 100 minutes of a launch that never
  * settled is the direction whose failure is visible and recoverable.
  *
+ * ── THE MID-PHASE HEARTBEAT NOW EXISTS, AND THIS MODULE READS IT ─────────────
+ *
+ * An earlier version of this header said the remaining gap needed "the real
+ * mid-phase heartbeat tracked in ISSUES #534". That heartbeat shipped: the build
+ * and review wrappers now stamp `codex-exec-alive` / `codex-review-alive` into
+ * `code_trident_stage_events` every 5 minutes, and the hang watchdog stands down
+ * on an event newer than its own threshold (`orchestrator.ts` section 1b-i).
+ *
+ * THAT MADE READING IT HERE MANDATORY, NOT OPTIONAL. The stand-down and this
+ * timer key on the SAME work. Before the heartbeat, a reaper-reachable run that
+ * stopped stamping was flipped `failed` at 90 min, so by the time this timer was
+ * consulted at 100 min the answer came from `terminal` — a fact — and waking the
+ * item was correct because nothing was running. With the heartbeat, a HEALTHY
+ * long build is spared at 90 min and stays non-terminal; if this module still
+ * decided it on `last_advanced_at` alone it would report `no-advance` from 100
+ * min and the wakeup would drive an item whose build is alive and building — up
+ * to four wakeup turns across the 100→120 min window, the exact double-drive
+ * `work-wakeup-selection.ts` exists to prevent. The fix's stated trade ("up to 30
+ * extra minutes before a wedge is reaped") silently bought that second window;
+ * reading the same evidence source closes it.
+ *
+ * IT CANNOT BECOME A PERMANENT DEFERRAL. Two independent bounds, both self-
+ * clearing and neither needing a human: the ticker is killed by the wrapper on
+ * every exit path (three guards, pinned in `codex-build.test.ts`), and — even if
+ * one leaked — the reprieve here is refused outright once `since_advance_ms`
+ * passes `DEFAULT_MAX_INFLIGHT_MS`, mirroring the orchestrator's "the ceiling
+ * outranks every reprieve" rule on the same clock. An endlessly-heartbeating
+ * corpse is released by this module at 2 h whatever the ledger says.
+ *
+ * WHAT IS DELIBERATELY *NOT* READ HERE: the launcher liveness probe. It answers
+ * about a launcher GENERATION that several runs can share (`tick.ts:561-563`), so
+ * a long-lived shared REPL would answer 'alive' for a run that is doing nothing
+ * and defer its item indefinitely. The stage ledger is per-RUN and stops on its
+ * own; that is the difference that makes one safe to stand down on here and the
+ * other not.
+ *
  * ── WHAT THIS STILL DOES NOT SOLVE ───────────────────────────────────────────
  *
- * A run the reaper cannot reach and whose build is nevertheless alive is decided
- * by the timer, late but still by a clock. Closing that needs the real mid-phase
- * heartbeat tracked in ISSUES #534 — the liveness probe (`tick.ts:113-125`) is
- * the right eventual signal because its answer is BINARY and no amount of slowness
- * can make it say "dead", but it is async, per-generation, and only defined for a
- * run that HAS a recorded generation, which the runs decided here do not.
+ * A run the reaper cannot reach, whose build is alive but which emits no stage
+ * events at all (nothing has stamped since `wrapper-start`), is still decided by
+ * the timer, late but still by a clock.
  */
 
-import { NO_ADVANCE_HANG_MS } from './liveness.ts'
+import { DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 
@@ -137,6 +170,13 @@ export const WAKEUP_STAND_DOWN_MS = NO_ADVANCE_HANG_MS + WAKEUP_REAP_MARGIN_MS
 export type RunDrivingReason =
   /** Non-terminal and it moved recently enough to still be trusted. */
   | 'advancing'
+  /**
+   * `last_advanced_at` is stale (or unreadable), but a MID-PHASE stage event
+   * landed inside the stand-down window — the same positive evidence the hang
+   * watchdog spares the run on. Distinct from `advancing` on purpose: the two are
+   * different observations and a log that conflates them cannot be audited.
+   */
+  | 'stage-alive'
   /** `done`/`failed`/`stopped` — it is finished and drives nothing. */
   | 'terminal'
   /** Non-terminal, and `last_advanced_at` has not moved past the stand-down threshold. */
@@ -166,12 +206,35 @@ export function runDrivingVerdict(
   run: TridentRun,
   now_ms: number,
   no_advance_hang_ms: number = WAKEUP_STAND_DOWN_MS,
+  latest_stage_event_at: string | null = null,
 ): RunDrivingVerdict {
   const advancedMs = Date.parse(run.last_advanced_at)
   const delta = Number.isFinite(advancedMs) ? now_ms - advancedMs : null
   const since_advance_ms = delta === null ? 0 : Math.max(0, delta)
 
   if (isTerminalPhase(run.phase)) return { driving: false, reason: 'terminal', since_advance_ms }
+
+  // POSITIVE MID-PHASE EVIDENCE, read the SAME way the hang watchdog reads it
+  // (`orchestrator.ts` 1b-0/1b-i): an event NEWER than the threshold proves the run
+  // advanced inside the window a bare `last_advanced_at` would call dead.
+  //
+  // ABSENCE IS NOT EVIDENCE — a null (not wired / no events) or an unparseable
+  // stamp falls straight through to the timer below, byte-identical to the
+  // behaviour before this source existed.
+  //
+  // AND THE CEILING OUTRANKS THE REPRIEVE, checked here for the same reason the
+  // orchestrator checks it first: a ticker that somehow outlived its build would
+  // otherwise defer its item forever, and this module is a BACKSTOP — a stand-down
+  // it can never retract is worse than the double-drive it prevents.
+  const stageMs = latest_stage_event_at === null ? NaN : Date.parse(latest_stage_event_at)
+  if (
+    Number.isFinite(stageMs) &&
+    now_ms - stageMs <= no_advance_hang_ms &&
+    now_ms - stageMs >= -FUTURE_STAMP_TOLERANCE_MS &&
+    since_advance_ms <= DEFAULT_MAX_INFLIGHT_MS
+  ) {
+    return { driving: true, reason: 'stage-alive', since_advance_ms }
+  }
 
   // NO READING IS NOT A GOOD READING. An unparseable stamp — or one from the
   // future, which is the same thing wearing a valid date — cannot show that this

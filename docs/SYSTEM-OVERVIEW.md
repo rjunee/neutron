@@ -287,18 +287,26 @@ the owner slug, unchanged; the HTTP ▶/create surface already scope-keyed from 
 
 > **M1 redesign polish (Ryan 2026-07-03) — CLOSED.** Four chat-UI refinements,
 > no feature flags, one code path each:
-> - **Favicon = the ⚛ atom mark.** `landing/favicon.svg` reproduces the `AtomMark`
->   geometry from `ChatApp.tsx` (center dot + 3 rotated orbit ellipses) in a FIXED
->   accent hex (a favicon can't read page CSS vars), so the browser tab matches the
->   rail-header icon.
+> - **Favicon = the ⚛ atom mark, and it is the SOURCE every raster copy is generated
+>   from.** `landing/favicon.svg` is a nucleus plus 3 rotated orbit ellipses in a FIXED
+>   accent hex (a favicon can't read page CSS vars). It is the same FAMILY as `AtomMark`
+>   in `ChatApp.tsx` (the rail-header icon) but NOT a copy of its geometry — this bullet
+>   said "reproduces the `AtomMark` geometry" and that was never true of the numbers; a
+>   tile has margins to respect and a 16px tab slot to survive, a header glyph has
+>   neither. The one mirror of the SVG's coordinates lives in `scripts/lib/atom_mark.py`,
+>   and `scripts/__tests__/atom-mark-geometry.test.ts` pins the two together AND decodes
+>   the committed PNGs, because until 2026-08-11 the rasteriser placed the stroke inside
+>   the bbox while SVG centres it, so the shipped icons silently disagreed with this file.
 >   **SUPERSEDED 2026-07-18** — as first shipped this mark was transparent and
 >   stroke-only in `#007aff` at `stroke-width 1.6` on a `0 0 24 24` viewBox, which
 >   at a 16px tab slot is a ~1.07-device-px mid-blue hairline on Chrome's near-black
 >   tab strip: served correctly, rendered invisibly, reported as "no favicon". The
 >   mark now carries an opaque `#0b0e14` tile, accent `#4da3ff`, and `0 0 32 32` @
->   `stroke-width 2.6`. A raster `landing/favicon.ico` (generated from the same
->   geometry by `scripts/gen-favicon-ico.py`) is declared first as the universal
->   fallback. See AS_BUILT §2026-07-18 "Favicon".
+>   `stroke-width 2.6`. A raster `landing/favicon.ico` AND `landing/apple-touch-icon.png`
+>   (both generated from the same geometry by `scripts/gen-favicon-ico.py`) are declared
+>   first as the universal fallback; the `.ico` was hand-placed until 2026-07-18 and the
+>   apple-touch icon until 2026-08-11, when it was found still holding the rejected teal
+>   ring artwork. See AS_BUILT §2026-07-18 "Favicon" and §2026-08-11 "the ⚛ app icon".
 > - **Work-item delete confirm is INLINE-in-row, not a modal.** The old
 >   full-screen `.cwb-confirm-backdrop` / `aria-modal` dialog was deleted; the ✕
 >   now reveals a `.cwb-confirm-inline` `role="group"` strip WITHIN the item's own
@@ -2313,7 +2321,7 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 > One guard, one code path, no flag.
 
 > **Turn timeout is ACTIVITY-BASED, not a fixed wall clock; freezes auto-retry +
-> get a Retry affordance (2026-07-01, Ryan live-test).** The `COLD_TURN_TIMEOUT_MS`
+> get a Retry affordance (updated 2026-08-14).** The `COLD_TURN_TIMEOUT_MS`
 > (600s) / `DEFAULT_TURN_TIMEOUT_MS` (180s) fixed budgets above were themselves the
 > next bug: a chat turn that ran a long-but-ACTIVE build (a "weave timer+tracker
 > together then do full e2e testing" request) hard-failed at exactly 180s
@@ -2328,13 +2336,16 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >   resets the idle clock and runs as long as it needs. Only a GENUINELY frozen turn
 >   goes silent long enough to trip. The liveness keepalive pushes `status` events
 >   but does NOT touch `lastDataAt`, so an alive-but-frozen child is still correctly
->   detected as frozen. `DEFAULT_TURN_INACTIVITY_MS` is 90s; a new
->   `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min, additive `AgentSpec.turn_absolute_
->   ceiling_ms`) is a hard backstop so a live-but-livelocked child can't run forever.
+>   detected as frozen. Chat and warm-fire turns use the same 30-minute inactivity
+>   window, deliberately below `DEFAULT_TURN_ABSOLUTE_CEILING_MS` (45min, additive
+>   `AgentSpec.turn_absolute_ceiling_ms`), which remains the hard backstop so a
+>   live-but-livelocked child can't run forever. A delayed Retry tap is suppressed
+>   once the original turn completed and receives an explicit acknowledgement, so
+>   widening freeze detection cannot redo finished work or create a dead control.
+>   Profile-less internal calls retain the 90-second substrate default.
 >   `AgentSpec.turn_timeout_ms` is REPURPOSED from "wall-clock budget" to "inactivity
 >   window" (the substrate reads it exactly the same way; only the semantics of the
->   number changed). The composer sends the snappy 90s window for a warm turn and a
->   larger 180s window for a cold/onboarding turn (heavier initial processing); its
+>   number changed). The composer sends the 30-minute window for every chat turn; its
 >   own AbortController is now a pure absolute-ceiling backstop (45min) that also
 >   covers the cold-SPAWN phase, which runs before the substrate's per-turn watchdog
 >   starts — that is where the cold path's "generous window" now lives (folded into
@@ -2352,6 +2363,12 @@ identically. Styled with the pre-existing `.ctask-*` block in `chat-react.html`.
 >   distinguished from a real credential/connection fault (`isFreezeTimeout`): only
 >   the latter keeps the actionable `FAILURE_BODY`, so a slow turn is never
 >   misdiagnosed as a broken setup again.
+> - **Chat pipelines cannot hide activity.** The conversational REPL's generated
+>   settings wire a Bash `PreToolUse` guard. A command that pipes into a
+>   full-buffering consumer is refused with the offending consumer named; streaming
+>   pipelines, including `tail -f`, remain allowed. Long output must be redirected to a log and inspected by a separate
+>   call, so a full-buffering consumer cannot conceal child activity from the
+>   inactivity watchdog.
 
 > **Onboarding reliability — opening recovery, empty-project loader, deterministic
 > archetype step, larger cold budget (#136+#138 fresh-install verify, 2026-06-30).**
@@ -6985,16 +7002,21 @@ and getting them confused produced a user-visible P1.
   the record or moves it to the crash queue via `markCrashed` — both of which
   drop the live record wholesale, so a dead child leaves nothing busy.
 
-  **Scope — `stuck_agent` is a narrow backstop, not broad protection.** The
-  per-turn driver watchdog in the pool catches most wedges an order of magnitude
-  faster: `failFrozen` abandons a turn after 90 s of PTY silence
-  (`TURN_INACTIVITY_MS`, `gateway/wiring/build-live-agent-turn.ts:95`; 180 s for
-  cold/onboarding turns at `:107`) and enforces a 45-minute absolute ceiling
-  (`TURN_ABSOLUTE_CEILING_MS`, `:117`). With `stuck_agent`'s 15-minute threshold
-  (`detectors.ts`), the band it uniquely covers is a turn that keeps emitting
-  output continuously — so the 90 s silence timer never trips — without settling,
-  for 15 to 45 minutes. Real, but narrow. Do not treat a quiet `stuck_agent` as
-  evidence that turns are healthy; the driver watchdog is the primary guard.
+  **Scope — `stuck_agent` is a narrow backstop, not broad protection.** For CHAT
+  turns, `failFrozen` abandons a turn after `CHAT_TURN_INACTIVITY_MS` (30 minutes)
+  of PTY silence and enforces the 45-minute `TURN_ABSOLUTE_CEILING_MS`, both in
+  `gateway/wiring/build-live-agent-turn.ts`; profile-less internal calls whose spec
+  has no `turn_timeout_ms` retain the substrate's `DEFAULT_TURN_INACTIVITY_MS`
+  (90 s). The ordering depends on the regime. For profile-less internal calls the
+  driver watchdog remains an order of magnitude faster, while `stuck_agent`'s
+  15-minute in-flight default in `watchdog/detectors.ts` uniquely covers a turn
+  that emits continuously without settling between 15 and 45 minutes. For CHAT
+  turns the ordering INVERTS: a wedged turn, silent or emitting, reaches
+  `stuck_agent` at 15 minutes before the 30-minute silence trip or 45-minute
+  ceiling. It may also flag a legitimately long healthy chat turn; this is an
+  alert, not an abandonment, and the turn keeps running. A quiet `stuck_agent` is
+  still not evidence that turns are healthy; the driver watchdog remains the
+  primary fast guard on the 90 s profile-less path.
 
   **Not covered: the pre-turn phase.** `markTurnStarted` fires only once the
   driver assigns `session.activeTurn`, which is *after* `getOrSpawnSession` and
@@ -7869,6 +7891,44 @@ turns; the onboarding engine is retained ONLY for the import pipeline, and the
 live agent's onboarding seam carries the interview until the owner is onboarded,
 then it is steady-state chat. A free-Core slash command is intercepted first by
 the chained `chat_command_filter` (`app-ws-surface.ts:605` / `:783`).
+
+**Conversation-lifecycle logging (ISSUES #557).** The whole lifecycle is
+greppable under the one `[app-ws] event=… k=v` prefix the surface already used
+for `session_open` / `session_close`. There is no second format and no flag —
+it is on, one code path.
+
+- `message_received topic=… transport=ws|http seq=… client_msg_id=… was_new=…` —
+  emitted by `AppWsAdapter.ingestUserMessage`
+  (`channels/adapters/app-ws/adapter.ts`), the single chokepoint BOTH inbound
+  paths funnel through (`/ws/app/chat` and `POST /api/app/chat/send`), so the
+  two transports cannot drift apart. It is emitted on EVERY outcome including
+  the de-duplicated one. That matters more than it looks: a repeated
+  `client_msg_id` collapses onto the existing row in
+  `persistence/app-chat-store.ts` and writes nothing, so before this line
+  "arrived and was de-duplicated" and "never arrived" were indistinguishable
+  from the server — two problems with opposite fixes.
+- `turn_dispatched topic=… session=… turn=…`, then exactly one of
+  `turn_completed … ms=…` or `turn_failed … ms=… error=…` — emitted by
+  `AppWsAdapter.dispatchInbound`, the one place a turn crosses into the agent.
+  `session` is the socket's device id (`http` for the HTTP fallback) and is
+  echoed as `device=` on `session_open` / `session_close`, so a turn ties back
+  to the connection it arrived on. `turn_failed` still rethrows. The `ms` is
+  load-bearing: a long turn must read as long rather than as a dead one.
+- `message_refused topic=… transport=… reason=…` at every refusal in
+  `gateway/http/app-ws-surface.ts` — `malformed_json`, `malformed_envelope`,
+  `dispatch_failed`, `missing_bearer`, the auth resolver's own rejection code,
+  `missing_body`, `body_too_long` — and
+  `turn_skipped … reason=duplicate_client_msg_id | chat_command | prompt_already_answered`
+  wherever a message is accepted but no turn runs. A silent refusal is what
+  produced ISSUES #516, so a drop always names its reason.
+
+Bodies are NEVER logged, nor tokens nor any credential material — ids, a seq,
+booleans and durations only. `gateway/__tests__/app-ws-chat-observability.test.ts`
+and `channels/adapters/app-ws/__tests__/chat-observability-log.test.ts` assert on
+the emitted lines (captured off the logger's real console sink, not on a spy) and
+both assert positively that the body never appears. No line was added inside a
+per-tick cron loop — a flooded journal is what made real events invisible to
+begin with.
 
 **Owner-timezone capture on connect (ISSUES #40, WRITE path landed #392).** The
 web + Expo clients detect their own IANA zone client-side

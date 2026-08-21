@@ -22,3 +22,12 @@ Tasks, in priority order (Fix 1 first — it is what unblocks enterprise landing
 - [ ] 5. FIX 3 — the ISO-timestamp window-filter trap: add the store-level window query (correct ISO-string comparison over the TEXT column) plus the seeded 2-year-table test proving a 24h filter returns ONLY recent rows, with the naive `strftime('%s')` numeric form as the red control that matches 100% of rows against today's TEXT column (falsification 5); document the trap at the column and in `docs/INVARIANTS.md`. (No in-repo query does numeric filtering today — the wrong analyses were ad-hoc; the helper + red-pin is the card's offered alternative to an epoch-ms migration.)
 - [ ] 6. FIX 4 — hang watchdog positive liveness: the `NO_ADVANCE_HANG_MS` reap consults positive evidence (live launcher process via the existing 15 s probe, or a growing artifact) before reaping; a run with positive liveness is never reaped by the no-advance clock (the 2h `DEFAULT_MAX_INFLIGHT_MS` ceiling still bounds); a dead pid is still reaped fast. Tests both directions; killing the liveness writer must turn a test red.
 - [ ] 7. DOCS sweep — `docs/SYSTEM-OVERVIEW.md` review-only dispatch section, `docs/INVARIANTS.md` entries (bound run never reaches the publisher; refusal-not-conversion at dispatch), and the card's falsification checklist recorded in `docs/AS_BUILT.md`.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/trident-cannot-review-an-existing-pr-handed-review-pr-n-it-b-q284gz.md`. Do not paraphrase this section._
+
+- Do not weaken the brief-part receipt check — it worked.
+- Do not "fix" this by having the review lane commit an empty file to satisfy the publisher.
+- Do not close this card on Fix 3 or 4 alone; **Fix 1 is what unblocks enterprise.**
+- Do not treat `CODEX_BUILD_BRANCH_RECLAIMED` as evidence this is solved — that class (formerly `BRANCH_UNBOUND`) appears addressed since the 00:12Z restart, and is a different defect.

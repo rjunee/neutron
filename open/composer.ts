@@ -39,7 +39,7 @@ import {
   resolveAmbientTier,
 } from '@neutronai/gateway/wiring/resolve-llm-credentials.ts'
 import { normalizeProvider, type Provider } from '@neutronai/runtime/adapters/select-substrate.ts'
-import { LoopRegistry } from '@neutronai/loop'
+import { LoopRegistry, SupervisedLoop } from '@neutronai/loop'
 import type { McpToolResolver } from '@neutronai/contracts/mcp-tool-resolver.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import { detectAmbientClaudeAuthCached } from './ambient-claude-auth.ts'
@@ -384,15 +384,17 @@ import {
   type ProjectScaffoldDeps,
 } from '@neutronai/gateway/wiring/project-create.ts'
 import type { CreateProjectToolService } from '@neutronai/gateway/wiring/create-project-tool.ts'
-import type { ApprovalManager } from '@neutronai/tools/approval.ts'
+import { APPROVAL_DEFAULT_TTL_MS, type ApprovalManager } from '@neutronai/tools/approval.ts'
 import {
   createHostDeployService,
+  HOST_DEPLOY_APPROVAL_SWEEP_INTERVAL_MS,
   HOST_DEPLOY_TOKEN_SERVICE,
   HOST_DEPLOY_URL_SERVICE,
   resolveHostDeployConfig,
   type HostDeployService,
 } from './host-deploy.ts'
 import { createHostDeployDispatch, createHostDeployRemoteGit } from './host-deploy-runtime.ts'
+import { buildHostDeployPromptRetirer } from './wiring/host-deploy-prompt-retirer.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
 import { createAppDevicesSurface } from '@neutronai/gateway/http/app-devices-surface.ts'
@@ -3023,9 +3025,47 @@ export function buildOpenGraphComposer(
           if (!result.persisted) {
             throw new Error('host deploy approval prompt failed to persist a durable row')
           }
+          // The grant→prompt link. `request()` persists this id into the
+          // approval row so the expiry sweep can retire the very button it
+          // raised — a grant that dies while its button stays drawn is the
+          // "still tappable, connected to nothing" state the owner hit.
+          return { prompt_id: result.prompt_id }
+        },
+        // Retire the dead grant's button on every surface. `appWs` is declared
+        // LATER in this composer body, but `hostDeployInstall` runs during GRAPH
+        // composition — after `createOpenComposition` has returned — so the
+        // closure's reference is bound long before it is called.
+        retire_prompt: buildHostDeployPromptRetirer({
+          buttonStore: landing.buttonStore,
+          recordPromptChoice: async (input) => {
+            await appWs.deref((a) => a.recordPromptChoice(input))
+          },
+        }),
+        // The expiry sentence, on the grant's OWN topic, INERT: an expired
+        // approval is history, not a new prompt, and it must never be tappable.
+        post_notice: async (topic_id, body) => {
+          await deliver(topic_id, { body, durability: 'inert' })
         },
         log: (m) => log.info('host_deploy', { detail: m }),
       })
+
+      // ── The sweeper. A dead grant must stop being pending WITHOUT a tap:
+      // until now nothing on this box expired one, so the row sat `pending`
+      // forever and the "Approval requested […]" banner sat with it.
+      // HOST-DEPLOY-SCOPED by construction (`sweepExpiredGrants` scans only
+      // `host-deploy` rows) — a global `ApprovalManager.expireStale()` tick
+      // would also expire pending RITUAL grants the owner may answer days later.
+      const hostDeploySweeper = new SupervisedLoop({
+        name: 'host-deploy-approval-sweeper',
+        intervalMs: HOST_DEPLOY_APPROVAL_SWEEP_INTERVAL_MS,
+        tick: () => hostDeployService!.sweepExpiredGrants().then(() => undefined),
+      })
+      // §F2 register-before-start: a duplicate name throws at boot, before the
+      // timer arms. §F1 quiescing stop() runs on shutdown, so an in-flight sweep
+      // drains before `db.close()`.
+      loopRegistry.register(hostDeploySweeper.describe())
+      hostDeploySweeper.start()
+      realmodeCleanups.push(() => hostDeploySweeper.stop())
     }
 
     const init_ritual_planner: CompositionInput['init_ritual_planner'] =
@@ -6154,6 +6194,12 @@ export function buildOpenGraphComposer(
         return selectWakeupWork({
           items: workBoardStore.listAllActive(),
           lookupRun: (run_id: string) => boardRunStore.get(run_id),
+          // THE SAME LIVENESS LEDGER THE HANG WATCHDOG READS. Without it this
+          // sweep and the trident reaper disagree about the same run: since the
+          // wrappers gained a 5-minute mid-phase heartbeat the watchdog spares a
+          // healthy long build past 90 min, and a wakeup keyed only on
+          // `last_advanced_at` would then start driving that item at 100 min.
+          latestStageEventAt: (run_id: string) => boardRunStore.latestStageEventAt(run_id),
           owner_slug: project_slug,
           now_ms: Date.now(),
         })
@@ -6332,7 +6378,13 @@ export function buildOpenGraphComposer(
       // production caller. App-ws broadcast per the `watchdogNotifier`
       // precedent above (`appWsRegistry` :2051 satisfies the structural
       // `ApprovalNotifierRegistry`); plain-text, fail-soft, never prompt bytes.
-      approval_notifier: buildAppWsApprovalNotifier({ registry: appWsRegistry }),
+      // `ttl_ms` is the TTL GUARD (2026-08-15): the banner is a one-shot frame
+      // with no retraction, so it must never be born already pointing at a grant
+      // past its lifetime — the owner's only cure for that is a page reload.
+      approval_notifier: buildAppWsApprovalNotifier({
+        registry: appWsRegistry,
+        ttl_ms: APPROVAL_DEFAULT_TTL_MS,
+      }),
       // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
       // replacing the no-op. Fully guarded; never throws into the tick.
       watchdog_notifier: watchdogNotifier,

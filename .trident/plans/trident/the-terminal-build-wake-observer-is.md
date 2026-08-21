@@ -8,3 +8,11 @@ Spec: the Plan card "The terminal-build wake observer is built and merged (#335)
 - [x] `trident/delivery.ts` PR#0 sentinel rendering fix (rode #335)
 - [x] T1+T2+T3 — WIRE THE OBSERVER: construct deps ONCE in `open/composer.ts` (claimWake→`boardRunStore.claimAgentWake`, boardItemIdForRun→`workBoardStore.getByRunId`, llm→the existing `reminderComposeSubstrate`/`buildSubstrateReminderLlm` seam, projectChatScope→`workBoardProjectIdForKey(...) ?? 'general'`, post→the `deliver` seam to `run.chat_id` with `notify:'suppress'` when quiet); thread the RUN into the module's `post` signature; register the ONE value at all three sites (boardTerminatorHolder array, codegenTerminatorHolder array, tick loop via new optional `trident.on_terminal_wake` in `gateway/composition/input/misc-input.ts` consumed in `gateway/composition/build-core-modules.ts`); add wiring tests that go red if ANY one registration is removed (new `gateway/composition/build-core-modules-trident-terminal-wake-wiring.test.ts` behavioural + new `open/__tests__/open-terminal-build-wake-wiring.test.ts` behavioural DELETE-card claim/one-turn test + source-scoped registration-count assertions per the codegen-cancel-composition precedent); lint + typecheck-all clean; NO ratchet baseline moves (verified: composition-field inventory tracks `trident` top-level only)
 - [ ] T4 — end-to-end verification + changelog: drive a run to terminal on a booted composition, record OBSERVED behaviour (exactly one agent turn, re-observation none, `failed`/`stopped` loud vs `done` suppressed), note that the reminder-based wake path is deliberately retained, and append the as-built record to `docs/AS_BUILT.md`
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/the-terminal-build-wake-observer-is-built-and-merged-335-but-nwgxfk.md`. Do not paraphrase this section._
+
+- Do not weaken the claim-first discipline. `agent_waked_at` is deliberately absent from `COLS`, `TridentRun`, `update()`, `save()` and `saveIfActive()` so no full-snapshot write can un-claim a delivered wake. Keep it that way.
+- Do not register at one site only.
+- Do not remove the reminder-based path in the same change. Prove the wake works first; retiring the fallback is a separate decision.

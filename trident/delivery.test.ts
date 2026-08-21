@@ -246,6 +246,42 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     }
   }
 
+  // THE TWO HALVES MUST MOVE TOGETHER (this file's own contract, delivery.ts:279-284).
+  // The hang watchdog now APPENDS a liveness disclosure to its reason and emits two
+  // NEW variants alongside the original — the 2 h ceiling and the positively-dead
+  // launcher. Nothing pinned any of the three, so a reword that dropped the matched
+  // substring would have silently routed a hang as a generic failure.
+  test.each([
+    [
+      'ceiling',
+      'inner workflow stalled (no terminal result within 120 min) — liveness checked: newest stage event 4 min ago, launcher probe=alive; the 2 h ceiling outranks any liveness reprieve',
+    ],
+    [
+      'launcher positively dead',
+      'no progress for 90 min and the inner workflow launcher is positively dead — liveness checked: newest stage event none, launcher probe=dead',
+    ],
+    [
+      'suspected hang, with disclosure',
+      'no progress for 90 min — suspected agent hang (inner workflow stopped advancing) — liveness checked: newest stage event 97 min ago, launcher probe=unknown',
+    ],
+  ])('the watchdog reason variant %s still routes as a hang', (_label, reason) => {
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(interp.klass).toBe('hang')
+    expect(interp.summary.toLowerCase()).toContain('progress')
+    // The disclosure is INTERNAL diagnostics — it must not leak into owner copy.
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+    expect(interp.summary).not.toContain('launcher probe')
+  })
+
+  test('CONTROL: a reason with none of the three matched substrings does NOT route as a hang', () => {
+    // Without this, `klass === 'hang'` above could be the classifier's default rather
+    // than a match on the strings the orchestrator actually emits.
+    const interp = interpretFailure(
+      runWith({ phase: 'failed', failure_reason: 'liveness checked: newest stage event 4 min ago, launcher probe=alive' }),
+    )
+    expect(interp.klass).not.toBe('hang')
+  })
+
   test('hang → plain "stopped making progress" + retry', () => {
     const interp = interpretFailure(
       runWith({ phase: 'failed', failure_reason: 'no progress for 25 min — suspected agent hang (inner workflow stopped advancing)' }),

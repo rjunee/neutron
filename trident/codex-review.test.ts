@@ -14,11 +14,14 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { Database } from 'bun:sqlite'
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { delimiter, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
+import { applyMigrations } from '@neutronai/migrations/runner.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const SCRIPT = join(HERE, 'codex-review.sh')
@@ -568,5 +571,312 @@ describe('trident/codex-review.sh — the review MODEL is pinned', () => {
     expect(codexStdin).toContain(rubric)
     expect(codexStdin).not.toContain('giving an INDEPENDENT second opinion')
     expect(codexStdin).toContain(DEFAULT_DIFF.trim())
+  })
+})
+
+/**
+ * THE REVIEW-PHASE LIVENESS HEARTBEAT — `codex-review-alive`.
+ *
+ * THE COVERAGE HOLE THIS CLOSES. `grep -c stamp_stage trident/codex-review.sh` was 0
+ * while the build wrapper's was 7: the review phase emitted NO stage events at all, so
+ * for the whole of review the newest event in the ledger was the BUILD's
+ * `codex-exec-end` and the orchestrator's hang watchdog — which stands down only on an
+ * event newer than its 90-minute threshold — could only ever go stale on it. A watchdog
+ * whose evidence is structurally absent during a phase cannot tell a working reviewer
+ * from a hung one, so it kills both.
+ *
+ * Driven against the REAL sqlite through the shipped `stage-stamp.sh`, with a review
+ * seam that genuinely sleeps: a mocked clock would prove the arithmetic, not that a
+ * background process really writes rows while the model is thinking.
+ */
+describe('trident/codex-review.sh — the review-phase liveness heartbeat', () => {
+  const STAGE_STAMP = join(HERE, 'stage-stamp.sh')
+
+  const withStageDb = <T>(body: (stageDb: string, read: () => string[]) => T): T => {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-codex-review-stage-db-'))
+    const stageDb = join(dir, 'project.db')
+    seedMigratedDb(stageDb)
+    const migrated = new Database(stageDb)
+    applyMigrations(migrated)
+    migrated.close()
+    const read = (): string[] => {
+      const db = new Database(stageDb, { readonly: true })
+      const rows = db
+        .query<{ stage: string }, []>('SELECT stage FROM code_trident_stage_events ORDER BY id')
+        .all()
+      db.close()
+      return rows.map((row) => row.stage)
+    }
+    try {
+      return body(stageDb, read)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  const stageEnv = (stageDb: string, runId: string, secs: string): Record<string, string> => ({
+    NEUTRON_CODEX_REVIEW_STAGE_SCRIPT: STAGE_STAMP,
+    NEUTRON_CODEX_REVIEW_STAGE_DB: stageDb,
+    NEUTRON_CODEX_REVIEW_STAGE_RUN_ID: runId,
+    NEUTRON_CODEX_REVIEW_HEARTBEAT_SECS: secs,
+  })
+
+  test('REAL BEHAVIOUR: a long review beats mid-phase, bracketed by start/end', () => {
+    withStageDb((stageDb, read) => {
+      const { status, stdout } = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: {
+          ...stageEnv(stageDb, 'run-review-heartbeat', '1'),
+          NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; sleep 3.4; echo "VERDICT: APPROVE"',
+        },
+      })
+      expect(status).toBe(0)
+      const stages = read()
+      expect(stages.filter((s) => s === 'codex-review-alive').length).toBeGreaterThanOrEqual(2)
+      // Strictly INSIDE the window — evidence during the silence, not at its edges.
+      expect(stages.indexOf('codex-review-alive')).toBeGreaterThan(stages.indexOf('codex-review-start'))
+      expect(stages.lastIndexOf('codex-review-alive')).toBeLessThan(stages.indexOf('codex-review-end'))
+      // AND THE REVIEW TEXT IS UNTOUCHED. This script's stdout IS the verdict the bridge
+      // parses; a ticker that leaked one line onto it would corrupt every review.
+      expect(stdout).toContain('VERDICT: APPROVE')
+      expect(stdout).not.toContain('codex-review-alive')
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: the ticker does NOT outlive the review it speaks for', () => {
+    withStageDb((stageDb, read) => {
+      const { status } = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: {
+          ...stageEnv(stageDb, 'run-review-heartbeat-leak', '1'),
+          NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; sleep 2.4; echo "VERDICT: APPROVE"',
+        },
+      })
+      expect(status).toBe(0)
+      const atExit = read()
+      // Positive control for the negative one: it really was ticking.
+      expect(atExit.filter((s) => s === 'codex-review-alive').length).toBeGreaterThanOrEqual(1)
+      spawnSync('sleep', ['3'])
+      expect(read().length).toBe(atExit.length)
+    })
+  }, 30_000)
+
+  test('NEGATIVE CONTROL: a fast review emits no alive rows, and no stage env emits nothing', () => {
+    withStageDb((stageDb, read) => {
+      const { status } = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: stageEnv(stageDb, 'run-review-heartbeat-fast', '30'),
+      })
+      expect(status).toBe(0)
+      // The brackets landed, so an empty ledger is not what makes this pass…
+      expect(read()).toEqual(['codex-review-start', 'codex-review-end'])
+
+      // …and with the SCRIPT coordinate removed — same database, same run id — the
+      // wrapper writes NOTHING MORE, exactly as it did before the heartbeat existed.
+      // Asserted against the SAME ledger that just proved it can be written to, so
+      // "no new rows" is an observation and not an empty check against an empty db.
+      const before = read().length
+      const second = run({
+        authed: true,
+        codexLoginExit: 0,
+        env: {
+          NEUTRON_CODEX_REVIEW_STAGE_DB: stageDb,
+          NEUTRON_CODEX_REVIEW_STAGE_RUN_ID: 'run-review-heartbeat-fast',
+        },
+      })
+      expect(second.status).toBe(0)
+      expect(read().length).toBe(before)
+    })
+  }, 30_000)
+
+  test('a broken stage recorder cannot change the review exit code or its verdict', () => {
+    const { status, stdout } = run({
+      authed: true,
+      codexLoginExit: 0,
+      env: {
+        ...stageEnv('/nonexistent-dir/does-not-exist.db', 'run-review-heartbeat-broken', '1'),
+        NEUTRON_CODEX_EXEC_CMD: 'cat >/dev/null; sleep 2.4; echo "VERDICT: APPROVE"',
+      },
+    })
+    expect(status).toBe(0)
+    expect(stdout).toContain('VERDICT: APPROVE')
+  }, 30_000)
+})
+
+describe('trident/codex-review.sh — a SIGNALLED review must never read as an APPROVAL', () => {
+  // WHY THIS IS THE MOST DANGEROUS THING IN THE HEARTBEAT DIFF. On this script the
+  // EXIT CODE **IS** THE VERDICT. inner-workflow.mjs runs
+  //   bash codex-review.sh <base> > outFile 2> errFile; echo "CODEX_EXIT=$?"
+  // and instructs: "EXIT 0 → codexStatus='connected'. Parse the review in <outFile>:
+  // set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any
+  // evidence-backed blocker, else APPROVE." A killed review that exits 0 leaves an
+  // EMPTY outFile — which ends in nothing and lists no blockers — so it is read as a
+  // clean APPROVE of a diff no reviewer ever saw.
+  //
+  // The heartbeat's first draft installed `trap '_rc=$?; stop_stage_heartbeat; exit
+  // $_rc' INT TERM`. In a trapped signal handler `$?` is the last COMPLETED command's
+  // status, not a signal status, so that trap exits 0. MEASURED on the real script:
+  //   with `exit $?` traps   → SIGTERM: exit 0,   0-byte stdout   (a silent approve)
+  //   on main (no traps)     → SIGTERM: exit 143
+  // Before this file had these tests, the suite pinned exits 0/3/5/10/11 and pinned
+  // that the ticker does not leak, but NOTHING asserted the wrapper's status on a
+  // signal — which is how 143 → 0 sailed through 2457 green tests.
+
+  interface KilledResult {
+    /** what a supervisor of the shape inner-workflow.mjs uses recorded (`CODEX_EXIT`). */
+    codexExit: number
+    /** the outFile the bridge would parse the verdict out of. */
+    stdout: string
+    /** true iff the mock `codex` reached its REVIEW invocation before the signal. */
+    reachedReview: boolean
+  }
+
+  /**
+   * Run the REAL `codex exec` branch (a mock `codex` on PATH that takes its time —
+   * NOT the `NEUTRON_CODEX_EXEC_CMD` seam), kill the WRAPPER's own pid mid-review,
+   * and report the number the supervisor recorded.
+   *
+   * The supervisor is `bash` with `set -m`, which is what makes the wrapper's signal
+   * dispositions match production: with job control ON, an async job is NOT given the
+   * inherited SIGINT ignore that a job-control-off shell hands its background
+   * children. MEASURED via /proc/<pid>/status — job-control async and plain
+   * foreground both give SigIgn=0x4 (SIGQUIT only), while a job-control-off async
+   * child gives 0x7 (HUP+INT+QUIT). Production runs this script in the FOREGROUND, so
+   * 0x4 is the disposition under test.
+   */
+  function runKilled(signal: 'TERM' | 'INT'): KilledResult {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-codex-review-signal-'))
+    try {
+      const codexHome = join(dir, 'codexhome')
+      mkdirSync(codexHome, { recursive: true })
+      writeFileSync(join(codexHome, 'auth.json'), '{"token":"x"}\n')
+
+      const bin = join(dir, 'bin')
+      mkdirSync(bin, { recursive: true })
+      const marker = join(dir, 'codex-running')
+      const mock = join(bin, 'codex')
+      // The marker is written by the REVIEW invocation only — `login status` exits
+      // above it. So "the wrapper is inside the real `codex exec` right now" is a fact
+      // about THIS fixture's own directory, never a guess from a sleep and never a
+      // read of any state another process could touch.
+      writeFileSync(
+        mock,
+        `#!/bin/sh\nif [ "$1" = "login" ] && [ "$2" = "status" ]; then exit 0; fi\ncat >/dev/null\n: > ${JSON.stringify(marker)}\nsleep 6\necho "VERDICT: APPROVE"\nexit 0\n`,
+      )
+      chmodSync(mock, 0o755)
+
+      const diffFile = join(dir, 'forge.diff')
+      writeFileSync(diffFile, DEFAULT_DIFF)
+      const outFile = join(dir, 'review.out')
+      const errFile = join(dir, 'review.err')
+      const statusFile = join(dir, 'review.status')
+
+      const sup = join(dir, 'signal-supervisor.sh')
+      writeFileSync(
+        sup,
+        `#!/bin/bash
+set -m
+bash "$SCRIPT_UNDER_TEST" main > "$OUTFILE" 2> "$ERRFILE" &
+child=$!
+i=0
+while [ ! -e "$MARKER" ]; do
+  i=$((i+1))
+  [ "$i" -gt 1200 ] && break
+  sleep 0.05
+done
+sleep 0.3
+kill -"$KILLSIG" "$child" 2>/dev/null
+wait "$child"
+rc=$?
+printf '%s\\n' "$rc" > "$STATUSFILE"
+`,
+      )
+      chmodSync(sup, 0o755)
+
+      spawnSync(BASH, [sup], {
+        cwd: dir,
+        encoding: 'utf8',
+        timeout: 60_000,
+        env: {
+          PATH: `${bin}${delimiter}/usr/bin${delimiter}/bin`,
+          CODEX_HOME: codexHome,
+          NEUTRON_CODEX_AUTH_RETRY_DELAY: '0',
+          NEUTRON_CODEX_DIFF_FILE: diffFile,
+          SCRIPT_UNDER_TEST: SCRIPT,
+          OUTFILE: outFile,
+          ERRFILE: errFile,
+          STATUSFILE: statusFile,
+          MARKER: marker,
+          KILLSIG: signal,
+        },
+      })
+      const readOr = (p: string): string => {
+        try {
+          return readFileSync(p, 'utf8')
+        } catch {
+          return ''
+        }
+      }
+      return {
+        codexExit: Number(readOr(statusFile).trim()),
+        stdout: readOr(outFile),
+        reachedReview: existsSync(marker),
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  test('SIGTERM mid-review → CODEX_EXIT 143, never 0', () => {
+    const r = runKilled('TERM')
+    // POSITIVE CONTROL: the wrapper really was inside the real review call when the
+    // signal landed. Without this, an exit code from some earlier refusal branch would
+    // satisfy the assertion below while proving nothing.
+    expect(r.reachedReview).toBe(true)
+    // THE SILENT-APPROVE SHAPE: nothing on stdout, so a `0` here would be parsed as a
+    // clean APPROVE.
+    expect(r.stdout).not.toContain('VERDICT')
+    expect(r.codexExit).toBe(143)
+    // Restated as the contract the shipped prompt actually depends on.
+    expect(r.codexExit).toBeGreaterThanOrEqual(128)
+    expect(r.codexExit).not.toBe(0)
+  }, 90_000)
+
+  test('SIGINT mid-review → CODEX_EXIT 130, never 0', () => {
+    const r = runKilled('INT')
+    expect(r.reachedReview).toBe(true)
+    expect(r.stdout).not.toContain('VERDICT')
+    expect(r.codexExit).toBe(130)
+    expect(r.codexExit).toBeGreaterThanOrEqual(128)
+    expect(r.codexExit).not.toBe(0)
+  }, 90_000)
+
+  test('ANTI-EMPTY-CHECK GUARD: the signal traps RE-RAISE, they do not `exit $?`', () => {
+    // The behavioural tests above are the real ones; this catches the specific
+    // regression by SHAPE, so a future edit that reintroduces `exit $_rc` on a signal
+    // is refused even if the two 6-second tests are ever skipped or trimmed for speed.
+    for (const path of [SCRIPT, join(dirname(SCRIPT), 'codex-build.sh')]) {
+      // CODE ONLY — the comment above each trap QUOTES the broken form in order to
+      // explain it, so a whole-file scan would match that prose and fail a correct
+      // script.
+      const traps = readFileSync(path, 'utf8')
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => !line.startsWith('#') && line.startsWith('trap '))
+      // The extraction must find SOMETHING, or "no bad trap here" is an empty check —
+      // the exact failure mode this repo has shipped four times.
+      expect(traps.length).toBe(3)
+      for (const line of traps) {
+        // No SIGNAL trap may decide the exit code from `$?`.
+        if (/ (INT|TERM)$/.test(line)) expect(line).not.toContain('exit $_rc')
+      }
+      expect(traps).toContain(`trap 'stop_stage_heartbeat; trap - INT EXIT; kill -INT "$$"' INT`)
+      expect(traps).toContain(`trap 'stop_stage_heartbeat; trap - TERM EXIT; kill -TERM "$$"' TERM`)
+      // The EXIT trap is the one form that IS correct here, and it must survive.
+      expect(traps).toContain(`trap '_rc=$?; stop_stage_heartbeat; exit $_rc' EXIT`)
+    }
   })
 })

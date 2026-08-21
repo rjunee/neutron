@@ -14,3 +14,11 @@ Card: "A docs-only change must not pay for a full build — give the gate a chea
 - [ ] 4. (T2b) Cheap review round: when the JS classification is `docs-only`, dispatch the reduced panel — core `argus:claude` seat only, skipping the adversarial seat and cross-model peers (codex/kimi) for that round — leaving `enforceSeverityGate`, synthesis, missing-seat gating for the seats actually dispatched, PR creation, and the merge gate untouched; the round log states the reduced panel and why.
 - [ ] 5. (T3) Persist + deliver the classification: surface `deltaClassification`/`deltaReason` from the harvested terminal result through `trident/orchestrator.ts` into the run record (`trident/store.ts` result JSON — avoid a schema migration if the terminal-result JSON column already carries it) and state the chosen path in the chat delivery text (`trident/delivery.ts`), so a cheap run is never silently mistaken for a full one.
 - [ ] 6. (Acceptance/measurement) Drive one real docs-only change and one mixed `.ts`+`.md` change through the gate; record measured wall-clock/CPU delta between cheap and full paths plus the mixed-case full-path assertion in `docs/AS_BUILT.md`.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/a-docs-only-change-must-not-pay-for-a-full-build-give-the-ga-nqbvtr.md`. Do not paraphrase this section._
+
+- Do not skip branch protection, PR creation, or the merge gate — only the redundant verification work.
+- Do not classify by file COUNT or by diff size; classify by path.
+- Do not let a docs-only classification suppress a genuine failure signal (if the cheap gates fail, the run fails).

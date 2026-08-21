@@ -43,14 +43,32 @@ export interface ApprovalNotifierRegistry {
  * Build the app-ws ApprovalNotifier. On `notify(row)` it broadcasts a
  * plain-text `agent_message` (`Approval requested [<id>]: <tool_name>[ — <description>]`)
  * to every live topic, fail-soft throughout.
+ *
+ * `ttl_ms` (optional) is the TTL GUARD: a row ALREADY older than it broadcasts
+ * nothing at all. This banner is a one-shot frame held in client memory with no
+ * retraction path, so a banner born pointing at a grant that is already dead can
+ * only be cleared by reloading the page — it must never be born that way.
+ * Omitted ⇒ the legacy always-broadcast behaviour, byte-identical.
  */
 export function buildAppWsApprovalNotifier(deps: {
   registry: ApprovalNotifierRegistry
+  /** Grant lifetime in ms. A row past it is never announced. */
+  ttl_ms?: number
+  /** Injectable clock for tests. Defaults to `Date.now`. */
+  now?: () => number
 }): ApprovalNotifier {
   const { registry } = deps
   return {
     notify: async (row: ApprovalRow): Promise<void> => {
       try {
+        // `requested_at` is SECONDS since epoch (the `tool_approvals` grammar).
+        if (
+          deps.ttl_ms !== undefined &&
+          (deps.now ?? Date.now)() - row.requested_at * 1000 > deps.ttl_ms
+        ) {
+          return
+        }
+
         let description: string | undefined
         try {
           const parsed = JSON.parse(row.args_json) as { description?: unknown }

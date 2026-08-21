@@ -13,3 +13,12 @@ Out of scope, by the card's own text — do not build here:
 - No pushes from the capture legs: snapshot capture is LOCAL (tag + reason text). Publishing commits stays the existing outer-loop `publishBuiltCommit` path.
 
 remaining after top task: 0 — single-card, single-iteration change.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/salvage-is-commit-scoped-so-the-one-measured-loss-it-would-m-7fgchp.md`. Do not paraphrase this section._
+
+- Do not have the inner loop push anything to origin. Capture is LOCAL — a tag or a
+  recorded OID in the shared ref store. GitHub remains the outer loop's job.
+- Do not delete or GC these snapshots automatically in v1. A retention sweep is a separate
+  card; losing work is the failure being fixed here.

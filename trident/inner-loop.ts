@@ -826,50 +826,67 @@ export function buildSubstrateWorkflowFire(
     }
 
     let timedOut = false
+    const consume = async (): Promise<FireOutcome> => {
+      try {
+        for await (const ev of handle.events) {
+          if (ev.kind === 'completion') {
+            // The launching turn settled (Workflow fired + replied). The workflow
+            // is now detached in the background; harvest its result from the DB.
+            return {
+              status: 'fired',
+              error: null,
+              ...(ev.launcher_session_key !== undefined
+                ? { launcher_session_key: ev.launcher_session_key }
+                : {}),
+            }
+          }
+          if (ev.kind === 'error') {
+            fireAndForget('inner-loop.cancel', handle.cancel())
+            return { status: 'failed', error: 'fire turn raised an error before settling' }
+          }
+          // token / thinking / status / tool_* events carry nothing terminal for
+          // the launcher turn — ignored.
+        }
+      } catch {
+        return {
+          status: 'failed',
+          error: timedOut ? 'fire turn did not settle within the budget' : 'fire stream error',
+        }
+      }
+
+      // Stream ended WITHOUT a terminal `completion` — a paused / abnormally-closed
+      // turn, NOT a confirmed fire. paused ≠ finished: never report `fired`.
+      return {
+        status: 'failed',
+        error: timedOut
+          ? 'fire turn did not settle within the budget'
+          : 'fire turn closed without a completion event',
+      }
+    }
+
+    if (input.settle_timeout_ms <= 0) return await consume()
+
     let timer: unknown = null
-    if (input.settle_timeout_ms > 0) {
+    let consumeWon = false
+    const consuming = consume().then((outcome) => {
+      consumeWon = true
+      return outcome
+    })
+    // If the timeout wins, the stream is abandoned and may reject later. It must
+    // never surface as an unhandled rejection after the fire has already settled.
+    consuming.catch(() => {})
+    const timeout = new Promise<FireOutcome>((resolve) => {
       timer = setTimer(() => {
         timedOut = true
         fireAndForget('inner-loop.cancel', handle.cancel())
+        resolve({ status: 'failed', error: 'fire turn did not settle within the budget' })
       }, input.settle_timeout_ms)
-    }
+    })
 
     try {
-      for await (const ev of handle.events) {
-        if (ev.kind === 'completion') {
-          // The launching turn settled (Workflow fired + replied). The workflow
-          // is now detached in the background; harvest its result from the DB.
-          return {
-            status: 'fired',
-            error: null,
-            ...(ev.launcher_session_key !== undefined
-              ? { launcher_session_key: ev.launcher_session_key }
-              : {}),
-          }
-        }
-        if (ev.kind === 'error') {
-          fireAndForget('inner-loop.cancel', handle.cancel())
-          return { status: 'failed', error: 'fire turn raised an error before settling' }
-        }
-        // token / thinking / status / tool_* events carry nothing terminal for
-        // the launcher turn — ignored.
-      }
-    } catch {
-      return {
-        status: 'failed',
-        error: timedOut ? 'fire turn did not settle within the budget' : 'fire stream error',
-      }
+      return await Promise.race([consuming, timeout])
     } finally {
-      if (timer !== null) clearTimer(timer)
-    }
-
-    // Stream ended WITHOUT a terminal `completion` — a paused / abnormally-closed
-    // turn, NOT a confirmed fire. paused ≠ finished: never report `fired`.
-    return {
-      status: 'failed',
-      error: timedOut
-        ? 'fire turn did not settle within the budget'
-        : 'fire turn closed without a completion event',
+      if (consumeWon && timer !== null) clearTimer(timer)
     }
   }
 }

@@ -759,6 +759,9 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           topic: data.channel_topic_id,
           project: data.project_id ?? '-',
           platform: data.platform ?? '-',
+          // ISSUES #557 — the same value `turn_dispatched` reports as
+          // `session`, so a turn ties back to the socket it arrived on.
+          device: data.device_id ?? '-',
         })
         // ISSUES #40 — persist the owner's reported IANA timezone (validate +
         // de-dupe + upsert) keyed on the SOCKET's auth-resolved `project_slug`,
@@ -817,6 +820,11 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         try {
           parsed = JSON.parse(typeof message === 'string' ? message : message.toString())
         } catch {
+          moduleLog.warn('message_refused', {
+            topic: data.channel_topic_id,
+            transport: 'ws',
+            reason: 'malformed_json',
+          })
           ws.send(
             JSON.stringify({ v: 1, type: 'error', code: 'malformed_json', message: 'invalid json' }),
           )
@@ -1070,7 +1078,18 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
                 chosen_value: choice.choice_value,
                 ...(data.project_id !== undefined ? { project_id: data.project_id } : {}),
               })
-              if (!first) return
+              if (!first) {
+                // ISSUES #557 — the ONE drop on this surface with no
+                // client-visible signal at all (the tap is answered by the
+                // re-broadcast above, not by an error frame). Name it, or a
+                // re-tap that runs nothing looks like a dead server.
+                moduleLog.info('turn_skipped', {
+                  topic: data.channel_topic_id,
+                  transport: 'ws',
+                  reason: 'prompt_already_answered',
+                })
+                return
+              }
             }
             await on_button_choice({
               user_id: data.user_id,
@@ -1091,6 +1110,14 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
         }
         const inbound = decodeAppWsInbound(parsed)
         if (inbound === null) {
+          // ISSUES #557 — a refusal the client only learns about from the
+          // error frame it may not even render. Log the reason so a message
+          // the owner believes he sent is not server-side silent.
+          moduleLog.warn('message_refused', {
+            topic: data.channel_topic_id,
+            transport: 'ws',
+            reason: 'malformed_envelope',
+          })
           ws.send(
             JSON.stringify({
               v: 1,
@@ -1118,6 +1145,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             channel_topic_id: data.channel_topic_id,
             user_id: data.user_id,
             body: inbound.body,
+            transport: 'ws',
             ...(inbound.client_msg_id !== undefined ? { client_msg_id: inbound.client_msg_id } : {}),
             ...(inbound_project_id !== undefined ? { project_id: inbound_project_id } : {}),
             ...(inbound.attachments !== undefined ? { attachments: inbound.attachments } : {}),
@@ -1130,7 +1158,18 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           // a re-send (offline-queue flush, double-tap, HTTP/WS race) fires the
           // agent / a command twice. Storage idempotency alone doesn't make the
           // surface idempotent; this gate does.
-          if (!was_new) return
+          if (!was_new) {
+            // ISSUES #557 — the `message_received was_new=false` line above
+            // already recorded the collapse; this names the CONSEQUENCE (no
+            // turn runs), so "the agent never answered" has a reason next to
+            // it instead of an unexplained gap.
+            moduleLog.info('turn_skipped', {
+              topic: data.channel_topic_id,
+              transport: 'ws',
+              reason: 'duplicate_client_msg_id',
+            })
+            return
+          }
           // Track B Phase 4 — the server has received this user message and is
           // about to act on it; record an `agent` READ receipt so the sender's
           // bubble shows the read tick the instant the agent picks it up — no
@@ -1156,6 +1195,14 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             if (inbound_project_id !== undefined) matchInput.project_id = inbound_project_id
             const cmd_result = await chat_command_filter.match(matchInput)
             if (cmd_result !== null) {
+              // ISSUES #557 — handled by a chat command, so no agent turn is
+              // dispatched. Named, or the missing `turn_dispatched` reads as a
+              // dropped message.
+              moduleLog.info('turn_skipped', {
+                topic: data.channel_topic_id,
+                transport: 'ws',
+                reason: 'chat_command',
+              })
               postCommandResult(ws, data.channel_topic_id, cmd_result, inbound.client_msg_id)
               return
             }
@@ -1164,11 +1211,21 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
             user_id: data.user_id,
             channel_topic_id: data.channel_topic_id,
             body: inbound.body,
+            session_id: data.device_id ?? `conn-${data.user_id}`,
             ...(inbound_project_id !== undefined ? { project_id: inbound_project_id } : {}),
             ...(inbound.attachments !== undefined ? { attachments: inbound.attachments } : {}),
           })
         } catch (err) {
           const reason = err instanceof Error ? err.message : 'dispatch error'
+          // ISSUES #557 — an ingest/dispatch throw drops the send. The error
+          // frame goes to a client that may already be gone, so the reason has
+          // to be on the server side too.
+          moduleLog.warn('message_refused', {
+            topic: data.channel_topic_id,
+            transport: 'ws',
+            reason: 'dispatch_failed',
+            error: reason,
+          })
           ws.send(JSON.stringify({ v: 1, type: 'error', code: 'dispatch_failed', message: reason }))
         }
       },
@@ -1191,6 +1248,7 @@ export function createAppWsSurface(opts: CreateAppWsSurfaceOptions): AppWsSurfac
           topic: data.channel_topic_id,
           project: data.project_id ?? '-',
           platform: data.platform ?? '-',
+          device: data.device_id ?? '-',
         })
       },
     },
@@ -1208,6 +1266,10 @@ async function handleSend(
 ): Promise<Response> {
   const auth = req.headers.get('authorization') ?? ''
   if (!auth.toLowerCase().startsWith('bearer ')) {
+    // ISSUES #557 — every refusal on this path names its reason. `topic` is
+    // `-` because the send was rejected before an identity (and therefore a
+    // topic) existed. The bearer itself is NEVER logged.
+    moduleLog.warn('message_refused', { topic: '-', transport: 'http', reason: 'missing_bearer' })
     return new Response(
       JSON.stringify({ ok: false, code: 'missing_bearer', message: 'expected Authorization: Bearer <token>' }),
       { status: 401, headers: { 'content-type': 'application/json' } },
@@ -1216,11 +1278,15 @@ async function handleSend(
   const token = auth.slice('bearer '.length).trim()
   const resolved = await ctx.auth.resolve(token)
   if ('code' in resolved) {
+    moduleLog.warn('message_refused', { topic: '-', transport: 'http', reason: resolved.code })
     return new Response(
       JSON.stringify({ ok: false, code: resolved.code, message: resolved.message }),
       { status: 401, headers: { 'content-type': 'application/json' } },
     )
   }
+  // Resolved here (rather than just before the ingest) so the refusal logs
+  // below can name the topic the send was meant for.
+  const channel_topic_id = appWsTopicId(resolved.user_id)
   let body: {
     body?: unknown
     client_msg_id?: unknown
@@ -1235,6 +1301,11 @@ async function handleSend(
       attachments?: unknown
     }
   } catch {
+    moduleLog.warn('message_refused', {
+      topic: channel_topic_id,
+      transport: 'http',
+      reason: 'malformed_json',
+    })
     return new Response(
       JSON.stringify({ ok: false, code: 'malformed_json', message: 'invalid json' }),
       { status: 400, headers: { 'content-type': 'application/json' } },
@@ -1251,6 +1322,11 @@ async function handleSend(
   if (text.length > MAX_USER_MESSAGE_LEN) {
     // Mirror the WS path's `decodeAppWsInbound` cap so HTTP and WS
     // accept identical envelopes. Per Codex P2 review on PR #142.
+    moduleLog.warn('message_refused', {
+      topic: channel_topic_id,
+      transport: 'http',
+      reason: 'body_too_long',
+    })
     return new Response(
       JSON.stringify({
         ok: false,
@@ -1272,6 +1348,11 @@ async function handleSend(
   // both transports reject the same shape. Either body or attachments
   // must be non-empty.
   if (payloadIsEmpty(text, cleaned_attachments)) {
+    moduleLog.warn('message_refused', {
+      topic: channel_topic_id,
+      transport: 'http',
+      reason: 'missing_body',
+    })
     return new Response(
       JSON.stringify({
         ok: false,
@@ -1289,7 +1370,6 @@ async function handleSend(
   // succeeds without project scoping, matching the WS path's
   // "absent or malformed → undefined" treatment.
   const project_id = body.project_id !== undefined ? sanitizeProjectId(body.project_id) : null
-  const channel_topic_id = appWsTopicId(resolved.user_id)
   const echoOpts: {
     channel_topic_id: string
     user_id: string
@@ -1297,10 +1377,12 @@ async function handleSend(
     client_msg_id?: string
     project_id?: string
     attachments?: ReadonlyArray<string>
+    transport?: 'ws' | 'http'
   } = {
     channel_topic_id,
     user_id: resolved.user_id,
     body: text,
+    transport: 'http',
   }
   if (typeof body.client_msg_id === 'string' && body.client_msg_id.length > 0) {
     echoOpts.client_msg_id = body.client_msg_id
@@ -1320,6 +1402,15 @@ async function handleSend(
   // agent dispatch below MUST be skipped so the agent / a command never fires
   // twice. We still return the canonical echo so the client renders correctly.
   let command_result: ChatCommandFilterResult | null = null
+  if (!was_new) {
+    // ISSUES #557 — parity with the WS path: name the consequence of the
+    // collapse so the absent turn has a reason beside it.
+    moduleLog.info('turn_skipped', {
+      topic: channel_topic_id,
+      transport: 'http',
+      reason: 'duplicate_client_msg_id',
+    })
+  }
   if (was_new) {
     // Track B Phase 4 — record an `agent` READ receipt for the freshly-received
     // message so the sender's bubble advances the moment the server picks it up
@@ -1344,6 +1435,14 @@ async function handleSend(
       if (project_id !== null) matchInput.project_id = project_id
       command_result = await ctx.chat_command_filter.match(matchInput)
     }
+    if (command_result !== null) {
+      // ISSUES #557 — handled by a chat command; no agent turn is dispatched.
+      moduleLog.info('turn_skipped', {
+        topic: channel_topic_id,
+        transport: 'http',
+        reason: 'chat_command',
+      })
+    }
     if (command_result === null) {
       // Chat transport — FIRE-AND-FORGET the agent turn; do NOT block the HTTP
       // response on it. The user echo is already persisted (with seq) + fanned
@@ -1361,6 +1460,7 @@ async function handleSend(
           user_id: resolved.user_id,
           channel_topic_id,
           body: text,
+          session_id: 'http',
           ...(project_id !== null ? { project_id } : {}),
           ...(cleaned_attachments !== null ? { attachments: cleaned_attachments } : {}),
         }), (err: unknown) => {

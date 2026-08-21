@@ -16,3 +16,11 @@ Survey findings (2026-08-17):
 - [x] **T4 — schema-surface treatment.** Already satisfied: `migrations/expected-schema.txt` IS generated from the applied schema by `migrations/regen-snapshot.ts` and byte-compared by `migrations/snapshot.test.ts` (its failure message names the refresh command) — no transcription step exists to fix. Per the card, the deliberate 36-column literal in `trident/store.test.ts` (~line 680) and `COLS` in `trident/store.ts` stay exactly as they are. No action.
 
 Out of scope / notes for the record: `trident/terminal-failure-reason.test.ts`'s cast fixture carries `ralph: 1` (a number where the type says boolean) — pre-existing, hidden by its cast, deliberately NOT touched (this card is a refactor, not a review). Do not weaken any `TridentRun` required field. Do not migrate `trident/orchestrator.test.ts` / `trident/store.test.ts` / `trident/crash-recovery.test.ts` — they build runs through `store.create()`, not literals.
+
+## Do not (copied verbatim from the card's plan doc)
+
+_Source: `docs/plans/every-branch-that-adds-a-tridentrun-field-breaks-up-to-14-fi-k95ebe.md`. Do not paraphrase this section._
+
+- Do not weaken `TridentRun`'s required fields to make fixtures compile — optional-by-default would hide real omissions in production code. The fields should stay required; the fixtures should stop repeating them.
+- Do not remove the deliberate column-count literal in `store.test.ts`. It exists so that adding a column is a conscious edit, and it caught real drift tonight.
+- Do not change what any migrated test asserts. If a test looks wrong, leave it and say so — this card is a refactor, not a review.

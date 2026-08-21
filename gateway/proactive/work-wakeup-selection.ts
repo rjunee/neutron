@@ -9,11 +9,21 @@
  * a trident run that is genuinely driving it — the trident tick is already that
  * item's wakeup driver, and waking it here too would double-drive one piece of
  * work from two schedulers. `runDrivingVerdict` (`trident/run-driving.ts`) answers
- * "genuinely driving": a terminal phase and an unusable `last_advanced_at` are
- * decided from the ROW, and everything else falls to a no-advance timer pitched
- * DELIBERATELY ABOVE the reaper's own threshold (`WAKEUP_STAND_DOWN_MS`) so the
- * reaper always answers first for any run it can reach. `phase` alone is never the
+ * "genuinely driving": a terminal phase is decided from the ROW, a fresh MID-PHASE
+ * stage event is decided from the same positive-liveness ledger the hang watchdog
+ * reads, and everything else falls to a no-advance timer pitched DELIBERATELY
+ * ABOVE the reaper's own no-advance threshold (`WAKEUP_STAND_DOWN_MS`) so the
+ * reaper answers first for any run it can reach. `phase` alone is never the
  * answer; that was the bug.
+ *
+ * THE TIMER ORDERING ALONE IS NO LONGER SUFFICIENT, which is why the ledger is
+ * threaded in. It was sized on the premise that a reaper-reachable run has already
+ * been flipped terminal by 100 minutes. Since the build/review wrappers started
+ * stamping a 5-minute heartbeat, the watchdog SPARES a healthy long build at 90
+ * minutes and it stays non-terminal — so from 100 minutes the timer would report
+ * `no-advance` for a run that is demonstrably building, and this sweep would fire
+ * a wakeup turn at it every 5 minutes until the 2 h ceiling. Standing down on the
+ * same evidence the peer stood down on is what keeps the two schedulers agreeing.
  *
  * WHY THE OLD `!isTerminalPhase(run.phase)` TEST WAS THE BUG, measured on the
  * owner's instance the night the wakeup shipped: three `in_progress` items were
@@ -49,6 +59,20 @@ export interface WakeupSelectionInput {
   items: readonly WorkBoardItem[]
   /** `TridentRunStore.get` — a vanished row reads as null (the item is eligible). */
   lookupRun(run_id: string): TridentRun | null | undefined
+  /**
+   * `TridentRunStore.latestStageEventAt` — the newest MID-PHASE stage event for a
+   * run, or null. THE SAME positive-liveness source the hang watchdog stands down
+   * on, and it has to be the same one: since the wrappers started stamping
+   * `codex-exec-alive` every 5 minutes, the watchdog spares a healthy long build
+   * past its 90-minute threshold, so the run stays non-terminal into the window
+   * where THIS module would otherwise report `no-advance` and wake the item —
+   * driving one piece of work from two schedulers, which is the exact thing this
+   * file exists to prevent.
+   *
+   * OPTIONAL, and absence is not evidence: unwired (or a run with no events) falls
+   * through to the pre-existing timer unchanged.
+   */
+  latestStageEventAt?: ((run_id: string) => string | null) | undefined
   /** The instance owner's slug — General's board key (`workBoardProjectIdForKey`). */
   owner_slug: string
   now_ms: number
@@ -101,7 +125,15 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
       // A parameter nothing exercises cannot be right; the ordering is pinned by a
       // test instead (`run-driving.test.ts`, "the stand-down threshold is STRICTLY
       // above the reaper, by more than a sweep").
-      const verdict = runDrivingVerdict(run, input.now_ms)
+      //
+      // The stage-event reader IS threaded through, though, because it is not a
+      // threshold — it is a second, positive EVIDENCE SOURCE, and the peer
+      // scheduler this module defers to already consults it. Two schedulers
+      // reading different evidence about the same run is how a healthy build ends
+      // up spared by one and driven by the other.
+      const stageAt =
+        input.latestStageEventAt === undefined ? null : input.latestStageEventAt(run.id)
+      const verdict = runDrivingVerdict(run, input.now_ms, undefined, stageAt)
       if (verdict.driving) {
         ensure(item.project_slug).deferred.push({
           title: item.title,

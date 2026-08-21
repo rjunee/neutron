@@ -16,7 +16,7 @@
  */
 import { describe, expect, test } from 'bun:test'
 import { execFileSync } from 'node:child_process'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -166,7 +166,115 @@ function git(cwd: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim()
 }
 
+function runGuard(repo: string, mainRef: string): { code: number; out: string } {
+  try {
+    const out = execFileSync('bash', [GUARD_SH], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: {
+        ...process.env,
+        ROUTE_SLOT_RATCHET_ROOT: repo,
+        ROUTE_SLOT_RATCHET_MAIN_REF: mainRef,
+        NEUTRON_BUN_BIN: process.env.NEUTRON_BUN_BIN ?? 'bun',
+      },
+    })
+    return { code: 0, out }
+  } catch (e: unknown) {
+    const err = e as { status?: number; stdout?: string; stderr?: string }
+    return { code: err.status ?? -1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` }
+  }
+}
+
+/** A bare origin with three main commits and the real inventory shapes. */
+function originWithRouteInventory(): { root: string; origin: string } {
+  const root = mkdtempSync(join(tmpdir(), 'route-slot-ratchet-origin-'))
+  const origin = join(root, 'origin.git')
+  const seed = join(root, 'seed')
+  const inventory = join(seed, 'open', '__tests__', 'route-slot-coverage-inventory.ts')
+  const slots = join(seed, 'gateway', 'http', 'route-slots.ts')
+  git(root, 'init', '--bare', '-q', origin)
+  mkdirSync(join(seed, 'open', '__tests__'), { recursive: true })
+  mkdirSync(join(seed, 'gateway', 'http'), { recursive: true })
+  git(seed, 'init', '-q', '-b', 'main')
+  git(seed, 'config', 'user.email', 'ci@example.com')
+  git(seed, 'config', 'user.name', 'ci')
+  writeInventory(inventory, ['app-tasks', 'app-docs'], [])
+  writeSlots(slots, ['app-tasks', 'app-docs'])
+  git(seed, 'add', '-A')
+  git(seed, 'commit', '-q', '-m', 'baseline')
+  for (const n of [2, 3]) {
+    const history = `history-${n}.txt`
+    writeFileSync(join(seed, history), `commit ${n}\n`)
+    git(seed, 'add', history)
+    git(seed, 'commit', '-q', '-m', `history ${n}`)
+  }
+  git(seed, 'remote', 'add', 'origin', `file://${origin}`)
+  git(seed, 'push', '-q', '-u', 'origin', 'main')
+  git(origin, 'symbolic-ref', 'HEAD', 'refs/heads/main')
+  return { root, origin }
+}
+
 describe('route-slot ratchet guard (shell, against a throwaway git repo)', () => {
+  test('the freshen never shallows a full clone', () => {
+    const { root, origin } = originWithRouteInventory()
+    const work = join(root, 'work')
+    try {
+      git(root, 'clone', '-q', `file://${origin}`, work)
+      const shallowFile = join(work, '.git', 'shallow')
+      expect(existsSync(shallowFile)).toBe(false)
+      expect(git(work, 'rev-parse', '--is-shallow-repository')).toBe('false')
+      const mainCommitCount = Number(git(work, 'rev-list', '--count', 'origin/main'))
+      expect(mainCommitCount).toBeGreaterThanOrEqual(3)
+
+      git(work, 'config', 'user.email', 'ci@example.com')
+      git(work, 'config', 'user.name', 'ci')
+      git(work, 'checkout', '-q', '-b', 'pr')
+      writeFileSync(join(work, 'unrelated.txt'), 'feature work\n')
+      git(work, 'add', 'unrelated.txt')
+      git(work, 'commit', '-q', '-m', 'unrelated feature work')
+
+      const result = runGuard(work, 'origin/main')
+      expect(result.code).toBe(0)
+      // Before the fix, `fetch --depth=1` into this full clone wrote
+      // `.git/shallow` and truncated origin/main to 1 (measured 2026-08-19).
+      expect({
+        shallowFilePresent: existsSync(shallowFile),
+        shallowRepository: git(work, 'rev-parse', '--is-shallow-repository'),
+        originMainCommitCount: Number(git(work, 'rev-list', '--count', 'origin/main')),
+      }).toEqual({
+        shallowFilePresent: false,
+        shallowRepository: 'false',
+        originMainCommitCount: mainCommitCount,
+      })
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('an already-shallow checkout still gets origin/main', () => {
+    const { root, origin } = originWithRouteInventory()
+    const work = join(root, 'shallow-work')
+    try {
+      git(root, 'clone', '-q', '--depth=1', `file://${origin}`, work)
+      const shallowFile = join(work, '.git', 'shallow')
+      // Anti-fake: a transport that ignored --depth must fail this test loudly.
+      expect(existsSync(shallowFile)).toBe(true)
+      git(work, 'update-ref', '-d', 'refs/remotes/origin/main')
+      git(work, 'config', 'user.email', 'ci@example.com')
+      git(work, 'config', 'user.name', 'ci')
+      git(work, 'checkout', '-q', '-b', 'pr')
+      writeFileSync(join(work, 'unrelated.txt'), 'feature work\n')
+      git(work, 'add', 'unrelated.txt')
+      git(work, 'commit', '-q', '-m', 'unrelated feature work')
+
+      const result = runGuard(work, 'origin/main')
+      expect(result.code).toBe(0)
+      expect(git(work, 'rev-parse', '--verify', 'origin/main')).not.toBe('')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   test('the git plumbing catches a demotion on a branch, and skips on main', () => {
     const dir = mkdtempSync(join(tmpdir(), 'route-slot-ratchet-git-'))
     try {
@@ -183,26 +291,8 @@ describe('route-slot ratchet guard (shell, against a throwaway git repo)', () =>
       git(dir, 'add', '-A')
       git(dir, 'commit', '-q', '-m', 'baseline')
 
-      const env = {
-        ROUTE_SLOT_RATCHET_ROOT: dir,
-        ROUTE_SLOT_RATCHET_MAIN_REF: 'main',
-      }
-      const runGuard = (): { code: number; out: string } => {
-        try {
-          const out = execFileSync('bash', [GUARD_SH], {
-            encoding: 'utf8',
-            stdio: ['ignore', 'pipe', 'pipe'],
-            env: { ...process.env, ...env },
-          })
-          return { code: 0, out }
-        } catch (e: unknown) {
-          const err = e as { status?: number; stdout?: string; stderr?: string }
-          return { code: err.status ?? -1, out: `${err.stdout ?? ''}${err.stderr ?? ''}` }
-        }
-      }
-
       // HEAD == main → the ratchet is N/A and must skip rather than judge.
-      const onMain = runGuard()
+      const onMain = runGuard(dir, 'main')
       expect(onMain.code).toBe(0)
       expect(onMain.out).toContain('push-to-main')
 
@@ -212,7 +302,7 @@ describe('route-slot ratchet guard (shell, against a throwaway git repo)', () =>
       git(dir, 'add', '-A')
       git(dir, 'commit', '-q', '-m', 'demote app-docs')
 
-      const demoted = runGuard()
+      const demoted = runGuard(dir, 'main')
       expect(demoted.code).toBe(1)
       expect(demoted.out).toContain('app-docs')
 
