@@ -1668,14 +1668,24 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
   test('a THROWN workflow persists a terminal FAILURE result so the run fails PROMPTLY (Codex [P2])', () => {
     // Without this, a crashed build writes no inner_result and the outer loop
     // leaves it `running` until the 2 h stall guard. The catch writes a
-    // REQUEST_CHANGES failure result the next harvest tick fails on.
+    // verdict-null failure result — a throw is not a review verdict.
     expect(SRC).toContain('} catch (err) {')
     expect(SRC).toContain('trident-v2 inner THREW')
-    expect(SRC).toMatch(/const failureResult = \{[\s\S]*?verdict: 'REQUEST_CHANGES'/)
+    expect(SRC).toMatch(/const failureResult = \{[\s\S]*?verdict: null/)
     expect(SRC).toContain("checkpoint: 'inner-error'")
     expect(SRC).toContain('await writeTerminalResult(failureResult)')
     // Best-effort: a failure-write that itself throws falls back to the stall guard.
     expect(SRC).toContain('terminal-failure write ALSO failed')
+  })
+
+  test('REQUEST_CHANGES is reserved for a reviewer that spoke — remove the writer discriminator and this goes RED', () => {
+    const fn = SRC.slice(SRC.indexOf('async function writeTerminalResult('), SRC.indexOf('function normalizeVerdict'))
+    expect(fn).toContain("'REVIEW_NOT_RUN'")
+    expect(fn).toContain("result.blockKind === 'code'")
+    expect(fn).toContain('result.findings.length > 0')
+    expect(fn).not.toContain("result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'")
+    expect(SRC).toMatch(/const stopResult = \{[\s\S]*?verdict: null/)
+    expect(SRC).toMatch(/const stop = \{ ok: false,[^\n]*verdict: null/)
   })
 })
 

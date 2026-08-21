@@ -114,6 +114,22 @@ describe('buildTridentTerminalObserver', () => {
     expect(byKind.get('decision')?.body).toContain('APPROVE')
   })
 
+  test('a harvested REVIEW_NOT_RUN row persists the handoff but never an Argus decision', async () => {
+    const observer = buildTridentTerminalObserver({ nexus, observers: [] })
+    const run = await terminalRun({
+      phase: 'failed',
+      inner_result: JSON.stringify({ ...JSON.parse(VALID_RESULT), ok: false, verdict: null }),
+      inner_verdict: 'REVIEW_NOT_RUN',
+      inner_checkpoint: 'argus-request-changes',
+      failure_reason: 'review never ran',
+      harvested_at: 1000,
+    })
+    await observer(run)
+    const rows = await nexus.readRecent('t1', { limit: 100 })
+    expect(rows.map((event) => event.kind)).toEqual(['handoff'])
+    expect(rows[0]?.body).toContain('REVIEW_NOT_RUN')
+  })
+
   test('the outer-harvest gate holds through the assembly: a STOPPED row with an inner-written verdict but no harvest marker persists NOTHING', async () => {
     const observer = buildTridentTerminalObserver({ nexus, observers: [] })
     const run = await terminalRun({

@@ -18,6 +18,7 @@
  * NOT shipped on any runtime path (only `*.test.ts` import this).
  */
 
+import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { FireOutcome, InnerLoopInput, TridentWorkflowFirer } from './inner-loop.ts'
 import type { TridentRunStore } from './store.ts'
 
@@ -28,6 +29,8 @@ export interface SimResult {
   prNumber?: number | null
   branch?: string | null
   verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
+  blockKind?: 'none' | 'code' | 'infra-only' | 'round-lost' | null
+  findings?: unknown[]
   round?: number
   /** The `checkpoint` field inside the result JSON (self-asserted). */
   checkpoint?: string | null
@@ -69,6 +72,8 @@ export function simResultJson(sim: SimResult): string {
     prNumber: sim.prNumber ?? null,
     branch: sim.branch ?? null,
     verdict: sim.verdict ?? null,
+    ...(sim.blockKind !== undefined ? { blockKind: sim.blockKind } : {}),
+    ...(sim.findings !== undefined ? { findings: sim.findings } : {}),
     round: sim.round ?? 1,
     checkpoint: sim.checkpoint ?? null,
     // Only emit when the test set it (mirrors the .mjs, which omits it for
@@ -100,6 +105,7 @@ export function simResultJson(sim: SimResult): string {
  * anything else to fail). Defaults to the result's own checkpoint.
  */
 export async function writeSimulatedResult(
+  db: ProjectDb,
   store: TridentRunStore,
   runId: string,
   sim: SimResult,
@@ -109,9 +115,25 @@ export async function writeSimulatedResult(
   await store.update(runId, {
     inner_result: simResultJson({ ...sim, checkpoint: sim.checkpoint ?? checkpoint }),
     inner_checkpoint: checkpoint,
-    inner_verdict: sim.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES',
     subagent_status: 'completed',
   })
+  // The verdict lands raw, modeling the FIXED out-of-process checkpoint.sh writer
+  // (post-T3 discriminator); it stays raw because production's writer is never the
+  // guarded store API.
+  await db.run(
+    'UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?',
+    [
+      sim.verdict === 'APPROVE'
+        ? 'APPROVE'
+        : sim.verdict === 'REQUEST_CHANGES' &&
+            sim.blockKind === 'code' &&
+            Array.isArray(sim.findings) &&
+            sim.findings.length > 0
+          ? 'REQUEST_CHANGES'
+          : 'REVIEW_NOT_RUN',
+      runId,
+    ],
+  )
 }
 
 /** A test's per-run plan for what the simulated fire + workflow do. */
@@ -142,6 +164,7 @@ export interface SimFirer {
  * after the launch tick's `save()` (production-faithful, race-free).
  */
 export function buildSimFirer(
+  db: ProjectDb,
   store: TridentRunStore,
   plan: (input: InnerLoopInput) => SimPlan,
 ): SimFirer {
@@ -155,7 +178,7 @@ export function buildSimFirer(
       const result = p.result
       const checkpoint =
         p.argusCheckpoint ?? (result.verdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes')
-      pending.push(() => writeSimulatedResult(store, input.run.id, result, checkpoint))
+      pending.push(() => writeSimulatedResult(db, store, input.run.id, result, checkpoint))
     }
     return outcome
   }

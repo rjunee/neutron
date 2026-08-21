@@ -54,7 +54,7 @@ interface Spy {
 }
 
 function spy(verdict: 'APPROVE' | 'REQUEST_CHANGES' = 'APPROVE'): Spy {
-  const sim = buildSimFirer(store, () => ({
+  const sim = buildSimFirer(db, store, () => ({
     result: { verdict, prNumber: 42, branch: 'feat-x' },
   }))
   return { fire_workflow: sim.fire_workflow, drain: sim.drain, inputs: sim.inputs }
@@ -130,7 +130,7 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
     })
     await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
 
-    const sim = buildSimFirer(store, () => ({
+    const sim = buildSimFirer(db, store, () => ({
       result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' },
     }))
     const orch = buildTridentOrchestrator({

@@ -18,6 +18,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
+import { parseCheckpointFindings } from './checkpoint-findings.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 
 /**
@@ -44,10 +45,19 @@ export type TridentPhase =
  */
 export type MergeMode = 'local' | 'pr'
 
+export type TridentVerdict = 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN'
+
 export class TridentRunReferenceAmbiguousError extends Error {
   constructor(reference: string) {
     super(`trident run reference is ambiguous: ${reference}`)
     this.name = 'TridentRunReferenceAmbiguousError'
+  }
+}
+
+export class TridentEmptyFindingsRejectionError extends Error {
+  constructor(id: string, source: 'update' | 'save' | 'saveIfActive') {
+    super(`refusing to record inner_verdict='REQUEST_CHANGES' with no findings for trident run ${id} (via ${source}): an empty finding set is either an approval or an infrastructure failure, never a rejection — record REVIEW_NOT_RUN instead`)
+    this.name = 'TridentEmptyFindingsRejectionError'
   }
 }
 
@@ -134,11 +144,12 @@ export interface TridentRun {
    */
   inner_checkpoint_findings: string | null
   /**
-   * Trident v2 (migration 0089) — the inner loop's final synthesised Argus
-   * verdict (`APPROVE` → merge; `REQUEST_CHANGES` → failed after maxRounds).
-   * Null while in flight.
+   * Trident v2 (migration 0089) — the terminal verdict recorded by the outer
+   * orchestrator. `REVIEW_NOT_RUN` means the run reached terminal without a
+   * reviewer producing a verdict (crash, infrastructure stop, provenance reject,
+   * or lost round); it is never a judgement about the code. Null while in flight.
    */
-  inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  inner_verdict: TridentVerdict | null
   /**
    * Work Board Phase 2a (migration 0091) — the inner workflow's TYPED terminal
    * result (`{ok, prNumber, branch, verdict, round, checkpoint}` as compact
@@ -270,7 +281,7 @@ export interface TridentRunUpdate {
   inner_checkpoint_head?: string | null
   /** Workflow-owned (0122); patchable for the workflow-sim writes in tests. */
   inner_checkpoint_findings?: string | null
-  inner_verdict?: 'APPROVE' | 'REQUEST_CHANGES' | null
+  inner_verdict?: TridentVerdict | null
   /** Phase 2a (0091) — the inner workflow's typed terminal result (compact JSON). */
   inner_result?: string | null
   /** RC2 (0102) — the outer-harvest marker (ms-epoch); set ONLY by
@@ -307,7 +318,7 @@ interface TridentRunDbRow {
   inner_checkpoint: string | null
   inner_checkpoint_head: string | null
   inner_checkpoint_findings: string | null
-  inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  inner_verdict: TridentVerdict | null
   inner_result: string | null
   started_at: string
   last_advanced_at: string
@@ -818,10 +829,11 @@ export class TridentRunStore {
 
   /**
    * Atomically CLAIM a measured infrastructure failure for retry: spend one
-   * durable budget unit, clear the harvested result and release every dispatch
-   * slot in ONE conditional UPDATE. A racing terminal transition, second tick,
-   * or crash latch wins cleanly and returns null. This is the only writer of
-   * `infra_retries`; agent rounds and `harvested_at` are intentionally untouched.
+   * durable budget unit, clear the harvested result + its stale verdict, and
+   * release every dispatch slot in ONE conditional UPDATE. A racing terminal
+   * transition, second tick, or crash latch wins cleanly and returns null. This
+   * is the only writer of `infra_retries`; agent rounds and `harvested_at` are
+   * intentionally untouched.
    */
   async beginInfraRetry(id: string): Promise<TridentRun | null> {
     const won = await this.db.transaction((tx) => {
@@ -829,6 +841,7 @@ export class TridentRunStore {
         `UPDATE code_trident_runs
             SET infra_retries = COALESCE(infra_retries, 0) + 1,
                 inner_result = NULL,
+                inner_verdict = NULL,
                 subagent_run_id = NULL,
                 subagent_status = NULL,
                 workflow_run_id = NULL,
@@ -892,10 +905,41 @@ export class TridentRunStore {
     const statusGuard = patch.subagent_status !== undefined && patch.subagent_status !== 'crashed'
       ? ` AND subagent_status IS NOT 'crashed'`
       : ''
-    await this.db.run(
-      `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?${statusGuard}`,
-      params,
-    )
+    if (patch.inner_verdict !== undefined || patch.inner_checkpoint_findings !== undefined) {
+      await this.db.transaction((tx) => {
+        const row = tx
+          .prepare<Pick<TridentRunDbRow, 'inner_verdict' | 'inner_checkpoint_findings'>, [string]>(
+            `SELECT inner_verdict, inner_checkpoint_findings FROM code_trident_runs WHERE id = ?`,
+          )
+          .get(id)
+        if (row !== null) {
+          const effectiveVerdict = patch.inner_verdict !== undefined
+            ? patch.inner_verdict
+            : row.inner_verdict
+          const effectiveFindings = patch.inner_checkpoint_findings !== undefined
+            ? patch.inner_checkpoint_findings
+            : row.inner_checkpoint_findings
+          // T1's production discriminator cannot reach this state. The guard makes
+          // findings-free rejection structurally unwritable by in-process writers;
+          // checkpoint.sh remains out-of-process SQL and bypasses it by construction.
+          if (
+            effectiveVerdict === 'REQUEST_CHANGES' &&
+            parseCheckpointFindings(effectiveFindings).length === 0
+          ) {
+            throw new TridentEmptyFindingsRejectionError(id, 'update')
+          }
+        }
+        tx.runSync(
+          `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?${statusGuard}`,
+          params,
+        )
+      })
+    } else {
+      await this.db.run(
+        `UPDATE code_trident_runs SET ${sets.join(', ')} WHERE id = ?${statusGuard}`,
+        params,
+      )
+    }
     return this.get(id)
   }
 
@@ -1024,6 +1068,13 @@ export class TridentRunStore {
    * and including an APPROVE — may be trusted.
    */
   async save(run: TridentRun): Promise<void> {
+    if (run.inner_verdict === 'REQUEST_CHANGES') {
+      // save() has no production callers, so its non-transactional pre-read is acceptable.
+      const row = this.get(run.id)
+      if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
+        throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+      }
+    }
     await this.db.run(
       `UPDATE code_trident_runs
           SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
@@ -1074,6 +1125,16 @@ export class TridentRunStore {
    */
   async saveIfActive(run: TridentRun): Promise<boolean> {
     return this.db.transaction((tx) => {
+      if (run.inner_verdict === 'REQUEST_CHANGES') {
+        const row = tx
+          .prepare<{ inner_checkpoint_findings: string | null }, [string]>(
+            'SELECT inner_checkpoint_findings FROM code_trident_runs WHERE id = ?',
+          )
+          .get(run.id)
+        if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
+          throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+        }
+      }
       const res = tx.runSync(
         `UPDATE code_trident_runs
             SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,

@@ -180,6 +180,7 @@ describe('(b) recovery is BOUNDED, and the bound is DURABLE across restarts', ()
     expect(counter.fires).toBe(3)
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after.failure_reason ?? '').toContain('crash-recovery budget')
     // The MEASURED crash text is carried, not thrown away (#240's other half).
     expect(after.failure_reason ?? '').toContain('pooled child exited')
@@ -218,6 +219,7 @@ describe('(b) recovery is BOUNDED, and the bound is DURABLE across restarts', ()
 
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after.failure_reason ?? '').toContain('crash-recovery budget')
     expect(after.failure_reason ?? '').toContain('gateway process booted 2026-08-14T07:13:00.000Z')
   })
@@ -247,6 +249,7 @@ describe('(b) recovery is BOUNDED, and the bound is DURABLE across restarts', ()
     expect(counter.fires).toBe(3)
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after.crash_recoveries).toBe(2)
     expect(after.failure_reason ?? '').toContain('crash-recovery budget')
   })

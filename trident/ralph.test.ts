@@ -73,7 +73,7 @@ describe('Ralph mode threads through to the inner loop', () => {
   })
 
   test('a governed run fires the inner workflow with run.ralph === true', async () => {
-    const sim = buildSimFirer(store, () => ({
+    const sim = buildSimFirer(db, store, () => ({
       result: { verdict: 'APPROVE', prNumber: 5, branch: 'feat-governed' },
     }))
     const inputs = sim.inputs

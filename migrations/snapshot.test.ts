@@ -48,3 +48,23 @@ test('current migrations produce the expected schema (snapshot diff)', () => {
   }
   expect(observed).toBe(expected)
 })
+
+test('code_trident_runs accepts REVIEW_NOT_RUN and rejects unknown verdicts', () => {
+  applyMigrations(db)
+  const insert = (id: string, verdict: string): void => {
+    db.run(
+      `INSERT INTO code_trident_runs
+         (id, slug, project_slug, repo_path, task, started_at, last_advanced_at, inner_verdict)
+       VALUES (?, ?, 'p', '/repo', 'build', '2026-08-19T00:00:00Z', '2026-08-19T00:00:00Z', ?)`,
+      [id, id, verdict],
+    )
+  }
+
+  expect(() => insert('review-not-run', 'REVIEW_NOT_RUN')).not.toThrow()
+  expect(() => insert('bogus-verdict', 'BOGUS')).toThrow()
+  expect(
+    db.query<{ inner_verdict: string }, [string]>(
+      'SELECT inner_verdict FROM code_trident_runs WHERE id = ?',
+    ).get('review-not-run')?.inner_verdict,
+  ).toBe('REVIEW_NOT_RUN')
+})
