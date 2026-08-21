@@ -732,7 +732,7 @@ describe('mid-loop resume — the launcher-read head replaces the probe agent', 
 /**
  * AN UNREADABLE HEAD IS A BOUNDED STOP, NEVER A REBUILD (Part 2b).
  *
- * The safety verdict is unchanged and must stay: "could not tell" is never
+ * The safety decision stays fail-closed: "could not tell" is never
  * "unchanged", so no fast path opens. What changes is the CONSEQUENCE. The recorded
  * work is committed and intact — only the READ failed — so rebuilding redoes it at
  * the most expensive effort available and can fork a divergent commit the publisher
@@ -763,7 +763,7 @@ describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebu
     expect(out.labels).not.toContain('resume-diff')
 
     expect(out.result.ok).toBe(false)
-    expect(out.result.verdict).toBe('REQUEST_CHANGES')
+    expect(out.result.verdict).toBeNull()
     // The RECORDED checkpoint is passed through untouched, so the failed row still says
     // WHAT was built and WHERE. It is evidence, not a resume input: a re-run is a fresh
     // dispatch with null checkpoints and rebuilds (corrected at Argus r4).
@@ -790,7 +790,7 @@ describe('mid-loop resume — an unreadable head is a bounded STOP, never a rebu
     expect(out.labels).not.toContain('resume-diff')
 
     expect(out.result.ok).toBe(false)
-    expect(out.result.verdict).toBe('REQUEST_CHANGES')
+    expect(out.result.verdict).toBeNull()
     expect(out.result.blockKind).toBe('infra-only')
     expect(out.result.terminalCause).toContain('trident/resume-run')
     expect(out.result.terminalCause).toContain(RECORDED)

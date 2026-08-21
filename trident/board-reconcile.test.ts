@@ -91,7 +91,7 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
 
     // 2. Drive the durable loop with a sim firer + the reconcile observer wired
     //    into on_terminal (exactly as build-core-modules composes it).
-    const sim = buildSimFirer(store, () => ({
+    const sim = buildSimFirer(db, store, () => ({
       result: { verdict: 'APPROVE', prNumber: 7, branch: `trident/${run_id}` },
     }))
     const orch = buildTridentOrchestrator({

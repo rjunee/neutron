@@ -67,8 +67,8 @@ export interface TridentHandoffFields {
   slug: string
   /** The run's human task text (label only; truncated). */
   task: string
-  /** The reviewed verdict on the harvested result (null = exhausted rounds). */
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  /** The recorded terminal verdict on the harvested result. */
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   /** Inner-loop round the result was produced on. */
   round: number
   /** PR number when the run merges a remote PR (→ a `pr` ref). */
@@ -231,7 +231,7 @@ export interface TridentTerminalRun {
   /** The SERVER-GATED verdict recorded on the committed row (also the verdict
    *  the inner workflow wrote — see `isTridentHarvestTerminal` for why the
    *  harvest gate below does NOT rely on this being non-null). */
-  inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  inner_verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   /** The SERVER-recorded Argus provenance checkpoint. An Argus VERDICT exists
    *  only when this is `argus-approved` / `argus-request-changes`. */
   inner_checkpoint: string | null
@@ -277,7 +277,9 @@ const ARGUS_CHECKPOINTS = new Set(['argus-approved', 'argus-request-changes'])
  *     a stopped/garbled/reaped row — which may still carry an inner-written
  *     `inner_verdict` — is NOT a handoff.
  *   - `decision` (actor `argus`) — the reviewed verdict, emitted ONLY with
- *     genuine Argus provenance (see the two reliable signals below). A
+ *     genuine Argus provenance (see the two reliable signals below).
+ *     `REVIEW_NOT_RUN` is still a real harvested handoff, but never an Argus
+ *     decision, even if a stale Argus checkpoint remains on the row. A
  *     pre-verdict failure (`inner-error`, Forge crash) has NO Argus verdict, so
  *     no `argus` decision is fabricated — RC3 can trust a `decision` event's
  *     provenance. The verdict is `inner_verdict` verbatim: a committed `APPROVE`
@@ -319,21 +321,24 @@ export async function emitTridentTerminalEvents(
   //     server provenance gate forces any APPROVE NOT backed by a recorded
   //     `argus-approved` checkpoint down to REQUEST_CHANGES, so a committed
   //     `APPROVE` can only have come from a real Argus approval; OR
-  //   - the committed `inner_checkpoint` is an Argus checkpoint (the
+  //   - a REQUEST_CHANGES with an Argus checkpoint (the
   //     REQUEST_CHANGES branches PRESERVE the server-recorded checkpoint, so
   //     this correctly separates an argus-reviewed REQUEST_CHANGES from a
   //     pre-verdict `inner-error` / Forge crash, which carries neither).
   const argusReviewed =
     run.inner_verdict === 'APPROVE' ||
-    (run.inner_checkpoint !== null && ARGUS_CHECKPOINTS.has(run.inner_checkpoint))
+    (run.inner_verdict === 'REQUEST_CHANGES' &&
+      run.inner_checkpoint !== null &&
+      ARGUS_CHECKPOINTS.has(run.inner_checkpoint))
   if (argusReviewed) {
+    const verdict = run.inner_verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
     await appendNexusEventDurable(
       store,
       run.project_slug,
       tridentDecisionEvent({
         slug: run.slug,
         task: run.task,
-        verdict: run.inner_verdict,
+        verdict,
         // A failed run carries the reason; a merged run has none.
         note: run.failure_reason ?? `verdict ${run.inner_verdict}`,
         pr: run.pr,

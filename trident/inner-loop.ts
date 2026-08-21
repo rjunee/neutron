@@ -58,8 +58,11 @@ import { parsePhaseModelConfig } from './phase-models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { writeBriefParts, type BriefParts } from './brief-parts.ts'
+import { parseCheckpointFindings } from './checkpoint-findings.ts'
 import { fileURLToPath } from 'node:url'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+
+export { parseCheckpointFindings } from './checkpoint-findings.ts'
 
 export interface InnerLoopInput {
   run: TridentRun
@@ -231,6 +234,13 @@ export interface InnerResult {
    * that carries real review findings (e.g. the round-lost shapes).
    */
   findings_present: boolean
+  /**
+   * The findings themselves, verbatim, so a terminal result can PROVE the rejection
+   * it is asserting. `findings_present` says a reviewer spoke; this says what they
+   * said, which is what `store.ts` requires before it will record REQUEST_CHANGES.
+   * `[]` when absent or garbled — the same fail-closed reading as the boolean.
+   */
+  findings: unknown[]
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
   /**
@@ -684,35 +694,24 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // wrapper's catch path) apart from a terminal result that carries real review findings;
     // a false positive here would report an infra death as a review verdict again.
     findings_present: Array.isArray(p.findings) && p.findings.length > 0,
+    // THE FINDINGS THEMSELVES, NOT JUST WHETHER THERE WERE ANY. `findings_present`
+    // above answers "did a reviewer say anything"; it CANNOT answer "what did they
+    // say", and the terminal path needs the latter. `store.ts` refuses to record
+    // `inner_verdict='REQUEST_CHANGES'` unless the row carries findings, but the row's
+    // `inner_checkpoint_findings` is only stamped when a CHECKPOINT is written — a run
+    // that reviews and goes straight to terminal never stamps it. Keeping only the
+    // boolean therefore left the orchestrator holding proof that findings existed and
+    // no way to satisfy the guard that demands them, so a genuine blocker-backed
+    // rejection was downgraded to REVIEW_NOT_RUN. Carried verbatim (the same passthrough
+    // contract as `parseCheckpointFindings`); `[]` when absent or garbled, which decodes
+    // identically to the fail-closed boolean above and never invents a rejection.
+    findings: Array.isArray(p.findings) ? p.findings : [],
     // RALPH RE-FIRE (#362). Absent/garbled → null (treated as no re-fire).
     remaining_tasks:
       typeof p.remainingTasks === 'number' && Number.isFinite(p.remainingTasks)
         ? Math.max(0, Math.trunc(p.remainingTasks))
         : null,
   }
-}
-
-/**
- * Decode the findings a checkpoint was recorded with
- * (`code_trident_runs.inner_checkpoint_findings`) for the resumed fix round.
- *
- * Returns `[]` for null/empty/unparseable/non-array content, and that empty array
- * is load-bearing rather than merely tidy: the workflow treats "no recorded
- * findings" as a reason to RE-REVIEW instead of skipping forward, so a column
- * written by an older or garbled writer degrades into paying for the review again
- * — never into a fix round with nothing to fix. Entries are passed through
- * verbatim (the workflow embeds them in the fix prompt exactly as the synthesis
- * produced them); this decoder's only job is to guarantee an array.
- */
-export function parseCheckpointFindings(raw: string | null | undefined): unknown[] {
-  if (typeof raw !== 'string' || raw.trim().length === 0) return []
-  let parsed: unknown
-  try {
-    parsed = JSON.parse(raw)
-  } catch {
-    return []
-  }
-  return Array.isArray(parsed) ? parsed : []
 }
 
 function normalizeVerdict(v: unknown): 'APPROVE' | 'REQUEST_CHANGES' | null {

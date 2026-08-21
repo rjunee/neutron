@@ -503,7 +503,7 @@ export interface AppWsRunProgress {
   stalled: boolean
   stalled_ms: number | null
   pr: number | null
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   failure_reason: string | null
   /** Durable brief-integrity refusal, retained even when a later retry recovers. */
   brief_alert: string | null

@@ -18,6 +18,7 @@ interface Options {
   claim?: string
   probes?: string[]
   verdicts?: Array<'APPROVE' | 'REQUEST_CHANGES'>
+  maxRounds?: number
   fixClaim?: string
   buildDiff?: string
   /** The diff path the FIX round reports — '' is a round that produced nothing. */
@@ -58,7 +59,7 @@ async function runBuiltHead(opts: Options = {}) {
   }
   const parallel = async (fns: Array<() => Promise<unknown>>) => Promise.all(fns.map((f) => f()))
   const args = {
-    repoPath: '/repo', task: 'Ship it', baseBranch: 'main', slug: 'built-head', maxRounds: 3,
+    repoPath: '/repo', task: 'Ship it', baseBranch: 'main', slug: 'built-head', maxRounds: opts.maxRounds ?? 3,
     ralph: false, mergeMode: opts.mode ?? 'local', prNumber: null, branch,
     dbPath: '/tmp/no.db', runId: 'built-head-run', codexHome: null,
     resumeCheckpoint: opts.resumeCheckpoint ?? null,
@@ -75,6 +76,8 @@ async function runBuiltHead(opts: Options = {}) {
 
 const checkpoint = (out: Awaited<ReturnType<typeof runBuiltHead>>, name: string) =>
   out.prompts.find((p) => p.label === `checkpoint:${name}`)?.prompt ?? ''
+const terminal = (out: Awaited<ReturnType<typeof runBuiltHead>>) =>
+  out.prompts.find((p) => p.label === 'terminal-result')?.prompt ?? ''
 
 describe('build-completion heads come from git', () => {
   test('PR no claim publishes with null claim and checkpoints the git OID', async () => {
@@ -428,7 +431,16 @@ describe('the two bounded stops agree on `ok` — one failure class, one shape',
     const out = await runBuiltHead({ probes: UNREADABLE })
     expect(out.result.ok).toBe(false)
     expect(out.result.blockKind).toBe('infra-only')
+    expect(out.result.verdict).toBeNull()
+    expect(terminal(out)).toContain("inner_verdict 'REVIEW_NOT_RUN'")
+  })
+
+  test('a genuine rejection still records REQUEST_CHANGES with its findings', async () => {
+    const out = await runBuiltHead({ verdicts: ['REQUEST_CHANGES'], maxRounds: 1 })
     expect(out.result.verdict).toBe('REQUEST_CHANGES')
+    expect(out.result.blockKind).toBe('code')
+    expect(out.result.findings).toEqual([{ severity: 'blocker', title: 'fix it', evidence: 'x:1' }])
+    expect(terminal(out)).toContain("inner_verdict 'REQUEST_CHANGES'")
   })
 
   /**

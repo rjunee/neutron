@@ -6,6 +6,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
+import { parseCheckpointFindings } from './checkpoint-findings.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import { interpretFailure } from './delivery.ts'
 import {
@@ -112,7 +113,7 @@ function buildHarness(opts: {
   // time base — production runs both on wall-clock; the tests run both on the
   // fake clock (mismatched clocks would make `elapsedSinceAdvance` meaningless).
   store = new TridentRunStore(db, now)
-  const sim = buildSimFirer(store, opts.plan)
+  const sim = buildSimFirer(db, store, opts.plan)
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
@@ -1084,8 +1085,8 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.failure_reason).toContain('other.ts')
     // …and it is NOT dressed up as a review verdict: what a human reads is the attention state,
     // named as a PUBLISH-step failure. (The row's `inner_verdict` column is the INNER loop's own
-    // last word — production's `writeTerminalResult` normalises every non-APPROVE result to
-    // REQUEST_CHANGES before this step ever runs; the rebase stamps no verdict of its own.)
+    // last word — production's `writeTerminalResult` records REVIEW_NOT_RUN unless a code-block
+    // reviewer produced findings; the rebase stamps no verdict of its own.)
     expect(final.failure_reason).toContain('publish failed: REBASE CONFLICT — needs attention:')
     expect(final.failure_reason).not.toContain('REQUEST_CHANGES')
     // With no resolver there is nothing to auto-resolve, and this path never drives a
@@ -2597,6 +2598,7 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
     // verbatim to chat) — never a raw "merge failed".
     expect(final.failure_reason).toBe(question)
     expect(final.failure_reason).not.toContain('merge failed')
+    expect(final.inner_verdict).toBe('APPROVE')
   })
 })
 
@@ -2615,13 +2617,13 @@ describe('orchestrator — server-gated verdict provenance', () => {
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('provenance gate')
-    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
   })
 })
 
 describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', () => {
-  test('a REQUEST_CHANGES inner result fails the run without merging', async () => {
+  test('a findings-free REQUEST_CHANGES inner result records REVIEW_NOT_RUN', async () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'REQUEST_CHANGES', round: 3, prNumber: 7, branch: 'feat-x' } }),
     })
@@ -2630,7 +2632,7 @@ describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', ()
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('failed')
     expect(final.failure_reason).toContain('without Argus APPROVE')
-    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
   })
 
@@ -2674,6 +2676,102 @@ describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', ()
     const final = await runToTerminal(h, run.id)
     expect(final.inner_checkpoint).toBe('inner-error')
     expect(final.failure_reason).toContain('inner-error')
+  })
+})
+
+describe('REVIEW_NOT_RUN — terminal without the reviewer speaking', () => {
+  async function harvestRawResult(over: {
+    verdict: 'REQUEST_CHANGES' | null
+    checkpoint: string | null
+    blockKind: 'code' | 'infra-only' | 'round-lost' | null
+    findings: string | null
+    terminalCause?: string
+  }): Promise<TridentRun> {
+    const h = buildHarness({ plan: () => ({ result: null }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+    await store.update(run.id, {
+      inner_result: JSON.stringify({
+        ok: false,
+        verdict: over.verdict,
+        prNumber: 7,
+        branch: 'feat-x',
+        round: 1,
+        checkpoint: over.checkpoint,
+        blockKind: over.blockKind,
+        terminalCause: over.terminalCause ?? null,
+      }),
+      inner_checkpoint: over.checkpoint,
+      inner_checkpoint_findings: over.findings,
+      subagent_status: 'completed',
+    })
+    // Model the old out-of-process inner writer: the outer harvest must replace
+    // this fabrication when no reviewer verdict can be substantiated.
+    await db.run(
+      'UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?',
+      ['REQUEST_CHANGES', run.id],
+    )
+    await h.loop.runOnce()
+    return store.get(run.id)!
+  }
+
+  test('a null verdict at inner-error records REVIEW_NOT_RUN and preserves findings/checkpoint', async () => {
+    const findings = '[{"severity":"note","summary":"diagnostic retained"}]'
+    const final = await harvestRawResult({
+      verdict: null,
+      checkpoint: 'inner-error',
+      blockKind: null,
+      findings,
+      terminalCause: 'executor crashed before review',
+    })
+
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+    expect(final.inner_checkpoint).toBe('inner-error')
+    expect(final.inner_checkpoint).not.toBe('argus-request-changes')
+    expect(final.inner_checkpoint_findings).toBe(findings)
+    expect(final.failure_reason).toContain('executor crashed before review')
+  })
+
+  test('a terminal result with no checkpoint does not fabricate an Argus checkpoint', async () => {
+    const final = await harvestRawResult({
+      verdict: null,
+      checkpoint: null,
+      blockKind: null,
+      findings: null,
+    })
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+    expect(final.inner_checkpoint).toBeNull()
+  })
+
+  test('infra-only and round-lost stops both record REVIEW_NOT_RUN', async () => {
+    for (const blockKind of ['infra-only', 'round-lost'] as const) {
+      const final = await harvestRawResult({
+        verdict: 'REQUEST_CHANGES',
+        checkpoint: 'argus-request-changes',
+        blockKind,
+        findings: '[{"severity":"blocker"}]',
+        terminalCause: `${blockKind} stop`,
+      })
+      expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+    }
+  })
+
+  test('a code verdict with recorded findings remains REQUEST_CHANGES', async () => {
+    const findings = '[{"severity":"blocker","summary":"wrong result"}]'
+    const final = await harvestRawResult({
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'argus-request-changes',
+      blockKind: 'code',
+      findings,
+      terminalCause: 'review found a correctness defect',
+    })
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.inner_checkpoint_findings).toBe(findings)
+    expect(final.failure_reason).toBe(
+      "inner workflow ended at round 1 of 10 at checkpoint 'argus-request-changes' without Argus APPROVE",
+    )
   })
 })
 
@@ -2763,6 +2861,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
 
     const final = await runToTerminal(h, run.id, 40)
     expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(final.failure_reason).toContain('max_ralph_rounds')
     // Never merged.
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('pr merge'))).toBe(false)
@@ -2987,6 +3086,7 @@ describe('orchestrator — stalled workflow guard', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('stalled')
   })
 })
@@ -3016,6 +3116,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('suspected agent hang')
   })
 
@@ -3533,6 +3634,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('suspected agent hang')
     // Reaped, NOT redispatched.
     expect(h.inputs).toHaveLength(0)
@@ -3616,6 +3718,7 @@ describe('orchestrator — orphan recovery', () => {
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
     expect(after?.subagent_status).toBe('crashed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('orphaned')
     expect(h.inputs).toHaveLength(0)
   })
@@ -3882,6 +3985,7 @@ describe('orchestrator — terminal-but-garbled harvest guard (Bug 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('terminal result missing/garbled')
     // Never re-fired, never merged.
     expect(h.inputs).toHaveLength(0)
@@ -3902,6 +4006,7 @@ describe('orchestrator — terminal-but-garbled harvest guard (Bug 2)', () => {
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('terminal result missing/garbled')
   })
 
@@ -3983,8 +4088,8 @@ describe('orchestrator — RC2 nexus producer over the REAL post-commit on_termi
   })
 
   test('a hang-reaped run (no harvest) fires the hook but persists NOTHING (no false handoff/decision)', async () => {
-    // A run that never harvests (stalls) → reaped to failed with inner_verdict
-    // null. The post-commit hook fires, but the producer emits nothing.
+    // A run that never harvests (stalls) → reaped to failed with REVIEW_NOT_RUN.
+    // The post-commit hook fires, but the harvest gate still emits nothing.
     let t = 0
     const h = buildHarness({
       plan: () => ({ result: null }),
@@ -3999,7 +4104,7 @@ describe('orchestrator — RC2 nexus producer over the REAL post-commit on_termi
     await h.loop.runOnce() // reaped → failed → on_terminal fires
     const final = store.get(run.id)
     expect(final?.phase).toBe('failed')
-    expect(final?.inner_verdict).toBeNull()
+    expect(final?.inner_verdict).toBe('REVIEW_NOT_RUN')
     await new Promise((r) => setTimeout(r, 20))
     expect(await nexus.readRecent('t1', { limit: 100 })).toEqual([])
   })
@@ -4803,7 +4908,18 @@ describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run
  * verdict is the wrapper's — no reviewer ever ran — so the harvested row must carry null.
  */
 describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f384460d)', () => {
-  test('the replayed inner-error harvest fails with a null verdict, the PR intact, and an infra reason', async () => {
+  // RENAMED, AND THE ASSERTION CHANGED ON PURPOSE — read this before "fixing" it back.
+  // T4 originally recorded `null` here to mean "nobody judged this code", which was right
+  // against the alternative it was written to kill (a fabricated REQUEST_CHANGES on an
+  // infrastructure death). It stays right; it is just no longer the best available answer.
+  // `null` is also what an un-harvested, still-running row carries, so the record could not
+  // distinguish "review provably did not happen" from "not filled in yet" — the same
+  // absence-read-as-information that this whole area keeps getting wrong.
+  // REVIEW_NOT_RUN is that identical claim with a NAME, and it is now a value the column's
+  // CHECK constraint accepts. The infra polarity T4 exists to protect is untouched and
+  // still asserted below: reason names infrastructure, never "without Argus APPROVE", and
+  // `interpretFailure` still classifies it `infra`.
+  test('the replayed inner-error harvest fails with REVIEW_NOT_RUN, the PR intact, and an infra reason', async () => {
     const h = buildHarness({
       plan: () => ({
         result: {
@@ -4822,7 +4938,11 @@ describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f3
 
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('failed')
-    expect(final.inner_verdict).toBeNull()
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+    // The point T4 actually defends: whatever this field says, it must NOT be the
+    // reviewer's rejection. Asserted positively so the test still fails if the old
+    // fabricated REQUEST_CHANGES ever comes back.
+    expect(final.inner_verdict).not.toBe('REQUEST_CHANGES')
     expect(final.pr).toBe(267)
     expect(final.failure_reason).toContain('build infrastructure failed')
     expect(final.failure_reason).not.toContain('without Argus APPROVE')
@@ -4847,6 +4967,17 @@ describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f3
 
     expect(final.phase).toBe('failed')
     expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    // THE ROW MUST CARRY THE EVIDENCE FOR THE VERDICT IT RECORDS, not merely have been
+    // allowed past the guard. Without this, the store's own rule ("REQUEST_CHANGES needs
+    // findings") holds only at the moment of the write and is false on disk the instant
+    // after -- and the next reader of this row, including the resumed fix round, sees a
+    // rejection with nothing to fix. Verified by mutation: deleting the
+    // `inner_checkpoint_findings` write from saveIfActive's UPDATE leaves every other
+    // assertion in this file green, so this is the only thing standing between a correct
+    // implementation and a column nothing ever populates.
+    const persisted = parseCheckpointFindings(final.inner_checkpoint_findings)
+    expect(persisted.length).toBeGreaterThan(0)
+    expect(JSON.stringify(persisted)).toContain('null deref in a.ts')
     expect(final.failure_reason).toContain('without Argus APPROVE')
     expect(interpretFailure(final).klass).not.toBe('infra')
   })

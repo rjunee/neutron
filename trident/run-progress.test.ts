@@ -124,6 +124,11 @@ describe('deriveRunProgress — phase/checkpoint → label', () => {
     expect(p.verdict).toBe('APPROVE')
   })
 
+  test('failed carries REVIEW_NOT_RUN without normalizing it away', () => {
+    const p = deriveRunProgress(run({ phase: 'failed', inner_verdict: 'REVIEW_NOT_RUN' }), T0)
+    expect(p.verdict).toBe('REVIEW_NOT_RUN')
+  })
+
   test('carries a recovered brief refusal independently of terminal failure', () => {
     const alert = 'CODEX_BUILD_BRIEF_PART_CORRUPT: persisted bytes disagree. DEFERRED.'
     const p = deriveRunProgress(run({ phase: 'forge-init', brief_alert: alert }), T0)

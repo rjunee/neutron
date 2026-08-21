@@ -2303,7 +2303,20 @@ function shSingleQuote(s) {
 // two columns from ever disagreeing at the source.
 async function writeTerminalResult(result) {
   if (!dbPath || !runId) return
-  const verdict = result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'
+  // REQUEST_CHANGES is RESERVED for a reviewer that judged the CODE and produced
+  // at least one finding — the same discriminator as `recordedTerminalVerdict`
+  // (trident/orchestrator.ts). Everything else — a throw, a bounded stop, an
+  // infra-only block, a lost round, a publish/refire handoff — records
+  // REVIEW_NOT_RUN: no reviewer has spoken about this state of the branch.
+  const verdict =
+    result.verdict === 'APPROVE'
+      ? 'APPROVE'
+      : result.verdict === 'REQUEST_CHANGES' &&
+          result.blockKind === 'code' &&
+          Array.isArray(result.findings) &&
+          result.findings.length > 0
+        ? 'REQUEST_CHANGES'
+        : 'REVIEW_NOT_RUN'
   const json = JSON.stringify(result)
   const tmp = `/tmp/trident-terminal-${runId}.json`
   const fields = [
@@ -5575,7 +5588,7 @@ try {
       ok: false,
       prNumber: pr,
       branch: forgeBranch,
-      verdict: 'REQUEST_CHANGES',
+      verdict: null,
       round,
       checkpoint: resumeCheckpoint,
       remainingTasks: 0,
@@ -5699,7 +5712,7 @@ try {
   // The bounded stop for a build-completion head that could not be read or that
   // disagrees with the builder's claim. `ok: false` DELIBERATELY, and the same value
   // the resume stop above uses: these are two instances of ONE failure class
-  // (blockKind 'infra-only', a measured terminalCause, verdict REQUEST_CHANGES), and
+  // (blockKind 'infra-only', a measured terminalCause, verdict null — no reviewer spoke), and
   // two terminal results of the same class that disagree on `ok` is a bug waiting for
   // its first consumer.
   //
@@ -5726,7 +5739,7 @@ try {
   // run re-reads, and the checkpoint columns this stop leaves untouched record where the
   // branch actually got to.
   const builtHeadStop = async (cause) => {
-    const stop = { ok: false, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: null, blockKind: 'infra-only', terminalCause: infraCause(cause), remainingTasks: 0 }
+    const stop = { ok: false, prNumber: pr, branch: forgeBranch, verdict: null, round, checkpoint: null, blockKind: 'infra-only', terminalCause: infraCause(cause), remainingTasks: 0 }
     await writeTerminalResult(stop)
     return stop
   }
@@ -6578,7 +6591,11 @@ ${task}${reflectionGuidance}`,
       ? { findings: [roundDidNotLandFinding(roundLostItsWork.round, roundLostItsWork.head)] }
       : roundLostItsDiff !== null
         ? { findings: [roundLeftNoDiffFinding(roundLostItsDiff)] }
-        : {}),
+        : finalVerdict === 'REQUEST_CHANGES' &&
+            Array.isArray(synthesis.findings) &&
+            synthesis.findings.length > 0
+          ? { findings: synthesis.findings }
+          : {}),
   }
   await writeTerminalResult(terminalResult)
   return terminalResult
@@ -6588,9 +6605,10 @@ ${task}${reflectionGuidance}`,
   // process/stdout left to report failure — the OUTER loop harvests `inner_result`
   // from the DB. Without a terminal write here, a crashed build would sit
   // `running` until the 2 h stall guard instead of failing PROMPTLY. So persist a
-  // terminal FAILURE result (verdict REQUEST_CHANGES → the harvest fails the run
-  // on the next tick). Best-effort: if THIS write also throws, the stall guard is
-  // the backstop. The `finally` cleanup still runs. We RETURN the failure object
+  // terminal FAILURE result (verdict null — a throw is not a review verdict; the
+  // harvest still fails the run on the next tick and the record says the reviewer
+  // never spoke). Best-effort: if THIS write also throws, the stall guard is the
+  // backstop. The `finally` cleanup still runs. We RETURN the failure object
   // (the detached workflow's result API) rather than re-throwing, so the result is
   // a clean terminal value, not an error.
   const awaiting = err != null && err.awaitingTrailer === true
@@ -6605,7 +6623,7 @@ ${task}${reflectionGuidance}`,
     ok: false,
     prNumber: pr,
     branch: forgeBranch,
-    verdict: 'REQUEST_CHANGES',
+    verdict: null,
     round,
     checkpoint: 'inner-error',
     // A THROWN iteration NEVER re-fires (a failure is a failure — recoverable via a

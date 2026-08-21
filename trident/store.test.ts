@@ -5,7 +5,13 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { changeSignatureEntries, COLS, TridentRunStore, waveChildSlug } from './store.ts'
+import {
+  changeSignatureEntries,
+  COLS,
+  TridentEmptyFindingsRejectionError,
+  TridentRunStore,
+  waveChildSlug,
+} from './store.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -216,6 +222,27 @@ describe('TridentRunStore', () => {
     expect(store.get(run.id)?.base_behind).toBe(17)
     expect(await store.saveIfActive({ ...store.get(run.id)!, base_behind: 18 })).toBe(true)
     expect(store.get(run.id)?.base_behind).toBe(18)
+  })
+
+  test('REVIEW_NOT_RUN round-trips through create, update, save, and get', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'review-not-run',
+      project_slug: 't1',
+      repo_path: '/repo',
+      task: 'build without fabricating a review',
+    })
+    const updated = await store.update(run.id, {
+      phase: 'failed',
+      inner_verdict: 'REVIEW_NOT_RUN',
+      failure_reason: 'reviewer never produced a verdict',
+    })
+    await store.save({ ...updated!, failure_reason: 'measured infrastructure stop' })
+
+    const got = store.get(run.id)
+    expect(got?.phase).toBe('failed')
+    expect(got?.inner_verdict).toBe('REVIEW_NOT_RUN')
+    expect(got?.failure_reason).toBe('measured infrastructure stop')
   })
 
   test('the checkpoint OID + findings start NULL and round-trip through update (0122)', async () => {
@@ -623,6 +650,10 @@ describe('TridentRunStore', () => {
         workflow_run_id: 'generation-1',
         inner_result: '{"verdict":"REQUEST_CHANGES"}',
       })
+      await db.run(
+        'UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?',
+        ['REQUEST_CHANGES', run.id],
+      )
       clock = '2026-08-14T20:11:00.000Z'
 
       const claimed = await store.beginInfraRetry(run.id)
@@ -630,6 +661,7 @@ describe('TridentRunStore', () => {
       expect(claimed).toMatchObject({
         infra_retries: 1,
         inner_result: null,
+        inner_verdict: null,
         subagent_run_id: null,
         subagent_status: null,
         workflow_run_id: null,
@@ -854,6 +886,156 @@ describe('wave children (migration 0137)', () => {
 
   test('waveChildSlug identifies the parent and task', () => {
     expect(waveChildSlug('a-slug', 'T12')).toBe('a-slug--wT12')
+  })
+})
+
+describe('empty-findings rejection guard — an empty finding set is never a rejection', () => {
+  test('FALSIFICATION 2 — update() refuses REQUEST_CHANGES on a row with no findings (delete the guard in update() and this goes RED)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-empty', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await expect(
+      store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+
+    expect(store.get(run.id)?.inner_verdict).toBeNull()
+  })
+
+  test('update() refuses REQUEST_CHANGES paired with findings=[] and with unparseable findings in the same patch', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-invalid', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await expect(
+      store.update(run.id, {
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: '[]',
+      }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    await expect(
+      store.update(run.id, {
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: 'not json',
+      }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+  })
+
+  test('update() accepts REQUEST_CHANGES with non-empty findings in the same patch', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-paired', project_slug: 't1', repo_path: '/r', task: 't' })
+    const findings = '[{"severity":"blocker"}]'
+
+    await store.update(run.id, {
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: findings,
+    })
+
+    expect(store.get(run.id)).toMatchObject({
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: findings,
+    })
+  })
+
+  test('update() accepts REQUEST_CHANGES when the ROW already carries findings', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-row', project_slug: 't1', repo_path: '/r', task: 't' })
+    const findings = '[{"severity":"blocker"}]'
+    await store.update(run.id, {
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: findings,
+    })
+
+    await store.update(run.id, { inner_verdict: 'REQUEST_CHANGES' })
+
+    expect(store.get(run.id)).toMatchObject({
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: findings,
+    })
+  })
+
+  test('update() refuses CLEARING findings on a row recorded REQUEST_CHANGES', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-clear', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, {
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: '[{"severity":"blocker"}]',
+    })
+
+    await expect(
+      store.update(run.id, { inner_checkpoint_findings: null }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+
+    expect(store.get(run.id)?.inner_checkpoint_findings).toBe('[{"severity":"blocker"}]')
+  })
+
+  test('FALSIFICATION 2 — save() and saveIfActive() refuse an RC snapshot when the row carries no findings (delete either guard and this goes RED)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-snapshots-empty', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await expect(
+      store.save({ ...run, phase: 'failed', inner_verdict: 'REQUEST_CHANGES' }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    expect(store.get(run.id)?.phase).toBe('forge-init')
+
+    await expect(
+      store.saveIfActive({ ...run, phase: 'failed', inner_verdict: 'REQUEST_CHANGES' }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+    expect(store.get(run.id)?.phase).toBe('forge-init')
+  })
+
+  test('saveIfActive() commits a genuine RC terminal snapshot when the row carries findings', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-save-active-genuine', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, {
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: '[{"severity":"blocker"}]',
+    })
+
+    expect(await store.saveIfActive({
+      ...store.get(run.id)!,
+      phase: 'failed',
+      inner_verdict: 'REQUEST_CHANGES',
+    })).toBe(true)
+    expect(store.get(run.id)).toMatchObject({ phase: 'failed', inner_verdict: 'REQUEST_CHANGES' })
+  })
+
+  test('the guard ignores APPROVE and REVIEW_NOT_RUN', async () => {
+    const store = new TridentRunStore(db)
+    for (const verdict of ['APPROVE', 'REVIEW_NOT_RUN'] as const) {
+      const updated = await store.create({
+        slug: `guard-update-${verdict.toLowerCase()}`,
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+      })
+      await store.update(updated.id, { inner_verdict: verdict })
+      expect(store.get(updated.id)?.inner_verdict).toBe(verdict)
+
+      const saved = await store.create({
+        slug: `guard-save-${verdict.toLowerCase()}`,
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+      })
+      expect(await store.saveIfActive({
+        ...saved,
+        phase: 'ralph-plan',
+        inner_verdict: verdict,
+      })).toBe(true)
+      expect(store.get(saved.id)?.inner_verdict).toBe(verdict)
+    }
+  })
+
+  test('a raw out-of-band write still lands (checkpoint.sh is outside the store contract)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-raw-writer', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await db.run(
+      'UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?',
+      ['REQUEST_CHANGES', run.id],
+    )
+
+    expect(store.get(run.id)?.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(store.get(run.id)?.inner_checkpoint_findings).toBeNull()
   })
 })
 

@@ -326,7 +326,10 @@ describe('REAL git — stranded terminal-failure salvage', () => {
       expect(row.failure_reason!.indexOf(TRIDENT_SALVAGE_MARKER)).toBeGreaterThan(
         row.failure_reason!.indexOf(FAILURE),
       )
-      expect(row.inner_verdict).toBeNull()
+      // REVIEW_NOT_RUN is the NAMED form of the null this used to assert: the same claim
+      // ("no reviewer judged this code"), now distinguishable from an un-harvested row.
+
+      expect(row.inner_verdict).toBe('REVIEW_NOT_RUN')
       expect(row.harvested_at).toBeNull()
 
       const remote = await spawnCapture(
@@ -741,6 +744,10 @@ describe('REAL git — stranded terminal-failure salvage', () => {
       subagent_status: 'failed',
       subagent_run_id: null,
       failure_reason: FAILURE,
+      // "byte-identical" is about the SALVAGE not mutating the row's own fields; the
+      // terminal verdict is still recorded, and it is now REVIEW_NOT_RUN rather than the
+      // null this object inherited from `run`. Same claim, named instead of absent.
+      inner_verdict: 'REVIEW_NOT_RUN',
       last_advanced_at: NOW,
     })
     expect(out.note).toContain('stranded build salvage failed')

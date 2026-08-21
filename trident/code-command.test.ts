@@ -422,7 +422,7 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     //    row and drives it with a mocked FIRER (the CC Dynamic Workflow exec
     //    model): the fire settles + the simulated workflow writes a server-gated
     //    APPROVE result to the DB, which the tick loop harvests + merges.
-    const sim = buildSimFirer(store, () => ({
+    const sim = buildSimFirer(db, store, () => ({
       result: { verdict: 'APPROVE', prNumber: 101, branch: 'trident/wire-the-widget' },
     }))
     const hostCalls: string[][] = []

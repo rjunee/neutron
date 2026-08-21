@@ -1736,7 +1736,15 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     // direct `sqlite3 < file.sql` run is also self-configuring; here we lift that leading
     // preamble out of the transactional body before BEGIN. Anything that's not a leading
     // comment or PRAGMA statement falls into the body and is wrapped atomically.
-    const { preamble, body } = splitPragmaPreamble(m.sql)
+    // The restore block is lifted BEFORE the PRAGMA preamble, not after: its
+    // delimiters are SQL comments, and `splitPragmaPreamble` absorbs every leading
+    // comment, so a block sitting between the header and the first real statement
+    // would be split down the middle and read as an unbalanced marker pair.
+    // Parsed and VALIDATED before the write, so a malformed or over-broad restore
+    // block refuses the boot without having touched the database — the same
+    // discipline every other refusal in this file follows.
+    const { restore, body: sqlWithoutRestore } = splitRestoreColumnBlock(m.sql, m.fileName)
+    const { preamble, body } = splitPragmaPreamble(sqlWithoutRestore)
     if (preamble.trim().length > 0) db.exec(preamble)
 
     // Each migration is atomic: either every statement in the body lands AND _migrations
@@ -1746,6 +1754,18 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     // retry against split state.
     db.exec('BEGIN')
     try {
+      // The restore block runs FIRST and inside the same transaction, so a
+      // migration that needs a column an earlier repair rebuild deleted can
+      // re-create it without failing on every instance that still has it. Only
+      // "duplicate column name" is tolerated, and only for a statement the
+      // block's own validator has already proved to be an ADD COLUMN.
+      for (const statement of restore) {
+        try {
+          db.exec(statement)
+        } catch (err) {
+          if (!isDuplicateColumnError(err)) throw err
+        }
+      }
       db.exec(body)
       const reapply = firingReapplyByName.get(m.name)
       if (reapply === undefined) {
@@ -1801,6 +1821,97 @@ export function applyMigrations(db: Database, dir: string = HERE): ApplyResult {
     applied.push(m.version)
   }
   return { applied, skipped }
+}
+
+/** The one marker that can buy a statement error tolerance. Deliberately ugly to type. */
+const RESTORE_BEGIN = '-- @neutron:restore-columns BEGIN'
+const RESTORE_END = '-- @neutron:restore-columns END'
+const RESTORE_BLOCK_RE =
+  /^[ \t]*--[ \t]*@neutron:restore-columns[ \t]+BEGIN[ \t]*\r?\n([\s\S]*?)^[ \t]*--[ \t]*@neutron:restore-columns[ \t]+END[ \t]*$/m
+const RESTORE_MARKER_RE = /^[ \t]*--[ \t]*@neutron:restore-columns[ \t]+(BEGIN|END)[ \t]*$/gm
+const ADD_COLUMN_RE = /^ALTER\s+TABLE\s+[A-Za-z_][A-Za-z0-9_]*\s+ADD\s+COLUMN\s+\S[\s\S]*$/i
+
+/**
+ * SQLite's error for adding a column that is already there. Matched on the
+ * message because bun:sqlite surfaces the same generic error code for most DDL
+ * failures, so the code cannot distinguish this from "no such table".
+ */
+function isDuplicateColumnError(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : String(err)
+  return /duplicate column name/i.test(message)
+}
+
+/**
+ * Lift a migration's RESTORE BLOCK out of its body.
+ *
+ * WHY THIS EXISTS. `0131_code_trident_runs_base_sha_repair.sql` rebuilds
+ * `code_trident_runs` by naming its columns, and it only ever runs LATE — it is
+ * pending exactly on the instances that skipped ordinal 125, which by now have
+ * also applied the migrations that added `brief_alert`, `parent_run_id` and
+ * `wave_task_id`. A rebuild copies only the columns it names, so on those
+ * instances 0131 SILENTLY DELETES three columns and a UNIQUE index, reports
+ * success, and the damage surfaces later as `no such column` at runtime. 0131's
+ * content hash is recorded in every ledger that ran it, so the file itself can
+ * never be edited; the repair has to come from a LATER migration, and SQLite has
+ * no conditional `ADD COLUMN`. Hence: an explicitly-marked block whose ALTERs
+ * are allowed to find the column already present.
+ *
+ * WHAT IT WILL NOT DO. The tolerance is not a general "ignore errors" switch:
+ *
+ *  - it applies ONLY inside a block delimited by both markers, which no migration
+ *    carries by accident;
+ *  - every statement in the block must be `ALTER TABLE <name> ADD COLUMN ...`, and
+ *    a block containing anything else REFUSES THE BOOT rather than running;
+ *  - only `duplicate column name` is swallowed. `no such table`, a bad type, a
+ *    STRICT-table violation — every other failure still rolls the migration back
+ *    and throws.
+ *
+ * The block is REMOVED from the returned body so the statements are not executed
+ * a second time, untolerated, by the strict `db.exec(body)` that follows.
+ */
+export function splitRestoreColumnBlock(
+  body: string,
+  fileName = '<migration>',
+): { restore: string[]; body: string } {
+  const markers = body.match(RESTORE_MARKER_RE) ?? []
+  if (markers.length === 0) return { restore: [], body }
+  const match = body.match(RESTORE_BLOCK_RE)
+  // An unbalanced or out-of-order pair is a refusal, never a silent skip: the
+  // failure mode it protects against is a restore that was MEANT to run and
+  // quietly did not.
+  if (!match || markers.length !== 2) {
+    throw new Error(
+      `${fileName}: a restore block must be exactly one \`${RESTORE_BEGIN}\` line ` +
+        `followed by one \`${RESTORE_END}\` line; found ${markers.length} marker line(s). ` +
+        'The block is what grants `duplicate column name` tolerance, so an ambiguous one is refused ' +
+        'rather than guessed at.',
+    )
+  }
+  const statements = (match[1] ?? '')
+    .split(';')
+    .map((raw) =>
+      raw
+        .replace(/--[^\n]*(?:\n|$)/g, '\n')
+        .replace(/\/\*[\s\S]*?\*\//g, ' ')
+        .trim(),
+    )
+    .filter((s) => s.length > 0)
+  if (statements.length === 0) {
+    throw new Error(
+      `${fileName}: the restore block is empty. Delete the markers rather than leaving a block ` +
+        'that grants tolerance to nothing.',
+    )
+  }
+  for (const statement of statements) {
+    if (!ADD_COLUMN_RE.test(statement)) {
+      throw new Error(
+        `${fileName}: a restore block may contain ONLY \`ALTER TABLE <table> ADD COLUMN ...\` ` +
+          `statements, because \`duplicate column name\` is the only error it tolerates. Refused: ` +
+          `${statement.split('\n')[0]?.slice(0, 120)}`,
+      )
+    }
+  }
+  return { restore: statements, body: body.slice(0, match.index) + body.slice(match.index! + match[0].length) }
 }
 
 const PRAGMA_PREAMBLE_RE = /^(?:\s*(?:--[^\n]*\n|\/\*[\s\S]*?\*\/|PRAGMA\s+[^;]+;))*/i

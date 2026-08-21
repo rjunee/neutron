@@ -118,7 +118,7 @@ function branchTree(): string {
     '0125_code_trident_runs_base_sha.sql',
     '0127_code_trident_runs_agent_waked_at.sql',
     '0130_work_board_items_archived_status.sql',
-    REPAIR_FILE,
+    ...REBUILD_FILES,
   ]) {
     rmSync(join(dir, file))
   }
@@ -165,13 +165,12 @@ function asPreviousReleaseWroteIt(db: Database, options: { provenance: boolean }
  * A copy of the real tree standing in for an EARLIER RELEASE: `0127` removed (so it
  * is left PENDING for the runner under test), and the given files renumbered.
  *
- * `REPAIR_FILE` comes out too, and not for convenience. It is `0131`, the repair
- * migration that REBUILDS `code_trident_runs`, and its `INSERT ... SELECT` names
- * `agent_waked_at` — the column `0127` adds. A tree that holds `0127` back and keeps
- * `0131` is not a release that ever existed; it is a tree that cannot apply, and it
- * fails with `no such column: agent_waked_at` from inside the fixture rather than
- * from the code under test. Holding back the tail of a dependent chain means holding
- * back the whole tail.
+ * `REBUILD_FILES` come out too, and not for convenience. Each REBUILDS
+ * `code_trident_runs`, and each `INSERT ... SELECT` names `agent_waked_at` — the column
+ * `0127` adds. A tree that holds `0127` back and keeps one of them is not a release that
+ * ever existed; it is a tree that cannot apply, and it fails with `no such column:
+ * agent_waked_at` from inside the fixture rather than from the code under test. Holding
+ * back the tail of a dependent chain means holding back the whole tail.
  */
 function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
   const dir = mkdtempSync(join(tmp, 'release-'))
@@ -180,7 +179,7 @@ function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
     cpSync(join(REAL_TREE, file), join(dir, file))
   }
   rmSync(join(dir, PENDING_FILE))
-  rmSync(join(dir, REPAIR_FILE))
+  for (const file of REBUILD_FILES) rmSync(join(dir, file))
   for (const [from, to] of renames) renameSync(join(dir, from), join(dir, to))
   return dir
 }
@@ -197,6 +196,40 @@ const PENDING_NAME = 'code_trident_runs_agent_waked_at'
  */
 const REPAIR_FILE = '0131_code_trident_runs_base_sha_repair.sql'
 const REPAIR_NAME = 'code_trident_runs_base_sha_repair'
+
+/**
+ * EVERY migration that REBUILDS `code_trident_runs` — and therefore every migration
+ * that no fixture tree here may contain.
+ *
+ * SQLite cannot ALTER a CHECK constraint, so widening one means create-copy-drop-rename,
+ * and the copy names each column ONE BY ONE. That makes a rebuild depend on the whole
+ * column chain before it: hold ANY earlier column-adding migration back and the rebuild
+ * dies inside the fixture with `no such column`, from the tree-builder rather than from
+ * the code under test. Every fixture in this file holds something back on purpose, so
+ * every fixture drops all of these.
+ *
+ * `0138` cost 9 tests when it landed on the branch: it names `base_sha` / `base_behind`
+ * (from `0125`, absent in `branchTree`) and `agent_waked_at` (from `0127`, held back by
+ * `treeWithoutPendingFile`). `rebuildFilesInRealTree` below fails loudly the next time
+ * this list goes stale, instead of leaving the next author the same `no such column`.
+ */
+const REBUILD_FILES = [REPAIR_FILE, '0138_code_trident_runs_review_not_run.sql']
+
+/**
+ * The second rebuild, and the one that has to survive a LATE `0131`. Held back by
+ * every fixture with the rest of `REBUILD_FILES`, so the runner under test applies it
+ * after the repair has just dropped three of the columns it names — see its restore
+ * block, and `restore-columns-tolerance.test.ts`.
+ */
+const REVIEW_NOT_RUN_NAME = 'code_trident_runs_review_not_run'
+
+/** The marker that identifies a rebuild, measured from the tree rather than assumed. */
+function rebuildFilesInRealTree(): string[] {
+  return readdirSync(REAL_TREE)
+    .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+    .filter((file) => readFileSync(join(REAL_TREE, file), 'utf8').includes('code_trident_runs_new'))
+    .sort()
+}
 
 /**
  * The name whose duplicate the collapse has to resolve, and its two ordinals.
@@ -320,6 +353,22 @@ function liveInstanceBefore(options: { provenance: boolean }): Database {
   asPreviousReleaseWroteIt(db, options)
   return db
 }
+
+// ------------------------------------------------- 0. the fixtures are buildable
+
+test('every table rebuild in the real tree is held back by the fixtures', () => {
+  // Positive control: the marker really does find something, so a rename that broke the
+  // detector could never read as "no rebuilds exist, list is trivially complete".
+  const found = rebuildFilesInRealTree()
+  expect(found.length).toBeGreaterThan(0)
+  expect(found).toEqual([...REBUILD_FILES].sort())
+
+  // And the fixtures really removed them, rather than the list merely being right.
+  for (const dir of [branchTree(), treeWithoutPendingFile()]) {
+    const present = readdirSync(dir)
+    for (const file of REBUILD_FILES) expect(present).not.toContain(file)
+  }
+})
 
 // ------------------------------------------------------- 1. the live instance
 
@@ -663,9 +712,26 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
   const result = applyMigrations(db)
 
   // IT BOOTED, and the pending migration actually ran.
-  // Both migrations this fixture's release predates — `0127` and the `0131` repair.
-  expect(result.applied).toEqual([127, 131])
+  // Every migration this fixture's release predates — `0127`, the `0131` repair, and
+  // `0138`, which is the one that has to SURVIVE the repair: 0131 runs late here, and
+  // its rebuild drops the columns 0136/0137 added, which 0138 then names.
+  expect(result.applied).toEqual([127, 131, 138])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
+  // THE DEFECT THIS FIXTURE NOW PINS. A late 0131 deletes these three columns and the
+  // wave-child UNIQUE index and still reports success; 0138's restore block puts the
+  // columns back before its rebuild, and the rebuild re-issues the index. Without the
+  // restore this whole case dies at `no such column: brief_alert`.
+  const restored = columnsOf(db, 'code_trident_runs')
+  expect(restored).toContain('brief_alert')
+  expect(restored).toContain('parent_run_id')
+  expect(restored).toContain('wave_task_id')
+  expect(
+    db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_code_trident_runs_wave_child'",
+      )
+      .get()?.name,
+  ).toBe('idx_code_trident_runs_wave_child')
   expect(
     db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
       ?.sql,
@@ -700,7 +766,9 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
 
   // No other row was collapsed, dropped or duplicated by the pass.
   const namesAfter = ledger(db).map((r) => r.name)
-  expect(new Set(namesAfter)).toEqual(new Set([...namesBefore, PENDING_NAME, REPAIR_NAME]))
+  expect(new Set(namesAfter)).toEqual(
+    new Set([...namesBefore, PENDING_NAME, REPAIR_NAME, REVIEW_NOT_RUN_NAME]),
+  )
   expect(namesAfter).toHaveLength(new Set(namesAfter).size)
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name LIKE '_migrations_%'").get()).toBeNull()
 
@@ -754,7 +822,7 @@ test('CASE 5c — the collapse adopts provenance from ONE row, never a column at
   expect(before[0]?.applied_by_commit).toBeNull()
   expect(before[1]?.applied_by_commit).toBe('d'.repeat(40))
 
-  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
 
   const after = db
     .query<
@@ -847,7 +915,7 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
 
   // And the remedy the message points at actually works: drop the view, boot.
   db.exec('DROP VIEW _migrations_version_keyed')
-  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   db.close()
 })
@@ -899,7 +967,7 @@ test('CASE 6b — a real TABLE at the rekey scratch name is REFUSED, never dropp
   // The remedy works, and note WHICH remedy: the operator moves their own table out of
   // the way. The runner never does it for them.
   db.exec('ALTER TABLE _migrations_version_keyed RENAME TO operator_kept_this')
-  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   expect(
     db.query<{ payload: string }, []>('SELECT payload FROM operator_kept_this').all(),

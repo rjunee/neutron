@@ -80,7 +80,7 @@ export interface RunProgress {
   /** How long stalled (ms), or null when not stalled. */
   stalled_ms: number | null
   pr: number | null
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   /** The failure reason (e.g. the hang-watchdog reap) when `phase_label==='failed'`. */
   failure_reason: string | null
   /** Brief-integrity refusal, including one recovered by the bridge retry. */

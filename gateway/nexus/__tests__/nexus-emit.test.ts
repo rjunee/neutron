@@ -265,7 +265,24 @@ describe('emitTridentTerminalEvents', () => {
     expect(rows.map((e) => e.kind)).toEqual(['handoff'])
   })
 
-  it('exhausted REQUEST_CHANGES (argus reviewed): decision REQUEST_CHANGES with the failure reason', async () => {
+  it('REVIEW_NOT_RUN emits a handoff and NO decision even with a stale Argus checkpoint', async () => {
+    await emitTridentTerminalEvents(
+      h.store,
+      terminalRun({
+        inner_verdict: 'REVIEW_NOT_RUN',
+        inner_checkpoint: 'argus-request-changes',
+        pr: null,
+        failure_reason: 'reviewer never produced a verdict',
+      }),
+      { harvested: true },
+    )
+    const rows = await h.store.readRecent('proj-a', { limit: 100 })
+    expect(rows.map((e) => e.kind)).toEqual(['handoff'])
+    expect(rows[0]?.body).toContain('REVIEW_NOT_RUN')
+    expect(rows.some((e) => e.actor_kind === 'argus')).toBe(false)
+  })
+
+  it('findings-backed REQUEST_CHANGES (argus reviewed): decision REQUEST_CHANGES with the failure reason', async () => {
     await emitTridentTerminalEvents(
       h.store,
       terminalRun({

@@ -88,9 +88,14 @@ async function writeResult(id: string, result: Record<string, unknown>): Promise
   await store.update(id, {
     subagent_status: 'completed',
     inner_checkpoint: typeof result.checkpoint === 'string' ? result.checkpoint : null,
-    inner_verdict: result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES',
     inner_result: JSON.stringify(result),
   })
+  // This helper models the detached checkpoint.sh terminal writer, whose verdict
+  // write is raw SQL and therefore intentionally outside the store contract.
+  await db.run(
+    'UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?',
+    [result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES', id],
+  )
 }
 
 describe('measured-fields classifier is conservative and total', () => {
@@ -167,6 +172,7 @@ describe('(b) genuine failures never auto-retry', () => {
 
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
+    expect(after.inner_verdict).toBe('REQUEST_CHANGES')
     expect(after.infra_retries).toBe(0)
     expect(h.inputs).toHaveLength(1)
   })
@@ -195,10 +201,13 @@ describe('(c) retry budget and backoff are separate from fix rounds', () => {
     expect(after.infra_retries).toBe(2)
     expect(after.round).toBe(1)
     expect(after.ralph_round).toBe(0)
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after.failure_reason).toContain('(budget 2)')
     expect(after.failure_reason).toContain(INCIDENT_CAUSE)
     expect(after.failure_reason).not.toContain('exhausted')
-    expect(after.inner_verdict).toBeNull()
+    // REVIEW_NOT_RUN, not null: an exhausted INFRA budget means review provably never
+    // ran, which is a fact worth naming rather than an absence to be inferred.
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
   })
 
   test('the attempt-1 observer is restart-proof told-once and a throw cannot stop retries', async () => {

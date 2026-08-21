@@ -77,6 +77,7 @@ import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import {
+  parseCheckpointFindings,
   parseInnerResult,
   type FireOutcome,
   type InnerResult,
@@ -789,6 +790,26 @@ export function classifyInnerFailure(
     if (INFRA_CAUSE_WORDS.some((word) => measured.includes(word))) return 'infrastructure'
   }
   return 'genuine'
+}
+
+/**
+ * REQUEST_CHANGES is reserved for a reviewer that judged the code and recorded
+ * at least one finding. `round-lost` and `infra-only` both mean the code was not
+ * (re-)judged (the inner workflow's own terminology), while an empty finding set
+ * is either approval or infrastructure failure — never a rejection.
+ */
+export function recordedTerminalVerdict(
+  result: Pick<InnerResult, 'verdict' | 'block_kind'>,
+  rowFindings: string | null,
+): 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' {
+  if (
+    result.verdict === 'REQUEST_CHANGES' &&
+    result.block_kind === 'code' &&
+    parseCheckpointFindings(rowFindings).length > 0
+  ) {
+    return 'REQUEST_CHANGES'
+  }
+  return 'REVIEW_NOT_RUN'
 }
 
 /**
@@ -2303,6 +2324,13 @@ export function buildTridentOrchestrator(
       phase: 'failed',
       subagent_status: 'failed',
       subagent_run_id: keepSubagentId ? run.subagent_run_id : null,
+      inner_verdict:
+        run.inner_verdict === 'APPROVE'
+          ? 'APPROVE'
+          : run.inner_verdict === 'REQUEST_CHANGES' &&
+              parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
+            ? 'REQUEST_CHANGES'
+            : 'REVIEW_NOT_RUN',
       failure_reason: reason,
       last_advanced_at: now(),
     }
@@ -3209,7 +3237,7 @@ export function buildTridentOrchestrator(
         pr,
         branch,
         harvested_at: nowMs(),
-        inner_verdict: 'REQUEST_CHANGES',
+        inner_verdict: 'REVIEW_NOT_RUN',
       }
       return { run: failed, changed: true, waiting: false, note: 'ralph loop → failed (max ralph rounds)' }
     }
@@ -3388,9 +3416,12 @@ export function buildTridentOrchestrator(
           ),
           pr: result.pr_number ?? run.pr,
           branch: result.branch ?? run.branch,
-          inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
-          // T4: an exhausted INFRA budget is still not a review verdict.
-          inner_verdict: isInfraDeath(result) ? null : 'REQUEST_CHANGES',
+          inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? null,
+          // T4 (main) said an exhausted INFRA budget is not a review verdict and recorded
+          // `null`. This branch says the same thing with a NAME instead of an absence:
+          // reaching here means the infra budget ran out, so review provably never ran.
+          // `null` is indistinguishable from "not yet set"; REVIEW_NOT_RUN is not.
+          inner_verdict: 'REVIEW_NOT_RUN',
         }
         return { run: failed, changed: true, waiting: false, note: 'infrastructure retry budget used → failed' }
       }
@@ -3510,7 +3541,7 @@ export function buildTridentOrchestrator(
         ),
         pr,
         branch,
-        inner_verdict: 'REQUEST_CHANGES',
+        inner_verdict: 'REVIEW_NOT_RUN',
       }
       return { run: failed, changed: true, waiting: false, note: 'APPROVE rejected (provenance gate) → failed' }
     }
@@ -3518,6 +3549,19 @@ export function buildTridentOrchestrator(
     // REQUEST_CHANGES / null — the inner loop ended without an APPROVE. This is a
     // CATCH-ALL over several distinct causes, so the reason is MEASURED rather than
     // assumed; see `innerTerminalFailureReason` for what that cost when it was not.
+    //
+    // Prefer what the row already has: a stamped checkpoint is the more specific record,
+    // and re-stamping it from a terminal result would overwrite the round's own findings
+    // with whatever the last result happened to carry. Only when the row is empty does
+    // the result's array fill it in, and a result with no findings leaves it null rather
+    // than writing `[]` — "nobody said anything" and "the column was never written" stay
+    // the same value, so no reader gains a distinction this path cannot actually support.
+    const terminalFindings: string | null =
+      parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
+        ? run.inner_checkpoint_findings
+        : result.findings.length > 0
+          ? JSON.stringify(result.findings)
+          : run.inner_checkpoint_findings
     const failed: TridentRun = {
       ...failedRun(run, innerTerminalFailureReason(run, result), true),
       pr,
@@ -3529,10 +3573,28 @@ export function buildTridentOrchestrator(
       // naming `inner-error` beside a structured field saying `forge-built`. Two answers to
       // one question is the shape of this whole defect; the terminal result is authoritative
       // on how it ended, so BOTH read it the same way and in the same order.
-      inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? 'argus-request-changes',
-      // T4 — the catch path self-asserts REQUEST_CHANGES on a throw, but run-progress.ts
-      // surfaces this exact field. Null is the honest record when nobody judged the code.
-      inner_verdict: isInfraDeath(result) ? null : 'REQUEST_CHANGES',
+      inner_checkpoint: result.checkpoint ?? run.inner_checkpoint ?? null,
+      // MERGE RESOLUTION (main's T4 × this branch's discriminator). Main recorded
+      // `isInfraDeath(result) ? null : 'REQUEST_CHANGES'`. `recordedTerminalVerdict`
+      // SUBSUMES that: an infra death carries `block_kind: 'infra-only'`, so it returns
+      // REVIEW_NOT_RUN — and it additionally catches the case main still got wrong,
+      // a NON-infra death with an empty finding set, which main recorded as
+      // REQUEST_CHANGES. That fabricated rejection is the defect this branch exists to
+      // kill, so the discriminator wins on the field. Main's differentiated `note` is
+      // kept verbatim below: it is the operator-visible half of the same fix.
+      // THE ROW MUST CARRY THE EVIDENCE FOR THE VERDICT IT RECORDS. `store.ts` refuses
+      // `REQUEST_CHANGES` on a row with no findings — correctly, that guard IS this
+      // branch's thesis. But the findings of a run that reviewed and went straight to
+      // terminal live on the RESULT, and `inner_checkpoint_findings` is only stamped
+      // when a checkpoint is written, so the row arrived at the guard empty-handed.
+      // Reading the result and leaving the column alone made the guard throw, the tick
+      // fail, and the run retry forever without leaving `forge-init` — a wrong value
+      // became a hang. So carry the evidence ACROSS with the verdict: below, the row is
+      // stamped from `result.findings` when the result has them, and only then can the
+      // discriminator honestly return REQUEST_CHANGES. Existing stamped findings win —
+      // a checkpoint that already recorded them is the more specific record.
+      inner_checkpoint_findings: terminalFindings,
+      inner_verdict: recordedTerminalVerdict(result, terminalFindings),
     }
     return {
       run: failed,
@@ -3915,6 +3977,13 @@ export function buildTridentOrchestrator(
           ...run,
           phase: 'failed',
           subagent_status: 'crashed',
+          inner_verdict:
+            run.inner_verdict === 'APPROVE'
+              ? 'APPROVE'
+              : run.inner_verdict === 'REQUEST_CHANGES' &&
+                  parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
+                ? 'REQUEST_CHANGES'
+                : 'REVIEW_NOT_RUN',
           failure_reason: `orphaned inner-loop dispatch ${orphanId} (lost after restart / never wrote a result)`,
           last_advanced_at: now(),
         }
