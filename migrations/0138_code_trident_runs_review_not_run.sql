@@ -25,6 +25,29 @@
 -- SQLite stores the statement text verbatim in sqlite_master, so a comment between
 -- columns becomes part of the persisted schema and shows up as snapshot drift.
 
+-- THE SECOND HEAD OF THE SAME DEFECT, AND THE REASON FOR THE BLOCK BELOW.
+-- 0131_code_trident_runs_base_sha_repair.sql is itself a rebuild, and it only ever
+-- runs LATE: it is pending exactly on the instances that skipped ordinal 125, which
+-- by now have also applied 0136 (brief_alert) and 0137 (parent_run_id, wave_task_id
+-- + the wave-child UNIQUE index). Its column list predates all three, so on those
+-- instances it silently DELETES them and reports success — measured by holding it
+-- back and applying it alone. Nothing on main names those columns after 0131, so
+-- the loss stays quiet there; this file names all three, so without the restore
+-- below the migration would fail with `no such column: brief_alert` and refuse the
+-- boot. 0131 cannot be edited — its content hash is in every ledger that ran it.
+--
+-- The runner tolerates `duplicate column name` for these three ALTERs and NOTHING
+-- else: only inside these markers, only for ADD COLUMN statements, and only for
+-- that one error. On an instance that never lost the columns each ALTER is a
+-- tolerated no-op; on one that did, this is what puts them back before the rebuild
+-- copies them. The wave-child index is restored by the CREATE at the bottom of
+-- this file, which a rebuild has to re-issue anyway.
+-- @neutron:restore-columns BEGIN
+ALTER TABLE code_trident_runs ADD COLUMN brief_alert TEXT;
+ALTER TABLE code_trident_runs ADD COLUMN parent_run_id TEXT;
+ALTER TABLE code_trident_runs ADD COLUMN wave_task_id TEXT;
+-- @neutron:restore-columns END
+
 PRAGMA foreign_keys = OFF;
 
 CREATE TABLE code_trident_runs_new (

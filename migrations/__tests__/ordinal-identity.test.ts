@@ -215,6 +215,14 @@ const REPAIR_NAME = 'code_trident_runs_base_sha_repair'
  */
 const REBUILD_FILES = [REPAIR_FILE, '0138_code_trident_runs_review_not_run.sql']
 
+/**
+ * The second rebuild, and the one that has to survive a LATE `0131`. Held back by
+ * every fixture with the rest of `REBUILD_FILES`, so the runner under test applies it
+ * after the repair has just dropped three of the columns it names — see its restore
+ * block, and `restore-columns-tolerance.test.ts`.
+ */
+const REVIEW_NOT_RUN_NAME = 'code_trident_runs_review_not_run'
+
 /** The marker that identifies a rebuild, measured from the tree rather than assumed. */
 function rebuildFilesInRealTree(): string[] {
   return readdirSync(REAL_TREE)
@@ -704,9 +712,26 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
   const result = applyMigrations(db)
 
   // IT BOOTED, and the pending migration actually ran.
-  // Both migrations this fixture's release predates — `0127` and the `0131` repair.
-  expect(result.applied).toEqual([127, 131])
+  // Every migration this fixture's release predates — `0127`, the `0131` repair, and
+  // `0138`, which is the one that has to SURVIVE the repair: 0131 runs late here, and
+  // its rebuild drops the columns 0136/0137 added, which 0138 then names.
+  expect(result.applied).toEqual([127, 131, 138])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
+  // THE DEFECT THIS FIXTURE NOW PINS. A late 0131 deletes these three columns and the
+  // wave-child UNIQUE index and still reports success; 0138's restore block puts the
+  // columns back before its rebuild, and the rebuild re-issues the index. Without the
+  // restore this whole case dies at `no such column: brief_alert`.
+  const restored = columnsOf(db, 'code_trident_runs')
+  expect(restored).toContain('brief_alert')
+  expect(restored).toContain('parent_run_id')
+  expect(restored).toContain('wave_task_id')
+  expect(
+    db
+      .query<{ name: string }, []>(
+        "SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'idx_code_trident_runs_wave_child'",
+      )
+      .get()?.name,
+  ).toBe('idx_code_trident_runs_wave_child')
   expect(
     db.query<{ sql: string }, []>("SELECT sql FROM sqlite_master WHERE name = '_migrations'").get()
       ?.sql,
@@ -741,7 +766,9 @@ test('CASE 5 — one migration name at TWO ordinals is collapsed, and the instan
 
   // No other row was collapsed, dropped or duplicated by the pass.
   const namesAfter = ledger(db).map((r) => r.name)
-  expect(new Set(namesAfter)).toEqual(new Set([...namesBefore, PENDING_NAME, REPAIR_NAME]))
+  expect(new Set(namesAfter)).toEqual(
+    new Set([...namesBefore, PENDING_NAME, REPAIR_NAME, REVIEW_NOT_RUN_NAME]),
+  )
   expect(namesAfter).toHaveLength(new Set(namesAfter).size)
   expect(db.query("SELECT 1 FROM sqlite_master WHERE name LIKE '_migrations_%'").get()).toBeNull()
 
@@ -795,7 +822,7 @@ test('CASE 5c — the collapse adopts provenance from ONE row, never a column at
   expect(before[0]?.applied_by_commit).toBeNull()
   expect(before[1]?.applied_by_commit).toBe('d'.repeat(40))
 
-  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
 
   const after = db
     .query<
@@ -888,7 +915,7 @@ test('CASE 6 — when the rekey fails, the ledger really is unchanged as the mes
 
   // And the remedy the message points at actually works: drop the view, boot.
   db.exec('DROP VIEW _migrations_version_keyed')
-  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   db.close()
 })
@@ -940,7 +967,7 @@ test('CASE 6b — a real TABLE at the rekey scratch name is REFUSED, never dropp
   // The remedy works, and note WHICH remedy: the operator moves their own table out of
   // the way. The runner never does it for them.
   db.exec('ALTER TABLE _migrations_version_keyed RENAME TO operator_kept_this')
-  expect(applyMigrations(db).applied).toEqual([127, 131])
+  expect(applyMigrations(db).applied).toEqual([127, 131, 138])
   expect(columnsOf(db, 'code_trident_runs')).toContain('agent_waked_at')
   expect(
     db.query<{ payload: string }, []>('SELECT payload FROM operator_kept_this').all(),

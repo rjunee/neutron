@@ -188,6 +188,9 @@ test('first apply runs all migrations in order and records them in _migrations',
     135,
     136,
     137,
+    // Carries a restore block, so a fresh install applies it with three tolerated
+    // no-op ALTERs — the columns are already there on this path.
+    138,
   ])
   expect(result.skipped).toEqual([])
 
