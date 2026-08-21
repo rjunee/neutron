@@ -66,6 +66,38 @@ describe('buildSettings — behaviour-preserving atomic write', () => {
     expect(parsed.hooks.PostToolUse).toBeUndefined()
     expect(parsed.hooks.Stop).toBeDefined()
   })
+
+  test('wires the chat pipeline guard as a Bash PreToolUse hook', () => {
+    const settingsPath = join(freshDir(), 'settings.json')
+    buildSettings({
+      settingsPath,
+      pipelineGuard: { hookPath: '/abs/pipeline-guard.ts' },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.hooks.PreToolUse).toEqual([
+      { matcher: 'Bash', hooks: [{ type: 'command', command: 'bun /abs/pipeline-guard.ts' }] },
+    ])
+  })
+
+  test('keeps the pipeline guard when the activity tap adds its PreToolUse hook', () => {
+    const settingsPath = join(freshDir(), 'settings.json')
+    buildSettings({
+      settingsPath,
+      pipelineGuard: { hookPath: '/abs/pipeline-guard.ts' },
+      activityTap: {
+        sinkPort: 1234,
+        sinkToken: 'token',
+        sessionId: 'session',
+        hookPath: '/abs/activity-tap.ts',
+      },
+    })
+    const parsed = JSON.parse(readFileSync(settingsPath, 'utf8'))
+    expect(parsed.hooks.PreToolUse).toHaveLength(2)
+    expect(parsed.hooks.PreToolUse[0]).toEqual({
+      matcher: 'Bash',
+      hooks: [{ type: 'command', command: 'bun /abs/pipeline-guard.ts' }],
+    })
+  })
 })
 
 describe('buildSettings — WAVE 3.5 task B TodoWrite→Work Board PostToolUse hook', () => {

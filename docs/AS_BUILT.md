@@ -2,6 +2,46 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-19 — `suiteOutcome='deferred'` separates an instructed Ralph deferral from a missing suite
+
+Two independent salvage lanes exposed the same two-meanings defect: every intermediate
+Ralph brief instructed `suiteOutcome='not-run'`, while the unoverridable full-suite gate
+correctly treats `not-run` as a suite that should have run but did not. The gate therefore
+blocked the very intermediate rounds whose own contract deferred stage 2 to the terminal
+task, without any relationship to the code in those lanes.
+
+The repair has four coordinated pieces. `FORGE_SCHEMA` now accepts `deferred` (and its
+property spread covers the Codex route); every intermediate instruction site teaches that
+value, and all three Codex EXIT-0 transcription paths preserve it, while the terminal
+vocabulary and Codex lane-failure rules retain `not-run`; the round-1 dispatch scope is
+threaded into `fullSuiteFindings`; and only an instructed `deferred` report from a
+subset-scoped dispatch yields no suite finding. The default scope remains full-suite,
+including fix rounds, so the exemption cannot become "no proof needed."
+
+| Report and dispatch | Expected gate result | Pinned result |
+| --- | --- | --- |
+| `testsPassed=false`, `deferred`, intermediate Ralph subset | No suite finding; checkpoint records `[]` | GREEN |
+| `testsPassed=false`, `not-run`, the same subset | `FULL SUITE NOT PROVEN` blocker | GREEN |
+| `testsPassed=false`, `deferred`, terminal Ralph full suite | Unoverridable blocker | GREEN |
+| `testsPassed=false`, `deferred`, non-Ralph full suite | Unoverridable blocker | GREEN |
+| `testsPassed=true`, `deferred`, any scope | `CONTRADICTORY SUITE CLAIM` blocker | GREEN |
+
+Mutation controls prove both directions: deleting only the subset exemption reds the
+intermediate-deferred test (67 pass / 1 fail), while bypassing the whole not-passed tail
+reds both the intermediate `not-run` case and the full-scope blocker table (55 pass /
+13 fail). At implementation commit `e24912c3`, with production code restored, the focused
+two-file run measured 152 pass / 0 fail, and `bun test trident/` measured 2321 pass / 0 fail
+across 86 files.
+
+## 2026-08-19 — a prNumber of 0 is a sentinel, never a PR number (ported from #282)
+
+The inner wrapper emits `PR_NUMBER=0` when no PR exists. `parseInnerResult` now decodes any
+non-positive or non-integer `prNumber` to `null` instead of letting 0 flow onward as a real
+PR number, and `inner-workflow.mjs` writes or adopts a PR number only when it is a positive
+integer — at the checkpoint, the terminal result, and forge adoption alike. A failed round
+reporting `prNumber` 0 therefore keeps the known PR on the row instead of overwriting it
+with the sentinel. The wrapper's `PR_NUMBER=0` trailer contract itself is byte-identical.
+
 ## 2026-08-19 — an infrastructure death is never a verdict (ported from #282)
 
 Run f384460d exposed a wrapper catch path that self-asserted `REQUEST_CHANGES` after an
@@ -13,14 +53,19 @@ infrastructure copy, keeping the writer and reader from drifting. `isInfraDeath`
 answers verdict honesty separately from `classifyInnerFailure`, whose stricter question is
 whether a measured failure is safe to auto-retry.
 
-## 2026-08-19 — a prNumber of 0 is a sentinel, never a PR number (ported from #282)
+## 2026-08-19 — salvage #239: the buffered-pipeline guard and the 30-minute chat window, ported fresh onto main
 
-The inner wrapper emits `PR_NUMBER=0` when no PR exists. `parseInnerResult` now decodes any
-non-positive or non-integer `prNumber` to `null` instead of letting 0 flow onward as a real
-PR number, and `inner-workflow.mjs` writes or adopts a PR number only when it is a positive
-integer — at the checkpoint, the terminal result, and forge adoption alike. A failed round
-reporting `prNumber` 0 therefore keeps the known PR on the row instead of overwriting it
-with the sentinel. The wrapper's `PR_NUMBER=0` trailer contract itself is byte-identical.
+PR #239 (`trident/turn-lifecycle`, head `19673841`, merge-base `6dfe3388`) was 187 commits stale. Its residual was ported onto a fresh branch from origin/main `5895e268`; the stale branch was neither merged nor rebased, conflicts resolve toward main because it is the thinner copy, and it was deliberately not deleted. Before the port, `CHAT_TURN_INACTIVITY_MS`, `PIPELINE_GUARD_HOOK_PATH`, and `findBufferedPipelineConsumer` were each verified in zero files on main.
+
+The hook is installed, not merely written. `PIPELINE_GUARD_HOOK_PATH` is exported and consumed by `build-settings.ts`, whose `PreToolUse` entry uses `matcher: 'Bash'`, emits the guard first, and appends activityTap instead of replacing the existing entries. `spawn.ts` activates it with `pipelineGuard: {}` inside the `enableToolBridge` gate only: owner chat and the nudge lane are guarded, while disposable Trident build REPLs remain exempt because post-exit `| tail` is legitimate there.
+
+The spawned-hook positive control sends `producer | tail -20` against a live producer and goes red with exit 2 and the offender named; `producer | tee build.log` stays green. Emptying `FULL_BUFFERING_CONSUMERS` flipped four of six guard tests, including the positive control, and the exact restore returned the focused run to green.
+
+For chat turns, `CHAT_TURN_INACTIVITY_MS` is 30 minutes, replacing the 90 s/180 s composer split below the untouched 45-minute absolute ceiling. The `completedUserText` stale-Retry guard acknowledges a delayed Retry but never re-dispatches completed work. Mutant m1 restored the 90,000 ms window and went red on three assertions; mutant m2 removed set-on-success and went red on the new delayed-Retry test. Both were restored exactly.
+
+Several stale hunks were deliberately dropped. The PR's `index.ts` and `types.ts` “(30min)” comment edits were false on the PR itself because `DEFAULT_TURN_INACTIVITY_MS` is 90,000 on both sides; `build-repl-argv.*` churn was net zero; and the PR's old mid-file AS_BUILT insertion is superseded by this append-only entry.
+
+This docs round also re-derived the `stuck_agent` Scope block for the 30-minute chat window. The ordering is now explicit: on chat turns its 15-minute in-flight alert precedes both the 30-minute silence trip and the 45-minute ceiling, while it remains alert-only and does not abandon the running turn.
 
 ## 2026-08-19 — stranded-run salvage records working-tree and stash evidence
 
@@ -49,6 +94,55 @@ are recoverable, the dirty worktree and HEAD remain byte-identical, retry after 
 keeps the first snapshot, stale/crafted
 stash entries and the shared checkout are rejected, and terminal delivery preserves the authored
 cause while exposing the local recovery ref.
+
+## 2026-08-19 — three ratchet guards silently re-shallowed the shared checkout
+
+This was the recurrence of card `01M03CH91WA6X87XG8CS5K4H84`, not a second
+provisioning defect. That prior card removed shallow cloning from `install.sh` and
+made the existing-checkout update path heal shallowness, but three later CI ratchet
+guards each carried the same independent writer:
+`scripts/ci/depcruise-ratchet-guard.sh`,
+`scripts/ci/route-slot-ratchet-guard.sh`, and
+`scripts/ci/composition-field-ratchet-guard.sh` all ran the supposedly best-effort
+freshen `git fetch --depth=1 origin main >/dev/null 2>&1 || true` whenever their
+main ref was the default `origin/main`.
+
+The mechanism was reproduced against fixture-local repositories on this box. A
+plain `git clone file://…` held all three commits and had no `.git/shallow`; running
+that fetch wrote `.git/shallow` and truncated the local `origin/main` history to one
+commit. The incident arithmetic agrees with the reproduction. The truncation root
+was `8a2a51c8`, the sha brought in by the 03:03 deploy pull. The depth-one fetch at
+05:21 made that commit the boundary; the 05:47 `bb976caa` and 05:55 `f2f65ddc`
+fetches then stacked one commit each, producing the observed three-commit history.
+It was invisible by construction: fetching an unchanged tip moved no ref, so the
+reflog recorded nothing, while `>/dev/null 2>&1 || true` discarded every other
+observable from the command. Only `.git/shallow`'s 05:21 ctime survived.
+
+The blast radius was machine-wide. Roughly 140 `wf_*` linked worktrees under
+`.claude/worktrees` share the repo of record's one common `.git` directory. The
+guards are steps in `ci.yml` and lanes run them locally during pre-verification, so
+one stale worktree invoking any one of these copies could rewrite the ancestry seen
+by every lane. That single mutation surfaced as three unrelated-looking failures:
+an empty merge base and “unrelated histories” locally, an unresolvable base sha in
+CI, and then a three-dot diff with no merge base after the named sha was fetched.
+
+Each guard now has two explicit arms. An already-shallow checkout retains the
+depth-one fetch needed by depth-one `actions/checkout` to make `origin/main`
+resolvable; a full clone uses plain `git fetch origin main`, which freshens the ref
+without creating a shallow boundary. The tests prove both sides in each guard. The
+full-clone fixture asserts its precondition, records the three-commit count, runs
+with the literal `origin/main`, and asserts both the absent shallow file and the
+unchanged count afterward. The shallow-CI fixture asserts `.git/shallow` exists
+before deleting `origin/main`, then proves the depth arm restores the ref. Mutation
+proof restored the old stanza and produced exactly the intended full-clone failure
+in all three guard files while each shallow-CI control stayed green; restoring the
+two-arm stanza made all three files green.
+
+One residual writer window deliberately remains for the next task in this plan:
+stale worktrees carry old guard copies until their branches rebase. They can
+temporarily recreate `.git/shallow` even though main has killed the writer. The
+dispatch chokepoint in `ensureProjectBuildWorkspace` therefore still needs its own
+probe-and-unshallow self-heal before any lane is allowed to use the shared checkout.
 
 ## 2026-08-18 — the bun-cache guard could not fail, and two of its own claims were false (#417)
 
@@ -126,11 +220,11 @@ content in the tree under review — and is still deliberately not done.
 ## 2026-08-18 — lane_review.sh fails closed (T1–T4)
 tools/lane_review.sh — the guard against green-but-unwired merges — is now IN THE REPO (it previously existed only as an untracked file on the record checkout) and can no longer pass on silence: an unresolvable ref or base exits 2 naming the ref ("could not be resolved" — measured 2026-08-18T08:13Z; the surviving precursor measured exit 2, so the report was either an earlier revision or a `$?`-after-pipe misread); a bare `trident/<slug>` resolves against `origin/trident/<slug>` and the output names the resolution; an invocation from any repository subdirectory analyzes the full tree; and an empty new-symbol set is stated in words ("no new exported symbols — nothing to verify") so "nothing to check" and "checked, all wired" can never look identical. Analyzer launch, dependency, parse, and internal failures also exit 2; only a completed analysis with findings becomes the public exit 1 verdict. Nested `test/`, `tests/`, and `__tests__/` directories share one test-only definition in the shell and analyzer.
 
-Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, aliased exports and anonymous defaults, cannot disappear. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports, TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows and a re-export by itself do not qualify, while aliases, namespace access, same-module runtime use and class `extends` remain valid callers. References contained wholly inside new definitions — recursion, mutual references and class self-construction — do not prove product reachability.
+Path transport is NUL-safe, and tools/lane_review_ast.mjs compares TypeScript-bound modules at both refs. Runtime exports in `.js`/`.jsx`/`.mjs`/`.cjs`/`.ts`/`.tsx`/`.mts`/`.cts`, including `export *`, route-specific aliases, anonymous defaults and CommonJS `module.exports`, cannot disappear; ambient declarations are not runtime exports. Relative routes and package/subpath routes declared by the root manifest's workspaces resolve against each ref, including calls through re-export hops. Static named/default/namespace imports (including namespace destructuring), TypeScript import-equals, dynamic `import()`, and CommonJS `require()` bindings are recognized. Shadows, publication assignments and a re-export by itself do not qualify, while aliases, namespace access, new same-module runtime use and class `extends` remain valid callers. A direct production caller proves a new definition is wired, then a fixpoint proves the new helpers that definition references. Recursion, mutual references and class self-construction with no independently proven entry point remain unwired.
 
-The result proves a direct runtime reference exists in some non-test production source; it does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer's direct `typescript` runtime dependency is declared by the tools workspace. Its command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
+The result proves a direct runtime reference exists in some non-test, non-prose production source; `docs/` and `plans/` prototypes cannot manufacture a caller. It does not compute whether that caller is reachable from a process entry point, so an otherwise dead caller island can still qualify. The analyzer fails closed if any included production source cannot be parsed. Its direct `typescript` runtime dependency is declared by the tools workspace. Its enforced command floor is Bash 4.4+ (`mapfile -d`) and Git 2.42+ (`cat-file --batch -Z`).
 
-Pinned by tools/lane_review.test.ts: 28 tests / 90 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
+Pinned by tools/lane_review.test.ts: 36 tests / 114 expect calls against a fixture git repo, including every false-clean/false-dirty witness above and real-call controls. Mutants, one per original hardening, remain killed: fail-open exit-0 on unresolvable ref → RED (unknown-ref test); deleted origin/ fallback → RED (resolution test); silenced empty-set line → RED (stated-in-words test).
 
 ## 2026-08-18 — Row 122 can reapply schema that its ledger name falsely witnesses
 
@@ -492,6 +586,26 @@ proves that removing this wiring prevents the branch publication. This startup
 sweep recovers the eleven already-stranded branches at next boot without moving
 their rows out of `failed` or introducing publishing credentials into the inner
 loop.
+
+## 2026-08-17 — the "red" T5 sweeper was never red: landing eeecad9d on main
+
+A clean-room checkout at `eeecad9d` measured 78/78 host-deploy tests passing. The
+three reported failures came from mixed `node_modules`: `@neutronai/tools` resolved
+to a checkout without `recordPromptLink`, the resulting `TypeError` was swallowed by
+the `(d1)` best-effort catch in `open/host-deploy.ts`, and exactly the three
+linkage-dependent assertions failed (`args_json.prompt_id` was undefined and prompt
+retirement remained empty). No T5 code hunk needed correction.
+
+The port kept main's root `IMPLEMENTATION_PLAN.md`, persisted the regenerated card
+plan under `.trident/plans/`, preserved the append-only AS_BUILT history, and resolved
+the two loop-inventory conflicts from main's side plus the new sweeper. The composer
+now has 12 existing loops + the sweeper = 13; the boot shell has those 13 +
+`gateway-liveness` = 14.
+
+Verification must always begin with `bun install --frozen-lockfile` in the worktree
+so every workspace link comes from that checkout. A missing `@neutronai/*` module or
+an older workspace package is an environment failure to repair before interpreting
+test results.
 
 ## 2026-08-17 — the arrival proof is repaired to the post-merge contract (PR #377)
 
@@ -2776,62 +2890,6 @@ files onto the rule is a wider change than this one should carry. Flagged rather
 than swept, because the alternative to flagging it is a fourth round discovering
 it.
 
-## 2026-08-16 — trimming one language alone split the installer from the server
-
-Landed via PR #338.
-
-Follow-up to PR #333, which is already merged. PR #333 moved `resolveOpenDbPath`
-(`migrations/db-path.ts:81`) onto a trimmed predicate and left `install.sh` on
-`!= ""`. Before it, BOTH sides honoured a whitespace-only `NEUTRON_DB_PATH`
-verbatim — `pinned.length > 0` at `migrations/db-path.ts:67` in `5bc6ee3d`, that
-PR's own merge parent. Wrong, but wrong IDENTICALLY, so install migrated exactly
-the file the server opened.
-
-TRIMMING ONE SIDE CONVERTED A SHARED BUG INTO A DIVERGENCE. With
-`NEUTRON_DB_PATH='   '` the installer resolved the literal three spaces
-(`install.sh:445`) while the server resolved `<home>/project.db`
-(`migrations/db-path.ts:81`). `install.sh:440-441` states the invariant that
-breaks, verbatim: "This MUST match the server so install migrates — and uninstall
-removes — the exact same DB file the server reads". `install.sh:1461` migrates
-that path; `uninstall.sh:512` removes it, so on the teardown path the split
-deletes a file named three spaces and LEAVES THE REAL DATABASE ON DISK.
-
-The `config/index.ts` docblock recorded this as a condition it had declined to
-clean up — an installer and its server "can STILL disagree", "deliberately NOT
-fixed here". The word STILL was doing the damage: it framed a regression that
-change introduced as one inherited from before it, which is precisely the defect
-the rest of that docblock exists to record — a claim wider than its proof, now in
-the paragraph disclaiming scope rather than in the paragraph making the claim.
-
-The shell now follows the same blank-is-unset rule. `install.sh` / `uninstall.sh`
-share an `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block;
-`neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
-`DATA_DIR`, which is written into the launchd plist and systemd unit and is what
-the backup timer commits. `resolveRepoRoot`
-(`gateway/boot-listener-registry.ts:361`) was the last `length > 0` in a file
-whose other two resolvers had already been trimmed — a blank `NEUTRON_REPO_ROOT`
-made the bundled-Cores registry walk a directory named three spaces and read as
-"no Cores installed". The duplication across four scripts is REQUIRED, not drift:
-`install.sh` is fetched and run standalone, so it cannot source a shared library,
-which is why `dotenv_get` is already copied four times.
-
-`scripts/__tests__/install-uninstall.test.ts` IS THE TEST `install.sh:396` HAD
-BEEN CITING BY THAT EXACT PATH, AND IT DID NOT EXIST. The block header promised
-"a parity test … asserts the two copies match, so install and uninstall always
-resolve the SAME data dir + DB file" and nothing enforced it — an aspirational
-docblock rather than a stale one, dangerous because it is specific enough that
-the next editor of one twin trusts CI to catch a drift in the other. It runs the
-shell resolvers and the TypeScript resolvers on the SAME inputs and compares the
-answers, so changing one language alone now fails.
-
-Mutation-tested, each with a control proving the mutation landed: reverting the
-shell trim reddens four arms including the cross-language one; drifting ONLY
-`uninstall.sh` reddens exactly one — the parity arm, which nothing else can see,
-and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
-the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
-assertion plus two new arms, which confirms that assertion does exercise the axis
-it names.
-
 ## 2026-08-16 — the citation guard counted citations instead of covering them
 
 Landed via PR #353.
@@ -2888,6 +2946,62 @@ shadow.
 The four installer items in the originating brief were re-verified against the
 merged code and were already fixed there, so this change does not touch the
 installer.
+
+## 2026-08-16 — trimming one language alone split the installer from the server
+
+Landed via PR #338.
+
+Follow-up to PR #333, which is already merged. PR #333 moved `resolveOpenDbPath`
+(`migrations/db-path.ts:81`) onto a trimmed predicate and left `install.sh` on
+`!= ""`. Before it, BOTH sides honoured a whitespace-only `NEUTRON_DB_PATH`
+verbatim — `pinned.length > 0` at `migrations/db-path.ts:67` in `5bc6ee3d`, that
+PR's own merge parent. Wrong, but wrong IDENTICALLY, so install migrated exactly
+the file the server opened.
+
+TRIMMING ONE SIDE CONVERTED A SHARED BUG INTO A DIVERGENCE. With
+`NEUTRON_DB_PATH='   '` the installer resolved the literal three spaces
+(`install.sh:445`) while the server resolved `<home>/project.db`
+(`migrations/db-path.ts:81`). `install.sh:440-441` states the invariant that
+breaks, verbatim: "This MUST match the server so install migrates — and uninstall
+removes — the exact same DB file the server reads". `install.sh:1461` migrates
+that path; `uninstall.sh:512` removes it, so on the teardown path the split
+deletes a file named three spaces and LEAVES THE REAL DATABASE ON DISK.
+
+The `config/index.ts` docblock recorded this as a condition it had declined to
+clean up — an installer and its server "can STILL disagree", "deliberately NOT
+fixed here". The word STILL was doing the damage: it framed a regression that
+change introduced as one inherited from before it, which is precisely the defect
+the rest of that docblock exists to record — a claim wider than its proof, now in
+the paragraph disclaiming scope rather than in the paragraph making the claim.
+
+The shell now follows the same blank-is-unset rule. `install.sh` / `uninstall.sh`
+share an `is_set` helper inside their marked `NEUTRON-SHARED-RESOLVERS` block;
+`neutron-service.sh` / `neutron-backup.sh` carry the same predicate for
+`DATA_DIR`, which is written into the launchd plist and systemd unit and is what
+the backup timer commits. `resolveRepoRoot`
+(`gateway/boot-listener-registry.ts:361`) was the last `length > 0` in a file
+whose other two resolvers had already been trimmed — a blank `NEUTRON_REPO_ROOT`
+made the bundled-Cores registry walk a directory named three spaces and read as
+"no Cores installed". The duplication across four scripts is REQUIRED, not drift:
+`install.sh` is fetched and run standalone, so it cannot source a shared library,
+which is why `dotenv_get` is already copied four times.
+
+`scripts/__tests__/install-uninstall.test.ts` IS THE TEST `install.sh:396` HAD
+BEEN CITING BY THAT EXACT PATH, AND IT DID NOT EXIST. The block header promised
+"a parity test … asserts the two copies match, so install and uninstall always
+resolve the SAME data dir + DB file" and nothing enforced it — an aspirational
+docblock rather than a stale one, dangerous because it is specific enough that
+the next editor of one twin trusts CI to catch a drift in the other. It runs the
+shell resolvers and the TypeScript resolvers on the SAME inputs and compares the
+answers, so changing one language alone now fails.
+
+Mutation-tested, each with a control proving the mutation landed: reverting the
+shell trim reddens four arms including the cross-language one; drifting ONLY
+`uninstall.sh` reddens exactly one — the parity arm, which nothing else can see,
+and it guards the path that deletes data; untrimming `resolveRepoRoot` reddens
+the new arm; untrimming `resolveNeutronHome` reddens PR #333's own rewritten
+assertion plus two new arms, which confirms that assertion does exercise the axis
+it names.
 
 ## 2026-08-16 — a deferral and a rejection no longer share a label
 
@@ -6210,6 +6324,60 @@ and turns it red with the production error. The parser round-trips this
 and ten undated sections included — because a merge driver that cannot reproduce
 its own input is a corruption engine.
 
+## 2026-08-15 — a dead host-deploy grant is swept without a tap, and its button dies with it
+
+Measured before the change: two host-deploy `tool_approvals` rows sat `pending` at 684 s
+and 1029 s against a 300 s TTL, because nothing on this box called
+`ApprovalManager.expireStale()` — the TTL was enforced only on the ANSWER. Their
+`button_prompts` rows carried `expires_at` in 2036, so the Approve button stayed drawn
+and tappable while the grant behind it was dead, and the "Approval requested […]" banner
+(a one-shot live frame, no retraction) stayed with it.
+
+`HostDeployService.sweepExpiredGrants()` now retires those rows without a tap: it scans
+`findByToolName(project_slug, 'host-deploy')`, claims each pending row past
+`HOST_DEPLOY_APPROVAL_TTL_MS` with `cancelPending(id)` (the identical pending→'expired'
+transition, atomic, so a tick and a tap can never both count one row), retires the linked
+`button_prompts` row, and posts an INERT notice on the grant's own topic naming the
+expiry. It touches `dispatch` on no path — an unattended tick must never be able to
+deploy — and it does not re-raise either; a replacement grant still requires a tap, which
+is evidence the owner is present. The composer arms it as a `SupervisedLoop` named
+`host-deploy-approval-sweeper` (60 s; register-before-start, quiescing stop on shutdown),
+so a dead grant lingers at most TTL + one tick.
+
+JUDGMENT CALL, deliberate: the sweep is SCOPED to host-deploy rows and is NOT a caller of
+`ApprovalManager.expireStale()`. A global five-minute sweep would also expire every
+pending RITUAL grant (`reminders/ritual-registration.ts`) — rows the owner may legitimately
+answer days later, with no re-raise path of their own — so the global call the plan card
+originally asked for would have been a regression. A test asserts a pending `ritual:*` row
+100× older than the TTL survives the sweep untouched.
+
+The grant→prompt link that makes button retirement possible: the emit seam now returns
+`deliver`'s `prompt_id` and `ApprovalManager.recordPromptLink` merges it into
+`tool_approvals.args_json` (post-emit, because the prompt id does not exist at insert
+time; best-effort, because a failed link may cost a retirement but must never cost the
+request). Retirement itself is `buildHostDeployPromptRetirer`
+(`open/wiring/host-deploy-prompt-retirer.ts`): a `__timeout__` sentinel resolve with
+`SYSTEM_SPEAKER_USER_ID` — the shape `ButtonStore.sweepExpired` already synthesizes, so the
+row reads as system-resolved rather than as an answer the owner gave — followed by
+`AppWsAdapter.recordPromptChoice`, whose `prompt_resolved` fan is what actually collapses
+the button on connected surfaces. The two halves are independently guarded: a missing store
+row must not cost the live fan. A client that missed the frame and taps anyway lands in
+T2/T4's expired branch, which explains and re-raises.
+
+`buildAppWsApprovalNotifier` gained a TTL guard (`ttl_ms`, wired to
+`APPROVAL_DEFAULT_TTL_MS`): a row already past its lifetime broadcasts to zero topics. The
+banner has no retraction path, so one born pointing at a dead grant can only be cleared by
+a page reload — T6 owns the retraction; this owns not creating the problem.
+
+Tests: linkage persisted into `args_json` (existing keys preserved, malformed replaced);
+an aged grant swept exactly once with the right prompt id, the grant's OWN topic, a body
+containing "expired" and "nothing was deployed", and zero dispatches; a young grant
+untouched; a row decided between scan and claim neither counted nor announced; a ritual row
+preserved; a swept grant's late tap answered with dedupe/re-raise; the retirer's sentinel,
+speaker, channel kind, topic-derived `project_id` and its resolve-throws-fan-still-runs
+path; the notifier's three TTL cases; both loop inventories updated (10 running in the
+composer, 11 through the boot shell).
+
 ## 2026-08-15 — the gateway had no idea whether he was looking, and the two ways to fake it both end in silence
 
 Landed via PR #305. The owner: *"can you also check if I'm actively using the web app, and if so dont
@@ -8550,37 +8718,6 @@ Mutation checks (each production guard was removed independently and restored):
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
 
-## 2026-08-19 — `suiteOutcome='deferred'` separates an instructed Ralph deferral from a missing suite
-
-Two independent salvage lanes exposed the same two-meanings defect: every intermediate
-Ralph brief instructed `suiteOutcome='not-run'`, while the unoverridable full-suite gate
-correctly treats `not-run` as a suite that should have run but did not. The gate therefore
-blocked the very intermediate rounds whose own contract deferred stage 2 to the terminal
-task, without any relationship to the code in those lanes.
-
-The repair has four coordinated pieces. `FORGE_SCHEMA` now accepts `deferred` (and its
-property spread covers the Codex route); every intermediate instruction site teaches that
-value, and all three Codex EXIT-0 transcription paths preserve it, while the terminal
-vocabulary and Codex lane-failure rules retain `not-run`; the round-1 dispatch scope is
-threaded into `fullSuiteFindings`; and only an instructed `deferred` report from a
-subset-scoped dispatch yields no suite finding. The default scope remains full-suite,
-including fix rounds, so the exemption cannot become "no proof needed."
-
-| Report and dispatch | Expected gate result | Pinned result |
-| --- | --- | --- |
-| `testsPassed=false`, `deferred`, intermediate Ralph subset | No suite finding; checkpoint records `[]` | GREEN |
-| `testsPassed=false`, `not-run`, the same subset | `FULL SUITE NOT PROVEN` blocker | GREEN |
-| `testsPassed=false`, `deferred`, terminal Ralph full suite | Unoverridable blocker | GREEN |
-| `testsPassed=false`, `deferred`, non-Ralph full suite | Unoverridable blocker | GREEN |
-| `testsPassed=true`, `deferred`, any scope | `CONTRADICTORY SUITE CLAIM` blocker | GREEN |
-
-Mutation controls prove both directions: deleting only the subset exemption reds the
-intermediate-deferred test (67 pass / 1 fail), while bypassing the whole not-passed tail
-reds both the intermediate `not-run` case and the full-scope blocker table (55 pass /
-13 fail). At implementation commit `e24912c3`, with production code restored, the focused
-two-file run measured 152 pass / 0 fail, and `bun test trident/` measured 2321 pass / 0 fail
-across 86 files.
-
 ## 2026-08-14 — launcher-held build brief segments travel by path
 
 Task and reflection brief segments now travel by path via the `briefParts` manifest
@@ -10435,6 +10572,68 @@ says nothing rather than blaming the owner's setup. There is no dual path and no
 this PR. A client older than this one decodes zero accounts and renders its honest
 empty state rather than a fabricated reading.
 
+## 2026-08-12 — a chat message that arrives now leaves a trace, so a silent chat is diagnosable (ISSUES #557)
+
+The chat surface logged a socket opening and a socket closing and nothing in
+between. When the newest USER row in `app_chat_messages` stopped advancing while
+the same database was still taking AGENT writes, the service healthy and the
+client demonstrably connecting, the server could not distinguish the two
+hypotheses that matter: the message never arrived, or the message arrived and
+was collapsed by the `client_msg_id` idempotency check in
+`persistence/app-chat-store.ts`, which returns `{was_new:false}` and writes
+nothing. Those have opposite fixes. Filtering the journal for the window left
+only `[app-ws] event=session_open` / `session_close` — and a window in which a
+turn demonstrably ran and replied looked exactly the same, so the absence of a
+line carried no information at all.
+
+**What now emits, all under the existing `[app-ws] event=… k=v` prefix so one
+grep covers the whole conversation lifecycle.**
+
+- `message_received topic=… transport=ws|http seq=… client_msg_id=… was_new=…`
+  from `channels/adapters/app-ws/adapter.ts` `ingestUserMessage` — the single
+  chokepoint both inbound paths (`/ws/app/chat` and `POST /api/app/chat/send`)
+  funnel through, so the two can never drift. **It logs on the de-duped outcome
+  too.** Logging only the insert would have left precisely the hole this issue
+  is about; `was_new=false` is the line that answers the question above.
+- `turn_dispatched topic=… session=… turn=…` then exactly one of
+  `turn_completed … ms=…` / `turn_failed … ms=… error=…`, from `dispatchInbound`
+  — the one place a turn crosses from the surface into the agent. The duration
+  is the point: without it a SLOW turn reads identically to a dead one.
+- `message_refused topic=… transport=… reason=…` at every refusal on
+  `gateway/http/app-ws-surface.ts` (malformed json, malformed envelope, dispatch
+  failure, missing bearer, a rejected token, empty payload, over-length body),
+  and `turn_skipped … reason=duplicate_client_msg_id|chat_command|prompt_already_answered`
+  wherever a message is accepted but no turn runs. Silent refusal is the failure
+  mode that produced ISSUES #516 — a mid-turn message accepted and never
+  acknowledged — so a drop now always names itself.
+- `session_open` / `session_close` gained `device=`, the same value
+  `turn_dispatched` reports as `session`, so a turn ties back to the socket it
+  arrived on.
+
+**Privacy is a constraint, not a note.** No line carries a message body, a token
+or any credential material — ids, a seq, booleans and durations only. Both test
+files assert that positively: the body is a nonsense marker string and every
+captured line is searched for it, and the refusal suite asserts a rejected
+bearer never reaches the journal.
+
+**What was deliberately NOT done.** No line was added inside a per-tick cron
+loop. The journal is already ~97% `[import-running-cron] event=tick`, which is
+why real events are invisible in the first place; adding volume to a flooded log
+makes this worse. This work neither depends on nor touches the open fix for that
+flood.
+
+**Verification.** Assertions are on the EMITTED LINE captured off the logger's
+real console sink, never on a spy proving a function ran — a logger that is
+invoked but whose output never reaches the journal is the same class of defect
+as the one being fixed. `gateway/__tests__/app-ws-chat-observability.test.ts`
+drives a real `Bun.serve` with the real surface, the real `AppWsAdapter` and a
+real `AppChatStore` over real SQLite, across BOTH transports, and includes the
+deduped-`client_msg_id` case on each. `channels/adapters/app-ws/__tests__/chat-observability-log.test.ts`
+pins the adapter lines exactly, including a turn whose injected clock advances
+1500ms so a never-measured duration cannot pass. Mutation-verified: forcing
+`was_new` to `true` on the emitted line fails the dedupe test. Full 51-tsconfig
+typecheck matrix green. NO FEATURE FLAGS — on by default, one code path.
+
 ## 2026-08-12 — the email pipeline reads only the mailboxes the owner switched on, and defaults to none
 
 Branch `trident/email-pipeline-p1-implement-the-esc` (P1.5, on top of P1 below).
@@ -10897,6 +11096,86 @@ prompt now names the EXACT diff path to re-write (`git diff <base>..HEAD > <diff
 next review reads that path, and a fix agent writing its diff somewhere else left the panel
 reading pre-fix code — latent before, and a resume whose diff file is named after the recorded
 OID would have hit it every time.
+
+## 2026-08-11 — the ⚛ app icon ships the nucleus it promised, and the pipeline checks pixels
+
+Branch `trident/one-canonical-atom-mark`. Refines `landing/favicon.svg` (core 2.8 → 2.3,
+orbit `rx/ry` 11.5/6.2 → 11.4/5.4, stroke 2.5 → 2.6) and regenerates all eight raster
+mirrors. Same three-orbit atom, same `#0b0e14` tile and `#4da3ff` accent, no new hue.
+
+**The mark that shipped on 2026-08-10 was never the mark that file described.** SVG
+centres a stroke on its path; Pillow strokes inside the bounding box, and nothing had
+reconciled the two — so every generated PNG placed the orbits' inner edge a half-stroke
+tight and the nucleus clearance measured **0.91 units against an asserted 2.15**, which
+is precisely the defect that round existed to fix. The `>= 1.5` assert passed because it
+read constants, and so did all 21 tests. `render_master` now grows the bbox by half the
+stroke, and `verify_raster_invariants()` measures a real render before either generator
+writes.
+
+Two further defects, both found by rendering the committed files and looking at them: the
+orbits were flattened from aspect 1.85 to 2.11, moving the tile closer to the rail-header
+icon it is a family with (2.33), and the union of the three bands left **six opaque
+background nicks** near the orbit crossings, visible on a 1024px launcher tile — geometry,
+not a compositing artefact, and closed by the heavier stroke.
+
+**WHAT THIS ENTRY NO LONGER CLAIMS.** It said the mark now "reads as an atom" where it
+previously read as "a six-lobed rosette", and review asked for the measurement behind
+that. Measured as accent coverage inside the mark's own painted extent, all three
+geometries rendered through the corrected stroke-centred renderer so that only the
+geometry varies: **old constants 68.1%, new constants 66.1%**, against the lighter
+rail-header icon at **51.9%**. Two points is a nudge, not a redesign, and it is nowhere
+near the thing that actually reads as crossing ellipses. The aspect change is a real
+geometric property and it stays pinned; the perceptual verdict was never measured and is
+withdrawn. What IS measured, on the committed binaries: the nucleus clearance the geometry
+promises (0.91 → 1.80 units), open voids between the petals, zero dark nicks at 1024px, the
+stroke above the 16px tab-slot floor, and one drawing feeding every mirror. The reason to
+state this plainly is that the accompanying `stroke/ry <= 0.42` guard was **relaxed to 0.5
+in this branch to admit the new value** — a guard loosened to pass the change it polices —
+and it is now deleted in favour of `measure_petal_void()`, which measures the property on a
+render.
+
+The geometry is boxed in rather than merely chosen, which is the answer to "then lighten
+it": sweeping the stroke toward the 16px tab-slot floor reopens the nicks — 2.40 (exactly
+the floor) gives 6 slivers at 0.051 sq units, 2.45 gives 0.039, 2.50 gives 0.0098, and 2.60
+is the first sliver-free weight. Approaching the rail icon's coverage means visible chips at
+launcher size or a sub-floor stroke.
+
+**Guards that measured less than they claimed** (review round 2, all fixed here). Three
+pixel scans sampled every other pixel in each axis — a quarter of the image — while
+asserting exactly zero; the "full-bleed and opaque" check tested four corner pixels; the
+flat-tile check tested three; and `carries the rejected teal in NO committed icon` never
+opened `landing/favicon.ico` at all. All now scan at full resolution, and the .ico's six
+frames are decoded (13 assets, asserted by count). Two guards passed over dead code: the
+generator-wiring test matched an identifier that also appears in the import block, so
+deleting the call left it green in both scripts; and the geometry test's regex was anchored
+on ` />`, so it pinned only the un-rotated ellipse while `rx`/`ry` on both rotated orbits
+were pinned by nothing. `assert slivers == 0` had no noise floor and was a latent hard block
+rather than a weak assertion — it held at n=1024 and not at n=1200 (4 islands of 0.000711 sq
+units), and since both generators call it before writing, a Pillow resample change would
+have made the pipeline unrunnable rather than the icon worse.
+
+`app/assets/images/icon.png` is now emitted **RGB**. It was RGBA — every pixel opaque, but
+the channel present — while the docstring beside it said "iOS rejects alpha", so it relied
+on a downstream Expo flatten that nothing in the repo pins. The test asserts the channel
+COUNT, not just that pixels are opaque, because an RGBA file full of opaque pixels satisfies
+the latter.
+
+**`landing/apple-touch-icon.png` was still the artwork the owner rejected on 2026-07-30** —
+teal `#6fe3d4` concentric rings — served as the iOS home-screen icon and declared in
+`landing/site.webmanifest`. The 2026-08-10 anti-regression guard could not see it
+because it read SVG text only. It is now generated by `scripts/gen-favicon-ico.py`, and
+`scripts/__tests__/atom-mark-geometry.test.ts` decodes every committed icon (via
+`node:zlib`, no new dependency) and asserts on pixels: measured nucleus gap, open petal
+voids, no teal-family pixel, opaque full-bleed iOS corners, both Android layers inside
+the 66/108 safe circle, white monochrome. It also fixes a tile-margin assertion that was
+off by exactly 2x and could not fail, and a `pyNumber` helper that silently returned
+`1.2` for a constant evaluating to `2.4`.
+
+`landing/og/neutron-og.png` still carries the rejected teal and is deliberately NOT
+fixed here: it is a typographic marketing card with no generator, whose teal is the
+display-type colour, so re-tinting it belongs with the colour-token lane.
+
+Detail: `docs/as-built/2026-08-10-atom-mark-refinement.md`.
 
 ## 2026-08-11 — an important email now reaches the owner's chat within five minutes
 

@@ -144,14 +144,25 @@ interface Harness {
   emits: HostDeployEmit[]
   dispatchCalls: HostDeployDispatchInput[]
   logs: string[]
+  /** Every `retire_prompt` call the expiry sweep made, in order. */
+  retired: Array<{ prompt_id: string; topic_id: string }>
+  /** Every inert notice the expiry sweep posted, in order. */
+  notices: Array<{ topic_id: string; body: string }>
   /** The option values of the most recent emitted prompt (the tappable set). */
   options(): string[]
   approveValue(): string
   denyValue(): string
+  /** The prompt id the emitter returned for the most recent prompt. */
+  promptId(): string
 }
+
+/** The prompt id the emit stub reports for the Nth emitted prompt. */
+const promptIdFor = (n: number): string => `bp-${n}`
 
 function harness(
   opts: {
+    /** Override the suite manager — the claim-race test swaps `cancelPending`. */
+    approvals?: ApprovalManager
     git?: HostDeployGit
     values?: { url?: string; token?: string }
     dispatch?: (i: HostDeployDispatchInput) => Promise<HostDeployDispatchResult>
@@ -160,16 +171,21 @@ function harness(
     valuesRef?: { current: { url?: string; token?: string } }
     /** Share the suite's logical clock so the grant-age gate is testable. */
     now?: () => number
+    /** Omit the optional sweep seams entirely (an unwired box). */
+    noSweepSeams?: boolean
+    retireThrows?: boolean
   } = {},
 ): Harness {
   const emits: HostDeployEmit[] = []
   const dispatchCalls: HostDeployDispatchInput[] = []
   const logs: string[] = []
+  const retired: Array<{ prompt_id: string; topic_id: string }> = []
+  const notices: Array<{ topic_id: string; body: string }> = []
   const valuesRef = opts.valuesRef ?? {
     current: opts.values ?? { url: URL, token: TOKEN },
   }
   const service = createHostDeployService({
-    approvals,
+    approvals: opts.approvals ?? approvals,
     git: opts.git ?? fakeGit({ head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }),
     resolveConfig: () => resolveHostDeployConfig(valuesRef.current),
     dispatch: async (i) => {
@@ -183,7 +199,21 @@ function harness(
     emit: async (p) => {
       if (opts.emitThrows === true) throw new Error('the socket was dead')
       emits.push(p)
+      // The real emitter is `deliver`, which returns the durable prompt row id;
+      // the grant→prompt link the sweep needs is built from exactly this value.
+      return { prompt_id: promptIdFor(emits.length) }
     },
+    ...(opts.noSweepSeams === true
+      ? {}
+      : {
+          retire_prompt: async (i) => {
+            retired.push(i)
+            if (opts.retireThrows === true) throw new Error('the prompt row was gone')
+          },
+          post_notice: async (topic_id, body) => {
+            notices.push({ topic_id, body })
+          },
+        }),
     log: (m) => logs.push(m),
     now: opts.now ?? (() => nowMs),
   })
@@ -194,9 +224,12 @@ function harness(
     emits,
     dispatchCalls,
     logs,
+    retired,
+    notices,
     options,
     approveValue: () => options().find((v) => v.endsWith(':a')) ?? '',
     denyValue: () => options().find((v) => v.endsWith(':d')) ?? '',
+    promptId: () => promptIdFor(emits.length),
   }
 }
 
@@ -1364,6 +1397,190 @@ describe('a grant has a lifetime of its own', () => {
     const out = await answer(h, h.approveValue())
     expect(h.dispatchCalls).toHaveLength(1)
     expect(out!.body).toContain('Deploy requested')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+describe('a dead grant is swept without a tap, and says so', () => {
+  /** Insert a raw pending approval row `age_ms` old — the sweep's input shape. */
+  const insertPending = async (
+    id: string,
+    tool_name: string,
+    age_ms: number,
+  ): Promise<void> => {
+    await db.run(
+      `INSERT INTO tool_approvals
+         (id, project_slug, topic_id, tool_name, args_json, status, requested_at)
+       VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
+      [id, PROJECT, TOPIC, tool_name, JSON.stringify({ ref: 'origin/main' }), (nowMs - age_ms) / 1000],
+    )
+  }
+
+  test('the emitted prompt id is persisted onto the grant', async () => {
+    const h = harness()
+    const result = await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    // The link is what lets the sweep retire the very button this request drew.
+    expect(result.status).toBe('pending_approval')
+    const row = approvals.listPending(PROJECT)[0]!
+    expect(JSON.parse(row.args_json).prompt_id).toBe(h.promptId())
+    // and it did not eat the arguments already there
+    expect(JSON.parse(row.args_json).ref).toBe('origin/main')
+    expect(JSON.parse(row.args_json).target_sha).toBe(TARGET_SHA)
+  })
+
+  test('a grant past its TTL is expired, its button retired and its topic told — with no tap', async () => {
+    const h = harness()
+    await h.service.request({ ref: 'origin/main', topic_id: 'app:owner:neutron-open' })
+    await settle()
+    const prompt_id = h.promptId()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    const swept = await h.service.sweepExpiredGrants()
+
+    expect(swept).toBe(1)
+    expect(approvals.listPending(PROJECT)).toEqual([])
+    expect(approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.status).toBe(
+      'expired',
+    )
+    // The button dies with the grant, on the grant's OWN topic — the prompt the
+    // owner is still looking at is the one that gets retired.
+    expect(h.retired).toEqual([{ prompt_id, topic_id: 'app:owner:neutron-open' }])
+    expect(h.notices).toHaveLength(1)
+    expect(h.notices[0]!.topic_id).toBe('app:owner:neutron-open')
+    expect(h.notices[0]!.body).toContain('expired')
+    expect(h.notices[0]!.body).toContain('nothing was deployed')
+    expect(h.notices[0]!.body).toContain('origin/main')
+    // THE assertion: an unattended tick can never deploy.
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('a second sweep of the same grant expires nothing and says nothing', async () => {
+    const h = harness()
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+    expect(await h.service.sweepExpiredGrants()).toBe(0)
+    expect(h.notices).toHaveLength(1)
+    expect(h.retired).toHaveLength(1)
+  })
+
+  test('a grant still inside its window is left alone', async () => {
+    const h = harness()
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS - 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(0)
+    expect(approvals.listPending(PROJECT)).toHaveLength(1)
+    expect(h.retired).toEqual([])
+    expect(h.notices).toEqual([])
+  })
+
+  test('a row a tap decides between the scan and the claim is not counted and not announced', async () => {
+    // The race, made deterministic: `cancelPending` settles the row the way the
+    // winning tap would and reports the loss, exactly as the real claim does.
+    const racing = Object.create(approvals) as ApprovalManager
+    ;(racing as unknown as { cancelPending: (id: string) => Promise<boolean> }).cancelPending =
+      async (id: string) => {
+        await approvals.respondApproval(id, 'denied', OWNER)
+        return false
+      }
+    const h = harness({ approvals: racing })
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(0)
+    // The tap already answered the owner; a second "it expired" would contradict it.
+    expect(h.notices).toEqual([])
+    expect(h.retired).toEqual([])
+    expect(approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.status).toBe(
+      'denied',
+    )
+  })
+
+  test('a pending RITUAL grant older than the TTL is NOT touched', async () => {
+    // THE JUDGMENT CALL, asserted. A global `expireStale()` tick would kill this
+    // row minutes after boot; a ritual grant has no re-raise path and the owner
+    // may legitimately answer it days later. The sweep is host-deploy-SCOPED.
+    const h = harness()
+    await insertPending('ritual-row-1', 'ritual:morning-brief', HOST_DEPLOY_APPROVAL_TTL_MS * 100)
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+
+    expect(approvals.get('ritual-row-1')!.status).toBe('pending')
+    expect(h.notices).toHaveLength(1)
+    expect(h.notices[0]!.body).toContain('host-deploy')
+  })
+
+  test('a grant with no linked prompt is still expired and still announced', async () => {
+    const h = harness()
+    await insertPending('legacy-grant', HOST_DEPLOY_APPROVAL_TOOL_NAME, HOST_DEPLOY_APPROVAL_TTL_MS * 3)
+
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+    expect(approvals.get('legacy-grant')!.status).toBe('expired')
+    expect(h.retired).toEqual([])
+    expect(h.notices).toHaveLength(1)
+    expect(h.notices[0]!.topic_id).toBe(TOPIC)
+  })
+
+  test('an unretirable prompt does not stop the notice or the rest of the sweep', async () => {
+    const h = harness({ retireThrows: true })
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+    expect(h.notices).toHaveLength(1)
+    expect(approvals.listPending(PROJECT)).toEqual([])
+  })
+
+  test('a box that wires neither seam still expires the row', async () => {
+    const h = harness({ noSweepSeams: true })
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+    expect(approvals.listPending(PROJECT)).toEqual([])
+  })
+
+  test('tapping a SWEPT grant gets the sentence and a fresh prompt, not silence', async () => {
+    const h = harness()
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+    const oldApprove = h.approveValue()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+
+    // The button was retired server-side, but a client that missed the frame can
+    // still send the tap. It must be ANSWERED — this is the end-to-end voice.
+    const out = await answer(h, oldApprove)
+    await settle()
+    expect(out!.body).toContain('had already expired')
+    expect(out!.body).toContain('fresh approval')
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
+
+    // A repeat tap on the same dead token points at the waiting prompt.
+    const again = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: oldApprove,
+      topic_id: TOPIC,
+      prior_option_values: [oldApprove, ...h.options()],
+    })
+    await settle()
+    expect(again!.body).toContain('already waiting')
+    expect(h.emits).toHaveLength(2)
+    expect(h.dispatchCalls).toEqual([])
   })
 })
 

@@ -178,6 +178,7 @@ async function spawnSession(
       ? {
           todoSync: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
           activityTap: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
+          pipelineGuard: {},
         }
       : {}),
     ...(options.permissions !== undefined ? { permissions: options.permissions } : {}),

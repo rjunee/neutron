@@ -334,6 +334,13 @@ export class AppWsAdapter implements ChannelAdapter {
    * lay the wiring NOW so the loop can be tagged when it lands
    * without retro-fitting the receiver path. The complementary
    * outbound read lives in `outgoingToEnvelope` below.
+   *
+   * OBSERVABILITY (ISSUES #557) — this is the ONE place a chat turn crosses
+   * from the surface into the agent, so it is where the turn's lifecycle is
+   * logged: `turn_dispatched` on entry, then exactly one of `turn_completed` /
+   * `turn_failed` with the elapsed `ms`. Without the duration a turn that is
+   * merely SLOW reads identically to one that died, which is the ambiguity the
+   * issue is about. Ids, durations and booleans only — never the body.
    */
   async dispatchInbound(input: {
     user_id: string
@@ -344,6 +351,13 @@ export class AppWsAdapter implements ChannelAdapter {
     project_id?: string
     /** P5.1 — image attachment URLs from the inbound envelope. */
     attachments?: ReadonlyArray<string>
+    /**
+     * ISSUES #557 — the client session this turn was dispatched for (the WS
+     * socket's device id, or `http` for the `POST /api/app/chat/send`
+     * fallback). Logged so a dispatch correlates to the `session_open` line
+     * of the socket it came from. Absent → logged as `-`.
+     */
+    session_id?: string
   }): Promise<void> {
     const event: IncomingEvent = {
       channel_kind: 'app_socket',
@@ -366,7 +380,31 @@ export class AppWsAdapter implements ChannelAdapter {
     if (Object.keys(metadata).length > 0) {
       event.adapter_metadata = metadata
     }
-    await this.receiver.receive(event)
+    const session = input.session_id ?? '-'
+    const started_at = this.now()
+    wsLog.info('turn_dispatched', {
+      topic: input.channel_topic_id,
+      session,
+      turn: event.event_id,
+    })
+    try {
+      await this.receiver.receive(event)
+    } catch (err) {
+      wsLog.warn('turn_failed', {
+        topic: input.channel_topic_id,
+        session,
+        turn: event.event_id,
+        ms: this.now() - started_at,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      throw err
+    }
+    wsLog.info('turn_completed', {
+      topic: input.channel_topic_id,
+      session,
+      turn: event.event_id,
+      ms: this.now() - started_at,
+    })
   }
 
   /**
@@ -426,6 +464,14 @@ export class AppWsAdapter implements ChannelAdapter {
    * so every send is dispatched, preserving legacy behaviour). A persist
    * failure likewise reports `was_new:true` — we couldn't establish that the
    * message was a duplicate, so we dispatch rather than silently drop it.
+   *
+   * OBSERVABILITY (ISSUES #557) — both inbound paths (`/ws/app/chat` and
+   * `POST /api/app/chat/send`) funnel through here, so this is the ONE place
+   * that logs `message_received`. It logs on EVERY outcome, including the
+   * de-duped one (`was_new=false`), because "arrived and collapsed onto an
+   * existing row" and "never arrived at all" are the two hypotheses an
+   * operator has to separate, and logging only the insert would leave exactly
+   * that hole. Ids, a seq and a boolean only — NEVER the message body.
    */
   async ingestUserMessage(input: {
     channel_topic_id: string
@@ -434,9 +480,23 @@ export class AppWsAdapter implements ChannelAdapter {
     client_msg_id?: string
     project_id?: string
     attachments?: ReadonlyArray<string>
+    /**
+     * ISSUES #557 — which inbound path carried this message, for the
+     * `message_received` line. Absent → logged as `-`.
+     */
+    transport?: 'ws' | 'http'
   }): Promise<{ message_id: string; seq: number | null; was_new: boolean }> {
+    const transport = input.transport ?? '-'
+    const client_msg_id = input.client_msg_id ?? '-'
     if (this.chat_log === undefined) {
       const message_id = this.emitUserMessageEcho(input)
+      wsLog.info('message_received', {
+        topic: input.channel_topic_id,
+        transport,
+        seq: '-',
+        client_msg_id,
+        was_new: true,
+      })
       return { message_id, seq: null, was_new: true }
     }
     const message_id = this.generate_message_id()
@@ -487,6 +547,16 @@ export class AppWsAdapter implements ChannelAdapter {
       env.attachments = [...input.attachments]
     }
     if (seq !== null) env.seq = seq
+    // ISSUES #557 — logged BEFORE the fan-out so the line exists even if the
+    // delivery side throws, and logged for a de-duped re-send as well
+    // (`was_new=false`), which is the case that was previously invisible.
+    wsLog.info('message_received', {
+      topic: input.channel_topic_id,
+      transport,
+      seq: seq ?? '-',
+      client_msg_id,
+      was_new,
+    })
     // Track B Phase 4 — record `delivered` for every connected device + stamp
     // them inline. On an idempotent re-send (`was_new === false`) this still
     // records delivered for any device that's now connected but wasn't when the

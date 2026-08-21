@@ -178,14 +178,30 @@ export const HOST_DEPLOY_MIN_SECRET_CHARS = PROJECT_CREDENTIAL_MIN_SECRET_CHARS
 
 /**
  * How long a pending host-deploy grant stays tappable. Mirrors
- * `APPROVAL_DEFAULT_TTL_MS` (`tools/approval.ts:67`), but is enforced HERE, on
- * the answer, rather than relying on the expire sweep: `expireStale()` has no
- * production caller on this box, so a grant's documented lifetime was inert and
- * a day-old Approve on an unmoved ref would still have deployed (Argus r1
- * minor). Checked against the row's own `requested_at`, so it holds whether or
- * not anything ever sweeps.
+ * `APPROVAL_DEFAULT_TTL_MS` (`tools/approval.ts`), and is enforced from BOTH
+ * ends:
+ *
+ *   - {@link HostDeployService.sweepExpiredGrants}, driven by the composer's
+ *     `host-deploy-approval-sweeper` loop, retires a dead grant WITHOUT a tap —
+ *     so the row stops being `pending`, its still-rendered button is retired and
+ *     the topic is told it expired. The sweep is HOST-DEPLOY-SCOPED on purpose
+ *     and is NOT a caller of `ApprovalManager.expireStale()`: that global sweep
+ *     would also expire pending RITUAL grants (`reminders/ritual-registration.ts`),
+ *     which the owner may legitimately answer days later and which have no
+ *     re-raise path.
+ *   - the ANSWER-path age gate below, which stays as the backstop for a tap that
+ *     races the tick (and for any box whose sweeper never armed). Checked against
+ *     the row's own `requested_at`, so it holds whether or not anything sweeps.
  */
 export const HOST_DEPLOY_APPROVAL_TTL_MS = 5 * 60_000
+
+/**
+ * How often the composer's `host-deploy-approval-sweeper` loop asks
+ * {@link HostDeployService.sweepExpiredGrants} to retire dead grants. A dead
+ * grant therefore lingers at most TTL + one tick before its banner, its button
+ * and its row are all retired.
+ */
+export const HOST_DEPLOY_APPROVAL_SWEEP_INTERVAL_MS = 60_000
 
 /**
  * Characters stripped from a git commit subject before it is rendered into the
@@ -538,7 +554,28 @@ export interface HostDeployServiceOptions {
    * to find a button, which is the defect fixed on 2026-08-15.
    */
   approval_topic_id: string
-  emit: (p: HostDeployEmit) => Promise<void>
+  /**
+   * Deliver the prompt. Returns the id of the `button_prompts` row it created,
+   * or null when the emitter raised no durable prompt — {@link
+   * HostDeployService.sweepExpiredGrants} needs that id to retire the button of
+   * a grant it expires, and a prompt the sweep cannot name is a button that
+   * outlives its grant.
+   */
+  emit: (p: HostDeployEmit) => Promise<{ prompt_id: string | null }>
+  /**
+   * Retire the still-rendered button prompt of a grant the sweep just expired.
+   * OPTIONAL: a box that wires no prompt surface simply keeps the current
+   * behaviour (the grant expires, the button goes stale). Never called from any
+   * path that could deploy.
+   */
+  retire_prompt?: (input: { prompt_id: string; topic_id: string }) => Promise<void>
+  /**
+   * Post an INERT sentence on the grant's own topic saying it expired. OPTIONAL
+   * for the same reason. "It timed out" and "I never answered" must be
+   * distinguishable, and the only surface that can say so is the topic the
+   * prompt landed on.
+   */
+  post_notice?: (topic_id: string, body: string) => Promise<void>
   log?: (msg: string) => void
   default_ref?: string
   /**
@@ -571,6 +608,13 @@ export interface HostDeployService {
   handleOwnerButtonAnswer(
     input: HostDeployOwnerAnswerInput,
   ): Promise<{ body: string } | null>
+  /**
+   * Retire every host-deploy grant that is still `pending` past
+   * {@link HOST_DEPLOY_APPROVAL_TTL_MS} — WITHOUT a tap. Returns how many rows
+   * THIS call transitioned (claim-gated, so a concurrent tap and a tick can
+   * never both count the same row). Deploys NOTHING on any path.
+   */
+  sweepExpiredGrants(): Promise<number>
 }
 
 /** The `tool_approvals.args_json` payload for a host-deploy request. */
@@ -580,6 +624,13 @@ interface HostDeployApprovalArgs {
   current_sha?: unknown
   /** Rendered by the notifier as the "an approval is waiting" one-liner. */
   description?: unknown
+  /**
+   * The `button_prompts` row this grant was rendered as, written post-emit by
+   * `ApprovalManager.recordPromptLink`. The sweep uses it to retire the button
+   * of a grant it expires; absent on a grant raised before this link existed
+   * (the sweep still expires the row, it just cannot retire the button).
+   */
+  prompt_id?: unknown
 }
 
 /** Read a grant's stored arguments. A row that will not parse reads as empty. */
@@ -603,6 +654,8 @@ export function createHostDeployService(
     owner_user_id,
     approval_topic_id,
     emit,
+    retire_prompt,
+    post_notice,
   } = opts
   const log = opts.log ?? ((): void => undefined)
   const default_ref = opts.default_ref ?? HOST_DEPLOY_DEFAULT_REF
@@ -724,6 +777,7 @@ export function createHostDeployService(
     })
 
     // ── (d) emit the CODE-rendered approval prompt carrying the commit list.
+    let emitted: { prompt_id: string | null }
     try {
       // Computed ONCE so the buttons and the typed fallback printed in the body
       // can never drift apart — both resolve through the same exact-match path.
@@ -741,7 +795,7 @@ export function createHostDeployService(
           value: deny_value,
         },
       ]
-      await emit({
+      emitted = await emit({
         topic_id: approval_topic,
         body: renderHostDeployApprovalBody({
           ref,
@@ -769,6 +823,18 @@ export function createHostDeployService(
       return {
         status: 'refused',
         reason: `the approval prompt could not be posted, so nothing is pending — ask again: ${errText(err)}`,
+      }
+    }
+
+    // ── (d1) LINK THE GRANT TO ITS PROMPT, so the sweep can retire the button of
+    // a grant it expires. BEST-EFFORT: a failure here costs only that retirement
+    // (the grant still expires on time, on both the sweep and the answer path),
+    // and it must never turn a raised prompt into a refused request.
+    if (emitted.prompt_id !== null) {
+      try {
+        await approvals.recordPromptLink(approval_id, emitted.prompt_id)
+      } catch (err) {
+        log(`host-deploy prompt link not recorded id=${approval_id}: ${errText(err)}`)
       }
     }
 
@@ -953,12 +1019,14 @@ export function createHostDeployService(
       }
     }
 
-    // ── (b2) THE GRANT'S OWN AGE. `requested_at` is seconds since epoch. This is
-    // enforced on the ANSWER rather than left to `ApprovalManager.expireStale()`,
-    // which nothing on this box calls — the documented 5-minute window was inert,
-    // so a grant tapped the next morning on an unmoved ref still deployed (Argus
-    // r1 minor). The row is expired as it is refused, so the same tap cannot be
-    // repeated into a race with a sweep that may never come.
+    // ── (b2) THE GRANT'S OWN AGE. `requested_at` is seconds since epoch. The
+    // production sweep is now `sweepExpiredGrants()`, driven by the composer's
+    // `host-deploy-approval-sweeper` loop — host-deploy-SCOPED on purpose, since a
+    // global `ApprovalManager.expireStale()` tick would also kill pending ritual
+    // grants that have no re-raise path. This gate REMAINS as the backstop: it
+    // catches the tap that races the tick (the sweep runs at most once a minute)
+    // and it holds on any box whose sweeper never armed. The row is expired as it
+    // is refused, so the same tap cannot be repeated into a race with the sweep.
     //
     // CLAIM-GATED, because the refusal now has a side effect (a fresh grant).
     // `cancelPending` reports whether THIS call retired the pending row, so of two
@@ -1160,7 +1228,86 @@ export function createHostDeployService(
     }
   }
 
-  return { status, request, handleOwnerButtonAnswer }
+  /**
+   * A DEAD GRANT IS SWEPT WITHOUT A TAP. Every host-deploy row still `pending`
+   * past {@link HOST_DEPLOY_APPROVAL_TTL_MS} is retired here: the row is expired,
+   * its still-rendered button prompt is retired, and the topic the prompt landed
+   * on is told — in an INERT sentence — that it expired and nothing was deployed.
+   *
+   * SCOPED TO HOST-DEPLOY ROWS, DELIBERATELY. `findByToolName(project_slug,
+   * 'host-deploy')` is the whole scan; `ApprovalManager.expireStale()` is NOT
+   * called, and must not be, because a global 5-minute sweep would also expire
+   * every pending RITUAL grant — rows the owner may legitimately answer days
+   * later, with no re-raise path of their own.
+   *
+   * CLAIM-GATED PER ROW. `cancelPending(id)` performs the identical
+   * pending→'expired' transition, atomically, and reports whether THIS call made
+   * it. A row a tap decided between the scan and the claim is skipped: not
+   * counted, no button retired, no notice posted. So the owner is told "it
+   * expired" exactly once, and never about a grant he just answered.
+   *
+   * IT NEVER DEPLOYS AND NEVER RE-RAISES. The sweep touches `dispatch` on no
+   * path — a tick that could deploy would be an unattended deploy — and it does
+   * not mint a replacement grant either: the re-raise belongs to a tap, which is
+   * evidence the owner is present.
+   */
+  async function sweepExpiredGrants(): Promise<number> {
+    const rows = approvals.findByToolName(project_slug, HOST_DEPLOY_APPROVAL_TOOL_NAME)
+    let swept = 0
+    for (const row of rows) {
+      if (row.status !== 'pending') continue
+      if (now() - row.requested_at * 1000 <= HOST_DEPLOY_APPROVAL_TTL_MS) continue
+
+      let claimed: boolean
+      try {
+        claimed = await approvals.cancelPending(row.id)
+      } catch (err) {
+        log(`host-deploy sweep could not expire ${row.id}: ${errText(err)}`)
+        claimed = false
+      }
+      // The loser of a race with a tap says nothing at all: the tap already
+      // answered the owner, and a second "it expired" would contradict it.
+      if (!claimed) continue
+      swept += 1
+
+      const args = parseApprovalArgs(row.args_json)
+      const ref = typeof args.ref === 'string' ? args.ref : null
+      const target_sha = typeof args.target_sha === 'string' ? args.target_sha : null
+      const prompt_id = typeof args.prompt_id === 'string' ? args.prompt_id : null
+      // The grant's OWN topic — where its button is actually drawn. The install
+      // fallback covers a row minted before the topic was recorded.
+      const topic = row.topic_id ?? approval_topic_id
+
+      if (prompt_id !== null && retire_prompt !== undefined) {
+        try {
+          await retire_prompt({ prompt_id, topic_id: topic })
+        } catch (err) {
+          // One unretirable button must not stop the rest of the sweep.
+          log(`host-deploy sweep could not retire prompt ${prompt_id}: ${errText(err)}`)
+        }
+      }
+
+      if (post_notice !== undefined) {
+        const what =
+          ref !== null && target_sha !== null ? ` for ${ref} at ${shortSha(target_sha)}` : ''
+        try {
+          await post_notice(
+            topic,
+            `The host-deploy approval${what} sat unanswered for over ` +
+              `${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} minutes and has expired — ` +
+              'nothing was deployed. Ask again for a fresh Approve/Deny prompt.',
+          )
+        } catch (err) {
+          log(`host-deploy sweep could not post the expiry notice on ${topic}: ${errText(err)}`)
+        }
+      }
+
+      log(`host-deploy grant swept id=${row.id} topic=${topic}${ref !== null ? ` ref=${ref}` : ''}`)
+    }
+    return swept
+  }
+
+  return { status, request, handleOwnerButtonAnswer, sweepExpiredGrants }
 }
 
 function errText(err: unknown): string {

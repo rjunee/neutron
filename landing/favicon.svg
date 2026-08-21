@@ -1,33 +1,87 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" width="32" height="32" role="img" aria-label="Neutron">
-  <!-- The ⚛ atom mark — geometry from landing/chat-react/ChatApp.tsx AtomMark()
-       (the rail-header icon): a center dot + 3 rotated electron-orbit ellipses.
+  <!-- THE Neutron ⚛ mark, and the source every raster copy is generated from:
+       an opaque tile, a solid nucleus, and three electron orbits at 0°/60°/120°.
+       Same family as AtomMark() in landing/chat-react/ChatApp.tsx (the rail-header
+       icon), tuned for a tile rather than for bare text-adjacent use.
 
-       FAVICON-LEGIBILITY (2026-07-18, ISSUES: "no favicon on the chat tab").
-       The 2026-07-03 rewrite (233e0c1b) dropped the opaque background tile the
-       ORIGINAL favicon carried and drew the atom as a transparent, stroke-only
-       outline in the fixed light-theme accent #007aff at stroke-width 1.6 on a
-       0 0 24 24 viewBox. Rendered into a 16px tab slot that stroke lands at
-       ~1.07 device px of mid-blue on TRANSPARENT — against Chrome's near-black
-       dark tab strip it is effectively invisible, which is why the tab read as
-       "no favicon" even though /favicon.svg served 200. Three changes fix it:
+       PROPORTIONS (2026-08-11). Three things make this read as an atom rather than as
+       a lump, a flower, or a nicked stencil — all ratios rather than values:
 
-         1. Opaque rounded-rect tile (#0b0e14 — the shell's theme-color) so the
-            mark never composites onto an unknown tab-strip colour. This is what
-            the pre-233e0c1b icon did and why it "used to work fine".
-         2. Accent lifted #007aff → #4da3ff. Same blue family as the rail header,
-            but enough luminance over #0b0e14 to survive 16px downsampling.
-         3. 0 0 32 32 viewBox + stroke-width 2.6 → ~1.3 device px at 16px, and a
-            solid r=3.2 core. The core carries recognition at small sizes; the
-            orbits are texture (identical trade to the original's solid r=6 core).
+         core→orbit gap = ry - stroke/2 - r  =  5.4 - 1.3 - 2.3  =  1.80
+         orbit aspect   = rx / ry            =  11.4 / 5.4  =  2.11
+         stroke/ry      = 2.6 / 5.4          =  48%
+         core dia/stroke= 4.6 / 2.6          =  1.77x
+         outer extent   = rx + stroke/2      =  12.70 of 16 → 3.30u margin a side
 
-       A favicon can't read page CSS vars, so the accent is a FIXED hex.
-       landing/favicon.ico is the raster fallback, generated from THIS geometry —
-       regenerate it (scripts/gen-favicon-ico.py) whenever this file changes. -->
+       THE GAP separates "nucleus with orbits around it" from a blob, and it is the
+       one that carried this mark: at 0.40 units the core and all three orbits fused
+       and no nucleus was visible at any size. THE ASPECT governs whether the six
+       petals lengthen or fatten, because three ellipses at 60° cross in a small
+       central region when they are flat and pile into a fat hexagonal void when they
+       are round. This pass takes ry 6.2 → 5.4 and the core 2.8 → 2.3, lifting the
+       aspect from 1.85 to 2.11 (the rail icon sits at 2.33).
+
+       HOW MUCH THE ASPECT BUYS, measured rather than asserted, because the 2026-08-10
+       docblock read it as "stopped being a rosette, became an atom" and that was never
+       measured. Accent coverage inside the mark's own painted extent, every candidate
+       rendered through the corrected stroke-centred renderer so only geometry varies:
+       1.85 gives 68.1%, 2.11 gives 66.1%, and the much lighter rail icon gives 51.9%
+       at 2.33. Two points. Flattening the orbits is worth doing and it moves the tile
+       toward the rail, but it is a nudge to the silhouette, not a redesign of it. The
+       defects this mark really had were the fused nucleus and, on 2026-08-10, a raster
+       that did not match its own vector. Twenty-two candidate geometries were rendered and
+       compared AS PIXELS at 16/24/32/96/256 px, with the small sizes magnified so the
+       real tab-slot pixels were visible rather than guessed at. Two constraints did the
+       rejecting: the ones that read best at 256 px (rx 12.4) broke the tile-margin
+       limit, and the flattest (ry 4.6-5.0) put the nucleus under one device pixel at
+       16 px.
+
+       THE THIRD THING IS WHY THE STROKE IS 2.6 AND NOT 2.45. At 2.45 the union of the
+       three bands leaves six tiny GEOMETRIC HOLES where the outer edge of one orbit
+       and the inner edges of the other two nearly concur without overlapping — dark
+       nicks a few hundredths of a unit across, invisible below ~100px and plainly
+       visible as chips in the artwork on a 1024px launcher tile. They are not a
+       compositing artefact: an analytic point-in-band test reproduces them exactly, so
+       no blend mode or resample filter fixes them. A slightly heavier stroke does —
+       worst nick measures 0.039 sq units at 2.45, 0.010 at 2.50, and 0 at 2.60.
+       count_background_slivers() in scripts/lib/atom_mark.py asserts the zero, and the
+       only reason any of this is known is that someone rendered the 1024px file and
+       looked at it. The heavier stroke also buys 1.30 device px in a 16px tab slot,
+       up from 1.23.
+
+       THE 2026-08-10 NUMBERS NEVER SHIPPED AS DRAWN. Pillow strokes an ellipse
+       INSIDE its bounding box while SVG centres the stroke on the path, so every
+       generated PNG was a half-stroke tighter than this file: the gap computed as
+       2.15 units and measured 0.90 in the committed binaries, and the assert that
+       was supposed to catch exactly that passed because it only ever read the
+       constants. scripts/lib/atom_mark.py now grows the bbox by half the stroke, and
+       measure_core_orbit_gap() checks the PIXELS.
+
+       SMALL SIZES ARE A HARD FLOOR, NOT A JUDGEMENT CALL. stroke must resolve to
+       >= 1.2 device px in a 16px tab slot; landing/__tests__/favicon-serving.test.ts
+       asserts it, because the icon that shipped broken on 2026-07-18 drew 1.067 px
+       (#007aff at stroke 1.6 on a 0 0 24 24 viewBox) on TRANSPARENT and was
+       invisible against Chrome's near-black tab strip. 16/32 = 0.5, so stroke 2.6
+       lands at 1.30 px — above the floor rather than exactly on it. That floor is
+       what caps how light the orbits can go, and therefore how flat the ellipse can
+       be at a given weight; it is the reason this mark cannot be as delicate as the
+       256px view alone would want. The other two halves of that fix still stand and
+       must not be undone: the opaque #0b0e14 tile, so the mark never composites onto
+       an unknown tab-strip colour, and the lifted #4da3ff accent.
+       Verified by rendering at 16/24/32/96/256 px and LOOKING at the output.
+
+       A favicon cannot read page CSS vars, so the accent is a FIXED hex.
+       REGENERATE EVERY RASTER MIRROR whenever this file changes:
+         python3 scripts/gen-favicon-ico.py   → landing/favicon.ico, apple-touch-icon
+         python3 scripts/gen-app-icons.py     → app/assets/images/*.png
+       Geometry is mirrored by hand into scripts/lib/atom_mark.py; landing/logo.svg
+       is this same drawing at 512px. scripts/__tests__/atom-mark-geometry.test.ts
+       pins all three together AND measures the committed PNGs. -->
   <rect width="32" height="32" rx="7" fill="#0b0e14" />
-  <circle cx="16" cy="16" r="3.2" fill="#4da3ff" />
   <g fill="none" stroke="#4da3ff" stroke-width="2.6">
-    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" />
-    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" transform="rotate(60 16 16)" />
-    <ellipse cx="16" cy="16" rx="11.5" ry="4.9" transform="rotate(120 16 16)" />
+    <ellipse cx="16" cy="16" rx="11.4" ry="5.4" />
+    <ellipse cx="16" cy="16" rx="11.4" ry="5.4" transform="rotate(60 16 16)" />
+    <ellipse cx="16" cy="16" rx="11.4" ry="5.4" transform="rotate(120 16 16)" />
   </g>
+  <circle cx="16" cy="16" r="2.3" fill="#4da3ff" />
 </svg>
