@@ -59,7 +59,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { Server, WebSocketHandler } from 'bun'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { composeProductionGraph } from '../composition.ts'
@@ -155,8 +155,8 @@ interface GraphHarness {
  */
 async function bootOpenGraph(): Promise<GraphHarness> {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-open-route-matrix-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 
   const graph = await composeProductionGraph({
     db,
@@ -610,8 +610,8 @@ describe('G1 — import_resume_handler-only composition (C4 divergence fix)', ()
     // `chat_topics_surface`, `import_resume_handler`, and `auth_gate` now
     // count, so the composed fetch exists and the resume route is OWNED.
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-import-resume-only-'))
+    seedMigratedDb(join(tmp, 'owner.db'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
     const graph = await composeProductionGraph({
       db,
       project_slug: OWNER,
@@ -648,8 +648,8 @@ describe('G1 — import_resume_handler-only composition (C4 divergence fix)', ()
     // exists AND the resume route is OWNED. This proves the divergence above is
     // purely the gate omission, not a broken import-resume mapping.
     const tmp = mkdtempSync(join(tmpdir(), 'neutron-import-resume-plus-'))
+    seedMigratedDb(join(tmp, 'owner.db'))
     const db = ProjectDb.open(join(tmp, 'owner.db'))
-    applyMigrations(db.raw())
     const graph = await composeProductionGraph({
       db,
       project_slug: OWNER,

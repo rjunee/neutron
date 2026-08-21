@@ -14,7 +14,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import {
   isValidIanaTimezone,
@@ -31,8 +31,8 @@ interface Harness {
 
 function openHarness(): Harness {
   const tmp = mkdtempSync(join(tmpdir(), 'neutron-owner-tz-persist-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   const db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   // Count only WRITES — `readOwnerTimezone` goes through `db.prepare`, so this
   // isolates the upsert path for the "no redundant write" assertion.
   let writes = 0

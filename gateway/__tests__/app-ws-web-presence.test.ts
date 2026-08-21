@@ -28,7 +28,7 @@ import {
   type AppWsOutbound,
 } from '@neutronai/channels/index.ts'
 import { AppChatStore, ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { composeHttpHandler } from '../http/compose.ts'
 import { createAppWsSurface } from '../http/app-ws-surface.ts'
 import { createWebPresenceTracker, type WebPresenceTracker } from '../push/web-presence.ts'
@@ -125,8 +125,8 @@ async function openClient(
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'ne-web-presence-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

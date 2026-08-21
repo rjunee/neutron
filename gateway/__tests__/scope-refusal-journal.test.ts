@@ -39,6 +39,9 @@ import {
 const FALLBACK = 'dev'
 
 function freshDb(): ProjectDb {
+  // Stays on the real runner: this suite wants an IN-MEMORY database, and
+  // `seedMigratedDb` seeds by copying a file, so it has no in-memory target to
+  // copy to (it refuses `:memory:` for exactly that reason).
   const db = ProjectDb.open(':memory:')
   applyMigrations(db.raw())
   return db

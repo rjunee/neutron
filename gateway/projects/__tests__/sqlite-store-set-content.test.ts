@@ -18,7 +18,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { SqliteProjectSettingsStore } from '../sqlite-store.ts'
 import { buildDefaultSettings } from '../../http/app-projects-surface.ts'
@@ -36,8 +36,8 @@ async function seed(id: string): Promise<void> {
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-setcontent-'))
+  seedMigratedDb(join(tmp, 'owner.db'))
   db = ProjectDb.open(join(tmp, 'owner.db'))
-  applyMigrations(db.raw())
   store = new SqliteProjectSettingsStore(db)
 })
 

@@ -54,11 +54,11 @@ import { join } from 'node:path'
 
 import { createLogger } from '@neutronai/logger'
 
-import type { HostCommandResult } from './git-mode.ts'
+import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
 import type { MergeCleanupDeps } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
 
-export type RunHostCommand = (cmd: string[], cwd?: string) => Promise<HostCommandResult>
+export type RunHostCommand = EnvCapableHostRunner
 
 const log = createLogger('trident-merge')
 

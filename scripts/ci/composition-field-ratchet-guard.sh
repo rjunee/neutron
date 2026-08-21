@@ -52,10 +52,26 @@ fi
   exit 2
 }
 
-# Best-effort: make origin/main present on a shallow checkout. Never fatal — an
-# offline/fork run falls through to the skip below rather than blocking.
+# Best-effort: make origin/main present (shallow CI checkout) or fresh (full
+# clone). Never fatal — an offline/fork run falls through to the skip below
+# rather than blocking.
+#
+# NEVER pass --depth into a repo that is not already shallow: `git fetch
+# --depth=1` into a complete repository WRITES `.git/shallow` and truncates the
+# fetched ref's local history. On the shared build checkout (~140 worktrees over
+# one common .git) this exact line re-shallowed the repo of record at 05:21 on
+# 2026-08-19 and poisoned every ancestry judgement on the box — merges refused
+# with "unrelated histories", merge-base returned empty — leaving no trace in
+# stderr or the reflog (the tip was unchanged, so no ref moved; >/dev/null ate
+# the rest). --depth=1 is ONLY for a checkout that is ALREADY shallow
+# (actions/checkout depth-1 in CI), where it makes origin/main resolvable
+# without downloading history the guard will not use.
 if [ "$MAIN_REF" = "origin/main" ]; then
-  git fetch --depth=1 origin main >/dev/null 2>&1 || true
+  if [ "$(git -C "$ROOT" rev-parse --is-shallow-repository 2>/dev/null)" = "true" ]; then
+    git -C "$ROOT" fetch --depth=1 origin main >/dev/null 2>&1 || true
+  else
+    git -C "$ROOT" fetch origin main >/dev/null 2>&1 || true
+  fi
 fi
 
 # Skip on a push-to-main run: HEAD already IS main, so there is nothing to ratchet
@@ -73,6 +89,12 @@ fi
 MAIN_INVENTORY="$ROOT/.composition-field-inventory-main.$$.ts"
 trap 'rm -f "$MAIN_INVENTORY"' EXIT
 if ! git show "$MAIN_REF:$INVENTORY_REL" > "$MAIN_INVENTORY" 2>/dev/null; then
+  # T3: name shallowness rather than leaving a true-but-useless message. An
+  # "unreachable" ref on a shallow clone is not a fork or an outage, it is the
+  # history simply not being present — the distinction cost hours to find once.
+  if [ -f "$(git -C "$ROOT" rev-parse --absolute-git-dir 2>/dev/null || echo /nonexistent)/shallow" ]; then
+    echo "composition-field-ratchet-guard: the checkout is SHALLOW (.git/shallow present), so $MAIN_REF's history is not available — this is a clone-depth problem, not a missing baseline. Run: git fetch --unshallow origin" >&2
+  fi
   echo "composition-field-ratchet-guard: $MAIN_REF has no $INVENTORY_REL (bootstrap) or is unreachable — skipping."
   exit 0
 fi

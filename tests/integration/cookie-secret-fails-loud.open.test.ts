@@ -12,7 +12,7 @@ import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -58,8 +58,8 @@ afterEach(() => {
 
 describe('S2 (c) — cookie secret fails loud when unset', () => {
   test('composer REJECTS with a loud NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET error', async () => {
+    seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
     const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-    applyMigrations(db.raw())
     const composer = buildOpenGraphComposer({
       env: process.env,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -78,8 +78,8 @@ describe('S2 (c) — cookie secret fails loud when unset', () => {
     // Operator sets a weak secret directly — the composer must refuse it, not
     // sign owner sessions with a guessable key.
     process.env['NEUTRON_ONBOARDING_CHAT_COOKIE_SECRET'] = 'short-secret' // 12 chars
+    seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
     const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-    applyMigrations(db.raw())
     const composer = buildOpenGraphComposer({
       env: process.env,
       // eslint-disable-next-line @typescript-eslint/no-explicit-any

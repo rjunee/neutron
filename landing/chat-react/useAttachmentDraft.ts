@@ -15,7 +15,7 @@
  * closure still sees the latest ready set.
  */
 
-import { useCallback, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 
 import {
   AttachmentUploadError,
@@ -145,14 +145,23 @@ export function useAttachmentDraft(opts: UseAttachmentDraftOptions): AttachmentD
     setItems([])
   }, [])
 
-  return {
-    items,
-    addFiles,
-    remove,
-    readUrls,
-    waitForUploads,
-    clear,
-    uploading: items.some((it) => it.status === 'uploading'),
-    hasReady: items.some((it) => it.status === 'ready'),
-  }
+  // MEMOIZED so the draft's IDENTITY only changes when the staged items do. It is
+  // owned at the Root and handed down to every mounted conversation surface, so a
+  // fresh object literal per render made it impossible for any of those surfaces to
+  // be `React.memo`'d — one unstable prop defeats the memo for the whole subtree,
+  // and this was that prop. Every member is already render-stable (`useCallback`)
+  // or derived from `items`.
+  return useMemo(
+    () => ({
+      items,
+      addFiles,
+      remove,
+      readUrls,
+      waitForUploads,
+      clear,
+      uploading: items.some((it) => it.status === 'uploading'),
+      hasReady: items.some((it) => it.status === 'ready'),
+    }),
+    [items, addFiles, remove, readUrls, waitForUploads, clear],
+  )
 }

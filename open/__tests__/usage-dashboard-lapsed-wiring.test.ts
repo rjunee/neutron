@@ -24,7 +24,7 @@ import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { PoolSummary } from '@neutronai/persistence/usage-samples-store.ts'
 
@@ -88,8 +88,8 @@ beforeAll(async () => {
   })
   process.env['ANTHROPIC_BASE_URL'] = `http://127.0.0.1:${upstream.port}`
 
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'])
   db = ProjectDb.open(process.env['NEUTRON_DB_PATH'])
-  applyMigrations(db.raw())
 
   const { buildOpenGraphComposer } = await import('../composer.ts')
   const composer = buildOpenGraphComposer({ env: process.env })

@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url'
 
 import { createIsolatedHome, type IsolatedHome } from '../support/test-isolation.ts'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { buildOpenGraphComposer } from '@neutronai/open/composer.ts'
 import type { Substrate } from '@neutronai/runtime/substrate.ts'
@@ -104,8 +104,8 @@ afterEach(() => {
 })
 
 async function compose(): Promise<OpenComposition> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH']!)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH']!)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({
     env: process.env,
     substrateFactory: (() => stubSubstrate()) as never,

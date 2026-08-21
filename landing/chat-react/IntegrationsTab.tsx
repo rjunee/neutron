@@ -196,8 +196,40 @@ export function IntegrationsTab({
   )
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null)
   const [codexAuth, setCodexAuth] = useState('')
+  /**
+   * The seat a paste is destined for. Empty means DEFAULT_SLOT, which is correct
+   * for a first connection and DESTRUCTIVE once a seat exists — the server
+   * resolves an absent account to the default slot and overwrites it. The web
+   * client could not send this field at all, which is why this pane could only
+   * ever write seat 1 while reporting success.
+   */
+  const [codexAccount, setCodexAccount] = useState('')
+
+  // DECLARED HERE, ABOVE ITS FIRST USE. The Codex handlers below take it as a
+  // dependency, and a dependency array is evaluated during render — a `const`
+  // defined further down would be a temporal-dead-zone ReferenceError on the
+  // first render, not a lint warning.
+  const doConfirm: ConfirmImpl = useMemo(
+    () => confirmImpl ?? ((message: string): boolean => window.confirm(message)),
+    [confirmImpl],
+  )
   const [codexBusy, setCodexBusy] = useState(false)
   const [codexError, setCodexError] = useState<string | null>(null)
+
+  /**
+   * The connected seats, and whether Codex is usable AT ALL — both asked of the
+   * POOL, not of the legacy top-level `status`.
+   *
+   * `status` only inspects the bare `codex` credential row (the DEFAULT seat). An
+   * owner who removes `default` while named seats remain, or who names their very
+   * first seat, gets `status: 'not_connected'` while `accounts` still holds healthy
+   * seats trident is actively rotating through. Gating the pane on `status` alone
+   * printed "Not connected" over a working pool and hid every control for managing
+   * it.
+   */
+  const codexPool = codexStatus?.accounts ?? []
+  const codexUsable =
+    codexPool.length > 0 || codexStatus?.status === 'connected' || codexStatus?.status === 'expired'
 
   const loadCodex = useCallback((): void => {
     void codexClient
@@ -219,11 +251,25 @@ export function IntegrationsTab({
     setCodexBusy(true)
     setCodexError(null)
     void codexClient
-      .connectGlobal(codexAuth.trim())
+      .connectGlobal(codexAuth.trim(), codexAccount.trim().toLowerCase())
+      // RE-READ THE POOL; DO NOT TRUST THE POST'S OWN REPLY. The POST answers
+      // `{ status, mode, scope, account }` — only the GET enriches with
+      // `accounts` / `next` / `exhausted` (`gateway/http/codex-credential-surface.ts`,
+      // the isGlobal branch). Storing the POST reply therefore ERASES the seat
+      // pool: the seat list disappears, `codexSeatNameRequired` goes false, and
+      // the very next blank paste overwrites `default` — reintroducing, one step
+      // later, the exact defect this PR exists to fix.
+      //
+      // It survived review once because the TEST STUB was more generous than the
+      // server: it returned the full two-seat body from the POST, so the pane
+      // never saw the shape production actually sends. A stub that answers better
+      // than reality is worse than no stub — it certifies the bug.
+      .then(() => codexClient.statusGlobal())
       .then((s) => {
         if (!mountedRef.current) return
         setCodexStatus(s)
         setCodexAuth('')
+        setCodexAccount('')
         setCodexBusy(false)
       })
       .catch((err: unknown) => {
@@ -231,13 +277,37 @@ export function IntegrationsTab({
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to connect Codex')
       })
-  }, [codexClient, codexAuth])
+  }, [codexClient, codexAuth, codexAccount])
 
-  const disconnectCodex = useCallback((): void => {
+  /**
+   * Forget EVERY seat, after saying so and being agreed with.
+   *
+   * THIS BUTTON BECAME DESTRUCTIVE WITHOUT CHANGING. Before seat rotation it
+   * deleted one credential; the gateway now maps a bare DELETE to
+   * `disconnectAllAccounts`, so the same unchanged button removes every
+   * subscription the owner has — and none of them can be re-minted without a
+   * fresh `codex login` on each original machine, which is worse than it sounds
+   * because Neutron has been refreshing those tokens and the copies left on
+   * those machines are likely already revoked.
+   *
+   * The confirmation NAMES THE COUNT rather than asking a generic "are you
+   * sure?", because the whole failure is that the owner believes he is clearing
+   * one thing. `window.confirm` is deliberately crude: this is the one action on
+   * this pane that cannot be undone, and a bespoke modal that can be dismissed by
+   * a stray click is not an improvement.
+   */
+  const disconnectAllCodexSeats = useCallback((): void => {
+    const count = codexStatus?.accounts?.length ?? 1
+    const ok = doConfirm(
+      count > 1
+        ? `Disconnect ALL ${count} Codex seats?\n\nEvery connected subscription is removed, not just one. Each will need a fresh \`codex login\` to reconnect.`
+        : 'Disconnect Codex?\n\nThe connected subscription is removed and will need a fresh `codex login` to reconnect.',
+    )
+    if (!ok) return
     setCodexBusy(true)
     setCodexError(null)
     void codexClient
-      .disconnectGlobal()
+      .disconnectAllSeats()
       .then(() => {
         if (!mountedRef.current) return
         setCodexStatus({ status: 'not_connected' })
@@ -248,7 +318,30 @@ export function IntegrationsTab({
         setCodexBusy(false)
         setCodexError(err instanceof Error ? err.message : 'failed to disconnect Codex')
       })
-  }, [codexClient])
+  }, [codexClient, codexStatus, doConfirm])
+
+  /** Forget ONE seat, leaving the rest of the pool connected. */
+  const disconnectCodexSeat = useCallback(
+    (slot: string): void => {
+      if (!doConfirm(`Remove Codex seat '${slot}'?\n\nThe other seats stay connected.`)) return
+      setCodexBusy(true)
+      setCodexError(null)
+      void codexClient
+        .disconnectSeat(slot)
+        .then(() => codexClient.statusGlobal())
+        .then((s) => {
+          if (!mountedRef.current) return
+          setCodexStatus(s)
+          setCodexBusy(false)
+        })
+        .catch((err: unknown) => {
+          if (!mountedRef.current) return
+          setCodexBusy(false)
+          setCodexError(err instanceof Error ? err.message : 'failed to remove seat')
+        })
+    },
+    [codexClient, doConfirm],
+  )
 
   // ── GitHub (GLOBAL, device flow) ──────────────────────────────────────────
   // The credential every build needs to push a branch and open a pull request.
@@ -559,10 +652,6 @@ export function IntegrationsTab({
   const doNavigate: NavigateImpl = useMemo(
     () => navigate ?? ((url: string): void => { window.location.assign(url) }),
     [navigate],
-  )
-  const doConfirm: ConfirmImpl = useMemo(
-    () => confirmImpl ?? ((message: string): boolean => window.confirm(message)),
-    [confirmImpl],
   )
 
   /**
@@ -1078,26 +1167,76 @@ export function IntegrationsTab({
             <section className="cint-section" aria-label="Codex cross-model review">
               <h3 className="cint-section-title">Codex cross-model review</h3>
               <p className="cint-row-sub">
-                Connect a ChatGPT <strong>subscription</strong> so trident builds get an independent
-                GPT-5 (Codex) review alongside Claude, across <strong>every</strong> project. This is
-                an account-wide credential. Run <code>codex login</code> on your machine, then paste
-                the contents of <code>~/.codex/auth.json</code> below. A metered
-                <code> OPENAI_API_KEY</code> is rejected — subscription only. (Need a different
-                subscription for one project? Set a per-project override in that project’s Settings.)
+                Connect one or more ChatGPT <strong>subscriptions</strong> so trident builds get an
+                independent GPT-5 (Codex) review alongside Claude, across <strong>every</strong>{' '}
+                project. Runs rotate between the connected seats, skipping any that are cooling.
+                Run <code>codex login</code> on a machine, then paste that account&rsquo;s{' '}
+                <code>~/.codex/auth.json</code> below and name the seat. A metered
+                <code> OPENAI_API_KEY</code> is rejected — subscription only. Each seat must be a{' '}
+                <strong>different</strong> ChatGPT account: two seats holding one account revoke each
+                other. (Need a different subscription for one project? Set a per-project override in
+                that project&rsquo;s Settings.)
               </p>
               <p className="cset-codex-status" data-status={codexStatus?.status ?? 'not_connected'}>
-                {codexStatus?.status === 'connected'
-                  ? '✓ Connected'
-                  : codexStatus?.status === 'expired'
-                    ? '⚠ Token expired — re-connect'
-                    : '○ Not connected'}
+                {codexPool.length > 0
+                  ? `✓ ${codexPool.length} seat${codexPool.length === 1 ? '' : 's'} connected`
+                  : codexStatus?.status === 'connected'
+                    ? '✓ Connected'
+                    : codexStatus?.status === 'expired'
+                      ? '⚠ Token expired — re-connect'
+                      : '○ Not connected'}
                 {codexStatus?.detail !== undefined ? ` — ${codexStatus.detail}` : ''}
               </p>
               {codexError !== null ? <div className="cdoc-comments-error">{codexError}</div> : null}
-              {codexStatus?.status === 'connected' || codexStatus?.status === 'expired' ? (
+              {codexPool.length > 0 ? (
+                <ul className="cint-codex-seats" aria-label="Connected Codex seats">
+                  {codexPool.map((seat) => (
+                    <li key={seat.slot} className="cint-codex-seat" data-slot={seat.slot}>
+                      <span className="cint-codex-seat-name">
+                        {seat.slot}
+                        {seat.active ? <em className="cint-codex-seat-next"> — next</em> : null}
+                      </span>
+                      <span className="cint-codex-seat-state" data-cooling={seat.cooling}>
+                        {seat.cooling
+                          ? `cooling${seat.cooling_reason !== null ? ` (${seat.cooling_reason})` : ''}`
+                          : seat.status === 'connected'
+                            ? 'ready'
+                            : seat.status}
+                        {seat.used_percent !== null ? ` · ${seat.used_percent}% used` : ''}
+                      </span>
+                      <button
+                        type="button"
+                        className="cdoc-btn"
+                        data-testid={`cint-codex-seat-remove-${seat.slot}`}
+                        disabled={codexBusy}
+                        onClick={() => disconnectCodexSeat(seat.slot)}
+                      >
+                        Remove
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+              {codexStatus?.exhausted === true ? (
+                <div className="cdoc-comments-error" data-testid="cint-codex-exhausted">
+                  Every seat is cooling. Runs continue on a capped seat — they will fail with a quota
+                  error rather than silently dropping cross-model review.
+                </div>
+              ) : null}
+              {codexUsable ? (
                 <div className="cint-key-actions">
-                  <button type="button" className="cdoc-btn" disabled={codexBusy} onClick={disconnectCodex}>
-                    {codexBusy ? 'Working…' : 'Disconnect Codex'}
+                  <button
+                    type="button"
+                    className="cdoc-btn"
+                    data-testid="cint-codex-disconnect-all"
+                    disabled={codexBusy}
+                    onClick={disconnectAllCodexSeats}
+                  >
+                    {codexBusy
+                      ? 'Working…'
+                      : codexPool.length > 1
+                        ? `Disconnect all ${codexPool.length} seats`
+                        : 'Disconnect Codex'}
                   </button>
                 </div>
               ) : null}
@@ -1108,6 +1247,17 @@ export function IntegrationsTab({
                   connectCodex()
                 }}
               >
+                <label className="cint-row-label" htmlFor="cint-codex-account">
+                  Seat name{codexPool.length > 0 ? '' : ' (optional for your first)'}
+                </label>
+                <input
+                  id="cint-codex-account"
+                  data-testid="cint-codex-account"
+                  className="cint-key-input"
+                  placeholder="e.g. work"
+                  value={codexAccount}
+                  onChange={(e) => setCodexAccount(e.target.value)}
+                />
                 <label className="cint-row-label" htmlFor="cint-codex-auth">
                   Paste ~/.codex/auth.json
                 </label>
@@ -1123,9 +1273,18 @@ export function IntegrationsTab({
                   <button
                     type="submit"
                     className="cdoc-btn cdoc-btn-primary"
-                    disabled={codexBusy || codexAuth.trim().length === 0}
+                    data-testid="cint-codex-connect"
+                    disabled={
+                      codexBusy ||
+                      codexAuth.trim().length === 0 ||
+                      (codexPool.length > 0 && codexAccount.trim().length === 0)
+                    }
                   >
-                    {codexBusy ? 'Connecting…' : 'Connect Codex'}
+                    {codexBusy
+                      ? 'Connecting…'
+                      : codexPool.length > 0
+                        ? 'Add seat'
+                        : 'Connect Codex'}
                   </button>
                 </div>
               </form>

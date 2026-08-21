@@ -23,12 +23,11 @@
  */
 
 import { afterEach, expect, test } from 'bun:test'
-import { Database } from 'bun:sqlite'
 import { mkdirSync, mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../../tests/support/migrated-db.ts'
 import {
   ProjectDb,
   asOwnerHandle,
@@ -83,9 +82,7 @@ async function makeBench() {
   const dbDir = join(home, 'db')
   mkdirSync(dbDir, { recursive: true })
   const dbPath = join(dbDir, 'owner.db')
-  const raw = new Database(dbPath, { create: true })
-  applyMigrations(raw)
-  raw.close()
+  seedMigratedDb(dbPath)
   const db = ProjectDb.open(dbPath)
   cleanups.push(() => db.close())
   const secrets = new SecretsStore({ data_dir: home, db })

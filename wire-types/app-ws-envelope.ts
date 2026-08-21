@@ -505,6 +505,8 @@ export interface AppWsRunProgress {
   pr: number | null
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   failure_reason: string | null
+  /** Durable brief-integrity refusal, retained even when a later retry recovers. */
+  brief_alert: string | null
 }
 
 /**

@@ -212,6 +212,33 @@ export function materializeCodexAuth(input: { codexHome: string; authJson: strin
   return { path: target }
 }
 
+/**
+ * The ChatGPT `account_id` inside a stored bundle, or null when it cannot be read.
+ *
+ * This is the only field that identifies WHICH subscription a bundle belongs to,
+ * and it exists to answer one question: is this account already connected to
+ * another seat? Two seats holding one account mutually revoke each other's refresh
+ * token on the next refresh, so the check has to happen before the second bundle is
+ * ever stored.
+ *
+ * Returns null rather than throwing on unparseable input, and null for a bundle
+ * that simply has no `account_id` — an unidentifiable bundle is ALLOWED through by
+ * the caller, because refusing every one of them would make a legitimate second
+ * seat impossible on any CLI version that omits the field.
+ */
+export function readAccountId(authJson: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(authJson)
+    if (parsed === null || typeof parsed !== 'object') return null
+    const tokens = (parsed as Record<string, unknown>)['tokens']
+    if (tokens === null || typeof tokens !== 'object') return null
+    const id = (tokens as Record<string, unknown>)['account_id']
+    return typeof id === 'string' && id.length > 0 ? id : null
+  } catch {
+    return null
+  }
+}
+
 /** Remove a materialized `auth.json` (idempotent — no-op if absent). */
 export function removeCodexAuth(codexHome: string): void {
   const target = codexAuthPath(codexHome)

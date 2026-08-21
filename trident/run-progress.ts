@@ -83,6 +83,8 @@ export interface RunProgress {
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   /** The failure reason (e.g. the hang-watchdog reap) when `phase_label==='failed'`. */
   failure_reason: string | null
+  /** Brief-integrity refusal, including one recovered by the bridge retry. */
+  brief_alert: string | null
 }
 
 const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
@@ -158,14 +160,25 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
   // floor it at 2 (the very next checkpoint `fix-round-N` carries the precise N).
   let round = run.round > 0 ? run.round : 1
 
-  // Refine the LIVE (non-terminal) label with the inner workflow's checkpoint —
-  // the outer phase alone is stuck on `forge-init` for the whole build.
+  // Refine the LIVE (non-terminal) label with the inner workflow's checkpoint.
+  //
+  // This block used to open "the outer phase alone is stuck on `forge-init` for
+  // the whole build" — true when it was written, and no longer: `checkpoint.sh`
+  // now writes the phase from the same checkpoint via the canonical table in
+  // `checkpoint-phase.ts`. It is KEPT because it is still the only thing that can
+  // read a run written before that landed, and because `merged`/the round
+  // arithmetic below are display concerns the phase column does not carry.
   if (!terminal && run.inner_checkpoint !== null) {
     const cp = run.inner_checkpoint
     const fixRound = /fix-round-(\d+)/.exec(cp)
     if (fixRound !== null) {
       round = Math.max(round, Number(fixRound[1]))
-      phase_label = 'building'
+      // `fix-round-N` marks fix N as BUILT, so the RE-REVIEW is what is running —
+      // which is what `deriveStepLabel` has always said for this checkpoint and
+      // what `phaseForCheckpoint` says now. This line said 'building' (the phase
+      // that had just ENDED), so one snapshot carried both claims at once:
+      // `phase_label: 'building'` beside `step_label: 'reviewing'`.
+      phase_label = 'reviewing'
     } else if (cp === 'forge-done' || cp === 'argus-approved') {
       // Build finished → reviewing (or approved, about to merge).
       phase_label = 'reviewing'
@@ -197,6 +210,7 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
     pr: run.pr,
     verdict: run.inner_verdict,
     failure_reason: run.failure_reason,
+    brief_alert: run.brief_alert,
   }
 }
 

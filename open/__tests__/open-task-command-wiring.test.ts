@@ -83,7 +83,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
@@ -149,8 +149,8 @@ interface Harness {
 let harness: Harness | null = null
 
 async function startHarness(): Promise<Harness> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'] as string)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
-  applyMigrations(db.raw())
   const composer = buildOpenGraphComposer({
     env: process.env,
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

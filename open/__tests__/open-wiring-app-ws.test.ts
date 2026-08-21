@@ -20,7 +20,7 @@ import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { readOwnerTimezone } from '@neutronai/gateway/storage/owner-metadata.ts'
 import { AppWsAdapter } from '@neutronai/channels/adapters/app-ws/adapter.ts'
@@ -64,8 +64,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmpDir = mkdtempSync(join(tmpdir(), 'neutron-open-wire-appws-'))
+  seedMigratedDb(join(tmpDir, 'project.db'))
   db = ProjectDb.open(join(tmpDir, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

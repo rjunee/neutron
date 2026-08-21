@@ -21,7 +21,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 
 import { buildOpenGraphComposer } from '../composer.ts'
 
@@ -30,8 +30,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), 'neutron-slug-provenance-'))
+  seedMigratedDb(join(home, 'project.db'))
   db = ProjectDb.open(join(home, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {

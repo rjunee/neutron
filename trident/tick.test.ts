@@ -2,9 +2,9 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { TridentRunStore, type TridentRun } from './store.ts'
+import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
 import {
   stubAdvanceDeps,
@@ -22,8 +22,8 @@ let db: ProjectDb
 
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-trident-tick-'))
+  seedMigratedDb(join(tmp, 'project.db'))
   db = ProjectDb.open(join(tmp, 'project.db'))
-  applyMigrations(db.raw())
 })
 
 afterEach(() => {
@@ -937,6 +937,108 @@ describe('TridentTickLoop — change watcher (wake-on-change)', () => {
     await store.update(run.id, { inner_checkpoint: 'building' })
     await new Promise((r) => setTimeout(r, 150))
     expect(stepped.length).toBe(0)
+    await loop.stop()
+  })
+})
+
+describe('TridentTickLoop — as-built catch-up (T2 self-heal)', () => {
+  test('the ordinary tick folds once per repo, including repos whose only runs are terminal', async () => {
+    let second = 0
+    const store = new TridentRunStore(
+      db,
+      () => new Date(Date.UTC(2026, 7, 18, 0, 0, second++)).toISOString(),
+    )
+    const a1 = await store.create({
+      slug: 'as-built-a1', project_slug: 't1', repo_path: '/repo-a', task: 't', merge_mode: 'pr',
+    })
+    const a2 = await store.create({
+      slug: 'as-built-a2', project_slug: 't1', repo_path: '/repo-a', task: 't', merge_mode: 'pr',
+    })
+    await store.update(a1.id, { phase: 'done' })
+    await store.update(a2.id, { phase: 'done' })
+    await store.create({
+      slug: 'as-built-a-local', project_slug: 't1', repo_path: '/repo-a', task: 't', merge_mode: 'local',
+    })
+    await store.create({
+      slug: 'as-built-b', project_slug: 't1', repo_path: '/repo-b', task: 't', merge_mode: 'local',
+    })
+    const calls: [string, MergeMode][] = []
+    const loop = new TridentTickLoop({
+      store,
+      deps: stubAdvanceDeps(),
+      fold_staged_as_built: async (repo, mode) => {
+        calls.push([repo, mode])
+        return { ok: true, folded: 1 }
+      },
+    })
+
+    await loop.runOnce()
+    expect(calls).toHaveLength(2)
+    expect(new Set(calls.map(([repo, mode]) => `${repo}:${mode}`))).toEqual(
+      new Set(['/repo-a:local', '/repo-b:local']),
+    )
+    await loop.stop()
+  })
+
+  test('one repo throwing does not stop the others', async () => {
+    let second = 0
+    const store = new TridentRunStore(
+      db,
+      () => new Date(Date.UTC(2026, 7, 18, 0, 0, second++)).toISOString(),
+    )
+    await store.create({ slug: 'as-built-b', project_slug: 't1', repo_path: '/repo-b', task: 't' })
+    // Newest-first enumeration makes repo-a run first, so repo-b proves the
+    // per-repo catch continues after the throw rather than merely before it.
+    await store.create({ slug: 'as-built-a', project_slug: 't1', repo_path: '/repo-a', task: 't' })
+    const calls: string[] = []
+    const loop = new TridentTickLoop({
+      store,
+      deps: stubAdvanceDeps(),
+      fold_staged_as_built: async (repo) => {
+        calls.push(repo)
+        if (repo === '/repo-a') throw new Error('repo-a unavailable')
+        return { ok: true, folded: 1 }
+      },
+    })
+
+    await loop.runOnce()
+    expect(calls).toContain('/repo-a')
+    expect(calls).toContain('/repo-b')
+    expect(calls).toHaveLength(2)
+    await loop.stop()
+  })
+
+  test('absent seam leaves the ordinary tick behavior and timer inventory unchanged', async () => {
+    const store = new TridentRunStore(db)
+    const absent = new TridentTickLoop({ store, deps: stubAdvanceDeps() })
+    expect(await absent.runOnce()).toEqual({ advanced: 0, skipped_due_to_overlap: false })
+    expect(absent.describeAll().map((descriptor) => descriptor.name)).toEqual(['trident', 'trident-watch'])
+    await absent.stop()
+  })
+
+  test('each repo is attempted once without starving older repos', async () => {
+    const store = new TridentRunStore(db)
+    for (let i = 0; i < 25; i++) {
+      await store.create({
+        slug: `as-built-bound-${i}`,
+        project_slug: 't1',
+        repo_path: `/repo-${i}`,
+        task: 't',
+      })
+    }
+    const calls: string[] = []
+    const loop = new TridentTickLoop({
+      store,
+      deps: stubAdvanceDeps(),
+      fold_staged_as_built: async (repo) => {
+        calls.push(repo)
+        return { ok: true, folded: 0 }
+      },
+    })
+
+    await loop.runOnce()
+    expect(calls).toHaveLength(25)
+    expect(new Set(calls).size).toBe(25)
     await loop.stop()
   })
 })

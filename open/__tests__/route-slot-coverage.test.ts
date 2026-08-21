@@ -58,7 +58,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { applyMigrations } from '@neutronai/migrations/runner.ts'
+import { seedMigratedDb } from '../../tests/support/migrated-db.ts'
 import { ProjectDb, asOwnerHandle } from '@neutronai/persistence/index.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { composeProductionGraph } from '@neutronai/gateway/composition.ts'
@@ -164,8 +164,8 @@ const declared: RouteSlotBaselineEntry[] = ROUTE_SLOTS.filter(
  * Cores surfaces do not exist until that step.
  */
 async function probeComposedSurfaces(): Promise<void> {
+  seedMigratedDb(process.env['NEUTRON_DB_PATH'] as string)
   const db = ProjectDb.open(process.env['NEUTRON_DB_PATH'] as string)
-  applyMigrations(db.raw())
   await seedTelegramSecrets(db)
   const composer = buildOpenGraphComposer({
     env: process.env,
