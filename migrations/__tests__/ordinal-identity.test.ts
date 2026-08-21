@@ -118,7 +118,7 @@ function branchTree(): string {
     '0125_code_trident_runs_base_sha.sql',
     '0127_code_trident_runs_agent_waked_at.sql',
     '0130_work_board_items_archived_status.sql',
-    REPAIR_FILE,
+    ...REBUILD_FILES,
   ]) {
     rmSync(join(dir, file))
   }
@@ -165,13 +165,12 @@ function asPreviousReleaseWroteIt(db: Database, options: { provenance: boolean }
  * A copy of the real tree standing in for an EARLIER RELEASE: `0127` removed (so it
  * is left PENDING for the runner under test), and the given files renumbered.
  *
- * `REPAIR_FILE` comes out too, and not for convenience. It is `0131`, the repair
- * migration that REBUILDS `code_trident_runs`, and its `INSERT ... SELECT` names
- * `agent_waked_at` — the column `0127` adds. A tree that holds `0127` back and keeps
- * `0131` is not a release that ever existed; it is a tree that cannot apply, and it
- * fails with `no such column: agent_waked_at` from inside the fixture rather than
- * from the code under test. Holding back the tail of a dependent chain means holding
- * back the whole tail.
+ * `REBUILD_FILES` come out too, and not for convenience. Each REBUILDS
+ * `code_trident_runs`, and each `INSERT ... SELECT` names `agent_waked_at` — the column
+ * `0127` adds. A tree that holds `0127` back and keeps one of them is not a release that
+ * ever existed; it is a tree that cannot apply, and it fails with `no such column:
+ * agent_waked_at` from inside the fixture rather than from the code under test. Holding
+ * back the tail of a dependent chain means holding back the whole tail.
  */
 function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
   const dir = mkdtempSync(join(tmp, 'release-'))
@@ -180,7 +179,7 @@ function treeWithoutPendingFile(renames: Array<[string, string]> = []): string {
     cpSync(join(REAL_TREE, file), join(dir, file))
   }
   rmSync(join(dir, PENDING_FILE))
-  rmSync(join(dir, REPAIR_FILE))
+  for (const file of REBUILD_FILES) rmSync(join(dir, file))
   for (const [from, to] of renames) renameSync(join(dir, from), join(dir, to))
   return dir
 }
@@ -197,6 +196,32 @@ const PENDING_NAME = 'code_trident_runs_agent_waked_at'
  */
 const REPAIR_FILE = '0131_code_trident_runs_base_sha_repair.sql'
 const REPAIR_NAME = 'code_trident_runs_base_sha_repair'
+
+/**
+ * EVERY migration that REBUILDS `code_trident_runs` — and therefore every migration
+ * that no fixture tree here may contain.
+ *
+ * SQLite cannot ALTER a CHECK constraint, so widening one means create-copy-drop-rename,
+ * and the copy names each column ONE BY ONE. That makes a rebuild depend on the whole
+ * column chain before it: hold ANY earlier column-adding migration back and the rebuild
+ * dies inside the fixture with `no such column`, from the tree-builder rather than from
+ * the code under test. Every fixture in this file holds something back on purpose, so
+ * every fixture drops all of these.
+ *
+ * `0138` cost 9 tests when it landed on the branch: it names `base_sha` / `base_behind`
+ * (from `0125`, absent in `branchTree`) and `agent_waked_at` (from `0127`, held back by
+ * `treeWithoutPendingFile`). `rebuildFilesInRealTree` below fails loudly the next time
+ * this list goes stale, instead of leaving the next author the same `no such column`.
+ */
+const REBUILD_FILES = [REPAIR_FILE, '0138_code_trident_runs_review_not_run.sql']
+
+/** The marker that identifies a rebuild, measured from the tree rather than assumed. */
+function rebuildFilesInRealTree(): string[] {
+  return readdirSync(REAL_TREE)
+    .filter((file) => /^\d{4}_.+\.sql$/.test(file))
+    .filter((file) => readFileSync(join(REAL_TREE, file), 'utf8').includes('code_trident_runs_new'))
+    .sort()
+}
 
 /**
  * The name whose duplicate the collapse has to resolve, and its two ordinals.
@@ -320,6 +345,22 @@ function liveInstanceBefore(options: { provenance: boolean }): Database {
   asPreviousReleaseWroteIt(db, options)
   return db
 }
+
+// ------------------------------------------------- 0. the fixtures are buildable
+
+test('every table rebuild in the real tree is held back by the fixtures', () => {
+  // Positive control: the marker really does find something, so a rename that broke the
+  // detector could never read as "no rebuilds exist, list is trivially complete".
+  const found = rebuildFilesInRealTree()
+  expect(found.length).toBeGreaterThan(0)
+  expect(found).toEqual([...REBUILD_FILES].sort())
+
+  // And the fixtures really removed them, rather than the list merely being right.
+  for (const dir of [branchTree(), treeWithoutPendingFile()]) {
+    const present = readdirSync(dir)
+    for (const file of REBUILD_FILES) expect(present).not.toContain(file)
+  }
+})
 
 // ------------------------------------------------------- 1. the live instance
 
