@@ -148,6 +148,13 @@ function readMcpConfig(argv: string[]): { mcpServers: Record<string, { args: str
   return JSON.parse(readFileSync(p, 'utf8'))
 }
 
+function readSettings(argv: string[]): {
+  hooks: { PreToolUse?: Array<{ matcher: string; hooks: Array<{ type: string; command: string }> }> }
+} {
+  const path = argv[argv.indexOf('--settings') + 1]!
+  return JSON.parse(readFileSync(path, 'utf8'))
+}
+
 describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
   it('attaches a SECOND mcpServers entry + manifest + --allowedTools when enabled', async () => {
     setReplToolBridge(fakeBridge([]))
@@ -173,6 +180,10 @@ describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
     expect(manifest[0].name).toBe('doc_search')
     expect(manifest[0].input_schema.required).toEqual(['query'])
+    expect(readSettings(argv).hooks.PreToolUse).toContainEqual({
+      matcher: 'Bash',
+      hooks: [{ type: 'command', command: expect.stringContaining('pipeline-guard.ts') }],
+    })
   })
 
   it('SECURITY: an opted-OUT substrate gets NO bridge even when one is wired', async () => {
@@ -186,6 +197,7 @@ describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
     const argv = argvs[0]!
     expect(argv).not.toContain('--allowedTools')
     expect(readMcpConfig(argv).mcpServers['neutron']).toBeUndefined()
+    expect(readSettings(argv).hooks.PreToolUse).toBeUndefined()
   })
 
   it('no-op when enabled but no bridge is wired (LLM-less / pre-compose)', async () => {
