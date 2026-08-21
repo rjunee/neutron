@@ -11097,6 +11097,86 @@ next review reads that path, and a fix agent writing its diff somewhere else lef
 reading pre-fix code — latent before, and a resume whose diff file is named after the recorded
 OID would have hit it every time.
 
+## 2026-08-11 — the ⚛ app icon ships the nucleus it promised, and the pipeline checks pixels
+
+Branch `trident/one-canonical-atom-mark`. Refines `landing/favicon.svg` (core 2.8 → 2.3,
+orbit `rx/ry` 11.5/6.2 → 11.4/5.4, stroke 2.5 → 2.6) and regenerates all eight raster
+mirrors. Same three-orbit atom, same `#0b0e14` tile and `#4da3ff` accent, no new hue.
+
+**The mark that shipped on 2026-08-10 was never the mark that file described.** SVG
+centres a stroke on its path; Pillow strokes inside the bounding box, and nothing had
+reconciled the two — so every generated PNG placed the orbits' inner edge a half-stroke
+tight and the nucleus clearance measured **0.91 units against an asserted 2.15**, which
+is precisely the defect that round existed to fix. The `>= 1.5` assert passed because it
+read constants, and so did all 21 tests. `render_master` now grows the bbox by half the
+stroke, and `verify_raster_invariants()` measures a real render before either generator
+writes.
+
+Two further defects, both found by rendering the committed files and looking at them: the
+orbits were flattened from aspect 1.85 to 2.11, moving the tile closer to the rail-header
+icon it is a family with (2.33), and the union of the three bands left **six opaque
+background nicks** near the orbit crossings, visible on a 1024px launcher tile — geometry,
+not a compositing artefact, and closed by the heavier stroke.
+
+**WHAT THIS ENTRY NO LONGER CLAIMS.** It said the mark now "reads as an atom" where it
+previously read as "a six-lobed rosette", and review asked for the measurement behind
+that. Measured as accent coverage inside the mark's own painted extent, all three
+geometries rendered through the corrected stroke-centred renderer so that only the
+geometry varies: **old constants 68.1%, new constants 66.1%**, against the lighter
+rail-header icon at **51.9%**. Two points is a nudge, not a redesign, and it is nowhere
+near the thing that actually reads as crossing ellipses. The aspect change is a real
+geometric property and it stays pinned; the perceptual verdict was never measured and is
+withdrawn. What IS measured, on the committed binaries: the nucleus clearance the geometry
+promises (0.91 → 1.80 units), open voids between the petals, zero dark nicks at 1024px, the
+stroke above the 16px tab-slot floor, and one drawing feeding every mirror. The reason to
+state this plainly is that the accompanying `stroke/ry <= 0.42` guard was **relaxed to 0.5
+in this branch to admit the new value** — a guard loosened to pass the change it polices —
+and it is now deleted in favour of `measure_petal_void()`, which measures the property on a
+render.
+
+The geometry is boxed in rather than merely chosen, which is the answer to "then lighten
+it": sweeping the stroke toward the 16px tab-slot floor reopens the nicks — 2.40 (exactly
+the floor) gives 6 slivers at 0.051 sq units, 2.45 gives 0.039, 2.50 gives 0.0098, and 2.60
+is the first sliver-free weight. Approaching the rail icon's coverage means visible chips at
+launcher size or a sub-floor stroke.
+
+**Guards that measured less than they claimed** (review round 2, all fixed here). Three
+pixel scans sampled every other pixel in each axis — a quarter of the image — while
+asserting exactly zero; the "full-bleed and opaque" check tested four corner pixels; the
+flat-tile check tested three; and `carries the rejected teal in NO committed icon` never
+opened `landing/favicon.ico` at all. All now scan at full resolution, and the .ico's six
+frames are decoded (13 assets, asserted by count). Two guards passed over dead code: the
+generator-wiring test matched an identifier that also appears in the import block, so
+deleting the call left it green in both scripts; and the geometry test's regex was anchored
+on ` />`, so it pinned only the un-rotated ellipse while `rx`/`ry` on both rotated orbits
+were pinned by nothing. `assert slivers == 0` had no noise floor and was a latent hard block
+rather than a weak assertion — it held at n=1024 and not at n=1200 (4 islands of 0.000711 sq
+units), and since both generators call it before writing, a Pillow resample change would
+have made the pipeline unrunnable rather than the icon worse.
+
+`app/assets/images/icon.png` is now emitted **RGB**. It was RGBA — every pixel opaque, but
+the channel present — while the docstring beside it said "iOS rejects alpha", so it relied
+on a downstream Expo flatten that nothing in the repo pins. The test asserts the channel
+COUNT, not just that pixels are opaque, because an RGBA file full of opaque pixels satisfies
+the latter.
+
+**`landing/apple-touch-icon.png` was still the artwork the owner rejected on 2026-07-30** —
+teal `#6fe3d4` concentric rings — served as the iOS home-screen icon and declared in
+`landing/site.webmanifest`. The 2026-08-10 anti-regression guard could not see it
+because it read SVG text only. It is now generated by `scripts/gen-favicon-ico.py`, and
+`scripts/__tests__/atom-mark-geometry.test.ts` decodes every committed icon (via
+`node:zlib`, no new dependency) and asserts on pixels: measured nucleus gap, open petal
+voids, no teal-family pixel, opaque full-bleed iOS corners, both Android layers inside
+the 66/108 safe circle, white monochrome. It also fixes a tile-margin assertion that was
+off by exactly 2x and could not fail, and a `pyNumber` helper that silently returned
+`1.2` for a constant evaluating to `2.4`.
+
+`landing/og/neutron-og.png` still carries the rejected teal and is deliberately NOT
+fixed here: it is a typographic marketing card with no generator, whose teal is the
+display-type colour, so re-tinting it belongs with the colour-token lane.
+
+Detail: `docs/as-built/2026-08-10-atom-mark-refinement.md`.
+
 ## 2026-08-11 — an important email now reaches the owner's chat within five minutes
 
 Branch `trident/email-pipeline-p1-implement-the-esc`. Email Core consolidation

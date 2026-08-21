@@ -287,18 +287,26 @@ the owner slug, unchanged; the HTTP ▶/create surface already scope-keyed from 
 
 > **M1 redesign polish (Ryan 2026-07-03) — CLOSED.** Four chat-UI refinements,
 > no feature flags, one code path each:
-> - **Favicon = the ⚛ atom mark.** `landing/favicon.svg` reproduces the `AtomMark`
->   geometry from `ChatApp.tsx` (center dot + 3 rotated orbit ellipses) in a FIXED
->   accent hex (a favicon can't read page CSS vars), so the browser tab matches the
->   rail-header icon.
+> - **Favicon = the ⚛ atom mark, and it is the SOURCE every raster copy is generated
+>   from.** `landing/favicon.svg` is a nucleus plus 3 rotated orbit ellipses in a FIXED
+>   accent hex (a favicon can't read page CSS vars). It is the same FAMILY as `AtomMark`
+>   in `ChatApp.tsx` (the rail-header icon) but NOT a copy of its geometry — this bullet
+>   said "reproduces the `AtomMark` geometry" and that was never true of the numbers; a
+>   tile has margins to respect and a 16px tab slot to survive, a header glyph has
+>   neither. The one mirror of the SVG's coordinates lives in `scripts/lib/atom_mark.py`,
+>   and `scripts/__tests__/atom-mark-geometry.test.ts` pins the two together AND decodes
+>   the committed PNGs, because until 2026-08-11 the rasteriser placed the stroke inside
+>   the bbox while SVG centres it, so the shipped icons silently disagreed with this file.
 >   **SUPERSEDED 2026-07-18** — as first shipped this mark was transparent and
 >   stroke-only in `#007aff` at `stroke-width 1.6` on a `0 0 24 24` viewBox, which
 >   at a 16px tab slot is a ~1.07-device-px mid-blue hairline on Chrome's near-black
 >   tab strip: served correctly, rendered invisibly, reported as "no favicon". The
 >   mark now carries an opaque `#0b0e14` tile, accent `#4da3ff`, and `0 0 32 32` @
->   `stroke-width 2.6`. A raster `landing/favicon.ico` (generated from the same
->   geometry by `scripts/gen-favicon-ico.py`) is declared first as the universal
->   fallback. See AS_BUILT §2026-07-18 "Favicon".
+>   `stroke-width 2.6`. A raster `landing/favicon.ico` AND `landing/apple-touch-icon.png`
+>   (both generated from the same geometry by `scripts/gen-favicon-ico.py`) are declared
+>   first as the universal fallback; the `.ico` was hand-placed until 2026-07-18 and the
+>   apple-touch icon until 2026-08-11, when it was found still holding the rejected teal
+>   ring artwork. See AS_BUILT §2026-07-18 "Favicon" and §2026-08-11 "the ⚛ app icon".
 > - **Work-item delete confirm is INLINE-in-row, not a modal.** The old
 >   full-screen `.cwb-confirm-backdrop` / `aria-modal` dialog was deleted; the ✕
 >   now reveals a `.cwb-confirm-inline` `role="group"` strip WITHIN the item's own

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the mobile app's icon assets from the landing/favicon.svg atom mark.
 
-Ryan, on installing the APK (2026-07-30): "make the app icon the same as our
+The owner, on installing the APK (2026-07-30): "make the app icon the same as our
 favicon. What is this weird icon you made". The shipped icons were teal
 concentric rings with a satellite dot — a drawing nothing in this repo produces,
 sharing neither the geometry nor the palette of the ⚛ mark the web wears. These
@@ -44,12 +44,14 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from lib.atom_mark import (  # noqa: E402
     ACCENT,
     ANDROID_SAFE_FRACTION,
+    ANDROID_SAFE_MARGIN,
     BG,
     CORNER_RADIUS,
     MARK_EXTENT,
     VIEWBOX,
     WHITE,
     render_atom,
+    verify_raster_invariants,
 )
 
 IMAGES = ROOT / "app" / "assets" / "images"
@@ -59,8 +61,10 @@ SPLASH_PX = 1024
 FAVICON_PX = 48
 
 #: How much to shrink the mark so its full painted extent fits the Android
-#: adaptive-icon safe circle. Natural extent is MARK_EXTENT/VIEWBOX of the layer.
-SAFE_SCALE = ANDROID_SAFE_FRACTION / (MARK_EXTENT / VIEWBOX)
+#: adaptive-icon safe circle, with ANDROID_SAFE_MARGIN of room to spare so the mark is
+#: INSIDE the circle instead of tangent to it (an antialiased edge exactly on the
+#: boundary puts pixels past it). Natural extent is MARK_EXTENT/VIEWBOX of the layer.
+SAFE_SCALE = ANDROID_SAFE_MARGIN * ANDROID_SAFE_FRACTION / (MARK_EXTENT / VIEWBOX)
 
 
 def write(image, name: str) -> None:
@@ -70,9 +74,26 @@ def write(image, name: str) -> None:
 
 
 def main() -> None:
+    # Measure a real render before writing anything. The 2026-08-10 icons were
+    # written by this script with every constant self-consistent and every assert
+    # green, and rasterised with a 0.90-unit nucleus gap instead of the 2.15 the
+    # algebra promised — because nothing in the pipeline had ever looked at a pixel.
+    verify_raster_invariants()
+
     # iOS / legacy launcher: opaque square, no baked corners, mark at its natural
     # proportions (the OS mask crops less than Android's, so no inset is needed).
-    write(render_atom(ICON_PX, background=BG), "icon.png")
+    #
+    # `.convert("RGB")` DROPS THE ALPHA CHANNEL, and that is the point rather than a
+    # tidy-up. The docstring above has said "iOS rejects alpha" since this script was
+    # written, while this file shipped as RGBA — every pixel opaque, but the channel
+    # present. So the asset did not satisfy the constraint its own documentation named,
+    # and whether that mattered depended entirely on a downstream flatten in the Expo
+    # build that nothing here verifies or pins. Emitting RGB removes the question instead
+    # of answering it: the file now IS what the docstring says it is, and no build step
+    # has to rescue it. `apple-touch-icon.png` in gen-favicon-ico.py has always done this;
+    # now both do, and 'ships the iOS and apple-touch icons FULL-BLEED and opaque' in
+    # scripts/__tests__/atom-mark-geometry.test.ts checks the decoded pixels of both.
+    write(render_atom(ICON_PX, background=BG).convert("RGB"), "icon.png")
 
     # Android adaptive: a flat tile behind, the mark inset into the safe circle
     # in front. Both layers are the same 1024px canvas the 108dp layer maps to.
