@@ -3549,6 +3549,19 @@ export function buildTridentOrchestrator(
     // REQUEST_CHANGES / null — the inner loop ended without an APPROVE. This is a
     // CATCH-ALL over several distinct causes, so the reason is MEASURED rather than
     // assumed; see `innerTerminalFailureReason` for what that cost when it was not.
+    //
+    // Prefer what the row already has: a stamped checkpoint is the more specific record,
+    // and re-stamping it from a terminal result would overwrite the round's own findings
+    // with whatever the last result happened to carry. Only when the row is empty does
+    // the result's array fill it in, and a result with no findings leaves it null rather
+    // than writing `[]` — "nobody said anything" and "the column was never written" stay
+    // the same value, so no reader gains a distinction this path cannot actually support.
+    const terminalFindings: string | null =
+      parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
+        ? run.inner_checkpoint_findings
+        : result.findings.length > 0
+          ? JSON.stringify(result.findings)
+          : run.inner_checkpoint_findings
     const failed: TridentRun = {
       ...failedRun(run, innerTerminalFailureReason(run, result), true),
       pr,
@@ -3569,7 +3582,19 @@ export function buildTridentOrchestrator(
       // REQUEST_CHANGES. That fabricated rejection is the defect this branch exists to
       // kill, so the discriminator wins on the field. Main's differentiated `note` is
       // kept verbatim below: it is the operator-visible half of the same fix.
-      inner_verdict: recordedTerminalVerdict(result, run.inner_checkpoint_findings),
+      // THE ROW MUST CARRY THE EVIDENCE FOR THE VERDICT IT RECORDS. `store.ts` refuses
+      // `REQUEST_CHANGES` on a row with no findings — correctly, that guard IS this
+      // branch's thesis. But the findings of a run that reviewed and went straight to
+      // terminal live on the RESULT, and `inner_checkpoint_findings` is only stamped
+      // when a checkpoint is written, so the row arrived at the guard empty-handed.
+      // Reading the result and leaving the column alone made the guard throw, the tick
+      // fail, and the run retry forever without leaving `forge-init` — a wrong value
+      // became a hang. So carry the evidence ACROSS with the verdict: below, the row is
+      // stamped from `result.findings` when the result has them, and only then can the
+      // discriminator honestly return REQUEST_CHANGES. Existing stamped findings win —
+      // a checkpoint that already recorded them is the more specific record.
+      inner_checkpoint_findings: terminalFindings,
+      inner_verdict: recordedTerminalVerdict(result, terminalFindings),
     }
     return {
       run: failed,

@@ -6,6 +6,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
+import { parseCheckpointFindings } from './checkpoint-findings.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
 import { interpretFailure } from './delivery.ts'
 import {
@@ -4907,7 +4908,18 @@ describe('orchestrator — a prNumber of 0 is a sentinel, never a PR number (run
  * verdict is the wrapper's — no reviewer ever ran — so the harvested row must carry null.
  */
 describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f384460d)', () => {
-  test('the replayed inner-error harvest fails with a null verdict, the PR intact, and an infra reason', async () => {
+  // RENAMED, AND THE ASSERTION CHANGED ON PURPOSE — read this before "fixing" it back.
+  // T4 originally recorded `null` here to mean "nobody judged this code", which was right
+  // against the alternative it was written to kill (a fabricated REQUEST_CHANGES on an
+  // infrastructure death). It stays right; it is just no longer the best available answer.
+  // `null` is also what an un-harvested, still-running row carries, so the record could not
+  // distinguish "review provably did not happen" from "not filled in yet" — the same
+  // absence-read-as-information that this whole area keeps getting wrong.
+  // REVIEW_NOT_RUN is that identical claim with a NAME, and it is now a value the column's
+  // CHECK constraint accepts. The infra polarity T4 exists to protect is untouched and
+  // still asserted below: reason names infrastructure, never "without Argus APPROVE", and
+  // `interpretFailure` still classifies it `infra`.
+  test('the replayed inner-error harvest fails with REVIEW_NOT_RUN, the PR intact, and an infra reason', async () => {
     const h = buildHarness({
       plan: () => ({
         result: {
@@ -4926,7 +4938,11 @@ describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f3
 
     const final = await runToTerminal(h, run.id)
     expect(final.phase).toBe('failed')
-    expect(final.inner_verdict).toBeNull()
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+    // The point T4 actually defends: whatever this field says, it must NOT be the
+    // reviewer's rejection. Asserted positively so the test still fails if the old
+    // fabricated REQUEST_CHANGES ever comes back.
+    expect(final.inner_verdict).not.toBe('REQUEST_CHANGES')
     expect(final.pr).toBe(267)
     expect(final.failure_reason).toContain('build infrastructure failed')
     expect(final.failure_reason).not.toContain('without Argus APPROVE')
@@ -4951,6 +4967,17 @@ describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f3
 
     expect(final.phase).toBe('failed')
     expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    // THE ROW MUST CARRY THE EVIDENCE FOR THE VERDICT IT RECORDS, not merely have been
+    // allowed past the guard. Without this, the store's own rule ("REQUEST_CHANGES needs
+    // findings") holds only at the moment of the write and is false on disk the instant
+    // after -- and the next reader of this row, including the resumed fix round, sees a
+    // rejection with nothing to fix. Verified by mutation: deleting the
+    // `inner_checkpoint_findings` write from saveIfActive's UPDATE leaves every other
+    // assertion in this file green, so this is the only thing standing between a correct
+    // implementation and a column nothing ever populates.
+    const persisted = parseCheckpointFindings(final.inner_checkpoint_findings)
+    expect(persisted.length).toBeGreaterThan(0)
+    expect(JSON.stringify(persisted)).toContain('null deref in a.ts')
     expect(final.failure_reason).toContain('without Argus APPROVE')
     expect(interpretFailure(final).klass).not.toBe('infra')
   })

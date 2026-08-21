@@ -205,7 +205,9 @@ describe('(c) retry budget and backoff are separate from fix rounds', () => {
     expect(after.failure_reason).toContain('(budget 2)')
     expect(after.failure_reason).toContain(INCIDENT_CAUSE)
     expect(after.failure_reason).not.toContain('exhausted')
-    expect(after.inner_verdict).toBeNull()
+    // REVIEW_NOT_RUN, not null: an exhausted INFRA budget means review provably never
+    // ran, which is a fact worth naming rather than an absence to be inferred.
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
   })
 
   test('the attempt-1 observer is restart-proof told-once and a throw cannot stop retries', async () => {

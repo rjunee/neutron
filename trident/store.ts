@@ -1126,13 +1126,30 @@ export class TridentRunStore {
   async saveIfActive(run: TridentRun): Promise<boolean> {
     return this.db.transaction((tx) => {
       if (run.inner_verdict === 'REQUEST_CHANGES') {
-        const row = tx
-          .prepare<{ inner_checkpoint_findings: string | null }, [string]>(
-            'SELECT inner_checkpoint_findings FROM code_trident_runs WHERE id = ?',
-          )
-          .get(run.id)
-        if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
-          throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+        // VALIDATE WHAT WILL BE PERSISTED, NOT ONLY WHAT IS ALREADY THERE. This used to
+        // read `inner_checkpoint_findings` from the STORED row while the UPDATE below
+        // never wrote that column — so a caller arriving with findings in hand could not
+        // satisfy the guard by any means. The only two outcomes were a downgraded verdict
+        // (a real blocker recorded as REVIEW_NOT_RUN) or, once a caller started passing
+        // findings, a throw on every tick and a run that retried forever without leaving
+        // `forge-init`. A guard that reads a column its own writer cannot populate is
+        // unsatisfiable by construction.
+        //
+        // The incoming value wins when it carries findings; otherwise fall back to the
+        // stored row, so a save that legitimately leaves the column alone is still judged
+        // against the evidence already on record. Both empty is still a refusal — that is
+        // the thesis and it is intact: an empty finding set is an approval or an
+        // infrastructure failure, never a rejection.
+        const incoming = parseCheckpointFindings(run.inner_checkpoint_findings)
+        if (incoming.length === 0) {
+          const row = tx
+            .prepare<{ inner_checkpoint_findings: string | null }, [string]>(
+              'SELECT inner_checkpoint_findings FROM code_trident_runs WHERE id = ?',
+            )
+            .get(run.id)
+          if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
+            throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+          }
         }
       }
       const res = tx.runSync(
@@ -1141,6 +1158,14 @@ export class TridentRunStore {
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+                -- COALESCE, NOT A PLAIN ASSIGNMENT. The verdict and the evidence for it
+                -- must land in the SAME statement or the guard above can never be
+                -- satisfied. But most callers of saveIfActive never touch findings, and a
+                -- bare assignment would let each of them blank the column on an unrelated
+                -- save. COALESCE writes only when the caller actually brought something.
+                -- (Keep this comment free of question marks: the driver counts every one
+                -- in the statement text as a bind parameter, comments included.)
+                inner_checkpoint_findings = COALESCE(?, inner_checkpoint_findings),
                 base_sha = ?, base_behind = ?,
                 last_advanced_at = ?
           WHERE id = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
@@ -1169,6 +1194,7 @@ export class TridentRunStore {
           run.inner_checkpoint,
           run.inner_verdict,
           run.harvested_at,
+          run.inner_checkpoint_findings,
           run.base_sha,
           run.base_behind,
           this.now(),

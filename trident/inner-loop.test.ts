@@ -130,6 +130,11 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       block_kind: null,
       terminal_cause: null,
       findings_present: false,
+      // The findings ARRAY now travels beside the boolean. `findings_present` answers
+      // "did a reviewer speak"; `findings` answers "what did they say", which is what
+      // the store requires as evidence before it will record a REQUEST_CHANGES. Absent
+      // in this payload, so it decodes to the same fail-closed empty the boolean does.
+      findings: [],
     })
   })
   // T4 (run f384460d) — DID A REVIEWER SAY ANYTHING AT ALL? This is the field that tells an
@@ -325,6 +330,11 @@ describe('parseInnerResult — decode the typed terminal column', () => {
       block_kind: null,
       terminal_cause: null,
       findings_present: false,
+      // The findings ARRAY now travels beside the boolean. `findings_present` answers
+      // "did a reviewer speak"; `findings` answers "what did they say", which is what
+      // the store requires as evidence before it will record a REQUEST_CHANGES. Absent
+      // in this payload, so it decodes to the same fail-closed empty the boolean does.
+      findings: [],
     })
   })
 })
