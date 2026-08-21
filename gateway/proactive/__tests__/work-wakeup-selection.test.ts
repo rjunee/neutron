@@ -136,6 +136,47 @@ describe('selectWakeupWork — which items the wakeup may act on', () => {
     expect(out).toHaveLength(1)
     expect(out[0]?.items.map((i) => i.title)).toEqual(['Ship the importer'])
     expect(out[0]?.deferred).toEqual([])
+    // AND IT SAYS THE BINDING SURVIVED. The run row is still there and still
+    // non-terminal; only the judgement that it drives lapsed. Dropping that made
+    // the prompt tell the agent no run existed, and an agent believing it
+    // dispatches a second one onto a slug the live-only unique index still holds
+    // (`migrations/0120_trident_slug_unique_only_live.sql:42-44`).
+    expect(out[0]?.items[0]?.stalled_run).toEqual({
+      run_id: 'run-1',
+      phase: 'forge-init',
+      reason: 'no-advance',
+      since_advance_ms: WAKEUP_STAND_DOWN_MS + 1,
+    })
+  })
+
+  test('an UNBOUND item carries no stalled_run — there is nothing to reap', () => {
+    const out = select({ items: [item()], runs: [] })
+    expect(out[0]?.items[0]?.stalled_run).toBeUndefined()
+  })
+
+  test('a TERMINAL run leaves no stalled_run either — it finished, it is not parked', () => {
+    // The distinction that keeps the prompt honest in the other direction: a run
+    // that reached `done`/`failed`/`stopped` is not something to go and reap, and
+    // telling the agent to reap it would be its own small lie.
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ phase: 'done' })],
+    })
+    expect(out[0]?.items[0]?.stalled_run).toBeUndefined()
+  })
+
+  test('a run whose row VANISHED leaves no stalled_run — there is no run to name', () => {
+    const out = select({ items: [item({ linked_run_id: 'ghost' })], runs: [] })
+    expect(out[0]?.items[0]?.stalled_run).toBeUndefined()
+  })
+
+  test('a CORRUPT stamp is released AND marked, so a broken clock is not silently an unbound item', () => {
+    const out = select({
+      items: [item({ linked_run_id: 'run-1' })],
+      runs: [run({ last_advanced_at: 'not-a-date' })],
+    })
+    expect(out[0]?.items[0]?.stalled_run?.reason).toBe('unknown-advance')
+    expect(out[0]?.items[0]?.stalled_run?.since_advance_ms).toBe(0)
   })
 
   test('THE LIVE INCIDENT: three parked forge-init runs no longer hide three items', () => {

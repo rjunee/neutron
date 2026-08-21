@@ -52,7 +52,7 @@ import { runDrivingVerdict } from '@neutronai/trident/run-driving.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { workBoardProjectIdForKey, type WorkBoardItem } from '@neutronai/work-board/store.ts'
 
-import type { WakeupProjectWork } from './work-wakeup.ts'
+import type { WakeupProjectWork, WakeupWorkItem } from './work-wakeup.ts'
 
 export interface WakeupSelectionInput {
   /** The board's non-done items (`WorkBoardStore.listAllActive()`). */
@@ -104,6 +104,7 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
 
   for (const item of input.items) {
     if (item.status !== 'in_progress') continue
+    let stalled_run: WakeupWorkItem['stalled_run']
     const linked =
       item.linked_run_id === null ? null : input.lookupRun(item.linked_run_id) ?? null
     // SCOPE THE LOOKUP, exactly as `runProgressForItem` does
@@ -144,8 +145,27 @@ export function selectWakeupWork(input: WakeupSelectionInput): WakeupProjectWork
         })
         continue
       }
+      // RELEASED, BUT STILL BOUND — and the caller has to be told which.
+      //
+      // `terminal` is excluded deliberately: that run finished, there is nothing
+      // left to reap, and the item is free in the ordinary way. The other two
+      // reasons are not that. `no-advance` and `unknown-advance` both release a run
+      // row that is STILL NON-TERMINAL and still named by `linked_run_id`, on
+      // evidence this module's own header calls the weakest it has. Dropping that
+      // distinction is what let the prompt tell the agent there was no background
+      // run at all, and an agent believing it dispatches a second one.
+      if (verdict.reason !== 'terminal') {
+        stalled_run = {
+          run_id: run.id,
+          phase: run.phase,
+          reason: verdict.reason,
+          since_advance_ms: verdict.since_advance_ms,
+        }
+      }
     }
-    ensure(item.project_slug).items.push({ title: item.title })
+    ensure(item.project_slug).items.push(
+      stalled_run === undefined ? { title: item.title } : { title: item.title, stalled_run },
+    )
   }
   return [...grouped.values()]
 }

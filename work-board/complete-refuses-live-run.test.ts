@@ -20,10 +20,14 @@ import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { runDrivingVerdict, WAKEUP_STAND_DOWN_MS } from '@neutronai/trident/run-driving.ts'
-import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
+import {
+  isRunLiveForCompletion,
+  runDrivingVerdict,
+  WAKEUP_STAND_DOWN_MS,
+} from '@neutronai/trident/run-driving.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { WorkBoardStore, WorkBoardRunStillLiveError } from './store.ts'
 
@@ -209,7 +213,10 @@ describe('completion legality is NOT wakeability', () => {
 
   test('and the store STILL refuses to call it done, because the build never ended', async () => {
     const run = stalled()
-    const store = new WorkBoardStore(db, { isRunLive: () => !isTerminalPhase(run.phase) })
+    // THE PRODUCTION PREDICATE, BY SYMBOL. This used to be an inline
+    // `() => !isTerminalPhase(run.phase)` — the test's own copy of the rule, which
+    // would have stayed green through exactly the revert it exists to catch.
+    const store = new WorkBoardStore(db, { isRunLive: isRunLiveForCompletion(() => run) })
     const item = await store.create(SCOPE, { title: 'P1' })
     await store.attachRun(SCOPE, item.id, 'run-1')
     let caught: unknown = null
@@ -224,9 +231,32 @@ describe('completion legality is NOT wakeability', () => {
 
   test('a terminal run completes normally — the refusal is not permanent', async () => {
     const run = { ...stalled(), phase: 'failed' } as TridentRun
-    const store = new WorkBoardStore(db, { isRunLive: () => !isTerminalPhase(run.phase) })
+    const store = new WorkBoardStore(db, { isRunLive: isRunLiveForCompletion(() => run) })
     const item = await store.create(SCOPE, { title: 'P1' })
     await store.attachRun(SCOPE, item.id, 'run-1')
     expect((await store.complete(SCOPE, item.id))?.status).toBe('done')
+  })
+
+  test('a vanished run row is NOT live — a deleted run must not brick completion', () => {
+    // The factory's null/undefined arm, which the inline closure never covered:
+    // `TridentRunStore.get` returns null for a row that no longer exists, and
+    // reading that as "still live" would make the item permanently uncompletable.
+    expect(isRunLiveForCompletion(() => null)('run-1')).toBe(false)
+    expect(isRunLiveForCompletion(() => undefined)('run-1')).toBe(false)
+  })
+
+  test('the COMPOSER wires that symbol — the pin is worthless if production drifts off it', async () => {
+    // Sharing a symbol pins the RULE; it does not pin the CALL SITE. Argus's
+    // finding was precisely that the suite "would stay green if the composer
+    // reverted to runDrivingVerdict", and that remains true of any test that only
+    // imports the helper. So assert the wiring itself, in the same shape the
+    // repo's other served-surface tests use (`tests/integration/*.open.test.ts`).
+    const composer = await Bun.file(
+      fileURLToPath(new URL('../open/composer.ts', import.meta.url)),
+    ).text()
+    expect(composer).toContain('isRunLive: isRunLiveForCompletion(')
+    // And the disagreement, stated as an absence: the completion guard must never
+    // be fed the wakeup's verdict.
+    expect(composer).not.toContain('isRunLive: runDrivingVerdict')
   })
 })

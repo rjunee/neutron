@@ -256,3 +256,37 @@ export function runDrivingVerdict(
   }
   return { driving: true, reason: 'advancing', since_advance_ms }
 }
+
+/**
+ * "Did this run FINISH?" — the Work Board completion guard's predicate, and
+ * deliberately NOT {@link runDrivingVerdict}.
+ *
+ * IT LIVES NEXT TO THE VERDICT IT MUST DISAGREE WITH, on purpose. A round of this
+ * change moved the completion guard onto `runDrivingVerdict` so that items the
+ * wakeup newly takes could also be closed; a cross-model review refused it and was
+ * right. The two questions fail in OPPOSITE directions. "Is anyone driving this?"
+ * may be answered from a stale clock, because guessing wrong costs one duplicated
+ * turn. "Did this work ship?" may not, because `complete()` writes the board row
+ * and does not stop the build (`work-board/store.ts:598`), so guessing wrong
+ * asserts a falsehood about the world. A quiet `last_advanced_at` is weak evidence
+ * that nobody is driving and NO evidence that the build ended.
+ *
+ * It is a FACTORY over an injected lookup rather than a free function on a store,
+ * because `work-board/` has no `trident` import in production code and must not
+ * grow one — `WorkBoardStore` takes `isRunLive` as a dependency precisely to keep
+ * that edge out. The factory is the seam, so the policy is shared by symbol while
+ * the layering stays as it was.
+ *
+ * Sharing it by symbol is also the only way the pin is worth anything: the
+ * completion tests previously rebuilt this closure inline, so they would have gone
+ * on passing if production had been reverted to the wakeup's verdict — a test
+ * asserting its own copy of the rule, which is no assertion at all.
+ */
+export function isRunLiveForCompletion(
+  lookup: (run_id: string) => TridentRun | null | undefined,
+): (run_id: string) => boolean {
+  return (run_id: string): boolean => {
+    const run = lookup(run_id)
+    return run !== null && run !== undefined && !isTerminalPhase(run.phase)
+  }
+}
