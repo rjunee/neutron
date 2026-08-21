@@ -182,6 +182,28 @@ const NOW = Date.parse('2026-08-20T21:29:00.000Z')
 const FUTURE_TOKEN = jwtWithExp(Math.floor(Date.parse('2026-08-28T02:04:50.000Z') / 1000))
 const PAST_TOKEN = jwtWithExp(Math.floor(Date.parse('2026-08-19T00:00:00.000Z') / 1000))
 
+// TWO FUTURE TOKENS, AND THE DIFFERENCE IS WHOSE CLOCK READS THEM.
+//
+// `FUTURE_TOKEN` is future relative to `NOW`, the PINNED clock every TypeScript case
+// here injects. That pairing is deterministic forever and must stay pinned — a test
+// that pins the clock and then dates a fixture off `Date.now()` is not pinned at all.
+//
+// The SHELL cases are different in kind. They exec the REAL `trident/codex-build.sh`
+// and `trident/codex-review.sh`, which compute `exp > now` themselves against the
+// REAL system clock — that computation is the behaviour under test, so it cannot be
+// injected. Against the real clock a fixed date is a countdown: `FUTURE_TOKEN` stops
+// being future on 2026-08-28, at which point P5, P5c and P5R flip to red on every box
+// and every commit, and blame whichever diff happens to be in flight.
+//
+// This repo has already lost a day to exactly that shape — two scheduler tests that
+// omitted a `now()` pin reddened at one hour of the day and were read as flaky. And
+// `scripts/ci/lint.sh`'s WALL-CLOCK-BOUND gate does NOT catch this: it bans asserting
+// on ELAPSED time, not on a fixture that silently expires.
+//
+// So: relative to the real clock, always a day out, never a countdown.
+const SHELL_FUTURE_TOKEN = jwtWithExp(Math.floor(Date.now() / 1000) + 86_400)
+const SHELL_PAST_TOKEN = jwtWithExp(Math.floor(Date.now() / 1000) - 86_400)
+
 function bundle(access: string): string {
   return JSON.stringify({
     tokens: { id_token: 'id', access_token: access, refresh_token: 'ref', account_id: 'acct' },
@@ -1093,6 +1115,27 @@ describe('codexDispatchPreflight — only a codex BUILD is ever blocked', () => 
 // P5 — THE WRAPPER. The measured false green, encoded: `codex login status`
 // exits 0 (it only reads a file) while the endpoint returns 401.
 // ─────────────────────────────────────────────────────────────────────────────
+// THE GUARD THAT WOULD HAVE CAUGHT THE COUNTDOWN. Both shell fixtures are asserted
+// against the SAME real clock the wrappers read, so if either ever stops straddling
+// "now" this fails here with a clear reason, instead of surfacing as three unrelated
+// shell cases going red on a date nobody connects to a fixture.
+describe('the shell fixtures are relative to the real clock, not a fixed date', () => {
+  function expOf(jwt: string): number {
+    return JSON.parse(Buffer.from(jwt.split('.')[1]!, 'base64url').toString()).exp as number
+  }
+  test('the future fixture is genuinely in the future, and the past one genuinely past', () => {
+    const nowSec = Math.floor(Date.now() / 1000)
+    expect(expOf(SHELL_FUTURE_TOKEN)).toBeGreaterThan(nowSec)
+    expect(expOf(SHELL_PAST_TOKEN)).toBeLessThan(nowSec)
+    // NEGATIVE CONTROL — the pinned TS fixture is NOT safe to use here, and this
+    // records why: it is a fixed calendar date, so this same comparison is a
+    // countdown. Asserting the reader, not the value, keeps this honest whichever
+    // side of 2026-08-28 the suite runs on.
+    expect(String(FUTURE_TOKEN)).not.toBe(String(SHELL_FUTURE_TOKEN))
+  })
+})
+
+
 describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
   const seen: Array<{ path: string; auth: string }> = []
   let httpStatus = 401
@@ -1185,7 +1228,7 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
   test('P5: `codex login status` passes, the endpoint 401s → DEFERRED (exit 3)', async () => {
     seen.length = 0
     httpStatus = 401
-    const out = await runWrapper(FUTURE_TOKEN)
+    const out = await runWrapper(SHELL_FUTURE_TOKEN)
     expect(out.status).toBe(3)
     expect(out.stderr).toContain('CODEX_BUILD_AUTH_EXPIRED')
     expect(out.stderr).toContain('REVOKED')
@@ -1193,14 +1236,14 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
     // curl were missing or the token unreadable the wrapper would skip the probe,
     // and this assertion — not a silent pass — is what says so.
     expect(seen.length).toBeGreaterThanOrEqual(1)
-    expect(seen[0]?.auth).toBe(`Bearer ${FUTURE_TOKEN}`)
+    expect(seen[0]?.auth).toBe(`Bearer ${SHELL_FUTURE_TOKEN}`)
     expect(seen[0]?.path).toContain('client_version=')
   })
 
   test('N7 (ANTI-HARDCODE): the same wrapper with a 200 does NOT fail the auth precheck', async () => {
     seen.length = 0
     httpStatus = 200
-    const out = await runWrapper(FUTURE_TOKEN)
+    const out = await runWrapper(SHELL_FUTURE_TOKEN)
     expect(seen.length).toBeGreaterThanOrEqual(1)
     // It may still DEFER later for its own reasons (no diff, no worktree) — what
     // must not happen is failing on AUTH.
@@ -1210,7 +1253,7 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
   test('N2: a 500 from the endpoint does NOT fail the auth precheck', async () => {
     seen.length = 0
     httpStatus = 500
-    const out = await runWrapper(FUTURE_TOKEN)
+    const out = await runWrapper(SHELL_FUTURE_TOKEN)
     expect(seen.length).toBeGreaterThanOrEqual(1)
     expect(out.stderr).not.toContain('CODEX_BUILD_AUTH_EXPIRED')
   })
@@ -1236,12 +1279,12 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
   test('P5b: an EXPIRED access token + 401 does NOT fail the precheck (the CLI refreshes it)', async () => {
     seen.length = 0
     httpStatus = 401
-    const out = await runWrapper(PAST_TOKEN)
+    const out = await runWrapper(SHELL_PAST_TOKEN)
     // POSITIVE CONTROL: the probe really ran with this token — otherwise "no
     // AUTH_EXPIRED" would be satisfied by a wrapper that skipped the probe
     // entirely (no curl, unreadable token) and this would assert nothing.
     expect(seen.length).toBeGreaterThanOrEqual(1)
-    expect(seen[0]?.auth).toBe(`Bearer ${PAST_TOKEN}`)
+    expect(seen[0]?.auth).toBe(`Bearer ${SHELL_PAST_TOKEN}`)
     expect(out.stderr).not.toContain('CODEX_BUILD_AUTH_EXPIRED')
     expect(out.stderr).not.toContain('REVOKED')
   })
@@ -1252,7 +1295,7 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
     // that simply stopped checking auth.
     seen.length = 0
     httpStatus = 401
-    const out = await runWrapper(FUTURE_TOKEN)
+    const out = await runWrapper(SHELL_FUTURE_TOKEN)
     expect(out.status).toBe(3)
     expect(out.stderr).toContain('CODEX_BUILD_AUTH_EXPIRED')
     expect(out.stderr).toContain('REVOKED')
@@ -1261,7 +1304,7 @@ describe('codex-build.sh auth precheck probes the endpoint (P5)', () => {
   test('N: a 403 does NOT fail the precheck — an edge refusal is not a credential fact', async () => {
     seen.length = 0
     httpStatus = 403
-    const out = await runWrapper(FUTURE_TOKEN)
+    const out = await runWrapper(SHELL_FUTURE_TOKEN)
     expect(seen.length).toBeGreaterThanOrEqual(1)
     expect(out.stderr).not.toContain('CODEX_BUILD_AUTH_EXPIRED')
   })
@@ -1326,9 +1369,9 @@ describe('codex-review.sh auth precheck applies the same clock (P5R)', () => {
   test('P5R: 401 on a token whose exp is in the FUTURE → DEFERRED, named REVOKED', async () => {
     seen.length = 0
     httpStatus = 401
-    const out = await runReviewWrapper(FUTURE_TOKEN)
+    const out = await runReviewWrapper(SHELL_FUTURE_TOKEN)
     expect(seen.length).toBeGreaterThanOrEqual(1)
-    expect(seen[0]?.auth).toBe(`Bearer ${FUTURE_TOKEN}`)
+    expect(seen[0]?.auth).toBe(`Bearer ${SHELL_FUTURE_TOKEN}`)
     expect(out.status).toBe(3)
     expect(out.stderr).toContain('CODEX_REVIEW_AUTH_EXPIRED')
     expect(out.stderr).toContain('REVOKED')
@@ -1337,16 +1380,16 @@ describe('codex-review.sh auth precheck applies the same clock (P5R)', () => {
   test('P5R b: the SAME 401 on an already-EXPIRED token does NOT fail the precheck', async () => {
     seen.length = 0
     httpStatus = 401
-    const out = await runReviewWrapper(PAST_TOKEN)
+    const out = await runReviewWrapper(SHELL_PAST_TOKEN)
     expect(seen.length).toBeGreaterThanOrEqual(1)
-    expect(seen[0]?.auth).toBe(`Bearer ${PAST_TOKEN}`)
+    expect(seen[0]?.auth).toBe(`Bearer ${SHELL_PAST_TOKEN}`)
     expect(out.stderr).not.toContain('CODEX_REVIEW_AUTH_EXPIRED')
   })
 
   test('P5R c: a 200 does not fail the precheck either (the anti-hardcode control)', async () => {
     seen.length = 0
     httpStatus = 200
-    const out = await runReviewWrapper(FUTURE_TOKEN)
+    const out = await runReviewWrapper(SHELL_FUTURE_TOKEN)
     expect(seen.length).toBeGreaterThanOrEqual(1)
     expect(out.stderr).not.toContain('CODEX_REVIEW_AUTH_EXPIRED')
   })
