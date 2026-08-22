@@ -298,6 +298,26 @@ export default function IntegrationsScreen() {
     }
   }, [codexClient, codexAuth, codexAccount, codexBusy, fetchCodex]);
 
+  /**
+   * What the connect control will ACTUALLY do, named on the control itself.
+   *
+   * The seat name is normalized here exactly as the server normalizes it —
+   * trimmed and lowercased — because that normalization is what makes the
+   * overwrite invisible. `Work`, ` work ` and `work` are one seat, so typing any
+   * of them over an existing `work` replaces a working subscription; the button
+   * said "Add seat" throughout, and the paste that followed destroyed a
+   * credential the owner would then have to fetch again from another machine.
+   * Reconnecting a seat is legitimate — it is how a revoked one is repaired — so
+   * the control stays enabled and simply stops lying about which it is doing.
+   */
+  const codexConnectLabel = useMemo(() => {
+    if (codexBusy) return 'Connecting…';
+    const typed = codexAccount.trim().toLowerCase();
+    const seats = codexStatus?.accounts ?? [];
+    if (typed.length === 0) return seats.length > 0 ? 'Replace first seat' : 'Connect';
+    return seats.some((a) => a.slot === typed) ? `Replace seat “${typed}”` : 'Add seat';
+  }, [codexBusy, codexAccount, codexStatus]);
+
   /** Disconnect ONE seat, leaving the rest of the pool connected. */
   const handleDisconnectSeat = useCallback(
     (slot: string) => {
@@ -953,15 +973,7 @@ export default function IntegrationsScreen() {
                     Reconnecting seat one is still legitimate (it is how an expired
                     or revoked first seat is fixed), so the control stays enabled
                     and simply tells the truth about which it is doing. */}
-                <Text style={styles.primaryBtnText}>
-                  {codexBusy
-                    ? 'Connecting…'
-                    : codexAccount.trim().length > 0
-                      ? 'Add seat'
-                      : (codexStatus?.accounts ?? []).length > 0
-                        ? 'Replace first seat'
-                        : 'Connect'}
-                </Text>
+                <Text style={styles.primaryBtnText}>{codexConnectLabel}</Text>
               </Pressable>
           </View>
 

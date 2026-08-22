@@ -74,14 +74,45 @@ export const MAX_RESET_HORIZON_MS = 32 * 24 * 60 * 60 * 1000
  * SQLite round-trips as a REAL and no clock comparison can ever clear — a
  * permanent retirement that looks exactly like a working cooldown.
  *
- * Clamping to the same horizon `normalizeResetsAt` already enforces on the other
+ * Clamping to the same horizon `classifyResetsAt` already enforces on the other
  * input makes the two paths symmetric. The cost of clamping too low is one
  * wasted selection attempt against a still-capped seat, which self-corrects on
  * the next harvest; the cost of not clamping is a seat that never returns.
  */
 export const MAX_FALLBACK_COOLDOWN_MS = MAX_RESET_HORIZON_MS
 
-/** Why a slot is not currently eligible. */
+/**
+ * Slack added to a cooldown that ends at a server-declared `resets_at`.
+ *
+ * The reset instant the CLI reports and the instant the server actually refunds
+ * the quota are not the same clock, and a cooldown that ends at the reported
+ * millisecond makes the seat eligible again at exactly the boundary. Landing a
+ * run one tick early spends a whole selection on a seat that answers with the
+ * same cap, which then re-cools it — the run is simply lost. A minute of slack
+ * costs a minute of a window measured in hours or a week, and removes the class
+ * of failure entirely. This is the tolerance the design asked for in place of an
+ * equality compare.
+ */
+export const RESET_JITTER_MS = 60_000
+
+/**
+ * Why a slot is not currently eligible.
+ *
+ * THERE IS NO `rate-limited` REASON, and its absence is deliberate rather than
+ * an omission. It would be set by a reactive classifier reading the codex
+ * wrappers' stderr — but the wrappers are shell scripts whose stderr is never
+ * observed by any TypeScript seam in this repo, so such a classifier would have
+ * had no caller and no way to fire. The evidence it was meant to recover —
+ * WHICH quota was spent — rides `rate_limit_reached_type` on the CLI's own
+ * `token_count` event, which this module already parses, and lands as
+ * `short-window` / `long-window`. Declaring a reason no path can set invites the
+ * next reader to believe a classifier exists.
+ */
+// `rate-limited` is main's, and the rebase must not drop it: it is a ROTATION
+// decision with its own timer and its own evidence, and a liveness probe knows
+// nothing about quota. Absent from this union, `coerceReason` narrows a stored
+// 'rate-limited' to 'manual', and the anti-overretract guard then rotates a
+// capped seat straight back into service.
 export type CoolingReason =
   | 'short-window'
   | 'long-window'
@@ -245,6 +276,22 @@ export function coolPercentFor(window_minutes: number): number {
  */
 export function signalToCooldown(outcome: HarvestOutcome, now: number): Cooldown | null {
   if (outcome.kind !== 'snapshot') return null
+
+  // THE WHOLE SNAPSHOT IS STALE WHEN EVERY WINDOW IN IT HAS ALREADY RESET, and
+  // that verdict has to bind the `reached_type` arm below as well as the
+  // percentages. A rollout is a file on disk that the harvest re-reads on every
+  // resolve; nothing rewrites it, so a seat that hit its weekly cap eight days
+  // ago still has `rate_limit_reached_type: 'weekly-limit'` sitting in its last
+  // `token_count` event, alongside the elapsed reset that proves the quota came
+  // back. Reading the reached_type without this guard cooled such a seat for a
+  // FRESH seven days measured from now — and because a cooling seat is skipped,
+  // it never ran, never wrote a newer rollout, and re-cooled itself from the
+  // same bytes on the next resolve. A healthy paid seat, benched forever, by a
+  // mechanism that looks exactly like a working cooldown.
+  const fresh = outcome.snapshot.windows.filter((w) => !w.expired)
+  const staleSnapshot = outcome.snapshot.windows.length > 0 && fresh.length === 0
+  if (staleSnapshot) return null
+
   let best: Cooldown | null = null
   for (const w of outcome.snapshot.windows) {
     if (!Number.isFinite(w.used_percent)) continue
@@ -260,7 +307,7 @@ export function signalToCooldown(outcome: HarvestOutcome, now: number): Cooldown
     if (w.expired) continue
     if (w.used_percent < coolPercentFor(w.window_minutes)) continue
     const short = isShortWindow(w.window_minutes)
-    const until = w.resets_at_ms !== null ? w.resets_at_ms : now + fallbackCooldownMs(w.window_minutes)
+    const until = coolUntil(w.resets_at_ms, now + fallbackCooldownMs(w.window_minutes))
     const reason: CoolingReason = short ? 'short-window' : 'long-window'
     if (best === null || until > best.cooling_until) best = { cooling_until: until, cooling_reason: reason }
   }
@@ -272,20 +319,43 @@ export function signalToCooldown(outcome: HarvestOutcome, now: number): Cooldown
   // keeps a weekly cap from being cooled for five hours.
   const hit = reachedWindowClass(outcome.snapshot.reached_type)
   if (hit !== null) {
-    const match = outcome.snapshot.windows.find(
-      (w) => !w.expired && isShortWindow(w.window_minutes) === (hit === 'short'),
+    // MATCHING THE CLASS IS A PREFERENCE, NOT A PRECONDITION — the class match
+    // usually FAILS, which is the difference between using the server's own
+    // answer and inventing one. `five-hour-limit` is a short-class hit, but every
+    // window the CLI has been observed to report declares 10080 minutes (12,582
+    // samples, all weekly), so no window is ever short-class and the match is
+    // always undefined. Requiring it meant a five-hour cap fell through to a
+    // blind five-hour constant while the same snapshot carried an explicit
+    // `resets_at` three hours out: over-cool by two hours, discard the only real
+    // datum, and repeat on every harvest because the constant never converges on
+    // the reset. ANY fresh window's declared reset beats a constant, because it
+    // is the server answering "when" rather than us guessing.
+    const matched = fresh.find((w) => isShortWindow(w.window_minutes) === (hit === 'short'))
+    const anchor = matched ?? fresh.find((w) => w.resets_at_ms !== null)
+    const until = coolUntil(
+      anchor?.resets_at_ms ?? null,
+      now +
+        (matched !== undefined
+          ? fallbackCooldownMs(matched.window_minutes)
+          : hit === 'short'
+            ? FAILURE_SHORT_COOLDOWN_MS
+            : FAILURE_LONG_COOLDOWN_MS),
     )
-    const until =
-      match?.resets_at_ms ??
-      now + (match !== undefined
-        ? fallbackCooldownMs(match.window_minutes)
-        : hit === 'short'
-          ? FAILURE_SHORT_COOLDOWN_MS
-          : FAILURE_LONG_COOLDOWN_MS)
     const reason: CoolingReason = hit === 'short' ? 'short-window' : 'long-window'
     if (best === null || until > best.cooling_until) best = { cooling_until: until, cooling_reason: reason }
   }
   return best
+}
+
+/**
+ * When a cooldown ends: the declared reset plus tolerance, else a duration.
+ *
+ * The jitter rides only the RESET path. A duration fallback is already our own
+ * conservative number and padding it would compound a guess; a reset is the
+ * server's instant, and that is the one worth not landing exactly on.
+ */
+function coolUntil(resets_at_ms: number | null, fallback: number): number {
+  return resets_at_ms !== null ? resets_at_ms + RESET_JITTER_MS : fallback
 }
 
 /**
@@ -297,20 +367,14 @@ export function signalToCooldown(outcome: HarvestOutcome, now: number): Cooldown
  * forever. See `MAX_FALLBACK_COOLDOWN_MS`.
  */
 export function fallbackCooldownMs(window_minutes: number): number {
-  if (!Number.isFinite(window_minutes) || window_minutes <= 0) {
-    return isShortWindow(window_minutes) ? FAILURE_SHORT_COOLDOWN_MS : FAILURE_LONG_COOLDOWN_MS
-  }
+  // A length we cannot read is treated as LONG, matching `coolPercentFor`: the
+  // two must agree, or a window could be judged against the weekly threshold and
+  // then cooled for a session's worth of time. (The short constant is
+  // unreachable from here by construction — `isShortWindow` demands a finite
+  // positive number, which is exactly what this guard has already excluded — so
+  // it is not offered as a branch that can never be taken.)
+  if (!Number.isFinite(window_minutes) || window_minutes <= 0) return FAILURE_LONG_COOLDOWN_MS
   return Math.min(window_minutes * 60_000, MAX_FALLBACK_COOLDOWN_MS)
-}
-
-/**
- * Convert the CLI's `resets_at` (epoch SECONDS) to milliseconds, rejecting a
- * value that cannot be a real reset. Returning null rather than a bogus number
- * makes the caller fall back to the window length, which is always safe.
- */
-export function normalizeResetsAt(raw: unknown, now: number): number | null {
-  const c = classifyResetsAt(raw, now)
-  return c.kind === 'future' ? c.ms : null
 }
 
 /**

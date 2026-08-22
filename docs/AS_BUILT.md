@@ -2,6 +2,93 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-08-17 — a stale rollout is not evidence, and a healthy reading must be able to release a seat (#418)
+
+PR #418, follow-up to #407. Review found three ways for the Codex seat pool to shrink to
+nothing while every surface reported it working. #407 was already merged when the findings
+landed, so this is a separate PR rather than another round on that one.
+
+**A stale rollout was read as current evidence.** A rollout is a FILE, and the harvest
+re-reads the same bytes on every resolve. A seat that hit its weekly cap last week still
+carries `weekly-limit` in its last `token_count` event — beside the elapsed `resets_at`
+that proves the quota has since come back. The percentage arm already skipped expired
+windows; the `rate_limit_reached_type` arm did not. With every window expired it matched
+none of them and fell through to a BLIND seven days measured from now. Because a cooling
+seat is skipped, it never ran, never wrote a newer rollout, and derived the same seven days
+again on the next resolve: a healthy paid seat benched permanently, by a mechanism
+indistinguishable from a working cooldown. A snapshot whose every window has expired now
+cools nothing at all, and that verdict binds both arms.
+
+**The short-window class could never match a window.** `reachedWindowClass('five-hour-limit')`
+is short, but every window the CLI has been observed to report declares 10080 minutes, so
+the class match ALWAYS failed for a short hit and fell through to a five-hour constant —
+while the same snapshot carried an explicit reset three hours out. Over-cooled, discarded
+the only real datum, and never converged, since the constant reproduces itself on every
+harvest. Any fresh window's declared reset now anchors the cooldown; the class-chosen
+constant is the last resort rather than the first.
+
+**Cooling was one-way.** The cooldown is set from a reset the CLI PREDICTED, and a later
+snapshot showing the seat under threshold is the CLI withdrawing that prediction. Nothing
+acted on it, so the predicted timestamp remained the only thing that could release the
+seat. A current healthy reading now clears the cooldown; a wholly stale one does not (the
+inverse error, and just as wrong); `unauthorized` still clears only on reconnect, because a
+revoked refresh token is not a usage state.
+
+**The top-level status field described seat one, not the pool.** `status()` reads the
+`codex` service row, which is slot `default` alone, so an owner who connected only a NAMED
+seat got `not_connected` in the single field every pre-rotation client reads — while
+trident was resolving that seat and running reviews with it. The mobile header announced
+that cross-model review was off; the web pane hid Disconnect, so the seat could not be
+managed from the surface that denied it existed. The field now reports the pool, from
+`CodexCredentialService.poolStatus` — on the SERVICE rather than in either surface, because
+the HTTP route and the `codex_status` agent tool had both hand-rolled the legacy reply and
+would otherwise drift into different answers about the same pool. The agent tool carried
+both defects and is fixed with the same two calls.
+
+Also: the status view HARVESTS (it reported the last run's figures and looked current) and
+does it in ONE pass, so the seat marked `active` and the seat reported `next` can no longer
+be answers to two different questions. A paste that will REPLACE a connected seat says so,
+including through the aliased spellings normalization folds together (`Work`, ` work `,
+`WORK` are one seat, and overwriting one destroys a bundle the owner must re-fetch from
+another machine). A seat keeps the name its owner gave it across a status poll, and the
+first seat can be named at all — it delegates to the legacy connect path, which hardcoded a
+description. An over-long label is a 400 with a code instead of a 500. A cooldown derived
+from a server reset carries a minute of tolerance rather than ending on the boundary
+instant, so a run is not spent landing one tick early.
+
+Deleted rather than left to mislead: the `rate-limited` cooling reason, which no path could
+set, and the `normalizeResetsAt` wrapper, which had no production caller. Both were
+residue of the reactive stderr classifier — which cannot exist at this seam and is
+correctly recorded as not shipping in the #407 entry: the codex wrappers are shell scripts
+whose stderr no TypeScript code in this repo observes, and the evidence it was meant to
+recover rides `rate_limit_reached_type`, already parsed. `trident/codex-rotation-store.ts`
+now documents why its synchronous writes survive the `runSync` hazard `persistence/db.ts`
+describes — every field it writes is DERIVED from the seat's rollout file and written
+together with the throttle stamp, so a lost write costs one selection and is re-derived on
+the next resolve — and states the property to protect: no field here may be one that cannot
+be recomputed from disk.
+
+**Correcting an evidence claim in the #407 entry.** That entry says its fail-safe rules were
+"each pinned by a mutation applied and observed red". Only one such proof was left in the
+tree as an artifact (a single `Verified RED` comment), so the claim was broader than what a
+later reader can check. For THIS change the mutations were scripted, run, and reverted one
+at a time: **13 mutations, 13 killed, 0 survivors** — the stale-snapshot guard, the anchor
+fallback, the jitter on the reset path, the jitter kept OFF the duration fallback, the
+cooldown-clearing arm, its freshness guard, the harvest in the status view, the syncSlots
+relabel, computing `replaced` before the write, the pool-derived top-level status (proved
+twice, once through the HTTP route and once through the agent tool), the validation-error
+mapping, and the app control's replace-vs-add label. Each test names its mutation in the
+test body.
+
+One survivor was found and fixed rather than counted: the first label test could not fail,
+because with a name supplied the credential row and the rotation row agree, so copying one
+onto the other is invisible. The discriminating case is a seat connected with NO name,
+where the two DIVERGE.
+
+Files: `trident/codex-rotation.ts`, `trident/codex-rotation-store.ts`,
+`trident/codex-credential.ts`, `gateway/http/codex-credential-surface.ts`,
+`app/app/integrations.tsx`, and their tests. No migration, no new surface, no flag.
+
 ## 2026-08-19 — `suiteOutcome='deferred'` separates an instructed Ralph deferral from a missing suite
 
 Two independent salvage lanes exposed the same two-meanings defect: every intermediate

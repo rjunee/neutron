@@ -298,3 +298,65 @@ describe('codex-auth HTTP surface — MULTIPLE SEATS', () => {
     expect(status.accounts).toEqual([])
   })
 })
+
+describe('the top-level status describes the POOL, not the first seat', () => {
+  // MUTATION: return `service.status(...)`'s own status verbatim in the GET
+  // body, i.e. drop the `effectiveStatus` call.
+  //
+  // `service.status` reads the `codex` service row, which is seat `default` and
+  // nothing else. An owner who connected only a NAMED seat therefore got
+  // `not_connected` in the one field every pre-rotation client reads — beside a
+  // populated `accounts` array, and while trident was happily resolving that
+  // named seat and running reviews with it. The mobile header announced that
+  // cross-model review was off; the web pane hid Disconnect, so the seat could
+  // not be managed from the UI that said it did not exist.
+  test('a named-seat-only pool reports connected, and can still be disconnected', async () => {
+    const res = await surface.handler(req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }))
+    expect(res?.status).toBe(201)
+    const body = (await (await surface.handler(req('GET', GLOBAL)))!.json()) as {
+      status: string
+      accounts: { slot: string; status: string }[]
+      next: string | null
+    }
+    expect(body.accounts.map((a) => a.slot)).toEqual(['work'])
+    expect(body.status).toBe('connected')
+    expect(body.next).toBe('work')
+    // The unqualified Disconnect button must reach it.
+    const del = await surface.handler(req('DELETE', GLOBAL))
+    expect(del?.status).toBe(200)
+  })
+
+  test('with no seat at all it still reports not_connected', async () => {
+    const body = (await (await surface.handler(req('GET', GLOBAL)))!.json()) as { status: string }
+    expect(body.status).toBe('not_connected')
+  })
+
+  // MUTATION: remove the try/catch around `connectAccount` in the POST branch.
+  //
+  // The store throws a typed validation error for a label over its ceiling.
+  // Unmapped it escaped as a 500, telling the owner the instance had broken when
+  // he had simply typed too long a name — and giving him nothing to correct. The
+  // sibling credentials surface has always mapped this; only this route missed it.
+  test('an over-long label is a 400 with a code, not a 500', async () => {
+    const res = await surface.handler(
+      req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work', label: 'x'.repeat(600) }),
+    )
+    expect(res?.status).toBe(400)
+    const body = (await res!.json()) as { code?: string }
+    expect(typeof body.code).toBe('string')
+  })
+
+  // MUTATION: always report `replaced: false`.
+  test('the reply says whether the paste ADDED a seat or REPLACED one', async () => {
+    const first = (await (await surface.handler(
+      req('POST', GLOBAL, { auth: subscriptionAuth(), account: 'work' }),
+    ))!.json()) as { replaced: boolean }
+    expect(first.replaced).toBe(false)
+    // Same seat under an aliased spelling — normalization makes it the same seat.
+    const again = (await (await surface.handler(
+      req('POST', GLOBAL, { auth: subscriptionAuth(), account: ' WORK ' }),
+    ))!.json()) as { replaced: boolean; account: string }
+    expect(again.account).toBe('work')
+    expect(again.replaced).toBe(true)
+  })
+})

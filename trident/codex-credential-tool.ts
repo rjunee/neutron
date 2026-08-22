@@ -115,10 +115,20 @@ export function registerCodexCredentialToolSurface(
       // bounded at 3s, and it never throws: an unreachable endpoint leaves the
       // reading precisely as it was before this call.
       await deps.service.refreshSeatLiveness(owner)
-      const next = deps.service.nextSlot(owner)
+      // ONE pass, and the POOL's status — the same two corrections the HTTP
+      // route needed, for the same reasons. Asking for the seats and the next
+      // seat separately reconciled the pool twice and let the two halves answer
+      // against different state; and `status(owner)` alone describes seat one, so
+      // an owner running only a NAMED seat would be told Codex was not connected
+      // while trident was running reviews with it.
+      //
+      // Both survive the rebase deliberately: main's probe answers "are these bytes
+      // still good", this branch's single pass answers "which seats are there". They
+      // are different questions and the tool needs both.
+      const { accounts, next } = deps.service.accountsView(owner)
       return {
-        ...deps.service.status(owner),
-        accounts: deps.service.listAccounts(owner),
+        ...deps.service.poolStatus(owner, accounts),
+        accounts,
         ...(next !== null ? { next: next.slot, exhausted: next.exhausted } : {}),
       }
     },
