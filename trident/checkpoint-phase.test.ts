@@ -32,7 +32,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { phaseForCheckpoint } from './checkpoint-phase.ts'
+import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
 import type { TridentPhase } from './store.ts'
 
@@ -308,5 +308,46 @@ describe('checkpoint.sh writes the phase — against a real sqlite database', ()
     const r = row('live')
     expect(r['phase']).toBe('argus')
     expect(r['last_advanced_at']).not.toBe(SEEDED_HEARTBEAT)
+  })
+})
+
+describe('hasArgusProvenance — did the reviewer actually speak?', () => {
+  test('the checkpoints that can only exist AFTER a review are provenance', () => {
+    expect(hasArgusProvenance('argus-approved')).toBe(true)
+    expect(hasArgusProvenance('argus-request-changes')).toBe(true)
+    expect(hasArgusProvenance('argus-request-changes-round-1')).toBe(true)
+    expect(hasArgusProvenance('argus-request-changes-round-10')).toBe(true)
+    // A fix round only ever follows an `argus-request-changes`.
+    expect(hasArgusProvenance('fix-round-1')).toBe(true)
+    expect(hasArgusProvenance('fix-round-7')).toBe(true)
+  })
+
+  test('forge-done is NOT provenance — review is what runs NEXT', () => {
+    // The measured hole: 68 terminal rows sat at `forge-done` carrying the suite
+    // gate's own blocker finding, and every one was recorded as a reviewed
+    // REQUEST_CHANGES. The build finished; nobody reviewed it.
+    expect(hasArgusProvenance('forge-done')).toBe(false)
+  })
+
+  test('the throw path and the pre-review checkpoints are NOT provenance', () => {
+    expect(hasArgusProvenance('inner-error')).toBe(false) // 45 more of the same
+    expect(hasArgusProvenance('awaiting-trailer')).toBe(false)
+    expect(hasArgusProvenance('ralph-task-built')).toBe(false)
+    expect(hasArgusProvenance('pr-merged')).toBe(false)
+    expect(hasArgusProvenance('outer-published:abc123:0:3')).toBe(false)
+    expect(hasArgusProvenance(null)).toBe(false)
+    expect(hasArgusProvenance('')).toBe(false)
+  })
+
+  test('near-miss shapes are NOT coerced into provenance', () => {
+    // Same discipline the phase table gets: a name that merely LOOKS like a
+    // reviewed checkpoint must not buy a verdict.
+    expect(hasArgusProvenance('fix-round-x')).toBe(false)
+    expect(hasArgusProvenance('fix-round-')).toBe(false)
+    expect(hasArgusProvenance('argus-request-changes-round-')).toBe(false)
+    expect(hasArgusProvenance('ARGUS-APPROVED')).toBe(false)
+    expect(hasArgusProvenance('argus-approved ')).toBe(false)
+    expect(hasArgusProvenance('not-argus-approved')).toBe(false)
+    expect(hasArgusProvenance('a-checkpoint-invented-next-week')).toBe(false)
   })
 })

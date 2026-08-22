@@ -2842,6 +2842,58 @@ describe('REVIEW_NOT_RUN — terminal without the reviewer speaking', () => {
     }
   })
 
+  // THE SUITE-GATE HOLE, MEASURED. `failedRun` used to keep REQUEST_CHANGES on any
+  // non-empty findings list. But the suite gate in `inner-workflow.mjs` writes a
+  // `blocker` of its own on a build that never reached a reviewer, so that test was
+  // satisfied by a run whose review provably never ran. Live count at the time of the
+  // fix: of 160 terminal REQUEST_CHANGES rows only 18 carried an Argus checkpoint —
+  // 68 stopped at `forge-done` and 45 at `inner-error`.
+  //
+  // RED-mutation: drop `hasArgusProvenance(run.inner_checkpoint) &&` from `failedRun`
+  // and this test fails while every other test in this file stays green.
+  test('a forge-done run carrying the SUITE GATE blocker is REVIEW_NOT_RUN, not a reviewed rejection', async () => {
+    // The verbatim shape the gate writes (trident/inner-workflow.mjs) — a real
+    // blocker, with no reviewer behind it.
+    const suiteGateFinding = JSON.stringify([
+      {
+        severity: 'blocker',
+        title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
+        evidence: 'The build reported testsPassed=false and suiteOutcome="not-run".',
+      },
+    ])
+    const final = await harvestRawResult({
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'forge-done',
+      blockKind: 'code',
+      findings: suiteGateFinding,
+      terminalCause: 'suite gate refused the round',
+    })
+
+    expect(final.phase).toBe('failed')
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+    // The finding itself is DIAGNOSTIC and must survive — the verdict is what was
+    // wrong, not the evidence.
+    expect(final.inner_checkpoint_findings).toBe(suiteGateFinding)
+    expect(final.inner_checkpoint).toBe('forge-done')
+  })
+
+  test('a fix-round checkpoint IS Argus provenance — a fix round only exists after a review', async () => {
+    // POSITIVE CONTROL for the guard above: `fix-round-N` means fix N is built in
+    // response to an `argus-request-changes`, so the review demonstrably ran. If the
+    // provenance predicate were tightened to `argus-*` only, this run would be
+    // silently downgraded and a genuine reviewed rejection would be lost.
+    const findings = '[{"severity":"blocker","summary":"reviewer found it in round 2"}]'
+    const final = await harvestRawResult({
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'fix-round-2',
+      blockKind: 'code',
+      findings,
+      terminalCause: 'round budget spent after a real review',
+    })
+
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+  })
+
   test('a code verdict with recorded findings remains REQUEST_CHANGES', async () => {
     const findings = '[{"severity":"blocker","summary":"wrong result"}]'
     const final = await harvestRawResult({
@@ -3806,6 +3858,51 @@ describe('orchestrator — orphan recovery', () => {
     expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
     expect(after?.failure_reason).toContain('orphaned')
     expect(h.inputs).toHaveLength(0)
+  })
+
+  // THE REAP PATHS ARE THE OTHER HALF OF THE SUITE-GATE HOLE. A row whose verdict
+  // was written OUT OF PROCESS by the inner workflow (the shape below) is reaped by
+  // `failedRun`, not by the harvest — so the provenance guard has to be in both, and
+  // the orphan branch used to inline a THIRD copy of the rule that had neither.
+  //
+  // RED-mutation: drop `hasArgusProvenance(run.inner_checkpoint) &&` from `failedRun`
+  // and both tests below fail.
+  test('a reaped orphan does NOT inherit a never-reviewed REQUEST_CHANGES from the row', async () => {
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE' } }), on_orphaned_session: 'fail' })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, {
+      subagent_run_id: 'STALE',
+      subagent_status: 'running',
+      // Written by the inner workflow before it died: the suite gate's own blocker,
+      // at a checkpoint that proves review never ran.
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_findings: '[{"severity":"blocker","title":"FULL SUITE NOT PROVEN"}]',
+    })
+    await db.run('UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?', ['REQUEST_CHANGES', run.id])
+
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.inner_verdict).toBe('REVIEW_NOT_RUN')
+    // The evidence survives; only the untrue verdict is corrected.
+    expect(after?.inner_checkpoint_findings).toContain('FULL SUITE NOT PROVEN')
+  })
+
+  test('a reaped orphan DOES keep a genuinely reviewed REQUEST_CHANGES', async () => {
+    // POSITIVE CONTROL — without this, a guard that simply always wrote
+    // REVIEW_NOT_RUN would pass the test above and destroy real review verdicts.
+    const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE' } }), on_orphaned_session: 'fail' })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, {
+      subagent_run_id: 'STALE',
+      subagent_status: 'running',
+      inner_checkpoint: 'argus-request-changes-round-2',
+      inner_checkpoint_findings: '[{"severity":"blocker","title":"the reviewer really did speak"}]',
+    })
+    await db.run('UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?', ['REQUEST_CHANGES', run.id])
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.inner_verdict).toBe('REQUEST_CHANGES')
   })
 })
 
