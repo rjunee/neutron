@@ -125,19 +125,53 @@ with cross-references noted inline.
     (`formatUnexplainedLedgerRows`, resolvable only via a hand-verified `migrations/repairs.json`
     entry), a pending migration file the deployed checkout does not track
     (`formatUntrackedMigration` in `migrations/runner.ts`, on the verdict from `resolveDeployedTree`
-    in `migrations/provenance.ts`), and an OCCUPIED REKEY SCRATCH NAME (`rekeyLedgerOnName` —
-    `_migrations_version_keyed` can never be this runner's own leftover, because the whole rekey is
-    one transaction, so a table there is somebody's data and is refused rather than dropped; an
-    earlier version's unconditional `DROP TABLE IF EXISTS` destroyed exactly that, silently and
-    permanently, and the test that should have caught it used a VIEW, which SQLite refuses to drop).
-    **All six decide before ANY write** — `_migrations` is created, rekeyed, and repairs are
-    acknowledged, only after the last refusal has been passed, which is what makes the untracked
-    message's claim that nothing was written true.
+    in `migrations/provenance.ts`), and an OCCUPIED REKEY SCRATCH NAME
+    (`formatOccupiedRekeyScratch` — `_migrations_version_keyed` can never be this runner's own
+    leftover, because the whole rekey is one transaction, so a table there is somebody's data and is
+    refused rather than dropped; an earlier version's unconditional `DROP TABLE IF EXISTS` destroyed
+    exactly that, silently and permanently, and the test that should have caught it used a VIEW,
+    which SQLite refuses to drop).
+    **ALL SIX DECIDE BEFORE ANY WRITE**, without exception, and the sixth had to be MOVED to make
+    that true rather than reworded. It was thrown from inside `rekeyLedgerOnName`, which runs AFTER
+    this boot's `_migration_repairs` acknowledgements, so on the only population that reaches it — an
+    instance mid-incident, carrying repairs — its own claim that nothing had been written was false
+    as the operator read it. Every condition it rests on (`ledgerExists`, `ledgerIsVersionKeyed`,
+    `tableExists`) is a pure read, so it now sits in the read-only preflight with the other five.
+    `ordinal-identity.test.ts` CASE 6d asserts `_migration_repairs` DOES NOT EXIST after the
+    refusal, with the un-refused boot as its positive control. A guard that has to disclose its own
+    write is still a guard that writes.
+    THE ACKNOWLEDGED-REPAIR WRITE HAPPENS ONCE PER ENTRY, NOT ONCE PER BOOT, which is what keeps
+    `applyMigrations` a pure read on a fully-migrated database — the property that lets a backup be
+    opened read-only, and the one that instances carrying repairs did not have. Rows in
+    `_migration_repairs` are never rewritten, so "already acknowledged" and "nothing to write" are
+    the same condition. CASE 10 pins it against a connection that genuinely refuses writes.
+    A repair entry is MATCHED ON (`recorded_name`, `version`) — the pair, for every entry, orphan or
+    not. `repairs.json` ships to the whole fleet, so an entry is one instance's history that every
+    instance evaluates, and two databases can legitimately record one unmerged branch migration at
+    DIFFERENT ordinals. Matching an orphan on the name alone let a shipped entry speak on the second
+    database, where its `file_name` marked a genuinely pending migration as applied: the `ALTER`s
+    never ran, no row was recorded, and the boot exited zero — this class, exported to an instance
+    the incident was never about (CASE 8c reproduces it and reads the columns back).
+    A repair entry that has ALREADY ACTIVATED on a database stays active on it —
+    `_migration_repairs` is consulted as a second, durable trigger, and THAT is what carries an entry
+    through the rekey rather than a looser match. The ledger predicate reads state the rekey erases:
+    `collapseLedgerRowsByName` drops the drifted row of a duplicated name, so a `recorded_name` this
+    build ships comes out of the rekey sitting exactly where a healthy apply would have put it, and
+    an entry keyed only on that mismatch goes inert while the instance still needs it — silently
+    un-suppressing a hand-verified migration whose `ALTER`s then re-run. The durable trigger cannot
+    over-activate: a database that never had the incident never wrote the row. CASE 8 pins the orphan
+    shape, CASE 8b the tree-file shape.
     Hash widening MUST stay conditioned on the recording row being one no file in this build
     accounts for. Widening on a bare hash set is a silent-skip bug: a new, distinctly-named,
     tracked migration whose bytes duplicate an applied one reads as applied, so it never runs,
     never records, and is reported under `skipped` by a boot that exits zero — this invariant's own
     defect class, reached through its fix.
+    AND ON THE FILE BEING THE ONLY CLAIMANT OF THOSE BYTES IN THIS BUILD, which is the same
+    ambiguity with the recording row off-tree. The condition above sees a row whose name is a file
+    here; it cannot see an ORPHAN row whose bytes TWO files here carry. Then one row marked both as
+    applied, neither was `duplicates-an-applied-file`, the refusal never fired, and both were skipped
+    and never recorded on a boot that exited zero. CASE 9 pins it, with the single-claimant rename —
+    the case the widening exists for — as its positive control.
     A name match with a MISMATCHED hash is REPORTED and never enforced: it emits
     `migration_content_drift` (`enforced=false`) and boots. Refusing is a rejected decision (see the
     README's "recorded and reported, not enforced" — an in-place comment edit must not become a
