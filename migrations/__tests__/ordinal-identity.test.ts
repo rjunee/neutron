@@ -1488,12 +1488,16 @@ test('CASE 8c — a shipped entry does NOT speak on a database that recorded the
   const FIX_ROUND_NAME = 'code_trident_runs_fix_round_contract'
   const ORPHAN_NAME = 'dispatch_dependencies_and_claims'
   // Held back so the fixture is a release that predates them, exactly as the other
-  // fixtures here do — `0131` rebuilds the table and would mask the missing columns.
+  // fixtures here do. EVERY rebuild comes out, not just `0131`: this list named the
+  // repair alone when it was written, and `0138` — which also rebuilds the table and
+  // names `reviewed_head` from the dropped `0124` — then failed this case from inside
+  // the fixture with `no such column`, saying nothing about the entry under test. That
+  // is the rule `REBUILD_FILES` exists for; see its docblock.
   const TAIL = [
     '0125_code_trident_runs_base_sha.sql',
     PENDING_FILE,
     RENUMBERED_FILE,
-    REPAIR_FILE,
+    ...REBUILD_FILES,
   ]
 
   // THE SECOND DATABASE. Its own build of the unmerged branch took ordinal 141 — not the
