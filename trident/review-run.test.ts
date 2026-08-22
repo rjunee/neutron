@@ -232,6 +232,46 @@ describe('executeBoundReview', () => {
     expect(host.calls).toHaveLength(1)
   })
 
+  // REDACTION RUNS ON ATTACKER-CONTROLLED TEXT, so it has to be linear. `gh pr
+  // view` prints a PR's title and body, which anyone can set on a public repo.
+  // CodeQL flagged the original `(\w+:\/\/)[^/\s@]+@` as `js/polynomial-redos`
+  // (high) and it was right: measured on this box, a run of word characters with
+  // no scheme separator took 272ms at 20k, 1030ms at 40k and 2287ms at 60k —
+  // quadratic — against 1.1ms / 1.7ms / 4.5ms once the leading quantifiers are
+  // bounded. The ceiling below is ~100x the measured cost and ~1/4 of the OLD
+  // cost at this size, so it is not a tight timing assertion that reds on a busy
+  // box; it only catches the quantifier becoming unbounded again.
+  test('redaction stays LINEAR on hostile output — the bounded quantifiers are load-bearing', async () => {
+    const worktree = scratch('redos')
+    const hostile = `${'0'.repeat(60_000)} ghp_realsecret`
+    const host = recordingHost({
+      worktree,
+      viewFailure: { ok: false, stdout: '', stderr: hostile, exit_code: 9 },
+    })
+
+    const started = Bun.nanoseconds()
+    const result = await executeBoundReview(
+      makeTridentRun({ id: 'bound-redos', bound_pr: 515, repo_path: '/repo' }),
+      {
+        run_host: host.run,
+        scratch_path: worktree,
+        run_review_panel: async () => {
+          throw new Error('must not run')
+        },
+      },
+    )
+    const elapsedMs = (Bun.nanoseconds() - started) / 1e6
+
+    expect(result.status).toBe('failure')
+    expect(elapsedMs).toBeLessThan(500)
+    // POSITIVE CONTROL — the scan really did happen and really did redact, so
+    // this cannot pass by the redaction having been skipped or short-circuited.
+    if (result.status === 'failure') {
+      expect(result.reason).toContain('bound PR #515')
+      expect(result.reason).not.toContain('ghp_realsecret')
+    }
+  })
+
   test('removes the detached worktree when the panel throws', async () => {
     const worktree = scratch('panel-throws')
     const host = recordingHost({ worktree })

@@ -99,10 +99,24 @@ const SHA = /^[0-9a-f]{40}$/
 const DEFAULT_PANEL_TIMEOUT_MS = 2 * 60 * 60_000
 const PANEL_POLL_MS = 1_000
 
+/**
+ * THE QUANTIFIERS ARE BOUNDED, AND THAT IS A CORRECTNESS REQUIREMENT HERE, NOT
+ * TIDINESS. This runs on `gh` command output, and `gh pr view` prints a PR's
+ * TITLE and BODY — attacker-controlled text on a public repo. CodeQL flagged the
+ * unbounded `\w+` before `://` as `js/polynomial-redos` (high): on a long run of
+ * word characters with no scheme separator, the engine retries from every start
+ * position, so the scan is quadratic in the input.
+ *
+ * Bounding each leading quantifier makes it linear while staying a superset of
+ * anything real: a URL scheme is a handful of characters (`https`, `ssh`,
+ * `git+ssh`), and a GitHub token is ~40-255. The `\s+` collapse is a single
+ * negation-free class with no following literal to backtrack against, so it is
+ * already linear and is left alone.
+ */
 function redactMeasured(text: string): string {
   return text
-    .replace(/(\w+:\/\/)[^/\s@]+@/g, '$1***@')
-    .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]+/g, '$1***')
+    .replace(/(\w{1,32}:\/\/)[^/\s@]{1,512}@/g, '$1***@')
+    .replace(/\b(gh[pousr]_|github_pat_)[A-Za-z0-9_]{1,512}/g, '$1***')
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, 500)
