@@ -108,7 +108,17 @@ export const RESET_JITTER_MS = 60_000
  * `short-window` / `long-window`. Declaring a reason no path can set invites the
  * next reader to believe a classifier exists.
  */
-export type CoolingReason = 'short-window' | 'long-window' | 'unauthorized' | 'manual'
+// `rate-limited` is main's, and the rebase must not drop it: it is a ROTATION
+// decision with its own timer and its own evidence, and a liveness probe knows
+// nothing about quota. Absent from this union, `coerceReason` narrows a stored
+// 'rate-limited' to 'manual', and the anti-overretract guard then rotates a
+// capped seat straight back into service.
+export type CoolingReason =
+  | 'short-window'
+  | 'long-window'
+  | 'rate-limited'
+  | 'unauthorized'
+  | 'manual'
 
 /** One usage window as the CLI reports it, with `resets_at` already in ms. */
 export interface RateLimitWindow {

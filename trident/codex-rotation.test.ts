@@ -816,7 +816,10 @@ describe('the multi-seat credential service', () => {
   test('a seat keeps the name the owner gave it, across a status poll', async () => {
     const svc = newService()
     await svc.connectAccount(OWNER, subscriptionAuth(), { label: 'Personal' })
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work', label: 'Company' })
+    // A DISTINCT account, per the fixture docblock: a second seat holding the same
+    // ChatGPT account is refused, so reusing one here would assert on a configuration
+    // the service is required to reject.
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work', label: 'Company' })
     // A poll runs syncSlots; the names must survive it.
     svc.listAccounts(OWNER)
     const byName = new Map(svc.listAccounts(OWNER).map((a) => [a.slot, a.label]))
@@ -986,7 +989,8 @@ describe('the multi-seat credential service', () => {
     let clock = NOW
     const svc = newService(() => clock)
     await svc.connectAccount(OWNER, subscriptionAuth())
-    await svc.connectAccount(OWNER, subscriptionAuth(), { slot: 'work' })
+    // Distinct account for the second seat — see the fixture docblock.
+    await svc.connectAccount(OWNER, subscriptionAuth(undefined, 'acct-work'), { slot: 'work' })
     svc.resolveActiveCodexHome(OWNER, 'proj')
     writeRollout(codexHome, 'rollout-spent2.jsonl', [tokenCountLine({ used_percent: 99.9, window_minutes: 10080 })], 1_800_000_000)
     clock = NOW + 5 * 60_000

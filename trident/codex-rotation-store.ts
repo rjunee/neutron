@@ -77,7 +77,13 @@ interface SlotRow {
   last_harvest_at: number | null
 }
 
-const VALID_REASONS: readonly CoolingReason[] = ['short-window', 'long-window', 'unauthorized', 'manual']
+const VALID_REASONS: readonly CoolingReason[] = [
+  'short-window',
+  'long-window',
+  'rate-limited',
+  'unauthorized',
+  'manual',
+]
 
 /**
  * Narrow a stored reason string back to the union.
