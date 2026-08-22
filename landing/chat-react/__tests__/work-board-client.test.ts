@@ -201,7 +201,32 @@ describe('parseWorkBoardItems', () => {
       created_at: '',
       updated_at: '',
       completed_at: null,
+      // Durable PR provenance — absent on an older frame, never undefined.
+      pr: null,
+      pr_url: null,
     })
+  })
+
+  it('round-trips the durable pr/pr_url and rejects wrongly-typed ones', () => {
+    const out = parseWorkBoardItems([
+      {
+        id: 'a',
+        title: 'merged',
+        status: 'done',
+        pr: 265,
+        pr_url: 'https://github.com/acme/widget/pull/265',
+      },
+      // A number with no resolvable repo — the tag renders as plain text.
+      { id: 'b', title: 'no url', status: 'done', pr: 42 },
+      // Wrongly-typed values are dropped, not coerced (no "#265" from a string).
+      { id: 'c', title: 'junk', status: 'done', pr: '265', pr_url: 12 },
+    ])
+    expect(out.map((i) => i.pr)).toEqual([265, 42, null])
+    expect(out.map((i) => i.pr_url)).toEqual([
+      'https://github.com/acme/widget/pull/265',
+      null,
+      null,
+    ])
   })
 
   it('#379 — parses task_type (research kept; anything else → build)', () => {
@@ -247,6 +272,47 @@ describe('parseWorkBoardItems', () => {
     expect(out[0]!.run_progress?.round).toBe(2)
     expect(out[0]!.run_progress?.brief_alert).toContain('CODEX_BUILD_BRIEF_PART_CORRUPT')
     expect(out[1]!.run_progress).toBeUndefined()
+  })
+
+  it('parses run_progress.pr_url through, and null when the gateway omits it', () => {
+    const base = {
+      run_id: 'run-1',
+      phase_label: 'building',
+      round: 1,
+      started_at: '2026-08-14T00:00:00Z',
+      last_advanced_at: '2026-08-14T00:01:00Z',
+      elapsed_ms: 60000,
+      stalled: false,
+      stalled_ms: null,
+      pr: 265,
+      verdict: null,
+      failure_reason: null,
+    }
+    const out = parseWorkBoardItems([
+      {
+        id: 'a',
+        title: 'Linked',
+        status: 'in_progress',
+        linked_run_id: 'run-1',
+        run_progress: { ...base, pr_url: 'https://github.com/acme/widget/pull/265' },
+      },
+      // An older gateway omits the field entirely — the frame stays valid and the
+      // card renders the tag as plain text.
+      { id: 'b', title: 'Plain', status: 'in_progress', linked_run_id: 'run-1', run_progress: base },
+      // Malformed (non-string) → null, never rendered as an href.
+      {
+        id: 'c',
+        title: 'Bogus',
+        status: 'in_progress',
+        linked_run_id: 'run-1',
+        run_progress: { ...base, pr_url: 42 },
+      },
+    ])
+    expect(out.map((i) => i.run_progress?.pr_url)).toEqual([
+      'https://github.com/acme/widget/pull/265',
+      null,
+      null,
+    ])
   })
 })
 

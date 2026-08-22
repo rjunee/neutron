@@ -180,10 +180,11 @@ test('first apply runs all migrations in order and records them in _migrations',
     130,
     131,
     132,
-    // 133 is RESERVED for the open #269 (work_board_items_pr) and is absent
-    // from this branch on purpose: this card's stage-events migration moved to
-    // 0135 so the two cannot collide on one ordinal. Like 59 and 64-68 above,
-    // the gap is deliberate — the runner has no contiguity requirement.
+    // 133 is the ordinal main RESERVED for this PR (#269, work_board_items_pr) —
+    // see the note this replaces. The branch had drifted to 0132, which main has
+    // since spent on work_board_items_dependencies; taking the reservation is what
+    // keeps the two off one ordinal.
+    133,
     134,
     135,
     136,

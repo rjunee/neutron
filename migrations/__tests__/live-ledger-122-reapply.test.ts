@@ -16,6 +16,8 @@ import { encodeIndex } from './git-index-fixture.ts'
 
 const MIGRATIONS_DIR = join(import.meta.dir, '..')
 const MIGRATION_FILE = /^\d{4}_.+\.sql$/
+/** Same shape, with the ordinal captured so a tree can be built up to a point. */
+const MIGRATION_FILE_CAPTURE = /^(\d{4})_.+\.sql$/
 const STAND_IN_FILE = '0133_work_board_items_pr.sql'
 const STAND_IN_SQL = `-- Stand-in for #269's migration; classification is by name, so byte parity is not required.
 ALTER TABLE work_board_items ADD COLUMN pr INTEGER;
@@ -60,15 +62,38 @@ function realRepairs(): Repair[] {
   return JSON.parse(readFileSync(join(MIGRATIONS_DIR, 'repairs.json'), 'utf8')) as Repair[]
 }
 
-function copyTree(name: string, repairs: Repair[], standIn = false): string {
+/**
+ * The ordinal that ships the migration this repair is ABOUT. It exists in the tree now
+ * (#269); it did not when these tests were written, and the SEED still needs the world
+ * as it was BEFORE it shipped — otherwise the full tree already applied a migration
+ * named `work_board_items_pr` and the scar-modelling rename below collides with it
+ * (`UNIQUE constraint failed: _migrations.name`). The whole point of the reapply entry
+ * is what happens when this file ARRIVES, so it belongs in the act, never in the seed.
+ */
+const SHIPPED_PR_ORDINAL = 133
+
+function copyTree(
+  name: string,
+  repairs: Repair[],
+  standIn = false,
+  include: (version: number) => boolean = () => true,
+): string {
   const dir = join(tmp, name)
   mkdirSync(dir)
   for (const file of readdirSync(MIGRATIONS_DIR)) {
-    if (MIGRATION_FILE.test(file)) copyFileSync(join(MIGRATIONS_DIR, file), join(dir, file))
+    const match = file.match(MIGRATION_FILE_CAPTURE)
+    if (match && include(Number.parseInt(match[1] ?? '', 10))) {
+      copyFileSync(join(MIGRATIONS_DIR, file), join(dir, file))
+    }
   }
   writeFileSync(join(dir, 'repairs.json'), `${JSON.stringify(repairs, null, 2)}\n`)
   if (standIn) writeStandIn(dir)
   return dir
+}
+
+/** The tree as it was before #269 shipped — used for every SEED, never for an act. */
+function seedTree(name: string, repairs: Repair[], standIn = false): string {
+  return copyTree(name, repairs, standIn, (version) => version !== SHIPPED_PR_ORDINAL)
 }
 
 function writeStandIn(dir: string): void {
@@ -83,7 +108,7 @@ function writeStandIn(dir: string): void {
  */
 function seedLiveReplica(name: string): Database {
   const db = new Database(join(tmp, `${name}.db`), { create: true })
-  applyMigrations(db, copyTree(`${name}-seed`, realRepairs()))
+  applyMigrations(db, seedTree(`${name}-seed`, realRepairs()))
   db.run(
     `UPDATE _migrations
         SET name = 'work_board_items_pr',
@@ -151,7 +176,12 @@ function untrackedTree(name: string): string {
 
   const tracked: string[] = []
   for (const file of readdirSync(MIGRATIONS_DIR)) {
-    if (!MIGRATION_FILE.test(file)) continue
+    const match = file.match(MIGRATION_FILE_CAPTURE)
+    if (!match) continue
+    // #269 ships the real `0133` now. Copying it here as a TRACKED file would defeat
+    // the test: `writeStandIn` below is meant to be the file's only copy and to be
+    // absent from the git index, which is the untracked condition under test.
+    if (Number.parseInt(match[1] ?? '', 10) === SHIPPED_PR_ORDINAL) continue
     copyFileSync(join(MIGRATIONS_DIR, file), join(dir, file))
     tracked.push(`migrations/${file}`)
   }
@@ -200,7 +230,9 @@ test('reapply lands the missing columns, preserves row 122, and is idempotent', 
 
 test('the deployed repair does not acknowledge before the future file arrives', () => {
   const db = seedLiveReplica('deploy-window')
-  const dir = copyTree('deploy-window-full', realRepairs())
+  // The 'before' half must genuinely lack the file — #269 ships it now, so the base
+  // tree is the pre-#269 one and `writeStandIn` below is what models its arrival.
+  const dir = seedTree('deploy-window-full', realRepairs())
 
   expect(applyMigrations(db, dir).applied).toEqual([])
   expect(reapplyAcknowledgements(db)).toBe(0)
@@ -273,3 +305,24 @@ test('the live row-122 reapply entry is pinned', () => {
     reapply: true,
   }))
 })
+
+/**
+ * SUPERSEDES `live-ledger-122-work-board-pr.test.ts`, removed with #269's rebase.
+ *
+ * That file asserted the opposite contract — that a live ledger row named
+ * `work_board_items_pr` makes the runner SKIP the migration of that name, so it cannot
+ * throw `duplicate column name: pr`. That was true when it was written, and `repairs.json`
+ * has since shipped the `"reapply": true` entry for exactly this row, which says the
+ * migration must APPLY despite being recorded by name. Two opposed contracts for one
+ * ledger row; the reapply entry is the survivor and the one every test above pins.
+ *
+ * The disagreement was settled by measurement, not by preference: replaying main's tree
+ * plus this branch's `0133_work_board_items_pr.sql` against a `VACUUM INTO` copy of the
+ * LIVE owner database gave `applied: [133]` and produced the `pr` column, on a database
+ * whose row 122 was intact. The skip contract would have left that instance without the
+ * column its code writes to.
+ *
+ * The removed file's genuine content — the `duplicate column name` red condition — is
+ * covered by `reapply is strict and does not probe or swallow duplicate-column failures`
+ * above, which asserts the throw on the population where the columns ARE present.
+ */

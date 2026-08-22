@@ -80,6 +80,17 @@ export interface RunProgress {
   /** How long stalled (ms), or null when not stalled. */
   stalled_ms: number | null
   pr: number | null
+  // REBASE NOTE — the branch's `pr_url` is kept, but the verdict union is MAIN'S
+  // three-member one. `'REVIEW_NOT_RUN'` landed with #454 after this branch forked;
+  // taking the branch's two-member union would delete it from the wire type and
+  // silently un-model a verdict the server now emits.
+  /**
+   * The composed `<repo web url>/pull/<pr>` for {@link RunProgress.pr}, so a LIVE
+   * card can render its `#NNN` as a link. null when the run has no PR yet or the
+   * run's own repo is not a resolvable GitHub remote — render the tag as plain
+   * text then, never a guessed/hardcoded repo.
+   */
+  pr_url: string | null
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   /** The failure reason (e.g. the hang-watchdog reap) when `phase_label==='failed'`. */
   failure_reason: string | null
@@ -135,8 +146,16 @@ export function deriveStepLabel(phase: TridentPhase, inner_checkpoint: string | 
 /**
  * Derive the live progress summary for a run. Pure + clock-injected (`nowMs`)
  * so both the HTTP surface and the push helper compute an identical snapshot.
+ *
+ * `repo_web_url` is the run's own repo web url (`https://github.com/<o>/<r>`,
+ * resolved from `run.repo_path`'s remote — see `repo-web-url.ts`). Omitted or
+ * null → `pr_url` is null and the card renders the tag as plain text.
  */
-export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
+export function deriveRunProgress(
+  run: TridentRun,
+  nowMs: number,
+  repo_web_url?: string | null,
+): RunProgress {
   const startedMs = Date.parse(run.started_at)
   const advancedMs = Date.parse(run.last_advanced_at)
   const elapsed_ms = Number.isFinite(startedMs) ? Math.max(0, nowMs - startedMs) : 0
@@ -208,6 +227,7 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
     stalled,
     stalled_ms: stalled ? sinceAdvance : null,
     pr: run.pr,
+    pr_url: run.pr !== null && repo_web_url != null ? `${repo_web_url}/pull/${run.pr}` : null,
     verdict: run.inner_verdict,
     failure_reason: run.failure_reason,
     brief_alert: run.brief_alert,
@@ -218,11 +238,17 @@ export function deriveRunProgress(run: TridentRun, nowMs: number): RunProgress {
  * Derive the progress for a board item bound to a run, or null when the item has
  * no linked run (or the run row is gone / cross-project). `lookupRun` is
  * `TridentRunStore.get`; `nowMs` is the caller's clock.
+ *
+ * `peekRepoWebUrl` is a SYNC lookup of the run's repo web url — both callers (the
+ * HTTP GET's `withRunProgress` and the composer's ws fan) are synchronous, so
+ * this is the composer's shared `RepoWebUrlCache.peek` (`repo-web-url.ts`), which
+ * returns null until its background warm lands. Omitted → `pr_url` is null.
  */
 export function runProgressForItem(
   item: { linked_run_id: string | null; project_slug?: string },
   lookupRun: (run_id: string) => TridentRun | null,
   nowMs: number,
+  peekRepoWebUrl?: ((repo_path: string) => string | null) | undefined,
 ): RunProgress | null {
   const runId = item.linked_run_id
   if (runId === null || runId.length === 0) return null
@@ -231,5 +257,9 @@ export function runProgressForItem(
   // Defensive scope check — a linked_run_id should only ever name this project's
   // run, but never derive across instances.
   if (item.project_slug !== undefined && run.project_slug !== item.project_slug) return null
-  return deriveRunProgress(run, nowMs)
+  return deriveRunProgress(
+    run,
+    nowMs,
+    peekRepoWebUrl !== undefined ? peekRepoWebUrl(run.repo_path) : null,
+  )
 }

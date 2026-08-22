@@ -61,7 +61,7 @@ function item(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
 }
 
 const rp = (phase: RunProgress['phase_label']): RunProgress =>
-  ({ run_id: 'r', phase_label: phase, step_label: 'building', round: 1, started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null, pr: null, verdict: null, failure_reason: null })
+  ({ run_id: 'r', phase_label: phase, step_label: 'building', round: 1, started_at: '', last_advanced_at: '', elapsed_ms: 0, stalled: false, stalled_ms: null, pr: null, pr_url: null, verdict: null, failure_reason: null })
 
 /** A controllable live source. `replay` (if set) is delivered SYNCHRONOUSLY on
  *  subscribe — mirroring the controller replaying its last snapshot to a late

@@ -168,6 +168,7 @@ import {
   KIMI_CREDENTIAL_SERVICE,
 } from '@neutronai/trident/kimi-key.ts'
 import { runProgressForItem } from '@neutronai/trident/run-progress.ts'
+import { makeRepoWebUrlCache } from '@neutronai/trident/repo-web-url.ts'
 import { SecretsStore } from '@neutronai/auth/secrets-store.ts'
 import { buildPersonalityCharacterSuggester } from '@neutronai/onboarding/interview/personality-character-suggester.ts'
 import { buildLivePersonalitySuggestionCoordinator } from '@neutronai/onboarding/interview/live-personality-suggestions.ts'
@@ -4089,6 +4090,12 @@ export function buildOpenGraphComposer(
         return { won: (await pending).won }
       },
     }
+    // ONE process-wide sync-peek repo-web-url cache, feeding BOTH `run_progress`
+    // attachment sites (the HTTP GET's `withRunProgress` and the ws fan below) so
+    // a repo shells `git remote get-url origin` once per process, not once per
+    // board frame. `peek` never blocks: it returns null until its background warm
+    // lands, and the next push/poll carries the composed `#NNN` link.
+    const repoWebUrls = makeRepoWebUrlCache()
     // `changedKey` is the storage key of the board that mutated. List + push THAT
     // project's snapshot (not one shared board) and tag the frame with the
     // per-project `project_id` so the clients' per-project filter applies it to the
@@ -4105,7 +4112,9 @@ export function buildOpenGraphComposer(
           type: 'work_board_changed',
           items: deriveInlineActivity(workBoardStore.list(changedKey), framePid).map((it) => {
             // Item 1 — attach the bound run's live progress (null when unbound).
-            const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs)
+            const run_progress = runProgressForItem(it, (id) => boardRunStore.get(id), nowMs, (p) =>
+              repoWebUrls.peek(p),
+            )
             return {
               id: it.id,
               title: it.title,
@@ -4117,6 +4126,10 @@ export function buildOpenGraphComposer(
               created_at: it.created_at,
               updated_at: it.updated_at,
               completed_at: it.completed_at,
+              // Durable PR provenance — survives the detach that kills
+              // `run_progress`, so a completed card can still say "Merged #265".
+              pr: it.pr,
+              pr_url: it.pr_url,
               ...(run_progress !== null ? { run_progress } : {}),
             }
           }),
@@ -4460,6 +4473,9 @@ export function buildOpenGraphComposer(
       // 'general'` matches the tap's General scope, so the URL project_id feeds
       // straight through. Display-only: it gates nothing.
       derive_inline_active: (items, project_id) => deriveInlineActivity(items, project_id),
+      // The SAME cache the ws fan uses — one `git remote` shell per repo, and the
+      // GET + push agree on whether a card's `#NNN` links yet.
+      repo_web_urls: repoWebUrls,
       // M1 — persist a non-trivial create `spec` to a plans/ doc + link the card.
       // The board scope and the DOCS project id are separate arguments on purpose:
       // see `spec-doc-service.ts`. Collapsing them wrote General's plans to a

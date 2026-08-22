@@ -203,6 +203,79 @@ describe('work-board HTTP surface — trident run integration (items 1 + 3)', ()
     expect(row?.run_progress?.pr).toBe(9)
   })
 
+  test('GET composes run_progress.pr_url from the shared repo-web-url peek', async () => {
+    const item = await store.create(SCOPE, { title: 'Building' })
+    await store.bindRun(SCOPE, item.id, 'run-pr')
+    const { access } = fakeRunAccess({
+      'run-pr': fakeRun({ id: 'run-pr', project_slug: SCOPE, pr: 265, repo_path: '/repos/x' }),
+    })
+    const peeked: string[] = []
+    const s = createWorkBoardSurface({
+      store,
+      auth,
+      trident_runs: access,
+      repo_web_urls: {
+        peek: (repo_path: string) => {
+          peeked.push(repo_path)
+          return 'https://github.com/acme/widget'
+        },
+      },
+    })
+    const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as {
+      items: Array<{ id: string; run_progress?: { pr: number | null; pr_url: string | null } }>
+    }
+    const row = body.items.find((i) => i.id === item.id)
+    // The url comes off the RUN'S OWN repo_path, never a hardcoded repo.
+    expect(peeked).toContain('/repos/x')
+    expect(row?.run_progress?.pr).toBe(265)
+    expect(row?.run_progress?.pr_url).toBe('https://github.com/acme/widget/pull/265')
+  })
+
+  test('GET without a repo-web-url cache still emits pr_url — null, not absent', async () => {
+    const item = await store.create(SCOPE, { title: 'Building' })
+    await store.bindRun(SCOPE, item.id, 'run-nourl')
+    const { access } = fakeRunAccess({
+      'run-nourl': fakeRun({ id: 'run-nourl', project_slug: SCOPE, pr: 265, repo_path: '/repos/x' }),
+    })
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+    const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as {
+      items: Array<{ id: string; run_progress?: Record<string, unknown> }>
+    }
+    const row = body.items.find((i) => i.id === item.id)
+    expect(row?.run_progress).toBeDefined()
+    // The field must EXIST on the wire (null → plain text), not be missing.
+    expect(Object.hasOwn(row?.run_progress ?? {}, 'pr_url')).toBe(true)
+    expect(row?.run_progress?.['pr_url']).toBeNull()
+  })
+
+  test('GET carries the DURABLE pr/pr_url of a completed (detached) card', async () => {
+    // The completed card has NO run binding — `run_progress` is impossible here,
+    // so the number can only come off the item's own columns (migration 0122).
+    const item = await store.create(SCOPE, { title: 'Merged one' })
+    await store.attachRun(SCOPE, item.id, 'run-1')
+    await store.detachRun(SCOPE, 'run-1', 'done', {
+      pr: 265,
+      pr_url: 'https://github.com/acme/widget/pull/265',
+    })
+    const { access } = fakeRunAccess({})
+    const s = createWorkBoardSurface({ store, auth, trident_runs: access })
+    const res = await s.handler(req('GET', '/api/app/projects/proj1/work-board'))
+    const body = (await res!.json()) as {
+      items: Array<{
+        id: string
+        pr?: number | null
+        pr_url?: string | null
+        run_progress?: unknown
+      }>
+    }
+    const row = body.items.find((i) => i.id === item.id)
+    expect(row?.run_progress).toBeUndefined()
+    expect(row?.pr).toBe(265)
+    expect(row?.pr_url).toBe('https://github.com/acme/widget/pull/265')
+  })
+
   test('GET omits run_progress on an unbound item', async () => {
     const item = await store.create(SCOPE, { title: 'Idle' })
     const { access } = fakeRunAccess({})

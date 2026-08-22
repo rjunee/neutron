@@ -74,6 +74,15 @@ export interface WorkBoardItem {
   /** ISO-8601 UTC; null until status='done'. */
   completed_at: string | null
   /**
+   * DURABLE PR provenance — the PR number the card's terminal run opened, plus
+   * its composed GitHub url. Present on completed/failed cards AFTER the detach
+   * that removes `run_progress`, which is what makes "Merged #265" possible.
+   * Optional on the wire (an older frame omits both); a `pr` with a null `pr_url`
+   * means the repo could not be resolved, so the number renders as plain text.
+   */
+  pr?: number | null
+  pr_url?: string | null
+  /**
    * Item 1 — the bound trident run's LIVE progress, present ONLY when this item
    * has a live `linked_run_id`. The tab renders it as a compact sub-label; absent
    * on unbound/idle items.
@@ -110,6 +119,9 @@ export interface RunProgress {
   stalled: boolean
   stalled_ms: number | null
   pr: number | null
+  /** `<repo web url>/pull/<pr>` — null when there is no PR or the repo could not
+   *  be resolved, in which case the `#NNN` tag renders as plain text. */
+  pr_url: string | null
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
   failure_reason: string | null
   /** Added after the base progress shape; optional for rolling-deploy frames. */
@@ -331,6 +343,9 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
       created_at: typeof r['created_at'] === 'string' ? (r['created_at'] as string) : '',
       updated_at: typeof r['updated_at'] === 'string' ? (r['updated_at'] as string) : '',
       completed_at: typeof r['completed_at'] === 'string' ? (r['completed_at'] as string) : null,
+      // Durable PR provenance (both null on an older frame that omits them).
+      pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
+      pr_url: typeof r['pr_url'] === 'string' ? (r['pr_url'] as string) : null,
       ...(run_progress !== null ? { run_progress } : {}),
     })
   }
@@ -419,6 +434,9 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     stalled: r['stalled'] === true,
     stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,
     pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
+    // Absent/malformed → null: an older gateway's frame stays valid and the tag
+    // simply renders as plain text.
+    pr_url: typeof r['pr_url'] === 'string' ? (r['pr_url'] as string) : null,
     verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
     brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,
