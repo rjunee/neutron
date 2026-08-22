@@ -180,6 +180,67 @@ const DEFAULT_TIMEOUT_MS = 90_000
 const DEFAULT_MAX_TOKENS = 512
 
 /**
+ * HOW MANY BACKGROUND COMPOSES ARE IN FLIGHT, PER WARM-POOL SCOPE.
+ *
+ * WHY THIS EXISTS — MEASURED. THREE unrelated schedulers compose on the ONE
+ * background `cc-nudge-*` substrate, and all three key the warm child on
+ * `metering_context.project_id`:
+ *
+ *   * `buildReminderDispatcher` (line ~328) — a fired reminder
+ *   * `runWorkWakeupSweep` (`gateway/proactive/work-wakeup.ts:528`) — the 5-min tick
+ *   * `buildTerminalBuildWake` (`gateway/proactive/terminal-build-wake.ts:66`)
+ *
+ * Same substrate id + same owner + same project id is the SAME pool key, so for
+ * one project those three serialize on a single warm child. A wakeup arriving
+ * while a reminder turn is still running therefore does not run — it queues,
+ * burns its 4-minute budget waiting, aborts (`cc-llm-call: aborted`), and the
+ * sweep posts a LOUD "Scheduled wakeup failed to run (attempt N)" to the owner.
+ * Attempts 1, 6 and 12 of exactly that reached the owner's phone on 2026-08-22,
+ * interleaved with the very reminder body that was occupying the child.
+ *
+ * The counter lives HERE, at the one seam every background compose passes
+ * through, rather than in any single caller — a gate in the wakeup alone would
+ * still be blind to the other two, and each new background scheduler would have
+ * to remember to register itself. Incrementing at the seam means registration is
+ * automatic and cannot be forgotten.
+ *
+ * IT IS A LIVE COUNT, NOT A TIMESTAMP. A "last compose finished at" watermark
+ * cannot distinguish a turn that is still running from one that ended a moment
+ * ago, and gating on a stale stamp is how a gate becomes an unconditional
+ * silence. This is decremented in a `finally`, so a throw, an abort and a
+ * timeout all release it.
+ */
+const backgroundComposesInFlight = new Map<string, number>()
+
+/**
+ * The warm-pool discriminator for a background compose. `substrate_instance_id`
+ * and `user_id` are constant across all three callers (one nudge substrate, one
+ * owner), so the project scope is the whole key in practice — and it MUST be
+ * read the same way the pool reads it, or the gate answers about a different
+ * child than the one that would serialize.
+ */
+function backgroundComposeScope(spec: AgentSpec): string {
+  return spec.metering_context?.project_id ?? 'default'
+}
+
+/**
+ * Is a background compose CURRENTLY running for this warm-pool scope?
+ *
+ * Read by the work-wakeup sweep before it fires, so a tick that would merely
+ * queue behind another scheduler's turn is SKIPPED rather than started and
+ * aborted. A skip is not a failure: it must not touch the failure streak and
+ * must not post anything.
+ */
+export function isBackgroundComposeInFlight(project_scope: string): boolean {
+  return (backgroundComposesInFlight.get(project_scope) ?? 0) > 0
+}
+
+/** Test-only: drop all in-flight bookkeeping (the map is process-local state). */
+export function resetBackgroundComposeStateForTests(): void {
+  backgroundComposesInFlight.clear()
+}
+
+/**
  * Wrap a warm CC substrate into the `ReminderLlm` composition seam. Spawns the
  * turn, collects tokens with an abort-on-timeout guard, returns the text.
  * Throws on timeout / substrate error so the dispatcher degrades to literal.
@@ -192,6 +253,8 @@ export function buildSubstrateReminderLlm(
   return {
     async compose(spec: AgentSpec, callOpts?: { timeout_ms?: number }): Promise<string> {
       const timeout_ms = callOpts?.timeout_ms ?? default_timeout_ms
+      const scope = backgroundComposeScope(spec)
+      backgroundComposesInFlight.set(scope, (backgroundComposesInFlight.get(scope) ?? 0) + 1)
       const handle = substrate.start(spec)
       const ac = new AbortController()
       const timer = setTimeout(() => ac.abort(), timeout_ms)
@@ -199,6 +262,12 @@ export function buildSubstrateReminderLlm(
         return await collectTokensToString(handle, ac.signal)
       } finally {
         clearTimeout(timer)
+        // Released on EVERY exit — resolve, throw, abort, timeout. A counter that
+        // leaked on the failure path would gate the wakeup off permanently, which
+        // is the unconditional silence this fix is specifically not allowed to be.
+        const left = (backgroundComposesInFlight.get(scope) ?? 1) - 1
+        if (left <= 0) backgroundComposesInFlight.delete(scope)
+        else backgroundComposesInFlight.set(scope, left)
       }
     },
   }
