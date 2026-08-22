@@ -14,7 +14,7 @@ import { CronHandlerRegistry } from '@neutronai/cron/handlers.ts'
 import { CronJobRegistry } from '@neutronai/cron/jobs.ts'
 import { CronScheduler } from '@neutronai/cron/scheduler.ts'
 import { CronStateStore } from '@neutronai/cron/state.ts'
-import { LoopRegistry } from '@neutronai/loop'
+import { LoopRegistry, type SupervisedLoop } from '@neutronai/loop'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import {
   setReplToolBridge,
@@ -82,6 +82,7 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
+import { buildWorktreeReaperLoop } from '@neutronai/trident/worktree-reaper.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
   buildFocusScoreRecomputeHandler,
@@ -504,6 +505,7 @@ export function buildCoreModules(
   const tridentModule: GatewayModule<{
     store: TridentRunStore
     loop: TridentTickLoop
+    reaper?: SupervisedLoop
     drain?: () => Promise<void>
     stranded_sweep?: Promise<void>
   }> = {
@@ -546,10 +548,23 @@ export function buildCoreModules(
       // skip delivery nor un-terminate the run (the loop already transitioned
       // it). Composed with any skill-forge observer into one observer fn.
       const boardReconcile = buildBoardReconcileObserver(input.work_board?.store) ?? undefined
+      // TEARDOWN ON EVERY TERMINAL PATH. The reaper is a 4 h timer, so without this a
+      // run that fails at 00:01 leaves its worktree standing until the next sweep. The
+      // closure reads `reaper` at CALL time, which is what lets this observer be composed
+      // here and the loop be built below on the wired path only — an unwired composition
+      // leaves it undefined and the wake is a no-op. `wake()` is fire-and-forget by
+      // design: a sweep must never be able to un-terminate a finished run.
+      let reaper: SupervisedLoop | undefined
+      const wakeReaper = async (): Promise<void> => {
+        reaper?.wake()
+      }
       // #335 — register the same terminal-build wake observer in the tick-loop chain.
-      const observers = [boardReconcile, runTerminalObserver, tridentWiring?.on_terminal_wake].filter(
-        (o): o is (run: TridentRun) => Promise<void> => o !== undefined,
-      )
+      const observers = [
+        boardReconcile,
+        runTerminalObserver,
+        tridentWiring?.on_terminal_wake,
+        wakeReaper,
+      ].filter((o): o is (run: TridentRun) => Promise<void> => o !== undefined)
       // §F6a — the SAME assembly the out-of-band `terminate()` chokepoint uses,
       // so a cancelled build runs the exact chain a loop-reaped one does.
       const on_terminal: TridentTerminalHook = composeTerminalHook(delivery, observers)
@@ -592,6 +607,12 @@ export function buildCoreModules(
       let reconcileStranded: ((run: TridentRun) => Promise<TridentRun | null>) | undefined
       if (tridentWiring !== undefined) {
         const runHost = tridentWiring.run_host ?? spawnCapture
+        // THE PROACTIVE WORKTREE REAPER. Teardown previously fired only on the merge
+        // path, so every other terminal path leaked its worktree — measured at 161
+        // worktrees / 84 `wf_*` holders, and 42% of run failures. Wired ONLY on this
+        // branch for the same reason as `fold_staged_as_built` below: the stub branch
+        // runs no builds, so it creates no worktrees to reap.
+        reaper = buildWorktreeReaperLoop({ store, run_host: runHost })
         // Trident v2 (Work Board Phase 2a exec-model) — the inner Forge→Argus→fix
         // loop is one native CC Dynamic Workflow. The FIRER (`fire_inner_workflow`)
         // invokes the `Workflow` tool on a WARM substrate and SETTLES the
@@ -743,24 +764,38 @@ export function buildCoreModules(
       // the 2 s wake-on-change watcher, and the 15 s liveness probe — and an
       // unregistered timer is one the inventory reports as healthy by never mentioning it.
       for (const descriptor of loop.describeAll()) loopRegistry.register(descriptor)
+      if (reaper !== undefined) loopRegistry.register(reaper.describe())
       loop.start()
+      // `immediate: true` on the descriptor, so `start()` IS the startup sweep — the
+      // one-time hand cleanup of 2026-08-17 becomes something the gateway does for
+      // itself on every boot.
+      reaper?.start()
       if (reconcileStranded !== undefined) {
         const stranded_sweep = sweepStrandedFailures({ store, reconcile: reconcileStranded })
         // `drain` is spread conditionally, matching the line below: under
         // exactOptionalPropertyTypes an explicit `drain: undefined` is NOT
         // assignable to `drain?: () => Promise<void>`, which is what reddened
         // typecheck here while every test stayed green.
+        // Spread conditionally for the same `exactOptionalPropertyTypes` reason as
+        // `drain`: an explicit `reaper: undefined` is not assignable to `reaper?:`.
+        const reaperOpt = reaper !== undefined ? { reaper } : {}
         return drain !== undefined
-          ? { store, loop, drain, stranded_sweep }
-          : { store, loop, stranded_sweep }
+          ? { store, loop, drain, stranded_sweep, ...reaperOpt }
+          : { store, loop, stranded_sweep, ...reaperOpt }
       }
-      return drain !== undefined ? { store, loop, drain } : { store, loop }
+      const reaperOpt = reaper !== undefined ? { reaper } : {}
+      return drain !== undefined
+        ? { store, loop, drain, ...reaperOpt }
+        : { store, loop, ...reaperOpt }
     },
     shutdown: async (instance) => {
       // §F1 — stop the tick loop FIRST (no new FIRE turns launch), then drain
       // the orchestrator's in-flight FIRE turns, so a clean shutdown quiesces
       // trident before `db.close()`. `drain` is only present on the wired path.
       await instance.loop.stop()
+      // Stopped alongside the tick loop: an unstopped 4 h timer keeps the process
+      // alive past `db.close()` and would sweep against a closed database.
+      if (instance.reaper !== undefined) await instance.reaper.stop()
       if (instance.drain !== undefined) await instance.drain()
     },
   }
