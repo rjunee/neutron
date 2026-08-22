@@ -558,7 +558,19 @@ describe('as-built write guard is wired into a gate the repo can own', () => {
     // The status must propagate VERBATIM. `exitCode !== 0 → process.exit(1)`
     // would collapse the guard's 2 (could not tell) into its 1 (wrote the log),
     // and every other spelling here discards it outright.
-    if (!/if \(guard\.exitCode !== 0\) process\.exit\(guard\.exitCode\)/.test(source)) {
+    //
+    // SCOPED TO THIS GUARD'S OWN BODY, and that scoping is load-bearing rather
+    // than tidiness. This read the WHOLE file until a second guard was hosted in
+    // the same gate carrying the identical propagation line — at which point both
+    // mutations below (collapse to 1, discard entirely) still left a matching line
+    // elsewhere in the file, so the check stayed satisfied over a gutted guard and
+    // reported it enforced. Caught by this describe's own mutation battery, which
+    // is exactly what it is for. The window runs from the declaration to the
+    // top-level call, so it contains this function and nothing else.
+    const bodyStart = source.indexOf('function guardBranchWritesOfCanonicalLog')
+    const bodyEnd = source.search(/^guardBranchWritesOfCanonicalLog\(\)$/m)
+    const body = bodyStart === -1 || bodyEnd <= bodyStart ? '' : source.slice(bodyStart, bodyEnd)
+    if (!/if \(guard\.exitCode !== 0\) process\.exit\(guard\.exitCode\)/.test(body)) {
       return 'the gate does not propagate the guard exit code verbatim'
     }
 
@@ -694,6 +706,149 @@ describe('as-built write guard is wired into a gate the repo can own', () => {
     expect(existsSync(join(REPO_ROOT, GUARD_PATH))).toBe(true)
   })
 })
+
+/**
+ * THE SAME RELOCATION, FOR THE MIGRATION ORDINAL GUARD — and this one needed it
+ * more, because it spent five days on main running NOWHERE.
+ *
+ * `migration-ordinal-guard.sh` landed with #404 and had zero callers. Its own
+ * header states it "lives in the `layering` job because that is the one job
+ * checked out with full history" — it never got there, for the reason the
+ * describe above documents: reaching `ci.yml` needs `workflow` scope, and this
+ * system's token is `repo read:org`. A guard written to prevent a specific
+ * outage, merged green, enforcing nothing.
+ *
+ * What it prevents is measured. On 2026-08-17 two branches took the same ordinal,
+ * the duplicate was SILENTLY SKIPPED at migrate time, and the deploy shipped code
+ * writing columns that did not exist — every dispatch died on `no such column`.
+ * The runner's own duplicate refusal fires only once such a collision has already
+ * merged, so a pre-merge gate is the only one that can help.
+ *
+ * The wiring is pinned the same way and for the same reason: `guardMigration-
+ * OrdinalCollisions` is a function that could be defined and never called, which
+ * is precisely the shape that let the guard sit inert in the first place. That
+ * the original defect can be restored by deleting one line is exactly what the
+ * mutation battery below exists to notice.
+ *
+ * NO EVENT FILTER IS PINNED HERE, unlike the as-built guard, and the asymmetry is
+ * deliberate rather than an omission: this guard needs none, because on a push to
+ * main the tree's ordinals ARE the base's, name for name, so it passes on its own
+ * logic rather than by being skipped. What IS pinned is that it fails CLOSED — an
+ * unresolvable base ref and a zero-file parse must both be failures, since
+ * "parsed nothing" reading as "found nothing wrong" is an error this repository
+ * has shipped more than once.
+ */
+describe('migration ordinal guard is wired into a gate the repo can own', () => {
+  const ORDINAL_GUARD_PATH = 'scripts/ci/migration-ordinal-guard.sh'
+  const ORDINAL_GATE_PATH = 'scripts/ci/check-governed-repo-attributes.ts'
+  const ordinalGuard = readFileSync(join(REPO_ROOT, ORDINAL_GUARD_PATH), 'utf8')
+  const ordinalGate = readFileSync(join(REPO_ROOT, ORDINAL_GATE_PATH), 'utf8')
+
+  /** Why the gate would not enforce the ordinal guard, or `null` when it would. */
+  function whyNotEnforcing(source: string): string | null {
+    if (!source.includes('migration-ordinal-guard.sh')) return 'the gate never names the guard'
+    if (!/^guardMigrationOrdinalCollisions\(\)$/m.test(source)) {
+      return 'the guard invocation is declared but never called at top level'
+    }
+    // The status must reach `process.exit`, scoped to THIS guard's body — the
+    // as-built guard above carries the identical line, so an unscoped search
+    // would stay satisfied after this one's was deleted.
+    const body = source.slice(source.indexOf('function guardMigrationOrdinalCollisions'))
+    if (!/if \(guard\.exitCode !== 0\) process\.exit\(guard\.exitCode\)/.test(body)) {
+      return 'the gate does not propagate the guard exit code'
+    }
+    // Before the attribute verdict's early exits, or a repo with no as-built log
+    // returns 0 without the migrations ever being read.
+    const firstExit = source.indexOf('process.exit(0)')
+    const callAt = source.search(/^guardMigrationOrdinalCollisions\(\)$/m)
+    if (firstExit !== -1 && callAt > firstExit) return 'the guard runs after an early exit 0'
+    return null
+  }
+
+  /** Why the guard would fail to catch a real collision, or `null` when it would. */
+  function whyNotGuarding(source: string): string | null {
+    // A base ref it cannot read must be a FAILURE, never a skip — that is the
+    // half that catches the race, and a shallow checkout would silently drop it.
+    if (!/rev-parse --verify --quiet "\$BASE_REF"/.test(source)) {
+      return 'the guard never resolves the base ref'
+    }
+    if (!source.includes('cannot resolve $BASE_REF')) return 'an unreadable base ref is not a failure'
+    // Parsing zero migrations must be a failure, not a pass.
+    if (!/\[ "\$count" -gt 0 \] \|\| fail/.test(source)) return 'a zero-file parse is not a failure'
+    // The collision test itself: same ordinal, DIFFERENT name.
+    if (!source.includes('[ -n "$theirs" ] && [ "$ours" != "$theirs" ]')) {
+      return 'the guard no longer compares names at a shared ordinal'
+    }
+    return null
+  }
+
+  test('the gate enforces the ordinal guard today', () => {
+    // POSITIVE CONTROLS FIRST — a regex over an empty string reports no problem,
+    // which reads exactly like a pass.
+    expect(ordinalGate.length).toBeGreaterThan(1000)
+    expect(ordinalGuard.length).toBeGreaterThan(1000)
+    expect(whyNotEnforcing(ordinalGate)).toBeNull()
+    expect(whyNotGuarding(ordinalGuard)).toBeNull()
+  })
+
+  const ordinalGateMutations: Array<[string, (source: string) => string]> = [
+    [
+      'the invocation is deleted — the original defect, restored',
+      (source) => source.replace(/^guardMigrationOrdinalCollisions\(\)$/m, ''),
+    ],
+    [
+      'the guard is no longer named',
+      (source) => source.replace(/migration-ordinal-guard\.sh/g, 'nothing.sh'),
+    ],
+    [
+      'the exit code is discarded',
+      (source) => {
+        const at = source.indexOf('function guardMigrationOrdinalCollisions')
+        return (
+          source.slice(0, at) +
+          source.slice(at).replace('if (guard.exitCode !== 0) process.exit(guard.exitCode)', '')
+        )
+      },
+    ],
+  ]
+
+  for (const [name, mutate] of ordinalGateMutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(ordinalGate)
+      expect(mutated).not.toBe(ordinalGate)
+      expect(whyNotEnforcing(mutated)).not.toBeNull()
+    })
+  }
+
+  const ordinalGuardMutations: Array<[string, (source: string) => string]> = [
+    [
+      'an unreadable base ref becomes a skip',
+      (source) => source.replace(/if ! git rev-parse --verify --quiet "\$BASE_REF"[\s\S]*?\nfi\n/, ''),
+    ],
+    [
+      'a zero-file parse becomes a pass',
+      (source) => source.replace(/\[ "\$count" -gt 0 \] \|\| fail[\s\S]*?trusting a pass\."\n/, ''),
+    ],
+    [
+      'the name comparison is dropped, so a shared ordinal always looks fine',
+      (source) =>
+        source.replace('[ -n "$theirs" ] && [ "$ours" != "$theirs" ]', '[ -n "$theirs" ] && false'),
+    ],
+  ]
+
+  for (const [name, mutate] of ordinalGuardMutations) {
+    test(`catches the bypass: ${name}`, () => {
+      const mutated = mutate(ordinalGuard)
+      expect(mutated).not.toBe(ordinalGuard)
+      expect(whyNotGuarding(mutated)).not.toBeNull()
+    })
+  }
+
+  test('the guard script it names exists on disk', () => {
+    expect(existsSync(join(REPO_ROOT, ORDINAL_GUARD_PATH))).toBe(true)
+  })
+})
+
 /**
  * 2026-08-17 — the bun install cache is TEN UNLINKED LITERALS, so it needs a guard.
  *

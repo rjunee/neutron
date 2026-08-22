@@ -103,6 +103,56 @@ function guardBranchWritesOfCanonicalLog(): void {
 
 guardBranchWritesOfCanonicalLog()
 
+/**
+ * MIGRATION ORDINAL COLLISIONS — the second repo-owned rule hosted here, for the
+ * SAME reason as the one above and with the same evidence behind it.
+ *
+ * `migration-ordinal-guard.sh` landed on main with #404 and then ran NOWHERE: it
+ * had zero callers for five days. Its own header says it "lives in the `layering`
+ * job because that is the one job checked out with full history" — it never got
+ * there, because reaching `ci.yml` needs `workflow` scope and this system's token
+ * is `repo read:org`, with the absence asserted by test
+ * (`github/__tests__/device-flow.test.ts`). So a guard written specifically to
+ * stop an outage sat inert, which is the exact failure mode the guard above was
+ * moved here to escape. A rule that runs nowhere is indistinguishable from a rule
+ * nobody wrote.
+ *
+ * WHAT IT CATCHES. Nothing allocates migration ordinals, so two branches cut from
+ * the same main both see the next integer as free and both take it. The runner
+ * refuses a duplicate at boot — AFTER the collision has merged. On 2026-08-17
+ * that was a live outage: a silently skipped ordinal shipped code writing columns
+ * that did not exist, and every dispatch died on `no such column`.
+ *
+ * THIS FILE IS THE LAYERING JOB'S REACHABLE ENTRY POINT, and that is now its
+ * second job rather than an accident. `layering` checks out at `fetch-depth: 0`
+ * — its own step comment says a depth-1 checkout "has no origin/main to compare"
+ * — which is precisely the base ref this guard needs.
+ *
+ * NO EVENT FILTER, because it does not need one and a wrong one would be worse.
+ * On a push to main the tree's ordinals ARE the base's, name for name, so there
+ * is no collision to find and the guard passes on its own logic rather than by
+ * being skipped. It fails CLOSED on an unresolvable base ref and on parsing zero
+ * migration files, so neither a shallow checkout nor a renamed directory can turn
+ * it into a silent pass.
+ *
+ * SCOPED TO THIS REPO, like the guard above: this gate is pointed at fixture
+ * repos by its own tests, and a fixture has no `migrations/` to answer for.
+ */
+function guardMigrationOrdinalCollisions(): void {
+  const here = import.meta.dir
+  const ownRepoRoot = resolve(here, '../..')
+  if (resolve(root) !== ownRepoRoot) return
+
+  const guard = Bun.spawnSync(['bash', join(here, 'migration-ordinal-guard.sh'), 'migrations'], {
+    cwd: ownRepoRoot,
+    stdout: 'inherit',
+    stderr: 'inherit',
+  })
+  if (guard.exitCode !== 0) process.exit(guard.exitCode)
+}
+
+guardMigrationOrdinalCollisions()
+
 /** Is `SPEC.md` in the tree a fresh clone would get, even if not checked out? */
 function specIsCommitted(dir: string): boolean {
   return clonedTreeContains(dir, ['SPEC.md']).length > 0
