@@ -37,6 +37,7 @@ import {
   InterviewEngine,
   SqliteOnboardingStateStore,
   TranscriptWriter,
+  IDLE_TICK_LOG_INTERVAL_MS,
   buildImportRunningHandler,
   registerImportRunningCron,
   ONBOARDING_IMPORT_RUNNING_HANDLER_NAME,
@@ -342,5 +343,67 @@ describe('import-running cron-tick (S12)', () => {
     expect(r.status).toBe('skipped')
     expect(r.detail ?? '').toContain('no_in_flight_imports')
     expect(sentPrompts.length).toBe(0)
+  })
+})
+
+/**
+ * The journal flood, and the proof it is gone WITHOUT the proof-of-life going with it.
+ *
+ * S15 added an unconditional `tick` line so operators could see the cron firing at all.
+ * It fires often enough that in steady state — nothing in flight, which is almost always —
+ * it buried every other line in journald. Silencing it would have deleted the S15 signal;
+ * rate-limiting the IDLE case keeps the signal and drops only the repetition.
+ *
+ * Both halves are asserted here because only the pair is the contract: an idle tick is
+ * emitted once per window per project, and a tick WITH work in flight is never suppressed.
+ */
+describe('the idle tick is rate-limited, and a busy tick never is', () => {
+  function tickLines(sink: string[]): string[] {
+    return sink.filter((line) => line.includes('event=tick'))
+  }
+
+  test('twenty idle ticks inside one window log ONCE, and the next window logs again', async () => {
+    let clock = 1_700_000_000_000
+    const lines: string[] = []
+    const handler = buildImportRunningHandler({
+      engine: makeEngine(() => clock),
+      db,
+      now: () => clock,
+      log_sink: (_level, line) => lines.push(line),
+    })
+
+    // A slug of this test's own: the rate-limit window is process-global per key, so
+    // reusing one another test already ticked would arrive PRE-LATCHED and this would
+    // pass for the wrong reason (it did, at 0 lines, before the slug was made unique).
+    const slug = 'idle-window-probe'
+    // No onboarding_state row for it → every tick is idle.
+    for (let i = 0; i < 20; i += 1) {
+      clock += 30_000
+      await handler({ owner_slug: slug } as never)
+    }
+    expect(tickLines(lines)).toHaveLength(1)
+
+    // Past the 10-minute window, the proof-of-life reappears.
+    clock += IDLE_TICK_LOG_INTERVAL_MS
+    await handler({ owner_slug: slug } as never)
+    expect(tickLines(lines)).toHaveLength(2)
+  })
+
+  test('one project going quiet cannot suppress another project’s proof-of-life', async () => {
+    let clock = 1_700_000_000_000
+    const lines: string[] = []
+    const mk = (slug: string) =>
+      buildImportRunningHandler({
+        engine: makeEngine(() => clock),
+        db,
+        now: () => clock,
+        log_sink: (_level, line) => lines.push(line),
+      })
+    const a = mk('two-projects-a')
+    const b = mk('two-projects-b')
+    await a({ owner_slug: 'two-projects-a' } as never)
+    await b({ owner_slug: 'two-projects-b' } as never)
+    // Keyed per owner, so both spoke.
+    expect(tickLines(lines)).toHaveLength(2)
   })
 })
