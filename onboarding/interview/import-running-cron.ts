@@ -58,6 +58,15 @@ import type { InterviewEngine } from './engine.ts'
 const log = createLogger('import-running-cron')
 
 /**
+ * How often an IDLE tick may log, per project.
+ *
+ * Ten minutes keeps the S15 proof-of-life visible at a glance in journald while
+ * turning a per-tick line into roughly six an hour. A busy tick is never subject
+ * to this — only the "nothing in flight" repetition is.
+ */
+export const IDLE_TICK_LOG_INTERVAL_MS = 10 * 60_000
+
+/**
  * Default sweep cadence — 5 s (lowered from 15 s on 2026-05-21 by the
  * import-progress-envelope sprint, v0.1.75).
  *
@@ -106,6 +115,13 @@ export interface ImportRunningHandlerDeps {
   db: ProjectDb
   /** Test seam. */
   now?: () => number
+  /**
+   * Test seam for the tick line only. Present so the idle-tick rate limit can be
+   * OBSERVED rather than asserted from source: without a sink the only proof that
+   * the window works is reading the code, which is the kind of check that passes
+   * on a comment.
+   */
+  log_sink?: (level: string, line: string) => void
 }
 
 /**
@@ -153,9 +169,30 @@ export function buildImportRunningHandler(
     // appeared; once it stops appearing in steady-state (or the count
     // stays > 0 for > 15 min on a single instance), operators have a
     // direct signal pointing at the cron tier rather than the engine.
-    log.info('tick', { project: ctx.owner_slug, in_flight_imports: rows.length })
+    // …but an IDLE tick proves nothing new, and this cron fires often enough that
+    // the steady state buried every other line in the journal. An idle tick is
+    // therefore rate-limited per project; a tick with work in flight is ALWAYS
+    // emitted, because that is the one the signal above is about. Silencing the
+    // line entirely would have removed the S15 proof; this keeps it and drops only
+    // the repetition.
+    //
+    // Keyed per owner so a busy project cannot suppress a quiet one's proof-of-life,
+    // and the clock comes from `deps.now` when injected so the window is testable
+    // rather than wall-clock-dependent.
+    const idle = rows.length === 0
+    const tickLog =
+      deps.now === undefined && deps.log_sink === undefined
+        ? log
+        : createLogger('import-running-cron', {
+            ...(deps.now === undefined ? {} : { now }),
+            ...(deps.log_sink === undefined ? {} : { sink: deps.log_sink }),
+          })
+    const tickEmitter = idle
+      ? tickLog.rateLimited(`idle_tick:${ctx.owner_slug}`, IDLE_TICK_LOG_INTERVAL_MS)
+      : tickLog
+    tickEmitter.info('tick', { project: ctx.owner_slug, in_flight_imports: rows.length })
 
-    if (rows.length === 0) {
+    if (idle) {
       return { status: 'skipped', detail: 'no_in_flight_imports' }
     }
 
