@@ -62,7 +62,7 @@ describe('buildBoardReconcileObserver', () => {
   })
 })
 
-describe('durable PR provenance — the number survives the detach that kills the binding', () => {
+describe('durable PR provenance — the number is written by the terminal reconcile', () => {
   const WEB = 'https://github.com/acme/widget'
 
   test('a done run writes pr/pr_url onto the ITEM; the re-read after detach still has it', async () => {
@@ -91,7 +91,9 @@ describe('durable PR provenance — the number survives the detach that kills th
 
     const reread = board.get('proj-1', a.id)!
     expect(reread.status).toBe('done')
-    expect(reread.linked_run_id).toBeNull()
+    // Main KEEPS the terminal binding on `done` (completed history still derives
+    // recovered run evidence from it). This branch was written when `done` NULLed it.
+    expect(reread.linked_run_id).not.toBeNull()
     expect(reread.completed_at).not.toBeNull()
     expect(reread.pr).toBe(265)
     expect(reread.pr_url).toBe('https://github.com/acme/widget/pull/265')
@@ -138,7 +140,9 @@ describe('durable PR provenance — the number survives the detach that kills th
 
     const reread = board.get('proj-1', a.id)!
     expect(reread.status).toBe('done') // the reconcile is NOT gated on the link
-    expect(reread.linked_run_id).toBeNull()
+    // Main KEEPS the terminal binding on `done` (completed history still derives
+    // recovered run evidence from it). This branch was written when `done` NULLed it.
+    expect(reread.linked_run_id).not.toBeNull()
     expect(reread.pr).toBe(12)
     expect(reread.pr_url).toBeNull() // plain text, never a guessed link
   })
@@ -178,7 +182,9 @@ describe('durable PR provenance — the number survives the detach that kills th
     } as never)
     const reread = board.get('proj-1', a.id)!
     expect(reread.status).toBe('done')
-    expect(reread.linked_run_id).toBeNull()
+    // Main KEEPS the terminal binding on `done` (completed history still derives
+    // recovered run evidence from it). This branch was written when `done` NULLed it.
+    expect(reread.linked_run_id).not.toBeNull()
     expect(reread.pr).toBeNull()
     expect(reread.pr_url).toBeNull()
     expect(shells).toBe(0)

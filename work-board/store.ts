@@ -257,8 +257,14 @@ export function workBoardProjectIdForKey(
 const COLS =
   'id, project_slug, title, status, sort_order, design_doc_ref, ' +
   'inline_active, linked_run_id, created_at, updated_at, completed_at, task_type, ' +
-  'blocked_by, declared_surfaces'
+  'blocked_by, declared_surfaces, ' +
   'pr, pr_url'
+
+/** One `?` per column in {@link COLS}, DERIVED — a hand-counted placeholder list is how
+ *  the rebase produced `SQLite query expected 14 values, received 16`. */
+const COL_PLACEHOLDERS = COLS.split(',')
+  .map(() => '?')
+  .join(', ')
 
 interface WorkBoardItemDbRow {
   id: string
@@ -623,7 +629,7 @@ export class WorkBoardStore {
       item.sort_order = max?.next ?? 1
       await tx.run(
         `INSERT INTO work_board_items (${COLS})
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         VALUES (${COL_PLACEHOLDERS})`,
         [
           item.id,
           item.project_slug,

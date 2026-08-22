@@ -864,7 +864,9 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
       pr_url: 'https://github.com/acme/widget/pull/265',
     })
     expect(done?.status).toBe('done')
-    expect(done?.linked_run_id).toBeNull()
+    // Main KEEPS the terminal binding on `done` (completed history still derives
+    // recovered run evidence from it). This branch was written when `done` NULLed it.
+    expect(done?.linked_run_id).toBe('run-pr')
     expect(done?.completed_at).not.toBeNull()
     // Re-read from the DB: the binding is gone and the number is still there.
     const reread = store.get(SLUG, a.id)!
@@ -897,7 +899,9 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     // The same run reconciling again with NO PR must not wipe what it wrote.
     const done = await store.detachRun(SLUG, 'run-1', 'done', { pr: null, pr_url: null })
     expect(done?.status).toBe('done')
-    expect(done?.linked_run_id).toBeNull()
+    // Main KEEPS the terminal binding on `done` (completed history still derives
+    // recovered run evidence from it). This branch was written when `done` NULLed it.
+    expect(done?.linked_run_id).toBe('run-1')
     expect(done?.pr).toBe(77)
     expect(done?.pr_url).toBe('https://github.com/acme/widget/pull/77')
   })

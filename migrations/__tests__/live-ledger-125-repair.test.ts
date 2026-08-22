@@ -90,7 +90,7 @@ test('the live 0125 incident boots, applies later migrations, and leaves row 125
 
   const result = applyMigrations(db, fullDir)
 
-  expect(result.applied).toEqual([127, 130, 131, 132, 134, 135, 136, 137, 138])
+  expect(result.applied).toEqual([127, 130, 131, 132, 133, 134, 135, 136, 137, 138])
   expect(result.skipped).toContain(125)
   const columns = columnNames(db, 'code_trident_runs')
   expect(columns).toContain('base_sha')
@@ -166,7 +166,7 @@ test('without the 125 entry the run no longer needs one — it applies 0125 and 
   const result = applyMigrations(db, fullDir)
 
   // It applied the migration itself, instead of demanding to be told about it.
-  expect(result.applied).toEqual([125, 127, 130, 131, 132, 134, 135, 136, 137, 138])
+  expect(result.applied).toEqual([125, 127, 130, 131, 132, 133, 134, 135, 136, 137, 138])
   expect(columnNames(db, 'code_trident_runs')).toContain('base_sha')
   expect(columnNames(db, 'code_trident_runs')).toContain('base_behind')
   // The incident row is untouched — never renamed, never renumbered, never deleted.
@@ -194,7 +194,12 @@ test('without the 125 entry the run no longer needs one — it applies 0125 and 
       .query<{ version: number }, []>('SELECT version FROM _migration_repairs ORDER BY version')
       .all()
       .map((r) => r.version),
-  ).toEqual([122, 124])
+    // 122 appears TWICE, and both are real: `repairs.json` carries two entries at that
+    // ordinal — the original `trident_checkpoint_head` acknowledgment, and the
+    // `work_board_items_pr` REAPPLY entry, which fires here for the first time because
+    // #269 now ships a migration of that name. This fixture ran 0130, so the columns are
+    // absent and the re-ALTER is exactly what the entry exists to do.
+  ).toEqual([122, 122, 124])
   db.close()
 })
 
