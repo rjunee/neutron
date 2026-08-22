@@ -77,3 +77,34 @@ export function phaseForCheckpoint(checkpoint: string | null): TridentPhase | nu
 
   return null
 }
+
+/**
+ * Did ARGUS actually review this run? Answered from the same checkpoint
+ * vocabulary the table above decodes, so the two cannot drift.
+ *
+ * WHY THIS EXISTS — MEASURED. `failedRun` kept a REQUEST_CHANGES verdict whenever
+ * the row carried any findings at all. But the suite gate in `inner-workflow.mjs`
+ * writes a `blocker` finding of its own ("FULL SUITE NOT PROVEN …") on a build
+ * that never reached review, so a never-reviewed run satisfied that test and was
+ * recorded as a reviewed rejection. Over this database: of 160 terminal
+ * REQUEST_CHANGES rows only 18 carry an Argus checkpoint — 68 stopped at
+ * `forge-done` and 45 at `inner-error`. Those 113 rows claim a review that
+ * provably never ran, which is what makes the queue look reviewed-and-rejected
+ * when it is really un-reviewed.
+ *
+ * TRUE for the checkpoints that can only exist AFTER a review:
+ *   * `argus-approved` / `argus-request-changes[-round-N]` — Argus spoke.
+ *   * `fix-round-N` — fix N is BUILT, which only happens in response to an
+ *     `argus-request-changes`; the re-review is what runs next.
+ *
+ * FALSE for everything else, and deliberately so for the two that look closest:
+ *   * `forge-done` — the build finished and review is what runs NEXT. Not yet.
+ *   * `awaiting-trailer` / `inner-error` — the inner loop's THROW path, which
+ *     is reached from anywhere, including before review.
+ */
+export function hasArgusProvenance(checkpoint: string | null): boolean {
+  if (checkpoint === null || checkpoint === '') return false
+  if (checkpoint === 'argus-approved' || checkpoint === 'argus-request-changes') return true
+  if (/^argus-request-changes-round-\d+$/.test(checkpoint)) return true
+  return /^fix-round-\d+$/.test(checkpoint)
+}

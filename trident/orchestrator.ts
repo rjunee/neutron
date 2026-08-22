@@ -75,6 +75,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
+import { hasArgusProvenance } from './checkpoint-phase.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import {
   parseCheckpointFindings,
@@ -797,14 +798,28 @@ export function classifyInnerFailure(
  * at least one finding. `round-lost` and `infra-only` both mean the code was not
  * (re-)judged (the inner workflow's own terminology), while an empty finding set
  * is either approval or infrastructure failure — never a rejection.
+ *
+ * AND THE REVIEWER MUST ACTUALLY HAVE RUN. Findings alone do not prove that: the
+ * suite gate in `inner-workflow.mjs` writes a `blocker` of its own ("FULL SUITE
+ * NOT PROVEN …") on a build that never reached a reviewer, and that build carries
+ * `block_kind: 'code'` too — so all three of the old conditions were satisfied by
+ * a run whose review provably never happened. Measured over this database at the
+ * time of the fix: of 160 terminal REQUEST_CHANGES rows only 18 carried an Argus
+ * checkpoint; 68 stopped at `forge-done` and 45 at `inner-error`. Those rows are
+ * why a queue of un-reviewed builds reads as reviewed-and-rejected, and why
+ * re-dispatching them changes nothing — there was never a finding to answer.
+ *
+ * The findings themselves are still PRESERVED on the row; only the verdict
+ * changes, because the verdict is the part that was untrue.
  */
 export function recordedTerminalVerdict(
-  result: Pick<InnerResult, 'verdict' | 'block_kind'>,
+  result: Pick<InnerResult, 'verdict' | 'block_kind' | 'checkpoint'>,
   rowFindings: string | null,
 ): 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' {
   if (
     result.verdict === 'REQUEST_CHANGES' &&
     result.block_kind === 'code' &&
+    hasArgusProvenance(result.checkpoint) &&
     parseCheckpointFindings(rowFindings).length > 0
   ) {
     return 'REQUEST_CHANGES'
@@ -2324,10 +2339,18 @@ export function buildTridentOrchestrator(
       phase: 'failed',
       subagent_status: 'failed',
       subagent_run_id: keepSubagentId ? run.subagent_run_id : null,
+      // A REQUEST_CHANGES survives only with ARGUS PROVENANCE — the run must have
+      // actually reached review. Non-empty findings are NOT that proof: the suite
+      // gate (`inner-workflow.mjs`, "FULL SUITE NOT PROVEN …") writes a blocker of
+      // its own on a build that never got near a reviewer, so the old
+      // findings-non-empty test recorded 113 never-reviewed runs — 68 stopped at
+      // `forge-done`, 45 at `inner-error` — as reviewed rejections. That is what
+      // makes an un-reviewed queue read as reviewed-and-rejected.
       inner_verdict:
         run.inner_verdict === 'APPROVE'
           ? 'APPROVE'
           : run.inner_verdict === 'REQUEST_CHANGES' &&
+              hasArgusProvenance(run.inner_checkpoint) &&
               parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
             ? 'REQUEST_CHANGES'
             : 'REVIEW_NOT_RUN',
@@ -4006,19 +4029,18 @@ export function buildTridentOrchestrator(
     if (run.subagent_run_id !== null && !fired.has(run.id)) {
       const orphanId = run.subagent_run_id
       if (on_orphaned === 'fail') {
+        // The verdict rule is `failedRun`'s, not a fourth copy of it: this branch
+        // used to inline the same conditional, which is exactly how the provenance
+        // guard would have been added in two places and missed in the third.
+        // `crashed` overrides the `failed` subagent_status because this row died
+        // with its process rather than reporting a failure.
         const reaped: TridentRun = {
-          ...run,
-          phase: 'failed',
+          ...failedRun(
+            run,
+            `orphaned inner-loop dispatch ${orphanId} (lost after restart / never wrote a result)`,
+            true,
+          ),
           subagent_status: 'crashed',
-          inner_verdict:
-            run.inner_verdict === 'APPROVE'
-              ? 'APPROVE'
-              : run.inner_verdict === 'REQUEST_CHANGES' &&
-                  parseCheckpointFindings(run.inner_checkpoint_findings).length > 0
-                ? 'REQUEST_CHANGES'
-                : 'REVIEW_NOT_RUN',
-          failure_reason: `orphaned inner-loop dispatch ${orphanId} (lost after restart / never wrote a result)`,
-          last_advanced_at: now(),
         }
         return { run: reaped, changed: true, waiting: false, note: `${run.phase} → failed (orphaned dispatch reaped)` }
       }
