@@ -570,6 +570,30 @@ describe('publishFailureReason — names the step, quotes the cause, invents not
     expect(r).toContain('non-fast-forward')
   })
 
+  test("'open a PR for' carries gh's words", () => {
+    const r = publishFailureReason(
+      'open a PR for',
+      'feat-x',
+      'GraphQL: No commits between main and feat-x (createPullRequest)',
+    )
+    expect(r).toContain('could not open a PR for branch feat-x')
+    expect(r).toContain('No commits between')
+  })
+
+  test("'open a PR for' keeps the previous wording when stderr is empty", () => {
+    expect(publishFailureReason('open a PR for', 'feat-x', '')).toBe(
+      'outer publisher could not open a PR for branch feat-x',
+    )
+  })
+
+  test("'open a PR for' redacts credentials before carrying gh's words", () => {
+    const raw = 'fatal: could not create PR: https://x-access-token:ghp_SECRET789@github.test/o/r rejected'
+    const reason = publishFailureReason('open a PR for', 'feat-x', raw)
+    expect(raw).toContain('ghp_SECRET789')
+    expect(reason).not.toContain('ghp_SECRET789')
+    expect(reason).toContain('***')
+  })
+
   test('silence stays silent rather than being filled in', () => {
     // The #240 rule applied to this path: with nothing measured, assert nothing.
     const r = publishFailureReason('push', 'feat-x', '   ')

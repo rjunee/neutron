@@ -292,24 +292,14 @@ describe('orchestrator — wave child built terminal', () => {
   })
 })
 
-test('a bound_pr run never takes the build path', async () => {
-  const h = buildHarness({
-    plan: () => ({ result: { verdict: 'APPROVE', prNumber: 515, branch: 'feat-x' } }),
-    base_branch: null,
-  })
-  const run = await createRun({ bound_pr: 515 })
-
-  await h.loop.runOnce()
-
-  expect(h.inputs).toHaveLength(0)
-  expect(h.hostCalls).toHaveLength(0)
-  const persisted = store.get(run.id)!
-  expect(persisted.phase).toBe('failed')
-  expect(persisted.failure_reason).toContain('PR #515')
-  expect(persisted.failure_reason).toContain('review-only')
-  expect(persisted.failure_reason).toContain('no branch, no commit')
-})
-
+// REMOVED WITH ITS BEHAVIOUR, NOT WITH ITS COVERAGE. This asserted task 1's
+// FAIL-CLOSED stop — a bound run terminal-FAILED with "review-only … no branch,
+// no commit" — which task 2 replaces with the real review executor, so the run
+// now lands `done`. Its successor is `trident/review-run.test.ts` "a bound run
+// lands done without a build fire or host fallthrough", which makes the same two
+// assertions that mattered here (zero build fires, zero host commands) against
+// the new outcome, and is joined there by a CONTROL proving an unbound run still
+// fires the ordinary build workflow — so the build path cannot quietly die.
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
@@ -1128,6 +1118,47 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // actually held, and the checkpoint carries the UNREBASED head.
     expect(calls.some((c) => c.includes(`--force-with-lease=refs/heads/feat-x:${stale}`))).toBe(true)
     expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a failed PR creation persists the underlying gh diagnostic', async () => {
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '4444444444444444444444444444444444444444'
+    const stale = '9'.repeat(40)
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'forge-done',
+          publishRequested: true,
+          publishHead: head,
+        },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr list')) return ok('')
+        if (joined.includes('gh pr create')) {
+          return failWith('pull request create failed: GraphQL: No commits between main and feat-x (createPullRequest)')
+        }
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('publish failed: outer publisher could not open a PR for branch feat-x')
+    expect(final.failure_reason).toContain('No commits between')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('gh pr create'))).toBe(true)
   })
 
   test('a rebase CONFLICT with NO resolver configured is an attention state naming the paths — never REQUEST_CHANGES', async () => {
