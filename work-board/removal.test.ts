@@ -27,6 +27,9 @@ function fakeItem(over: Partial<WorkBoardItem> = {}): WorkBoardItem {
     task_type: 'build',
     blocked_by: [],
     declared_surfaces: null,
+    // Durable PR provenance (#269) — written only by the terminal reconcile.
+    pr: null,
+    pr_url: null,
     inline_active: false,
     linked_run_id: null,
     created_at: '2026-08-14T00:00:00Z',

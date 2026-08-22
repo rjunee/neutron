@@ -55,6 +55,7 @@ function runProgress(over: Partial<RunProgress> = {}): RunProgress {
     stalled: false,
     stalled_ms: null,
     pr: null,
+    pr_url: null,
     verdict: null,
     failure_reason: null,
     ...over,

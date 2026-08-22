@@ -22,6 +22,7 @@
  */
 
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
  * Parse a git remote URL into its GitHub WEB url (`https://github.com/<o>/<r>`),
@@ -118,13 +119,22 @@ export function makeRepoWebUrlCache(
       if (!warming.has(repo_path)) {
         warming.add(repo_path)
         try {
-          void resolve(repo_path)
-            .then((v) => {
-              settled.set(repo_path, v)
-            })
-            .catch(() => {
-              settled.set(repo_path, null)
-            })
+          // NOT `void`, and NOT `.catch` — the void-promise gate wants the rejection to
+          // reach a named wrapper, and the pre-swallow gate bans catching it before that.
+          // So the failure path caches NOTHING: `settled` stays unset and `warming` is
+          // released in `.finally`, which makes a transient git failure retry on the next
+          // peek instead of being negatively cached for the life of the process. The
+          // rejection itself is logged by `fireAndForget`.
+          fireAndForget(
+            'repo-web-url-warm',
+            resolve(repo_path)
+              .then((v) => {
+                settled.set(repo_path, v)
+              })
+              .finally(() => {
+                warming.delete(repo_path)
+              }),
+          )
         } catch {
           // A synchronously-throwing run_host must not take down a board render.
           settled.set(repo_path, null)
