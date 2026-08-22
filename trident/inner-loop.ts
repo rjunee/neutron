@@ -414,16 +414,26 @@ export function buildWorkflowArgs(
   const run = input.run
   let memberArgs: { pinnedTaskId: string; memberBranch: string } | Record<string, never> = {}
   let workflowBranch = run.branch
-  if (run.parent_run_id !== null && run.wave_task_id !== null) {
+  // WAVE-CHILD DISCRIMINATION, FAIL-CLOSED. `!== null` was wrong here and reddened 62
+  // tests across 11 files: a run object that simply OMITS these two fields has them
+  // `undefined`, and `undefined !== null` is true — so every ordinary run took the
+  // wave-child path and died on `has no run branch`. A row read from the store always
+  // carries them (0137 added both columns), so production never saw it; every in-process
+  // caller that builds a partial run did. Require the positive evidence instead — two
+  // non-empty strings — so only an actual wave child can take this branch, and any other
+  // shape falls through to the ordinary path it belongs on.
+  const parentRunId = typeof run.parent_run_id === 'string' ? run.parent_run_id : ''
+  const waveTaskId = typeof run.wave_task_id === 'string' ? run.wave_task_id : ''
+  if (parentRunId !== '' && waveTaskId !== '') {
     if (run.branch === null) throw new Error(`wave child ${run.id} has no run branch`)
-    const memberSuffix = `--w${run.wave_task_id}`
+    const memberSuffix = `--w${waveTaskId}`
     const runBranch = run.branch.endsWith(memberSuffix)
       ? run.branch.slice(0, -memberSuffix.length)
       : run.branch
     workflowBranch = runBranch
     memberArgs = {
-      pinnedTaskId: run.wave_task_id,
-      memberBranch: waveChildSlug(runBranch, run.wave_task_id),
+      pinnedTaskId: waveTaskId,
+      memberBranch: waveChildSlug(runBranch, waveTaskId),
     }
   }
   return {

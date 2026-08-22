@@ -363,6 +363,33 @@ describe('buildWorkflowFirer — fire mechanics over a fire seam', () => {
     expect(buildWorkflowArgs(input({ run: makeRun({ ralph: true, ralph_round: 4 }) })).ralphRound).toBe(4)
   })
 
+  /**
+   * ONLY A REAL WAVE CHILD TAKES THE WAVE-CHILD PATH.
+   *
+   * The first cut discriminated on `parent_run_id !== null && wave_task_id !== null`, which
+   * is TRUE for a run that simply OMITS the fields — `undefined !== null`. A row read from
+   * the store always carries both (0137 added the columns), so production never saw it;
+   * every in-process caller building a partial run did, and 62 tests across 11 files died on
+   * `wave child … has no run branch`. The rule is positive evidence, not absence of null:
+   * two non-empty strings, or it is an ordinary run.
+   */
+  test('a run missing the wave columns is an ORDINARY run, not a malformed wave child', () => {
+    const bare = { ...makeRun({ branch: 'feat/x' }) } as Record<string, unknown>
+    delete bare['parent_run_id']
+    delete bare['wave_task_id']
+    const args = buildWorkflowArgs(input({ run: bare as unknown as TridentRun }))
+    expect('pinnedTaskId' in args).toBe(false)
+    expect(args.branch).toBe('feat/x')
+
+    // POSITIVE CONTROL — the same call WITH both fields present must still produce the
+    // member args, so this cannot pass by the wave path being dead altogether.
+    const child = buildWorkflowArgs(
+      input({ run: makeRun({ branch: 'feat/x--wT3', parent_run_id: 'parent-1', wave_task_id: 'T3' }) }),
+    )
+    expect(child.pinnedTaskId).toBe('T3')
+    expect(child.branch).toBe('feat/x')
+  })
+
   test('a valid launch base sha is threaded and invalid values are omitted', () => {
     const sha = 'a'.repeat(40)
     expect(buildWorkflowArgs(input({ base_sha: sha })).baseSha).toBe(sha)
