@@ -481,4 +481,31 @@ describe('the work-board wakeup shares that background substrate', () => {
       expect(resolved, `buildSubstrateReminderLlm(${name})`).toBe(true)
     }
   })
+
+  // THE THREE WRAPPERS ABOVE ARE THE HAZARD THIS ONE GUARDS. They all compose on
+  // ONE `cc-nudge-*` child per project (same substrate + same owner + same
+  // `metering_context.project_id` = same pool key), so they serialize. The wakeup
+  // is the only one on a fixed 5-minute cadence, so it is the one that collides:
+  // firing while another holds the child, it QUEUES, burns its 4-minute budget,
+  // aborts, and posts "Scheduled wakeup … failed to run" to the owner. Attempts 1,
+  // 6 and 12 of that reached his phone on 2026-08-22.
+  //
+  // `agentBusy` is OPTIONAL on `WorkWakeupDeps` — deliberately, so tests and any
+  // caller with no pool to ask can omit it. That is exactly why the wiring needs a
+  // pin: drop the one line in the composer and every unit test still passes while
+  // the gate is dead in production. This is the check that would notice.
+  test('the wakeup loop is WIRED to the live in-flight probe, not merely able to be', () => {
+    // POSITIVE CONTROLS FIRST. A regex over a moved or renamed file matches
+    // nothing and reads as satisfied; assert the source is really here.
+    expect(code.length).toBeGreaterThan(1000)
+    expect(code).toContain('buildWorkWakeupLoop')
+
+    const call = /buildWorkWakeupLoop\(\{([\s\S]*?)\n {4}\}\)/.exec(code)
+    expect(call, 'buildWorkWakeupLoop({ … }) not found in composer.ts').not.toBeNull()
+    const args = call![1]!
+    expect(args).toMatch(/\bagentBusy\s*:/)
+    // And wired to the SHARED counter — a bespoke local predicate would see this
+    // loop's own composes and be blind to the other two schedulers.
+    expect(args).toContain('isBackgroundComposeInFlight')
+  })
 })

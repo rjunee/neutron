@@ -81,12 +81,14 @@ function harness(over: {
   reply?: string | (() => string)
   composeError?: string
   activity?: number | null
+  agentBusy?: (chat_scope: string) => boolean
 } = {}): Harness {
   const specs: AgentSpec[] = []
   const posts: Array<{ project_key: string; body: string; loud: boolean }> = []
   const deps: WorkWakeupDeps = {
     listOutstanding: () => over.projects ?? [project()],
     ownerActivityMs: () => over.activity ?? null,
+    ...(over.agentBusy === undefined ? {} : { agentBusy: over.agentBusy }),
     llm: {
       compose: async (spec) => {
         specs.push(spec)
@@ -111,7 +113,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const h = harness()
     const result = await runWorkWakeupSweep(h.deps, new Map())
 
-    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0 })
+    expect(result).toEqual({ woke: 1, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(1)
     const spec = h.specs[0]!
     // The warm-pool key — what lands the turn ON the owner's session.
@@ -134,7 +136,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('owner active inside the grace window → skipped, and the session is NEVER entered', async () => {
     const h = harness({ activity: NOW - (WORK_WAKEUP_OWNER_GRACE_MS - 1) })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0, released_stalled_run: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
     expect(h.posts).toHaveLength(0)
   })
@@ -144,6 +146,70 @@ describe('runWorkWakeupSweep — the wake path', () => {
     const result = await runWorkWakeupSweep(h.deps, new Map())
     expect(result.woke).toBe(1)
     expect(h.specs).toHaveLength(1)
+  })
+
+  // ── the AGENT-activity gate ────────────────────────────────────────────────
+  // The owner gate answers "is the human driving?". These answer "is a MACHINE
+  // already driving?" — the gap that made this loop announce its own queueing as
+  // a mechanism failure, loudly, every five minutes.
+
+  test('a busy warm child → SKIPPED, the session is never entered, and NOTHING is posted', async () => {
+    const h = harness({ agentBusy: () => true })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result).toEqual({
+      woke: 0,
+      skipped_active: 0,
+      failed: 0,
+      deferred_to_run: 0,
+      released_stalled_run: 0,
+      skipped_agent_busy: 1,
+    })
+    expect(h.specs).toHaveLength(0)
+    // THE POINT OF THE WHOLE FIX. The old behaviour composed anyway, queued,
+    // aborted at the turn budget, and posted "Scheduled wakeup … failed to run".
+    expect(h.posts).toHaveLength(0)
+  })
+
+  test('CONTROL — an idle warm child still wakes (proves the gate, not the harness, is the discriminator)', async () => {
+    const h = harness({ agentBusy: () => false })
+    const result = await runWorkWakeupSweep(h.deps, new Map())
+    expect(result.woke).toBe(1)
+    expect(result.skipped_agent_busy).toBe(0)
+    expect(h.specs).toHaveLength(1)
+  })
+
+  test('a busy skip does NOT count as a failure — the streak is untouched, so the next real failure is still attempt 1', async () => {
+    const streaks = new Map<string, number>()
+    const busy = harness({ agentBusy: () => true })
+    await runWorkWakeupSweep(busy.deps, streaks)
+    await runWorkWakeupSweep(busy.deps, streaks)
+    await runWorkWakeupSweep(busy.deps, streaks)
+    expect(streaks.size).toBe(0)
+
+    // …and when the substrate is genuinely dead, it is STILL loud on the first
+    // one. Suppressing the notice unconditionally was the forbidden shortcut.
+    const dead = harness({ composeError: 'cc-llm-call: aborted' })
+    const result = await runWorkWakeupSweep(dead.deps, streaks)
+    expect(result.failed).toBe(1)
+    expect(dead.posts).toHaveLength(1)
+    expect(dead.posts[0]!.loud).toBe(true)
+    expect(dead.posts[0]!.body).toContain('attempt 1')
+  })
+
+  test('the gate is asked about the CHAT SCOPE — the warm-pool key, not the board key', async () => {
+    const asked: string[] = []
+    const h = harness({
+      projects: [project({ project_key: 'board-key', chat_scope: 'pool-scope' })],
+      agentBusy: (scope) => {
+        asked.push(scope)
+        return false
+      },
+    })
+    await runWorkWakeupSweep(h.deps, new Map())
+    expect(asked).toEqual(['pool-scope'])
+    // The same string must be what reaches the substrate, or the gate answered
+    // about a different warm child than the one the compose lands on.
+    expect(h.specs[0]!.metering_context?.project_id).toBe('pool-scope')
   })
 
   test('a BLOCKED reply posts LOUD — that is the "say so loudly" channel', async () => {
@@ -156,7 +222,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
   test('a project with zero items is not woken', async () => {
     const h = harness({ projects: [project({ items: [] })] })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 0, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -178,7 +244,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1, released_stalled_run: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 0, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
     expect(h.specs).toHaveLength(0)
   })
 
@@ -498,7 +564,7 @@ describe('runWorkWakeupSweep — the wake path', () => {
       ],
     })
     const result = await runWorkWakeupSweep(h.deps, new Map())
-    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1, released_stalled_run: 0 })
+    expect(result).toEqual({ woke: 0, skipped_active: 1, failed: 0, deferred_to_run: 1, released_stalled_run: 0, skipped_agent_busy: 0 })
   })
 
   test('an over-long report is truncated to the bound, never dropped', async () => {
@@ -591,6 +657,7 @@ describe('runWorkWakeupSweep — loud failure, bounded siren', () => {
       failed: 1,
       deferred_to_run: 0,
       released_stalled_run: 0,
+      skipped_agent_busy: 0,
     })
   })
 })

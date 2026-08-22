@@ -48,6 +48,19 @@
  * `last_user_activity_at` (only a real person moves it — the same field the
  * idle-nudge sweep relies on for exactly the same reason).
  *
+ * AND THE AGENT-ACTIVITY GATE, which the owner gate is not a substitute for. The
+ * owner gate answers "is the human driving?"; nothing answered "is a MACHINE
+ * already driving this session?". Three schedulers compose on ONE background
+ * `cc-nudge-*` warm child per project — this sweep, the fired-reminder dispatcher
+ * and the terminal-build wake — because all three key the pool on
+ * `metering_context.project_id`. A tick firing while one of the others holds that
+ * child does not run: it QUEUES, spends its whole `turn_timeout_ms` waiting,
+ * aborts (`cc-llm-call: aborted`), and this sweep announces a mechanism failure —
+ * loudly, every five minutes, about the very work it was interrupting. Attempts
+ * 1, 6 and 12 of exactly that reached the owner's phone on 2026-08-22. So
+ * `agentBusy` is asked, LIVE, before composing, and a busy scope is SKIPPED. A
+ * skip is not a failure: the streak is untouched and nothing is posted.
+ *
  * LOUD ON FAILURE, QUIET ON PROGRESS: every wakeup report is posted as a durable
  * inert chat row (visible in history + live push), but with the native device
  * buzz SUPPRESSED — twelve buzzes an hour all night is a product bug, not a
@@ -213,6 +226,23 @@ export interface WorkWakeupDeps {
    * (`last_user_activity_at` semantics), or null when he has never spoken there.
    */
   ownerActivityMs(project_key: string): number | null | Promise<number | null>
+  /**
+   * Is a background compose ALREADY RUNNING on the warm child this sweep would
+   * compose on? Called with `chat_scope` — the same value that goes into
+   * `metering_context.project_id` below, and therefore the same warm-pool
+   * discriminator the substrate keys on. Absent ⇒ never busy (tests and any
+   * caller with no pool to ask).
+   *
+   * THE OWNER GATE WAS NEVER THE WHOLE GATE. `ownerActivityMs` answers "is the
+   * human driving this project?" and nothing answered "is a MACHINE already
+   * driving this session?". Three schedulers compose on one `cc-nudge-*` child
+   * per project (this sweep, the fired-reminder dispatcher, the terminal-build
+   * wake), so a tick that fires while one of the others holds the child does not
+   * run: it queues, spends its whole `turn_timeout_ms` waiting, aborts, and this
+   * sweep then reports a MECHANISM FAILURE to the owner — loud, on a five-minute
+   * cadence, describing as broken the very work it was interrupting.
+   */
+  agentBusy?(chat_scope: string): boolean | Promise<boolean>
   llm: WakeupLlm
   /**
    * Post one report/notice to the project's chat topic. `loud: false` ⇒ durable
@@ -250,6 +280,14 @@ export interface WakeupSweepResult {
    * the per-run log's rate limit costs volume and never the fact.
    */
   released_stalled_run: number
+  /**
+   * Projects skipped because another background compose already held their warm
+   * child. COUNTED SEPARATELY FROM `skipped_active` on purpose: that one means
+   * "the owner is driving", this one means "a machine is", and folding them
+   * together would hide the arrival of a new background scheduler behind a number
+   * that reads as ordinary owner activity.
+   */
+  skipped_agent_busy: number
 }
 
 /**
@@ -395,6 +433,7 @@ export async function runWorkWakeupSweep(
     failed: 0,
     deferred_to_run: 0,
     released_stalled_run: 0,
+    skipped_agent_busy: 0,
   }
 
   const projects = await deps.listOutstanding()
@@ -503,6 +542,26 @@ export async function runWorkWakeupSweep(
       log.debug('wakeup_skipped_owner_active', {
         project: project.project_key,
         idle_ms: now() - last,
+      })
+      continue
+    }
+
+    // AGENT-ACTIVITY GATE — the other half of the owner gate, and the cure for a
+    // loop that reported its own queueing as a mechanism failure. Asked LIVE, of
+    // the warm child this tick would actually compose on: a compose that is
+    // running right now would make this one queue behind it and abort at
+    // `turn_timeout_ms`, which is not a failure of the wakeup mechanism and must
+    // never be announced as one. Deliberately NOT cured by widening the timeout
+    // (that makes the collision longer, not rarer) and NOT by suppressing the
+    // failure notice (a genuinely dead substrate must still be loud). Skipping
+    // costs one tick; the next comes in five minutes and the streak is untouched,
+    // because nothing failed.
+    const busy = deps.agentBusy === undefined ? false : await deps.agentBusy(project.chat_scope)
+    if (busy) {
+      result.skipped_agent_busy += 1
+      log.debug('wakeup_skipped_agent_busy', {
+        project: project.project_key,
+        chat_scope: project.chat_scope,
       })
       continue
     }
@@ -618,7 +677,8 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
         result.failed > 0 ||
         result.deferred_to_run > 0 ||
         result.released_stalled_run > 0 ||
-        result.skipped_active > 0
+        result.skipped_active > 0 ||
+        result.skipped_agent_busy > 0
       ) {
         log.info('wakeup_sweep', {
           woke: result.woke,
@@ -626,6 +686,7 @@ export function buildWorkWakeupLoop(deps: WorkWakeupDeps): WorkWakeupLoop {
           deferred_to_run: result.deferred_to_run,
           released_stalled_run: result.released_stalled_run,
           skipped_owner_active: result.skipped_active,
+          skipped_agent_busy: result.skipped_agent_busy,
         })
       }
     },

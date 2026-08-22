@@ -293,6 +293,7 @@ import { readSessionCookie } from '@neutronai/landing/session-cookie.ts'
 import {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
+  isBackgroundComposeInFlight,
   buildStatusMdContextSource,
   createRitualRegistry,
   buildRitualFirePlanner,
@@ -6225,6 +6226,14 @@ export function buildOpenGraphComposer(
         }
         return max
       },
+      // IS A MACHINE ALREADY DRIVING THIS SESSION? Asked of the live in-flight
+      // count kept at the one seam every background compose passes through
+      // (`buildSubstrateReminderLlm`), so it sees the fired-reminder dispatcher
+      // and the terminal-build wake too — not just this loop. Keyed on
+      // `chat_scope` because that is what reaches `metering_context.project_id`
+      // and therefore the warm-pool key: asking about any other string would
+      // answer about a different child than the one that would serialize.
+      agentBusy: (chat_scope: string): boolean => isBackgroundComposeInFlight(chat_scope),
       // The SAME warm-substrate wrapper the fired-reminder path composes
       // through — one substrate entry point, two callers — and on the SAME
       // background REPL (`cc-nudge-*`), never the owner's chat REPL. This wakeup is

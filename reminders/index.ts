@@ -58,6 +58,8 @@ export {
 export {
   buildReminderDispatcher,
   buildSubstrateReminderLlm,
+  isBackgroundComposeInFlight,
+  resetBackgroundComposeStateForTests,
 } from './dispatcher.ts'
 export type {
   ReminderOutbound,
