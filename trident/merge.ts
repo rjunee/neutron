@@ -32,6 +32,7 @@
  * no removal here ever passes `--force`. Force-removal from a cleanup path is
  * what destroyed 197 insertions across 7 files on PR #171; an orphaned worktree
  * is cosmetic, work that exists nowhere else is not. See `removeWorktreePath`.
+ * The worktree reaper reuses this export as Trident's single preservation policy.
  *
  * THE MERGE IS PINNED TO THE REVIEWED COMMIT (#545). A bare `gh pr merge` merges
  * whatever the PR head is AT MERGE TIME, which is not necessarily what Argus
@@ -342,7 +343,7 @@ async function worktreeDirt(run_host: RunHostCommand, wt: string): Promise<strin
  *          removal was refused — and `null` when it was removed (or was already
  *          absent, or was never a worktree of ours).
  */
-async function removeWorktreePath(
+export async function removeWorktreePath(
   run_host: RunHostCommand,
   repo: string,
   wt: string,

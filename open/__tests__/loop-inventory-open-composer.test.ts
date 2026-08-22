@@ -20,7 +20,7 @@
  */
 
 import { afterEach, beforeEach, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
@@ -36,6 +36,10 @@ import { buildOpenGraphComposer } from '../composer.ts'
 
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
+const CORE_MODULES_SRC = readFileSync(
+  join(HERE, '..', '..', 'gateway', 'composition', 'build-core-modules.ts'),
+  'utf8',
+)
 
 /** The COMPLETE set of loops a credentialed single-owner Open boot starts. */
 const EXPECTED_RUNNING_LOOPS = [
@@ -63,6 +67,11 @@ const EXPECTED_RUNNING_LOOPS = [
   // Trident's 2 s wake-on-change detector and 15 s launcher liveness probe.
   'trident-liveness',
   'trident-watch',
+  // The 4 h proactive worktree reaper, plus its startup sweep (`immediate: true`).
+  // PINNED HERE ON PURPOSE: the reaper module and its tests can be perfectly green
+  // while nothing in production ever ticks it — deleting the registration in
+  // `build-core-modules.ts` must turn this exact-set assertion RED.
+  'trident-worktree-reaper',
   'watchdog',
   // The 5-minute server-side continuation tick: re-enters a project's warm chat
   // session with a continue-work turn for every in-progress Work Board item
@@ -206,10 +215,46 @@ test('D-7 dormant loops are enumerated + NOT running (no silent dead loop)', () 
   }
 })
 
-test('the ONE boot line names all twelve running loops + the dormant set', () => {
+test('the ONE boot line names every running loop + the dormant set', () => {
   const line = harness.graph.loopRegistry.bootLine('owner', DORMANT_LOOPS)
-  expect(line).toContain('13 loop(s) running')
+  // Derived, not restated. The count and the name list were two independent
+  // literals that had already drifted apart — the title said "twelve" while the
+  // assertion said 13 — so a new loop reddened this on the number rather than on
+  // anything about the loop. One source now: the exact set above.
+  expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toMatch(/cron \(\d+ jobs/)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
+})
+
+/**
+ * THE REAPER'S OTHER HALF, WHICH THE SET ABOVE CANNOT SEE.
+ *
+ * Registration and ticking are pinned by the exact-set assertion; the terminal-path
+ * `wake()` is not. Deleting it leaves the loop registered, the boot line correct and
+ * every reaper test green, and quietly reverts teardown to "once every four hours" —
+ * so a run that fails at 00:01 keeps its worktree until 04:00, which is the leak this
+ * PR exists to close. Measured at 161 worktrees / 84 `wf_*` holders.
+ *
+ * This is a SOURCE-scoped assertion, deliberately, and it is the weaker kind: it
+ * proves the wake is composed into the observer list, not that it fires. The
+ * behavioural version needs a booted graph plus a terminated run, which the exact-set
+ * harness above is not shaped to drive. Recorded as a known limit rather than dressed
+ * up — the point is that DELETING the line turns something red instead of nothing.
+ */
+test('the worktree reaper is woken from the terminal-observer chain, not only on its 4 h timer', () => {
+  // POSITIVE CONTROL FIRST. A regex over a file that failed to load, got renamed, or
+  // was refactored past recognition would otherwise "pass" by matching nothing at all
+  // — an empty check reads exactly like a satisfied one. These two anchors must hold
+  // for the assertion below to mean anything.
+  expect(CORE_MODULES_SRC.length).toBeGreaterThan(1000)
+  expect(CORE_MODULES_SRC).toContain('buildWorktreeReaperLoop')
+
+  // The observer array the terminal chokepoint composes. Both the wake closure and
+  // its presence in that list are required: a closure defined and never composed is
+  // the same dead code in a different shape.
+  expect(CORE_MODULES_SRC).toMatch(/const wakeReaper\s*=/)
+  const observerList = /const observers = \[([\s\S]*?)\]\.filter\(/.exec(CORE_MODULES_SRC)
+  expect(observerList).not.toBeNull()
+  expect(observerList![1]).toContain('wakeReaper')
 })

@@ -656,6 +656,18 @@ export class TridentRunStore {
       .map(rowToRun)
   }
 
+  /** Every repository ever named by a run, including terminal leaked runs. */
+  listRepoPaths(): string[] {
+    return this.db
+      .prepare<{ repo_path: string }, []>(
+        `SELECT DISTINCT repo_path
+           FROM code_trident_runs
+          ORDER BY repo_path`,
+      )
+      .all()
+      .map((row) => row.repo_path)
+  }
+
   /** Every actively running row with an external launcher generation.
    * Unbounded deliberately: liveness must not inherit the expensive sweep's
    * per-tick cap or leave newer lanes invisible behind older rows. */
