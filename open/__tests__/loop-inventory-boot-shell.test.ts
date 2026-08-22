@@ -42,7 +42,7 @@ import { __resetAmbientAuthCacheForTests } from '../ambient-claude-auth.ts'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const LANDING_DIR = join(HERE, '..', '..', 'landing')
 
-/** COMPLETE set through the boot shell — 13 composer/graph loops + gateway-liveness. */
+/** COMPLETE set through the boot shell — the composer/graph loops + gateway-liveness. */
 const EXPECTED_RUNNING_LOOPS = [
   'chunked-upload-sweeper',
   // The usage meter's 60 s credential probe. It arms UNCONDITIONALLY — an
@@ -64,6 +64,11 @@ const EXPECTED_RUNNING_LOOPS = [
   // Trident's 2 s wake-on-change detector and 15 s launcher liveness probe.
   'trident-liveness',
   'trident-watch',
+  // The 4 h proactive worktree reaper, plus its `immediate: true` startup sweep.
+  // Pinned in BOTH exact-set inventories on purpose — the composer-level one and
+  // this boot-shell one are separate assertions, and a loop registered in only one
+  // of them is exactly how a wiring regression stays half-visible.
+  'trident-worktree-reaper',
   'watchdog',
   // The 5-minute server-side continuation tick (`gateway/proactive/work-wakeup.ts`).
   'work-wakeup',
@@ -172,7 +177,10 @@ test('the real boot EMITS exactly ONE complete boot-inventory line (captured fro
   const inventoryLines = lines.filter((l) => l.includes('[loop-registry]'))
   expect(inventoryLines).toHaveLength(1) // exactly one, emitted by the boot shell
   const line = inventoryLines[0]!
-  expect(line).toContain('14 loop(s) running')
+  // Derived from the exact set above, not restated as a second literal. The count
+  // and the name list are the same fact; keeping them independent means adding a
+  // loop reds this on the NUMBER, which says nothing about the loop.
+  expect(line).toContain(`${EXPECTED_RUNNING_LOOPS.length} loop(s) running`)
   for (const name of EXPECTED_RUNNING_LOOPS) expect(line).toContain(name)
   expect(line).toContain('2 dormant (deferred): [agent-watcher, project-backup-scheduler]')
 }, 60_000)
