@@ -51,7 +51,7 @@
 
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
-import type { TridentRun } from './store.ts'
+import { waveChildSlug, type TridentRun } from './store.ts'
 import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/runtime/models.ts'
 import { modelTierRegistry } from './model-tiers.ts'
 import { parsePhaseModelConfig } from './phase-models.ts'
@@ -241,6 +241,10 @@ export interface InnerResult {
    * `[]` when absent or garbled — the same fail-closed reading as the boolean.
    */
   findings: unknown[]
+  /** A wave child completed its one pinned build and needs no review or publish path. */
+  built?: boolean
+  /** Full commit OID reported by a built wave child; null on every legacy result. */
+  commit_sha?: string | null
   /** The inner workflow produced a commit and is asking the outer loop to publish it. */
   publish_requested?: boolean
   /**
@@ -408,6 +412,30 @@ export function buildWorkflowArgs(
   reflectionGuidance?: string,
 ): Record<string, unknown> {
   const run = input.run
+  let memberArgs: { pinnedTaskId: string; memberBranch: string } | Record<string, never> = {}
+  let workflowBranch = run.branch
+  // WAVE-CHILD DISCRIMINATION, FAIL-CLOSED. `!== null` was wrong here and reddened 62
+  // tests across 11 files: a run object that simply OMITS these two fields has them
+  // `undefined`, and `undefined !== null` is true — so every ordinary run took the
+  // wave-child path and died on `has no run branch`. A row read from the store always
+  // carries them (0137 added both columns), so production never saw it; every in-process
+  // caller that builds a partial run did. Require the positive evidence instead — two
+  // non-empty strings — so only an actual wave child can take this branch, and any other
+  // shape falls through to the ordinary path it belongs on.
+  const parentRunId = typeof run.parent_run_id === 'string' ? run.parent_run_id : ''
+  const waveTaskId = typeof run.wave_task_id === 'string' ? run.wave_task_id : ''
+  if (parentRunId !== '' && waveTaskId !== '') {
+    if (run.branch === null) throw new Error(`wave child ${run.id} has no run branch`)
+    const memberSuffix = `--w${waveTaskId}`
+    const runBranch = run.branch.endsWith(memberSuffix)
+      ? run.branch.slice(0, -memberSuffix.length)
+      : run.branch
+    workflowBranch = runBranch
+    memberArgs = {
+      pinnedTaskId: waveTaskId,
+      memberBranch: waveChildSlug(runBranch, waveTaskId),
+    }
+  }
   return {
     repoPath: run.repo_path,
     task: run.task,
@@ -428,7 +456,8 @@ export function buildWorkflowArgs(
     // and the OUTER loop's `mergeLocal` takes it from there.
     mergeMode: run.merge_mode,
     prNumber: run.pr,
-    branch: run.branch,
+    branch: workflowBranch,
+    ...memberArgs,
     dbPath: input.db_path,
     runId: run.id,
     // The checked-in checkpoint-writer the workflow's Bash steps invoke for
@@ -665,6 +694,15 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     // the whole-repo survey this card exists to stop paying for.
     deviated_from_spec: p.deviatedFromSpec === true,
     publish_requested: p.publishRequested === true,
+    ...(p.built === true
+      ? {
+          built: true,
+          commit_sha:
+            typeof p.commitSha === 'string' && /^[0-9a-fA-F]{40}$/.test(p.commitSha.trim())
+              ? p.commitSha.trim().toLowerCase()
+              : null,
+        }
+      : {}),
     // A CLAIM, NOT THE SOURCE. Anything that could plausibly be an OID — 7 to 40 hex
     // chars, either case — is kept VERBATIM for the outer publisher to CHECK against
     // `rev-parse`. Requiring full 40-hex here silently dropped abbreviated shas, which

@@ -25,6 +25,8 @@ import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
+import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 /**
  * Trident v2 (Work Board Phase 2a exec-model) — the orchestrator step now FIRES
@@ -206,6 +208,89 @@ async function createRun(over: Partial<Parameters<TridentRunStore['create']>[0]>
     ...over,
   })
 }
+
+describe('orchestrator — wave child built terminal', () => {
+  test('a child built result ends done without merge, re-fire, review provenance, or owner delivery', async () => {
+    const commitSha = 'abcdef0123456789abcdef0123456789abcdef01'
+    const memberBranch = 'trident/card--wT3'
+    const h = buildHarness({
+      plan: () => {
+        throw new Error('a harvested child result must not launch another workflow')
+      },
+    })
+    const child = makeTridentRun({
+      id: 'child-T3',
+      slug: 'card--wT3',
+      parent_run_id: 'parent-1',
+      wave_task_id: 'T3',
+      chat_id: null,
+      branch: 'trident/card',
+      subagent_run_id: 'member-agent',
+      subagent_status: 'completed',
+      inner_checkpoint: 'built',
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_result: JSON.stringify({
+        ok: true,
+        built: true,
+        commitSha,
+        branch: memberBranch,
+        verdict: null,
+        round: 1,
+        checkpoint: 'built',
+        remainingTasks: 0,
+      }),
+    })
+
+    const outcome = await h.step(child)
+    expect(outcome.run.phase).toBe('done')
+    expect(outcome.run.branch).toBe(memberBranch)
+    expect(outcome.run.inner_checkpoint).toBe('built')
+    expect(outcome.run.inner_verdict).toBeNull()
+    expect(outcome.run.failure_reason).toBeNull()
+    expect(outcome.run.harvested_at).not.toBeNull()
+    expect(h.hostCalls).toEqual([])
+    expect(h.refirePatches).toEqual([])
+    expect(h.inputs).toEqual([])
+
+    let ownerDeliveries = 0
+    const sink: OutboundSink = {
+      send: async () => {
+        ownerDeliveries += 1
+        return 'unexpected-delivery'
+      },
+    }
+    await buildTridentDelivery({ sink }).onTerminal(outcome.run)
+    expect(ownerDeliveries).toBe(0)
+  })
+
+  test('a non-child built-shaped result retains the legacy terminal-failure path', async () => {
+    const h = buildHarness({
+      plan: () => {
+        throw new Error('a harvested result must not launch another workflow')
+      },
+    })
+    const ordinary = makeTridentRun({
+      subagent_run_id: 'ordinary-agent',
+      subagent_status: 'completed',
+      inner_checkpoint: 'built',
+      inner_result: JSON.stringify({
+        ok: true,
+        built: true,
+        commitSha: 'abcdef0123456789abcdef0123456789abcdef01',
+        branch: 'trident/card--wT3',
+        verdict: null,
+        round: 1,
+        checkpoint: 'built',
+      }),
+    })
+
+    const outcome = await h.step(ordinary)
+    expect(outcome.run.phase).toBe('failed')
+    expect(outcome.note).toBe('inner loop ended without APPROVE → failed')
+    expect(h.hostCalls).toEqual([])
+    expect(h.refirePatches).toEqual([])
+  })
+})
 
 test('a bound_pr run never takes the build path', async () => {
   const h = buildHarness({

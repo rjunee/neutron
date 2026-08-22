@@ -3291,6 +3291,39 @@ export function buildTridentOrchestrator(
     fired.delete(run.id)
     redispatched.delete(run.id)
 
+    // A wave child owns exactly one pinned build. Its `built` result is the join
+    // barrier's input, not an approval or publish handoff: finish the child in
+    // place and leave its member branch untouched for the parent to integrate.
+    // This must precede every side-effecting path below (publish, Ralph re-fire,
+    // review provenance, merge). Children have no chat route, so none is read.
+    if (run.parent_run_id !== null && result.built) {
+      if (typeof result.commit_sha !== 'string') {
+        const failed = failedRun(
+          { ...run, harvested_at: nowMs() },
+          'wave member reported built without a full commitSha',
+          true,
+        )
+        return { run: failed, changed: true, waiting: false, note: 'wave member built result missing commit → failed' }
+      }
+      const done: TridentRun = {
+        ...run,
+        harvested_at: nowMs(),
+        phase: 'done',
+        branch: result.branch ?? run.branch,
+        inner_checkpoint: result.checkpoint ?? 'built',
+        inner_verdict: null,
+        subagent_status: 'completed',
+        failure_reason: null,
+        last_advanced_at: now(),
+      }
+      return {
+        run: done,
+        changed: true,
+        waiting: false,
+        note: `wave member ${run.wave_task_id ?? '?'} built ${result.commit_sha} → done`,
+      }
+    }
+
     // A merged PR is terminal even if the inner process was about to request a
     // publish. Do not recreate its deleted branch or open a replacement PR.
     if (result.pr_merged) {

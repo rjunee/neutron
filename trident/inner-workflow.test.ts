@@ -18,6 +18,8 @@ import { fileURLToPath } from 'node:url'
 import { reviewedHeadOid } from './merge.ts'
 import { TERMINAL_PHASES } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
+import { buildWorkflowArgs } from './inner-loop.ts'
+import { makeTridentRun } from './testing/make-trident-run.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -123,6 +125,25 @@ function loadCodexDeferralMessage(): (
   )() as (label: string, codexStatus: string, wrapperErrTail: string) => string
 }
 
+function loadMemberHelpers(): {
+  pinnedUncheckedTaskLine: (body: unknown, taskId: unknown) => string | null
+  memberExecuteNote: (
+    plan: { executionSpec: string },
+    pinnedLine: string,
+  ) => string
+} {
+  return new Function(
+    [
+      grabFunction('pinnedUncheckedTaskLine'),
+      grabFunction('memberExecuteNote'),
+      'return { pinnedUncheckedTaskLine, memberExecuteNote }',
+    ].join('\n'),
+  )() as {
+    pinnedUncheckedTaskLine: (body: unknown, taskId: unknown) => string | null
+    memberExecuteNote: (plan: { executionSpec: string }, pinnedLine: string) => string
+  }
+}
+
 // The checked-in checkpoint-writer the workflow's Bash steps invoke (P10) —
 // its SQL is asserted here; its runtime behavior in checkpoint-sh.test.ts.
 const CHECKPOINT_SH = readFileSync(fileURLToPath(new URL('./checkpoint.sh', import.meta.url)), 'utf8')
@@ -221,6 +242,85 @@ describe('inner-workflow.mjs — args normalization behavior', () => {
     expect(normalizeWorkflowArgs('"a-bare-string"')).toEqual({})
     expect(normalizeWorkflowArgs(null)).toEqual({})
     expect(normalizeWorkflowArgs(undefined)).toEqual({})
+  })
+})
+
+describe('inner-workflow.mjs — pinned wave member mode', () => {
+  test('child workflow args carry the pinned id + member branch while a non-child payload is unchanged', () => {
+    const run = makeTridentRun({
+      id: 'child-1',
+      slug: 'card',
+      branch: 'trident/card',
+      repo_path: '/repo',
+      task: 'card task',
+      ralph: true,
+    })
+    const input = { run, base_branch: 'main', db_path: '/tmp/project.db', max_rounds: 3 }
+    const ordinary = buildWorkflowArgs(input)
+    expect('pinnedTaskId' in ordinary).toBe(false)
+    expect('memberBranch' in ordinary).toBe(false)
+
+    const child = buildWorkflowArgs({
+      ...input,
+      run: makeTridentRun({
+        ...run,
+        parent_run_id: 'parent-1',
+        wave_task_id: 'T3',
+      }),
+    })
+    expect(child.pinnedTaskId).toBe('T3')
+    expect(child.memberBranch).toBe('trident/card--wT3')
+
+    const withoutMemberArgs = { ...child }
+    delete withoutMemberArgs.pinnedTaskId
+    delete withoutMemberArgs.memberBranch
+    expect(withoutMemberArgs).toEqual(ordinary)
+
+    const resumed = buildWorkflowArgs({
+      ...input,
+      run: makeTridentRun({
+        ...run,
+        branch: 'trident/card--wT3',
+        parent_run_id: 'parent-1',
+        wave_task_id: 'T3',
+      }),
+    })
+    expect(resumed.branch).toBe('trident/card')
+    expect(resumed.memberBranch).toBe('trident/card--wT3')
+  })
+
+  test('the pinned task wins over an earlier unchecked task and its plan line is quoted verbatim without a plan write', () => {
+    const { pinnedUncheckedTaskLine, memberExecuteNote } = loadMemberHelpers()
+    const body = [
+      '- [ ] T1: earlier unchecked task | requires: none | surface: first.ts',
+      '  - [ ] T3: pinned member task | requires: T2 | surface: member.ts',
+    ].join('\n')
+    const pinned = pinnedUncheckedTaskLine(body, 'T3')
+    expect(pinned).toBe('  - [ ] T3: pinned member task | requires: T2 | surface: member.ts')
+
+    const note = memberExecuteNote(
+      { executionSpec: 'TARGET FILES: member.ts\nACCEPTANCE: pinned only\nTEST PLAN: member test' },
+      pinned!,
+    )
+    expect(note).toContain(`quoted verbatim from the shared plan:\n${pinned}`)
+    expect(note).not.toContain('T1: earlier unchecked task')
+    expect(note).toContain('Do NOT write, stage, or commit it')
+    expect(note).not.toContain('Persist the plan')
+  })
+
+  test('member Forge uses the member branch and returns built+commitSha before every Argus path', () => {
+    expect(SRC).toContain('const forgeBranch = memberMode ? pinnedMemberBranch')
+    expect(SRC).toContain("await checkpoint('built', { head: commitSha })")
+    expect(SRC).toContain('built: true')
+    expect(SRC).toContain('commitSha,')
+    expect(SRC).toContain('skipping publish, Argus, and re-fire')
+
+    const memberReturn = SRC.indexOf('return builtResult')
+    const mergedProbe = SRC.indexOf("probePrMerged(pr, 'r1')", memberReturn)
+    const firstReview = SRC.indexOf('runReviewRound(diffFile', memberReturn)
+    expect(memberReturn).toBeGreaterThan(-1)
+    expect(mergedProbe).toBeGreaterThan(memberReturn)
+    expect(firstReview).toBeGreaterThan(memberReturn)
   })
 })
 
