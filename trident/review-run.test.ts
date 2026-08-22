@@ -263,6 +263,16 @@ describe('executeBoundReview', () => {
     const elapsedMs = (Bun.nanoseconds() - started) / 1e6
 
     expect(result.status).toBe('failure')
+    // WALL-CLOCK-BOUND-OK: the property under test IS time complexity, so no
+    // logical clock or ordering can stand in for it — a quadratic regex and a
+    // linear one produce identical VALUES and differ only in elapsed time. The
+    // deterministic alternative, asserting the regex source still looks bounded,
+    // is a source-text check that passes on a comment and would not have caught
+    // the original `(\w+:\/\/)[^/\s@]+@`. Measured margin on this box at 60k
+    // hostile chars: 4.5ms bounded vs 2287ms unbounded. The 500ms ceiling is
+    // ~100x the linear cost and ~1/5 of the quadratic cost, so it discriminates
+    // the two by two orders of magnitude and only reds if the quantifiers become
+    // unbounded again — not because the runner was busy.
     expect(elapsedMs).toBeLessThan(500)
     // POSITIVE CONTROL — the scan really did happen and really did redact, so
     // this cannot pass by the redaction having been skipped or short-circuited.
