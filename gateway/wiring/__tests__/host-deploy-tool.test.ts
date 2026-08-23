@@ -230,3 +230,137 @@ describe('handler behaviour', () => {
     )
   })
 })
+
+/**
+ * THE WARM-REPL BLIND SPOT.
+ *
+ * The calling-topic fix above is correct and was still not enough. A persistent
+ * REPL agent has no bound `TopicContext` — `mcp/server.ts:279` says so — so every
+ * tool it calls arrives with `topic_id: null`, the service takes its install
+ * fallback, and the prompt lands in General. The owner asked three separate times
+ * why deploy approvals kept appearing in a conversation he was not having.
+ *
+ * `project_id` DOES survive that path (the `/tool-call` sink threads it so
+ * `work_board_*` writes reach the right board), so the destination is
+ * recoverable — and the recovery must not be a second copy of the routing rule,
+ * which is why the resolver is injected rather than computed here.
+ */
+describe('a topic-less call recovers its destination from the active project', () => {
+  /** Recording stub for BOTH request paths — the single-deploy and the window. */
+  function recorder(): {
+    service: HostDeployToolService
+    requests: Array<{ topic_id?: string | null }>
+    windows: Array<{ hours: number; topic_id?: string | null }>
+  } {
+    const requests: Array<{ topic_id?: string | null }> = []
+    const windows: Array<{ hours: number; topic_id?: string | null }> = []
+    const base = stub().service
+    return {
+      requests,
+      windows,
+      service: {
+        ...base,
+        request: async (input) => {
+          requests.push(input)
+          return await base.request(input)
+        },
+        requestWindow: async (input) => {
+          windows.push(input)
+          return await base.requestWindow(input)
+        },
+      },
+    }
+  }
+
+  test('no calling topic + an active project → the project topic reaches the service', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = recorder()
+    registerHostDeployToolSurface(reg, () => service, (id) => `app:owner:${id}`)
+
+    await reg
+      .get(HOST_DEPLOY_REQUEST_TOOL)!
+      .handler({}, { ...CTX, topic_id: null, project_id: 'neutron-open' })
+
+    expect(requests).toEqual([{ topic_id: 'app:owner:neutron-open' }])
+  })
+
+  test('the WINDOW request recovers the same way — both prompts or neither', async () => {
+    const reg = new ToolRegistry()
+    const { service, windows } = recorder()
+    registerHostDeployToolSurface(reg, () => service, (id) => `app:owner:${id}`)
+
+    await reg
+      .get(HOST_DEPLOY_WINDOW_REQUEST_TOOL)!
+      .handler({ hours: 72 }, { ...CTX, topic_id: null, project_id: 'neutron-open' })
+
+    expect(windows).toEqual([{ hours: 72, topic_id: 'app:owner:neutron-open' }])
+  })
+
+  test('a real calling topic still WINS — the resolver is not consulted at all', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = recorder()
+    let consulted = 0
+    registerHostDeployToolSurface(reg, () => service, (id) => {
+      consulted += 1
+      return `app:owner:${id}`
+    })
+
+    await reg
+      .get(HOST_DEPLOY_REQUEST_TOOL)!
+      .handler({}, { ...CTX, topic_id: 'app:owner:asked-from-here', project_id: 'other-project' })
+
+    expect(requests).toEqual([{ topic_id: 'app:owner:asked-from-here' }])
+    // Not merely "the right answer" — the project must not even be examined when
+    // the call names its own conversation, or a stale project_id could redirect
+    // a prompt away from the topic the owner is looking at.
+    expect(consulted).toBe(0)
+  })
+
+  test('an EMPTY calling topic counts as absent, not as a destination', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = recorder()
+    registerHostDeployToolSurface(reg, () => service, (id) => `app:owner:${id}`)
+
+    await reg.get(HOST_DEPLOY_REQUEST_TOOL)!.handler({}, { ...CTX, topic_id: '', project_id: 'p' })
+
+    // `''` would be a delivery to nowhere. Falling through to the project is the
+    // only reading that puts the prompt in front of a human.
+    expect(requests).toEqual([{ topic_id: 'app:owner:p' }])
+  })
+
+  test('a resolver that knows no topic for the project defers to the service fallback', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = recorder()
+    registerHostDeployToolSurface(reg, () => service, () => null)
+
+    await reg
+      .get(HOST_DEPLOY_REQUEST_TOOL)!
+      .handler({}, { ...CTX, topic_id: null, project_id: 'not-a-project' })
+
+    // The tool never invents a destination: choosing the fallback stays the
+    // service's single decision, exactly as it is for a cron caller.
+    expect(requests).toEqual([{ topic_id: null }])
+  })
+
+  test('no project either (cron/system) → null, unchanged', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = recorder()
+    registerHostDeployToolSurface(reg, () => service, (id) => `app:owner:${id}`)
+
+    await reg.get(HOST_DEPLOY_REQUEST_TOOL)!.handler({}, { ...CTX, topic_id: null, project_id: null })
+
+    expect(requests).toEqual([{ topic_id: null }])
+  })
+
+  test('a composer that supplies no resolver keeps the previous behaviour exactly', async () => {
+    const reg = new ToolRegistry()
+    const { service, requests } = recorder()
+    registerHostDeployToolSurface(reg, () => service)
+
+    await reg
+      .get(HOST_DEPLOY_REQUEST_TOOL)!
+      .handler({}, { ...CTX, topic_id: null, project_id: 'neutron-open' })
+
+    expect(requests).toEqual([{ topic_id: null }])
+  })
+})

@@ -241,17 +241,51 @@ interface WindowRequestArgs {
 }
 
 /**
+ * Resolve the chat topic that serves a project, for a call that arrived WITHOUT
+ * one. Supplied by the composer, which owns the validated resolver; a project
+ * the owner does not have resolves to his General topic rather than to a
+ * fabricated destination.
+ */
+export type ResolveProjectTopic = (project_id: string) => string | null
+
+/**
  * Register `host_deploy_request` + `host_deploy_status` against `registry`,
  * backed by the composer-built service. `service` is a LATE-BOUND getter: the
  * tools module initializes before the graph's `ApprovalManager` exists, so the
  * handler derefs at CALL time. A null deref means the box never installed the
  * service — the tool says so rather than throwing an internal error. Returns
  * the registered tool names.
+ *
+ * `resolveProjectTopic` REPAIRS THE WARM-REPL BLIND SPOT. Both request handlers
+ * pass the calling topic through so the prompt lands where it was asked for
+ * (`open/composer.ts:2968`). But a persistent-REPL agent has no bound
+ * `TopicContext` — `mcp/server.ts:279` says so in as many words — so every tool
+ * it calls arrives with `topic_id: null` and the service falls back to the
+ * install default, which is General. The owner then gets told to tap a button in
+ * a conversation he is not in, which is the exact failure the calling-topic
+ * change was written to end.
+ *
+ * `project_id` DOES survive that path (the sink threads it so `work_board_*`
+ * writes hit the right board), so the topic is recoverable from it. Optional:
+ * a composer that does not supply it keeps the previous fallback exactly.
  */
 export function registerHostDeployToolSurface(
   registry: ToolRegistry,
   service: () => HostDeployToolService | null,
+  resolveProjectTopic?: ResolveProjectTopic,
 ): string[] {
+  /**
+   * The topic a request should be answered in: the calling topic when the call
+   * carried one, else the topic serving the call's active project, else null
+   * (the service's install-default fallback — cron and system calls land here).
+   */
+  const destinationTopic = (ctx: { topic_id: string | null; project_id: string | null }): string | null => {
+    if (ctx.topic_id !== null && ctx.topic_id.length > 0) return ctx.topic_id
+    if (resolveProjectTopic === undefined) return null
+    if (ctx.project_id === null || ctx.project_id.length === 0) return null
+    return resolveProjectTopic(ctx.project_id)
+  }
+
   registry.register({
     name: HOST_DEPLOY_REQUEST_TOOL,
     description:
@@ -280,12 +314,13 @@ export function registerHostDeployToolSurface(
       }
       const a = (args ?? {}) as RequestArgs
       const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
-      // THE CALLING TOPIC IS THE DESTINATION. `ToolCallContext.topic_id` is null
-      // for cron/system calls; pass it through as-is and let the service pick
+      // THE CALLING TOPIC IS THE DESTINATION, and when the call carries no topic
+      // (the warm-REPL sink, cron, system) the call's ACTIVE PROJECT names it.
+      // Still null for a genuinely project-less caller; the service then picks
       // the install fallback — the tool does not decide where the button goes.
       return await svc.request({
         ...(ref.length > 0 ? { ref } : {}),
-        topic_id: ctx.topic_id,
+        topic_id: destinationTopic(ctx),
       })
     },
   })
@@ -341,7 +376,7 @@ export function registerHostDeployToolSurface(
       return await svc.requestWindow({
         hours: a.hours as number,
         ...(ref.length > 0 ? { ref } : {}),
-        topic_id: ctx.topic_id,
+        topic_id: destinationTopic(ctx),
       })
     },
   })

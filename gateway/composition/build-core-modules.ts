@@ -291,7 +291,11 @@ export function buildCoreModules(
       // capability stays invisible for weeks. The service getter is late-bound
       // (see `install` below) — the graph's ApprovalManager does not exist yet.
       if (input.host_deploy !== undefined) {
-        registerHostDeployToolSurface(reg, input.host_deploy.service)
+        registerHostDeployToolSurface(
+          reg,
+          input.host_deploy.service,
+          input.host_deploy.resolveProjectTopic,
+        )
       }
       return reg
     },

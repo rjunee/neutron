@@ -477,5 +477,14 @@ export interface MiscCompositionInput {
       | import('../../../gateway/wiring/host-deploy-tool.ts').HostDeployToolService
       | null
     install: (deps: { approvals: import('@neutronai/tools/approval.ts').ApprovalManager }) => void
+    /**
+     * Where an approval prompt goes when the CALL carried no topic. A warm-REPL
+     * agent has no bound `TopicContext` (`mcp/server.ts:279`), so its tool calls
+     * arrive `topic_id: null` and the button would land in General — the owner
+     * told to tap in a conversation he is not in. `project_id` does survive that
+     * path, so the composer supplies the resolver that turns one into a topic.
+     * Omitted = the previous install-default fallback, unchanged.
+     */
+    resolveProjectTopic?: import('../../../gateway/wiring/host-deploy-tool.ts').ResolveProjectTopic
   }
 }
