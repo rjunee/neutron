@@ -20,6 +20,9 @@ import {
   registerHostDeployToolSurface,
   HOST_DEPLOY_REQUEST_TOOL,
   HOST_DEPLOY_STATUS_TOOL,
+  HOST_DEPLOY_WINDOW_REQUEST_TOOL,
+  HOST_DEPLOY_WINDOW_REVOKE_TOOL,
+  HOST_DEPLOY_WINDOW_STATUS_TOOL,
   type HostDeployToolService,
 } from '../host-deploy-tool.ts'
 
@@ -55,6 +58,21 @@ function stub(
         approval_topic_id: input.topic_id ?? 'app:owner',
       }
     },
+    requestWindow: async (input) => ({
+      status: 'pending_approval',
+      request_id: 'w1',
+      ref: input.ref ?? 'origin/main',
+      hours: input.hours,
+      expires_at_ms: 1_800_000_000_000,
+      approval_topic_id: input.topic_id ?? 'app:owner',
+    }),
+    windowStatus: (ref) => ({
+      open: false,
+      ref: ref ?? 'origin/main',
+      expires_at_ms: null,
+      remaining: null,
+    }),
+    revokeWindow: async () => 0,
     ...overrides,
   }
   return { service, requests }
@@ -65,7 +83,16 @@ describe('registration', () => {
     const reg = new ToolRegistry()
     const { service } = stub()
     const names = registerHostDeployToolSurface(reg, () => service)
-    expect(names).toEqual([HOST_DEPLOY_REQUEST_TOOL, HOST_DEPLOY_STATUS_TOOL])
+    // The two single-deploy tools FIRST and in this order — the window trio was
+    // added after them and must not reshuffle the pair anything else asserts on.
+    expect(names.slice(0, 2)).toEqual([HOST_DEPLOY_REQUEST_TOOL, HOST_DEPLOY_STATUS_TOOL])
+    expect(names).toEqual([
+      HOST_DEPLOY_REQUEST_TOOL,
+      HOST_DEPLOY_STATUS_TOOL,
+      HOST_DEPLOY_WINDOW_REQUEST_TOOL,
+      HOST_DEPLOY_WINDOW_STATUS_TOOL,
+      HOST_DEPLOY_WINDOW_REVOKE_TOOL,
+    ])
 
     const request = reg.get(HOST_DEPLOY_REQUEST_TOOL)
     expect(request).not.toBeUndefined()

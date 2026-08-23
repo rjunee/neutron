@@ -68,6 +68,21 @@ import { PROJECT_CREDENTIAL_MIN_SECRET_CHARS } from '@neutronai/project-credenti
 // live row) and a second private copy of that property is a second place for it
 // to be wrong. Only the PREFIX differs — `hdp:` here, `rap:` there.
 import { tokenToUuid, uuidToToken } from '@neutronai/reminders/index.ts'
+import {
+  describeRemaining,
+  HOST_DEPLOY_WINDOW_TOOL_NAME,
+  HOST_DEPLOY_WINDOW_VALUE_PREFIX,
+  HOST_DEPLOY_WINDOW_VALUE_RE,
+  parseWindowArgs,
+  pickLiveWindow,
+  readLiveWindow,
+  renderAutoDeployNotice,
+  renderWindowApprovalBody,
+  validateWindowHours,
+  windowApprovalOptions,
+  windowExpiryMs,
+  type HostDeployWindow,
+} from './host-deploy-window.ts'
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -339,9 +354,53 @@ export type HostDeployRequestResult =
        */
       note?: string
     }
+  | {
+      /**
+       * A STANDING WINDOW WAS OPEN, SO THIS ALREADY DEPLOYED. The distinct
+       * status is the point: `pending_approval` and `auto_approved` differ in
+       * whether the host was touched, and an agent that cannot tell them apart
+       * would report a completed deploy as a waiting button (or worse, the
+       * reverse). See `open/host-deploy-window.ts`.
+       */
+      status: 'auto_approved'
+      ref: string
+      target_sha: string
+      current_sha: string
+      commit_count: number
+      /** Whether the control plane ACCEPTED the deploy — it may still refuse. */
+      accepted: boolean
+      /** What the control plane said, secret-scrubbed. */
+      detail: string
+      /** When the authorising window closes, ms since epoch. */
+      window_expires_at_ms: number
+    }
   | { status: 'unavailable'; reason: string }
   | { status: 'up_to_date'; ref: string; target_sha: string }
   | { status: 'refused'; reason: string }
+
+/** What `requestWindow()` reports. Opening a window is itself an owner tap. */
+export type HostDeployWindowRequestResult =
+  | {
+      status: 'pending_approval'
+      request_id: string
+      ref: string
+      hours: number
+      expires_at_ms: number
+      approval_topic_id: string
+      note?: string
+    }
+  | { status: 'unavailable'; reason: string }
+  | { status: 'refused'; reason: string }
+
+/** The live window for a ref, as reported to the agent. */
+export interface HostDeployWindowStatus {
+  open: boolean
+  ref: string
+  /** Null when no window is open. */
+  expires_at_ms: number | null
+  /** Human phrase for how long is left — null when nothing is open. */
+  remaining: string | null
+}
 
 // ── Configuration (CALL TIME) ────────────────────────────────────────────────
 
@@ -576,6 +635,28 @@ export interface HostDeployServiceOptions {
    * prompt landed on.
    */
   post_notice?: (topic_id: string, body: string) => Promise<void>
+  /**
+   * THE PER-SHA SAFETY CHECK A STANDING WINDOW MAY NEVER SKIP.
+   *
+   * A window authorises the DECISION — the owner's tap — and nothing else. The
+   * plan for this feature states it as a hard constraint: the grant replaces the
+   * human tap, never the guard. The guard that matters is migration drift: a
+   * duplicate ordinal is SILENTLY SKIPPED by the runner, so a deploy can ship
+   * code that writes columns which do not exist and take the instance down on
+   * boot (2026-08-17, and armed again at ordinal 125 on 2026-08-20).
+   *
+   * FAIL-CLOSED, AND CLOSED IS THE DEFAULT. When this seam is absent the service
+   * cannot prove the target is safe, so a window NEVER auto-deploys: the request
+   * falls back to the ordinary per-sha approval and the owner decides, because
+   * his tap is his own judgement and this constrains the STANDING grant, not him.
+   * The absence is a refusal rather than a skip because an unchecked auto-deploy
+   * is precisely the outcome the constraint forbids, and a permissive default
+   * would produce it silently on exactly the boxes where nothing wired a check.
+   */
+  check_preconditions?: (input: {
+    ref: string
+    sha: string
+  }) => Promise<{ ok: boolean; reason: string }>
   log?: (msg: string) => void
   default_ref?: string
   /**
@@ -615,6 +696,23 @@ export interface HostDeployService {
    * never both count the same row). Deploys NOTHING on any path.
    */
   sweepExpiredGrants(): Promise<number>
+  /**
+   * Ask the owner to open a STANDING WINDOW: deploys of `ref` need no further
+   * tap until it closes. Opens NOTHING by itself — it raises the same kind of
+   * Approve/Deny prompt `request()` does, and only the owner's tap opens it.
+   */
+  requestWindow(input: {
+    hours: number
+    ref?: string
+    topic_id?: string | null
+  }): Promise<HostDeployWindowRequestResult>
+  /** Is a window open for `ref` right now? Reads only; never deploys. */
+  windowStatus(ref?: string): HostDeployWindowStatus
+  /**
+   * Close every live window for `ref` immediately. Returns how many THIS call
+   * closed, so "there was nothing open" and "I closed it" stay distinguishable.
+   */
+  revokeWindow(ref?: string): Promise<number>
 }
 
 /** The `tool_approvals.args_json` payload for a host-deploy request. */
@@ -656,10 +754,27 @@ export function createHostDeployService(
     emit,
     retire_prompt,
     post_notice,
+    check_preconditions,
   } = opts
   const log = opts.log ?? ((): void => undefined)
   const default_ref = opts.default_ref ?? HOST_DEPLOY_DEFAULT_REF
   const now = opts.now ?? Date.now
+
+  /**
+   * (ref@sha) pairs a standing window is dispatching RIGHT NOW. See the guard in
+   * `request()`: it exists so two turns inside one open window cannot restart the
+   * instance twice for the same commit.
+   */
+  const auto_in_flight = new Set<string>()
+
+  /** The live standing window for `ref`, or null. Reads only. */
+  function liveWindow(ref: string): HostDeployWindow | null {
+    return pickLiveWindow(
+      approvals.findByToolName(project_slug, HOST_DEPLOY_WINDOW_TOOL_NAME),
+      ref,
+      now(),
+    )
+  }
 
   function status(): HostDeployStatus {
     const cfg = resolveConfig()
@@ -746,6 +861,129 @@ export function createHostDeployService(
       return {
         status: 'refused',
         reason: `could not list the commits between ${shortSha(current_sha)} and ${shortSha(target_sha)}, so there is no approval to show: ${errText(err)}`,
+      }
+    }
+
+    // ── (b1) A STANDING WINDOW SHORT-CIRCUITS THE TAP. Checked HERE and not
+    // earlier on purpose: everything above still runs, so an auto-approved deploy
+    // resolves the same shas, refuses on the same unreadable checkout, and stops
+    // on the same `up_to_date` as a tapped one. The window replaces the OWNER'S
+    // TAP; it replaces none of the checks.
+    const window = liveWindow(ref)
+    if (window !== null) {
+      // ── THE GUARD THE WINDOW MAY NOT REPLACE. Run per sha, every time, before
+      // anything is dispatched. No checker wired ⇒ nothing is proven ⇒ the window
+      // does not act, and the owner is asked the ordinary way.
+      const verdict =
+        check_preconditions === undefined
+          ? {
+              ok: false,
+              reason:
+                'no deploy precondition check is wired on this instance, so a standing window ' +
+                'cannot prove the target is safe to deploy',
+            }
+          : await check_preconditions({ ref, sha: target_sha }).catch((err: unknown) => ({
+              ok: false,
+              // A checker that THREW proved nothing. Treating a crash as a pass
+              // is how a guard becomes decoration.
+              reason: `the deploy precondition check could not be run: ${errText(err)}`,
+            }))
+      if (!verdict.ok) {
+        log(
+          `host-deploy window HELD ref=${ref} target=${shortSha(target_sha)} window=${window.id}: ${verdict.reason}`,
+        )
+        if (post_notice !== undefined) {
+          try {
+            await post_notice(
+              approval_topic,
+              `Your standing deploy window covers ${ref} at ${shortSha(target_sha)}, but it was NOT ` +
+                `deployed: ${verdict.reason}. Asking you per commit instead.`,
+            )
+          } catch (err) {
+            log(`host-deploy hold notice not posted on ${approval_topic}: ${errText(err)}`)
+          }
+        }
+        // FALL THROUGH to the ordinary approval below — held, not refused. The
+        // owner can still look at the commit list and decide for himself.
+      } else {
+        // ONE AUTO-DEPLOY PER (ref, sha) AT A TIME. Two agent turns that both ask
+        // inside the window would otherwise both dispatch the same sha and restart
+        // the instance twice. Process-local, which is enough: the dispatch site is
+        // this one function in this one process, and a cross-process guard would
+        // need state the control plane already owns (it is the thing that refuses
+        // a redundant deploy).
+        const flight_key = `${ref}@${target_sha}`
+        if (auto_in_flight.has(flight_key)) {
+          return {
+            status: 'refused',
+            reason: `a deploy of ${ref} at ${shortSha(target_sha)} is already in flight under the standing window — nothing new was requested`,
+          }
+        }
+        auto_in_flight.add(flight_key)
+        let outcome: Awaited<ReturnType<typeof performDeploy>>
+        try {
+          outcome = await performDeploy(ref, target_sha)
+        } finally {
+          auto_in_flight.delete(flight_key)
+        }
+        log(
+          `host-deploy auto_approved ref=${ref} target=${shortSha(target_sha)} commits=${range.total} ` +
+            `window=${window.id} kind=${outcome.kind}`,
+        )
+
+        // ── AUDITED ON THE GRANT ITSELF. "Which permission authorised this
+        // deploy, and what else did it authorise" must be answerable after the
+        // fact, and the only durable record of a deploy nobody tapped is the row
+        // that authorised it. Best-effort: a failed audit write must never
+        // un-deploy or re-deploy anything, so it is logged and the outcome
+        // stands.
+        try {
+          const prior = parseWindowArgs(approvals.get(window.id)?.args_json ?? '{}')
+          const uses = Array.isArray(prior.uses) ? prior.uses : []
+          await approvals.mergeArgs(window.id, {
+            uses: [
+              ...uses,
+              { sha: target_sha, at_ms: now(), kind: outcome.kind, commits: range.total },
+            ],
+          })
+        } catch (err) {
+          log(`host-deploy window use not recorded window=${window.id}: ${errText(err)}`)
+        }
+
+        // THE OWNER DID NOT TAP, SO HE MUST BE TOLD. This is the only record he
+        // sees of a deploy he did not personally authorise sha-by-sha; a silent
+        // one would make the window impossible to audit and "I never saw it
+        // deploy" true.
+        if (post_notice !== undefined) {
+          try {
+            await post_notice(
+              approval_topic,
+              outcome.kind === 'accepted'
+                ? renderAutoDeployNotice({
+                    ref,
+                    sha: target_sha,
+                    commit_count: range.total,
+                    expires_at_ms: window.expires_at_ms,
+                    now_ms: now(),
+                    detail: outcome.detail,
+                  })
+                : `A deploy of ${ref} at ${shortSha(target_sha)} was authorised by your standing deploy ` +
+                  `window and did NOT go out: ${outcome.detail || outcome.kind}.`,
+            )
+          } catch (err) {
+            log(`host-deploy auto notice not posted on ${approval_topic}: ${errText(err)}`)
+          }
+        }
+        return {
+          status: 'auto_approved',
+          ref,
+          target_sha,
+          current_sha,
+          commit_count: range.total,
+          accepted: outcome.kind === 'accepted',
+          detail: outcome.detail,
+          window_expires_at_ms: window.expires_at_ms,
+        }
       }
     }
 
@@ -888,6 +1126,16 @@ export function createHostDeployService(
     if (fresh.status === 'up_to_date') {
       return `And nothing is left to deploy — the host is already at ${shortSha(fresh.target_sha)}.`
     }
+    // A window opened between the dead tap and this re-raise, so there was no
+    // approval to raise: the deploy the owner was chasing has ALREADY gone out.
+    // Saying "a fresh approval is waiting" here would send him hunting for a
+    // button that does not exist, for work that is already done.
+    if (fresh.status === 'auto_approved') {
+      return fresh.accepted
+        ? `Your standing deploy window covered it, so ${ref} at ${shortSha(fresh.target_sha)} ` +
+            `has just been deployed without a further tap. ${fresh.detail}`
+        : `Your standing deploy window covered it, but the deploy did not go out: ${fresh.detail}`
+    }
     return `A fresh approval could not be raised: ${fresh.reason}`
   }
 
@@ -907,10 +1155,139 @@ export function createHostDeployService(
       })
   }
 
+  /**
+   * The `hdw:` half of the tap surface — the owner opening or refusing a standing
+   * window. Kept as its own function rather than another branch inside the
+   * single-deploy handler: the two grants share a token codec and NOTHING else,
+   * and the single-deploy path's stale-sha gate is meaningless for a permission
+   * that is deliberately not bound to a sha.
+   *
+   * FAIL-SAFE IN THE SAME DIRECTION: a token that is not an offered button, not
+   * from the owner, not pending, or older than the prompt TTL opens no window.
+   */
+  async function handleWindowAnswer(
+    input: HostDeployOwnerAnswerInput,
+    value: string,
+  ): Promise<{ body: string }> {
+    if (input.user_id !== owner_user_id) {
+      return { body: 'Only the owner can open a deploy window. Nothing was changed.' }
+    }
+    if (!input.prior_option_values.includes(value)) {
+      return {
+        body:
+          'That deploy-window prompt has aged out of the answer window, so it can no longer be ' +
+          'answered — no window was opened. Ask again for a fresh one.',
+      }
+    }
+    const token = value.slice(
+      HOST_DEPLOY_WINDOW_VALUE_PREFIX.length,
+      HOST_DEPLOY_WINDOW_VALUE_PREFIX.length + 22,
+    )
+    const id = tokenToUuid(token)
+    if (id === null) {
+      return { body: 'That deploy-window token is not recognized — no window was opened.' }
+    }
+    const row = approvals.get(id)
+    if (
+      row === null ||
+      row.project_slug !== project_slug ||
+      row.tool_name !== HOST_DEPLOY_WINDOW_TOOL_NAME
+    ) {
+      return { body: 'That deploy-window request is unknown or no longer valid — no window was opened.' }
+    }
+    if (row.status !== 'pending') {
+      return {
+        body: `That deploy-window request was already ${row.status} — this tap changed nothing.`,
+      }
+    }
+    // The GRANT PROMPT's own TTL — five minutes, the same as a single deploy's.
+    // This is not the window's length; it is how long the offer to open one stays
+    // tappable, and a prompt answered hours later is answering a question the
+    // owner no longer has in front of him.
+    if (now() - row.requested_at * 1000 > HOST_DEPLOY_APPROVAL_TTL_MS) {
+      await cancel(id)
+      return {
+        body:
+          `That deploy-window request is older than ${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} ` +
+          'minutes, so it has expired — no window was opened. Ask again.',
+      }
+    }
+
+    const args = parseWindowArgs(row.args_json)
+    const ref = typeof args.ref === 'string' ? args.ref : null
+    const expires_at_ms = typeof args.expires_at_ms === 'number' ? args.expires_at_ms : null
+    if (ref === null || expires_at_ms === null) {
+      await cancel(id)
+      return { body: 'That deploy-window request could not be read back — no window was opened. Ask again.' }
+    }
+
+    if (value.endsWith(':d')) {
+      let denied: boolean
+      try {
+        denied = await approvals.respondApproval(id, 'denied', input.user_id)
+      } catch (err) {
+        log(`host-deploy window deny not recorded id=${id}: ${errText(err)}`)
+        return { body: 'That deny could not be recorded — but no window was opened either way.' }
+      }
+      if (!denied) {
+        const settled = approvals.get(id)?.status ?? 'decided'
+        return { body: `That deploy-window request was already ${settled} — this tap changed nothing.` }
+      }
+      return { body: 'No deploy window opened. Every deploy will keep asking you per commit.' }
+    }
+
+    let claimed: boolean
+    try {
+      claimed = await approvals.respondApproval(id, 'approved', input.user_id)
+    } catch (err) {
+      log(`host-deploy window approval not recorded id=${id}: ${errText(err)}`)
+      return { body: 'That could not be recorded, so no window was opened. Ask again.' }
+    }
+    if (!claimed) {
+      const settled = approvals.get(id)?.status ?? 'decided'
+      return { body: `That deploy-window request was already ${settled} — this tap changed nothing.` }
+    }
+
+    // ── THE WINDOW IS NOW OPEN, so the deploy that is already waiting should go.
+    // He opened it BECAUSE work is queued; making him then ask for the very
+    // deploy he just pre-authorised would be the round trip this removes. It runs
+    // through `request()`, which finds the window it just opened and takes the
+    // ordinary auto-approved path — no second dispatch site, no bypass.
+    const remaining = describeRemaining(expires_at_ms, now())
+    const opened = `Deploy window open for ${remaining}: I can deploy \`${ref}\` without asking until it closes.`
+    let follow: HostDeployRequestResult
+    try {
+      follow = await request({ ref, topic_id: input.topic_id })
+    } catch (err) {
+      return { body: `${opened} (Checking for anything waiting to deploy failed: ${errText(err)}.)` }
+    }
+    if (follow.status === 'up_to_date') {
+      return { body: `${opened} Nothing is waiting — the host is already at ${shortSha(follow.target_sha)}.` }
+    }
+    if (follow.status === 'auto_approved') {
+      return {
+        body: follow.accepted
+          ? `${opened}\n\nDeployed ${follow.ref} at ${shortSha(follow.target_sha)} ` +
+            `(${follow.commit_count} commit${follow.commit_count === 1 ? '' : 's'}) straight away. ${follow.detail}`
+          : `${opened}\n\nThe deploy of ${follow.ref} at ${shortSha(follow.target_sha)} did NOT go out: ${follow.detail}`,
+      }
+    }
+    if (follow.status === 'refused' || follow.status === 'unavailable') {
+      return { body: `${opened} Nothing was deployed just now: ${follow.reason}` }
+    }
+    return { body: opened }
+  }
+
   async function handleOwnerButtonAnswer(
     input: HostDeployOwnerAnswerInput,
   ): Promise<{ body: string } | null> {
     const value = input.user_text.trim()
+
+    // The window grant is a DIFFERENT token namespace with a different handler.
+    // Routed first so an `hdw:` value can never fall through the `hdp:` regex
+    // into the single-deploy path (it cannot — the prefixes are disjoint — but
+    // the ordering makes that a property of the code rather than of the regex).
+    if (HOST_DEPLOY_WINDOW_VALUE_RE.test(value)) return await handleWindowAnswer(input, value)
 
     // ── (a) ELIGIBILITY. An EXACT opaque token AND membership in the persisted
     // option set of a recent prompt. Silence, a timeout, "yes", a paraphrase or
@@ -1150,10 +1527,39 @@ export function createHostDeployService(
       }
     }
 
+    const outcome = await performDeploy(ref, approved_sha)
+    return { body: `${outcome.body}` }
+  }
+
+  /**
+   * THE ONE AUTHENTICATED CALL, and the only place in this file that makes it.
+   *
+   * Extracted so the owner's tap and a standing window (`requestWindow`) reach
+   * the host through the SAME code — a second dispatch site is a second place
+   * for the timeout wording, the secret scrubbing and the refusal handling to
+   * drift, and the timeout wording in particular is load-bearing (a deploy
+   * reported as "nothing happened" that had in fact succeeded is what taught
+   * this file to distinguish silence from failure, 2026-08-15).
+   *
+   * `body` is written for the TAP path and is returned to it VERBATIM — its
+   * wording is the wording that was reviewed, and the extraction must not have
+   * reworded a single sentence of it. The window path ignores `body` entirely and
+   * composes its own from `kind` + `detail`, because the two are not the same
+   * event: one follows an affirmative tap ("Approved, but…"), the other follows a
+   * permission granted hours earlier and has to say which.
+   */
+  async function performDeploy(
+    ref: string,
+    sha: string,
+  ): Promise<{ kind: 'accepted' | 'refused' | 'timeout' | 'error' | 'unconfigured'; body: string; detail: string }> {
     // ── (e) RESOLVE THE ENDPOINT + CREDENTIAL NOW, not at composition time.
     const cfg = resolveConfig()
     if (!cfg.configured) {
-      return { body: `Approved, but nothing was deployed: ${cfg.reason}` }
+      return {
+        kind: 'unconfigured',
+        detail: cfg.reason,
+        body: `Approved, but nothing was deployed: ${cfg.reason}`,
+      }
     }
     // The URL is ordinary configuration and useful diagnostic context. Only the
     // credential is secret; treating the URL as one makes real failures opaque.
@@ -1166,7 +1572,7 @@ export function createHostDeployService(
         url: cfg.endpoint.url,
         token: cfg.endpoint.token,
         ref,
-        sha: approved_sha,
+        sha,
       })
     } catch (err) {
       const detail = scrubHostDeploySecrets(errText(err), secrets)
@@ -1186,8 +1592,10 @@ export function createHostDeployService(
       // and point at the check that CAN answer it. Never invite a blind retry of
       // a non-idempotent action whose outcome is unobserved.
       if (isDispatchTimeout(err)) {
-        log(`host-deploy call TIMED OUT ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`)
+        log(`host-deploy call TIMED OUT ref=${ref} sha=${shortSha(sha)}: ${detail}`)
         return {
+          kind: 'timeout',
+          detail,
           body:
             `Approved, and the deploy was requested — but I stopped waiting for the answer after ` +
             `${Math.round(HOST_DEPLOY_CALL_TIMEOUT_MS / 1000)}s. ${detail}\n\n` +
@@ -1198,26 +1606,217 @@ export function createHostDeployService(
             `instance again.`,
         }
       }
-      log(`host-deploy call failed ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`)
+      log(`host-deploy call failed ref=${ref} sha=${shortSha(sha)}: ${detail}`)
       return {
+        kind: 'error',
+        detail,
         body: `Approved, but the deploy request did not go through: ${detail}. Nothing was deployed; ask again to retry.`,
       }
     }
 
     const detail = scrubHostDeploySecrets(result.detail, secrets).slice(0, HOST_DEPLOY_DETAIL_CAP)
     log(
-      `host-deploy call ${result.ok ? 'accepted' : 'refused'} ref=${ref} sha=${shortSha(approved_sha)}: ${detail}`,
+      `host-deploy call ${result.ok ? 'accepted' : 'refused'} ref=${ref} sha=${shortSha(sha)}: ${detail}`,
     )
     if (result.ok) {
       return {
-        body: `Deploy requested: ${ref} at ${shortSha(approved_sha)}. ${detail}`,
+        kind: 'accepted',
+        detail,
+        body: `Deploy requested: ${ref} at ${shortSha(sha)}. ${detail}`,
       }
     }
     // A REFUSED contract gate is a normal outcome here — the host said no, which
     // is the system working. It reads as a sentence, not as a crash.
     return {
-      body: `The host refused the deploy of ${ref} at ${shortSha(approved_sha)}: ${detail}. Nothing was deployed.`,
+      kind: 'refused',
+      detail,
+      body: `The host refused the deploy of ${ref} at ${shortSha(sha)}: ${detail}. Nothing was deployed.`,
     }
+  }
+
+  /**
+   * RAISE the window-grant prompt. Opens nothing: like `request()`, this returns
+   * `pending_approval` and the permission exists only after the owner taps.
+   *
+   * It deliberately does NOT resolve a sha or render a commit list. There is no
+   * commit list to render — the commits this authorises have not been written
+   * yet, and showing today's would imply a binding to them that a window does not
+   * have. What the owner is agreeing to is stated in words instead
+   * (`renderWindowApprovalBody`).
+   */
+  async function requestWindow(input: {
+    hours: number
+    ref?: string
+    topic_id?: string | null
+  }): Promise<HostDeployWindowRequestResult> {
+    const requested_topic =
+      typeof input.topic_id === 'string' && input.topic_id.length > 0 ? input.topic_id : null
+    const approval_topic = requested_topic ?? approval_topic_id
+
+    // Same order as `request()`: an unconfigured box never mints a grant the
+    // owner could tap into a guaranteed failure.
+    const cfg = resolveConfig()
+    if (!cfg.configured) return { status: 'unavailable', reason: cfg.reason }
+
+    const ref = (input.ref ?? default_ref).trim()
+    if (!HOST_DEPLOY_REF_RE.test(ref)) {
+      return {
+        status: 'refused',
+        reason: `${JSON.stringify(ref)} is not a usable git ref (letters, digits, . _ / - only, 1-200 chars)`,
+      }
+    }
+    // ONE REF MAY BE STOOD DOWN, AND IT IS THE DEFAULT ONE. A standing grant on
+    // an arbitrary ref would let the permission be pointed at a branch the owner
+    // never reviews — "deploy without asking" is only a bounded promise while
+    // the thing being deployed is the trunk he already watches. Every other ref
+    // keeps its per-sha tap. (Plan constraint: do not auto-deploy a ref other
+    // than the configured default.)
+    if (ref !== default_ref) {
+      return {
+        status: 'refused',
+        reason:
+          `a standing deploy window is only available for the default ref (${default_ref}); ` +
+          `${ref} keeps its per-sha approval`,
+      }
+    }
+
+    const validated = validateWindowHours(input.hours)
+    if ('reason' in validated) return { status: 'refused', reason: validated.reason }
+    const { hours } = validated
+
+    // An open window is not extended by asking again — that would let a caller
+    // ratchet a 1-hour grant into a permanent one an hour at a time, which is
+    // exactly the unbounded permission the ceiling exists to prevent. The owner
+    // must close the current one first, so every extension is a decision.
+    const open = liveWindow(ref)
+    if (open !== null) {
+      return {
+        status: 'refused',
+        reason:
+          `a deploy window for ${ref} is already open for another ` +
+          `${describeRemaining(open.expires_at_ms, now())} — close it first to change the duration`,
+      }
+    }
+
+    const granted_at = now()
+    const expires_at_ms = windowExpiryMs(granted_at, hours)
+    const approval_id = crypto.randomUUID()
+    const decision = approvals.requestApproval({
+      id: approval_id,
+      project_slug,
+      topic_id: approval_topic,
+      tool_name: HOST_DEPLOY_WINDOW_TOOL_NAME,
+      policy: 'prompt-user',
+      args: {
+        ref,
+        hours,
+        // FIXED AT GRANT TIME, not at tap time. The owner approves a body that
+        // names a closing time; binding the row to that same instant means the
+        // permission cannot outlive what he read, and a tap that arrives late
+        // simply gets a shorter window rather than a later one.
+        expires_at_ms,
+        description: `deploy ${ref} without asking for ${hours} hour${hours === 1 ? '' : 's'}`,
+      },
+    })
+    fireAndForget('host-deploy.window', decision, (err: unknown) => {
+      log(`host-deploy window ${approval_id} did not resolve: ${errText(err)}`)
+    })
+
+    let emitted: { prompt_id: string | null }
+    try {
+      const approve_value = `${HOST_DEPLOY_WINDOW_VALUE_PREFIX}${uuidToToken(approval_id)}:a`
+      const deny_value = `${HOST_DEPLOY_WINDOW_VALUE_PREFIX}${uuidToToken(approval_id)}:d`
+      emitted = await emit({
+        topic_id: approval_topic,
+        body: renderWindowApprovalBody({
+          ref,
+          hours,
+          expires_at_ms,
+          now_ms: granted_at,
+          approve_value,
+          deny_value,
+        }),
+        options: windowApprovalOptions(approve_value, deny_value),
+        idempotency_key: `host-deploy-window:${approval_id}`,
+        metadata: { kind: 'host-deploy-window', ref, hours },
+      })
+    } catch (err) {
+      try {
+        await approvals.cancelPending(approval_id)
+      } catch {
+        /* best-effort */
+      }
+      return {
+        status: 'refused',
+        reason: `the window prompt could not be posted, so nothing is pending — ask again: ${errText(err)}`,
+      }
+    }
+
+    if (emitted.prompt_id !== null) {
+      try {
+        await approvals.recordPromptLink(approval_id, emitted.prompt_id)
+      } catch (err) {
+        log(`host-deploy window prompt link not recorded id=${approval_id}: ${errText(err)}`)
+      }
+    }
+
+    log(
+      `host-deploy window pending_approval ref=${ref} hours=${hours} topic=${approval_topic}`,
+    )
+    return {
+      status: 'pending_approval',
+      request_id: uuidToToken(approval_id),
+      ref,
+      hours,
+      expires_at_ms,
+      approval_topic_id: approval_topic,
+      ...(requested_topic === null
+        ? {
+            note:
+              `The Approve/Deny prompt was posted to the owner's General chat topic (${approval_topic}). ` +
+              'Tell the owner where to find it.',
+          }
+        : {}),
+    }
+  }
+
+  function windowStatus(ref?: string): HostDeployWindowStatus {
+    const target = (ref ?? default_ref).trim()
+    const open = liveWindow(target)
+    return {
+      open: open !== null,
+      ref: target,
+      expires_at_ms: open?.expires_at_ms ?? null,
+      remaining: open === null ? null : describeRemaining(open.expires_at_ms, now()),
+    }
+  }
+
+  /**
+   * CLOSE every live window for `ref`. Claim-gated per row through
+   * `revokeApproved`, so the count is what THIS call closed and two racing
+   * revocations cannot both report having done it.
+   */
+  async function revokeWindow(ref?: string): Promise<number> {
+    const target = (ref ?? default_ref).trim()
+    const rows = approvals.findByToolName(project_slug, HOST_DEPLOY_WINDOW_TOOL_NAME)
+    const at = now()
+    let closed = 0
+    for (const row of rows) {
+      // Only LIVE windows for this ref. An already-lapsed row is left exactly as
+      // it is: rewriting its `decided_at` would relabel a permission that ended
+      // on its own clock as one the owner took back.
+      if (readLiveWindow(row, target, at) === null) continue
+      let claimed: boolean
+      try {
+        claimed = await approvals.revokeApproved(row.id)
+      } catch (err) {
+        log(`host-deploy window could not be revoked ${row.id}: ${errText(err)}`)
+        claimed = false
+      }
+      if (claimed) closed += 1
+    }
+    if (closed > 0) log(`host-deploy window revoked ref=${target} closed=${closed}`)
+    return closed
   }
 
   async function cancel(id: string): Promise<void> {
@@ -1307,7 +1906,15 @@ export function createHostDeployService(
     return swept
   }
 
-  return { status, request, handleOwnerButtonAnswer, sweepExpiredGrants }
+  return {
+    status,
+    request,
+    handleOwnerButtonAnswer,
+    sweepExpiredGrants,
+    requestWindow,
+    windowStatus,
+    revokeWindow,
+  }
 }
 
 function errText(err: unknown): string {

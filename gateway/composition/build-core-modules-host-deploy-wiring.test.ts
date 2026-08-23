@@ -72,6 +72,17 @@ function stubService(): HostDeployToolService {
       status: 'unavailable',
       reason: 'no control-plane endpoint is configured on this instance',
     }),
+    requestWindow: async () => ({
+      status: 'unavailable',
+      reason: 'no control-plane endpoint is configured on this instance',
+    }),
+    windowStatus: () => ({
+      open: false,
+      ref: 'origin/main',
+      expires_at_ms: null,
+      remaining: null,
+    }),
+    revokeWindow: async () => 0,
   }
 }
 

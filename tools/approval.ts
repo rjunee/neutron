@@ -231,6 +231,22 @@ export class ApprovalManager {
    * unparseable arguments were already unreadable to every other caller.
    */
   async recordPromptLink(id: string, prompt_id: string): Promise<void> {
+    await this.mergeArgs(id, { prompt_id })
+  }
+
+  /**
+   * Merge `patch` into a row's stored `args_json`, preserving every other key.
+   *
+   * The general form of `recordPromptLink`, extracted when a second caller
+   * needed it: the standing deploy window records each deploy it authorised onto
+   * its own grant row (`open/host-deploy.ts`), so "which permission authorised
+   * this deploy, and what else did it authorise" has an answer after the fact.
+   * A grant that cannot say what it was used for is not an audit trail.
+   *
+   * No-op for an unknown id. A row whose `args_json` will not parse is REPLACED
+   * with the patch — those arguments were already unreadable to every caller.
+   */
+  async mergeArgs(id: string, patch: Record<string, unknown>): Promise<void> {
     const row = this.get(id)
     if (row === null) return
     let args: Record<string, unknown>
@@ -240,11 +256,10 @@ export class ApprovalManager {
     } catch {
       args = {}
     }
-    args['prompt_id'] = prompt_id
     // Async `run` — the same per-instance mutex path `cancelPending` uses, so
     // this write serializes behind the INSERT rather than racing it.
     await this.db.run(`UPDATE tool_approvals SET args_json = ? WHERE id = ?`, [
-      JSON.stringify(args),
+      JSON.stringify({ ...args, ...patch }),
       id,
     ])
   }
@@ -344,5 +359,38 @@ export class ApprovalManager {
       waiter.resolve('expired')
     }
     return this.get(id)?.status === 'expired'
+  }
+
+  /**
+   * REVOKE a grant the owner already APPROVED, before it would otherwise lapse.
+   *
+   * `cancelPending` cannot do this: its predicate is `status = 'pending'`, which
+   * is exactly right for a prompt nobody answered and useless for a durable
+   * grant that was answered YES and is still in force. The standing deploy
+   * window (`open/host-deploy-window.ts`) is the first such grant — a permission
+   * with hours left on its clock that the owner must be able to take back in one
+   * move, without waiting for the clock.
+   *
+   * ATOMIC CLAIM, like `respondApproval`. The `WHERE status = 'approved'`
+   * predicate and the affected-row count are read inside ONE transaction, so of
+   * two racing revocations exactly one is told `true`. A caller that reports
+   * "closed" to the owner must gate that sentence on this boolean, or two taps
+   * both claim to have done it.
+   *
+   * The row lands on 'expired' rather than 'denied' deliberately: 'denied' is
+   * the record of an owner who refused the grant when asked, and overwriting a
+   * real YES with it would erase the fact that the permission WAS given and used.
+   */
+  async revokeApproved(id: string): Promise<boolean> {
+    const decided_at = this.now() / 1000
+    return await this.db.transaction((tx) => {
+      const res = tx.runSync(
+        `UPDATE tool_approvals
+           SET status = 'expired', decided_at = ?
+         WHERE id = ? AND status = 'approved'`,
+        [decided_at, id],
+      )
+      return res.changes > 0
+    })
   }
 }
