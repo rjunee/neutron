@@ -204,7 +204,13 @@ describe('composer wiring', () => {
     expect(wires("from './deploy-migration-preflight.ts'")).toBe(true)
   })
 
+  // `db.path`, never `db.raw().filename`: the lint gate reserves `ProjectDb.raw()`
+  // for the migration runner, and CI caught exactly that on the first push.
   test('it reads the database this process is open on, not a re-derived path', () => {
-    expect(wires('db_path: db.raw().filename')).toBe(true)
+    expect(wires('db_path: db.path')).toBe(true)
+  })
+
+  test('it does not reach for the raw handle the lint gate reserves', () => {
+    expect(COMPOSER_SRC.includes('db_path: db.raw()')).toBe(false)
   })
 })

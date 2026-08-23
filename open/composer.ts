@@ -3053,11 +3053,13 @@ export function buildOpenGraphComposer(
         // service failed closed and every auto-deploy fell back to asking per
         // sha — safe, but it also made the 72h window the owner granted
         // completely inert. The window authorises his TAP; this still proves
-        // the target migrates. `db.raw().filename` rather than re-deriving the
-        // path from the environment, so the check reads the database this
-        // process is actually open on and cannot drift from it.
+        // the target migrates. `db.path` rather than re-deriving the path from
+        // the environment, so the check reads the database this process is
+        // actually open on and cannot drift from it — the public accessor, not
+        // `raw().filename`, which the lint gate reserves for the migration
+        // runner. Same shape as `build-core-modules.ts`'s `db_path: input.db.path`.
         check_preconditions: createDeployMigrationPreflight({
-          db_path: db.raw().filename,
+          db_path: db.path,
           log: (m) => log.info('host_deploy_preflight', { detail: m }),
         }),
         log: (m) => log.info('host_deploy', { detail: m }),
