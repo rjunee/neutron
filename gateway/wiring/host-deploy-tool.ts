@@ -34,6 +34,9 @@ import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 
 export const HOST_DEPLOY_REQUEST_TOOL = 'host_deploy_request'
 export const HOST_DEPLOY_STATUS_TOOL = 'host_deploy_status'
+export const HOST_DEPLOY_WINDOW_REQUEST_TOOL = 'host_deploy_window_request'
+export const HOST_DEPLOY_WINDOW_STATUS_TOOL = 'host_deploy_window_status'
+export const HOST_DEPLOY_WINDOW_REVOKE_TOOL = 'host_deploy_window_revoke'
 
 /**
  * The structural slice of `open/host-deploy.ts`'s service this surface needs.
@@ -57,10 +60,41 @@ export interface HostDeployToolService {
         approval_topic_id: string
         note?: string
       }
+    | {
+        /** A standing window was open, so this DEPLOYED instead of asking. */
+        status: 'auto_approved'
+        ref: string
+        target_sha: string
+        current_sha: string
+        commit_count: number
+        accepted: boolean
+        detail: string
+        window_expires_at_ms: number
+      }
     | { status: 'unavailable'; reason: string }
     | { status: 'up_to_date'; ref: string; target_sha: string }
     | { status: 'refused'; reason: string }
   >
+  requestWindow(input: { hours: number; ref?: string; topic_id?: string | null }): Promise<
+    | {
+        status: 'pending_approval'
+        request_id: string
+        ref: string
+        hours: number
+        expires_at_ms: number
+        approval_topic_id: string
+        note?: string
+      }
+    | { status: 'unavailable'; reason: string }
+    | { status: 'refused'; reason: string }
+  >
+  windowStatus(ref?: string): {
+    open: boolean
+    ref: string
+    expires_at_ms: number | null
+    remaining: string | null
+  }
+  revokeWindow(ref?: string): Promise<number>
 }
 
 const requestInputSchema: JsonSchemaDocument = {
@@ -121,7 +155,88 @@ const statusOutputSchema: JsonSchemaDocument = {
   required: ['enabled', 'reason', 'default_ref'],
 }
 
+const windowRequestInputSchema: JsonSchemaDocument = {
+  type: 'object',
+  properties: {
+    hours: {
+      type: 'integer',
+      description:
+        'How long the window stays open, in whole hours (1-72). Outside that range is REFUSED, ' +
+        'never clamped.',
+    },
+    ref: {
+      type: 'string',
+      description:
+        'The git ref the window authorises. Defaults to the instance default. A window for one ref ' +
+        'authorises nothing about any other.',
+    },
+  },
+  required: ['hours'],
+  additionalProperties: false,
+}
+
+const windowRequestOutputSchema: JsonSchemaDocument = {
+  type: 'object',
+  properties: {
+    status: {
+      type: 'string',
+      description:
+        "'pending_approval' (the owner has been asked to open it), 'unavailable' (no control plane " +
+        "configured) or 'refused' (nothing was requested — the reason says why).",
+    },
+    request_id: { type: 'string' },
+    ref: { type: 'string' },
+    hours: { type: 'integer' },
+    expires_at_ms: { type: 'integer' },
+    approval_topic_id: {
+      type: 'string',
+      description: 'The chat topic the Approve/Deny prompt was posted to.',
+    },
+    note: { type: 'string' },
+    reason: { type: 'string' },
+  },
+  required: ['status'],
+}
+
+const windowStatusInputSchema: JsonSchemaDocument = {
+  type: 'object',
+  properties: { ref: { type: 'string' } },
+  required: [],
+  additionalProperties: false,
+}
+
+const windowStatusOutputSchema: JsonSchemaDocument = {
+  type: 'object',
+  properties: {
+    open: { type: 'boolean' },
+    ref: { type: 'string' },
+    expires_at_ms: { type: ['integer', 'null'] },
+    remaining: {
+      type: ['string', 'null'],
+      description: 'How long the window has left, in words. Null when nothing is open.',
+    },
+  },
+  required: ['open', 'ref'],
+}
+
+const windowRevokeOutputSchema: JsonSchemaDocument = {
+  type: 'object',
+  properties: {
+    closed: {
+      type: 'integer',
+      description: 'How many live windows THIS call closed. 0 means none was open.',
+    },
+    ref: { type: 'string' },
+  },
+  required: ['closed', 'ref'],
+}
+
 interface RequestArgs {
+  ref?: unknown
+}
+
+interface WindowRequestArgs {
+  hours?: unknown
   ref?: unknown
 }
 
@@ -198,5 +313,85 @@ export function registerHostDeployToolSurface(
     },
   })
 
-  return [HOST_DEPLOY_REQUEST_TOOL, HOST_DEPLOY_STATUS_TOOL]
+  registry.register({
+    name: HOST_DEPLOY_WINDOW_REQUEST_TOOL,
+    description:
+      'ASK the owner to open a STANDING DEPLOY WINDOW: for the next N hours (1-72), deploys of the ' +
+      'named ref go out WITHOUT a per-sha Approve tap. IMPORTANT: this opens nothing by itself — it ' +
+      'posts an Approve/Deny prompt and returns "pending_approval"; only the owner\'s tap opens the ' +
+      'window. Use it when the owner is away or when a run of merges would otherwise need a tap each. ' +
+      'While a window is open, host_deploy_request returns "auto_approved" and the deploy has ALREADY ' +
+      'happened — every one of them posts a notice to chat saying what went out. An open window is ' +
+      'never extended by asking again: close it first. Tell the owner WHICH topic carries the prompt ' +
+      '(the "approval_topic_id" field).',
+    input_schema: windowRequestInputSchema,
+    output_schema: windowRequestOutputSchema,
+    capability_required: 'write:project_data',
+    approval_policy: 'auto',
+    handler: async (args, ctx) => {
+      const svc = service()
+      if (svc === null) {
+        return { status: 'unavailable', reason: 'host deploys are not wired on this instance' }
+      }
+      const a = (args ?? {}) as WindowRequestArgs
+      const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
+      // Passed through UNVALIDATED on purpose: the range check lives in the
+      // service (`validateWindowHours`), so the tool surface and the chat surface
+      // cannot disagree about what a legal window is.
+      return await svc.requestWindow({
+        hours: a.hours as number,
+        ...(ref.length > 0 ? { ref } : {}),
+        topic_id: ctx.topic_id,
+      })
+    },
+  })
+
+  registry.register({
+    name: HOST_DEPLOY_WINDOW_STATUS_TOOL,
+    description:
+      'Report whether a standing deploy window is open right now, and how long it has left. ' +
+      'Read-only. Check this before telling the owner whether a deploy needs his tap.',
+    input_schema: windowStatusInputSchema,
+    output_schema: windowStatusOutputSchema,
+    capability_required: 'read:project_data',
+    approval_policy: 'auto',
+    handler: async (args) => {
+      const svc = service()
+      if (svc === null) {
+        return { open: false, ref: '', expires_at_ms: null, remaining: null }
+      }
+      const a = (args ?? {}) as RequestArgs
+      const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
+      return svc.windowStatus(ref.length > 0 ? ref : undefined)
+    },
+  })
+
+  registry.register({
+    name: HOST_DEPLOY_WINDOW_REVOKE_TOOL,
+    description:
+      'CLOSE the standing deploy window immediately, so deploys go back to asking the owner per sha. ' +
+      'Safe to call when nothing is open — it returns closed:0. Call it the moment the owner says to ' +
+      'stop deploying without asking; do NOT wait for the window to lapse.',
+    input_schema: windowStatusInputSchema,
+    output_schema: windowRevokeOutputSchema,
+    capability_required: 'write:project_data',
+    approval_policy: 'auto',
+    handler: async (args) => {
+      const svc = service()
+      if (svc === null) return { closed: 0, ref: '' }
+      const a = (args ?? {}) as RequestArgs
+      const ref = typeof a.ref === 'string' ? a.ref.trim() : ''
+      const target = ref.length > 0 ? ref : undefined
+      const closed = await svc.revokeWindow(target)
+      return { closed, ref: svc.windowStatus(target).ref }
+    },
+  })
+
+  return [
+    HOST_DEPLOY_REQUEST_TOOL,
+    HOST_DEPLOY_STATUS_TOOL,
+    HOST_DEPLOY_WINDOW_REQUEST_TOOL,
+    HOST_DEPLOY_WINDOW_STATUS_TOOL,
+    HOST_DEPLOY_WINDOW_REVOKE_TOOL,
+  ]
 }

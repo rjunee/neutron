@@ -260,3 +260,72 @@ describe('ApprovalManager', () => {
     void pTool
   })
 })
+
+describe('revokeApproved', () => {
+  test('only an APPROVED row can be revoked — a pending one is left alone', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const p = mgr.requestApproval({
+      id: 'w-pending',
+      project_slug: 't1',
+      topic_id: null,
+      tool_name: 'host-deploy-window',
+      args: {},
+      policy: 'prompt-user',
+    })
+    await new Promise((r) => setTimeout(r, 5))
+
+    // THE PREDICATE. Without `status = 'approved'` this would silently expire a
+    // grant the owner has not answered yet — revoking a permission that was
+    // never given, and retiring the prompt he is still looking at.
+    expect(await mgr.revokeApproved('w-pending')).toBe(false)
+    expect(mgr.get('w-pending')?.status).toBe('pending')
+
+    void p
+  })
+
+  test('revoking twice reports true then false — the claim is atomic', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const p = mgr.requestApproval({
+      id: 'w-live',
+      project_slug: 't1',
+      topic_id: null,
+      tool_name: 'host-deploy-window',
+      args: {},
+      policy: 'prompt-user',
+    })
+    await new Promise((r) => setTimeout(r, 5))
+    await mgr.respondApproval('w-live', 'approved', 'owner')
+
+    expect(await mgr.revokeApproved('w-live')).toBe(true)
+    expect(mgr.get('w-live')?.status).toBe('expired')
+    // Of two racing revocations exactly one may tell the owner it closed the
+    // window; the loser must not claim it too.
+    expect(await mgr.revokeApproved('w-live')).toBe(false)
+
+    void p
+  })
+
+  test('a DENIED row is not revocable — the record of a refusal is not rewritten', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    const p = mgr.requestApproval({
+      id: 'w-denied',
+      project_slug: 't1',
+      topic_id: null,
+      tool_name: 'host-deploy-window',
+      args: {},
+      policy: 'prompt-user',
+    })
+    await new Promise((r) => setTimeout(r, 5))
+    await mgr.respondApproval('w-denied', 'denied', 'owner')
+
+    expect(await mgr.revokeApproved('w-denied')).toBe(false)
+    expect(mgr.get('w-denied')?.status).toBe('denied')
+
+    void p
+  })
+
+  test('an unknown id revokes nothing', async () => {
+    const mgr = new ApprovalManager(db, recordingNotifier())
+    expect(await mgr.revokeApproved('nope')).toBe(false)
+  })
+})
