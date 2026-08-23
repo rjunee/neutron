@@ -140,40 +140,75 @@ function buildHarness(opts: {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
     if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
-    if (joined.includes('rev-parse --verify --quiet refs/heads/')) {
+    // `^{commit}` EXCLUDED ON PURPOSE. Two different probes both open with
+    // `rev-parse --verify --quiet refs/heads/…`: the launch path's local-tip
+    // check (`orchestrator.ts:3090`, no suffix) and #542's ref resolution
+    // (`merge.ts` → `revParseCommit`, which ALWAYS appends `^{commit}`).
+    // Without the exclusion the gate's branch lookup gets this stub's exit-1
+    // whenever a test leaves `local_branch_tip` unset; the gate then cannot
+    // resolve the branch, fails closed, and the run ends `failed`.
+    if (
+      joined.includes('rev-parse --verify --quiet refs/heads/') &&
+      !joined.includes('^{commit}')
+    ) {
       return opts.local_branch_tip === undefined || opts.local_branch_tip === null
         ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
         : ok(opts.local_branch_tip)
     }
     const stubbed = opts.hostResponder?.(cmd)
-    if (
-      stubbed !== undefined &&
-      (!joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}') ||
-        !stubbed.ok ||
-        stubbed.stdout.trim() !== '')
-    ) {
-      return stubbed
-    }
-    // Board-shaped PR runs now pin before every first fire. Most tests do not care
-    // which base commit was observed, so give the harness a valid fetched tip while
-    // preserving any explicit responder value (including failures) above.
-    if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
-      return ok('0'.repeat(40))
-    }
-    // #542's drift probes, ADDED to main's defaults rather than replacing them.
-    // Answered as a healthy repo whose base has not moved, because an empty
-    // answer is not neutral here — it reads as a repo the gate cannot assess,
-    // which pr mode HOLDS on, and every unrelated test would then fail on a hold
-    // it never meant to exercise.
+    // A responder's answer wins EXCEPT an empty-but-ok answer to one of the
+    // gate's OWN probes. An unreadable ref is not a neutral stub — it is a repo
+    // the gate cannot assess, which pr mode HOLDS on, so tests written before
+    // #542 would fail on a hold they never meant to exercise.
+    // A `^{commit}` resolution of a BARE SHA is the publish path resolving the
+    // build's claimed commit, NOT the drift gate resolving a ref. Answering it
+    // with a canned sha makes the publisher see claim≠branch and refuse, which
+    // is a real guard doing its job against a stub that lied to it. The gate
+    // only ever resolves NAMED refs (`origin/main^{commit}`,
+    // `refs/heads/<branch>^{commit}`), so the ref shape discriminates cleanly.
     //
-    // Swapping main's `stubbed ?? ok()` default for `driftFreeHost` instead of
-    // adding these two lines red 15 publish-path tests: that path drives its own
-    // `rev-parse --verify` probes and legitimately expects an EMPTY answer for
-    // refs that should not resolve. Measured against a control run of unmodified
-    // main, which is green.
-    if (joined.includes('merge-base')) return ok(NO_DRIFT_SHA)
-    if (joined.includes('headRefName,baseRefName,isCrossRepository')) {
-      return ok('feat-x\nmain\nfalse')
+    // `merge-base` MUST stay in this list. Dropping it on the theory that an
+    // unresolvable ref "fails open" costs 33 tests (vs 5 with it): the gate
+    // fails CLOSED when materiality is unassessable, which is correct — it
+    // guards `gh pr merge`, a SERVER-side call with no downstream check to catch
+    // what it waves through, so "could not check" must never read as "checked
+    // and fine".
+    const resolvesBareSha = /\b[0-9a-f]{7,40}\^\{commit\}/.test(joined)
+    const driftProbe =
+      (joined.includes('^{commit}') && !resolvesBareSha) ||
+      joined.includes('merge-base') ||
+      joined.includes('headRefName,baseRefName,isCrossRepository')
+    if (driftProbe && (stubbed === undefined || (stubbed.ok && stubbed.stdout.trim() === ''))) {
+      // Board-shaped PR runs pin before every first fire; most tests do not care
+      // which base commit was observed, so hand back a valid fetched tip.
+      if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
+        return ok('0'.repeat(40))
+      }
+      if (joined.includes('headRefName,baseRefName,isCrossRepository')) {
+        return ok('feat-x\nmain\nfalse')
+      }
+      // THE FORK POINT IS THE BASE TIP — derived, never canned. The gate calls
+      // drift when `merge-base(base, branch)` differs from `base^{commit}`, so a
+      // fixed sha here silently becomes "the base the review saw" and reports
+      // drift against whatever tip the scenario actually set. The hold message
+      // then names this constant as the reviewed base, which is how the fake
+      // gives itself away. Ask the test's own responder what the base resolves
+      // to and echo it, so "no drift" means no drift against THIS scenario.
+      if (cmd[3] === 'merge-base') {
+        const baseRef = cmd[4] ?? ''
+        const tip = opts.hostResponder?.([
+          'git',
+          '-C',
+          cmd[2] ?? '',
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          `${baseRef}^{commit}`,
+        ])
+        const sha = tip !== undefined && tip.ok ? tip.stdout.trim() : ''
+        return ok(sha !== '' ? sha : NO_DRIFT_SHA)
+      }
+      return ok(NO_DRIFT_SHA)
     }
     return stubbed ?? ok()
   }
