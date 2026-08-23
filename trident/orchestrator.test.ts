@@ -68,6 +68,26 @@ const ghPrDiffTo = (joined: string, body: string): HostCommandResult => {
   return ok('')
 }
 
+/**
+ * The DEFAULT host answers the #542 drift probes as a healthy repo whose base
+ * has NOT moved: every ref resolves and the fork point IS the base tip. A host
+ * that answers `rev-parse` with an empty string is not a neutral stub — it is a
+ * repo the gate cannot assess, which pr mode now HOLDS on (it has no loud local
+ * failure to fall back on, since `gh pr merge` runs on GitHub). Tests about
+ * anything other than drift want a repo the gate can actually read.
+ */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : // …and the PR's head lives in THIS repository, not a fork, on the base it
+      // says it targets. pr mode cannot score a fork head against `origin` (so
+      // it holds one) and will not guess a base GitHub declines to name — a stub
+      // that answers this probe with an empty string reads as both.
+      cmd.includes('headRefName,baseRefName,isCrossRepository')
+      ? ok('feat-x\nmain\nfalse')
+      : ok()
+
 interface Harness {
   loop: TridentTickLoop
   step: import('./orchestrator.ts').TridentStep
@@ -120,25 +140,75 @@ function buildHarness(opts: {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
     if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
-    if (joined.includes('rev-parse --verify --quiet refs/heads/')) {
+    // `^{commit}` EXCLUDED ON PURPOSE. Two different probes both open with
+    // `rev-parse --verify --quiet refs/heads/…`: the launch path's local-tip
+    // check (`orchestrator.ts:3090`, no suffix) and #542's ref resolution
+    // (`merge.ts` → `revParseCommit`, which ALWAYS appends `^{commit}`).
+    // Without the exclusion the gate's branch lookup gets this stub's exit-1
+    // whenever a test leaves `local_branch_tip` unset; the gate then cannot
+    // resolve the branch, fails closed, and the run ends `failed`.
+    if (
+      joined.includes('rev-parse --verify --quiet refs/heads/') &&
+      !joined.includes('^{commit}')
+    ) {
       return opts.local_branch_tip === undefined || opts.local_branch_tip === null
         ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
         : ok(opts.local_branch_tip)
     }
     const stubbed = opts.hostResponder?.(cmd)
-    if (
-      stubbed !== undefined &&
-      (!joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}') ||
-        !stubbed.ok ||
-        stubbed.stdout.trim() !== '')
-    ) {
-      return stubbed
-    }
-    // Board-shaped PR runs now pin before every first fire. Most tests do not care
-    // which base commit was observed, so give the harness a valid fetched tip while
-    // preserving any explicit responder value (including failures) above.
-    if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
-      return ok('0'.repeat(40))
+    // A responder's answer wins EXCEPT an empty-but-ok answer to one of the
+    // gate's OWN probes. An unreadable ref is not a neutral stub — it is a repo
+    // the gate cannot assess, which pr mode HOLDS on, so tests written before
+    // #542 would fail on a hold they never meant to exercise.
+    // A `^{commit}` resolution of a BARE SHA is the publish path resolving the
+    // build's claimed commit, NOT the drift gate resolving a ref. Answering it
+    // with a canned sha makes the publisher see claim≠branch and refuse, which
+    // is a real guard doing its job against a stub that lied to it. The gate
+    // only ever resolves NAMED refs (`origin/main^{commit}`,
+    // `refs/heads/<branch>^{commit}`), so the ref shape discriminates cleanly.
+    //
+    // `merge-base` MUST stay in this list. Dropping it on the theory that an
+    // unresolvable ref "fails open" costs 33 tests (vs 5 with it): the gate
+    // fails CLOSED when materiality is unassessable, which is correct — it
+    // guards `gh pr merge`, a SERVER-side call with no downstream check to catch
+    // what it waves through, so "could not check" must never read as "checked
+    // and fine".
+    const resolvesBareSha = /\b[0-9a-f]{7,40}\^\{commit\}/.test(joined)
+    const driftProbe =
+      (joined.includes('^{commit}') && !resolvesBareSha) ||
+      joined.includes('merge-base') ||
+      joined.includes('headRefName,baseRefName,isCrossRepository')
+    if (driftProbe && (stubbed === undefined || (stubbed.ok && stubbed.stdout.trim() === ''))) {
+      // Board-shaped PR runs pin before every first fire; most tests do not care
+      // which base commit was observed, so hand back a valid fetched tip.
+      if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) {
+        return ok('0'.repeat(40))
+      }
+      if (joined.includes('headRefName,baseRefName,isCrossRepository')) {
+        return ok('feat-x\nmain\nfalse')
+      }
+      // THE FORK POINT IS THE BASE TIP — derived, never canned. The gate calls
+      // drift when `merge-base(base, branch)` differs from `base^{commit}`, so a
+      // fixed sha here silently becomes "the base the review saw" and reports
+      // drift against whatever tip the scenario actually set. The hold message
+      // then names this constant as the reviewed base, which is how the fake
+      // gives itself away. Ask the test's own responder what the base resolves
+      // to and echo it, so "no drift" means no drift against THIS scenario.
+      if (cmd[3] === 'merge-base') {
+        const baseRef = cmd[4] ?? ''
+        const tip = opts.hostResponder?.([
+          'git',
+          '-C',
+          cmd[2] ?? '',
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          `${baseRef}^{commit}`,
+        ])
+        const sha = tip !== undefined && tip.ok ? tip.stdout.trim() : ''
+        return ok(sha !== '' ? sha : NO_DRIFT_SHA)
+      }
+      return ok(NO_DRIFT_SHA)
     }
     return stubbed ?? ok()
   }
@@ -2632,14 +2702,19 @@ describe('orchestrator — #545: a head that MOVED after the review never merges
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }),
       hostResponder: (cmd) =>
-        cmd[0] === 'gh'
+        // Only the MERGE is refused. The gate's read-only head-location probe
+        // (`gh pr view … isCrossRepository`) must keep answering, or this test
+        // stops at the gate instead of at the merge it is about.
+        cmd[0] === 'gh' && !cmd.includes('headRefName,baseRefName,isCrossRepository')
           ? {
               ok: false,
               stdout: '',
               stderr: 'failed to merge pull request: Head branch was modified. Review and try the merge again.',
               exit_code: 1,
             }
-          : ok(),
+          : // A repo the #542 drift gate can read, so this test fails at the
+            // MERGE (the thing it is about) and not at the gate before it.
+            driftFreeHost(cmd),
     })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 
@@ -2715,6 +2790,62 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
     expect(final.failure_reason).toBe(question)
     expect(final.failure_reason).not.toContain('merge failed')
     expect(final.inner_verdict).toBe('APPROVE')
+  })
+})
+
+describe('orchestrator — base-drift hold (#542): a HELD merge fails LOUDLY, not silently', () => {
+  /** A host whose base has moved since the fork point, editing `baseTouched`;
+   *  the branch's reviewed diff touches `reviewedFiles`. The rebase is clean, so
+   *  nothing textual catches the overlap — only the #542 hold can. */
+  const driftedHost = (
+    baseTouched: string[],
+    reviewedFiles: string[],
+  ): ((cmd: string[]) => HostCommandResult) => {
+    const REVIEW_BASE = '1111111111111111111111111111111111111111'
+    const CURRENT_BASE = '2222222222222222222222222222222222222222'
+    const BRANCH_HEAD = '3333333333333333333333333333333333333333'
+    return (cmd) => {
+      if (cmd.includes('rev-parse') && cmd.includes('--verify')) {
+        const ref = (cmd[cmd.length - 1] ?? '').replace('^{commit}', '')
+        if (ref.startsWith('feat-')) return ok(BRANCH_HEAD)
+        return ok(CURRENT_BASE)
+      }
+      if (cmd.includes('merge-base')) return ok(REVIEW_BASE)
+      if (cmd.includes('diff') && cmd.includes('--name-only') && !cmd.includes('--diff-filter=U')) {
+        return ok((cmd[cmd.length - 1] === BRANCH_HEAD ? reviewedFiles : baseTouched).join('\n'))
+      }
+      return ok()
+    }
+  }
+
+  test('an APPROVE whose base drifted INTO the reviewed diff is HELD → failed, nothing merged', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: driftedHost(['shared.ts'], ['shared.ts']),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    // The reason IS the hold text (the terminal delivery posts it verbatim) — not
+    // a raw "merge failed", and it names both shas + the overlapping file.
+    expect(final.failure_reason).toContain('holding the merge')
+    expect(final.failure_reason).toContain('shared.ts')
+    expect(final.failure_reason).not.toContain('merge failed')
+    // The APPROVE is preserved: the work is intact, it just may not land here.
+    expect(final.inner_verdict).toBe('APPROVE')
+    // NOTHING landed on the base.
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge --no-ff'))).toBe(false)
+  })
+
+  test('an APPROVE whose base drifted ELSEWHERE still merges (done)', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      hostResponder: driftedHost(['docs/CHANGELOG.md'], ['shared.ts']),
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.startsWith('git -C /repo merge --no-ff'))).toBe(true)
   })
 })
 
@@ -3191,7 +3322,10 @@ describe('orchestrator — idempotent crash-resume', () => {
   test('when the row has no PR but gh finds one, it is folded in (no duplicate open)', async () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', prNumber: 99, branch: 'feat-x' } }),
-      hostResponder: (cmd) => (cmd.includes('pr') && cmd.includes('list') ? ok('99') : ok()),
+      // Answers the PR lookup, and falls through to a drift-free repo for
+      // everything else — an unanswered `rev-parse` would hold this pr-mode
+      // merge (#542) and the run would never reach `done`.
+      hostResponder: (cmd) => (cmd.includes('pr') && cmd.includes('list') ? ok('99') : driftFreeHost(cmd)),
     })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
 

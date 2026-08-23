@@ -26464,3 +26464,56 @@ four scenarios, one each.
 | M3 `local-ref-boundary`: fetch every target | RED — local branch/raw-sha no-fetch assertion failed |
 | M4 `remote-timeout`: omit the explicit timeout | RED — timeout propagation assertion failed |
 | M5 `remote-failure-refusal`: convert resolver failure to parity | RED — both stale-local cases returned `up_to_date` |
+
+## 2026-08-12 — a verdict may no longer land on a base the review never saw (#542)
+
+Nothing held a merge when the base moved AFTER the review, so an APPROVE could be
+applied to a combination nobody looked at. Local mode rebases onto the latest base
+and lands: a TEXTUAL conflict reaches the bounded resolver, but a semantic one —
+base and branch editing the same file in places git reconciles silently — landed
+unseen. PR mode's only other protection was GitHub's
+`strict_required_status_checks_policy`, which is off on this repository.
+
+`assessBaseDrift` (`trident/merge.ts`) now scores every merge BEFORE the rebase —
+after it, the fork point equals the base tip and the drift being measured is
+already erased. The review-time base is DERIVED (`merge-base(branch, base)`), not
+recorded by the reviewing agent: the build worktree is cut from base and the
+reviewed diff is computed inside it, so the fork point IS the tree the review read,
+and a derived fact cannot go missing the way an LLM-written column can. Drift holds
+only when it is MATERIAL — the moved base and the reviewed diff changed the same
+file — minus paths the resolver was handed with both sides in context. Rename
+detection is off, so a base that renames a reviewed file cannot slip past the path
+comparison. PR mode takes both the head and the base branch from GitHub
+(`headRefName`/`baseRefName`), because `gh pr merge` obeys those and not this row's
+columns; a FORK head is refused outright rather than scored against `origin/<name>`,
+which for the ordinary `fork:main → main` shape would compare the base with itself
+and report all-clear about a head it never read.
+
+**Every degraded path fails CLOSED in PR mode** — the step it guards is a
+server-side merge with nothing downstream to catch what it waves through — and the
+two ways that could have made the gate useless are closed:
+
+- **A SHALLOW checkout held EVERY merge, forever.** `merge-base` answers by walking
+  history; below a graft boundary it prints nothing, which is indistinguishable
+  from "unrelated histories", so both modes held — under a message correctly saying
+  a re-run could not clear it. The repository this runs on is shallow, so that was
+  every merge. The missing history is now fetched once (`git fetch --unshallow`,
+  only when git reports the repository shallow) and the question asked again; a
+  complete repo is never touched, a failed or unhelpful deepen keeps the hold, and
+  deepening can only reveal a fork point that was always there, never invent one.
+  A gate that refuses everything gets switched off, and a switched-off gate
+  protects nothing.
+- **A failed land left the branch rebased, blinding the gate for good.** The rebase
+  moves the shared `refs/heads/<branch>` onto the base tip, and only the HOLD path
+  put it back — so any other exit between rebase and land (the `git merge` refusing,
+  a throw from the resolver) left the ref on the tip, where the next attempt
+  measures no drift and lands what nothing reviewed. The restore now runs on every
+  path that did not land. A `SIGKILL` in that window still cannot be undone by any
+  `finally{}`; that is stated in the code rather than implied away.
+
+Real-git coverage (`trident/merge-realgit.test.ts`) drives actual repositories,
+including a genuine `--depth=1` clone: it proves the checkout is shallow and that
+git finds no fork point BEFORE asserting the merge lands, and a companion test
+proves the same clone still HOLDS a real same-file overlap — deepening made the
+gate answerable, not permissive.
+
