@@ -226,9 +226,20 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
+      // #542 — a host that answers `rev-parse` with '' is a repo the drift gate
+      // cannot assess, and pr mode holds on that. Answer as a healthy repo whose
+      // base has not moved, so this test exercises the board reconcile it is about.
       run_host: async (cmd) => ({
         ok: true,
-        stdout: cmd.includes('refs/remotes/origin/main^{commit}') ? 'a'.repeat(40) : '',
+        stdout:
+          (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+            ? '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+            : // …and the head is in THIS repo, not a fork, on the base it names:
+              // pr mode holds a fork head and a base GitHub will not name, and
+              // an empty answer here reads as both.
+              cmd.includes('headRefName,baseRefName,isCrossRepository')
+              ? 'feat-x\nmain\nfalse'
+              : '',
         stderr: '',
         exit_code: 0,
       }),

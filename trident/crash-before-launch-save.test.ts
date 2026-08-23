@@ -80,7 +80,24 @@ function orchestrator(
   return buildTridentOrchestrator({
     fire_workflow: fire as never,
     db_path: join(tmp, 'project.db'),
-    run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+    // #542 — see board-reconcile.test.ts: an empty `rev-parse` answer reads as a
+    // repo the drift gate cannot assess, which pr mode holds on. This is a
+    // healthy repo whose base has not moved.
+    run_host: async (cmd) => ({
+      ok: true,
+      stdout:
+        (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+          ? '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+          : // …and whose head-location probe answers like every other drift-gate
+            // harness: same repo, `feat-x`, onto `main`. This test never reaches
+            // the merge, but a stub that answers this probe with an empty string
+            // is a stub that would hold if it ever did.
+            cmd.includes('headRefName,baseRefName,isCrossRepository')
+            ? 'feat-x\nmain\nfalse'
+            : '',
+      stderr: '',
+      exit_code: 0,
+    }),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
     ...over,

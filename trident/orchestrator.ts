@@ -90,6 +90,7 @@ import {
   detectBaseBranch,
   MAX_CONFLICT_ROUNDS,
   runWorktreePath,
+  TridentBaseDriftHold,
   TridentMergeConflictEscalation,
   type MergeConflictResolver,
   type RunHostCommand,
@@ -3650,6 +3651,19 @@ export function buildTridentOrchestrator(
         }
         return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}${foldNote}` }
       } catch (err) {
+        // #542 — the base moved materially between the review and the merge, so
+        // the merge was HELD rather than landed. Fail the run with the hold text
+        // AS the reason (the terminal delivery posts exactly it), keeping
+        // `inner_verdict: 'APPROVE'` + the pr/branch: the reviewed work is intact
+        // and re-runnable, it just may not land against a base nothing reviewed.
+        if (err instanceof TridentBaseDriftHold) {
+          return {
+            run: { ...failedRun(doneRun, err.message, true), inner_verdict: 'APPROVE' },
+            changed: true,
+            waiting: false,
+            note: 'done → failed (merge HELD: base drifted since review)',
+          }
+        }
         // #342 — a genuinely ambiguous merge conflict escalates a SPECIFIC
         // question to chat (not a raw "merge failed"): fail the run with the
         // question AS the reason so the terminal delivery posts exactly it.

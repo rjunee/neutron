@@ -107,14 +107,18 @@ export type {
 } from './agent-prompts.ts'
 
 export {
+  assessBaseDrift,
+  baseDriftHoldMessage,
   buildMergeCleanupDeps,
   detectBaseBranch,
   recoverStaleGitState,
   runWorktreePath,
+  shouldHoldForBaseDrift,
+  TridentBaseDriftHold,
   TridentMergeError,
   TridentMergeConflictEscalation,
 } from './merge.ts'
-export type { RunHostCommand, MergeConflictResolver } from './merge.ts'
+export type { BaseDriftAssessment, RunHostCommand, MergeConflictResolver } from './merge.ts'
 
 export {
   buildWorktreeReaperLoop,

@@ -48,6 +48,23 @@ afterEach(() => {
 })
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+/** #542 — the base-drift gate has to be able to READ the repo. A host that
+ *  answers `rev-parse` with an empty string is not a neutral stub: it is a repo
+ *  the gate cannot assess, and pr mode HOLDS on that (`gh pr merge` runs on
+ *  GitHub, so there is no loud local failure behind it). This is a healthy repo
+ *  whose base has NOT moved. */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : // …and the PR's head lives in THIS repository, not a fork, on the base it
+      // says it targets. pr mode cannot score a fork head against `origin` (so
+      // it holds one) and will not guess a base GitHub declines to name — a stub
+      // that answers this probe with an empty string reads as both.
+      cmd.includes('headRefName,baseRefName,isCrossRepository')
+      ? ok('feat-x\nmain\nfalse')
+      : ok()
+
 
 /** A board binder with one READY item ('item-1', a detailed title → passes the
  *  ask-gate), a doc-backed item ('item-doc'), and a terse UNDERSPECIFIED item
@@ -431,8 +448,7 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {
         hostCalls.push(cmd)
-        if (cmd.includes('refs/remotes/origin/main^{commit}')) return ok('a'.repeat(40))
-        return ok()
+        return driftFreeHost(cmd)
       },
       base_branch: 'main',
       now: () => new Date(0).toISOString(),

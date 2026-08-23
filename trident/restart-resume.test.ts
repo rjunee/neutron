@@ -46,6 +46,23 @@ afterEach(() => {
 })
 
 const ok = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+/** #542 — the base-drift gate has to be able to READ the repo. A host that
+ *  answers `rev-parse` with an empty string is not a neutral stub: it is a repo
+ *  the gate cannot assess, and pr mode HOLDS on that (`gh pr merge` runs on
+ *  GitHub, so there is no loud local failure behind it). This is a healthy repo
+ *  whose base has NOT moved. */
+const NO_DRIFT_SHA = '0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f'
+const driftFreeHost = (cmd: string[]): HostCommandResult =>
+  (cmd.includes('rev-parse') && cmd.includes('--verify')) || cmd.includes('merge-base')
+    ? ok(NO_DRIFT_SHA)
+    : // …and the PR's head lives in THIS repository, not a fork, on the base it
+      // says it targets. pr mode cannot score a fork head against `origin` (so
+      // it holds one) and will not guess a base GitHub declines to name — a stub
+      // that answers this probe with an empty string reads as both.
+      cmd.includes('headRefName,baseRefName,isCrossRepository')
+      ? ok('feat-x\nmain\nfalse')
+      : ok()
+
 
 interface Spy {
   fire_workflow: ReturnType<typeof buildSimFirer>['fire_workflow']
@@ -67,7 +84,7 @@ function freshBoot(
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
     fire_workflow: s.fire_workflow,
     db_path: join(tmp, 'project.db'),
-    run_host: async () => ok(),
+    run_host: async (cmd) => driftFreeHost(cmd),
     base_branch: 'main',
     now: () => new Date(0).toISOString(),
   }
@@ -136,8 +153,7 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
     const orch = buildTridentOrchestrator({
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
-      run_host: async (cmd) =>
-        cmd.includes('refs/remotes/origin/main^{commit}') ? ok('a'.repeat(40)) : ok(),
+      run_host: async (cmd) => driftFreeHost(cmd),
       base_branch: 'main',
       now: () => new Date(0).toISOString(),
     })
