@@ -72,11 +72,19 @@ export interface DeployMigrationPreflightDeps {
   db_path: string
   /**
    * A checkout that HOLDS THE TARGET SHA'S OBJECTS. `git archive` reads the
-   * object store, so this need not be the host checkout and is never written
-   * to — but a sha it has not fetched cannot be inspected, and that is a
-   * refusal rather than a pass.
+   * object store and is never written to — but a sha the checkout has not
+   * fetched cannot be inspected, and that is a refusal rather than a pass.
+   *
+   * DEFAULTS TO THE CHECKOUT THIS MODULE IS RUNNING FROM, which is the correct
+   * answer rather than a convenient one: the code executing here is the code
+   * the deploy is about to replace, so its checkout IS the deploy target, and
+   * the control plane resolves the ref by fetching into that same checkout —
+   * so by the time this seam is called the sha is present. Verified on this
+   * box: the gateway runs from `/opt/neutron-managed/vendor/neutron`, whose
+   * `origin/main` already pointed at the target sha. Reading it needs no
+   * privilege the deploy path lacks; only WRITING there does.
    */
-  repo_path: string
+  repo_path?: string
   /** Seam for tests; defaults to the OS temp dir. */
   tmp_root?: string
   log?: (msg: string) => void
@@ -136,6 +144,11 @@ export function createDeployMigrationPreflight(
   deps: DeployMigrationPreflightDeps,
 ): (input: { ref: string; sha: string }) => Promise<DeployPreflightVerdict> {
   const log = deps.log ?? ((): void => {})
+  // `import.meta.dir` is THIS FILE's directory (`<checkout>/open`), so the
+  // repository root is its parent. Deliberately not `process.cwd()`, which a
+  // caller can change, nor an env var, which can drift from the checkout that
+  // is actually running.
+  const repo_path = deps.repo_path ?? join(import.meta.dir, '..')
 
   return async ({ ref, sha }): Promise<DeployPreflightVerdict> => {
     if (!SHA_PATTERN.test(sha)) {
@@ -151,7 +164,7 @@ export function createDeployMigrationPreflight(
       workdir = mkdtempSync(join(deps.tmp_root ?? tmpdir(), 'deploy-preflight-'))
       const copy = join(workdir, 'copy.db')
 
-      const archived = await gitArchiveMigrations(deps.repo_path, sha, workdir)
+      const archived = await gitArchiveMigrations(repo_path, sha, workdir)
       if (!archived.ok) {
         return {
           ok: false,

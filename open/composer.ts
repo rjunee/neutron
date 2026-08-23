@@ -395,6 +395,7 @@ import {
   type HostDeployService,
 } from './host-deploy.ts'
 import { createHostDeployDispatch, createHostDeployRemoteGit } from './host-deploy-runtime.ts'
+import { createDeployMigrationPreflight } from './deploy-migration-preflight.ts'
 import { buildHostDeployPromptRetirer } from './wiring/host-deploy-prompt-retirer.ts'
 import { createAppTasksSurface } from '@neutronai/gateway/http/app-tasks-surface.ts'
 import { createAppRemindersSurface } from '@neutronai/gateway/http/app-reminders-surface.ts'
@@ -3048,6 +3049,17 @@ export function buildOpenGraphComposer(
         post_notice: async (topic_id, body) => {
           await deliver(topic_id, { body, durability: 'inert' })
         },
+        // THE SEAM A STANDING WINDOW MAY NEVER SKIP. While it was absent the
+        // service failed closed and every auto-deploy fell back to asking per
+        // sha — safe, but it also made the 72h window the owner granted
+        // completely inert. The window authorises his TAP; this still proves
+        // the target migrates. `db.raw().filename` rather than re-deriving the
+        // path from the environment, so the check reads the database this
+        // process is actually open on and cannot drift from it.
+        check_preconditions: createDeployMigrationPreflight({
+          db_path: db.raw().filename,
+          log: (m) => log.info('host_deploy_preflight', { detail: m }),
+        }),
         log: (m) => log.info('host_deploy', { detail: m }),
       })
 
