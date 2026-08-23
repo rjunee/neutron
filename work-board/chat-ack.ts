@@ -58,21 +58,72 @@ export interface WorkBoardChatAck {
 
 const DEFAULT_DEDUP_WINDOW_MS = 30_000
 const MAX_TITLE_LEN = 96
+const MAX_BOARD_LABEL_LEN = 48
 
-function truncateTitle(title: string): string {
-  // Measure + slice by CODE POINTS, not UTF-16 code units: a raw `.slice` on a
-  // string whose astral char (emoji, etc.) straddles the cut index yields a lone
-  // surrogate → mojibake before the ellipsis. `Array.from` iterates code points.
-  const chars = Array.from(title)
-  if (chars.length <= MAX_TITLE_LEN) return title
-  return `${chars.slice(0, MAX_TITLE_LEN - 1).join('')}…`
+/** The board every ack from the General surface belongs to. */
+export const GENERAL_BOARD_LABEL = 'General'
+/**
+ * What a project that cannot be named degrades to.
+ *
+ * A WORD, never the raw id: an ack is chat copy the owner reads, and a uuid in it
+ * is noise that also leaks an internal identifier into a message. A project
+ * deleted mid-turn is the ordinary way to get here.
+ */
+export const UNKNOWN_BOARD_LABEL = 'unknown project'
+
+/**
+ * Which board an ack is about, as a word.
+ *
+ * `null` — the General surface — is answered WITHOUT calling `lookup`: General has
+ * no row to find, so asking would be a guaranteed miss that renders as
+ * `unknown project` for the one scope that is never unknown.
+ */
+export function boardLabelForProjectId(
+  project_id: string | null,
+  lookup: (project_id: string) => string | null,
+): string {
+  if (project_id === null || project_id.length === 0) return GENERAL_BOARD_LABEL
+  let name: string | null = null
+  try {
+    name = lookup(project_id)
+  } catch {
+    // A naming failure must never cost the owner the ack itself.
+    name = null
+  }
+  if (name === null) return UNKNOWN_BOARD_LABEL
+  const label = truncateByGrapheme(name.trim(), MAX_BOARD_LABEL_LEN)
+  return label.length === 0 ? UNKNOWN_BOARD_LABEL : label
 }
 
-function textFor(kind: WorkBoardChatAckKind, title: string): string {
+const GRAPHEME_SEGMENTER = new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+
+/**
+ * Truncate by GRAPHEME CLUSTER, not code point.
+ *
+ * Code points already fixed the lone-surrogate mojibake, but they still cut inside
+ * a cluster: a flag is two regional indicators, a family emoji is several code
+ * points joined by ZWJ, and `é` may be `e` + a combining accent. Slicing between
+ * them yields half a flag, a stray accent, or a fragment of a family. `Intl.Segmenter`
+ * is the only thing in the platform that knows where a user-perceived character ends.
+ */
+function truncateByGrapheme(text: string, max: number): string {
+  const g = Array.from(GRAPHEME_SEGMENTER.segment(text), (part) => part.segment)
+  if (g.length <= max) return text
+  return `${g.slice(0, max - 1).join('')}…`
+}
+
+function truncateTitle(title: string): string {
+  return truncateByGrapheme(title, MAX_TITLE_LEN)
+}
+
+function textFor(kind: WorkBoardChatAckKind, title: string, board: string): string {
   const t = truncateTitle(title)
   switch (kind) {
     case 'card_added':
-      return `▸ On the Work Board: "${t}"`
+      // NAMES THE BOARD. Without it an ack for a card added in one project is
+      // indistinguishable from one added in another, and the owner cannot tell
+      // from the message which board just changed.
+      return `▸ On the Work Board · ${board}: "${t}"`
     case 'build_dispatched':
       return `⑂ Build dispatched: "${t}" — running autonomously; the result will post here when it lands.`
     case 'inline_started':
@@ -94,6 +145,12 @@ function textFor(kind: WorkBoardChatAckKind, title: string): string {
 export function buildWorkBoardChatAck(deps: {
   resolve_chat_id: (project_id: string | null) => string
   post: (chat_id: string, text: string) => void
+  /**
+   * Resolve ONE project id to its rail name, so the ack can say which board it is
+   * about. OPTIONAL: absent, every ack degrades to `unknown project` rather than
+   * failing, which keeps an un-wired composition working exactly as before.
+   */
+  project_name?: (project_id: string) => string | null
   now?: () => number
   dedup_window_ms?: number
 }): WorkBoardChatAck {
@@ -131,7 +188,9 @@ export function buildWorkBoardChatAck(deps: {
         // next fire for this (item,kind) can still land instead of being muted
         // for the whole window with no ack ever delivered.
         const chatId = deps.resolve_chat_id(input.project_id)
-        deps.post(chatId, textFor(input.kind, input.title))
+        const lookup = deps.project_name ?? ((): string | null => null)
+        const board = boardLabelForProjectId(input.project_id, lookup)
+        deps.post(chatId, textFor(input.kind, input.title, board))
         lastPostedAt.set(key, t)
       } catch {
         // The ack must NEVER perturb the tool result — swallow everything.

@@ -6,10 +6,20 @@ interface Posted {
   text: string
 }
 
-function harness(opts?: { now?: () => number; dedup_window_ms?: number }) {
+function harness(opts?: {
+  now?: () => number
+  dedup_window_ms?: number
+  /** Rail names by project id; a miss returns null, exactly as the real reader does. */
+  names?: Record<string, string>
+}) {
   const posts: Posted[] = []
   const resolvedWith: Array<string | null> = []
+  const namedWith: string[] = []
   const ack = buildWorkBoardChatAck({
+    project_name: (project_id) => {
+      namedWith.push(project_id)
+      return opts?.names?.[project_id] ?? null
+    },
     resolve_chat_id: (project_id) => {
       resolvedWith.push(project_id)
       return project_id === null ? 'chat:general' : `chat:${project_id}`
@@ -20,14 +30,16 @@ function harness(opts?: { now?: () => number; dedup_window_ms?: number }) {
     ...(opts?.now !== undefined ? { now: opts.now } : {}),
     ...(opts?.dedup_window_ms !== undefined ? { dedup_window_ms: opts.dedup_window_ms } : {}),
   })
-  return { ack, posts, resolvedWith }
+  return { ack, posts, resolvedWith, namedWith }
 }
 
 describe('buildWorkBoardChatAck — exact texts', () => {
   test('card_added text', () => {
-    const { ack, posts } = harness()
+    const { ack, posts } = harness({ names: { p1: 'Willow' } })
     ack.post({ project_id: 'p1', item_id: 'i1', title: 'Ship the landing page', kind: 'card_added' })
-    expect(posts).toEqual([{ chat_id: 'chat:p1', text: '▸ On the Work Board: "Ship the landing page"' }])
+    expect(posts).toEqual([
+      { chat_id: 'chat:p1', text: '▸ On the Work Board · Willow: "Ship the landing page"' },
+    ])
   })
 
   test('build_dispatched text', () => {
@@ -45,26 +57,26 @@ describe('buildWorkBoardChatAck — exact texts', () => {
   })
 
   test('title longer than 96 chars truncates to 95 + ellipsis', () => {
-    const { ack, posts } = harness()
+    const { ack, posts } = harness({ names: { p1: 'Willow' } })
     const long = 'x'.repeat(200)
     ack.post({ project_id: 'p1', item_id: 'i1', title: long, kind: 'card_added' })
     const expectedTitle = `${'x'.repeat(95)}…`
     expect(expectedTitle.length).toBe(96)
-    expect(posts[0]?.text).toBe(`▸ On the Work Board: "${expectedTitle}"`)
+    expect(posts[0]?.text).toBe(`▸ On the Work Board · Willow: "${expectedTitle}"`)
   })
 
   test('title exactly 96 chars is NOT truncated', () => {
-    const { ack, posts } = harness()
+    const { ack, posts } = harness({ names: { p1: 'Willow' } })
     const title = 'y'.repeat(96)
     ack.post({ project_id: 'p1', item_id: 'i1', title, kind: 'card_added' })
-    expect(posts[0]?.text).toBe(`▸ On the Work Board: "${title}"`)
+    expect(posts[0]?.text).toBe(`▸ On the Work Board · Willow: "${title}"`)
   })
 
   // Argus r2 nit: truncation must land on a code-POINT boundary, never split an
   // astral pair into a lone surrogate. An emoji straddling the 95/96 cut must be
   // dropped whole, not halved into mojibake.
   test('truncation of an astral-heavy title yields no lone surrogate', () => {
-    const { ack, posts } = harness()
+    const { ack, posts } = harness({ names: { p1: 'Willow' } })
     // 100 astral chars (each is a surrogate pair) — over MAX_TITLE_LEN (96) by code
     // points; a naive UTF-16 slice at unit index 95 would cut mid-pair.
     const title = '😀'.repeat(100)
@@ -73,7 +85,7 @@ describe('buildWorkBoardChatAck — exact texts', () => {
     // No unpaired surrogate survived (each code point round-trips).
     expect(/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/.test(text)).toBe(false)
     // 95 whole emoji + the ellipsis (MAX_TITLE_LEN - 1 code points, then '…').
-    expect(text).toBe(`▸ On the Work Board: "${'😀'.repeat(95)}…"`)
+    expect(text).toBe(`▸ On the Work Board · Willow: "${'😀'.repeat(95)}…"`)
   })
 })
 
@@ -258,5 +270,74 @@ describe('buildWorkBoardChatAck — never throws', () => {
       ack.post({ project_id: 'p1', item_id: `i${idx}`, title: 't', kind })
     })
     expect(posts.length).toBe(3)
+  })
+})
+
+/**
+ * WHICH board the ack is about.
+ *
+ * Before this, every ack read `▸ On the Work Board: "<title>"`, so a card added in one
+ * project and a card added in another produced messages the owner could not tell apart.
+ * The label is the fix; the cases below are the ones that make it safe to render.
+ */
+describe('the ack names its board', () => {
+  test('a named project renders its rail name', () => {
+    const { ack, posts } = harness({ names: { p1: 'Willow' } })
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 'Ship it', kind: 'card_added' })
+    expect(posts[0]?.text).toBe('▸ On the Work Board · Willow: "Ship it"')
+  })
+
+  test('General is answered WITHOUT a lookup — it has no row to find', () => {
+    const { ack, posts, namedWith } = harness()
+    ack.post({ project_id: null, item_id: 'i1', title: 'Ship it', kind: 'card_added' })
+    expect(posts[0]?.text).toBe('▸ On the Work Board · General: "Ship it"')
+    // The point of the early return: asking would be a guaranteed miss, and a miss
+    // renders as `unknown project` — for the one scope that is never unknown.
+    expect(namedWith).toEqual([])
+  })
+
+  test('an unnameable project degrades to a WORD, never the raw id', () => {
+    const { ack, posts } = harness({ names: {} })
+    ack.post({ project_id: 'deleted-mid-turn', item_id: 'i1', title: 'Ship it', kind: 'card_added' })
+    expect(posts[0]?.text).toBe('▸ On the Work Board · unknown project: "Ship it"')
+    expect(posts[0]?.text).not.toContain('deleted-mid-turn')
+  })
+
+  test('a THROWING resolver still delivers the ack', () => {
+    const posts: Posted[] = []
+    const ack = buildWorkBoardChatAck({
+      resolve_chat_id: () => 'chat:p1',
+      post: (chat_id, text) => posts.push({ chat_id, text }),
+      project_name: () => {
+        throw new Error('db gone')
+      },
+    })
+    ack.post({ project_id: 'p1', item_id: 'i1', title: 'Ship it', kind: 'card_added' })
+    // Naming is a nicety; the ack is the point. A failure to name must not cost it.
+    expect(posts[0]?.text).toBe('▸ On the Work Board · unknown project: "Ship it"')
+  })
+
+  test('an over-long board name is truncated, and a whitespace-only one is not a label', () => {
+    const long = harness({ names: { p1: 'z'.repeat(80) } })
+    long.ack.post({ project_id: 'p1', item_id: 'i1', title: 'x', kind: 'card_added' })
+    expect(long.posts[0]?.text).toBe(`▸ On the Work Board · ${'z'.repeat(47)}…: "x"`)
+
+    const blank = harness({ names: { p2: '   ' } })
+    blank.ack.post({ project_id: 'p2', item_id: 'i1', title: 'x', kind: 'card_added' })
+    expect(blank.posts[0]?.text).toBe('▸ On the Work Board · unknown project: "x"')
+  })
+
+  test('a title is cut on GRAPHEME clusters, so a flag is never left as half a flag', () => {
+    // 🇬🇧 is two regional indicators. Code-point slicing can cut between them and
+    // render a stray letter-like glyph; grapheme segmentation cannot.
+    const { ack, posts } = harness({ names: { p1: 'Willow' } })
+    const title = '🇬🇧'.repeat(60)
+    ack.post({ project_id: 'p1', item_id: 'i1', title, kind: 'card_added' })
+    const rendered = posts[0]?.text ?? ''
+    const body = rendered.slice(rendered.indexOf('"') + 1, rendered.lastIndexOf('"'))
+    const withoutEllipsis = body.endsWith('…') ? body.slice(0, -1) : body
+    // Every regional indicator that survived is paired: no half flags.
+    const indicators = Array.from(withoutEllipsis).filter((c) => c >= '🇦' && c <= '🇿')
+    expect(indicators.length % 2).toBe(0)
   })
 })

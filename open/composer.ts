@@ -4332,6 +4332,21 @@ export function buildOpenGraphComposer(
     const workBoardChatAck = buildWorkBoardChatAck({
       resolve_chat_id: (projectId) => tridentDeliveryChatId(projectId),
       post: (chatId, text) => buildClarifyPoster.post?.(chatId, text),
+      // One id → one name. A read failure or a miss returns null and
+      // `boardLabelForProjectId` turns that into a WORD, never the raw id.
+      project_name: (projectId) => {
+        try {
+          return (
+            db
+              .prepare<{ name: string }, [string]>(
+                `SELECT name FROM projects WHERE id = ? AND deleted_at IS NULL LIMIT 1`,
+              )
+              .get(projectId)?.name ?? null
+          )
+        } catch {
+          return null
+        }
+      },
     })
     // ▶ start/retry closure — resolves the card's saved spec (its plans/ doc, else
     // its title) and dispatches a board-bound build through the SAME chokepoint
