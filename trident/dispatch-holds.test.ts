@@ -61,7 +61,7 @@ function stubBoard(cards: StubCard[]): StubBoard {
 function deps(
   board: StubBoard,
   extra: Partial<BoardBoundBuildDeps> = {},
-): BoardBoundBuildDeps {
+): BoardBoundBuildDeps & { preflight: NonNullable<BoardBoundBuildDeps['preflight']> } {
   return {
     store,
     board,
@@ -71,6 +71,10 @@ function deps(
     resolveMergeMode: async () => 'local',
     resolveRalph: async () => false,
     holds,
+    // An always-alive executor. Present because `buildDispatchHoldSweep` requires
+    // it in the type: the sweep re-dispatches UNATTENDED, so it may not be the
+    // one entry that skips the liveness gate.
+    preflight: async () => ({ ok: true }),
     ...extra,
   }
 }

@@ -249,7 +249,24 @@ export class DispatchHoldStore {
 export function buildDispatchHoldSweep(deps: {
   holds: DispatchHoldStore
   board: TridentBoardBinder
-  makeDispatchDeps: (hold: DispatchHold) => BoardBoundBuildDeps
+  /**
+   * Rebuild the dispatch deps for one queued hold. `preflight` is REQUIRED here
+   * even though `BoardBoundBuildDeps` leaves it optional, and that narrowing is
+   * deliberate.
+   *
+   * This sweep is a fourth production entry into `dispatchBoardBoundBuild`, and
+   * it is the one entry not written by hand at a call site — it re-fires builds
+   * later, unattended, with nobody watching. An unattended re-dispatch onto a
+   * known-dead executor is strictly worse than an interactive one: it spawns a
+   * lane that dies ~15 minutes later and no one asked for it just then.
+   *
+   * Requiring it in the TYPE is also what lets the executor-liveness wiring
+   * guard count this file as a properly gated entry. The guard greps for the
+   * word; this type is what makes the word true.
+   */
+  makeDispatchDeps: (hold: DispatchHold) => BoardBoundBuildDeps & {
+    preflight: NonNullable<BoardBoundBuildDeps['preflight']>
+  }
 }): (run: TridentRun) => Promise<void> {
   return async (_run: TridentRun): Promise<void> => {
     const queued = deps.holds.list()

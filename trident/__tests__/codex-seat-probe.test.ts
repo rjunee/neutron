@@ -1044,11 +1044,20 @@ describe('dispatch preflight (P4)', () => {
       .map((l) => l.trim())
       .filter((l) => l.length > 0 && !l.includes('.test.') && !l.includes('__tests__'))
       .filter((f) => f !== 'trident/board-dispatch.ts') // the definition is not a caller
-    // The three known production entries, named — a caller that disappears from
-    // this list is as interesting as one that forgets the gate.
+    // The known production entries, named — a caller that disappears from this
+    // list is as interesting as one that forgets the gate.
+    //
+    // `dispatch-holds.ts` is the FOURTH, added with the dependency-aware
+    // dispatch rebuild: its sweep re-fires a held card through this same
+    // chokepoint when the blocker completes. It is listed here only because it
+    // is genuinely wired (composer appends the sweep to both terminal-observer
+    // chains) AND genuinely gated — its `makeDispatchDeps` requires a
+    // `preflight` in the TYPE, so the grep below is backed by the compiler
+    // rather than by a comment that happens to contain the word.
     expect(callers.sort()).toEqual([
       'open/composer.ts',
       'trident/code-command.ts',
+      'trident/dispatch-holds.ts',
       'trident/work-board-build-tool.ts',
     ])
     for (const file of callers) {
@@ -1056,8 +1065,14 @@ describe('dispatch preflight (P4)', () => {
     }
     // …and the ▶ closure specifically: the same shared object, by name, inside
     // the `boardStartBuild` dispatch call.
+    //
+    // FOUR uses, not four entries: the three dispatch entries above, plus the
+    // hold sweep's `makeDispatchDeps`, which rebuilds deps for a card it
+    // re-fires later and must hand it the SAME gate. Counting by name is the
+    // point — it proves the sweep shares the one probe rather than quietly
+    // constructing a second, differently-behaved one.
     const composer = readFileSync(join(REPO, 'open', 'composer.ts'), 'utf8')
-    expect((composer.match(/preflight: tridentCodexBuildPreflight/g) ?? []).length).toBe(3)
+    expect((composer.match(/preflight: tridentCodexBuildPreflight/g) ?? []).length).toBe(4)
   })
 })
 
