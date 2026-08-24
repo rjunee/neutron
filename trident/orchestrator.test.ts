@@ -7,7 +7,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
-import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan } from './inner-loop-sim.ts'
+import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { interpretFailure } from './delivery.ts'
 import {
   buildTridentOrchestrator,
@@ -2436,7 +2436,9 @@ describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {
     const calls: TridentRun[] = []
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
-      merge_deps: {},
+      // A REAL gate would provision a worktree at a `/repo` that does not exist.
+    prove_mutation: buildSimMutationProofGate(),
+    merge_deps: {},
       fold_as_built: async (run) => {
         calls.push(run)
         return { ok: true, folded: 1 }
@@ -2453,7 +2455,9 @@ describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {
     const calls: TridentRun[] = []
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
-      merge_deps: {
+      // A REAL gate would provision a worktree at a `/repo` that does not exist.
+    prove_mutation: buildSimMutationProofGate(),
+    merge_deps: {
         mergeLocal: async () => {
           throw new Error('cleanup failed before fold')
         },
