@@ -195,6 +195,9 @@ export interface TridentRun {
    * agent's failure and must not consume its fix rounds.
    */
   crash_recoveries: number
+  /** Repo-relative paths this run has CLAIMED, so two dispatches cannot edit the
+   *  same file concurrently. Stored as JSON; an explicitly-empty set is `'[]'`. */
+  claimed_paths: string[]
   /**
    * INFRASTRUCTURE AUTO-RETRY BUDGET SPENT (migration 0126) — how many
    * harvested executor/transport failures have been atomically claimed for a
@@ -253,6 +256,9 @@ export interface CreateTridentRunInput {
   reviewed_head?: string | null
   bound_pr?: number | null
   fenced_paths?: string | null
+  /** Paths this run claims. Omitted → the EMPTY set, never undefined: a run with no
+   *  declared claim must hold nothing rather than hold everything. */
+  claimed_paths?: string[]
   /** Both-or-neither; `create` refuses a half-declared pair. */
   parent_run_id?: string | null
   wave_task_id?: string | null
@@ -325,6 +331,7 @@ interface TridentRunDbRow {
   last_advanced_at: string
   harvested_at: number | null
   crash_recoveries: number | null
+  claimed_paths: string | null
   infra_retries: number | null
   reviewed_head: string | null
   bound_pr: number | null
@@ -341,7 +348,8 @@ export const COLS =
   'workflow_run_id, inner_checkpoint, inner_checkpoint_head, ' +
   'inner_checkpoint_findings, inner_verdict, inner_result, ' +
   'started_at, last_advanced_at, harvested_at, crash_recoveries, infra_retries, ' +
-  'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind, parent_run_id, wave_task_id'
+  'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind, parent_run_id, wave_task_id, ' +
+  'claimed_paths'
 
 // The nullable launch-pin columns deliberately backfill through their database
 // NULL default; all inserted columns still derive their placeholders here. A
@@ -399,6 +407,10 @@ export class TridentRunStore {
     const ts = this.now()
     const run: TridentRun = {
       id,
+      // Omitted → the EMPTY set. A run with no declared claim must hold NOTHING; the
+      // alternative (undefined) would read downstream as "no restriction" and let two
+      // dispatches edit the same file, which is the whole thing holds exist to prevent.
+      claimed_paths: input.claimed_paths ?? [],
       slug: input.slug,
       project_slug: input.project_slug,
       phase: input.phase ?? 'forge-init',
@@ -488,6 +500,10 @@ export class TridentRunStore {
         run.fenced_paths,
         run.parent_run_id,
         run.wave_task_id,
+        // Stored as JSON, matching COLS order. The placeholder count is DERIVED from
+        // COLS, so a column added there without a value here fails every insert with
+        // "expected N values, received N-1" — which is how this was caught.
+        JSON.stringify(run.claimed_paths ?? []),
       ],
     )
     return run
@@ -1269,6 +1285,20 @@ export class TridentRunStore {
   }
 }
 
+/** Repo-relative claimed paths, stored as JSON. Every malformed shape degrades to the
+ *  EMPTY set rather than throwing: a run whose claim cannot be read holds no paths, so a
+ *  parse failure can never widen what a run is allowed to touch. */
+function parseClaimedPaths(raw: string | null): string[] {
+  if (raw === null || raw === '') return []
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) return []
+    return parsed.filter((p): p is string => typeof p === 'string' && p.length > 0)
+  } catch {
+    return []
+  }
+}
+
 function rowToRun(row: TridentRunDbRow): TridentRun {
   return {
     id: row.id,
@@ -1311,6 +1341,7 @@ function rowToRun(row: TridentRunDbRow): TridentRun {
     reviewed_head: row.reviewed_head,
     bound_pr: row.bound_pr,
     fenced_paths: row.fenced_paths,
+    claimed_paths: parseClaimedPaths(row.claimed_paths),
     parent_run_id: row.parent_run_id,
     wave_task_id: row.wave_task_id,
   }
