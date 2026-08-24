@@ -235,6 +235,7 @@ function makeRun(checkout: string, overrides: Partial<TridentRun> = {}): Trident
     brief_alert: null,
     parent_run_id: null,
     wave_task_id: null,
+    claimed_paths: [],
     ...overrides,
   }
 }

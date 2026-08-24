@@ -433,6 +433,13 @@ export interface MiscCompositionInput {
      * that cannot start, and blames the CLI. Omitted → unchanged behaviour.
      */
     preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
+    /**
+     * The dispatch hold queue. Forwarded to the chokepoint, where the declared-
+     * blocker and file-contention gates live. Omitted → those two gates fail
+     * OPEN for this entry, which is the failure mode that does not announce
+     * itself: builds still start, they just stop respecting dependencies.
+     */
+    holds?: import('@neutronai/trident/dispatch-holds.ts').DispatchHoldStore
   }
   /**
    * Codex connect/status agent tools (Part B) — when supplied, the `tools`

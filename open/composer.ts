@@ -162,6 +162,7 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { DispatchHoldStore, buildDispatchHoldSweep } from '@neutronai/trident/dispatch-holds.ts'
 import {
   ensureKimiKeyExported,
   resolveKimiApiKey,
@@ -2136,6 +2137,19 @@ export function buildOpenGraphComposer(
     }
     const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
     const tridentLandedProbe = makeDispatchLandedProbe(tridentHostRunner)
+    /**
+     * ONE hold queue, handed to ALL THREE production entries into
+     * `dispatchBoardBoundBuild` — the same discipline, and for the same reason,
+     * as `tridentCodexBuildPreflight` below: a dispatch gate wired per-entry is
+     * a gate on whichever entry was remembered.
+     *
+     * Both gates it feeds fail OPEN by construction (`deps.holds?`), so an
+     * unwired entry does not refuse builds — it silently skips the blocker and
+     * file-contention checks, which is precisely the failure that is invisible
+     * in testing. Sharing one object also lets the wiring test assert the three
+     * sites hold the SAME queue by identity rather than by shape.
+     */
+    const tridentDispatchHolds = new DispatchHoldStore(db)
     // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
     // board seam. Shared rather than re-derived so a wiring test can assert the
     // credential the board seam closes over by identity, not by `typeof`.
@@ -2211,6 +2225,7 @@ export function buildOpenGraphComposer(
           resolveMergeMode: resolveTridentMergeMode,
           landedProbe: tridentLandedProbe,
           preflight: tridentCodexBuildPreflight,
+          holds: tridentDispatchHolds,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -4368,6 +4383,7 @@ export function buildOpenGraphComposer(
                 // The ▶ button is the owner's primary dispatch path and was the
                 // one this gate originally missed.
                 preflight: tridentCodexBuildPreflight,
+                holds: tridentDispatchHolds,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -5913,12 +5929,57 @@ export function buildOpenGraphComposer(
     // `harvested_at` marker, which `terminalTransition` never sets), so even if a
     // future change routed a terminate through the producer it would emit nothing.
     // `boardRunStore` is a thin `TridentRunStore` over the SAME `db` the loop reads.
+    /**
+     * THE RELEASE HALF of the dispatch hold queue (#314 rebuild).
+     *
+     * Recording a hold without a release is worse than never holding: the card
+     * is parked, nothing ever re-fires it, and it stalls in silence with no
+     * event that could clear it. So this observer is not optional garnish — it
+     * is the other half of the gates wired above, and the two must land
+     * together.
+     *
+     * A terminal run is exactly the moment both hold kinds can clear: it drops
+     * the run's file claims (the claim is a query over LIVE runs, so going
+     * terminal releases them with no write), and it may have completed a card
+     * some other card declared as a blocker.
+     *
+     * ORDER IS LOAD-BEARING — it is appended AFTER `buildBoardReconcileObserver`,
+     * which is what marks the finished card `done`. Placed before it, the sweep
+     * would read the blocker as still unfinished and leave every dependent held
+     * until some unrelated run happened to go terminal.
+     */
+    const tridentHoldSweep = buildDispatchHoldSweep({
+      holds: tridentDispatchHolds,
+      board: workBoardStore,
+      makeDispatchDeps: (hold) => ({
+        store: boardRunStore,
+        board: workBoardStore,
+        // The queue is handed back in, so a card released off one hold and
+        // immediately blocked by another is re-parked rather than dispatched.
+        holds: tridentDispatchHolds,
+        project_slug: hold.project_slug,
+        repo_path: owner_home,
+        resolveMergeMode: resolveTridentMergeMode,
+        landedProbe: tridentLandedProbe,
+        preflight: tridentCodexBuildPreflight,
+        // Replay the ORIGINATING turn's chat/limits context, so a build that
+        // finally starts an hour later still answers into the conversation that
+        // asked for it instead of going silently to no one.
+        ...(hold.payload?.chat_id !== undefined ? { chat_id: hold.payload.chat_id } : {}),
+        ...(hold.payload?.thread_id !== undefined ? { thread_id: hold.payload.thread_id } : {}),
+        ...(hold.payload?.channel_kind !== undefined ? { channel_kind: hold.payload.channel_kind } : {}),
+        ...(hold.payload?.max_rounds !== undefined ? { max_rounds: hold.payload.max_rounds } : {}),
+        ...(hold.payload?.max_ralph_rounds !== undefined
+          ? { max_ralph_rounds: hold.payload.max_ralph_rounds }
+          : {}),
+      }),
+    })
     boardTerminatorHolder.bind(
       buildTridentTerminator({
         store: boardRunStore,
         observer: composeTerminalHook(
           buildTridentDelivery({ sink: channelRouter }),
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -5939,7 +6000,7 @@ export function buildOpenGraphComposer(
         store: boardRunStore,
         observer: composeTerminalHook(
           { onTerminal: async (): Promise<void> => {} },
-          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake].filter(
+          [buildBoardReconcileObserver(workBoardStore), skillForgeOnRunTerminal, terminalBuildWake, tridentHoldSweep].filter(
             (o): o is (run: TridentRun) => Promise<void> => o !== null,
           ),
         ),
@@ -6897,6 +6958,7 @@ export function buildOpenGraphComposer(
               // THE SAME closure the ▶ route and `/code` are handed — not a
               // second copy. Three entries, one gate.
               preflight: tridentCodexBuildPreflight,
+              holds: tridentDispatchHolds,
             },
           }
         : {}),
