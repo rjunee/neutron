@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -79,6 +80,8 @@ describe('as-built outer-loop wiring with real git', () => {
       }),
     })
     const orchestrator = buildTridentOrchestrator({
+    // The real gate needs a git worktree at a path this test does not have.
+    prove_mutation: buildSimMutationProofGate(),
       fire_workflow: async () => ({ status: 'fired', error: null }),
       db_path: dbPath,
       run_host: spawnCapture,
@@ -142,6 +145,8 @@ describe('as-built outer-loop wiring with real git', () => {
     })
     const calls: { repo_path: string; merge_mode: string; base: string }[] = []
     const orchestrator = buildTridentOrchestrator({
+    // The real gate needs a git worktree at a path this test does not have.
+    prove_mutation: buildSimMutationProofGate(),
       fire_workflow: async () => ({ status: 'fired', error: null }),
       db_path: dbPath,
       run_host: spawnCapture,

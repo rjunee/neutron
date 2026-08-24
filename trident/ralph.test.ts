@@ -19,7 +19,7 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { detectRalphMode, defaultRalphModeProbe, type HostCommandResult } from './git-mode.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore } from './store.ts'
@@ -95,6 +95,8 @@ describe('Ralph mode threads through to the inner loop', () => {
     }))
     const inputs = sim.inputs
     const orch = buildTridentOrchestrator({
+    // The real gate needs a git worktree at a path this test does not have.
+    prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => driftFreeHost(cmd),

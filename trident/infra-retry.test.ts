@@ -3,6 +3,7 @@
  * retried without a human, while genuine review/build failures stay terminal.
  */
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'

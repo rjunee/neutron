@@ -101,6 +101,7 @@ interface Harness {
 }
 
 function buildHarness(opts: {
+  prove_mutation?: Parameters<typeof buildTridentOrchestrator>[0]['prove_mutation']
   plan: (input: InnerLoopInput) => SimPlan
   hostResponder?: (cmd: string[]) => HostCommandResult
   on_orphaned_session?: 'redispatch' | 'wait' | 'fail'
@@ -245,6 +246,12 @@ function buildHarness(opts: {
   // Keep unrelated orchestrator tests hermetic: production defaults to the real
   // appender, while the focused wiring tests below inject their own observable seam.
   o.fold_as_built = opts.fold_as_built ?? (async () => ({ ok: true, folded: 0 }))
+  // THE MUTATION PROVER IS SUBSTITUTED FOR EVERY HARNESS RUN. The real gate
+  // provisions a git worktree at the branch head and runs the guard, which cannot
+  // work against this harness's `/repo` path — left unset it refuses every
+  // APPROVE and 41 unrelated tests fail on a PUBLISH error that is really the gate
+  // blocking the merge two steps later.
+  o.prove_mutation = opts.prove_mutation ?? buildSimMutationProofGate()
   if (opts.merge_deps !== undefined) o.merge_deps = opts.merge_deps
   const orch = buildTridentOrchestrator(o)
   const loop = new TridentTickLoop({
@@ -554,6 +561,27 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.failure_reason).toContain('could not confirm')
     expect(h.inputs).toHaveLength(1)
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('gh pr create'))).toBe(false)
+  })
+
+  // THE GATE MUST ACTUALLY REFUSE. Everything else about the mutation prover can be
+  // wired and green while it never blocks anything - which is the failure mode the
+  // prover exists to prevent, reproduced one level up. So this pins the refusal
+  // itself: an APPROVE whose proof comes back not-ok does NOT merge.
+  test('an APPROVE whose mutation proof FAILS does not merge — and is not blamed on the reviewer', async () => {
+    const h = buildHarness({
+      prove_mutation: buildSimMutationProofGate({ ok: false, reason: 'guard stayed GREEN under the mutation' }),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x', checkpoint: 'argus-approved' } }),
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'local' as MergeMode })).id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('guard stayed GREEN under the mutation')
+    // The review really did APPROVE, and its provenance is the audit trail. A missing
+    // PROOF is not a reviewer's finding, so the verdict must not be rewritten to make
+    // the row look like a rejection.
+    expect(final.inner_verdict).toBe('APPROVE')
+    // …and nothing merged.
+    expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge'))).toBe(false)
   })
 
   test('the outer publisher refuses a commit that is not the local branch tip — naming BOTH values', async () => {
@@ -2437,6 +2465,7 @@ describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       // A REAL gate would provision a worktree at a `/repo` that does not exist.
+    base_branch: 'main',
     prove_mutation: buildSimMutationProofGate(),
     merge_deps: {},
       fold_as_built: async (run) => {
@@ -2456,6 +2485,7 @@ describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       // A REAL gate would provision a worktree at a `/repo` that does not exist.
+    base_branch: 'main',
     prove_mutation: buildSimMutationProofGate(),
     merge_deps: {
         mergeLocal: async () => {
