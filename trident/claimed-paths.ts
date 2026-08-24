@@ -52,7 +52,16 @@ const BARE_PATH = /(?:^|[\s,'"(\[{])((?:[A-Za-z0-9_.-]+\/)+[A-Za-z0-9_.-]+\.[A-Z
 function normalize(raw: string): string | null {
   let token = raw.trim()
   // Trailing sentence punctuation from prose ("edit trident/store.ts, then …").
-  token = token.replace(/[.,;:)\]}]+$/, '')
+  //
+  // Trimmed by a LINEAR scan, not `/[.,;:)\]}]+$/`. That regex is quadratic on a
+  // token of many `)` (CodeQL js/polynomial-redos, high): anchoring `+$` makes
+  // the engine re-scan the whole run from each starting offset. The input here
+  // is a card's task text and plan doc, which reach this code unvalidated, so
+  // the bound has to come from the algorithm rather than from trusting the
+  // caller.
+  let end = token.length
+  while (end > 0 && '.,;:)]}'.includes(token[end - 1] as string)) end--
+  token = token.slice(0, end)
   if (token.startsWith('./')) token = token.slice(2)
   if (token.length === 0) return null
   if (token.includes('://')) return null
@@ -99,7 +108,14 @@ export function deriveClaimedPaths(sources: { task: string; planDoc?: string | n
     if (!/\b(?:add|append|build|change|create|edit|fix|implement|modify|move|publish|remove|rename|replace|rewrite|touch|update|wire)\b/i.test(line)) continue
     for (const m of line.matchAll(BACKTICKED)) {
       const span = m[1] ?? ''
-      for (const candidate of span.split(/\s+(?:and|or)\s+|\s*,\s*/i)) take(candidate)
+      // Split on ONE character class, which is a linear scan. The obvious
+      // `/\s+(?:and|or)\s+|\s*,\s*/i` is quadratic on a span of many spaces
+      // (CodeQL js/polynomial-redos, high), because `\s+`/`\s*` on both sides of
+      // an alternation give the engine an ambiguous split point to backtrack
+      // over. Nothing is lost by widening it: a repo-relative path cannot
+      // contain whitespace, and a bare `and` / `or` left as its own token is
+      // dropped by `normalize` for having no extension.
+      for (const candidate of span.split(/[\s,]+/)) take(candidate)
     }
     for (const m of line.matchAll(BARE_PATH)) take(m[1] ?? '')
   }

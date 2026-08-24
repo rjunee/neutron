@@ -72,4 +72,28 @@ describe('deriveClaimedPaths', () => {
     expect(deriveClaimedPaths({ task: '' })).toEqual([])
     expect(deriveClaimedPaths({ task: 'ship the thing', planDoc: null })).toEqual([])
   })
+
+  test('repetition inside a claim span is trimmed, and an oversized span is ignored', () => {
+    // CodeQL flagged two HIGH polynomial-ReDoS patterns in the first cut of this
+    // file: `/[.,;:)\]}]+$/` on a run of `)`, and `/\s+(?:and|or)\s+|\s*,\s*/i`
+    // on a run of spaces. Both were rewritten as linear scans.
+    //
+    // I first wrote this as a TIMING test with 50k-character inputs. It failed,
+    // and the reason is the useful part: `BACKTICKED` is capped at `{1,200}`, so
+    // an oversized span never matches at all and the derivation returns []. The
+    // quadratic patterns were therefore never reachable with an input large
+    // enough to hurt — the cap was the real bound the whole time. A timing
+    // assertion at 200 characters would separate nothing, so this pins the two
+    // things that ARE true and load-bearing instead.
+    const parens = ')'.repeat(60)
+    expect(deriveClaimedPaths({ task: `edit \`trident/store.ts${parens}\`` })).toEqual([
+      'trident/store.ts',
+    ])
+    expect(deriveClaimedPaths({ task: 'edit `trident/store.ts   and    trident/tick.ts`' })).toEqual(
+      ['trident/store.ts', 'trident/tick.ts'],
+    )
+    // The cap itself, pinned: raise it and this fails, which is the reminder
+    // that the linear rewrites are what keep that safe to do.
+    expect(deriveClaimedPaths({ task: `edit \`${'x'.repeat(200)}/store.ts\`` })).toEqual([])
+  })
 })
