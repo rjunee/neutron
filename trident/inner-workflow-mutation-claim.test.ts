@@ -58,6 +58,11 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
       commitSha: 'abc',
       testsPassed: true,
     }
+    // THE BUILD-COMPLETION HEAD. Without it the run stops `infra-only` at
+    // "could not read the head of refs/heads/… after forge:build", returns
+    // `verdict: null`, and every assertion below reads a run that never reviewed
+    // anything. (`typeof null === 'object'` is why this surfaced as a type error.)
+    if (String(label).startsWith('head-probe-round-')) return { head: 'a'.repeat(40) }
     if (label === 'forge:build') return { ...forgeResult, mutationClaim: BUILD_CLAIM }
     if (String(label).startsWith('forge:fix-round-')) {
       return opts.fixRoundClaim === undefined
@@ -69,6 +74,13 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
       synthCount += 1
       return { verdict: synthCount === 1 ? 'REQUEST_CHANGES' : 'APPROVE', findings: [] }
     }
+    // THE HEAD PROBE MUST ANSWER WITH A REAL OID. The catch-all below returns '',
+    // which the workflow reads as "could not read the head of refs/heads/… after
+    // forge:build" and stops `infra-only` BEFORE review - so `verdict` comes back
+    // null (typeof null === 'object', which is what the string assertion was
+    // actually tripping on) and the terminal result this suite exists to inspect is
+    // never produced.
+    if (String(label).startsWith('head-probe-round-')) return { head: 'a'.repeat(40) }
     return ''
   }
   const parallel = async (fns: Array<() => Promise<unknown>>): Promise<unknown[]> => Promise.all(fns.map((f) => f()))
