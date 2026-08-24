@@ -98,6 +98,13 @@ export type WorkBoardStartResult =
         | 'review_needs_bound_pr'
         | 'underspecified'
         | 'already_landed'
+        // NOT A FAILURE — the build is QUEUED. The card declares an unfinished
+        // blocker, or a live run already claims a file it would touch, so it was
+        // parked in `code_trident_dispatch_holds` and the sweep re-dispatches it
+        // when the blocker completes / the holding run goes terminal. The ▶ route
+        // must therefore report it as accepted-and-waiting rather than as an
+        // error the owner is expected to act on.
+        | 'held'
         // The executor this build needs is positively known-dead (the Codex seat
         // was probed and refused server-side). Falls through to the 409 arm, so
         // the ▶ route answers with the refusal sentence rather than spawning a

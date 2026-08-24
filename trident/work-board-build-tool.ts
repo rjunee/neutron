@@ -25,6 +25,7 @@
 import type { JsonSchemaDocument } from '@neutronai/cores-sdk/manifest'
 import type { ToolRegistry } from '@neutronai/tools/registry.ts'
 import type { Topic } from '@neutronai/channels/types.ts'
+import type { DispatchHoldStore } from './dispatch-holds.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
@@ -169,6 +170,13 @@ export interface TridentBuildToolDeps {
    * sentence about the Build phase's executor.
    */
   preflight?: () => Promise<{ ok: true } | { ok: false; reason: string }>
+  /**
+   * The dispatch hold queue, forwarded to the chokepoint for the same reason as
+   * `preflight`: the blocker + file-contention gates live THERE, so every entry
+   * that reaches the chokepoint must carry the queue or it silently skips them.
+   * Absent → unchanged behaviour (the gates fail open).
+   */
+  holds?: DispatchHoldStore
 }
 
 /** First non-empty line of a task, truncated — the ack title when a board item
@@ -252,6 +260,7 @@ export function registerTridentBuildToolSurface(
         // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
         // shares (see BoardBoundBuildDeps.preflight).
         ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
+        ...(deps.holds !== undefined ? { holds: deps.holds } : {}),
       }
       const result = await dispatchBoardBoundBuild(
         { board_item_id, task, ...(bound_pr !== undefined ? { bound_pr } : {}) },
@@ -370,6 +379,7 @@ export function registerTridentBuildToolSurface(
         // EXECUTOR LIVENESS, enforced at the chokepoint every dispatch path
         // shares (see BoardBoundBuildDeps.preflight).
         ...(deps.preflight !== undefined ? { preflight: deps.preflight } : {}),
+        ...(deps.holds !== undefined ? { holds: deps.holds } : {}),
       }
       const result = await dispatchBoardBoundBuild({ board_item_id, task }, buildDeps)
       if (!result.ok) {

@@ -162,6 +162,7 @@ import {
   resolveAgentSkillsDir,
 } from '@neutronai/runtime/adapters/claude-code/persistent/agent-skills.ts'
 import { TridentRunStore, type TridentRun } from '@neutronai/trident/store.ts'
+import { DispatchHoldStore } from '@neutronai/trident/dispatch-holds.ts'
 import {
   ensureKimiKeyExported,
   resolveKimiApiKey,
@@ -2136,6 +2137,19 @@ export function buildOpenGraphComposer(
     }
     const tridentHostRunner = makeLazyCredentialedHostRunner(tridentGithubEnv)
     const tridentLandedProbe = makeDispatchLandedProbe(tridentHostRunner)
+    /**
+     * ONE hold queue, handed to ALL THREE production entries into
+     * `dispatchBoardBoundBuild` — the same discipline, and for the same reason,
+     * as `tridentCodexBuildPreflight` below: a dispatch gate wired per-entry is
+     * a gate on whichever entry was remembered.
+     *
+     * Both gates it feeds fail OPEN by construction (`deps.holds?`), so an
+     * unwired entry does not refuse builds — it silently skips the blocker and
+     * file-contention checks, which is precisely the failure that is invisible
+     * in testing. Sharing one object also lets the wiring test assert the three
+     * sites hold the SAME queue by identity rather than by shape.
+     */
+    const tridentDispatchHolds = new DispatchHoldStore(db)
     // ONE probe object, shared by `/code`, the HTTP ▶ route and the agent-native
     // board seam. Shared rather than re-derived so a wiring test can assert the
     // credential the board seam closes over by identity, not by `typeof`.
@@ -2211,6 +2225,7 @@ export function buildOpenGraphComposer(
           resolveMergeMode: resolveTridentMergeMode,
           landedProbe: tridentLandedProbe,
           preflight: tridentCodexBuildPreflight,
+          holds: tridentDispatchHolds,
         }
       },
       // Runs started here originate on the app socket, so the terminal result is
@@ -4368,6 +4383,7 @@ export function buildOpenGraphComposer(
                 // The ▶ button is the owner's primary dispatch path and was the
                 // one this gate originally missed.
                 preflight: tridentCodexBuildPreflight,
+                holds: tridentDispatchHolds,
               },
             )
             if (result.ok) return { ok: true, run_id: result.run.id }
@@ -6897,6 +6913,7 @@ export function buildOpenGraphComposer(
               // THE SAME closure the ▶ route and `/code` are handed — not a
               // second copy. Three entries, one gate.
               preflight: tridentCodexBuildPreflight,
+              holds: tridentDispatchHolds,
             },
           }
         : {}),
