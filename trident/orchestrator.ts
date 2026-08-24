@@ -78,6 +78,12 @@ import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from '.
 import { hasArgusProvenance } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
+import { reviewedHeadOid } from './merge.ts'
+import {
+  runMutationProofGate,
+  type MutationGateInput,
+  type MutationGateOutcome,
+} from './mutation-prover.ts'
 import {
   parseCheckpointFindings,
   parseInnerResult,
@@ -242,6 +248,19 @@ export interface BuildTridentOrchestratorOptions {
   resolve_phase_models?: () => Record<string, { model?: string; effort?: string }> | null
   /** Override the merge/cleanup deps (else built from `run_host`). */
   merge_deps?: MergeCleanupDeps
+  /**
+   * THE POST-APPROVE MUTATION PROVER, as a test seam ONLY. The real gate
+   * provisions a git worktree at the branch head, applies the nominated mutation
+   * and runs the guard — none of which a unit test with a fake `run_host` and a
+   * `/repo` path that does not exist can do.
+   *
+   * PRODUCTION MUST NOT SET THIS. Same rule as `merge_deps`: the composer wires
+   * neither, so a real run always gets the real gate. Deliberately NOT a config
+   * flag or an env override — there is no supported way for an OPERATOR, or an
+   * agent editing settings, to turn the proof off; only for a test process to
+   * substitute one.
+   */
+  prove_mutation?: (input: MutationGateInput) => Promise<MutationGateOutcome>
   /**
    * AS-BUILT ONE-WRITER (T2) — the post-merge fold pass. Invoked once after a
    * SUCCESSFUL `cleanupAfterMerge` (both merge modes) with the merged (done) run and
@@ -2025,6 +2044,7 @@ export function buildTridentOrchestrator(
   const beginInfraRetry = opts.begin_infra_retry
   const maxInfraRetries = opts.max_infra_retries ?? DEFAULT_MAX_INFRA_RETRIES
   const onInfraRetry = opts.on_infra_retry
+  const proveMutation = opts.prove_mutation ?? runMutationProofGate
 
   // This-process liveness: run ids whose workflow THIS process fired (and whose
   // launching turn settled). A persisted `subagent_run_id` whose run.id is NOT
@@ -3631,6 +3651,39 @@ export function buildTridentOrchestrator(
         subagent_status: 'completed',
         failure_reason: null,
         last_advanced_at: now(),
+      }
+      // MUTATION PROVER — the post-APPROVE, pre-merge phase. An APPROVE says a
+      // reviewer BELIEVES the change is guarded; this RUNS the mutation and
+      // watches the guard go red and come back green. It is deterministic TS and
+      // the only producer of its own evidence — no agent output is read here,
+      // because a convincing paragraph about a mutation is exactly what this
+      // phase exists to stop being sufficient. Fails CLOSED: an unprovable
+      // APPROVE does not merge.
+      //
+      // `{ ...run, branch }` — the FRESHLY RESOLVED branch, never the row's. On a
+      // run whose row predates the build naming its branch, the prover would
+      // resolve a head off the OLD ref while the merge below took the new one:
+      // proving one commit and merging another.
+      //
+      // `expected_head` — the commit the merge will ACTUALLY take (#545 pins it
+      // to the reviewed OID, not to whatever the branch tip is now). The prover
+      // pins the branch tip. Those are two independent answers to "which commit
+      // is this about", and nothing compared them before: a tip that moved past
+      // the reviewed commit gave a proof of B while the merge took A.
+      const proof = await proveMutation({
+        run: { ...run, branch },
+        claim: result.mutation_claim,
+        base_branch: await resolveBase(run),
+        run_host: opts.run_host,
+        expected_head: reviewedHeadOid(run),
+      })
+      if (!proof.ok) {
+        // `inner_verdict` / `inner_checkpoint` are left EXACTLY as the review left
+        // them: Argus really did approve, and its provenance is the audit trail.
+        // Rewriting either would misattribute the block — this is a MISSING
+        // PROOF, not a reviewer's finding, and `failure_reason` says which.
+        const blocked: TridentRun = { ...failedRun(run, proof.reason, true), pr, branch }
+        return { run: blocked, changed: true, waiting: false, note: 'APPROVE blocked (mutation prover) → failed' }
       }
       try {
         const res = await cleanupAfterMerge(doneRun, merge_deps)

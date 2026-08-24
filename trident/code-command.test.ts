@@ -23,7 +23,7 @@ import {
 } from './code-command.ts'
 import type { TridentBoardBinder } from './board-dispatch.ts'
 import type { HostCommandResult } from './git-mode.ts'
-import { buildSimFirer, SIM_REVIEWED_HEAD } from './inner-loop-sim.ts'
+import { buildSimFirer, SIM_REVIEWED_HEAD, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type TridentRun } from './store.ts'
@@ -444,6 +444,8 @@ describe('end-to-end — /code → tick loop drives the run to done (mocked subs
     }))
     const hostCalls: string[][] = []
     const orch = buildTridentOrchestrator({
+    // The real gate needs a git worktree at a path this test does not have.
+    prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => {

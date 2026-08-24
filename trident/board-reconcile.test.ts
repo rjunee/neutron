@@ -12,7 +12,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { buildBoardReconcileObserver } from './board-reconcile.ts'
 import { dispatchBoardBoundBuild } from './board-dispatch.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { runProgressForItem } from './run-progress.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -224,6 +224,8 @@ describe('end-to-end — the tick loop reconciles the board on a terminal run', 
       result: { verdict: 'APPROVE', prNumber: 7, branch: `trident/${run_id}` },
     }))
     const orch = buildTridentOrchestrator({
+    // The real gate needs a git worktree at a path this test does not have.
+    prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       // #542 — a host that answers `rev-parse` with '' is a repo the drift gate

@@ -884,8 +884,21 @@ const KIMI_VERDICT_SCHEMA = {
 const FORGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['worktreePath', 'branch', 'commitSha', 'prNumber', 'diffFile', 'testsPassed'],
+  required: ['worktreePath', 'branch', 'commitSha', 'prNumber', 'diffFile', 'testsPassed', 'mutationClaim'],
   properties: {
+    mutationClaim: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['file', 'find', 'replace', 'guard', 'control'],
+      properties: {
+        file: { type: 'string', description: 'repo-relative PRODUCTION file to mutate (never a test file)' },
+        find: { type: 'string', description: 'exact substring occurring EXACTLY ONCE, whose behaviour the PR relies on' },
+        replace: { type: 'string', description: 'what replaces it — the break' },
+        guard: { type: 'array', items: { type: 'string' }, description: 'argv that MUST go RED under the mutation' },
+        control: { type: 'array', items: { type: 'string' }, description: 'argv that MUST stay GREEN under the mutation' },
+        rationale: { type: 'string', description: 'why this is the behaviour worth proving (recorded, not parsed)' },
+      },
+    },
     worktreePath: { type: 'string' },
     branch: { type: 'string' },
     commitSha: { type: 'string' },
@@ -5586,6 +5599,12 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
 let finalVerdict = 'REQUEST_CHANGES'
 let round = 1
 let pr = prNumber
+// THE MUTATION THE POST-APPROVE PROVER WILL RUN — a NOMINATION, never a result.
+// Declared beside `pr` deliberately: it has the same lifetime (set by the build
+// round, re-nominated by a fix round, read at the terminal result). Declaring it
+// next to the forge call instead puts it in a block that does not enclose the
+// terminal result, and the reference throws `is not defined`.
+let mutationClaim = null
 let lastReviewRecord = 'No review round completed.'
 
 try {
@@ -6197,6 +6216,7 @@ ${task}${reflectionGuidance}`,
     // zero onto the run row. `pr` keeps its known value unless a positive integer
     // arrives to replace it.
     if (Number.isInteger(forge.prNumber) && forge.prNumber > 0) pr = forge.prNumber
+    mutationClaim = forge.mutationClaim ?? null
 
     const forgeSha = typeof forge.commitSha === 'string' ? forge.commitSha.trim() : ''
     const forgeDiff = typeof forge.diffFile === 'string' ? forge.diffFile.trim() : ''
@@ -6547,6 +6567,11 @@ ${task}${reflectionGuidance}`,
     // lines down ends this process, and the checkpoint is the only thing the panel's
     // process will be able to read.
     const fixSuiteFindings = fullSuiteFindings(fix)
+    // The LAST round that touched the code owns the nomination: a fix round can
+    // move or delete the line round 1 nominated, and proving a mutation against a
+    // line that no longer exists is not a proof. A round that nominates nothing
+    // leaves the previous nomination standing.
+    if (fix && fix.mutationClaim) mutationClaim = fix.mutationClaim
     await checkpoint(`fix-round-${round}`, {
       pr,
       head: fixHead === '' ? normalizeOid(fixClaim) : fixHead === 'absent' ? '' : fixHead,
@@ -6681,6 +6706,10 @@ ${task}${reflectionGuidance}`,
     round,
     checkpoint: finalVerdict === 'APPROVE' ? 'argus-approved' : 'argus-request-changes',
     reviewRecord: lastReviewRecord,
+    // The mutation the outer loop's post-APPROVE prover will RUN. A NOMINATION,
+    // not a result — nothing this workflow can write asserts that a mutation was
+    // verified, by construction.
+    mutationClaim,
     // THE REVIEWED COMMIT (#545) — the OUTER merge pins to exactly this OID
     // (`gh pr merge --match-head-commit`), so anything pushed after the review
     // makes the merge fail loudly rather than ship unreviewed. Empty means the

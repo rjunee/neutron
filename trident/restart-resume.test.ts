@@ -23,7 +23,7 @@ import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { HostCommandResult } from './git-mode.ts'
 import type { InnerLoopInput } from './inner-loop.ts'
-import { buildSimFirer } from './inner-loop-sim.ts'
+import { buildSimFirer, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { buildTridentOrchestrator } from './orchestrator.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -82,6 +82,8 @@ function freshBoot(
   opts: { on_orphaned_session?: 'redispatch' | 'wait' | 'fail' } = {},
 ): { loop: TridentTickLoop; complete: () => Promise<void> } {
   const o: Parameters<typeof buildTridentOrchestrator>[0] = {
+    // The real gate needs a git worktree at the branch head; this harness has none.
+    prove_mutation: buildSimMutationProofGate(),
     fire_workflow: s.fire_workflow,
     db_path: join(tmp, 'project.db'),
     run_host: async (cmd) => driftFreeHost(cmd),
@@ -89,6 +91,9 @@ function freshBoot(
     now: () => new Date(0).toISOString(),
   }
   if (opts.on_orphaned_session !== undefined) o.on_orphaned_session = opts.on_orphaned_session
+  // The real gate provisions a git worktree at the branch head; this harness has
+  // none, so an unsubstituted gate refuses every APPROVE and the merge never lands.
+  o.prove_mutation = buildSimMutationProofGate()
   const orch = buildTridentOrchestrator(o)
   return { loop: new TridentTickLoop({ store, step: orch.step }), complete: s.drain }
 }
@@ -151,6 +156,8 @@ describe('restart-resume — a lost inner-loop dispatch resumes on a fresh boot'
       result: { verdict: 'APPROVE', prNumber: 7, branch: 'feat-x' },
     }))
     const orch = buildTridentOrchestrator({
+    // The real gate needs a git worktree at a path this test does not have.
+    prove_mutation: buildSimMutationProofGate(),
       fire_workflow: sim.fire_workflow,
       db_path: join(tmp, 'project.db'),
       run_host: async (cmd) => driftFreeHost(cmd),

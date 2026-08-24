@@ -49,6 +49,7 @@
  * silent success.
  */
 
+import { parseMutationClaim, type MutationClaim } from './mutation-prover.ts'
 import type { AgentSpec, Substrate } from '@neutronai/runtime/substrate.ts'
 import type { SessionHandle } from '@neutronai/runtime/session-handle.ts'
 import { waveChildSlug, type TridentRun } from './store.ts'
@@ -185,6 +186,19 @@ export interface InnerLoopInput {
 export interface InnerResult {
   ok: boolean
   verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  /**
+   * MUTATION PROVER (post-APPROVE phase) — the build's NOMINATION of which
+   * production behaviour to break and which command guards it. UNTRUSTED input:
+   * the outer loop RUNS it and observes the result; it never reads a conclusion
+   * the workflow drew about it.
+   *
+   * Deliberately NOT carried here: an evidence block. A workflow cannot report
+   * that a mutation was verified — that finding is produced by
+   * `mutation-prover.ts` from its own observations, or it does not exist. `null`
+   * (absent or malformed) → the gate has nothing to run, so it refuses the merge
+   * unless the diff is prose-only.
+   */
+  mutation_claim: MutationClaim | null
   pr_number: number | null
   branch: string | null
   round: number
@@ -670,6 +684,8 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
   return {
     ok: p.ok === true,
     verdict: normalizeVerdict(p.verdict),
+    // MUTATION PROVER — shape-checked only; the outer loop proves it by RUNNING it.
+    mutation_claim: parseMutationClaim(p.mutationClaim),
     // A NON-POSITIVE (or fractional) prNumber IS THE "NO PR" SENTINEL, NOT AN ANSWER.
     // The codex build wrapper reports `PR_NUMBER=0` in pr mode by design — the outer
     // loop publishes after the build exits — and GitHub numbers PRs from 1. Decoding

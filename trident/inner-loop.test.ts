@@ -118,6 +118,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(raw)).toEqual({
       ok: true,
       verdict: 'APPROVE',
+      mutation_claim: null,
       pr_number: 7,
       branch: 'feat-x',
       round: 2,
@@ -318,6 +319,7 @@ describe('parseInnerResult — decode the typed terminal column', () => {
     expect(parseInnerResult(JSON.stringify({ verdict: 'COMMENT' }))).toEqual({
       ok: false,
       verdict: null,
+      mutation_claim: null,
       pr_number: null,
       branch: null,
       round: 0,
