@@ -19,6 +19,7 @@
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 
 /**
@@ -903,6 +904,33 @@ export class TridentRunStore {
       if (derived !== null) {
         sets.push('round = MAX(round, ?)')
         params.push(derived)
+      }
+    }
+    // CANARY phase-persist, the same shape as the round derivation above and for
+    // the same reason. `checkpoint.sh` applies the canonical table
+    // (`phaseForCheckpoint`) at the choke point the INNER workflow checkpoints
+    // through, so a run driven by the inner loop moves off `forge-init` correctly.
+    // The orchestrator does NOT go through that script — it writes
+    // `inner_checkpoint` here, at ~9 sites (`orchestrator.ts` `argus-approved`,
+    // `pr-merged`, `built`, the bound-review pair, …) — so every checkpoint the
+    // OUTER loop stamps used to leave `phase` exactly as it found it. That is the
+    // same decorative-column defect the table was written to end, surviving in the
+    // half of the system the bash mirror cannot reach.
+    //
+    // Semantics are the mirror's, not a second opinion:
+    //   * an explicit `patch.phase` (the orchestrator's own terminal writes,
+    //     tests, the sim) WINS and skips the derivation entirely;
+    //   * `null` from the table means the checkpoint implies NOTHING — terminal-
+    //     adjacent, an outer-loop marker, or a name never seen — and the column is
+    //     left untouched rather than guessed at;
+    //   * a terminal phase is FROZEN in SQL, exactly as `checkpoint.sh`'s
+    //     `frozen()` does it. A late checkpoint landing on a finished row must not
+    //     resurrect it into a live phase.
+    if (patch.phase === undefined && patch.inner_checkpoint !== undefined) {
+      const derivedPhase = phaseForCheckpoint(patch.inner_checkpoint)
+      if (derivedPhase !== null) {
+        sets.push(`phase = CASE WHEN phase IN ${TERMINAL_PHASE_SQL} THEN phase ELSE ? END`)
+        params.push(derivedPhase)
       }
     }
     if (patch.inner_checkpoint_head !== undefined) push('inner_checkpoint_head', patch.inner_checkpoint_head)

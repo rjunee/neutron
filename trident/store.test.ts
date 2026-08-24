@@ -1482,3 +1482,92 @@ describe('INSERT column/placeholder/bound-array alignment — the silent-corrupt
     })
   })
 })
+
+describe('update() derives the phase from the checkpoint', () => {
+  /**
+   * WHY THIS SUITE EXISTS — MEASURED. `phaseForCheckpoint` (the canonical
+   * checkpoint → phase table) had ZERO production callers. `checkpoint.sh` mirrors
+   * the table in bash and applies it, so the half of the system the INNER workflow
+   * drives moved off `forge-init` correctly. The orchestrator does not checkpoint
+   * through that script — it calls `update()` directly, at ~9 sites — so every
+   * checkpoint the OUTER loop stamped left `phase` exactly as it found it. The
+   * table was merged green and wired on one side only.
+   *
+   * Each test below is the assertion that the TS seam now answers the same way the
+   * bash seam does. `checkpoint-phase.test.ts` separately pins the two TABLES
+   * against each other; this pins the two WRITE PATHS.
+   */
+  const seed = async (store: TridentRunStore, slug: string) =>
+    await store.create({ slug, project_slug: 't1', repo_path: '/r', task: 't' })
+
+  test('a checkpoint the table recognises moves the phase off forge-init', async () => {
+    const store = new TridentRunStore(db)
+    const run = await seed(store, 'phase-forge-done')
+    // POSITIVE CONTROL: prove the starting state, so a test that passes because
+    // nothing happened cannot masquerade as a test that passes because it worked.
+    expect(run.phase).toBe('forge-init')
+
+    expect((await store.update(run.id, { inner_checkpoint: 'forge-done' }))?.phase).toBe('argus')
+  })
+
+  test('every live checkpoint name maps as the canonical table says', async () => {
+    const store = new TridentRunStore(db)
+    const cases: [string, string][] = [
+      ['forge-done', 'argus'],
+      ['argus-approved', 'argus'],
+      ['fix-round-1', 'argus'],
+      ['fix-round-10', 'argus'],
+      ['argus-request-changes', 'forge-fix'],
+      ['argus-request-changes-round-2', 'forge-fix'],
+      ['ralph-task-built', 'ralph-task'],
+    ]
+    for (const [checkpoint, phase] of cases) {
+      const run = await seed(store, `phase-map-${checkpoint}`)
+      const got = await store.update(run.id, { inner_checkpoint: checkpoint })
+      expect([checkpoint, got?.phase]).toEqual([checkpoint, phase])
+    }
+  })
+
+  test('a checkpoint that implies NOTHING leaves the phase exactly as it was', async () => {
+    const store = new TridentRunStore(db)
+    // The three `null` cases from the table's header, which must not be conflated
+    // with each other OR with a guess: terminal-adjacent, an outer-loop marker,
+    // and a name the table has never seen.
+    for (const cp of ['pr-merged', 'inner-error', 'awaiting-trailer', 'outer-published:abc123:0:3', 'a-checkpoint-invented-next-week']) {
+      const run = await seed(store, `phase-null-${cp.slice(0, 12)}`)
+      await store.update(run.id, { phase: 'argus' })
+      const got = await store.update(run.id, { inner_checkpoint: cp })
+      expect([cp, got?.phase]).toEqual([cp, 'argus'])
+      // ...and the checkpoint itself still lands. Leaving the phase alone must not
+      // mean dropping the write.
+      expect(got?.inner_checkpoint).toBe(cp)
+    }
+  })
+
+  test('an explicit phase in the same patch wins over the derivation', async () => {
+    const store = new TridentRunStore(db)
+    const run = await seed(store, 'phase-explicit')
+    // The orchestrator's terminal writes pass BOTH — e.g. `{ phase: 'done',
+    // inner_checkpoint: 'pr-merged' }`. A derivation that overrode the caller
+    // would un-finish a finished run.
+    const got = await store.update(run.id, { phase: 'done', inner_checkpoint: 'forge-done' })
+    expect(got?.phase).toBe('done')
+  })
+
+  test('a terminal phase is frozen — a late checkpoint cannot resurrect a finished run', async () => {
+    const store = new TridentRunStore(db)
+    for (const terminal of ['done', 'failed', 'stopped'] as const) {
+      const run = await seed(store, `phase-frozen-${terminal}`)
+      await store.update(run.id, { phase: terminal })
+      const got = await store.update(run.id, { inner_checkpoint: 'forge-done' })
+      expect([terminal, got?.phase]).toEqual([terminal, terminal])
+    }
+  })
+
+  test('the derivation does not disturb the round derivation beside it', async () => {
+    const store = new TridentRunStore(db)
+    const run = await seed(store, 'phase-and-round')
+    const got = await store.update(run.id, { inner_checkpoint: 'fix-round-4' })
+    expect([got?.phase, got?.round]).toEqual(['argus', 4])
+  })
+})
