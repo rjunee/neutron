@@ -90,13 +90,21 @@ test('the live 0125 incident boots, applies later migrations, and leaves row 125
 
   const result = applyMigrations(db, fullDir)
 
-  expect(result.applied).toEqual([127, 130, 131, 132, 133, 134, 135, 136, 137, 138])
+  expect(result.applied).toEqual([127, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139])
   expect(result.skipped).toContain(125)
   const columns = columnNames(db, 'code_trident_runs')
   expect(columns).toContain('base_sha')
   expect(columns).toContain('base_behind')
   expect(columns).toContain('agent_waked_at')
-  expect(columns).not.toContain('claimed_paths')
+  // WAS `not.toContain`, and flipping it is the point of migration 0139 rather
+  // than a concession to it. The column was dropped from this replica by a table
+  // rebuild that copied only the columns it named; main then had no migration
+  // that put it back, so its absence was the correct expectation for as long as
+  // nothing read it (`0131_code_trident_runs_base_sha_repair.sql` says so in
+  // as many words: "unused on main"). Dependency-aware dispatch reads it, so
+  // 0139 restores it and this replica must now come back with it — a live
+  // database that boots without it would fail every file-contention query.
+  expect(columns).toContain('claimed_paths')
   expect(
     db
       .query<{ version: number; name: string }, []>(
@@ -166,7 +174,7 @@ test('without the 125 entry the run no longer needs one — it applies 0125 and 
   const result = applyMigrations(db, fullDir)
 
   // It applied the migration itself, instead of demanding to be told about it.
-  expect(result.applied).toEqual([125, 127, 130, 131, 132, 133, 134, 135, 136, 137, 138])
+  expect(result.applied).toEqual([125, 127, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139])
   expect(columnNames(db, 'code_trident_runs')).toContain('base_sha')
   expect(columnNames(db, 'code_trident_runs')).toContain('base_behind')
   // The incident row is untouched — never renamed, never renumbered, never deleted.

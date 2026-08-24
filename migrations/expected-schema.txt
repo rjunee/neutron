@@ -236,6 +236,10 @@ CREATE INDEX idx_topics_project_id ON topics(project_id)
 [index] idx_topics_status (tbl=topics)
 CREATE INDEX idx_topics_status ON topics(status)
 
+[index] idx_trident_dispatch_holds_item (tbl=code_trident_dispatch_holds)
+CREATE UNIQUE INDEX idx_trident_dispatch_holds_item
+    ON code_trident_dispatch_holds (project_slug, board_item_id)
+
 [index] idx_upload_sessions_expires (tbl=upload_sessions)
 CREATE INDEX idx_upload_sessions_expires
     ON upload_sessions (expires_at)
@@ -558,6 +562,22 @@ CREATE TABLE "code_subagent_registry" (
     boot_id             TEXT NOT NULL
 ) STRICT
 
+[table] code_trident_dispatch_holds (tbl=code_trident_dispatch_holds)
+CREATE TABLE code_trident_dispatch_holds (
+    id                TEXT PRIMARY KEY,
+    project_slug      TEXT NOT NULL,
+    board_item_id     TEXT NOT NULL,
+    task              TEXT NOT NULL,
+    payload           TEXT,
+    claimed_paths     TEXT,
+    hold_kind         TEXT NOT NULL CHECK (hold_kind IN ('blocker', 'path')),
+    hold_reason       TEXT NOT NULL,
+    held_on_run_id    TEXT,
+    held_on_blocker_id TEXT,
+    created_at        TEXT NOT NULL,
+    updated_at        TEXT NOT NULL
+)
+
 [table] code_trident_runs (tbl=code_trident_runs)
 CREATE TABLE "code_trident_runs" (
     id                  TEXT PRIMARY KEY NOT NULL,
@@ -610,7 +630,7 @@ CREATE TABLE "code_trident_runs" (
     base_behind         INTEGER,
     infra_retries       INTEGER,
     agent_waked_at      INTEGER
-, brief_alert TEXT, parent_run_id TEXT, wave_task_id TEXT) STRICT
+, brief_alert TEXT, parent_run_id TEXT, wave_task_id TEXT, claimed_paths TEXT) STRICT
 
 [table] code_trident_stage_events (tbl=code_trident_stage_events)
 CREATE TABLE code_trident_stage_events (
@@ -1556,7 +1576,7 @@ CREATE TABLE "work_board_items" (
     completed_at    TEXT,                           -- ISO-8601 UTC; NULL until status='done' (NEVER stamped for 'archived')
     task_type       TEXT NOT NULL DEFAULT 'build'   -- 0105 — the ▶ routing discriminator
                         CHECK (task_type IN ('build', 'research'))
-, blocked_by TEXT, declared_surfaces TEXT, pr INTEGER, pr_url TEXT) STRICT
+, blocked_by TEXT, declared_surfaces TEXT, pr INTEGER, pr_url TEXT, blockers TEXT) STRICT
 
 [table] workspace_members (tbl=workspace_members)
 CREATE TABLE workspace_members (

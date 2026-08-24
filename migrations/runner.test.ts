@@ -192,6 +192,13 @@ test('first apply runs all migrations in order and records them in _migrations',
     // Carries a restore block, so a fresh install applies it with three tolerated
     // no-op ALTERs — the columns are already there on this path.
     138,
+    // Dependency-aware dispatch. The dispatch-holds TABLE already exists on the
+    // live database (left by closed PR #314) while `work_board_items.blockers`
+    // and `code_trident_runs.claimed_paths` do NOT — a past table rebuild
+    // dropped the columns and left the table behind. So the CREATEs are
+    // IF NOT EXISTS and the two ADD COLUMNs are not; on the FRESH database this
+    // test builds, every statement runs for real.
+    139,
   ])
   expect(result.skipped).toEqual([])
 

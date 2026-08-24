@@ -128,6 +128,12 @@ export const SCOPE_SWEEP_COLUMNS: readonly ScopedColumn[] = [
   { table: 'api_keys', column: 'project_slug' },
   { table: 'code_ritual_runs', column: 'project_slug' },
   { table: 'code_trident_runs', column: 'project_slug' },
+  // A QUEUED build, waiting on a blocker or on a file another run holds. Left on
+  // the old slug it becomes unreachable: the sweep looks its card up by
+  // (project_slug, board_item_id), finds nothing, and drops the hold as a card
+  // that went away — so a rename would silently discard queued work rather than
+  // merely mis-scope it.
+  { table: 'code_trident_dispatch_holds', column: 'project_slug' },
   // The owner boundary on Codex seat rotation. Stranding these on a rename would
   // orphan every connected seat AND lose the active-slot pointer, so rotation
   // would silently start over from the first seat — including re-selecting one
