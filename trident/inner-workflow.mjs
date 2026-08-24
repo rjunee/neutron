@@ -884,8 +884,21 @@ const KIMI_VERDICT_SCHEMA = {
 const FORGE_SCHEMA = {
   type: 'object',
   additionalProperties: false,
-  required: ['worktreePath', 'branch', 'commitSha', 'prNumber', 'diffFile', 'testsPassed'],
+  required: ['worktreePath', 'branch', 'commitSha', 'prNumber', 'diffFile', 'testsPassed', 'mutationClaim'],
   properties: {
+    mutationClaim: {
+      type: ['object', 'null'],
+      additionalProperties: false,
+      required: ['file', 'find', 'replace', 'guard', 'control'],
+      properties: {
+        file: { type: 'string', description: 'repo-relative PRODUCTION file to mutate (never a test file)' },
+        find: { type: 'string', description: 'exact substring occurring EXACTLY ONCE, whose behaviour the PR relies on' },
+        replace: { type: 'string', description: 'what replaces it — the break' },
+        guard: { type: 'array', items: { type: 'string' }, description: 'argv that MUST go RED under the mutation' },
+        control: { type: 'array', items: { type: 'string' }, description: 'argv that MUST stay GREEN under the mutation' },
+        rationale: { type: 'string', description: 'why this is the behaviour worth proving (recorded, not parsed)' },
+      },
+    },
     worktreePath: { type: 'string' },
     branch: { type: 'string' },
     commitSha: { type: 'string' },
