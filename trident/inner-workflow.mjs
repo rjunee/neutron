@@ -5494,7 +5494,18 @@ TASK: ${task}`
   const offPanelLines = offSeats.map((seat) => `${seat}: OFF — deliberately set to NONE; no reviewer was dispatched and this seat does not block.`).join('\n')
   const runSynthesis = () =>
     agent(
-      `Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
+      // THE SYNTHESIS SEAT GETS THE RULE TOO (#207). It was exempted as "toolless", and
+      // that exemption was circular: its only evidence was that the other shell rules
+      // had not been written into this prompt either, which re-observes the
+      // prompt-authoring choice it was meant to justify. Checked against the source
+      // rather than the claim — there is NO `allowedTools` / `disallowedTools` plumbing
+      // anywhere in this file, so every `agent()` seat runs with the same default
+      // toolset. A seat that can shell out can `pkill`, and the cost of being wrong is
+      // asymmetric: the rule exists because one such command already SIGTERMed every
+      // concurrent lane on this box, including the one that issued it.
+      `${NO_PATTERN_KILL_RULE}
+
+Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying ASYMMETRIC GATING:
 - A finding MORE THAN ONE reviewer raises → keep it as confirmed.
 - ONE credible, evidence-backed BLOCKER is enough to VETO APPROVE (minority-veto) → verdict REQUEST_CHANGES.
 - A single-reviewer NON-blocking finding → keep it but label it 'unverified' (surface it; do NOT block merge on it alone).
@@ -6798,7 +6809,17 @@ ${task}${reflectionGuidance}`,
   const cleanupMode = isPr ? 'delete-branch' : 'keep-branch'
   const cleanupCmd = `bash ${shSingleQuote(worktreeCleanupSh)} ${shSingleQuote(repoPath)} ${shSingleQuote(forgeBranch)} ${cleanupMode} 2>&1; echo "___EXIT=$?"`
   const cleanup = await agent(
-    `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT run any other command, do NOT remove or modify any worktree, branch or file yourself, and do NOT re-run or "fix" a non-zero exit — exit 3 means the script PRESERVED work ON PURPOSE.
+    // THIS SEAT GETS THE RULE, and it is the one that needs it most rather than least:
+    // `git worktree remove --force` is exactly the command that fails with "worktree is
+    // dirty/locked" when some process still holds the directory, and the incident of
+    // record began with an agent concluding that a stale typecheck was holding ITS
+    // worktree. A cleanup agent that reaches for `pkill` to unstick a removal re-runs the
+    // whole fratricide. It is a single-command seat, so it could be exempted with a
+    // proof - but an exemption is a claim that it CANNOT kill, and on the destructive
+    // path the cheaper thing is to just tell it.
+    `${NO_PATTERN_KILL_RULE}
+
+Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT run any other command, do NOT remove or modify any worktree, branch or file yourself, and do NOT re-run or "fix" a non-zero exit — exit 3 means the script PRESERVED work ON PURPOSE.
 ${cleanupCmd}`,
     withModel({ label: 'cleanup:worktree', phase: 'Synthesis', schema: CLEANUP_SCHEMA }),
   )

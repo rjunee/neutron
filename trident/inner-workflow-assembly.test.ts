@@ -928,16 +928,43 @@ describe('inner-workflow.mjs — AS-BUILT: every command-running agent is told n
     expect(prompt).toContain('do NOT kill it — work around it')
   })
 
-  test('argus:synthesis is toolless, so it gets none of the three shell rules (not an omission)', () => {
+  // REVERSED FROM "TOOLLESS, SO EXEMPT" (#207). The old assertion here encoded a
+  // CIRCULAR argument: its evidence that argus:synthesis needs no shell rule was that
+  // the other shell rules had not been written into its prompt either — which
+  // re-observes the prompt-authoring choice it was meant to justify, and says nothing
+  // about the seat.
+  //
+  // Checked against the source instead of the claim: there is NO `allowedTools` /
+  // `disallowedTools` plumbing anywhere in inner-workflow.mjs, so every `agent()` seat
+  // runs with the SAME default toolset. argus:synthesis can shell out exactly as
+  // argus:claude can, and a seat that can shell out can `pkill`. The cost is
+  // asymmetric — the rule exists because one such command already SIGTERMed every
+  // concurrent lane on this box, including the one that issued it — so the seat carries
+  // the rule rather than an argument for why it should not need to.
+  test('argus:synthesis carries the rule — nothing in this workflow withholds tools from it', () => {
     const synth = captured.filter((c) => c.label === 'argus:synthesis')
     expect(synth.length).toBeGreaterThan(0)
     for (const c of synth) {
-      expect(c.prompt).not.toContain(SHARED_BOX)
-      // The pre-existing rules are absent for the same reason — this is the control
-      // that shows exclusion is the file's convention for a toolless seat.
-      expect(c.prompt).not.toContain('NEVER call AskUserQuestion')
-      expect(c.prompt).not.toContain('redirect stdout+stderr to a log file')
+      expect(c.prompt).toContain(SHARED_BOX)
+      expect(c.prompt).toContain(PROHIBITION)
+      expect(c.prompt).toContain(CARVE_OUT)
     }
+  })
+
+  // THE PREMISE, PINNED. The exemption above was only ever as good as its claim that
+  // something withholds tools from a seat. Nothing does, and if that ever changes this
+  // fails and the argument can be re-opened deliberately rather than by drift.
+  // Matches USAGE (`allowedTools:` / `allowedTools =`), not the words. The first draft
+  // of this test searched for the bare identifier and failed on the COMMENT above,
+  // which names the very thing it says does not exist - a guard that cannot tell prose
+  // about a mechanism from the mechanism.
+  test('no tool-restriction plumbing exists, so no seat can be exempted as "toolless"', () => {
+    // Asserted as a BOOLEAN. `expect(SRC).not.toMatch(...)` prints the ENTIRE 6800-line
+    // source on failure - measured at 432KB - which buries the one sentence saying what
+    // to do about it.
+    const plumbing = /\b(dis)?allowedTools\s*[:=]/.test(SRC)
+    expect({ plumbing, note: 'a seat may only be exempted as toolless if something withholds tools' })
+      .toEqual({ plumbing: false, note: 'a seat may only be exempted as toolless if something withholds tools' })
   })
 })
 
