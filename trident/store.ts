@@ -644,6 +644,24 @@ export class TridentRunStore {
    * the tick driver's load query: it advances each returned run. Capped
    * at `limit` so a single tick stays bounded.
    */
+  /**
+   * Every non-terminal run in ONE repo. The path-claim check reads only these, so a
+   * run going terminal — harvest, cancel, crash-reap, anything — releases its claim
+   * BY DEFINITION. There is no release write to be missed, which is what makes a
+   * crashed run structurally incapable of stranding a claim on a file forever.
+   */
+  listNonTerminalByRepo(repo_path: string): TridentRun[] {
+    return this.db
+      .prepare<TridentRunDbRow, [string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE repo_path = ? AND phase NOT IN ${TERMINAL_PHASE_SQL}
+          ORDER BY started_at ASC`,
+      )
+      .all(repo_path)
+      .map(rowToRun)
+  }
+
   listNonTerminal(limit: number = 50): TridentRun[] {
     return this.db
       .prepare<TridentRunDbRow, [number]>(

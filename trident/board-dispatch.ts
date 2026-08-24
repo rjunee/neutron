@@ -64,6 +64,7 @@ import {
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
+import type { DispatchHoldStore } from './dispatch-holds.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 
 export interface AlreadyLandedFinding {
@@ -148,7 +149,16 @@ export interface TridentBoardBinder {
   get(
     project_slug: string,
     id: string,
-  ): (DispatchReadinessTarget & { id: string; linked_run_id?: string | null }) | null
+  ): (DispatchReadinessTarget & {
+    id: string
+    linked_run_id?: string | null
+    /**
+     * The card's lane. OPTIONAL so the existing readiness/bind test seams need not
+     * implement it — but the hold sweep reads it, because a card finished BY HAND
+     * while its dispatch sat held must drop the hold rather than be retried forever.
+     */
+    status?: string
+  }) | null
   attachRun(project_slug: string, id: string, run_id: string): Promise<unknown>
   /**
    * Reconcile a terminal run's bound card (mark it done/failed, preserve its
@@ -182,6 +192,19 @@ export interface BoardBoundBuildInput {
 export interface BoardBoundBuildDeps {
   store: TridentRunStore
   board: TridentBoardBinder
+  /**
+   * Where a dispatch that cannot run YET is parked, rather than dropped or queued
+   * twice. OPTIONAL: a composition wiring no hold store keeps today's behaviour
+   * exactly, so this cannot change dispatch on a box that has not opted in.
+   */
+  holds?: DispatchHoldStore
+  /**
+   * Reads a card's plan doc so the claimed-path set is DERIVED from what the work
+   * declares. Optional for the same reason, and an unreadable doc yields the EMPTY
+   * set — which claims nothing and therefore never holds anyone, rather than
+   * claiming everything and stalling the board.
+   */
+  readPlanDoc?: (project_slug: string, design_doc_ref: string) => Promise<string | null>
   project_slug: string
   /**
    * The owner HOME base under which per-project build workspaces are created —
@@ -240,6 +263,11 @@ export interface BoardBoundBuildDeps {
 }
 
 export type BoardBoundBuildRejectionCode =
+  // NOT a rejection in the usual sense: the dispatch is well-formed and WILL run,
+  // just not yet. It is parked in `code_trident_dispatch_holds` because a blocker
+  // is unfinished or another live run claims an overlapping path. Distinguished
+  // from the codes below because those mean "this will never run as asked".
+  | 'held'
   | 'missing_board_item'
   | 'unknown_board_item'
   | 'invalid_bound_pr'

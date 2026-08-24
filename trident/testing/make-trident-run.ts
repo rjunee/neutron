@@ -57,6 +57,9 @@ export function makeTridentRun(over: Partial<TridentRun> = {}): TridentRun {
     fenced_paths: null,
     parent_run_id: null,
     wave_task_id: null,
+    // Default EMPTY, never undefined: a fixture run holds no paths unless a test
+    // says otherwise, matching the store's own degrade-to-empty rule.
+    claimed_paths: [],
     ...over,
   }
 }
