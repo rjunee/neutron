@@ -256,7 +256,15 @@ describe('the label is resolved WITH the credential, never separately', () => {
     const algorithm = /sha-?\d|scrypt|md5|digest|hash/i
     const contract = (doc: string, from: string, to: string): string => {
       const at = doc.indexOf(from)
-      expect(at).toBeGreaterThan(-1)
+      if (at < 0) {
+        throw new Error(
+          `AS_BUILT contract guard: the START heading is gone.\n` +
+            `  missing: ${from}\n` +
+            `  This test reads a SCOPED region of docs/AS_BUILT.md — it is a docs-drift\n` +
+            `  guard, not a credential test. Restore the heading, or update this test if\n` +
+            `  the entry was deliberately retitled.`,
+        )
+      }
       // THE END HAS TO BE FOUND TOO. `indexOf` returns -1 when the terminator is
       // gone, and `slice(at, -1)` does not fail — it silently widens the region to
       // the whole rest of the document. Measured: renaming the Tier-2 heading grew
@@ -264,7 +272,35 @@ describe('the label is resolved WITH the credential, never separately', () => {
       // below still green. A drift guard that quietly stops being scoped to the one
       // statement it guards is worse than no guard, because it reports success.
       const end = doc.indexOf(to, at + from.length)
-      expect(end).toBeGreaterThan(at)
+      if (end < 0) {
+        // TWO DIFFERENT DEFECTS, AND THE MESSAGE HAS TO SAY WHICH. A terminator that
+        // exists EARLIER in the file means the log was REORDERED, not edited — which is
+        // exactly what a squash or rebase of a stale branch does to an append-at-the-top
+        // log: no conflict, no content change, only order. Measured 2026-08-24 rescuing
+        // #203: `A fix round that never reached the branch` moved from offset 14264 to
+        // 13285, above its own start heading. CI went red HERE, in a file named for
+        // credentials, while the diff touched only `trident/` — so it read as an
+        // unrelated flake and was nearly dismissed as one. `expect(end).toBeGreaterThan(at)`
+        // reported `expected -1 to be greater than 14248`, which names neither the file
+        // nor the cause. Naming it turns an hour of triage into one line.
+        const earlier = doc.indexOf(to)
+        throw new Error(
+          earlier >= 0
+            ? `AS_BUILT contract guard: docs/AS_BUILT.md was REORDERED, not edited.\n` +
+              `  start heading:  "${from}" at offset ${at}\n` +
+              `  its terminator: "${to.trim()}" at offset ${earlier} — BEFORE the start\n` +
+              `  Both headings exist and their content is intact; only their ORDER moved,\n` +
+              `  so nothing conflicted and no diff looks wrong. A squash or rebase of a\n` +
+              `  stale branch does this. Fix: take main's docs/AS_BUILT.md verbatim and\n` +
+              `  re-append your own new entry, instead of keeping the merged order.`
+            : `AS_BUILT contract guard: the TERMINATOR heading is gone.\n` +
+              `  start heading: "${from}" at offset ${at}\n` +
+              `  missing:       "${to.trim()}"\n` +
+              `  Without it this guard silently widens to the rest of the document and\n` +
+              `  asserts against some other entry — passing while reading the wrong text.\n` +
+              `  Restore the heading, or update this test if it was retitled.`,
+        )
+      }
       return doc.slice(at, end)
     }
 
