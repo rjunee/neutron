@@ -1869,8 +1869,15 @@ describe('inner-workflow.mjs — RB2 (b) reflection trust boundary + subordinati
   })
 
   test('argus:synthesis verdict-interpreter EXCLUDES reflection', () => {
-    expect(SRC).toContain('`Synthesise these INDEPENDENT review verdicts')
-    expect(SRC).not.toContain('reflectionGuidance}Synthesise these INDEPENDENT review verdicts')
+    // The synthesis template now legitimately OPENS with an interpolation — the
+    // no-pattern-kill rule — so this no longer pins a backtick immediately before
+    // `Synthesise`. What it must pin is the actual invariant: whatever precedes the
+    // synthesis text, it is never the untrusted reflection block. Asserted as a regex
+    // over any whitespace so a reformat cannot slip a leak past it.
+    expect(SRC).toContain('Synthesise these INDEPENDENT review verdicts')
+    expect(SRC).not.toMatch(/reflectionGuidance\}\s*Synthesise these INDEPENDENT review verdicts/)
+    // …and the seat DOES open with the shell rule, which is the reason the backtick moved.
+    expect(SRC).toContain('`${NO_PATTERN_KILL_RULE}\n\nSynthesise these INDEPENDENT review verdicts')
   })
 
   test('argus:codex external-peer launcher EXCLUDES reflection', () => {
