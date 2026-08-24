@@ -64,7 +64,8 @@ import {
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
-import type { DispatchHoldStore } from './dispatch-holds.ts'
+import type { DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
+import { deriveClaimedPaths } from './claimed-paths.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
 
 export interface AlreadyLandedFinding {
@@ -158,6 +159,11 @@ export interface TridentBoardBinder {
      * while its dispatch sat held must drop the hold rather than be retried forever.
      */
     status?: string
+    /**
+     * 0139 — the card ids this card declares it depends on. OPTIONAL for the same
+     * reason as `status`: an absent list declares NO dependency and never holds.
+     */
+    blockers?: string[]
   }) | null
   attachRun(project_slug: string, id: string, run_id: string): Promise<unknown>
   /**
@@ -279,7 +285,42 @@ export type BoardBoundBuildRejectionCode =
 
 export type BoardBoundBuildResult =
   | { ok: true; run: TridentRun; merge_mode: MergeMode; ralph: boolean }
+  | {
+      ok: false
+      code: 'held'
+      message: string
+      hold: {
+        kind: 'blocker' | 'path'
+        blocker_id?: string
+        holding_run_id?: string
+        path?: string
+      }
+    }
   | { ok: false; code: BoardBoundBuildRejectionCode; message: string }
+
+/**
+ * Resolve a `neutron-docs:` plan doc off disk. Any other scheme (an https URL,
+ * an `/api/app/...` deep link) and any read error resolve to null — an
+ * unreadable plan doc must degrade to "derive from the task text alone", never
+ * to a thrown dispatch.
+ */
+async function defaultReadPlanDoc(
+  owner_home: string,
+  project_slug: string,
+  design_doc_ref: string,
+): Promise<string | null> {
+  const PREFIX = 'neutron-docs:'
+  if (!design_doc_ref.startsWith(PREFIX)) return null
+  const rel = design_doc_ref.slice(PREFIX.length).replace(/^\/+/, '')
+  if (rel.length === 0 || rel.includes('..')) return null
+  try {
+    const { readFile } = await import('node:fs/promises')
+    const { join } = await import('node:path')
+    return await readFile(join(owner_home, 'Projects', project_slug, 'docs', rel), 'utf8')
+  } catch {
+    return null
+  }
+}
 
 /**
  * Detect a request for a review ROUND OF AN EXISTING PR. Over-refusal is CHEAP:
@@ -380,6 +421,45 @@ export async function dispatchBoardBoundBuild(
     }
   }
 
+  // The chat/limits context to replay when the queue re-fires this card, built
+  // HERE (not by the callers) so every dispatch entry queues the same shape.
+  const holdPayload: DispatchHoldPayload = {
+    ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),
+    ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
+    ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
+    ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
+    ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+  }
+
+  // (4) DECLARED BLOCKERS — do not fan out onto an unmet dependency.
+  //
+  // A blocker id that resolves to NO card is treated as CLEARED. Judgment call,
+  // documented: the board's removal path HARD-DELETES cards, so waiting forever
+  // on a ghost would wedge this card (and everything queued behind it) with no
+  // event that could ever release it.
+  for (const blocker_id of item.blockers ?? []) {
+    const blocker = deps.board.get(deps.project_slug, blocker_id)
+    if (blocker === null) continue
+    const status = blocker.status
+    if (status === undefined || status === 'done') continue
+    let message =
+      `Plan item "${board_item_id}" is blocked by "${blocker_id}" ("${blocker.title}", status ${status}) — ` +
+      'it will dispatch automatically when the blocker completes.'
+    if (status === 'failed') {
+      message += ' That blocker has FAILED; it must be retried before this card can start.'
+    }
+    await deps.holds?.upsert({
+      project_slug: deps.project_slug,
+      board_item_id,
+      task: input.task,
+      payload: holdPayload,
+      hold_kind: 'blocker',
+      hold_reason: message,
+      held_on_blocker_id: blocker_id,
+    })
+    return { ok: false, code: 'held', message, hold: { kind: 'blocker', blocker_id } }
+  }
+
   // Resolve THIS project's own git-initialized build workspace from the owner
   // HOME base. A brand-new project has no code repo; without this the run row's
   // repo_path would be the HOME dir (not a git repo) and the inner workflow's
@@ -459,8 +539,34 @@ export async function dispatchBoardBoundBuild(
     }
   }
 
+  // (5) FILE CONTENTION — do not start a build on a file a LIVE run already owns.
+  //
+  // The claim is derived from what actually exists at dispatch time: the task
+  // text (always) plus the card's plan doc when `design_doc_ref` is a resolvable
+  // `neutron-docs:` ref. An EMPTY derived set claims nothing and NEVER holds —
+  // the gate cannot hold on paths it could not measure.
+  //
+  // Scoped to this repo: `listNonTerminalByRepo` is also the CLAIM RELEASE (a
+  // terminal run is simply not returned), so no explicit clear exists to be
+  // missed and a crashed run cannot strand a claim.
+  let paths: string[]
   try {
-    const run = await deps.store.create({
+    const planDoc =
+      item.design_doc_ref !== null && item.design_doc_ref !== undefined
+        ? await (deps.readPlanDoc ??
+            ((slug, ref) => defaultReadPlanDoc(deps.repo_path, slug, ref)))(
+            deps.project_slug,
+            item.design_doc_ref,
+          )
+        : null
+    paths = deriveClaimedPaths({ task: input.task, planDoc })
+  } catch {
+    // An unreadable plan doc degrades to the task text alone — never a throw.
+    paths = deriveClaimedPaths({ task: input.task })
+  }
+
+  try {
+    const admission = await deps.store.createIfClaimsAvailable({
       slug,
       project_slug: deps.project_slug,
       repo_path,
@@ -468,6 +574,9 @@ export async function dispatchBoardBoundBuild(
       merge_mode,
       ralph,
       branch,
+      // RECORD THE CLAIM on the run row, so the next dispatch's gate is a real
+      // query against live state rather than an inference.
+      claimed_paths: paths,
       ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
       ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
@@ -475,9 +584,34 @@ export async function dispatchBoardBoundBuild(
       ...(deps.thread_id !== undefined ? { thread_id: deps.thread_id } : {}),
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     })
+    if (!admission.ok) {
+      const message =
+        `"${admission.path}" is claimed by live run ${admission.holding_run.id.slice(0, 8)} ` +
+        `(${admission.holding_run.slug}) — this build will start automatically when that run goes terminal.`
+      await deps.holds?.upsert({
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        claimed_paths: paths,
+        hold_kind: 'path',
+        hold_reason: message,
+        held_on_run_id: admission.holding_run.id,
+      })
+      return {
+        ok: false,
+        code: 'held',
+        message,
+        hold: { kind: 'path', holding_run_id: admission.holding_run.id, path: admission.path },
+      }
+    }
+    const run = admission.run
     // BIND: light the item up (fork ⑂ + in_progress) the instant the build starts.
     // The durable loop fires + harvests by runId; terminal-reconcile clears it.
     await deps.board.attachRun(deps.project_slug, item.id, run.id)
+    // A card that was previously HELD and has now finally dispatched clears its
+    // queue entry (idempotent — a never-held card has no row to delete).
+    await deps.holds?.deleteByItem(deps.project_slug, board_item_id)
     return { ok: true, run, merge_mode, ralph }
   } catch (err) {
     return {
