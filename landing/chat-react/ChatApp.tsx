@@ -1628,6 +1628,12 @@ function Composer({
         />
         <ComposerPrimitive.Input
           className="car-input"
+          // Paste is owned by the surface-level document listener (the
+          // handleFiles funnel). assistant-ui's built-in paste-to-attachment is
+          // inert today (no attachments adapter → capabilities.attachments is
+          // false) — pin it OFF so a future adapter can't open a second
+          // attachment path that bypasses ZIP routing and the upload limits.
+          addAttachmentOnPaste={false}
           placeholder="Message Neutron…"
           autoFocus
           rows={1}
@@ -1669,6 +1675,206 @@ function Composer({
       </ComposerPrimitive.Root>
     </div>
   )
+}
+
+/**
+ * Collect the IMAGE files a paste carries. Prefers `items` (Chromium exposes a
+ * pasted screenshot as a single `kind === 'file'` item); falls back to `files`
+ * for engines that only populate the list.
+ *
+ * The `image/` filter is load-bearing, not tidiness: this card is paste-an-image
+ * only, and the listener is DOCUMENT-wide. Without it a stray Cmd-V of a copied
+ * `.pptx` becomes a failed attachment chip and a copied `.zip` raises the
+ * "No history import is in progress" banner — and in a real browser (where an
+ * ordinary file paste carries no text flavour) the paste would be
+ * `preventDefault()`ed too. Returns [] for those, and for a text/HTML-only
+ * paste; the caller must then NOT interfere with the default paste at all.
+ *
+ * Two consequences of that filter, stated so nobody reads more into it:
+ * an `image/*` subtype the upload allow-list rejects (bmp, tiff, heic, svg+xml)
+ * IS still collected and still produces the same failed chip a DROPPED bmp
+ * produces — the filter narrows the listener to images, it does not pre-validate
+ * them; and a paste carrying an image PLUS an attachable non-image (a PDF) takes
+ * only the image, where a drop of both would take both. Both are deliberate:
+ * this card is paste-an-image, and widening it is tracked separately.
+ *
+ * `items` is read defensively (`?.length ?? 0`): an engine that exposes only
+ * `files` and leaves `items` undefined must fall through to the fallback, not
+ * throw inside a document-level listener.
+ */
+function clipboardImages(dt: DataTransfer): File[] {
+  const out: File[] = []
+  const itemCount = (dt.items as DataTransferItemList | undefined)?.length ?? 0
+  for (let i = 0; i < itemCount; i += 1) {
+    const item = dt.items[i]
+    if (item !== undefined && item.kind === 'file' && item.type.startsWith('image/')) {
+      const f = item.getAsFile()
+      if (f !== null) out.push(f)
+    }
+  }
+  if (out.length === 0) {
+    const fileCount = (dt.files as FileList | undefined)?.length ?? 0
+    for (let i = 0; i < fileCount; i += 1) {
+      const f = dt.files[i]
+      if (f !== undefined && f.type.startsWith('image/')) out.push(f)
+    }
+  }
+  return out
+}
+
+/**
+ * Does the paste carry TEXT alongside its image(s) — i.e. does the default
+ * insert still have work to do? ANY `text/*` flavour counts, not just
+ * `text/plain`: a copy out of a web page ships the caption as `text/html` with
+ * no plain flavour at all, and the earlier `types.includes('text/plain')` test
+ * cancelled exactly those pastes and dropped the caption.
+ *
+ * `types` (rather than a walk of `items`) because it is the one view every
+ * engine populates, including the `files`-only ones {@link clipboardImages}
+ * falls back for. A real browser lists the image itself as the literal
+ * `'Files'`, which is why this is a `text/` prefix test and not "types is
+ * non-empty".
+ */
+function clipboardHasText(dt: DataTransfer): boolean {
+  return Array.from((dt.types as readonly string[] | undefined) ?? []).some((t) =>
+    t.startsWith('text/'),
+  )
+}
+
+/**
+ * The one editable that is allowed to feed the chat draft: `.car-input` is the
+ * composer textarea (`ComposerPrimitive.Input`).
+ */
+const COMPOSER_INPUT_SELECTOR = '.car-input'
+
+/**
+ * `<input>` types that cannot take a text paste at all. `input.type` reads back
+ * NORMALISED (an unknown or absent type reads as `'text'`), so a blocklist is
+ * the safe direction: anything not named here counts as a text field.
+ */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button',
+  'checkbox',
+  'color',
+  'file',
+  'hidden',
+  'image',
+  'radio',
+  'range',
+  'reset',
+  'submit',
+])
+
+/**
+ * What this element's OWN `contenteditable` attribute declares: `true` =
+ * editable here, `false` = explicitly not (an opt-out nested inside an editable
+ * region), `null` = says nothing, so the answer is INHERITED from an ancestor.
+ *
+ * Read off the attribute rather than `HTMLElement.isContentEditable` because
+ * that property is not uniform across the DOMs this code runs in: happy-dom
+ * reports the valid, browser-`true` spelling `contenteditable=""` as
+ * `'inherit'`, i.e. false. All three of `""`, `"true"` and `"plaintext-only"`
+ * are editable here — `plaintext-only` being the form a single-line rich editor
+ * uses, which the old attribute-literal selector missed entirely and whose
+ * pastes the chat draft therefore stole.
+ */
+function ownContentEditable(el: Element): boolean | null {
+  const raw = el.getAttribute('contenteditable')
+  if (raw === null) return null
+  const v = raw.toLowerCase()
+  if (v === '' || v === 'true' || v === 'plaintext-only') return true
+  if (v === 'false') return false
+  return null // 'inherit', and any invalid value, defers to the ancestor
+}
+
+/**
+ * The nearest editable ancestor-or-self of `start`, or null when the paste
+ * landed outside every editor.
+ *
+ * Walked by hand instead of with one `closest(selector)` for two reasons a
+ * selector cannot express: `contenteditable` INHERITS (a paste inside
+ * `<div contenteditable>` targets the inner `<span>`, which carries no
+ * attribute of its own, and a nested `contenteditable="false"` opts back out),
+ * and a bare `input` also matches the inputs that cannot receive a paste at all.
+ */
+function closestEditable(start: Element): Element | null {
+  for (let el: Element | null = start; el !== null; el = el.parentElement) {
+    if (el instanceof HTMLTextAreaElement) return el
+    if (el instanceof HTMLInputElement) {
+      // A focused checkbox/radio/range must NOT make a page-level Cmd-V look
+      // foreign: nothing would paste into it, so bailing there would only lose
+      // the screenshot.
+      if (!NON_TEXT_INPUT_TYPES.has(el.type)) return el
+      continue
+    }
+    const declared = ownContentEditable(el)
+    if (declared !== null) return declared ? el : null
+  }
+  return null
+}
+
+/**
+ * Is this paste aimed at SOMEONE ELSE'S text field?
+ *
+ * The listener has to be document-level (card req 2: the screenshot → Cmd-V flow
+ * pastes with focus on `<body>`), which means it also sees every paste destined
+ * for the other editors on the page — the rail's project-name input
+ * (`.car-rail-input`), the in-place message editor (`.car-edit-input`), any
+ * field added later. Stealing those is strictly worse than the missing feature:
+ * the paste would be cancelled out of the field the user was typing in, the
+ * image dropped into the chat draft and uploaded immediately.
+ *
+ * So the rule is by TARGET, not by geometry: a paste that lands inside an
+ * editable element is ours only if that editable is the composer input. A paste
+ * with no editable ancestor — `<body>`, the thread, the document itself, i.e.
+ * the case req 2 exists for — is the page-level paste and stays ours.
+ */
+function isForeignEditorPaste(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  const editable = closestEditable(target)
+  return editable !== null && editable.closest(COMPOSER_INPUT_SELECTOR) === null
+}
+
+/** Monotonic per-page counter for synthesized paste filenames. */
+let pasteNameSeq = 0
+
+/** The generated clipboard filename: `image.` + the subtype's extension. */
+const GENERIC_PASTE_NAME = /^image\.[a-z0-9]+$/i
+
+/**
+ * Clipboard image files arrive with an EMPTY name, or with the engines' generic
+ * screenshot name `image.<ext>` — `image.png` overwhelmingly, but a JPEG or WebP
+ * on the clipboard comes through as `image.jpeg` / `image.webp` from the same
+ * generator. The draft keys items by generated id, so duplicate names never
+ * collide as ITEMS, but two pasted screenshots would then render two chips both
+ * carrying the identical label with nothing to tell them apart (card req 5). So
+ * synthesize a stable, unique name for exactly that generic shape; any other
+ * name a real file carries (duplicates included) passes through untouched.
+ *
+ * THE RENAME IS NOT DISPLAY-ONLY, deliberately: this returns a NEW `File`, and
+ * that File is the one `handleFiles` hands to the draft and the one
+ * `uploads.ts` puts on the wire (`form.set('file', file)`) — so the upload is
+ * named `pasted-N.png` too. That is intended, and harmless: the server
+ * content-addresses the blob and derives its own storage name, so the uploaded
+ * name is a label, not an identity. Keeping the chip and the upload on ONE name
+ * beats showing the user a name the transcript does not carry.
+ *
+ * KNOWN AND KEPT: a file GENUINELY named `image.png` gets renamed too. There is
+ * nothing in the event to tell it apart from the generated one, and the generic
+ * case is the overwhelmingly common one on a paste.
+ */
+function withPasteName(f: File): File {
+  if (f.name !== '' && !GENERIC_PASTE_NAME.test(f.name)) return f
+  pasteNameSeq += 1
+  // `image/svg+xml` → `svg`, not `svgxml`: drop the structured suffix first.
+  const subtype = (f.type.split('/')[1] ?? '').split('+')[0] ?? ''
+  const ext = subtype.replace(/[^a-z0-9]/gi, '')
+  const name = `pasted-${pasteNameSeq}.${ext !== '' ? ext : 'png'}`
+  try {
+    return new File([f], name, { type: f.type })
+  } catch {
+    return f // exotic engine without new File(File) — a blank chip beats a lost paste
+  }
 }
 
 /**
@@ -1811,6 +2017,66 @@ function ChatSurface({
     onDrop,
   }
 
+  // Paste-to-attach (owner, 2026-08-31): a pasted screenshot must behave exactly
+  // like a dropped one — same handleFiles funnel, so ZIP routing, the
+  // import-affordance error and the upload limits keep working unchanged. The
+  // listener is DOCUMENT-level: the screenshot-then-Cmd-V flow often pastes with
+  // focus on <body>, and that event dispatches on <body>/document — it never
+  // propagates through this <main>, so a React onPaste here would miss it.
+  //
+  // GATE (load-bearing): up to MAX_MOUNTED_CONVERSATIONS ChatSurfaces stay
+  // mounted sharing ONE draft — inactive ones under `.car-conv[hidden]`, and a
+  // non-Chat tab hides the whole `.car-tabpanel`. Each surface registers its own
+  // document listener, so without the closest('[hidden]') bail a single paste
+  // would attach once per mounted surface (and attach from other tabs).
+  // DECIDED, not overlooked: the gate reads the hidden ATTRIBUTE only, because
+  // that is precisely how this app parks a kept-alive surface (`.car-conv`
+  // above, `.car-tabpanel` in ProjectShell) — nothing hides one with a bare
+  // `display:none`, so matching on computed style would buy no coverage and cost
+  // a layout read on every paste.
+  //
+  // TARGET GATE (also load-bearing): a document listener sees pastes aimed at
+  // every OTHER text field on the page too — the rail's project-name input, the
+  // in-place message editor. {@link isForeignEditorPaste} bails on those, so an
+  // image pasted into one of them is neither cancelled nor stolen into the chat
+  // draft; only the composer input and the no-editor (page-level) case are ours.
+  // An event another handler already cancelled is left alone for the same reason.
+  //
+  // WHAT IS INTERCEPTED: only a paste that actually carries IMAGE data. Anything
+  // else — text, HTML, a copied .pptx, a copied .zip — returns before touching
+  // the event, so ordinary pastes behave exactly as before.
+  //
+  // WHAT IS DEFAULTED AWAY: an image paste that carries NO text flavour at all.
+  // If text rides along with the image (some tools ship both, and a copy out of
+  // a web page ships `text/html`), the image attaches AND the text still
+  // inserts. The narrow preventDefault exists so an image-only paste cannot let
+  // an engine smear a placeholder — e.g. the file's own name — into the input.
+  const mainRef = useRef<HTMLElement | null>(null)
+  const handleFilesRef = useRef(handleFiles)
+  // Keep the latch out of the render body: the listener is registered once, so
+  // the ref only has to be current by the time an event can fire (post-commit).
+  useEffect(() => {
+    handleFilesRef.current = handleFiles
+  })
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent): void => {
+      if (e.defaultPrevented) return
+      if (isForeignEditorPaste(e.target)) return
+      const el = mainRef.current
+      if (el === null || el.closest('[hidden]') !== null) return
+      const dt = e.clipboardData
+      if (dt === null) return
+      const images = clipboardImages(dt)
+      if (images.length === 0) return
+      if (!clipboardHasText(dt)) e.preventDefault()
+      handleFilesRef.current(images.map(withPasteName))
+    }
+    document.addEventListener('paste', onPaste)
+    return () => {
+      document.removeEventListener('paste', onPaste)
+    }
+  }, [])
+
   // SEV1 chat project-switch race (2026-07-02) — the assistant-ui message
   // primitives resolve a message/part by INDEX into the runtime's live list, so
   // a runtime shared across a project switch (whose `msgs` empties IN-PLACE)
@@ -1824,6 +2090,7 @@ function ChatSurface({
   // of a dead black screen; it should essentially never fire on a normal switch.
   return (
     <main
+      ref={mainRef}
       className={`car-main${dragOver && !importActive ? ' car-dragover' : ''}`}
       {...dragProps}
     >
