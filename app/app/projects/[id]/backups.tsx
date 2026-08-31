@@ -250,7 +250,7 @@ export default function BackupsTab(): ReactNode {
         </View>
         <View style={styles.headerBtn} />
       </View>
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scroll}>
         <View style={styles.intro}>
           <Text style={styles.bodyText}>
             Every six hours this project is snapshotted into a hidden{' '}
@@ -536,7 +536,7 @@ function PreviewModal({
                     ? 'No tracked changes vs current'
                     : `${preview.files.length} ${preview.files.length === 1 ? 'file changes' : 'file changes'} vs current`}
                 </Text>
-                <ScrollView style={styles.previewFilesScroll}>
+                <ScrollView keyboardShouldPersistTaps="handled" style={styles.previewFilesScroll}>
                   {preview.files.map((f) => (
                     <FileRow
                       key={`${f.path}-${f.status}`}
@@ -648,7 +648,10 @@ function DiffView({ diff }: { diff: SnapshotFileDiff }) {
     );
   }
   return (
-    <ScrollView style={styles.diffScroll}>
+    <ScrollView
+      // KEYBOARD-TAPS-EXEMPT: diff body is plain selectable Text lines; no tappable child for a tap to reach
+      style={styles.diffScroll}
+    >
       <View>
         {diff.hunks.split('\n').map((line, idx) => (
           <Text

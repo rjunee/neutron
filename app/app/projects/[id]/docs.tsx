@@ -370,7 +370,7 @@ export default function DocsTab() {
           {loadingTree ? (
             <ActivityIndicator color="#cfcfcf" />
           ) : (
-            <ScrollView contentContainerStyle={styles.treeScroll}>
+            <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.treeScroll}>
               {tree.length === 0 ? (
                 <Text style={styles.treeEmpty}>
                   No docs yet — tap “+ New file” to create one.

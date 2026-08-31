@@ -77,7 +77,7 @@ export function MaxAccountPane({ client }: { client: AdminClient }): React.React
   }, [client]);
 
   return (
-    <ScrollView contentContainerStyle={styles.paneScroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.paneScroll}>
       <View style={styles.intro}>
         <Text style={styles.paneTitle}>Claude Max account</Text>
         <Text style={styles.paneSubtitle}>

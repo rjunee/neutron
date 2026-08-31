@@ -302,7 +302,7 @@ export default function SettingsScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
         <View style={styles.userCard} testID="settings-user-card">
           <View style={styles.avatar} accessibilityElementsHidden>
             <Text style={styles.avatarInitial}>{initial(user.displayName)}</Text>

@@ -42,7 +42,10 @@ export function MemoryPane({ client }: { client: AdminClient }) {
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.paneScroll}>
+    <ScrollView
+      // KEYBOARD-TAPS-EXEMPT: read-only text and stats; no Pressable/Touchable/onPress child for a tap to reach
+      contentContainerStyle={styles.paneScroll}
+    >
       <View style={styles.intro}>
         <Text style={styles.paneTitle}>Memory</Text>
         <Text style={styles.paneSubtitle}>

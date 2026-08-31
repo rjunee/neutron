@@ -37,7 +37,7 @@ export function GatewayPane({ client }: { client: AdminClient }) {
   }, [client]);
 
   return (
-    <ScrollView contentContainerStyle={styles.paneScroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.paneScroll}>
       <View style={styles.intro}>
         <Text style={styles.paneTitle}>Gateway</Text>
         <Text style={styles.paneSubtitle}>

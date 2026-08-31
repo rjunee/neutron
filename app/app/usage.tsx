@@ -414,7 +414,7 @@ export default function ModelUsageScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scroll}>
         <Text style={styles.muted}>
           Every connected account, in its own units — never added together. Each card says
           how much of each window is used, whether it is on track to run out, and when

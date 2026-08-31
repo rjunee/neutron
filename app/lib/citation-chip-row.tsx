@@ -58,6 +58,7 @@ export function CitationChipRow({ citations, onOpen }: CitationChipRowProps) {
   });
   return (
     <ScrollView
+      keyboardShouldPersistTaps="handled"
       horizontal
       showsHorizontalScrollIndicator={false}
       contentContainerStyle={styles.row}

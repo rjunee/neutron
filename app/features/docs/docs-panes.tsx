@@ -227,6 +227,7 @@ export function DocViewerPane({
             </CommentsProvider>
           ) : mode === 'view' ? (
             <ScrollView
+              keyboardShouldPersistTaps="handled"
               ref={viewerScrollRef}
               contentContainerStyle={styles.markdownScroll}
               testID="docs-viewer-scroll"
@@ -275,6 +276,7 @@ export function DocViewerPane({
                 />
               </EditorDropTarget>
               <ScrollView
+                keyboardShouldPersistTaps="handled"
                 style={styles.preview}
                 contentContainerStyle={styles.markdownScroll}
               >
@@ -352,7 +354,7 @@ export function DocViewerPane({
                   />
                 </EditorDropTarget>
               ) : (
-                <ScrollView contentContainerStyle={styles.markdownScroll}>
+                <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.markdownScroll}>
                   <RenderMarkdown source={draftContent} binarySource={resolveBinary} />
                 </ScrollView>
               )}
@@ -376,7 +378,7 @@ export function DocViewerPane({
                   <Text style={styles.actionBtnGhostText}>Exit preview</Text>
                 </Pressable>
               </View>
-              <ScrollView contentContainerStyle={styles.markdownScroll}>
+              <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.markdownScroll}>
                 <RenderMarkdown source={previewVersion.content} binarySource={resolveBinary} />
               </ScrollView>
             </View>
@@ -439,7 +441,7 @@ export function DocHistoryPane({ docHistory, file, wideViewport }: DocHistoryPan
           This file has no version history yet.
         </Text>
       ) : (
-        <ScrollView contentContainerStyle={styles.historyScroll}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.historyScroll}>
           {historyEntries.map((entry, idx) => {
             const version = historyEntries.length - idx;
             const isReverting = revertingSha === entry.sha;

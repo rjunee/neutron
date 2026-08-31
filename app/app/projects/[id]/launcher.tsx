@@ -224,6 +224,7 @@ function LauncherTabBody({ projectId }: LauncherTabBodyProps) {
       ) : null}
 
       <ScrollView
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.gridContent}
         style={styles.gridScroll}
       >

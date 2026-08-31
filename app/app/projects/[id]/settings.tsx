@@ -295,6 +295,7 @@ function SettingsBody({ projectId, token }: { projectId: string; token: string }
 
   return (
     <ScrollView
+      keyboardShouldPersistTaps="handled"
       style={styles.container}
       contentContainerStyle={styles.content}
       testID="settings-scroll"

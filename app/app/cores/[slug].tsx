@@ -225,7 +225,7 @@ export default function CoreScreen() {
         <View style={styles.headerIconBtn} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scroll}>
         {error !== null ? <Text style={styles.bannerError}>{error}</Text> : null}
 
         <View style={styles.section}>

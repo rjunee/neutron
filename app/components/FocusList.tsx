@@ -160,6 +160,7 @@ export function FocusList({
     if (heroAvailable) {
       return (
         <ScrollView
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={contentStyle}
           style={styles.listScroll}
           testID="focus-list"
@@ -207,6 +208,7 @@ export function FocusList({
 
   return (
     <ScrollView
+      keyboardShouldPersistTaps="handled"
       contentContainerStyle={contentStyle}
       style={styles.listScroll}
       testID="focus-list"
