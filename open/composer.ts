@@ -76,7 +76,10 @@ import {
   buildLlmCallSubstrate,
   collectTokensToString,
 } from '@neutronai/gateway/wiring/build-llm-call-substrate.ts'
-import { PROFILE_UNTRUSTED_IMPORT } from '@neutronai/gateway/wiring/substrate-profiles.ts'
+import {
+  PROFILE_LEAK_FIXER,
+  PROFILE_UNTRUSTED_IMPORT,
+} from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { buildSubstrateWorkflowFire } from '@neutronai/trident/inner-loop.ts'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import { FAST_MODEL } from '@neutronai/runtime/models.ts'
@@ -521,6 +524,7 @@ import {
   type TridentBoardBinder,
 } from '@neutronai/trident/board-dispatch.ts'
 import { buildForgeConflictResolver } from '@neutronai/trident/conflict-resolver.ts'
+import { buildLeakPreflightFixer } from '@neutronai/trident/leak-fixer.ts'
 import { buildTridentDelivery } from '@neutronai/trident/delivery.ts'
 import { buildTridentTerminalObserver } from './wiring/trident-nexus-observer.ts'
 import { composeTerminalHook } from '@neutronai/trident/terminal-observer.ts'
@@ -6025,6 +6029,22 @@ export function buildOpenGraphComposer(
           })
         : undefined
 
+    // Purity-preflight fixer (2026-08-31): a fresh ephemeral REPL rooted in the
+    // preflight's scratch worktree rewords gate-flagged prose so a finding is a
+    // fixable defect in THIS round instead of a guaranteed-red PR. Same gating
+    // as the conflict resolver — a fixer can only run where builds run. Absent →
+    // findings are annotated on the PR and CI stays the enforcement of record.
+    // CREDENTIAL-FREE BY PROFILE, not by prompt. The reword turn never commits, never pushes and
+    // never opens a PR — the outer preflight does all three — so it runs on `PROFILE_LEAK_FIXER`,
+    // which is `PROFILE_EPHEMERAL` minus the GitHub grant. It is the one dispatch here that reads
+    // text the gate has already objected to, and it needs nothing that publishes.
+    const tridentLeakFixer =
+      tridentFireInnerWorkflow !== null
+        ? buildLeakPreflightFixer({
+            build_substrate: makeEphemeralSubstrate('cc-trident-leakfix', PROFILE_LEAK_FIXER),
+          })
+        : undefined
+
     // ── F4 — wire the supervision watchdog for real (D-8 = wire) ─────────────
     // Both supervision systems were decorative: the `watchdog/` package ran with
     // a no-op notifier + a never-stale heartbeat, and the subagent watchdog
@@ -6914,6 +6934,9 @@ export function buildOpenGraphComposer(
               ...(tridentConflictResolver !== undefined
                 ? { resolve_conflict: tridentConflictResolver }
                 : {}),
+              // Purity preflight (2026-08-31) — the bounded reword turn behind
+              // the orchestrator's fix_leak_findings seam.
+              ...(tridentLeakFixer !== undefined ? { fix_leak_findings: tridentLeakFixer } : {}),
             },
             // Work Board Phase 2b — the agent-native board-bound build dispatch
             // (`work_board_dispatch_build`). Gated on the SAME live-credential

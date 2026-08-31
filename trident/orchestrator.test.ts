@@ -14,6 +14,7 @@ import {
   isTridentHarvestTerminal,
   remoteAlreadyAtPublishHead,
   resolveClaimedCommit,
+  sanitizeLeakAnnotation,
   resolveResumeLiveHead,
   RESUME_HEAD_RETRY_DELAYS_MS,
   sweepStrandedFailures,
@@ -117,6 +118,7 @@ function buildHarness(opts: {
   resolve_active_runs?: () => number
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
+  fix_leak_findings?: import('./leak-preflight.ts').LeakPreflightFixer
   fold_as_built?: (
     run: TridentRun,
     base: string,
@@ -243,6 +245,7 @@ function buildHarness(opts: {
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
   if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
+  if (opts.fix_leak_findings !== undefined) o.fix_leak_findings = opts.fix_leak_findings
   // Keep unrelated orchestrator tests hermetic: production defaults to the real
   // appender, while the focused wiring tests below inject their own observable seam.
   o.fold_as_built = opts.fold_as_built ?? (async () => ({ ok: true, folded: 0 }))
@@ -891,7 +894,14 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // Their commits survive: we never opened a PR or advanced past the refusal.
     expect(calls.some((c) => c.includes('gh pr create'))).toBe(false)
     // NOTHING may reach for a bare force as a fallback when the lease refuses.
-    expect(calls.some((c) => /\s--force(\s|$)/.test(c))).toBe(false)
+    // The purity preflight's throwaway SCAN worktree is excluded: it is added
+    // and removed with `--force` so a stale scratch directory cannot wedge a
+    // lane, which publishes nothing and is not a push.
+    expect(
+      calls
+        .filter((c) => !c.includes('/.trident-worktrees/leak-preflight-'))
+        .some((c) => /\s--force(\s|$)/.test(c)),
+    ).toBe(false)
   })
 
   test('a first push of a new card still works — an absent remote branch leases the EMPTY value', async () => {
@@ -1209,7 +1219,12 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     const calls = h.hostCalls.map((c) => c.join(' '))
 
     expect(final.phase).toBe('done')
-    expect(calls.some((c) => c.includes('worktree add'))).toBe(false)
+    // Only the REBASE scratch must be absent here. The purity preflight now
+    // provisions a throwaway SCAN worktree on every publish, so a bare
+    // `worktree add` match would assert that expected worktree away too.
+    expect(
+      calls.some((c) => c.includes('worktree add') && c.includes('/.trident-worktrees/rebase-')),
+    ).toBe(false)
     expect(calls.some((c) => c.includes('apply --3way'))).toBe(false)
     expect(calls.some((c) => c.includes('gh pr diff'))).toBe(false)
     // The build's own head is published, untouched — the lease is pinned to what the remote
@@ -5361,5 +5376,299 @@ describe('orchestrator — T4: an inner-error harvest carries NO verdict (run f3
     expect(JSON.stringify(persisted)).toContain('null deref in a.ts')
     expect(final.failure_reason).toContain('without Argus APPROVE')
     expect(interpretFailure(final).klass).not.toBe('infra')
+  })
+})
+
+/**
+ * PURITY PREFLIGHT wiring (2026-08-31). Every case here drives the DEFAULT —
+ * the real `runLeakGatePreflight` — through a scripted host responder. Nothing
+ * injects a fake `leak_preflight`, on purpose: a seam whose producer is missing
+ * ships an inert feature, and a test that injects its own producer proves the
+ * fake rather than the wiring.
+ *
+ * The gate's rule ids embed the six-letter word the gate itself bans anywhere in
+ * a committed file, so every fixture assembles it from FRAGMENTS at runtime —
+ * the discipline `trident/leak-preflight.test.ts` and
+ * `scripts/ci/leak-gate-selftest.test.ts` established.
+ */
+describe('orchestrator — purity preflight in the outer publisher', () => {
+  const T2 = 'ten' + 'ant'
+  const RULE_W = `${T2}-word`
+  const RULE_P = `${T2}-purged`
+  const PLAN_DOC = '.trident/plans/trident/x.md'
+  const EXCERPT_W = 'Repo rules: never write the flagged vocabulary'
+  const FAIL_OUT = [
+    '── Tier 2: vocabulary ─────',
+    `  [${RULE_W}] ${PLAN_DOC}:7:${EXCERPT_W}`,
+    `  [${RULE_P}] ${PLAN_DOC}:24:zero flagged words in the commit`,
+    '    TOTAL FINDINGS: 2',
+    'LEAK GATE: FAIL — the public tree must be fully silent.',
+  ].join('\n')
+  const SILENT_OUT = ['    TOTAL FINDINGS: 0', 'LEAK GATE: SILENT'].join('\n')
+  const gateFail: HostCommandResult = { ok: false, stdout: FAIL_OUT, stderr: '', exit_code: 1 }
+  const gateSilent: HostCommandResult = { ok: true, stdout: SILENT_OUT, stderr: '', exit_code: 0 }
+  const isGate = (joined: string): boolean => joined.includes('leak-gate.sh --tree')
+
+  const head = 'abcdef0123456789abcdef0123456789abcdef01'
+  const baseTip = '4444444444444444444444444444444444444444'
+  const stale = '9'.repeat(40)
+
+  /** The publish scenario of the NO-OP replay test above: the branch already
+   *  carries the base tip, so nothing here turns on the rebase. */
+  const publishPlan = (): ((input: InnerLoopInput) => SimPlan) => {
+    let fires = 0
+    return () => {
+      fires += 1
+      return fires === 1
+        ? {
+            result: {
+              verdict: 'REQUEST_CHANGES',
+              branch: 'feat-x',
+              checkpoint: 'forge-done',
+              publishRequested: true,
+              publishHead: head,
+            },
+          }
+        : { result: { verdict: 'APPROVE', prNumber: 42, branch: 'feat-x' } }
+    }
+  }
+
+  test('the gate runs on the branch tree before the PR is opened, and a silent verdict adds nothing', async () => {
+    let lsRemotes = 0
+    let prCreated = false
+    const h = buildHarness({
+      plan: publishPlan(),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (isGate(joined)) return gateSilent
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr create')) {
+          prCreated = true
+          return ok()
+        }
+        // No PR exists until this publish mints one.
+        if (joined.includes('gh pr list')) return ok(prCreated ? '42' : '')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    const gateAt = calls.findIndex((c) => isGate(c))
+    const createAt = calls.findIndex((c) => c.includes('gh pr create'))
+    expect(gateAt).toBeGreaterThanOrEqual(0)
+    expect(createAt).toBeGreaterThanOrEqual(0)
+    expect(gateAt).toBeLessThan(createAt)
+    // A silent verdict says nothing on the PR. (`gh pr view … --json body` is
+    // the annotation's own read; the unrelated `--json state,number` merge probe
+    // is not it.)
+    expect(calls.some((c) => c.includes('gh pr view') && c.includes('--json body'))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr edit'))).toBe(false)
+    expect(calls.some((c) => c.includes('gh pr comment'))).toBe(false)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('findings with no fixer still open the PR, and the annotation is sanitized', async () => {
+    let lsRemotes = 0
+    let prCreated = false
+    const h = buildHarness({
+      plan: publishPlan(),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (isGate(joined)) return gateFail
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr create')) {
+          prCreated = true
+          return ok()
+        }
+        // No PR exists until this publish mints one.
+        if (joined.includes('gh pr list')) return ok(prCreated ? '42' : '')
+        if (joined.includes('gh pr view 42 --json body')) return ok('original body')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls.some((c) => c.includes('gh pr create'))).toBe(true)
+    const edit = h.hostCalls.find((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'edit')
+    expect(edit).toBeDefined()
+    const bodyFile = edit === undefined ? '' : (edit[edit.indexOf('--body-file') + 1] ?? '')
+    const written = readFileSync(bodyFile, 'utf8')
+    expect(written).toContain('original body')
+    expect(written).toContain(`${PLAN_DOC}:7`)
+    // The rule id lands SPLIT — an unsanitized one would re-redden this very PR.
+    expect(written).toContain('ten-ant' + '-word')
+    expect(written).not.toContain(T2)
+    // …and no excerpt is quoted, ever.
+    expect(written).not.toContain(EXCERPT_W)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a failing annotation never fails the publish', async () => {
+    let lsRemotes = 0
+    const h = buildHarness({
+      plan: publishPlan(),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (isGate(joined)) return gateFail
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('gh pr comment')) return { ok: false, stdout: '', stderr: 'boom', exit_code: 1 }
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    // A PRE-EXISTING PR is COMMENTED on, never edited (an edit would clobber it).
+    expect(calls.some((c) => c.includes('gh pr comment') && c.includes('--body-file'))).toBe(true)
+    expect(calls.some((c) => c.includes('gh pr edit'))).toBe(false)
+    // The annotation failed and the publish still completed.
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  /**
+   * A FRESHLY-MINTED PR WHOSE BODY EDIT FAILS STILL GETS THE FINDINGS. The flag that says "the
+   * annotation is placed" used to be set BEFORE the edit's result was checked, so a transient
+   * `gh pr edit` failure left the unresolved findings in a log line and nowhere a human reads.
+   */
+  test('a failed body edit on a NEW PR falls back to the comment path', async () => {
+    let lsRemotes = 0
+    let prCreated = false
+    const h = buildHarness({
+      plan: publishPlan(),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (isGate(joined)) return gateFail
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('gh pr create')) {
+          prCreated = true
+          return ok()
+        }
+        if (joined.includes('gh pr list')) return ok(prCreated ? '42' : '')
+        if (joined.includes('gh pr view 42 --json body')) return ok('original body')
+        if (joined.includes('gh pr edit')) return { ok: false, stdout: '', stderr: 'boom', exit_code: 1 }
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    expect(calls.some((c) => c.includes('gh pr edit'))).toBe(true)
+    // The edit failed, so the findings take the OTHER route rather than evaporating.
+    const comment = h.hostCalls.find((c) => c[0] === 'gh' && c[1] === 'pr' && c[2] === 'comment')
+    expect(comment).toBeDefined()
+    const bodyFile = comment === undefined ? '' : (comment[comment.indexOf('--body-file') + 1] ?? '')
+    const written = readFileSync(bodyFile, 'utf8')
+    expect(written).toContain(`${PLAN_DOC}:7`)
+    expect(written).not.toContain(T2)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${head}:0:1`)
+  })
+
+  test('a fixer-moved head is what gets pushed, confirmed, diffed and checkpointed', async () => {
+    const newHead = 'e'.repeat(40)
+    const fixerFindings: unknown[] = []
+    let gateRuns = 0
+    let lsRemotes = 0
+    let refMoved = false
+    const h = buildHarness({
+      plan: publishPlan(),
+      fix_leak_findings: async (input) => {
+        fixerFindings.push(input.findings)
+        return { fixed: true }
+      },
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (isGate(joined)) {
+          gateRuns += 1
+          return gateRuns === 1 ? gateFail : gateSilent
+        }
+        // The fixer staged its reword, and the preflight AUDITS what it staged: an
+        // in-place modification (`M`) of exactly the file the gate flagged.
+        if (joined.includes('.trident-worktrees/leak-preflight-') && joined.includes('diff --cached --name-status'))
+          return ok(`M\t${PLAN_DOC}\n`)
+        if (joined.includes('.trident-worktrees/leak-preflight-') && joined.includes('rev-parse HEAD'))
+          return ok(newHead)
+        if (joined.includes('update-ref refs/heads/feat-x')) {
+          refMoved = true
+          return ok()
+        }
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          lsRemotes += 1
+          return ok(lsRemotes === 1 ? `${stale}\trefs/heads/feat-x` : `${newHead}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        // The branch ref really did move under the compare-and-swap.
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(refMoved ? newHead : head)
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('changed.ts')
+        return ok()
+      },
+    })
+    const final = await runToTerminal(h, (await createRun({ merge_mode: 'pr' as MergeMode })).id)
+    const calls = h.hostCalls.map((c) => c.join(' '))
+
+    expect(final.phase).toBe('done')
+    // Findings reach the fixer as rule/file/line — never an excerpt.
+    expect(fixerFindings[0]).toEqual([
+      { rule: RULE_W, file: PLAN_DOC, line: 7 },
+      { rule: RULE_P, file: PLAN_DOC, line: 24 },
+    ])
+    expect(calls.some((c) => c.includes(`update-ref refs/heads/feat-x ${newHead} ${head}`))).toBe(true)
+    expect(calls.some((c) => c.includes(`--force-with-lease=refs/heads/feat-x:${stale}`))).toBe(true)
+    expect(calls.some((c) => c.includes(`${baseTip}..${newHead}`))).toBe(true)
+    expect(h.refirePatches[0]?.inner_checkpoint).toBe(`outer-published:${newHead}:0:1`)
+  })
+})
+
+describe('sanitizeLeakAnnotation', () => {
+  const T2 = 'ten' + 'ant'
+
+  test('splits the flagged root in any case, anywhere, and is idempotent', () => {
+    const mixed = `[${T2}-word] and ${T2.toUpperCase()} and ${T2.slice(0, 1).toUpperCase()}${T2.slice(1)}`
+    const once = sanitizeLeakAnnotation(mixed)
+    expect(once).not.toContain(T2)
+    expect(once).not.toContain(T2.toUpperCase())
+    expect(once).toContain('ten-ant' + '-word')
+    expect(sanitizeLeakAnnotation(once)).toBe(once)
+
+    // A file PATH can carry the root too, not only a rule id.
+    const path = sanitizeLeakAnnotation(`- [rule] var/${T2}s/x/plan.md:7`)
+    expect(path).not.toContain(T2)
+    expect(path).toContain('ten-ants/x/plan.md:7')
   })
 })

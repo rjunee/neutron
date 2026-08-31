@@ -21,6 +21,10 @@ __pycache__/
 *.pyc
 
 .worktrees/
+# trident's own scratch checkouts (rebase replay, purity preflight). A linked
+# worktree's `.git` is a POINTER FILE holding an absolute path on this host, so
+# these must never be stageable from the checkout they are created under.
+.trident-worktrees/
 STATUS.md
 
 # Belt-and-braces. The leak gate's PII denylist is supposed to live OUTSIDE every

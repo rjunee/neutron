@@ -286,6 +286,28 @@ export const PROFILE_EPHEMERAL: SubstrateProfile = {
 }
 
 /**
+ * The purity-preflight REWORD substrate (`cc-trident-leakfix-*`) — same disposable per-worktree
+ * shape as `PROFILE_EPHEMERAL`, MINUS the GitHub grant.
+ *
+ * WHY IT IS ITS OWN PROFILE. This turn's whole job is to reword prose the leak gate flagged, in a
+ * throwaway scratch worktree, and the contract it is given says in as many words: do not commit,
+ * do not push, do not create branches — the outer preflight does that
+ * (`trident/leak-fixer.ts`, `trident/leak-preflight.ts`). It runs BEFORE the PR exists, on text
+ * the gate objected to, with a Bash grant. A turn that cannot publish anything has no use for the
+ * credential that publishes everything, and least privilege is cheapest to apply where the need
+ * is provably absent.
+ *
+ * Site: `open/composer.ts` (`cc-trident-leakfix` via `makeEphemeralSubstrate`).
+ */
+export const PROFILE_LEAK_FIXER: SubstrateProfile = {
+  skip_permissions: true,
+  // it rewords a file and `git add`s it; the outer preflight owns every commit and every push.
+  github_credential: false,
+  // one bounded reword turn — the caller names its model (`[getBestModel()]` by default).
+  frontier_model_floor: false,
+}
+
+/**
  * The Trident v2 FIRE seam substrate (`cc-trident-fire-*`) — a WARM (non-
  * ephemeral) per-repo REPL that invokes the native `Workflow` tool and survives
  * the launching turn's settle so the detached background workflow keeps running.

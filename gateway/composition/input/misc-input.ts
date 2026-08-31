@@ -180,6 +180,18 @@ export interface MiscCompositionInput {
      */
     resolve_conflict?: import('@neutronai/trident/merge.ts').MergeConflictResolver
     /**
+     * Bounded reword turn behind the purity preflight (2026-08-31). The publisher
+     * runs the repository's public leak gate on the branch tree BEFORE opening a
+     * PR; a finding is handed to this seam, which rewords the flagged prose in
+     * place and stages it (the preflight owns the commit, the compare-and-swap
+     * and the attempt bound). The composer wires this to
+     * `buildLeakPreflightFixer` over the ephemeral substrate factory — DECLARED
+     * HERE because a wiring key this type does not carry is silently dropped and
+     * the seam ships inert. Absent → findings are reported and annotated on the
+     * PR only, and the PR still opens.
+     */
+    fix_leak_findings?: import('@neutronai/trident/leak-preflight.ts').LeakPreflightFixer
+    /**
      * Terminal-result delivery sink (#339). The trident module posts each run's
      * terminal completion message ("✅ done, merged" / "❌ failed: <reason>")
      * through this sink instead of the bare `ChannelRouter` — which on Open has

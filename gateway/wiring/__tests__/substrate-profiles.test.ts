@@ -35,6 +35,7 @@ import {
   PROFILE_ISOLATED_COMPOSE,
   PROFILE_UNTRUSTED_IMPORT,
   PROFILE_EPHEMERAL,
+  PROFILE_LEAK_FIXER,
   PROFILE_WARM_FIRE,
   type SubstrateProfile,
 } from '../substrate-profiles.ts'
@@ -131,6 +132,7 @@ const ALL_PROFILES: ReadonlyArray<{ name: string; profile: SubstrateProfile }> =
   { name: 'PROFILE_ISOLATED_COMPOSE', profile: PROFILE_ISOLATED_COMPOSE },
   { name: 'PROFILE_UNTRUSTED_IMPORT', profile: PROFILE_UNTRUSTED_IMPORT },
   { name: 'PROFILE_EPHEMERAL', profile: PROFILE_EPHEMERAL },
+  { name: 'PROFILE_LEAK_FIXER', profile: PROFILE_LEAK_FIXER },
   { name: 'PROFILE_WARM_FIRE', profile: PROFILE_WARM_FIRE },
 ]
 
@@ -154,6 +156,10 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
       PROFILE_ISOLATED_COMPOSE: false,
       PROFILE_UNTRUSTED_IMPORT: false,
       PROFILE_EPHEMERAL: true,
+      // The purity-preflight reword turn commits nothing and pushes nothing — the outer
+      // preflight does both — so it carries no credential. Flipping this to `true` must fail
+      // here until someone states why a reword needs push access to the owner's repos.
+      PROFILE_LEAK_FIXER: false,
       PROFILE_WARM_FIRE: true,
     }
     // The frontier-model FLOOR is frozen for the same reason the GitHub grant is,
@@ -168,6 +174,7 @@ test('every profile encodes exactly { skip_permissions: true } — except the ON
       PROFILE_ISOLATED_COMPOSE: false,
       PROFILE_UNTRUSTED_IMPORT: false,
       PROFILE_EPHEMERAL: false,
+      PROFILE_LEAK_FIXER: false,
       PROFILE_WARM_FIRE: false,
     }
     const github_credential = GRANTS[name]
@@ -252,6 +259,17 @@ const SITES: ReadonlyArray<{
     site: 'open/wiring/substrates.ts makeEphemeralSubstrate (cc-trident)',
     profile: PROFILE_EPHEMERAL,
     extra: { substrate_instance_id: 'cc-trident-owner', cwd: '/w', user_id: 'u', project_slug: 'owner', ephemeral: true },
+  },
+  {
+    site: 'open/composer.ts makeEphemeralSubstrate (cc-trident-leakfix)',
+    profile: PROFILE_LEAK_FIXER,
+    extra: {
+      substrate_instance_id: 'cc-trident-leakfix-owner',
+      cwd: '/w',
+      user_id: 'u',
+      project_slug: 'owner',
+      ephemeral: true,
+    },
   },
   {
     site: 'open/wiring/substrates.ts makeWarmFireSubstrate (cc-trident-fire)',

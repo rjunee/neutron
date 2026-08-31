@@ -660,6 +660,13 @@ export function buildCoreModules(
         if (tridentWiring.resolve_conflict !== undefined) {
           orchestratorOpts.resolve_conflict = tridentWiring.resolve_conflict
         }
+        // The purity preflight's bounded reword turn. The preflight itself always
+        // runs (its runner is the orchestrator's DEFAULT); this line is what gives
+        // it something to do about a finding instead of only naming it on the PR.
+        // Absent → findings are annotated and the PR still opens.
+        if (tridentWiring.fix_leak_findings !== undefined) {
+          orchestratorOpts.fix_leak_findings = tridentWiring.fix_leak_findings
+        }
         // OPTIONAL cross-model review: resolve the Codex credential dir
         // (CODEX_HOME) for the inner workflow. PREFER the composer's per-run
         // resolver (`resolve_codex_home` → `CodexCredentialService.resolveActiveCodexHome`:
