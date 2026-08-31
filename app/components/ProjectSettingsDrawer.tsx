@@ -358,7 +358,7 @@ export function ProjectSettingsDrawer({ open, onClose }: ProjectSettingsDrawerPr
         accessibilityViewIsModal
         testID="project-drawer-panel"
       >
-        <ScrollView contentContainerStyle={styles.panelContent}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.panelContent}>
           <PanelHeader projectName={project?.name ?? 'Project settings'} onClose={onClose} />
           {loading && project === null ? (
             <Text style={styles.loadingText}>Loading project settings…</Text>

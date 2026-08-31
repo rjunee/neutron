@@ -392,7 +392,7 @@ function WorkBoardBody({
           </Text>
         </View>
       ) : (
-        <ScrollView style={styles.grow} contentContainerStyle={styles.listContent}>
+        <ScrollView keyboardShouldPersistTaps="handled" style={styles.grow} contentContainerStyle={styles.listContent}>
           {active.map((it, i) => (
             <WorkBoardRow
               key={it.id}

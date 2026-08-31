@@ -107,6 +107,7 @@ export function TaskList({
       ) : null}
 
       <ScrollView
+        keyboardShouldPersistTaps="handled"
         ref={scrollRef}
         contentContainerStyle={contentStyle}
         style={styles.listScroll}

@@ -99,6 +99,7 @@ export function ReminderEditModal({
     <Modal visible transparent animationType="fade" onRequestClose={onCancel}>
       <View style={styles.backdrop}>
         <ScrollView
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.scrollContent}
           style={styles.scroll}
         >

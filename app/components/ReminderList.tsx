@@ -131,6 +131,7 @@ export function ReminderList({
       ) : null}
 
       <ScrollView
+        keyboardShouldPersistTaps="handled"
         ref={scrollRef}
         contentContainerStyle={contentStyle}
         style={styles.listScroll}

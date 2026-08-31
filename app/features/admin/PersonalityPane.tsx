@@ -321,7 +321,7 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
   const dirty = pane.draft !== pane.baseline;
 
   return (
-    <ScrollView contentContainerStyle={styles.paneScroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.paneScroll}>
       <View style={styles.intro}>
         <Text style={styles.paneTitle}>Personality</Text>
         <Text style={styles.paneSubtitle}>
@@ -444,6 +444,7 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
             />
           </View>
           <ScrollView
+            keyboardShouldPersistTaps="handled"
             style={styles.editorPaneWide}
             contentContainerStyle={styles.previewScroll}
           >
@@ -464,6 +465,7 @@ export function PersonalityPane({ client }: { client: AdminPersonalityClient }) 
         />
       ) : (
         <ScrollView
+          keyboardShouldPersistTaps="handled"
           style={styles.previewMobile}
           contentContainerStyle={styles.previewScroll}
         >

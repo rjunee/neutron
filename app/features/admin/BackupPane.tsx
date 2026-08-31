@@ -114,7 +114,7 @@ export function BackupPane({ client }: { client: AdminClient }): React.ReactElem
 
   if (!configured) {
     return (
-      <ScrollView contentContainerStyle={styles.paneScroll}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.paneScroll}>
         <View style={styles.intro}>
           <Text style={styles.paneTitle}>Backup</Text>
           <Text style={styles.paneSubtitle}>
@@ -126,7 +126,7 @@ export function BackupPane({ client }: { client: AdminClient }): React.ReactElem
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.paneScroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.paneScroll}>
       <View style={styles.intro}>
         <Text style={styles.paneTitle}>Backup</Text>
         <Text style={styles.paneSubtitle}>

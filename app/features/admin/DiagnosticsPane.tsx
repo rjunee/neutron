@@ -107,7 +107,7 @@ export function DiagnosticsPane({
   }
 
   return (
-    <ScrollView contentContainerStyle={styles.paneScroll}>
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.paneScroll}>
       <View style={styles.intro}>
         <Text style={styles.paneTitle}>Diagnostics</Text>
         <Text style={styles.paneSubtitle}>

@@ -134,6 +134,7 @@ export default function AdminScreen() {
       </View>
 
       <ScrollView
+        keyboardShouldPersistTaps="handled"
         horizontal
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.tabBarContent}

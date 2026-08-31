@@ -449,6 +449,7 @@ export function ActivityInspectorDrawer({
           </View>
         </View>
         <ScrollView
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={[
             styles.list,
             { paddingBottom: safeArea.bottom + SPACING.lg },

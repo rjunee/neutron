@@ -595,7 +595,7 @@ export default function IntegrationsScreen() {
         <View style={styles.headerSpacer} />
       </View>
 
-      <ScrollView contentContainerStyle={styles.body}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
         {error !== null ? <Text style={styles.bannerError}>{error}</Text> : null}
 
         {view !== null ? (

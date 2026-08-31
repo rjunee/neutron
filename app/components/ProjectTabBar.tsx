@@ -122,6 +122,7 @@ function NarrowTabBar({
       <ScrollView
         horizontal
         showsHorizontalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.narrowContent}
       >
         {tabs.map((tab) => {

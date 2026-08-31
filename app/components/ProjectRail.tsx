@@ -337,6 +337,7 @@ export function ProjectRail({
     <View style={styles.rail} testID="project-rail">
       <ScrollView
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
         contentContainerStyle={styles.railContent}
       >
         {orderRailProjects(projects, activeProjectId).map((project) => (

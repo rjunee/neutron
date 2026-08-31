@@ -878,6 +878,7 @@ export function ChatSyncSurface({
           data={rows}
           renderItem={renderItem}
           keyExtractor={keyForRow}
+          keyboardShouldPersistTaps="handled"
           contentContainerStyle={styles.listContent}
           // ISSUES #505 — the opening position, spread from the frozen anchor.
           // These OUTRANK `startRenderingFromBottom`'s implicit `dataLength - 1`

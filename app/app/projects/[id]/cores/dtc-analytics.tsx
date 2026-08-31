@@ -198,7 +198,7 @@ export default function DtcAnalyticsDashboard() {
   }
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView keyboardShouldPersistTaps="handled" style={styles.container} contentContainerStyle={styles.content}>
       <View style={styles.headerBlock}>
         <Text style={styles.overline}>Core · DTC Analytics</Text>
         <Text style={styles.title}>Daily aggregates</Text>

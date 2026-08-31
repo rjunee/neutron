@@ -58,7 +58,7 @@ export class DiagnosticsErrorBoundary extends Component<Props, State> {
     if (error === null) return this.props.children;
     return (
       <View style={styles.container} testID="diagnostics-error-boundary">
-        <ScrollView contentContainerStyle={styles.body}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.body}>
           <Text style={styles.title}>Something broke</Text>
           <Text style={styles.subtitle}>
             The error has been saved and will be sent to your own Neutron server the

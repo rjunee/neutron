@@ -151,7 +151,7 @@ export default function CodeGenSettingsScreen() {
         </View>
       </View>
 
-      <ScrollView contentContainerStyle={styles.scroll}>
+      <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scroll}>
         <Text style={styles.muted}>
           Which model runs each step of a build, and how hard it thinks. One setting for
           every project on this install — which model you can run is a property of your

@@ -266,6 +266,7 @@ export function CommentsSidePane({
 
   const paneInner = (
     <ScrollView
+      keyboardShouldPersistTaps="handled"
       contentContainerStyle={styles.panelContent}
       testID="comments-side-pane-scroll"
     >

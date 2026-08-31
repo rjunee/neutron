@@ -98,7 +98,7 @@ export function DocsDrillList({
   const showFilesLabel = pinned.length > 0 || recent.length > 0;
 
   return (
-    <ScrollView contentContainerStyle={styles.scroll} testID="docs-drill-list">
+    <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={styles.scroll} testID="docs-drill-list">
       {pinned.length > 0 ? (
         <>
           <Text style={styles.seclbl}>Pinned</Text>
