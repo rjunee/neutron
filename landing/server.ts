@@ -621,6 +621,31 @@ export function ifNoneMatchSatisfied(header: string | null, etag: string): boole
 }
 
 /**
+ * Build options for the web chat SPA bundle (`/chat-react.js`), exported so
+ * the bundle tests build with the SAME config the server uses — imported, not
+ * copied, so an edit here cannot drift from what CI asserts on.
+ *
+ * `define` is REQUIRED, not decorative. Without `process.env.NODE_ENV` pinned
+ * at BUILD time, React core resolves to its production build but the JSX
+ * runtime does not: Bun emits the DEVELOPMENT transform, every element is
+ * created by `jsxDEV`, and each one records an owner stack via
+ * `console.createTask` — measured at ~60% of a project-switch profile and
+ * ~240 KB of extra bundle (854 jsxDEV / 6 createTask sites vs 3 / 0). Setting
+ * NODE_ENV on the SERVER process changes nothing: Bun reads the build config,
+ * not the ambient environment. The define value is a JS source snippet, so the
+ * inner double quotes around `"production"` are load-bearing.
+ */
+export const CHAT_REACT_BUNDLE_BUILD_OPTIONS = {
+  target: 'browser',
+  format: 'esm',
+  // Minified: the bundle carries React + ReactDOM + assistant-ui +
+  // chat-core (~0.6 MB minified). Cached after the first build.
+  minify: true,
+  sourcemap: 'none',
+  define: { 'process.env.NODE_ENV': '"production"' },
+} as const satisfies Partial<Parameters<typeof Bun.build>[0]>
+
+/**
  * Bun.serve handler that surfaces the landing `/chat` (HTTP) SPA shell
  * plus the rest of the landing HTTP routes. Chat moved to the unified
  * `/ws/app/chat` Expo-app socket, so this server no longer upgrades a
@@ -791,12 +816,7 @@ export function createLandingServer(options: LandingServerOptions): LandingServe
     try {
       const result = await Bun.build({
         entrypoints: [chat_react_entry_path],
-        target: 'browser',
-        format: 'esm',
-        // Minified: the bundle carries React + ReactDOM + assistant-ui +
-        // chat-core (~0.6 MB minified). Cached after the first build.
-        minify: true,
-        sourcemap: 'none',
+        ...CHAT_REACT_BUNDLE_BUILD_OPTIONS,
       })
       if (!result.success || result.outputs.length === 0) {
         // O4 — VISIBILITY ONLY: the web chat client silently 404s when this
