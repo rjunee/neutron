@@ -15,7 +15,7 @@
  * that never registered cannot pass.
  */
 
-import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 import type { AttachmentDraft } from '../useAttachmentDraft.ts'
@@ -68,6 +68,25 @@ const filesOnlyClipboard = (files: readonly File[], types: readonly string[]): D
   ({ items: [], files, types }) as unknown as DataTransfer
 
 describe('paste-to-attach on the chat surface (happy-dom)', () => {
+  /**
+   * Every mount registers here and is torn down in `afterEach`, NOT at the end
+   * of the test body. An unmount written as the last statement of an `it` is
+   * SKIPPED when an assertion above it throws, and the surface's document-level
+   * `paste` listener then survives into every test that follows — one real
+   * failure would print as several, from files that are actually fine.
+   */
+  const mounted: Array<{ container: HTMLDivElement; root: { unmount: () => void } }> = []
+  afterEach(async () => {
+    const { act } = await import('react')
+    while (mounted.length > 0) {
+      const m = mounted.pop()!
+      await act(async () => {
+        m.root.unmount()
+      })
+      m.container.remove()
+    }
+  })
+
   /**
    * Mount a live chat over a fake socket + fake upload endpoint. `shell: 'project'`
    * mounts the real {@link ProjectShell} instead of a bare `ChatApp`, which is
@@ -188,6 +207,7 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
       sockets[0]!.deliver(ready())
       await tick()
     })
+    mounted.push({ container, root })
     return { container, root, draft: () => draftRef! }
   }
 
@@ -206,8 +226,7 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
   const pasteOnBody = (ev: ClipboardEvent): Promise<void> => pasteOn(document.body, ev)
 
   it('pasting an image on the page attaches it through the funnel; blank names get stable synthesized names; consecutive pastes never collide', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount()
+    const { container, draft } = await mount()
 
     // A blank-named clipboard image (the common screenshot shape).
     const dt1 = new DataTransfer()
@@ -260,14 +279,22 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     await pasteOnBody(pasteEvent(dt5))
     expect(draft().items[5]!.name).toMatch(/^pasted-\d+\.svg$/)
 
-    await act(async () => {
-      root.unmount()
-    })
+    // The generic clipboard name is `image.` + the subtype's extension, NOT
+    // `image.png` alone: a JPEG or a WebP on the clipboard arrives as
+    // `image.jpeg` / `image.webp` from the same generator, and two of those
+    // would otherwise render two identically-labelled chips.
+    const dt6 = new DataTransfer()
+    dt6.items.add(blob('image.jpeg', 'image/jpeg'))
+    dt6.items.add(blob('image.webp', 'image/webp'))
+    await pasteOnBody(pasteEvent(dt6))
+    const generic = draft().items.slice(6).map((i) => i.name)
+    expect(generic[0]).toMatch(/^pasted-\d+\.jpeg$/)
+    expect(generic[1]).toMatch(/^pasted-\d+\.webp$/)
+    expect(new Set(generic).size).toBe(2)
   })
 
   it('pasting with focus IN the composer attaches exactly once (req 1; the library’s own paste path stays pinned off)', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount()
+    const { container, draft } = await mount()
 
     const input = container.querySelector('.car-input')
     expect(input).not.toBeNull()
@@ -281,15 +308,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     // built-in paste-to-attachment did not add a second along the way.
     expect(draft().items.length).toBe(1)
     expect(draft().items[0]!.name).toBe('shot.png')
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('an image-only paste IS defaulted away (nothing may smear a placeholder into the composer)', async () => {
-    const { act } = await import('react')
-    const { root, draft } = await mount()
+    const { draft } = await mount()
 
     const dt = new DataTransfer()
     dt.items.add(png('shot.png'))
@@ -298,15 +320,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
 
     expect(draft().items.length).toBe(1)
     expect(ev.defaultPrevented).toBe(true)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('a clipboard that populates only `files` (no `items`) still attaches', async () => {
-    const { act } = await import('react')
-    const { root, draft } = await mount()
+    const { draft } = await mount()
 
     const ev = pasteEvent(filesOnlyClipboard([png('shot.png')], ['Files']))
     await pasteOnBody(ev)
@@ -320,15 +337,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     await pasteOnBody(evDoc)
     expect(draft().items.length).toBe(1)
     expect(evDoc.defaultPrevented).toBe(false)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('pasting a NON-image file is left entirely alone — no chip, no import banner, no preventDefault', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount()
+    const { container, draft } = await mount()
 
     const dtDeck = new DataTransfer()
     dtDeck.items.add(
@@ -356,15 +368,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     dtImg.items.add(png('shot.png'))
     await pasteOnBody(pasteEvent(dtImg))
     expect(draft().items.length).toBe(1)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('a plain-text paste is untouched: not preventDefault()ed, draft unchanged — and the listener is provably live', async () => {
-    const { act } = await import('react')
-    const { root, draft } = await mount()
+    const { draft } = await mount()
 
     const dtText = new DataTransfer()
     dtText.setData('text/plain', 'hello world')
@@ -381,15 +388,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     dtImg.items.add(png('shot.png'))
     await pasteOnBody(pasteEvent(dtImg))
     expect(draft().items.length).toBe(1)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('a paste carrying BOTH text and an image attaches the image and leaves the text’s default insert alone', async () => {
-    const { act } = await import('react')
-    const { root, draft } = await mount()
+    const { draft } = await mount()
 
     const dt = new DataTransfer()
     dt.setData('text/plain', 'caption')
@@ -413,15 +415,11 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
 
     expect(draft().items.length).toBe(2)
     expect(evHtml.defaultPrevented).toBe(false)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('an image pasted into ANOTHER field (the rail project-name input) is neither cancelled nor stolen', async () => {
     const { act } = await import('react')
-    const { container, root, draft } = await mount({ shell: 'project' })
+    const { container, draft } = await mount({ shell: 'project' })
 
     // Open the rail's inline create form — a REAL live editor that sits OUTSIDE
     // the composer and outside the chat tabpanel, exactly where the owner might
@@ -454,15 +452,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     await pasteOnBody(evPage)
     expect(draft().items.length).toBe(1)
     expect(evPage.defaultPrevented).toBe(true)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('an editable INSIDE the chat surface that is not the composer is foreign too', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount()
+    const { container, draft } = await mount()
 
     // Stand-in for `.car-edit-input`, the in-place message editor: it renders
     // inside <main>, between the thread and the composer, but is not the
@@ -489,15 +482,129 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     dtPage.items.add(png('shot.png'))
     await pasteOnBody(pasteEvent(dtPage))
     expect(draft().items.length).toBe(1)
+  })
 
-    await act(async () => {
-      root.unmount()
-    })
+  it('a foreign RICH-TEXT editor is foreign too: plaintext-only, bare `contenteditable`, and a nested target that only INHERITS it', async () => {
+    const { container, draft } = await mount()
+
+    const main = container.querySelector('main')
+    expect(main).not.toBeNull()
+
+    // Three spellings a real editor uses that an attribute-literal selector
+    // (`[contenteditable=""], [contenteditable="true"]`) does not see. Each one
+    // is a field the user is typing in; stealing its image paste cancels the
+    // paste out from under them and uploads the image to chat instead.
+    const cases: Array<{ label: string; build: () => HTMLElement }> = [
+      {
+        // The single-line rich editor's spelling.
+        label: 'plaintext-only',
+        build: () => {
+          const el = document.createElement('div')
+          el.setAttribute('contenteditable', 'plaintext-only')
+          return el
+        },
+      },
+      {
+        // The bare attribute — `contenteditable` with no value, which is `true`.
+        label: 'bare contenteditable',
+        build: () => {
+          const el = document.createElement('div')
+          el.setAttribute('contenteditable', '')
+          return el
+        },
+      },
+      {
+        // A caret inside a rich editor targets the INNER node, which carries no
+        // attribute of its own and is editable purely by inheritance.
+        label: 'inherited from an editable ancestor',
+        build: () => {
+          const host = document.createElement('div')
+          host.setAttribute('contenteditable', 'TRUE') // the attribute is case-insensitive
+          const inner = document.createElement('span')
+          inner.textContent = 'caret is here'
+          host.appendChild(inner)
+          return host
+        },
+      },
+    ]
+
+    for (const c of cases) {
+      const host = c.build()
+      main!.appendChild(host)
+      const target = host.firstElementChild ?? host
+
+      const dt = new DataTransfer()
+      dt.items.add(png('shot.png'))
+      const ev = pasteEvent(dt)
+      await pasteOn(target, ev)
+
+      expect({ case: c.label, items: draft().items.length }).toEqual({
+        case: c.label,
+        items: 0,
+      })
+      expect({ case: c.label, cancelled: ev.defaultPrevented }).toEqual({
+        case: c.label,
+        cancelled: false,
+      })
+      host.remove()
+    }
+
+    // The nearest declaration wins: a `contenteditable="false"` island nested
+    // inside an editor is NOT editable, so a paste landing there is the
+    // page-level paste and stays ours.
+    const host = document.createElement('div')
+    host.setAttribute('contenteditable', 'true')
+    const island = document.createElement('div')
+    island.setAttribute('contenteditable', 'false')
+    host.appendChild(island)
+    main!.appendChild(host)
+
+    const dtIsland = new DataTransfer()
+    dtIsland.items.add(png('shot.png'))
+    const evIsland = pasteEvent(dtIsland)
+    await pasteOn(island, evIsland)
+    expect(draft().items.length).toBe(1)
+    expect(evIsland.defaultPrevented).toBe(true)
+  })
+
+  it('a focused checkbox does not make a page-level paste foreign (nothing can paste into it)', async () => {
+    const { container, draft } = await mount()
+
+    // `input` as a bare selector also matches the inputs that cannot take a
+    // paste at all. Treating one as a foreign editor would silently drop the
+    // screenshot — the exact "Cmd-V does nothing" this card exists to remove.
+    const main = container.querySelector('main')
+    expect(main).not.toBeNull()
+    const box = document.createElement('input')
+    box.type = 'checkbox'
+    main!.appendChild(box)
+    box.focus()
+
+    const dt = new DataTransfer()
+    dt.items.add(png('shot.png'))
+    const ev = pasteEvent(dt)
+    await pasteOn(box, ev)
+
+    expect(draft().items.length).toBe(1)
+    expect(ev.defaultPrevented).toBe(true)
+
+    // …while a real text input right beside it stays foreign.
+    const text = document.createElement('input')
+    text.type = 'text'
+    main!.appendChild(text)
+    text.focus()
+
+    const dtText = new DataTransfer()
+    dtText.items.add(png('other.png'))
+    const evText = pasteEvent(dtText)
+    await pasteOn(text, evText)
+
+    expect(draft().items.length).toBe(1)
+    expect(evText.defaultPrevented).toBe(false)
   })
 
   it('a paste already handled by someone else (defaultPrevented) is left alone', async () => {
-    const { act } = await import('react')
-    const { root, draft } = await mount()
+    const { draft } = await mount()
 
     const dt = new DataTransfer()
     dt.items.add(png('shot.png'))
@@ -505,15 +612,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     ev.preventDefault()
     await pasteOnBody(ev)
     expect(draft().items.length).toBe(0)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('text + image pasted INTO the composer attaches the image and leaves the caption\u2019s insert alone', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount()
+    const { container, draft } = await mount()
 
     const input = container.querySelector('.car-input') as HTMLTextAreaElement | null
     expect(input).not.toBeNull()
@@ -534,15 +636,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     expect(draft().items[0]!.name).toBe('shot.png')
     expect(ev.defaultPrevented).toBe(false)
     expect(input!.value).toBe(before)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('a paste under a REAL hidden `.car-tabpanel` does not attach', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount({ shell: 'project' })
+    const { container, draft } = await mount({ shell: 'project' })
 
     // The gate's real coupling: ProjectShell parks the chat surface under a
     // `.car-tabpanel[hidden]` when another tab is selected.
@@ -562,15 +659,10 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     dtVisible.items.add(png('shot.png'))
     await pasteOnBody(pasteEvent(dtVisible))
     expect(draft().items.length).toBe(1)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 
   it('a paste while the chat surface is hidden does not attach (kept-alive surfaces share one draft)', async () => {
-    const { act } = await import('react')
-    const { container, root, draft } = await mount()
+    const { container, draft } = await mount()
 
     // Stand in for the hidden `.car-tabpanel` / `.car-conv[hidden]` ancestor.
     container.hidden = true
@@ -584,9 +676,5 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     dtVisible.items.add(png('shot.png'))
     await pasteOnBody(pasteEvent(dtVisible))
     expect(draft().items.length).toBe(1)
-
-    await act(async () => {
-      root.unmount()
-    })
   })
 })

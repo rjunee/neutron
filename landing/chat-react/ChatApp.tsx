@@ -1742,11 +1742,76 @@ function clipboardHasText(dt: DataTransfer): boolean {
 }
 
 /**
- * Every editable element, and the one that is allowed to feed the chat draft.
- * `.car-input` is the composer textarea (`ComposerPrimitive.Input`).
+ * The one editable that is allowed to feed the chat draft: `.car-input` is the
+ * composer textarea (`ComposerPrimitive.Input`).
  */
-const EDITABLE_SELECTOR = 'input, textarea, [contenteditable=""], [contenteditable="true"]'
 const COMPOSER_INPUT_SELECTOR = '.car-input'
+
+/**
+ * `<input>` types that cannot take a text paste at all. `input.type` reads back
+ * NORMALISED (an unknown or absent type reads as `'text'`), so a blocklist is
+ * the safe direction: anything not named here counts as a text field.
+ */
+const NON_TEXT_INPUT_TYPES = new Set([
+  'button',
+  'checkbox',
+  'color',
+  'file',
+  'hidden',
+  'image',
+  'radio',
+  'range',
+  'reset',
+  'submit',
+])
+
+/**
+ * What this element's OWN `contenteditable` attribute declares: `true` =
+ * editable here, `false` = explicitly not (an opt-out nested inside an editable
+ * region), `null` = says nothing, so the answer is INHERITED from an ancestor.
+ *
+ * Read off the attribute rather than `HTMLElement.isContentEditable` because
+ * that property is not uniform across the DOMs this code runs in: happy-dom
+ * reports the valid, browser-`true` spelling `contenteditable=""` as
+ * `'inherit'`, i.e. false. All three of `""`, `"true"` and `"plaintext-only"`
+ * are editable here — `plaintext-only` being the form a single-line rich editor
+ * uses, which the old attribute-literal selector missed entirely and whose
+ * pastes the chat draft therefore stole.
+ */
+function ownContentEditable(el: Element): boolean | null {
+  const raw = el.getAttribute('contenteditable')
+  if (raw === null) return null
+  const v = raw.toLowerCase()
+  if (v === '' || v === 'true' || v === 'plaintext-only') return true
+  if (v === 'false') return false
+  return null // 'inherit', and any invalid value, defers to the ancestor
+}
+
+/**
+ * The nearest editable ancestor-or-self of `start`, or null when the paste
+ * landed outside every editor.
+ *
+ * Walked by hand instead of with one `closest(selector)` for two reasons a
+ * selector cannot express: `contenteditable` INHERITS (a paste inside
+ * `<div contenteditable>` targets the inner `<span>`, which carries no
+ * attribute of its own, and a nested `contenteditable="false"` opts back out),
+ * and a bare `input` also matches the inputs that cannot receive a paste at all.
+ */
+function closestEditable(start: Element): Element | null {
+  for (let el: Element | null = start; el !== null; el = el.parentElement) {
+    if (el instanceof HTMLTextAreaElement) return el
+    if (el instanceof HTMLInputElement) {
+      // A focused checkbox/radio/range must NOT make a page-level Cmd-V look
+      // foreign: nothing would paste into it, so bailing there would only lose
+      // the screenshot.
+      if (!NON_TEXT_INPUT_TYPES.has(el.type)) return el
+      continue
+    }
+    const declared = ownContentEditable(el)
+    if (declared !== null) return declared ? el : null
+  }
+  return null
+}
 
 /**
  * Is this paste aimed at SOMEONE ELSE'S text field?
@@ -1766,24 +1831,33 @@ const COMPOSER_INPUT_SELECTOR = '.car-input'
  */
 function isForeignEditorPaste(target: EventTarget | null): boolean {
   if (!(target instanceof Element)) return false
-  const editable = target.closest(EDITABLE_SELECTOR)
+  const editable = closestEditable(target)
   return editable !== null && editable.closest(COMPOSER_INPUT_SELECTOR) === null
 }
 
 /** Monotonic per-page counter for synthesized paste filenames. */
 let pasteNameSeq = 0
 
+/** The generated clipboard filename: `image.` + the subtype's extension. */
+const GENERIC_PASTE_NAME = /^image\.[a-z0-9]+$/i
+
 /**
  * Clipboard image files arrive with an EMPTY name, or with the engines' generic
- * screenshot name `image.png` — every browser uses that same literal. The draft
- * keys items by generated id, so duplicate names never collide as ITEMS, but two
- * pasted screenshots would then render two chips both labelled `image.png` with
- * nothing to tell them apart (card req 5's display half). So synthesize a stable,
- * unique name for exactly those two cases; any other name a real file carries
- * (duplicates included) passes through untouched.
+ * screenshot name `image.<ext>` — `image.png` overwhelmingly, but a JPEG or WebP
+ * on the clipboard comes through as `image.jpeg` / `image.webp` from the same
+ * generator. The draft keys items by generated id, so duplicate names never
+ * collide as ITEMS, but two pasted screenshots would then render two chips both
+ * carrying the identical label with nothing to tell them apart (card req 5's
+ * display half). So synthesize a stable, unique name for exactly that generic
+ * shape; any other name a real file carries (duplicates included) passes through
+ * untouched.
+ *
+ * KNOWN AND KEPT: a file GENUINELY named `image.png` gets renamed too. There is
+ * nothing in the event to tell it apart from the generated one, and the generic
+ * case is the overwhelmingly common one on a paste.
  */
 function withPasteName(f: File): File {
-  if (f.name !== '' && f.name !== 'image.png') return f
+  if (f.name !== '' && !GENERIC_PASTE_NAME.test(f.name)) return f
   pasteNameSeq += 1
   // `image/svg+xml` → `svg`, not `svgxml`: drop the structured suffix first.
   const subtype = (f.type.split('/')[1] ?? '').split('+')[0] ?? ''
