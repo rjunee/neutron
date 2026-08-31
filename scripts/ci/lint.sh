@@ -125,7 +125,7 @@ fi
 # ── CHECK 7: keyboard-taps gate (mobile: first tap eaten while keyboard open) ──
 # Every scrollable under app/ must set keyboardShouldPersistTaps or argue an
 # in-tag exemption; the check refuses to pass on an empty match set. See
-# keyboard-taps-check.mjs and docs/plans/mobile-the-first-tap-is-eaten-while-the-keyboard-is-open-key-p1z70d.md.
+# keyboard-taps-check.mjs and .trident/plans/trident/fix-the-mobile-first-tap-is-eaten-w.md.
 if ! bun "$HERE/keyboard-taps-check.mjs"; then
   fail=1
 fi

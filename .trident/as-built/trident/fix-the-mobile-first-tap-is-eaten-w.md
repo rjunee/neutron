@@ -18,15 +18,25 @@ still dismisses the keyboard on a tap that hits nothing, so the keyboard cannot 
 impossible to dismiss.
 
 A CI gate keeps it fixed (`scripts/ci/keyboard-taps-check.mjs`, CHECK 7 in
-`scripts/ci/lint.sh`): a TypeScript-AST matcher over every `ScrollView`/`FlashList`/`FlatList`
-opening tag under `app/` — immune to the type positions (`useRef<ScrollView | null>`) a grep
-miscounts — fails any site with neither the prop nor a justified in-tag exemption, and a bare
-marker with no reason is its own offense. The gate refuses to read an empty extraction as a
-pass: a hard-coded positive control must reproduce its known offenses, a negative control must
-produce zero, and walking zero files or matching zero sites each exit 1 — on this tree it
-reports 45 sites, 2 exempt.
+`scripts/ci/lint.sh`): a TypeScript-AST matcher over every scrollable opening tag under `app/`
+(`ScrollView`, `FlashList`, `FlatList`, plus `SectionList`, `MasonryFlashList` and
+`KeyboardAwareScrollView`, which share the same `"never"` default and have no JSX use here yet)
+— immune to the type positions (`useRef<ScrollView | null>`) a grep miscounts — failing any
+site with neither the prop nor a justified in-tag exemption. A bare marker with no reason is
+its own offense; the marker is read from the tag's COMMENT trivia only, so one in a `testID`
+string is data rather than an argument and a bare `/* … */` cannot borrow the attribute text
+after it for a justification. The two values the card forbids are rejected outright, because
+`keyboardShouldPersistTaps="never"` is the bug spelled out and `"always"` breaks tap-to-dismiss.
+The gate refuses to read an empty extraction as a pass: a hard-coded positive control must
+reproduce its known offenses, a negative control must produce zero, and walking zero files or
+matching zero sites each exit 1 — on this tree it reports 45 sites, 2 exempt. The cheap
+pre-filter that decides whether a file is parsed at all is built FROM the same tag set and
+allows any namespace depth, after review found it skipped `<RN.Animated.ScrollView>` entirely:
+a pre-filter narrower than the matcher is a silent miss in the artifact whose whole job is
+preventing silent misses.
 
-**Verified:** the prop is present at source on all 45 sites (now gate-enforced); FlashList
+**Verified:** all 45 sites are covered at source and gate-enforced — 43 declaring
+`keyboardShouldPersistTaps="handled"` plus the 2 argued in-tag exemptions; FlashList
 2.3.2 forwards it to its compat ScrollView (`FlashListProps extends Omit<ScrollViewProps, ...>`
 at dist/FlashListProps.d.ts:31, `{...rest}` spread at dist/recyclerview/RecyclerView.js:357);
 the chat transcript's ask is pinned by `app/__tests__/chat-keyboard-taps-ask.test.tsx`; the

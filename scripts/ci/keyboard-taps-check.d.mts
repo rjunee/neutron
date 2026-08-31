@@ -4,7 +4,7 @@ export const MARKER: string
 
 export const MIN_JUSTIFICATION_CHARS: number
 
-export type KeyboardTapsState = 'prop' | 'exempt' | 'bare-exempt' | 'offense'
+export type KeyboardTapsState = 'prop' | 'exempt' | 'bare-exempt' | 'offense' | 'forbidden'
 
 export interface KeyboardTapsSite {
   line: number
