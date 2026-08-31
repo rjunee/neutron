@@ -260,6 +260,46 @@ describe('the two values the card forbids', () => {
     expect(sites[0]?.state).toBe('forbidden')
   })
 
+  // THE BOOLEAN SPELLINGS. React Native maps `false` → "never" and `true` →
+  // "always" (ScrollView.js, deprecated but still functional) and TYPES the prop
+  // `boolean | 'always' | 'never' | 'handled'` — so `{false}` IS this bug, it
+  // typechecks clean, and before this it read as "a site that declared the prop".
+  test('{false} is the RN spelling of "never" and is rejected', () => {
+    const sites = findScrollableSites(`const P = () => <FlatList keyboardShouldPersistTaps={false} data={rows} />`)
+    expect(sites[0]?.state).toBe('forbidden')
+  })
+
+  test('{true} is the RN spelling of "always" and is rejected', () => {
+    const sites = findScrollableSites(`const P = () => <FlatList keyboardShouldPersistTaps={true} data={rows} />`)
+    expect(sites[0]?.state).toBe('forbidden')
+  })
+
+  test('a SHORTHAND attribute is {true} — "always" — and is rejected', () => {
+    const sites = findScrollableSites(`const P = () => <FlatList keyboardShouldPersistTaps data={rows} />`)
+    expect(sites[0]?.state).toBe('forbidden')
+  })
+
+  test('`as const` and parentheses do not launder a forbidden value', () => {
+    expect(
+      findScrollableSites(`const P = () => <FlatList keyboardShouldPersistTaps={'never' as const} data={r} />`)[0]
+        ?.state,
+    ).toBe('forbidden')
+    expect(
+      findScrollableSites(`const P = () => <FlatList keyboardShouldPersistTaps={('always')} data={r} />`)[0]?.state,
+    ).toBe('forbidden')
+  })
+
+  // React applies the LAST duplicate attribute; a gate that read the first would
+  // pass the tag that ships "never".
+  test('a duplicated prop is judged on ALL its occurrences, not the first', () => {
+    const src = `const P = () => (
+      <ScrollView keyboardShouldPersistTaps="handled" keyboardShouldPersistTaps="never">
+        <Pressable onPress={go} />
+      </ScrollView>
+    )`
+    expect(findScrollableSites(src)[0]?.state).toBe('forbidden')
+  })
+
   test('"handled" and a computed value pass', () => {
     expect(
       findScrollableSites(`const P = () => <FlatList keyboardShouldPersistTaps="handled" data={rows} />`)[0]?.state,
@@ -366,6 +406,80 @@ describe('false-positive locks — the grep hits that are not elements', () => {
   })
 })
 
+describe('import aliases — the same component under another name', () => {
+  // `import { ScrollView as NativeScroll }` renders the identical RN component
+  // and eats the identical first tap, but its tag text says nothing about a
+  // scrollable, so a tag-text-only matcher reports the file as having no sites
+  // at all — a silent miss in the artifact whose whole job is preventing them.
+  test('an aliased ScrollView is a site, and the prefilter lets its file through', () => {
+    const src = `import { ScrollView as NativeScroll } from 'react-native'
+export const P = () => (
+  <NativeScroll>
+    <Pressable onPress={go} />
+  </NativeScroll>
+)
+`
+    expect(mightCarrySite(src)).toBe(true)
+    const hits = offenders(src)
+    expect(hits.length).toBe(1)
+    expect(hits[0]?.state).toBe('offense')
+    expect(hits[0]?.line).toBe(3)
+  })
+
+  test('an aliased scrollable that declares the prop passes', () => {
+    const src = `import { FlashList as Rows } from '@shopify/flash-list'
+export const P = () => <Rows keyboardShouldPersistTaps="handled" data={rows} renderItem={ri} />
+`
+    const sites = findScrollableSites(src)
+    expect(sites.length).toBe(1)
+    expect(sites[0]?.state).toBe('prop')
+  })
+
+  test('an alias of something that is NOT a scrollable is not a site', () => {
+    expect(
+      findScrollableSites(`import { View as ScrollThing } from 'react-native'
+export const P = () => <ScrollThing><Pressable onPress={go} /></ScrollThing>
+`).length,
+    ).toBe(0)
+  })
+
+  test('a TYPE-ONLY aliased import is not a site', () => {
+    expect(
+      findScrollableSites(`import type { ScrollView as NativeScroll } from 'react-native'
+export type P = NativeScroll
+`).length,
+    ).toBe(0)
+  })
+
+  test('an alias binding is only consulted for a bare tag, not a property tail', () => {
+    expect(
+      findScrollableSites(`import { ScrollView as NativeScroll } from 'react-native'
+export const P = () => <Wrapper.NativeScroll><Pressable onPress={go} /></Wrapper.NativeScroll>
+`).length,
+    ).toBe(0)
+  })
+
+  // End-to-end through the PREFILTER, which decides whether the file is parsed
+  // at all — the layer the alias used to slip past.
+  test('an aliased offender in a scratch tree is reported', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'keyboard-taps-alias-'))
+    writeFileSync(
+      join(dir, 'Aliased.tsx'),
+      `import { ScrollView as NativeScroll } from 'react-native'
+export const P = () => (
+  <NativeScroll>
+    <Pressable onPress={go} />
+  </NativeScroll>
+)
+`,
+    )
+    const { sites } = scanTree(dir)
+    expect(sites.length).toBe(1)
+    expect(sites[0]?.state).toBe('offense')
+    expect(sites[0]?.rel).toBe('Aliased.tsx')
+  })
+})
+
 describe('scanTree', () => {
   // THE REAL-TREE FLOOR. Pins both directions at once: the matcher still finds
   // the real sites (a silently-narrowed matcher fails here, not silently), and
@@ -374,10 +488,12 @@ describe('scanTree', () => {
   test('the repo tree is found and is clean', () => {
     const { files, sites } = scanTree(join(import.meta.dir, '..', '..', 'app'))
     expect(files).toBeGreaterThan(0)
-    // 45 sites at the sweep. The floor sits just under it deliberately: a walk or
-    // matcher change that quietly loses a fifth of the tree must fail HERE, not
-    // pass because 20 was a number nobody would ever drop below.
-    expect(sites.length).toBeGreaterThanOrEqual(44)
+    // 45 sites at the sweep, and the floor sits ON that number, not under it: a
+    // floor of 44 tolerated losing a site to a narrowed walk or matcher, which is
+    // exactly the silent miss this gate exists to prevent. Adding a scrollable to
+    // app/ is expected to raise this number by hand — that edit is the moment to
+    // check the new site declares the prop.
+    expect(sites.length).toBeGreaterThanOrEqual(45)
     expect(sites.filter((s) => s.state === 'offense' || s.state === 'bare-exempt')).toEqual([])
     expect(sites.filter((s) => s.state === 'exempt').length).toBeGreaterThan(0)
   })
@@ -420,6 +536,14 @@ export const P = () => (
     expect(sites.length).toBe(1)
     expect(sites[0]?.state).toBe('offense')
     expect(sites[0]?.line).toBe(3)
+  })
+
+  test('a rootDir with a trailing slash still reports a correct rel path', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'keyboard-taps-slash-'))
+    mkdirSync(join(dir, 'panes'))
+    writeFileSync(join(dir, 'panes', 'Offender.tsx'), 'export const P = () => <ScrollView><Pressable /></ScrollView>\n')
+    const { sites } = scanTree(`${dir}/`)
+    expect(sites[0]?.rel).toBe('panes/Offender.tsx')
   })
 
   test('an empty tree reports zero files — the CLI refuses on this', () => {
@@ -482,6 +606,29 @@ describe('the CLI', () => {
     const res = runGate(dir)
     expect(res.code).toBe(1)
     expect(res.err).toContain('Bad.tsx:2')
+  })
+
+  test('a boolean-spelled forbidden value exits 1 (RN maps {false} to "never")', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'keyboard-taps-cli-false-'))
+    writeFileSync(join(dir, 'Bool.tsx'), 'export const P = () => <FlatList keyboardShouldPersistTaps={false} data={r} />\n')
+    const res = runGate(dir)
+    expect(res.code).toBe(1)
+    expect(res.err).toContain('forbids')
+    expect(res.out).not.toContain('✅')
+  })
+
+  test('an aliased scrollable with no prop exits 1', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'keyboard-taps-cli-alias-'))
+    writeFileSync(
+      join(dir, 'Aliased.tsx'),
+      `import { ScrollView as NativeScroll } from 'react-native'
+export const P = () => <NativeScroll><Pressable onPress={go} /></NativeScroll>
+`,
+    )
+    const res = runGate(dir)
+    expect(res.code).toBe(1)
+    expect(res.err).toContain('Aliased.tsx:2')
+    expect(res.out).not.toContain('✅')
   })
 
   test('a forbidden value exits 1 and says which value', () => {

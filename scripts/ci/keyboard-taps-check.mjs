@@ -27,10 +27,14 @@
 //
 // Property-access tails are matched too (`<Animated.ScrollView>`,
 // `<RN.Animated.ScrollView>` — any depth), by tag-name EQUALITY on the tail —
-// `<ScrollViewBanner>` is a different component and is not a site. The cheap
-// pre-filter that decides whether a file is worth parsing is built FROM the same
-// tag set and allows the same qualifier depth, so it cannot drift narrower than
-// the matcher and skip a file that carries a real site.
+// `<ScrollViewBanner>` is a different component and is not a site. IMPORT
+// ALIASES are resolved as well: `import { ScrollView as NativeScroll }` renders
+// the identical component and eats the identical first tap, but its tag text
+// never mentions a scrollable, so a tag-text-only matcher would let it through
+// as a non-site. The cheap pre-filter that decides whether a file is worth
+// parsing is built FROM the same tag set, allows the same qualifier depth and
+// admits the alias form, so it cannot drift narrower than the matcher and skip a
+// file that carries a real site.
 //
 // ── THE OPT-OUT ───────────────────────────────────────────────────────
 // A scrollable with ZERO tappable children has nothing for the first tap to
@@ -75,12 +79,19 @@
 // fixture that renders a bare scrollable is asserting about rendering, not
 // shipping a surface the owner taps.
 //
-// NOTE ON VALUE: the gate does not demand a particular value — a computed one
-// (`keyboardShouldPersistTaps={mode}`) is a site that thought about the prop, and
-// that is not the regression this gate exists to catch. But the two string
-// literals the card FORBIDS are rejected outright: `"never"` is the RN default
-// that IS the bug, and `"always"` also stops a tap on empty space dismissing the
-// keyboard. Declaring the bug by name must not buy a pass.
+// NOTE ON VALUE: the gate does not demand a particular value — a genuinely
+// computed one (`keyboardShouldPersistTaps={mode}`) is a site that thought about
+// the prop, and that is not the regression this gate exists to catch. But EVERY
+// LITERAL spelling of the two values the card FORBIDS is rejected outright:
+// `"never"` is the RN default that IS the bug, and `"always"` also stops a tap on
+// empty space dismissing the keyboard. That includes the BOOLEAN spellings, which
+// are the same bug wearing a different hat: React Native's ScrollView maps
+// `false` → "never" and `true` → "always" (deprecated, still functional), it
+// types the prop `boolean | 'always' | 'never' | 'handled'` so `{false}`
+// typechecks clean, and a JSX shorthand `keyboardShouldPersistTaps` IS `{true}`.
+// `as const` / parenthesis wrappers are unwrapped first, and when a tag declares
+// the prop TWICE any forbidden occurrence condemns it (React applies the last).
+// Declaring the bug by name — in any of its spellings — must not buy a pass.
 //
 // EXIT: 0 = every site declares the prop (not a forbidden value) or argues its
 //           exemption,
@@ -91,7 +102,7 @@
 // companion test exercises the zero-files / zero-sites tripwires for real.
 
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, resolve, sep } from 'node:path'
+import { join, relative, resolve, sep } from 'node:path'
 import ts from 'typescript'
 
 export const MARKER = 'KEYBOARD-TAPS-EXEMPT'
@@ -131,20 +142,49 @@ function tagNameOf(node) {
   return null
 }
 
-/** The `keyboardShouldPersistTaps` attribute of an opening tag, or undefined. */
-function propAttribute(node) {
-  return node.attributes.properties.find(
+/** EVERY `keyboardShouldPersistTaps` attribute of an opening tag, in source
+ *  order. Plural on purpose: `keyboardShouldPersistTaps="handled"
+ *  keyboardShouldPersistTaps="never"` is legal TSX and React applies the LAST
+ *  one, so a gate that read only the first would pass the tag that ships the
+ *  bug. Any forbidden occurrence condemns the tag. */
+function propAttributes(node) {
+  return node.attributes.properties.filter(
     (p) => ts.isJsxAttribute(p) && ts.isIdentifier(p.name) && p.name.text === 'keyboardShouldPersistTaps',
   )
 }
 
-/** The forbidden string literal this tag sets the prop to, or null. A computed
- *  value is not inspected — see the NOTE ON VALUE in the header. */
+/** Strip the wrappers that do not change the value: `('never' as const)`,
+ *  `(<'never'>x)`, `('never' satisfies T)`, parentheses at any depth. */
+function unwrapValue(expr) {
+  let e = expr
+  while (
+    e &&
+    (ts.isParenthesizedExpression(e) ||
+      ts.isAsExpression(e) ||
+      ts.isTypeAssertionExpression(e) ||
+      (ts.isSatisfiesExpression?.(e) ?? false))
+  ) {
+    e = e.expression
+  }
+  return e
+}
+
+/** The forbidden value this tag sets the prop to, or null. A genuinely computed
+ *  value is not inspected — see the NOTE ON VALUE in the header — but every
+ *  LITERAL spelling of the two forbidden values is, including the BOOLEAN ones:
+ *  React Native's ScrollView maps `false` → "never" and `true` → "always"
+ *  (ScrollView.js, deprecated but still functional), and its own types declare
+ *  the prop `boolean | 'always' | 'never' | 'handled'`, so `{false}` is the bug
+ *  itself and typechecks clean. A shorthand `keyboardShouldPersistTaps` with no
+ *  initializer is JSX `{true}` — "always". */
 function forbiddenValueOf(attr) {
   const init = attr.initializer
-  if (!init) return null
-  const expr = ts.isJsxExpression(init) ? init.expression : init
-  if (!expr || !ts.isStringLiteralLike(expr)) return null
+  if (!init) return 'always' // shorthand attribute === {true} === "always"
+  const expr = unwrapValue(ts.isJsxExpression(init) ? init.expression : init)
+  if (!expr) return null
+  if (expr.kind === ts.SyntaxKind.TrueKeyword) return 'always'
+  if (expr.kind === ts.SyntaxKind.FalseKeyword) return 'never'
+  if (!ts.isStringLiteralLike(expr)) return null
   return FORBIDDEN_VALUES.has(expr.text) ? expr.text : null
 }
 
@@ -203,6 +243,31 @@ function classifyTagMarker(comments) {
 }
 
 /**
+ * The LOCAL names a file binds to a scrollable it imported under another name:
+ * `import { ScrollView as NativeScroll } from 'react-native'` renders the same
+ * component and eats the same first tap, but the tag text says `NativeScroll`
+ * and matching on tag text alone never sees it. Type-only imports are skipped —
+ * they cannot be rendered.
+ * @returns {Set<string>} local names that are scrollables in THIS file.
+ */
+function aliasedScrollableNames(sf) {
+  const out = new Set()
+  for (const stmt of sf.statements) {
+    if (!ts.isImportDeclaration(stmt)) continue
+    const clause = stmt.importClause
+    if (!clause || clause.isTypeOnly) continue
+    const bindings = clause.namedBindings
+    if (!bindings || !ts.isNamedImports(bindings)) continue
+    for (const el of bindings.elements) {
+      if (el.isTypeOnly) continue
+      const imported = (el.propertyName ?? el.name).text
+      if (SCROLLABLE_TAGS.has(imported) && el.name.text !== imported) out.add(el.name.text)
+    }
+  }
+  return out
+}
+
+/**
  * Find every JSX scrollable element in `source`.
  * @param {string} source     TS/TSX source text.
  * @param {string} [fileName] virtual file name (drives TSX parsing).
@@ -217,14 +282,17 @@ export function findScrollableSites(source, fileName = 'fixture.tsx') {
     fileName.endsWith('.tsx') ? ts.ScriptKind.TSX : ts.ScriptKind.TS,
   )
   const out = []
+  const aliases = aliasedScrollableNames(sf)
   const visit = (node) => {
     if (ts.isJsxOpeningElement(node) || ts.isJsxSelfClosingElement(node)) {
       const tag = tagNameOf(node)
-      if (tag && SCROLLABLE_TAGS.has(tag)) {
-        const attr = propAttribute(node)
+      // An alias binds a bare identifier, so it is only consulted for one —
+      // `<Something.NativeScroll>` is a different component's property.
+      if (tag && (SCROLLABLE_TAGS.has(tag) || (ts.isIdentifier(node.tagName) && aliases.has(tag)))) {
+        const attrs = propAttributes(node)
         let state
-        if (attr) {
-          state = forbiddenValueOf(attr) ? 'forbidden' : 'prop'
+        if (attrs.length > 0) {
+          state = attrs.some((a) => forbiddenValueOf(a)) ? 'forbidden' : 'prop'
         } else {
           // The OPENING TAG ONLY, and only its COMMENTS: a comment above the
           // element, a JSX child comment, or a marker in an attribute value are
@@ -255,7 +323,11 @@ export function findScrollableSites(source, fileName = 'fixture.tsx') {
  *  `<RN.Animated.ScrollView>` skipped the parse) is a SILENT miss in the one
  *  artifact whose whole job is preventing silent misses. */
 const SITE_PREFILTER = new RegExp(
-  `<\\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\\s*\\.\\s*)*(?:${[...SCROLLABLE_TAGS].join('|')})\\b`,
+  `<\\s*(?:[A-Za-z_$][A-Za-z0-9_$]*\\s*\\.\\s*)*(?:${[...SCROLLABLE_TAGS].join('|')})\\b` +
+    // …or an ALIASED import of one (`{ ScrollView as NativeScroll }`), whose
+    // element text never mentions a scrollable at all. The matcher resolves the
+    // binding, so the prefilter has to let the file reach it.
+    `|\\b(?:${[...SCROLLABLE_TAGS].join('|')})\\s+as\\s+[A-Za-z_$]`,
 )
 
 export function mightCarrySite(src) {
@@ -293,7 +365,9 @@ export function scanTree(rootDir) {
   walk(rootDir, files)
   const sites = []
   for (const abs of files) {
-    const rel = abs.slice(rootDir.length + 1).split(sep).join('/')
+    // `relative`, not a length slice: a rootDir with a trailing slash used to
+    // chop the first character off every path it reported.
+    const rel = relative(rootDir, abs).split(sep).join('/')
     const src = readFileSync(abs, 'utf8')
     if (!mightCarrySite(src)) continue
     for (const site of findScrollableSites(src, abs)) sites.push({ rel, ...site })
@@ -303,11 +377,16 @@ export function scanTree(rootDir) {
 
 // ── CLI ───────────────────────────────────────────────────────────────
 
-/** A sample with exactly 2 offenses, 1 forbidden value and 1 prop. If the
+/** A sample with exactly 3 offenses, 2 forbidden values and 1 prop. If the
  *  matcher stops reproducing that, it is broken and the gate must not report a
- *  pass. The multi-segment namespace is here on purpose: the pre-filter once
- *  allowed exactly one qualifier and skipped that file entirely. */
+ *  pass. Three shapes are in here on purpose because each was, at some point, a
+ *  SILENT MISS: the multi-segment namespace (the pre-filter once allowed exactly
+ *  one qualifier and skipped that file entirely), the ALIASED import (invisible
+ *  to a tag-text matcher), and `{false}` (RN's boolean spelling of "never" — the
+ *  bug itself, and it typechecks). */
 const POSITIVE_CONTROL = `
+import { FlatList as Rows } from 'react-native'
+
 export function Sample() {
   return (
     <>
@@ -315,7 +394,11 @@ export function Sample() {
         <Text>body</Text>
       </RN.Animated.ScrollView>
       <FlashList data={rows} renderItem={ri} />
+      <Rows data={rows} renderItem={ri} />
       <SectionList keyboardShouldPersistTaps="never" sections={rows} />
+      <ScrollView keyboardShouldPersistTaps={false}>
+        <Pressable onPress={go} />
+      </ScrollView>
       <FlatList keyboardShouldPersistTaps="handled" data={rows} />
     </>
   )
@@ -355,9 +438,9 @@ if (import.meta.main) {
   const controlForbidden = control.filter((s) => s.state === 'forbidden').length
   const controlProps = control.filter((s) => s.state === 'prop').length
   if (
-    control.length !== 4 ||
-    controlOffenses !== 2 ||
-    controlForbidden !== 1 ||
+    control.length !== 6 ||
+    controlOffenses !== 3 ||
+    controlForbidden !== 2 ||
     controlProps !== 1 ||
     !mightCarrySite(POSITIVE_CONTROL)
   ) {
