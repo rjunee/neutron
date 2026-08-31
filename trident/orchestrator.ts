@@ -108,6 +108,14 @@ import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunStore, TridentRunUpdate } from './store.ts'
 import { DEAD_LAUNCHER_OVERRIDE_MS, DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+import {
+  decideHang,
+  describeRunEvidence,
+  freshestActivityAgeMs,
+  unknownRunEvidence,
+  type RunEvidenceGatherer,
+  type RunHangEvidence,
+} from './run-evidence.ts'
 
 const log = createLogger('trident')
 
@@ -463,6 +471,39 @@ export interface BuildTridentOrchestratorOptions {
    * Omitted → the watchdog behaves exactly as it did before this seam existed.
    */
   probe_run_alive?: (run: TridentRun) => RunLiveness | Promise<RunLiveness>
+  /**
+   * THE THREE RUN-SCOPED PROBES — the evidence the watchdog was missing.
+   *
+   * The two sources above answer about the wrong subject. `latest_stage_event_at`
+   * reads a ledger that is measured silent for up to 72 minutes during ONE `codex
+   * exec` and emits nothing at all during review; `probe_run_alive` answers about
+   * a launcher GENERATION that several runs share, not about THIS run. Neither
+   * can say whether this particular build is doing work right now. These three
+   * can, and are asked strongest-first:
+   *
+   *   1. PROCESS — is there a live process for this run? Ground truth, and it
+   *      outranks everything else: nothing about a shared generation, a quiet
+   *      ledger or an unmoved ref survives contact with a running build.
+   *   2. ARTIFACTS — newest mtime on the run's OWN files (its output/error
+   *      streams, its journal, its worktree).
+   *   3. REF — recent local movement on the run's branch.
+   *
+   * EACH ANSWER IS THREE-VALUED (`EvidenceObservation`), and the third value is
+   * the reason this seam exists at all: `unknown` — a probe that COULD NOT run —
+   * DEFERS the kill and never authorises one. An unreadable artifact directory or
+   * an unqueryable process table is not "no activity"; an empty check must not
+   * read as a passing check. Only when every probe RAN and none of them saw
+   * activity inside the window may the run be declared hung, and then the
+   * terminal reason names every probe and what it returned.
+   *
+   * BOUNDED, like every other reprieve here: `max_inflight_ms` is checked FIRST
+   * and no stand-down and no deferral can cross it, so a permanently blind probe
+   * cannot make a run immortal.
+   *
+   * Omitted → the watchdog behaves BYTE-IDENTICALLY to before this seam existed:
+   * same decisions, same disclosure strings.
+   */
+  gather_run_evidence?: RunEvidenceGatherer
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
@@ -2071,6 +2112,7 @@ export function buildTridentOrchestrator(
   const noAdvanceHangMs = opts.no_advance_hang_ms ?? NO_ADVANCE_HANG_MS
   const latestStageEventAt = opts.latest_stage_event_at ?? null
   const probeRunAlive = opts.probe_run_alive ?? null
+  const gatherRunEvidence = opts.gather_run_evidence ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
@@ -4155,15 +4197,31 @@ export function buildTridentOrchestrator(
       //     MID-phase, so one that is NEWER than the hang threshold is proof the run
       //     advanced inside the window the watchdog just called dead.
       //
-      //     NOTHING IS WRITTEN, DELIBERATELY. The obvious implementation re-stamps
-      //     `last_advanced_at` to the event's timestamp — but `TridentRunUpdate`
-      //     documents that the field "is always re-stamped by `save`/`update` so
-      //     callers never pass it", so that write would silently land as `now()`:
-      //     liveness the run never demonstrated, and a fresh full threshold bought
-      //     by an event that may be 89 minutes old. Returning `changed: false`
-      //     instead means the reprieve is RECOMPUTED FROM THE EVIDENCE on every
-      //     tick and expires the moment the events stop, with no stored state to
-      //     go stale and no timestamp invented anywhere.
+      //     A RUN-SCOPED SPARE RE-STAMPS THE CLOCK; NOTHING ELSE DOES (T4). The
+      //     column is caller-unpassable — `TridentRunUpdate` documents that
+      //     `last_advanced_at` "is always re-stamped by `save`/`update` so callers
+      //     never pass it" — so the stand-down below never touches it and never
+      //     invents a timestamp: it returns the run snapshot UNMODIFIED with
+      //     `changed: true`, and the tick's `saveIfActive` stamps `now()` as a
+      //     matter of course.
+      //
+      //     WHY re-stamp at all: display consumers read that column and nothing
+      //     else — the `STALLED_WARN_MS` badge computed in `tick.ts`
+      //     `progressSignature`, and run-driving — so a run this watchdog has
+      //     positively established is alive kept rendering as hours stale. It also
+      //     costs: the probes re-fire on EVERY tick of a spared run instead of once
+      //     per hang window, and the 2 h `maxInflightMs` ceiling false-kills a
+      //     healthy long Forge round that never crosses a phase boundary.
+      //
+      //     WHAT IS PRESERVED. The watchdog still never READS this column as
+      //     evidence (the defect this card names): every window's reprieve is
+      //     re-earned from live evidence at decision time, so the re-stamp moves
+      //     expiry from next-tick to next-window — exactly the latency the
+      //     phase-transition stamp always had. A DEFER never re-stamps (an unknown
+      //     check must not manufacture progress), and a spare carried SOLELY by a
+      //     live shared launcher never re-stamps either: that answer is
+      //     GENERATION-scoped, not run-scoped, which is what keeps the 2 h ceiling
+      //     reachable for a forever-alive launcher.
       //
       //     ABSENCE IS NOT EVIDENCE: a null reader (not wired), an unparseable
       //     timestamp, or a run with no events at all falls straight through to the
@@ -4204,6 +4262,35 @@ export function buildTridentOrchestrator(
         }
       }
 
+      // (1b-iv) THE THREE RUN-SCOPED PROBES — the only evidence that answers about
+      //     THIS run rather than about a ledger or a shared generation: a live
+      //     process (ground truth), fresh mtime on the run's own artifacts, recent
+      //     movement on its branch ref. See `gather_run_evidence`.
+      //
+      //     A GATHERER THAT THROWS OBSERVED NOTHING, and is recorded as such. The
+      //     failure of the evidence collector must never present as evidence of
+      //     death — `unknownRunEvidence` marks all three probes unknown, which
+      //     defers the kill instead of authorising it.
+      //
+      //     Named `runEvidence`, not `evidence`: the stand-down branch below owns
+      //     the sentence it hands the operator, and two things called "evidence"
+      //     one screen apart is how the wrong one gets interpolated.
+      let runEvidence: RunHangEvidence | null = null
+      if (gatherRunEvidence !== null) {
+        try {
+          runEvidence = await gatherRunEvidence(run, noAdvanceHangMs)
+        } catch (err) {
+          runEvidence = unknownRunEvidence(err instanceof Error ? err.message : String(err))
+        }
+      }
+      const runDecision = runEvidence === null ? null : decideHang(runEvidence, noAdvanceHangMs)
+      const runFreshestMs = runEvidence === null ? null : freshestActivityAgeMs(runEvidence)
+      // The same narrow window the stage ledger gets against a POSITIVE launcher
+      // death, for the same reason: only evidence young enough that this run's own
+      // wrapper must still have been alive may overturn it. A live process is age 0
+      // and is therefore always inside it.
+      const runEvidenceBeatsDeath = runFreshestMs !== null && runFreshestMs <= DEAD_LAUNCHER_OVERRIDE_MS
+
       // WHAT WAS CHECKED AND WHAT IT FOUND — carried onto BOTH outcomes, the reap
       // `reason` and the stand-down `note` alike. A reap that says only "suspected
       // agent hang" is unfalsifiable after the fact: the whole reason this watchdog
@@ -4214,10 +4301,15 @@ export function buildTridentOrchestrator(
       // so a run spared on stage evidence left no record of the probe's verdict and
       // the comment claiming "BOTH outcomes" was simply untrue. Concrete numbers,
       // never a boolean.
+      //
+      // APPEND-ONLY. The two clauses below are pinned by tests and read by
+      // operators; the run-scoped clauses are added AFTER them, and when the seam
+      // is not wired the string is byte-identical to what it was before it existed.
       const disclosure =
         `liveness checked: newest stage event ` +
         `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min ago`}` +
-        `, launcher probe=${probe === 'not-wired' ? 'not wired' : probe}`
+        `, launcher probe=${probe === 'not-wired' ? 'not wired' : probe}` +
+        (runEvidence === null ? '' : `; ${describeRunEvidence(runEvidence)}`)
 
       // (1b-iii) THE CEILING OUTRANKS EVERY REPRIEVE, and is checked FIRST so no
       //     evidence path can skip it. `maxInflightMs` (2 h) is the absolute
@@ -4226,6 +4318,12 @@ export function buildTridentOrchestrator(
       //     an endlessly-heartbeating ticker or a launcher that outlives its build
       //     would hold one of ~6 lanes forever. That is a WORSE failure than the
       //     false kill this card fixes, not a quieter one.
+      //
+      //     AFTER T4 THE CEILING BOUNDS EXACTLY ONE CLASS OF RUN: the one whose only
+      //     reprieve is a shared launcher or a deferral, neither of which re-stamps
+      //     the advancement clock. A run spared by RUN-SCOPED evidence renews the
+      //     window by design (the card's re-stamp ask), and its expiry is pinned by
+      //     the reprieve-EXPIRES test rather than by this bound.
       const overCeiling = elapsedSinceAdvance(run) > maxInflightMs
 
       // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING.
@@ -4247,32 +4345,79 @@ export function buildTridentOrchestrator(
       // wrapper. A stale-but-under-threshold row with a dead launcher still reaps —
       // "a heartbeat row proves a TICKER ran, not that the build did" remains true at
       // every resolution coarser than this one.
+      //
+      // THE RUN-SCOPED PROBES JOIN ON BOTH SIDES OF THE DEAD-LAUNCHER SPLIT: inside
+      // the override window they can overturn a positive launcher death exactly as a
+      // fresh stage row can, and on the ordinary path any activity inside the hang
+      // window spares the run. Both are per-RUN evidence, which is the whole reason
+      // they are allowed to argue with a generation-scoped answer.
       const standDown = overCeiling
         ? false
         : probe === 'dead'
-          ? stageBeatsDeath
-          : stageFresh || probe === 'alive'
+          ? stageBeatsDeath || runEvidenceBeatsDeath
+          : stageFresh || probe === 'alive' || runDecision?.action === 'stand-down'
       if (standDown) {
-        const evidence =
+        // WHICH SPARES MOVE THE CLOCK (T4). Run-scoped evidence only. When
+        // `probe === 'dead'` the stand-down can only have come from
+        // `stageBeatsDeath || runEvidenceBeatsDeath`, both run-scoped; otherwise a
+        // fresh stage row or a run-evidence stand-down is run-scoped, and if
+        // neither holds the spare came solely from `probe === 'alive'` — an answer
+        // about a SHARED launcher generation, which must not renew this run's
+        // window or a forever-alive launcher would never reach the 2 h ceiling.
+        const restamp = probe === 'dead' || stageFresh || runDecision?.action === 'stand-down'
+        const sparedBy =
           probe === 'dead'
-            ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — inside the ` +
-              `${Math.round(DEAD_LAUNCHER_OVERRIDE_MS / 60_000)} min window in which this run's OWN wrapper ` +
-              `must still have been alive, and a shared launcher generation's death does not answer for it`
+            ? stageBeatsDeath
+              ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — inside the ` +
+                `${Math.round(DEAD_LAUNCHER_OVERRIDE_MS / 60_000)} min window in which this run's OWN wrapper ` +
+                `must still have been alive, and a shared launcher generation's death does not answer for it`
+              : `a run-scoped probe saw activity ${Math.round((runFreshestMs ?? 0) / 60_000)} min ago — inside the ` +
+                `${Math.round(DEAD_LAUNCHER_OVERRIDE_MS / 60_000)} min window in which this run's OWN wrapper ` +
+                `must still have been alive, and a shared launcher generation's death does not answer for it`
             : stageFresh
               ? `a stage event landed ${Math.round((stageAgeMs ?? 0) / 60_000)} min ago — the run is advancing mid-phase`
-              : `the launcher probe positively observed the process ALIVE (stage evidence: ` +
-                `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min old`})`
+              : probe === 'alive'
+                ? `the launcher probe positively observed the process ALIVE (stage evidence: ` +
+                  `${stageAgeMs === null ? 'none' : `${Math.round(stageAgeMs / 60_000)} min old`})`
+                : `a run-scoped probe saw activity ${Math.round((runFreshestMs ?? 0) / 60_000)} min ago — ` +
+                  `this run itself is doing work inside the window the clock called dead`
         // DISCLOSED, not silent, and disclosed the SAME WAY the reap is. A watchdog
         // that quietly declines to fire is as hard to trust as one that quietly fires;
         // the note carries the full `disclosure` — both clocks AND the probe's answer —
         // so a run that survived is as auditable as one that did not.
         return {
           run,
+          changed: restamp,
+          waiting: true,
+          note:
+            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but ${sparedBy}` +
+            ` — ${disclosure}` +
+            (restamp
+              ? ' — advancement clock re-stamped (run-scoped evidence)'
+              : ' — advancement clock NOT re-stamped (a live shared launcher is generation evidence,' +
+                ' not run-scoped)'),
+        }
+      }
+
+      // (1b-v) DEFER — the branch that exists because "could not check" must never
+      //     read as "checked and found nothing". No probe saw activity inside the
+      //     window, but at least one COULD NOT LOOK, so the kill is postponed to the
+      //     next tick rather than taken on a blind check. The run is NOT spared: it
+      //     is re-examined every tick, and `maxInflightMs` (checked above, and which
+      //     no reprieve crosses) still bounds it, so a permanently blind probe cannot
+      //     make a lane immortal.
+      //
+      //     SUSPECTED-HANG PATH ONLY. A positive launcher death and the inflight
+      //     ceiling are MEASURED causes, not inferences from silence — they keep
+      //     today's behaviour and reap through a deferral.
+      if (!overCeiling && probe !== 'dead' && runDecision?.action === 'defer') {
+        return {
+          run,
           changed: false,
           waiting: true,
           note:
-            `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but ${evidence}` +
-            ` — ${disclosure}`,
+            `hang watchdog DEFERRED: no positive liveness evidence inside the window, but a probe could ` +
+            `not run and an unknown check must not authorise a kill — ${disclosure}`,
         }
       }
       fired.delete(run.id)

@@ -112,6 +112,7 @@ function buildHarness(opts: {
   no_advance_hang_ms?: number
   latest_stage_event_at?: (run_id: string) => string | null
   probe_run_alive?: (run: TridentRun) => 'alive' | 'dead' | 'unknown' | Promise<'alive' | 'dead' | 'unknown'>
+  gather_run_evidence?: import('./run-evidence.ts').RunEvidenceGatherer
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
@@ -238,6 +239,7 @@ function buildHarness(opts: {
   if (opts.no_advance_hang_ms !== undefined) o.no_advance_hang_ms = opts.no_advance_hang_ms
   if (opts.latest_stage_event_at !== undefined) o.latest_stage_event_at = opts.latest_stage_event_at
   if (opts.probe_run_alive !== undefined) o.probe_run_alive = opts.probe_run_alive
+  if (opts.gather_run_evidence !== undefined) o.gather_run_evidence = opts.gather_run_evidence
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
@@ -3507,17 +3509,20 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
     expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
-    // NOTHING WAS WRITTEN. `TridentRunUpdate` re-stamps `last_advanced_at` on every
-    // save, so a re-stamp here would have landed as now() — inventing liveness and
-    // buying a wedged run a fresh full threshold. The clock stays where it was and
-    // the reprieve is recomputed from the evidence on the next tick.
-    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+    // THE CLOCK MOVED (T4). A spare authorised by RUN-SCOPED evidence — here a stage
+    // row inside the window — persists the unmodified snapshot, and `saveIfActive`
+    // re-stamps `last_advanced_at` to now() as a matter of course. That is what stops
+    // display consumers reporting phantom staleness and makes the probes fire once per
+    // hang window instead of once per tick. The watchdog still never READS this column
+    // as evidence: the next window's reprieve is re-earned from live evidence.
+    expect(after?.last_advanced_at).toBe(new Date(90_000).toISOString())
   })
 
   test('the reprieve EXPIRES on its own once the evidence stops', async () => {
-    // The other half: a stand-down must not become immortality. The re-stamp moves
-    // the clock to the last event, so a run that goes quiet is reaped on schedule
-    // measured from THAT moment.
+    // The other half: a stand-down must not become immortality. A run-scoped spare
+    // re-stamps the clock (T4), so expiry is measured one full window from the last
+    // SPARE — not from the last event, and not from the run's fire. Each window must
+    // RE-EARN the reprieve from fresh evidence, and a run that has gone quiet cannot.
     let t = 0
     let stageAt: string | null = null
     const h = buildHarness({
@@ -3535,9 +3540,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).not.toBe('failed')
 
-    // Events stop. Because nothing was persisted, the very next tick past the
-    // threshold measured from the LAST event reaps as designed.
-    t = 111_000
+    // Events stop. The spare at t=90s re-stamped the clock to 90s, so the run is
+    // reaped one full window after THAT — and the stage row is by then 105 s old,
+    // outside the 60 s window, so there is nothing left to re-earn the reprieve with.
+    t = 155_000
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
@@ -3640,8 +3646,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     // The probe was actually CONSULTED — a stand-down that happened for some other
     // reason would pass the assertion above while proving nothing.
     expect(probed).toBeGreaterThan(0)
-    // NOTHING WAS WRITTEN, same property as the stage-event reprieve: the clock stays
-    // where it was, so the reprieve is recomputed from evidence on the next tick.
+    // NOTHING WAS WRITTEN, and deliberately so (T4). The launcher probe answers about a
+    // shared launcher GENERATION, not about this run, so it spares the run but does not
+    // move its clock; only RUN-SCOPED evidence re-stamps. That split is exactly what
+    // keeps the 2 h ceiling reachable for a forever-alive launcher (see N4).
     expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
   })
 
@@ -3790,8 +3798,9 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
-    // NOTHING WAS WRITTEN — the reprieve is recomputed from evidence every tick.
-    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+    // THE CLOCK MOVED: this run was spared by THIS run's own ticker row — run-scoped
+    // evidence — so the spared tick re-stamped `last_advanced_at` (T4).
+    expect(after?.last_advanced_at).toBe(new Date(90 * 60_000 + 60_000).toISOString())
   })
 
   test('NEGATIVE (N2d): the override window is BOUNDED — the 2 h ceiling still reaps through it', async () => {
@@ -3860,7 +3869,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     t = 20 * 60_000
 
     const outcome = await h.step(store.get(run.id)!)
-    expect(outcome.changed).toBe(false)
+    // A fresh stage row is RUN-SCOPED evidence, so this spare re-stamps the clock (T4)
+    // and the note says which of the two clock decisions was taken.
+    expect(outcome.changed).toBe(true)
+    expect(outcome.note ?? '').toContain('advancement clock re-stamped')
     expect(outcome.note ?? '').toContain('hang watchdog STOOD DOWN')
     // THE SAME CONCRETE DISCLOSURE THE REAP CARRIES — both clocks and the probe's
     // answer, never a boolean.
@@ -3930,7 +3942,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     expect(after?.failure_reason ?? '').toContain('ceiling outranks any liveness reprieve')
   })
 
-  test('NEGATIVE (N5): when the heartbeat STOPS, the reprieve expires from the LAST beat', async () => {
+  test('NEGATIVE (N5): when the heartbeat STOPS, the reprieve expires from the LAST SPARED TICK', async () => {
     // The sibling of "the reprieve EXPIRES on its own", for the ticker case: a heartbeat
     // that dies while the exec hangs must not leave the run un-reapable. The probe is
     // pinned 'unknown' so ONLY the heartbeat is under test — a live-launcher answer
@@ -3948,21 +3960,26 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     await h.loop.runOnce()
 
-    // The ticker beats twice, 30 s apart, each one sparing the run.
-    for (const beat of [70_000, 100_000]) {
+    // The ticker beats twice, one hang window apart, each beat landing on a tick where
+    // the watchdog TRIPS — so each one is a run-scoped spare that re-stamps the clock
+    // (T4). The spacing is deliberate: after the first spare moves the clock to t=71 s,
+    // a beat sooner than one window later would not even reach the watchdog.
+    for (const beat of [70_000, 140_000]) {
       lastBeat = new Date(beat).toISOString()
       t = beat + 1_000
       await h.loop.runOnce()
       expect(store.get(run.id)?.phase).not.toBe('failed')
     }
 
-    // Then it dies. 59 s after the last beat: still spared, measured from THAT moment.
-    t = 159_000
+    // Then it dies. 58 s after the last SPARED TICK (t=141 s) the watchdog does not even
+    // trip — the reprieve now runs from the spare, not from the run's fire.
+    t = 199_000
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).not.toBe('failed')
 
-    // Past the threshold measured from the last beat: reaped, on schedule.
-    t = 161_000
+    // One full window past that LAST SPARED TICK: the watchdog trips, the newest beat is
+    // by now 62 s old — outside the window — and nothing re-earns the reprieve. Reaped.
+    t = 202_000
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
@@ -3989,6 +4006,283 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     expect(after?.failure_reason).toContain('suspected agent hang')
     // Reaped, NOT redispatched.
     expect(h.inputs).toHaveLength(0)
+  })
+})
+
+/**
+ * THE THREE RUN-SCOPED PROBES (card #2). The two evidence sources that came
+ * before this one answer about the wrong subject: the stage ledger is measured
+ * silent for up to 72 min inside one `codex exec` and says nothing at all during
+ * review, and the launcher probe answers about a GENERATION several runs share.
+ * Neither can say whether THIS build is doing work — which is how 17 runs in 30
+ * days were terminated as "suspected agent hang", four of them with a complete,
+ * green PR already on GitHub.
+ *
+ * The seam is exercised with FAKE gatherers only: no real process table, no real
+ * scratch files, and nothing in this file ever signals a process.
+ */
+describe('orchestrator — run-scoped hang evidence (three probes)', () => {
+  const HANG_MS = 60_000
+  type Obs = import('./run-evidence.ts').EvidenceObservation
+  const obs = {
+    activity: (age_ms: number, detail = 'seen'): Obs => ({ observed: 'activity', age_ms, detail }),
+    nothing: (detail = 'looked, found none'): Obs => ({ observed: 'nothing', detail }),
+    unknown: (detail = 'could not look'): Obs => ({ observed: 'unknown', detail }),
+  }
+
+  test('SPARED BY A LIVE PROCESS: the ground-truth probe outranks a stale clock', async () => {
+    // The measured false kill, reduced: `last_advanced_at` frozen at the fire while
+    // the run's own process is running this second.
+    let t = 0
+    let consulted = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      gather_run_evidence: () => {
+        consulted += 1
+        return { process: obs.activity(0), artifacts: obs.nothing(), ref: obs.nothing() }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 90_000
+    const outcome = await h.step(store.get(run.id)!)
+
+    expect(consulted).toBeGreaterThan(0) // the seam really was asked, not defaulted past
+    // A live process is the strongest RUN-SCOPED answer there is, so the spare re-stamps
+    // the advancement clock (T4) and says so.
+    expect(outcome.changed).toBe(true)
+    expect(outcome.note ?? '').toContain('advancement clock re-stamped')
+    expect(outcome.note ?? '').toContain('hang watchdog STOOD DOWN')
+    expect(outcome.note ?? '').toContain('run process=live')
+    const after = store.get(run.id)
+    expect(after?.phase).not.toBe('failed')
+
+    // AND IT ACTUALLY PERSISTS. `changed: true` is only half the claim — the tick's
+    // `saveIfActive` is what carries it to the column (the orchestrator never touches
+    // `last_advanced_at` itself; callers cannot pass it). Same instant, through the real
+    // seam: this is the unit half of T4's verification.
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.last_advanced_at).toBe(new Date(90_000).toISOString())
+  })
+
+  test('SPARED BY A FRESH ARTIFACT: an mtime inside the window is activity', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      gather_run_evidence: () => ({
+        process: obs.nothing(),
+        artifacts: obs.activity(30_000),
+        ref: obs.nothing(),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 90_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('SPARED BY BRANCH-REF MOVEMENT: the third probe carries a stand-down on its own', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      gather_run_evidence: () => ({
+        process: obs.nothing(),
+        artifacts: obs.nothing(),
+        ref: obs.activity(30_000),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 90_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('POSITIVE CONTROL: all quiet still REAPS, and the reason names every probe', async () => {
+    // A watchdog that can no longer kill anything is a different bug of the same
+    // family. Every probe ran, none saw activity inside the window — reap, with the
+    // reap prefix unchanged byte-for-byte and the evidence spelled out after it.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      gather_run_evidence: () => ({
+        process: obs.nothing(),
+        // OLDER than the 60 s window: quiet, but its age is still disclosed.
+        artifacts: obs.activity(120_000),
+        ref: obs.nothing(),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 90_000
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    const reason = after?.failure_reason ?? ''
+    expect(reason).toStartWith(
+      'no progress for 1 min — suspected agent hang (inner workflow stopped advancing)',
+    )
+    expect(reason).toContain('liveness checked:')
+    expect(reason).toContain('run process=none observed')
+    expect(reason).toContain('newest artifact 2 min old')
+    expect(reason).toContain('no branch ref movement recorded')
+  })
+
+  test('AN UNKNOWN PROBE DEFERS — and the reap stays reachable once it can look again', async () => {
+    // Both directions in one test. "Could not check" must not read as "checked and
+    // found nothing" (the defect class this card forbids), and the deferral must not
+    // become an amnesty.
+    let t = 0
+    let blind = true
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      gather_run_evidence: () => ({
+        process: obs.nothing(),
+        artifacts: blind ? obs.unknown('scratch dir unreadable') : obs.nothing(),
+        ref: obs.nothing(),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 90_000
+    const deferred = await h.step(store.get(run.id)!)
+    expect(deferred.changed).toBe(false)
+    expect(deferred.note ?? '').toContain('hang watchdog DEFERRED')
+    expect(deferred.note ?? '').toContain('newest artifact unknown (scratch dir unreadable)')
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    // The probe recovers and positively sees nothing: the very next tick reaps.
+    blind = false
+    t = 120_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('suspected agent hang')
+  })
+
+  test('A THROWING GATHERER DEFERS, never reaps — its own failure is not evidence of death', async () => {
+    let t = 0
+    let throwing = true
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 2 * 60 * 60_000,
+      gather_run_evidence: () => {
+        if (throwing) throw new Error('process table query failed')
+        return { process: obs.nothing(), artifacts: obs.nothing(), ref: obs.nothing() }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 90_000
+    const deferred = await h.step(store.get(run.id)!)
+    expect(deferred.changed).toBe(false)
+    expect(deferred.note ?? '').toContain('hang watchdog DEFERRED')
+    expect(deferred.note ?? '').toContain('process table query failed')
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).not.toBe('failed')
+
+    throwing = false
+    t = 120_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.phase).toBe('failed')
+  })
+
+  test('THE CEILING OUTRANKS A DEFERRAL — a permanently blind probe cannot hold a lane', async () => {
+    // NEVER WIDEN A REPRIEVE WITHOUT A RETRACTION PATH. A gatherer that can never
+    // answer would otherwise defer forever, which is a worse failure than the false
+    // kill this card fixes: there are only ~6 lanes.
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ result: null }),
+      now: () => new Date(t).toISOString(),
+      no_advance_hang_ms: HANG_MS,
+      max_inflight_ms: 100_000,
+      gather_run_evidence: () => ({
+        process: obs.unknown('process table unreadable'),
+        artifacts: obs.unknown('process table unreadable'),
+        ref: obs.unknown('process table unreadable'),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    t = 150_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)
+    expect(after?.phase).toBe('failed')
+    expect(after?.failure_reason ?? '').toContain('inner workflow stalled (no terminal result within 2 min)')
+    expect(after?.failure_reason ?? '').toContain('ceiling outranks any liveness reprieve')
+    // Disclosed there too — the ceiling reaped THROUGH a blind check, and says so.
+    expect(after?.failure_reason ?? '').toContain('run process=unknown (process table unreadable)')
+  })
+
+  test('DEAD LAUNCHER: only run-scoped activity INSIDE the override window overturns it', async () => {
+    // Mirrors N2/N2c for the new probes, at the REAL thresholds — the 90-min hang
+    // window and the 15-min override window only differ at real scale, and a fixture
+    // that collapses them makes one of the two assertions vacuous.
+    const REAL_HANG_MS = 90 * 60_000
+    for (const [artifactAgeMs, reaped] of [
+      [10 * 60_000, false],
+      [30 * 60_000, true],
+    ] as const) {
+      let t = 0
+      const h = buildHarness({
+        plan: () => ({ result: null }),
+        now: () => new Date(t).toISOString(),
+        no_advance_hang_ms: REAL_HANG_MS,
+        max_inflight_ms: 4 * 60 * 60_000,
+        // ANCIENT stage evidence: the stage ledger cannot be what saves here.
+        latest_stage_event_at: () => new Date(0).toISOString(),
+        probe_run_alive: () => 'dead',
+        gather_run_evidence: () => ({
+          process: obs.nothing(),
+          artifacts: obs.activity(artifactAgeMs),
+          ref: obs.nothing(),
+        }),
+      })
+      // Both legs share one database (`beforeEach`), so each needs its own slug.
+      const run = await createRun({ merge_mode: 'pr' as MergeMode, slug: `add-thing-${artifactAgeMs}` })
+      await h.loop.runOnce()
+      t = REAL_HANG_MS + 60_000
+      await h.loop.runOnce()
+
+      const after = store.get(run.id)
+      if (reaped) {
+        expect(after?.phase).toBe('failed')
+        expect(after?.failure_reason ?? '').toContain('launcher is positively dead')
+      } else {
+        expect(after?.phase).not.toBe('failed')
+      }
+      // CONTROL: the artifact really was inside the ordinary hang window in BOTH legs,
+      // so the difference above is the override window and not the hang window.
+      expect(artifactAgeMs).toBeLessThan(REAL_HANG_MS)
+    }
   })
 })
 

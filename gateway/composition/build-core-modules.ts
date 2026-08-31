@@ -82,6 +82,7 @@ import { buildBoardReconcileObserver } from '@neutronai/trident/board-reconcile.
 import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
+import { buildRunEvidenceGatherer } from '@neutronai/trident/run-evidence-probes.ts'
 import { buildWorktreeReaperLoop } from '@neutronai/trident/worktree-reaper.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
@@ -636,6 +637,23 @@ export function buildCoreModules(
           // "no evidence" and reaps exactly as before, so gating the wire-up would
           // be how this fix ships green, tested, and inert in production.
           latest_stage_event_at: (run_id) => store.latestStageEventAt(run_id),
+          // THE THREE RUN-SCOPED PROBES the watchdog must consult before it may
+          // declare a hang: a live process for the run, fresh mtime on the run's
+          // own artifacts, recent movement on its branch ref.
+          //
+          // UNCONDITIONAL, for the same reason as `latest_stage_event_at` above:
+          // the orchestrator treats an absent seam as before-behaviour, so gating
+          // this wire-up behind a flag is exactly how the fix would ship green,
+          // tested, and inert.
+          //
+          // DEFAULT-CONSTRUCTED — deliberately NOT `run_host: runHost`. The probes
+          // carry their own 15 s host bound (`RUN_EVIDENCE_HOST_TIMEOUT_MS`),
+          // whereas this wiring's `run_host` is the build-operation runner (60 s
+          // budget, and stubbed with canned git/gh answers in composed tests). A
+          // liveness probe must observe the REAL host or answer `unknown`; routing
+          // it through a canned stub would let bookkeeping impersonate evidence
+          // again, which is the defect this card exists to fix.
+          gather_run_evidence: buildRunEvidenceGatherer(),
         }
         // The hang watchdog's SECOND positive-liveness source: the same launcher
         // pid probe the 'trident-liveness' tick loop uses. The loop acts only on a
