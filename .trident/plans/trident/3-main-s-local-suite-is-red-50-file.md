@@ -34,7 +34,7 @@
 - [x] T1 — Hermetic per-instance env baseline for every `bun test` process: new preload `tests/support/scrub-instance-env.ts` (delete `OWNER_HOME` + all `NEUTRON_*` except `NEUTRON_TEST_*`; set `NEUTRON_HOME` to a fresh per-process scratch dir with best-effort exit cleanup), registered in `bunfig.toml` after the existing `scrub-substrate-env.ts`, plus a race-proof pinned self-test (child-process probe with a poisoned env + a bunfig registration assertion). A/B demonstrated: control run names the live DB path in the ownership refusal; fixed run names a scratch path. Committed in `ca6e2a93`.
 - [x] T2 — Fix the `persona-loader.test.ts` mtime-cache test's precision bug: pin the file mtime to a WHOLE-second stamp before the first load and restore to the same stamp after the body rewrite, so the stamp round-trips exactly through `utimes`+`stat` on every bun/filesystem. Control 18 pass / 1 fail; after, 19 pass / 0 fail x3. Committed in `ca6e2a93`.
 - [x] T3 — Full-suite verification on the branch worktree with the naturally inherited (dirty) shell env: (a) before spot-check — detached scratch worktree of origin/main + `bun install` + `bun test gateway/boot.test.ts`, expect the migration ownership refusal naming the live DB (evidence only, not gating; redact absolute host paths in anything committed); (b) after — `NEUTRON_TEST_JOBS=2 bash scripts/run-tests.sh` in the branch worktree, backgrounded to a log, required exit 0 with `failed: 0` lanes and the coverage audit line showing `declared == bun-discovered == executed` and executed >= 1400 (baseline 1399 + the new self-test file; any drop below 1399 is an automatic FAIL of this task); (c) positive control A — `NEUTRON_TEST_ROOT` scratch dir holding one deliberately failing test, real runner must exit 1 with `FAIL — 1/1 lane(s)`; (d) positive control B — temp failing `*.test.ts` inside the worktree run via `bun test` (preloads active) must exit 1, then be deleted before commit; (e) triage any straggler red with its measured error before touching anything — widen the scrub list only on a quoted variable, fix a bun-1.3.13-vs-1.3.9 skew as a pinned test fix, never skip/delete a test, never touch the ownership guard, `scripts/run-tests.sh`, or the PGLite lane; one more full run after any fix; (f) append the redacted verification record to this plan and commit.
-- [ ] T4 (TERMINAL, salvage-recovered — restore per Round-8 notes; checkpoint-push the docs BEFORE the suite run) — Documentation + staged as-built entry + terminal suite record: (a) add a `## Hermeticity — the env a test run sees` section to `docs/testing-runner.md` (both bunfig preloads by path and purpose; why the scrub exists with the measured 2026-08-31 incident, ownership guard framed as CORRECT; the `NEUTRON_TEST_*` carve-out; the child-process boundary; CI parity — CI executes every file via the SAME `scripts/run-tests.sh` under an 8-way `NEUTRON_TEST_SHARD` matrix with bun pinned 1.3.9, no hidden skipping; the bun-version-skew gotchas incl. sub-ms `mtimeMs`; the two residual non-hermeticities a preload cannot close). (b) Stage the as-built entry as `.trident/as-built/trident/3-main-s-local-suite-is-red-50-file.md` per the Round-7 shape contract — NEVER touch `docs/AS_BUILT.md`. (c) Terminal full-suite record: `NEUTRON_TEST_JOBS=2 bash scripts/run-tests.sh` on the branch tip, logged; REQUIRED: audit line with `declared == bun-discovered == assigned == executed` and executed >= 1405 (a drop below 1399 is an automatic FAIL), and every failing file within the 14-file FOLLOW-UP set; a red outside it is triaged per T3(e) before finishing. (d) Flip this task to `- [x]` in `.trident/plans/trident/3-main-s-local-suite-is-red-50-file.md` and append the T4 record — PRESERVE every existing section of that file verbatim. Redact absolute host data paths as `<data-home>/…` in everything written; never write the leak-gate-banned word in any file, commit message, or PR body.
+- [x] T4 (TERMINAL, salvage-recovered — restore per Round-8 notes; checkpoint-push the docs BEFORE the suite run) — Documentation + staged as-built entry + terminal suite record: (a) add a `## Hermeticity — the env a test run sees` section to `docs/testing-runner.md` (both bunfig preloads by path and purpose; why the scrub exists with the measured 2026-08-31 incident, ownership guard framed as CORRECT; the `NEUTRON_TEST_*` carve-out; the child-process boundary; CI parity — CI executes every file via the SAME `scripts/run-tests.sh` under an 8-way `NEUTRON_TEST_SHARD` matrix with bun pinned 1.3.9, no hidden skipping; the bun-version-skew gotchas incl. sub-ms `mtimeMs`; the two residual non-hermeticities a preload cannot close). (b) Stage the as-built entry as `.trident/as-built/trident/3-main-s-local-suite-is-red-50-file.md` per the Round-7 shape contract — NEVER touch `docs/AS_BUILT.md`. (c) Terminal full-suite record: `NEUTRON_TEST_JOBS=2 bash scripts/run-tests.sh` on the branch tip, logged; REQUIRED: audit line with `declared == bun-discovered == assigned == executed` and executed >= 1405 (a drop below 1399 is an automatic FAIL), and every failing file within the 14-file FOLLOW-UP set; a red outside it is triaged per T3(e) before finishing. (d) Flip this task to `- [x]` in `.trident/plans/trident/3-main-s-local-suite-is-red-50-file.md` and append the T4 record — PRESERVE every existing section of that file verbatim. Redact absolute host data paths as `<data-home>/…` in everything written; never write the leak-gate-banned word in any file, commit message, or PR body.
 
 ## T3 verification record (2026-08-31)
 
@@ -357,3 +357,68 @@ The 4 reds are `FOLLOW-UP-A` again and none is in `git diff 34995c68..HEAD`: res
 build-gbrain-memory's DISABLED-warning case and its per-connect-key sibling (5000 ms timeout) —
 this box carries `/usr/local/bin/gbrain` and `/usr/bin/codex` as real deployment symlinks, a
 filesystem leak no `bun test` preload can close. Everything this branch touches is green.
+
+## T4 terminal verification record (2026-08-31)
+
+Run in the branch worktree at the T4 checkpoint commit (documentation + staged as-built entry
+already committed), under the box's naturally inherited (dirty) shell env — nothing scrubbed
+outside the committed preload. `bun --version` = **1.3.13** (CI pins 1.3.9). `bun install` =
+**2503 packages installed, exit 0**. Command: `NEUTRON_TEST_JOBS=2 bash scripts/run-tests.sh`,
+backgrounded to a log and polled by tail (never foreground — a foreground hour-long run is what
+got the previous round reaped).
+
+Planner + audit, verbatim from the log:
+
+```
+run-tests: 1405 test files (bun-discovered: 1405) → 14 general chunks of <=100 + 20-file PGLite lane + 38-file device lane
+run-tests: bun=bun max-concurrency=16 timeout=15000ms jobs=2
+---- run-tests coverage audit ----
+declared files: 1405   bun-discovered: 1405   assigned here: 1405   files executed: 1405 (1347 general + 20 PGLite + 38 device)
+lanes: 14 general chunks + PGLite lane + device lane   failed: 5 (7 8 12 PGLite-lane device-lane)
+run-tests: FAIL — 5/16 lane(s) contained failing tests (see output above).
+SUITE_EXIT=1
+```
+
+**Coverage audit four-way equal at 1405** — `declared == bun-discovered == assigned == executed`.
+**The executed count did not drop: 1405 >= 1405, still up from the 1399 baseline, never down.**
+Nothing was skipped, emptied or dropped to buy a green number, and the audit's own
+no-silent-truncation guard is untouched. `SUITE_EXIT=1` with 5 red lanes is the EXPECTED terminal
+outcome recorded in the Round-7/Round-8 notes, not a regression: the reds are measured non-branch
+conditions of this box.
+
+Distinct failing FILES this run — **14, and the set is exactly a subset of (in fact equal to) the
+14 recorded FOLLOW-UP files**; every one of the four recorded families fired, and NOTHING outside
+the allow-set went red:
+
+```
+FOLLOW-UP-A (real deployment binaries on this box's filesystem)   4 files
+  5  tests/integration/install-gbrain.test.ts
+  4  tests/integration/install-codex.test.ts
+  2  gbrain-memory/__tests__/resolve-gbrain-command.test.ts
+  3  gateway/wiring/__tests__/build-gbrain-memory.test.ts        (also the PGLite lane's only red)
+FOLLOW-UP-B (bun 1.3.13 Bun.build race under lane concurrency)    4 files
+  6  landing/__tests__/server.test.ts
+  1  landing/__tests__/chat-react-serving.test.ts
+  1  landing/__tests__/chat-react-bundle-builds.test.ts
+  1  landing/__tests__/chat-react-bundle-production-runtime.test.ts
+FOLLOW-UP-C (bun 1.3.13 "Requested module is already fetched")    5 files
+  4  app/__tests__/general-tab-set.test.tsx
+  3  app/__tests__/project-switch-is-instant.test.tsx
+  5  app/__tests__/project-switch-reaches-the-wire.test.tsx
+  2  app/__tests__/rail-tap-lands-on-the-tapped-project.test.tsx
+  2  app/__tests__/reachability.test.tsx
+FOLLOW-UP-D (owner GH_TOKEN in the environ spawned children inherit)  1 file
+  2  tests/integration/github-credential-wired.open.test.ts
+```
+
+(Counts are failing test cases per file.) **No red outside the allow-set**, so no T3(e) triage and
+no family extension was required this round; no code changed for the terminal run.
+
+Baseline → terminal, unchanged from the T3 measurement and re-confirmed here: **10 of 16 red lanes
+/ 50 distinct files → 5 of 16 red lanes / 14 distinct files**, executed **1399 → 1405**. The entire
+live-environment cluster (`gateway/boot`, `open/__tests__/*-wiring|served`,
+`tests/integration/*.open`, `gbrain-memory/__tests__/doctor-*`, `persona-loader`, …) is green.
+
+T4's documentation content (`docs/testing-runner.md` hermeticity sections, staged as-built entry)
+was restored byte-for-byte from the reaped round's salvage snapshot `067bef28` and verified with an
+empty `git diff 067bef28 --` on both files. `docs/AS_BUILT.md` was not touched.
