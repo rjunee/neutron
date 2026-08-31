@@ -262,3 +262,29 @@ Re-confirmed on the box: `/usr/local/bin/gbrain -> ../install/global/node_module
 and `/usr/bin/codex -> ../lib/node_modules/@openai/codex/bin/codex.js` are both real symlinks from
 the deployment. Everything this branch actually touches is green: `persona-loader.test.ts`,
 `memory-swap-seam.depcruise.test.ts` and `tests/support/*` all pass. T3 stays `- [x]`.
+
+### (i) Fourth re-entry — the child-process boundary is now recorded where it will be re-tried
+
+T3 was dispatched a fourth time onto the same committed tip. The full-suite verification, both
+positive controls and the four follow-up triages above stand; the full-suite re-run is deferred
+to this plan's terminal task by the runner contract, and nothing inside T3's prohibitions was
+left undone. Rather than record a fourth no-op, this round closed the one gap that was costing a
+round every time: `FOLLOW-UP-D`'s dead end had to be re-derived by hand in each of the last three
+rounds because it lived only in commit messages.
+
+Re-measured once more, independently, on bun 1.3.13 — `sh -c 'echo "[${PROBE_VAR-MISSING}]"'`
+spawned from one process:
+
+```
+process.env.PROBE_VAR = 'secret123'   -> [MISSING]
+after set-empty                       -> [MISSING]
+after delete                          -> [MISSING]
+node:child_process execFileSync       -> [MISSING]
+```
+
+A default-env spawn hands the child the environ the process STARTED with, so **neither a set nor
+a delete in a preload propagates** — which is why the preload cannot strip `GH_TOKEN` from a
+spawned test child, and equally why the self-test's poisoned-env probe must (and does) pass an
+explicit `env:{…}`. That boundary is now a comment block in `tests/support/scrub-instance-env.ts`
+itself, next to the delete list, so the next reader tries the fix at the spawn site instead of a
+fifth time here. No behaviour changed: comment-only, plus this record.

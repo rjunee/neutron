@@ -33,6 +33,23 @@
  *
  * Scope: `bun test` ONLY (bunfig [test].preload). Server boot does not load
  * this file, so a real install still reads its real environment at runtime.
+ *
+ * BOUNDARY — this preload cannot reach CHILD PROCESSES. Measured three times
+ * on bun 1.3.13 (2026-08-31): a spawn with the default env hands the child the
+ * environ this process STARTED with, not the mutated `process.env`. In one
+ * process, spawning `sh -c 'echo "[${PROBE_VAR-MISSING}]"'`:
+ *
+ *   process.env.PROBE_VAR = 'secret123'  -> child prints [MISSING]
+ *   after set-empty                      -> [MISSING]
+ *   after delete                         -> [MISSING]
+ *   node:child_process execFileSync      -> [MISSING]
+ *
+ * i.e. neither a set nor a delete here propagates; only an explicit `env:{…}`
+ * at the spawn site decides what a child sees. So a test that asserts on what a
+ * SPAWNED process reads (e.g. GH_TOKEN/GITHUB_TOKEN reaching a child of the
+ * test runner) cannot be fixed by adding the var to the delete list below —
+ * that fix was tried and reverted once already, and re-measured twice. It
+ * belongs at the spawn site or in the runner's own invocation, not here.
  */
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
