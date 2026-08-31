@@ -1220,6 +1220,10 @@
   .car-banner-closed { background: var(--banner-error-bg); color: var(--banner-error-fg); }
   .car-thread { position: relative; flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
   .car-viewport { flex: 1 1 auto; overflow-y: auto; padding: 18px 16px 8px; display: flex; flex-direction: column; gap: 10px; }
+  /* Transcript window — the control that reveals the next older slice. First
+     child of the scrollback column; visually quiet. */
+  .car-load-older { align-self: center; flex: 0 0 auto; margin: 2px 0 6px; padding: 6px 14px; border: 1px solid var(--muted); border-radius: 999px; background: transparent; color: var(--muted); font: inherit; font-size: 0.8667rem; cursor: pointer; }
+  .car-load-older:hover { color: var(--fg); border-color: var(--fg); }
   .car-empty { margin: auto; text-align: center; color: var(--muted); }
   .car-empty-title { font-size: 1.4667rem; color: var(--fg); margin-bottom: 6px; }
   /* BUG 1 — each row is a centered, column-width flex container: the user bubble

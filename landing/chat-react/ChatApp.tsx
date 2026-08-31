@@ -12,13 +12,14 @@
  * CSS framework is bundled.
  */
 
-import { createContext, memo, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { createContext, memo, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   ThreadPrimitive,
   MessagePrimitive,
   ComposerPrimitive,
   MessagePartPrimitive,
   AssistantRuntimeProvider,
+  useAuiState,
   useMessage,
   useMessagePartText,
   useComposer,
@@ -912,6 +913,67 @@ function buildEditIndex(
     })
   }
   return map
+}
+
+/**
+ * The explicit "Load older messages" control that sits above the transcript
+ * window (see {@link TRANSCRIPT_WINDOW_MESSAGES}). Renders nothing when the
+ * whole conversation is already mounted.
+ *
+ * SCROLL ANCHORING — the restore is keyed on the RUNTIME's rendered message
+ * count, NOT on props or parent renders, because the extension lands one commit
+ * AFTER the click: `useExternalStoreRuntime` applies the adapter in an effect and
+ * then notifies, so the older bubbles only mount in that SECOND commit. An effect
+ * keyed on the parent's render would fire before they exist and restore against
+ * the old height. A LAYOUT effect there runs pre-paint, so there is no visible
+ * jump; and because the user is at the TOP of the viewport when they click,
+ * `isAtBottom` is false and assistant-ui's `useThreadViewportAutoScroll` will not
+ * fight the restore.
+ *
+ * The hooks are ABOVE the `hiddenCount <= 0` early return on purpose: the final
+ * extend is exactly the one that makes this button disappear, and its pending
+ * scroll restore must still run on that commit.
+ *
+ * The label uses the PLAIN number (no `toLocaleString`) so the component test can
+ * match the count as written.
+ */
+function LoadOlderMessages({
+  hiddenCount,
+  onLoadOlder,
+}: {
+  hiddenCount: number
+  onLoadOlder: () => void
+}): React.JSX.Element | null {
+  const btnRef = useRef<HTMLButtonElement | null>(null)
+  const pendingRef = useRef<{ viewport: HTMLElement; scrollHeight: number; scrollTop: number } | null>(null)
+  const renderedCount = useAuiState((s) => s.thread.messages.length)
+  useLayoutEffect(() => {
+    const p = pendingRef.current
+    if (p === null) return
+    pendingRef.current = null
+    p.viewport.scrollTop = p.scrollTop + (p.viewport.scrollHeight - p.scrollHeight)
+  }, [renderedCount])
+  if (hiddenCount <= 0) return null
+  return (
+    <button
+      type="button"
+      className="car-load-older"
+      ref={btnRef}
+      onClick={() => {
+        const viewport = btnRef.current?.closest('.car-viewport')
+        if (viewport instanceof HTMLElement) {
+          pendingRef.current = {
+            viewport,
+            scrollHeight: viewport.scrollHeight,
+            scrollTop: viewport.scrollTop,
+          }
+        }
+        onLoadOlder()
+      }}
+    >
+      Load older messages ({hiddenCount} more)
+    </button>
+  )
 }
 
 function TypingIndicator({
@@ -1890,6 +1952,8 @@ function ChatSurface({
   config,
   draft,
   uploadAffordance,
+  olderHiddenCount,
+  onLoadOlder,
   showPane,
   paneProjectId,
   paneOnOpenDoc,
@@ -1901,6 +1965,11 @@ function ChatSurface({
   config: BootstrapConfig
   draft: AttachmentDraft
   uploadAffordance: ChatMessageUploadAffordance | null
+  /** How many of this conversation's messages are OUTSIDE the mounted transcript
+   *  window (see {@link TRANSCRIPT_WINDOW_MESSAGES}); 0 hides the control. */
+  olderHiddenCount: number
+  /** Extend this surface's window by another {@link TRANSCRIPT_WINDOW_MESSAGES}. */
+  onLoadOlder: () => void
   /** M1 polish (item 3+5) — mount the desktop Work slide-out pane inside this
    *  Chat view (to the right of the messages, above the full-width composer). */
   showPane: boolean
@@ -2105,6 +2174,7 @@ function ChatSurface({
         <div className="car-chatstage">
         <div className="car-chatmain">
         <ThreadPrimitive.Viewport className="car-viewport">
+          <LoadOlderMessages hiddenCount={olderHiddenCount} onLoadOlder={onLoadOlder} />
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
               // BUG 1 — a FRESH onboarding auto-starts: the server pushes the
@@ -2247,6 +2317,16 @@ function ConversationRuntimeHost({
  *  grow without bound over a long session. The active surface is never evicted. */
 const MAX_MOUNTED_CONVERSATIONS = 8
 
+/** Transcript window (2026-08-31 web-slowness card): a surface mounts only the
+ *  trailing N messages of its conversation. The owner measured 56,096 DOM nodes
+ *  with Layout at 27.2% self time while typing — every mounted bubble costs full
+ *  price at Layout/Recalculate Style/Hit Test even when it never re-renders, so
+ *  the fix is fewer mounted nodes, not more memoization. Older messages are
+ *  reached via the explicit "Load older messages" control, which pins the window
+ *  start by message id (see olderAnchorId in MountedConversationImpl). The ONLY
+ *  place this number lives. */
+export const TRANSCRIPT_WINDOW_MESSAGES = 100
+
 /** FIX #343 / Codex P2 — grace window after a switch during which an active
  *  conversation's empty live vm is treated as a transient re-hydration and masked
  *  by its cached snapshot. Once it elapses with the transcript still empty, the
@@ -2341,6 +2421,60 @@ function MountedConversationImpl({
   const uploadsCtx = useUploadsCtx(config, fetchImpl)
   const docLinkCtx = useDocLinkCtx(config.origin, onOpenDocLink)
 
+  // ── TRANSCRIPT WINDOW (see TRANSCRIPT_WINDOW_MESSAGES) ────────────────────────
+  // Only the trailing N messages are handed to the runtime, so the DOM of EVERY
+  // surface — the active one AND the up-to-MAX_MOUNTED_CONVERSATIONS hidden
+  // keep-alive ones — is bounded, without touching assistant-ui or the cache.
+  //
+  // `olderAnchorId === null` ⇒ pure trailing slice: arrivals shift the window
+  // forward and the newest message is ALWAYS mounted. Once the user loads older,
+  // the window START is pinned BY ID, so arrivals GROW the rendered list instead
+  // of sliding it — nothing the user scrolled back to reading is dropped, and no
+  // rendered message changes index (assistant-ui keys bubbles by INDEX, so a
+  // shifting front would re-point every mounted bubble).
+  const [olderAnchorId, setOlderAnchorId] = useState<string | null>(null)
+  // Reset to the trailing window when this surface is switched AWAY from: the
+  // hidden surface shrinks off-screen (keep-alive DOM stays bounded across all
+  // mounted surfaces) and a switch back INTO it does zero extra work. Updater-form
+  // bailout: when already trailing (null) no render is scheduled — load-bearing
+  // for __tests__/switch-render-cost.test.tsx, which pins exactly which surfaces
+  // render on a switch.
+  useEffect(() => {
+    if (!active) setOlderAnchorId((prev) => (prev === null ? prev : null))
+  }, [active])
+  const windowedMessages = useMemo(() => {
+    // IDENTITY-PRESERVING short-circuit, and it is load-bearing rather than an
+    // optimization: `useChatAdapter` (useNeutronChat.ts:165-172) memoizes the
+    // external-store adapter on `vm.messages` IDENTITY — the #354 blank-screen /
+    // notify-storm guard — and switch-render-cost.test.tsx pins conversions=0 on a
+    // warm switch. Returning the SAME array keeps every short transcript
+    // bit-identical to the pre-window world.
+    if (messages.length <= TRANSCRIPT_WINDOW_MESSAGES) return messages
+    if (olderAnchorId !== null) {
+      const i = messages.findIndex((m) => m.id === olderAnchorId)
+      if (i === 0) return messages
+      if (i > 0) return messages.slice(i)
+      // anchor id gone (cleared/replaced transcript) → fall through to trailing
+    }
+    return messages.slice(-TRANSCRIPT_WINDOW_MESSAGES)
+  }, [messages, olderAnchorId])
+  const olderHiddenCount = messages.length - windowedMessages.length
+  const windowRef = useRef({ messages, windowedMessages })
+  windowRef.current = { messages, windowedMessages }
+  const onLoadOlder = useCallback(() => {
+    const { messages: all, windowedMessages: win } = windowRef.current
+    const first = win[0]
+    if (first === undefined) return
+    const i = all.findIndex((m) => m.id === first.id)
+    if (i <= 0) return
+    const next = all[Math.max(0, i - TRANSCRIPT_WINDOW_MESSAGES)]
+    if (next !== undefined) setOlderAnchorId(next.id)
+  }, [])
+  const runtimeVm = useMemo(
+    () => (windowedMessages === hostVm.messages ? hostVm : { ...hostVm, messages: windowedMessages }),
+    [hostVm, windowedMessages],
+  )
+
   return (
     <div className="car-conv" hidden={!active} aria-hidden={!active}>
     <DocLinkContext.Provider value={docLinkCtx}>
@@ -2352,16 +2486,24 @@ function MountedConversationImpl({
     <MetaContext.Provider value={metaCtx}>
       <ConversationRuntimeHost
         controller={controller}
-        vm={hostVm}
+        // The WINDOWED view-model — this is the seam that bounds the DOM. Only
+        // the runtime (and therefore ThreadPrimitive.Messages) is windowed; the
+        // byRenderId indexes above stay over the FULL list, where they are
+        // correct for every rendered message and cost no DOM.
+        vm={runtimeVm}
         origin={config.origin}
         draft={draft}
       >
         <ChatSurface
+          // NOT windowed: ChatSurface reads status / pending / notices, never
+          // the transcript.
           vm={hostVm}
           controller={controller}
           config={config}
           draft={draft}
           uploadAffordance={uploadAffordance}
+          olderHiddenCount={olderHiddenCount}
+          onLoadOlder={onLoadOlder}
           // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
           // surface (NOT gated on `active`). Gating on `active` unmounted the pane
           // on every switch-away and re-mounted it on return, replaying the
