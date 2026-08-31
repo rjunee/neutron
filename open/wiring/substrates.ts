@@ -39,6 +39,7 @@ import {
   PROFILE_WARM_CHAT,
   PROFILE_EPHEMERAL,
   PROFILE_WARM_FIRE,
+  type SubstrateProfile,
 } from '@neutronai/gateway/wiring/substrate-profiles.ts'
 import { getOpenAiModelPreference } from '@neutronai/runtime/models-openai.ts'
 import { OWNER_USER_ID } from '../owner-identity.ts'
@@ -74,8 +75,12 @@ export interface WiredSubstrates {
    * LLM-less.
    */
   reminderComposeSubstrate: Substrate | null
-  /** Per-worktree ephemeral factory: `(prefix) => (cwd) => Substrate`. */
-  makeEphemeralSubstrate: (instance_prefix: string) => (cwd: string) => Substrate
+  /**
+   * Per-worktree ephemeral factory: `(prefix, profile?) => (cwd) => Substrate`.
+   * The profile defaults to `PROFILE_EPHEMERAL`; a caller whose turn cannot publish anything
+   * passes a narrower one (the purity-preflight reword turn passes `PROFILE_LEAK_FIXER`).
+   */
+  makeEphemeralSubstrate: (instance_prefix: string, profile?: SubstrateProfile) => (cwd: string) => Substrate
   /** Warm per-repo-cwd trident-fire factory (memoized, non-ephemeral). */
   makeWarmFireSubstrate: (cwd: string) => Substrate
   /** Build-time pre-warm promise (never rejects); null when LLM-less. */
@@ -487,7 +492,7 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
   // path (NEVER a direct api.anthropic.com call). Throws on an empty pool so a
   // dispatch surfaces as a crashed turn rather than a silent no-op.
   const makeEphemeralSubstrate =
-    (instance_prefix: string) =>
+    (instance_prefix: string, profile: SubstrateProfile = PROFILE_EPHEMERAL) =>
     (cwd: string): Substrate => {
       const s =
         llmPool === null
@@ -500,8 +505,11 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
               user_id: OWNER_USER_ID,
               project_slug,
               // Disposable per-worktree Trident/agent-dispatch REPL. Security
-              // knobs live on the profile — see substrate-profiles.ts.
-              profile: PROFILE_EPHEMERAL,
+              // knobs live on the profile — see substrate-profiles.ts. The
+              // default GRANTS a GitHub credential because these builds commit
+              // and push; a caller whose turn does neither passes a narrower
+              // profile rather than inheriting an unused credential.
+              profile,
               ephemeral: true,
               ...(substrateFactory !== undefined ? { substrateFactory } : {}),
             })

@@ -30,6 +30,7 @@ import type { Event } from '@neutronai/runtime/events.ts'
 import type { ClaudeCodeSubstrateOptions } from '@neutronai/runtime/adapters/claude-code/index.ts'
 import { replToolBridgeRef } from '@neutronai/runtime/adapters/claude-code/persistent/pool-state.ts'
 import {
+  PROFILE_LEAK_FIXER,
   githubSpawnEnvRef,
   setGithubSpawnEnvResolver,
 } from '@neutronai/gateway/wiring/substrate-profiles.ts'
@@ -221,6 +222,20 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       await drain(w.llmCallSubstrate!)
       const llm = captured.find((o) => o.substrate_instance_id === 'cc-llm-owner')
       expect(llm!.env!['GH_TOKEN']).toBeUndefined()
+
+      // The ephemeral factory's DEFAULT still carries it: a trident build commits and pushes.
+      await drain(w.makeEphemeralSubstrate('cc-trident')('/repo/one'))
+      const build = captured.find((o) => o.substrate_instance_id === 'cc-trident-owner')
+      expect(build!.env!['GH_TOKEN']).toBe('probe-value')
+
+      // …but the purity-preflight REWORD turn passes PROFILE_LEAK_FIXER, and it must not. It
+      // runs before any PR exists, over text the leak gate objected to, with a Bash grant, and
+      // the outer preflight owns every commit and every push — so there is nothing for a
+      // publishing credential to do there except be stolen.
+      await drain(w.makeEphemeralSubstrate('cc-trident-leakfix', PROFILE_LEAK_FIXER)('/repo/scan'))
+      const leakfix = captured.find((o) => o.substrate_instance_id === 'cc-trident-leakfix-owner')
+      expect(leakfix).toBeDefined()
+      expect(leakfix!.env!['GH_TOKEN']).toBeUndefined()
     } finally {
       githubSpawnEnvRef.resolve = undefined
     }
