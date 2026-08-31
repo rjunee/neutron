@@ -866,6 +866,87 @@ with cross-references noted inline.
      Protects: **S2** (WS origin + fail-closed guards) — the unit that replaces this gap, not an
      invariant to keep forever.
 
+## 12. The honesty contract (provenance spine, 2026-08-31)
+
+TARGET contract, not current behaviour. These invariants state the direction the system is
+being moved toward; a line marked NOT YET ENFORCED is one today's code violates, and it is
+listed so a build touching the named site closes the gap rather than widens it. One transition
+is already enforced (#122) and anchors the pattern. Core rule: no component may return a
+two-valued answer where the third value is possible — every status is exactly one of OBSERVED
+(probed now, by a named probe), RECORDED (stored, carrying `observed_at`, the time of the
+observation it came from), or UNKNOWN (the probe did not run, or reached no conclusion).
+
+118. Every reported status carries its grade: OBSERVED, RECORDED (with `observed_at`), or
+     UNKNOWN — never a bare boolean where the third value is possible. Prevents: a stored
+     value consumed as though probed — a credential status read from stored metadata that
+     reads healthy while the token is revoked. Representative violating site:
+     `gateway/cores/integrations.ts:155` (`connected`; API-key slots are a presence check,
+     per the note at `:412`).
+     Protects: NOT YET ENFORCED — covered by review only.
+119. A probe that returned nothing reports UNKNOWN with a reason — never an implicit negative
+     observation and never an implicit pass. Prevents: an empty extraction from a check
+     reading as a passing check, and an absent CI run on a changed head reading as green.
+     Protects: NOT YET ENFORCED — covered by review only.
+120. A consumer of a RECORDED value declares the maximum observation age it accepts; age is
+     provenance, not metadata. Prevents: a merge-readiness flag consumed as true while the
+     run's own tests predate the change that invalidated them. Representative violating
+     consumer: the merge path's read of GitHub `mergeable` (`trident/gh-authed.ts:50`).
+     Protects: NOT YET ENFORCED — covered by review only.
+121. UNKNOWN never authorises an irreversible action (merge, deploy, delete, force-push,
+     terminate a run); it may only defer or refuse. Prevents: reaping a live build because a
+     probe failed to run or to conclude. One site already conforms: external launcher
+     liveness acts only on positive death evidence (the external-launcher liveness invariant
+     in §9; `trident/liveness.ts`).
+     Protects: `trident/liveness-death-e2e.test.ts` (that one site); everywhere else NOT YET
+     ENFORCED — covered by review only.
+122. Honesty is enforced structurally at the ledger write site — the one narrow waist every
+     path must pass through — never by convention at call sites; a guard at a caller is one
+     more guard among many, a guard at the waist is the contract. The enforced instance:
+     `inner_verdict='REQUEST_CHANGES'` with an empty findings list is a write the store
+     REJECTS, recording REVIEW_NOT_RUN instead (`TridentEmptyFindingsRejectionError`,
+     `trident/store.ts:58`, checked in the update path at `:948`). Prevents: infrastructure
+     failures recorded as reviewer rejections — 113 never-reviewed runs once read as
+     reviewed-and-rejected (`trident/orchestrator.ts:2350` comment).
+     Protects: `trident/store.test.ts` (this one transition); the general graded-transition
+     waist is NOT YET BUILT.
+123. A run is `finished` only when its declared artefact exists — evidence of OUTPUT, never
+     evidence of life; a cost above zero, a recent timestamp, and a process that replied are
+     activity proxies, not output. Prevents: a dispatched run recorded finished having
+     produced nothing, and live builds reaped over `last_advanced_at`, which a long build
+     round never re-stamps (`trident/store.ts:523-527` documents the staleness;
+     `runtime/subagent/registry.ts:18` defines `finished` as process-ended).
+     Protects: NOT YET ENFORCED — covered by review only.
+
+## 13. The action contract (provenance spine, 2026-08-31)
+
+Same status: TARGET contract. Each requirement retires a specific incident class; none is a
+structural rule in code today.
+
+124. Identity is resolved, never typed: an action taking a branch, a card, a project or a PR
+     resolves the name to an identity and reports what it resolved to. Prevents: a force-push
+     to a branch name that was typed rather than resolved, and an update call that silently
+     accepts a card belonging to another project — the same defect, an unresolved name
+     accepted as an identity.
+     Protects: NOT YET ENFORCED — covered by review only.
+125. An action's preconditions and effect are visible in its declaration BEFORE the call, not
+     discovered from its silence — a relaunch that rebuilds the branch from a card's
+     design-doc slug rather than from the failed run's branch must say so in its declaration,
+     so the agent knows before the call cuts a new branch. Prevents: semantics learned only
+     from the wreckage of the call.
+     Protects: NOT YET ENFORCED — covered by review only.
+126. A refusal names the layer that refused and carries the identifier of the probe that
+     produced the UNKNOWN. Prevents: a routing 404 rendered as "the checkout does not know
+     the ref"; a worktree leak rendered as an executor error (`CODEX_BUILD_BRANCH_UNBOUND`,
+     `trident/codex-build.sh:1165` — the message now names the holding worktree, the token
+     still points at the executor); and a gate whose recorded reason describes a scan it
+     never reached because it had already failed earlier with a different error.
+     Protects: NOT YET ENFORCED — covered by review only.
+127. No action may silently do nothing: a call whose precondition is unmet is structurally
+     incapable of returning success — what replaces a bare success value on a no-op is a
+     refusal that names the unmet precondition. Prevents: an update that reports success
+     having updated nothing, and a create that returns an id it never persisted.
+     Protects: NOT YET ENFORCED — covered by review only.
+
 ---
 
 ## Coverage summary
@@ -889,6 +970,11 @@ with cross-references noted inline.
 - `verified-findings.json` (the raw adversarial-verification workflow log) was consulted but not
   separately itemized — its 24/24 confirmed findings are already folded into the critic reports
   this file distills.
+- **#118–#127** (2026-08-31) encode the honesty and action contracts from the provenance-spine
+  architecture as §12–§13. They are TARGET contracts: apart from the store's empty-findings
+  refusal (#122) and the one conforming liveness site (#121), the code does not enforce them
+  yet — each line carries its own enforcement status so this doc never describes the target as
+  the present.
 
 This file should be re-run/re-checked at Fable synthesis time for each merged unit: if a unit
 closes an "unprotected" item by adding a test, update its line here to name that test.

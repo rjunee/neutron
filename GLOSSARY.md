@@ -117,3 +117,43 @@ Neutron lifts several of its runtime patterns:
   (doc comments + `SDK-CONTRACT.md`), where "Topline" was confusing residue with
   no in-repo pointer to follow; the concrete reference Core (`dtc-analytics`) is
   named directly instead.
+
+---
+
+## Names whose plain reading is false
+
+Everything above decodes lineage codenames. This section decodes LIVE names — columns, fields
+and markers in this repo whose plain English reading asserts something the system does not
+mean. Each entry: the name, what a reader assumes, what it actually means. Added 2026-08-31
+with the provenance-spine encoding (`docs/INVARIANTS.md` §12–§13); where a fix exists it is
+named — otherwise assume the false reading is still load-bearing.
+
+- **`last_advanced_at`** (`code_trident_runs`; `trident/store.ts:523-527`) — reads as "when
+  this run last showed life". Actually stamped at checkpoint boundaries only; a long build
+  round never re-stamps it, so a live build looks dead for the whole round. Mid-phase stage
+  events (`latestStageEventAt`) are the liveness evidence this column is not.
+- **`inner_verdict = 'REQUEST_CHANGES'`** (`trident/store.ts`) — reads as "a reviewer
+  rejected this work". Historical rows carry it on runs that never reached review. The store
+  now refuses that write (`TridentEmptyFindingsRejectionError`); old rows still lie.
+- **`REVIEW_NOT_RUN`** (`trident/store.ts:49`) — reads as "this run failed before review".
+  Actually "no reviewer verdict was recorded on this row" — it appears on runs that built
+  and published successfully; it marks missing review evidence, not a failed build.
+- **`connected`** (`gateway/cores/integrations.ts:155`) — reads as "this credential works
+  right now". For API-key slots it is a stored presence check, not a probe: a revoked token
+  reads `connected: true` until something exercises it. (OAuth slots do a live read; see the
+  note at `:412`.)
+- **`mergeable` / `MERGEABLE`** (GitHub PR field, consumed via `trident/gh-authed.ts`) —
+  reads as "safe to merge". Actually "no textual conflict when GitHub last computed it": it
+  says nothing about whether checks are still valid, so it reads true while the run's own
+  tests predate the change that invalidated them.
+- **empty `inner_checkpoint_findings`** (`trident/store.ts`) — reads as "the review found
+  nothing wrong". Actually "the run never reached review": an empty findings list is an
+  infrastructure outcome, never a clean bill of health.
+- **`finished`** (`runtime/subagent/registry.ts:18`; agent dispatch) — reads as "the
+  dispatched run did its job". Actually "the process ended": runs have been recorded
+  `finished` having produced no artefact at all. Evidence of output is not part of this
+  status today.
+- **`CODEX_BUILD_BRANCH_UNBOUND`** (`trident/codex-build.sh:1165`) — reads as an executor
+  fault ("the build could not bind its branch"). Actually a refusal because a leaked
+  worktree still holds the branch: the message now names the holding worktree, but the token
+  still points a reader at the wrong layer.
