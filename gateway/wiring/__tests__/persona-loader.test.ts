@@ -13,11 +13,19 @@
  * (Date.now()-relative) so the suite survives across wall-clock weeks
  * per the "no hardcoded ISO" rule (internal design notes
  * watchdog-test-data-rot-stale-hardcoded-dates.md).
+ *
+ * Stamps that must ROUND-TRIP through utimes+stat are pinned to WHOLE
+ * seconds (Date.now() floored to :00.000): the loader keys its cache on
+ * st.mtimeMs, which on newer bun (1.3.13 local) carries sub-millisecond
+ * precision, while a utimes(Date) restore is integer-ms at best — so
+ * restoring a sub-ms original stamp silently changes the cache key and a
+ * "same mtime" cache hit can never fire (green on CI's bun 1.3.9, where
+ * mtimeMs is integer-ms; deterministically red on newer local bun).
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
-import { stat, utimes, readFile } from 'node:fs/promises'
+import { utimes, readFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -134,16 +142,20 @@ describe('load()', () => {
 describe('mtime-keyed cache', () => {
   test('first load reads, second load (same mtime) returns identical content from cache', async () => {
     seed('SOUL.md', SOUL_BODY)
+    // Pin the mtime to a whole-second stamp BEFORE the first load: the cache
+    // key is st.mtimeMs, and only an integer-ms stamp survives the utimes
+    // round-trip below exactly (see header note).
+    const target = join(personaDir, 'SOUL.md')
+    const pinned = new Date(Math.floor(Date.now() / 1000) * 1000)
+    await utimes(target, pinned, pinned)
     const loader = new PersonaPromptLoader({ owner_home: tmpRoot, log: () => {} })
     const first = await loader.load()
     expect(first).toContain(SOUL_BODY)
     // Overwrite the file body but DO NOT advance the mtime — cache must
     // still return the original body on the next call (it trusts mtime).
-    const target = join(personaDir, 'SOUL.md')
-    const st = await stat(target)
     writeFileSync(target, 'STALE_NEW_BODY', 'utf8')
-    // Force the mtime back to the original so the cache hit fires.
-    await utimes(target, st.atime, st.mtime)
+    // Force the mtime back to the pinned stamp so the cache hit fires.
+    await utimes(target, pinned, pinned)
     const second = await loader.load()
     expect(second).toBe(first)
     expect(second).not.toContain('STALE_NEW_BODY')
@@ -167,15 +179,19 @@ describe('mtime-keyed cache', () => {
 
   test('invalidate(filename) drops the single entry; next load re-reads from disk', async () => {
     seed('SOUL.md', SOUL_BODY)
+    // Whole-second pin BEFORE the first load (see header note) — the restore
+    // below must reproduce the cached mtimeMs EXACTLY, so invalidate() stays
+    // the only explanation for the fresh read this test asserts.
+    const target = join(personaDir, 'SOUL.md')
+    const pinned = new Date(Math.floor(Date.now() / 1000) * 1000)
+    await utimes(target, pinned, pinned)
     const loader = new PersonaPromptLoader({ owner_home: tmpRoot, log: () => {} })
     const first = await loader.load()
     expect(first).toContain(SOUL_BODY)
-    // Rewrite the file but keep the original mtime — without invalidate
+    // Rewrite the file but keep the pinned mtime — without invalidate
     // the cache would return the stale body.
-    const target = join(personaDir, 'SOUL.md')
-    const st = await stat(target)
     writeFileSync(target, 'INVALIDATED_BODY', 'utf8')
-    await utimes(target, st.atime, st.mtime)
+    await utimes(target, pinned, pinned)
     loader.invalidate('SOUL.md')
     const second = await loader.load()
     // Re-read from disk picks up the new body even though mtime is same.
@@ -188,14 +204,18 @@ describe('mtime-keyed cache', () => {
     seed('SOUL.md', SOUL_BODY)
     seed('USER.md', USER_BODY)
     seed('priority-map.md', PMAP_BODY)
+    // Whole-second pin BEFORE the populate load (see header note).
+    const pinned = new Date(Math.floor(Date.now() / 1000) * 1000)
+    for (const fname of PERSONA_FILENAMES) {
+      await utimes(join(personaDir, fname), pinned, pinned)
+    }
     const loader = new PersonaPromptLoader({ owner_home: tmpRoot, log: () => {} })
     await loader.load() // populate
     // Rewrite all three with new bodies but keep mtimes pinned.
     for (const fname of PERSONA_FILENAMES) {
       const target = join(personaDir, fname)
-      const st = await stat(target)
       writeFileSync(target, `INVALIDATED_${fname}`, 'utf8')
-      await utimes(target, st.atime, st.mtime)
+      await utimes(target, pinned, pinned)
     }
     loader.invalidate()
     const out = await loader.load()
