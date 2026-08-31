@@ -15,7 +15,7 @@
  * that never registered cannot pass.
  */
 
-import { afterAll, afterEach, beforeAll, describe, expect, it } from 'bun:test'
+import { afterAll, afterEach, beforeAll, describe, expect, it, mock } from 'bun:test'
 import { GlobalRegistrator } from '@happy-dom/global-registrator'
 
 import type { AttachmentDraft } from '../useAttachmentDraft.ts'
@@ -293,7 +293,7 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     expect(new Set(generic).size).toBe(2)
   })
 
-  it('pasting with focus IN the composer attaches exactly once (req 1; the library’s own paste path stays pinned off)', async () => {
+  it('pasting with focus IN the composer attaches exactly once (req 1)', async () => {
     const { container, draft } = await mount()
 
     const input = container.querySelector('.car-input')
@@ -304,11 +304,70 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     dt.items.add(png('shot.png'))
     await pasteOn(input!, pasteEvent(dt))
 
-    // Exactly ONE item: the surface funnel attached it, and assistant-ui's
-    // built-in paste-to-attachment did not add a second along the way.
+    // Exactly ONE item: the surface funnel attached it, and nothing else in the
+    // composer added a second along the way. NOTE this case cannot, on its own,
+    // prove assistant-ui's own paste-to-attachment stays shut — that path is
+    // gated on `capabilities.attachments`, which is false here (and in
+    // production) because no attachments adapter is registered, so it would be
+    // silent even if `addAttachmentOnPaste` were removed. The prop is pinned by
+    // the prop-contract case below instead.
     expect(draft().items.length).toBe(1)
     expect(draft().items[0]!.name).toBe('shot.png')
   })
+
+  it('the composer input is handed addAttachmentOnPaste={false} — the library’s own attachment path stays shut', async () => {
+    // WHY A PROP-CONTRACT ASSERTION AND NOT A BEHAVIOURAL ONE. assistant-ui's
+    // ComposerPrimitive.Input paste handler returns early unless BOTH
+    // `addAttachmentOnPaste` and `thread.capabilities.attachments` are true.
+    // This app registers no attachments adapter, so the capability is false and
+    // the library path is inert TODAY: no observable state can distinguish the
+    // prop being there from it being gone, and a mount-and-paste test that
+    // claims to pin it is a test that passes when the prop is deleted (it did).
+    // The prop is future-proofing — it exists so that adding an adapter later
+    // cannot silently open a second attachment path that bypasses the
+    // `handleFiles` funnel's ZIP routing and upload limits — so what is pinned
+    // here is exactly what is asserted: the prop reaches the primitive, false.
+    //
+    // `mock.module` REPLACES the registry entry, `mock.restore()` does not undo
+    // it, and `bun test` runs every file in ONE process — so the snapshot is
+    // re-registered in `finally`, the same discipline switch-render-cost.test.tsx
+    // uses. The mock re-exports the REAL bindings (same function identities, so
+    // React context is untouched) and swaps only ComposerPrimitive.Input for a
+    // recorder that renders the real one.
+    const React = await import('react')
+    const spec = '@assistant-ui/react'
+    const realExports = { ...((await import(spec)) as unknown as Record<string, unknown>) }
+    const realComposer = realExports['ComposerPrimitive'] as Record<string, unknown>
+    const RealInput = realComposer['Input'] as React.ComponentType<Record<string, unknown>>
+    const seen: Array<Record<string, unknown>> = []
+    try {
+      mock.module(spec, () => ({
+        ...realExports,
+        ComposerPrimitive: {
+          ...realComposer,
+          Input: (props: Record<string, unknown>) => {
+            seen.push(props)
+            return React.createElement(RealInput, props)
+          },
+        },
+      }))
+
+      const { container } = await mount()
+      // Non-vacuity: the recorder really is the composer's input — the real
+      // primitive rendered under it, and the surface still works.
+      expect(container.querySelector('.car-input')).not.toBeNull()
+      expect(seen.length).toBeGreaterThan(0)
+
+      // EVERY render of the composer input, not just the first: a prop that is
+      // conditional would otherwise slip through on the render that matters.
+      expect(seen.map((p) => p['addAttachmentOnPaste'])).toEqual(seen.map(() => false))
+    } finally {
+      mock.module(spec, () => realExports)
+    }
+    // Explicit budget: `mock.module` invalidates the module graph it then
+    // re-imports, so this case pays a full re-import of ChatApp's dependency
+    // tree on top of a real mount.
+  }, 60_000)
 
   it('an image-only paste IS defaulted away (nothing may smear a placeholder into the composer)', async () => {
     const { draft } = await mount()
@@ -612,6 +671,16 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     ev.preventDefault()
     await pasteOnBody(ev)
     expect(draft().items.length).toBe(0)
+
+    // Non-vacuity: the SAME mount, the same file, the same dispatch — the only
+    // difference is that this one was not already cancelled — attaches. Without
+    // this the case passes on a listener that never registered at all.
+    const dtLive = new DataTransfer()
+    dtLive.items.add(png('shot.png'))
+    const evLive = pasteEvent(dtLive)
+    await pasteOnBody(evLive)
+    expect(draft().items.length).toBe(1)
+    expect(evLive.defaultPrevented).toBe(true)
   })
 
   it('text + image pasted INTO the composer attaches the image and leaves the caption\u2019s insert alone', async () => {
@@ -620,7 +689,23 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     const input = container.querySelector('.car-input') as HTMLTextAreaElement | null
     expect(input).not.toBeNull()
     input!.focus()
+    // SEEDED THROUGH REAL TYPING, not left empty: an empty-vs-empty comparison
+    // below cannot tell "we did not write into the composer" from "nothing ever
+    // writes here". The input is CONTROLLED, so a bare `.value =` is reverted on
+    // the next render — write through the native setter and fire `input`, which
+    // is what a keystroke does.
+    const { act } = await import('react')
+    const nativeValue = Object.getOwnPropertyDescriptor(
+      window.HTMLTextAreaElement.prototype,
+      'value',
+    )!.set!
+    await act(async () => {
+      nativeValue.call(input!, 'already typing')
+      input!.dispatchEvent(new Event('input', { bubbles: true }))
+      await tick()
+    })
     const before = input!.value
+    expect(before).toBe('already typing')
 
     const dt = new DataTransfer()
     dt.setData('text/plain', 'caption')

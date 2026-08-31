@@ -1847,10 +1847,17 @@ const GENERIC_PASTE_NAME = /^image\.[a-z0-9]+$/i
  * on the clipboard comes through as `image.jpeg` / `image.webp` from the same
  * generator. The draft keys items by generated id, so duplicate names never
  * collide as ITEMS, but two pasted screenshots would then render two chips both
- * carrying the identical label with nothing to tell them apart (card req 5's
- * display half). So synthesize a stable, unique name for exactly that generic
- * shape; any other name a real file carries (duplicates included) passes through
- * untouched.
+ * carrying the identical label with nothing to tell them apart (card req 5). So
+ * synthesize a stable, unique name for exactly that generic shape; any other
+ * name a real file carries (duplicates included) passes through untouched.
+ *
+ * THE RENAME IS NOT DISPLAY-ONLY, deliberately: this returns a NEW `File`, and
+ * that File is the one `handleFiles` hands to the draft and the one
+ * `uploads.ts` puts on the wire (`form.set('file', file)`) — so the upload is
+ * named `pasted-N.png` too. That is intended, and harmless: the server
+ * content-addresses the blob and derives its own storage name, so the uploaded
+ * name is a label, not an identity. Keeping the chip and the upload on ONE name
+ * beats showing the user a name the transcript does not carry.
  *
  * KNOWN AND KEPT: a file GENUINELY named `image.png` gets renamed too. There is
  * nothing in the event to tell it apart from the generated one, and the generic
