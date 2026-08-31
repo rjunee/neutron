@@ -48,6 +48,17 @@ import ts from 'typescript'
 const HERE = dirname(fileURLToPath(import.meta.url))
 const ROOT = join(HERE, '..', '..') // gbrain-memory/__tests__ → gbrain-memory → worktree root
 const CONFIG = join(ROOT, '.dependency-cruiser.cjs')
+/**
+ * The workspace-local dependency-cruiser binary — the exact thing `bunx
+ * depcruise` resolves to when node_modules is installed, minus the launcher.
+ * Measured 2026-08-31: on a box where bun is installed as a bare
+ * `/usr/local/bin/bun` there is no sibling `bunx`, so `execFileSync('bunx', …)`
+ * threw ENOENT, `stdout` fell through as '' and every probe died in
+ * `JSON.parse` with "Unexpected EOF" — a red that says nothing about the seam.
+ * Calling the installed binary directly is hermetic (no launcher, no network)
+ * and `scripts/run-tests.sh` already refuses to run an uninstalled tree.
+ */
+const DEPCRUISE = join(ROOT, 'node_modules', '.bin', 'depcruise')
 
 const REJECT_REL = 'gateway/__ra5_seam_probe_reject__.ts'
 const PASS_REL = 'gateway/__ra5_seam_probe_pass__.ts'
@@ -67,8 +78,8 @@ function cruiseViolations(relPath: string): Violation[] {
   let stdout = ''
   try {
     stdout = execFileSync(
-      'bunx',
-      ['depcruise', '--config', CONFIG, '--output-type', 'json', relPath],
+      DEPCRUISE,
+      ['--config', CONFIG, '--output-type', 'json', relPath],
       { cwd: ROOT, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] },
     )
   } catch (err) {

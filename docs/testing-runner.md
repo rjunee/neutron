@@ -93,6 +93,83 @@ bun test $(grep -LE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__
 bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__/*.test.tsx)
 ```
 
+## Hermeticity — the env a test run sees
+
+`bunfig.toml`'s `[test].preload` runs two scrubs before **every** `bun test`
+process, in this order:
+
+1. `tests/support/scrub-substrate-env.ts` — the substrate credentials bun
+   auto-loads from `.env`. A developer's live Claude Max token must never reach
+   the suite.
+2. `tests/support/scrub-instance-env.ts` — the live-**instance** env.
+
+The second one exists because `bun test` inherits the invoking shell's
+environment. On a box that runs a live Neutron instance, that environment
+carries the instance's own configuration: `NEUTRON_DB_PATH` (an absolute host
+filesystem path to the live `project.db` — and it wins **verbatim** over
+`NEUTRON_HOME` in `resolveOpenDbPath`, `migrations/db-path.ts`), `OWNER_HOME`,
+`NEUTRON_IDENTITY_*`, `NEUTRON_CORES_GOOGLE_*`, and the onboarding flags. Any
+boot-path test that did not arrange its own home therefore resolved the LIVE
+data home, and the migration ownership guard (`migrations/runner.ts`) refused
+the non-owner runner checkout:
+
+```
+error: Migration ownership refusal: the recorded owning checkout is not this runner checkout.
+  database  <data-home>/project.db   owner  <deployed-checkout>/migrations
+```
+
+Measured 2026-08-31: **10 of 16 lanes / 50 files red locally on main while CI
+was green on the same commit.** Say it plainly — the guard was RIGHT, and it is
+untouched. The bug was that tests reached the live home at all. The preload
+deletes `OWNER_HOME` and every `NEUTRON_*` var **except** `NEUTRON_TEST_*`, and
+points `NEUTRON_HOME` at a fresh per-process scratch dir, so a test that boots
+without its own home can only ever reach a scratch database.
+
+The `NEUTRON_TEST_*` carve-out is deliberate: those are the runner's own knobs,
+threaded into test processes by `scripts/run-tests.sh` — CI sets
+`NEUTRON_TEST_SHARD` that way. Scrubbing them would *create* a local/CI
+divergence instead of closing one.
+
+**The boundary: a preload cannot reach CHILD processes.** A default-env spawn
+hands the child the environ the process **started** with — measured on bun
+1.3.13, neither a set nor a delete in `process.env` propagates; only an explicit
+`env:{…}` at the spawn site decides what a child reads. The measurement table is
+the comment block at the top of `tests/support/scrub-instance-env.ts` — read it
+before "fixing" a spawned-child env assertion by extending the delete list.
+
+### CI parity
+
+CI executes **every** file. `.github/workflows/ci.yml` runs the *same*
+`bash scripts/run-tests.sh` under an 8-way `NEUTRON_TEST_SHARD` matrix with bun
+pinned `1.3.9`, and the same coverage audit (`declared == bun-discovered ==
+executed`, drift fatal) gates both. There is no hidden skip list. "CI is green"
+and "the local suite passes" now mean the same thing, up to toolchain version.
+
+### The toolchain-skew gotcha
+
+That last clause is load-bearing: CI pins bun `1.3.9`, and a newer local bun can
+differ. Measured on `1.3.13`:
+
+- `stat.mtimeMs` carries sub-ms precision (1.3.9 hands back integer ms) — which
+  is why `gateway/wiring/__tests__/persona-loader.test.ts` pins whole-second
+  mtime stamps that round-trip exactly through `utimes` + `stat`;
+- `Bun.build` races under general-lane concurrency with `EBADF` /
+  `Unexpected reading file` (the landing chat-react files — green file-scoped);
+- a `require()` of an already-ESM-imported module reds with
+  `Requested module is already fetched` in the single-process device lane.
+
+Rule of thumb: **green file-scoped + green CI + red only in the local aggregate
+is usually toolchain skew, not suite rot.**
+
+### What a preload can NOT make hermetic
+
+Two residual non-hermeticities remain, and each needs its own card:
+
+- **the box's filesystem** — a live deployment installs real `gbrain` / `codex`
+  binaries, which the tests that assert their *absence* then find;
+- **the real environ spawned children inherit** — e.g. the owner's `GH_TOKEN`,
+  per the child-process boundary above.
+
 ## Knobs
 
 | Env | Default | What it does |
