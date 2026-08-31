@@ -1678,16 +1678,23 @@ function Composer({
 }
 
 /**
- * Collect the File payloads a paste carries. Prefers `items` (Chromium exposes a
+ * Collect the IMAGE files a paste carries. Prefers `items` (Chromium exposes a
  * pasted screenshot as a single `kind === 'file'` item); falls back to `files`
- * for engines that only populate the list. Returns [] for a text/HTML-only
- * paste — the caller must then NOT interfere with the default paste at all.
+ * for engines that only populate the list.
+ *
+ * The `image/` filter is load-bearing, not tidiness: this card is paste-an-image
+ * only, and the listener is DOCUMENT-wide. Without it a stray Cmd-V of a copied
+ * `.pptx` becomes a failed attachment chip and a copied `.zip` raises the
+ * "No history import is in progress" banner — and in a real browser (where an
+ * ordinary file paste carries no text flavour) the paste would be
+ * `preventDefault()`ed too. Returns [] for those, and for a text/HTML-only
+ * paste; the caller must then NOT interfere with the default paste at all.
  */
-function clipboardFiles(dt: DataTransfer): File[] {
+function clipboardImages(dt: DataTransfer): File[] {
   const out: File[] = []
   for (let i = 0; i < dt.items.length; i += 1) {
     const item = dt.items[i]
-    if (item !== undefined && item.kind === 'file') {
+    if (item !== undefined && item.kind === 'file' && item.type.startsWith('image/')) {
       const f = item.getAsFile()
       if (f !== null) out.push(f)
     }
@@ -1695,26 +1702,46 @@ function clipboardFiles(dt: DataTransfer): File[] {
   if (out.length === 0) {
     for (let i = 0; i < dt.files.length; i += 1) {
       const f = dt.files[i]
-      if (f !== undefined) out.push(f)
+      if (f !== undefined && f.type.startsWith('image/')) out.push(f)
     }
   }
   return out
+}
+
+/**
+ * Does the paste carry TEXT alongside its image(s) — i.e. does the default
+ * insert still have work to do? ANY `text/*` flavour counts, not just
+ * `text/plain`: a copy out of a web page ships the caption as `text/html` with
+ * no plain flavour at all, and the earlier `types.includes('text/plain')` test
+ * cancelled exactly those pastes and dropped the caption.
+ *
+ * `types` (rather than a walk of `items`) because it is the one view every
+ * engine populates, including the `files`-only ones {@link clipboardImages}
+ * falls back for. A real browser lists the image itself as the literal
+ * `'Files'`, which is why this is a `text/` prefix test and not "types is
+ * non-empty".
+ */
+function clipboardHasText(dt: DataTransfer): boolean {
+  return Array.from(dt.types).some((t) => t.startsWith('text/'))
 }
 
 /** Monotonic per-page counter for synthesized paste filenames. */
 let pasteNameSeq = 0
 
 /**
- * Clipboard image files frequently arrive with an EMPTY name (and Chromium names
- * every screenshot `image.png`). The draft keys items by generated id, so even
- * duplicate names never collide as items — but a blank name renders a blank chip
- * and a blank upload-error message, so synthesize a stable, unique one. Non-blank
- * names (duplicates included) pass through untouched.
+ * Clipboard image files arrive with an EMPTY name, or with the engines' generic
+ * screenshot name `image.png` — every browser uses that same literal. The draft
+ * keys items by generated id, so duplicate names never collide as ITEMS, but two
+ * pasted screenshots would then render two chips both labelled `image.png` with
+ * nothing to tell them apart (card req 5's display half). So synthesize a stable,
+ * unique name for exactly those two cases; any other name a real file carries
+ * (duplicates included) passes through untouched.
  */
 function withPasteName(f: File): File {
-  if (f.name !== '') return f
+  if (f.name !== '' && f.name !== 'image.png') return f
   pasteNameSeq += 1
-  const subtype = f.type.split('/')[1] ?? ''
+  // `image/svg+xml` → `svg`, not `svgxml`: drop the structured suffix first.
+  const subtype = (f.type.split('/')[1] ?? '').split('+')[0] ?? ''
   const ext = subtype.replace(/[^a-z0-9]/gi, '')
   const name = `pasted-${pasteNameSeq}.${ext !== '' ? ext : 'png'}`
   try {
@@ -1876,25 +1903,38 @@ function ChatSurface({
   // non-Chat tab hides the whole `.car-tabpanel`. Each surface registers its own
   // document listener, so without the closest('[hidden]') bail a single paste
   // would attach once per mounted surface (and attach from other tabs).
+  // DECIDED, not overlooked: the gate reads the hidden ATTRIBUTE only, because
+  // that is precisely how this app parks a kept-alive surface (`.car-conv`
+  // above, `.car-tabpanel` in ProjectShell) — nothing hides one with a bare
+  // `display:none`, so matching on computed style would buy no coverage and cost
+  // a layout read on every paste.
   //
-  // A text-only paste is untouched: no files → return WITHOUT preventDefault, so
-  // ordinary text pastes into the composer exactly as before. When text rides
-  // along WITH an image (some tools ship both), the image attaches AND the text
-  // still inserts (no preventDefault); only an image-only paste is defaulted
-  // away, so no engine can smear e.g. a filename into the input.
+  // WHAT IS INTERCEPTED: only a paste that actually carries IMAGE data. Anything
+  // else — text, HTML, a copied .pptx, a copied .zip — returns before touching
+  // the event, so ordinary pastes behave exactly as before.
+  //
+  // WHAT IS DEFAULTED AWAY: an image paste that carries NO text flavour at all.
+  // If text rides along with the image (some tools ship both, and a copy out of
+  // a web page ships `text/html`), the image attaches AND the text still
+  // inserts. The narrow preventDefault exists so an image-only paste cannot let
+  // an engine smear a placeholder — e.g. the file's own name — into the input.
   const mainRef = useRef<HTMLElement | null>(null)
   const handleFilesRef = useRef(handleFiles)
-  handleFilesRef.current = handleFiles
+  // Keep the latch out of the render body: the listener is registered once, so
+  // the ref only has to be current by the time an event can fire (post-commit).
+  useEffect(() => {
+    handleFilesRef.current = handleFiles
+  })
   useEffect(() => {
     const onPaste = (e: ClipboardEvent): void => {
       const el = mainRef.current
       if (el === null || el.closest('[hidden]') !== null) return
       const dt = e.clipboardData
       if (dt === null) return
-      const files = clipboardFiles(dt)
-      if (files.length === 0) return
-      if (!dt.types.includes('text/plain')) e.preventDefault()
-      handleFilesRef.current(files.map(withPasteName))
+      const images = clipboardImages(dt)
+      if (images.length === 0) return
+      if (!clipboardHasText(dt)) e.preventDefault()
+      handleFilesRef.current(images.map(withPasteName))
     }
     document.addEventListener('paste', onPaste)
     return () => {

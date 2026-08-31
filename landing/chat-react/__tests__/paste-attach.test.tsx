@@ -1,10 +1,13 @@
 /**
  * Paste-to-attach on the web chat surface (happy-dom). The owner's flow is
  * screenshot → Cmd/Ctrl-V, which pastes with focus on the PAGE, not the
- * composer — so every dispatch here goes on `document.body`, the case a React
+ * composer — so most dispatches here go on `document.body`, the case a React
  * `onPaste` on `<main>` provably cannot see (body never propagates through a
- * descendant). These assert observable draft state: the pasted File must land
- * in the SAME `handleFiles` funnel a drop or the 📎 picker uses.
+ * descendant). One test dispatches on the composer input instead, covering the
+ * focus-in-the-composer half of the card and pinning the "attaches exactly
+ * once" property the library's own paste path could otherwise break. These
+ * assert observable draft state: the pasted File must land in the SAME
+ * `handleFiles` funnel a drop or the 📎 picker uses.
  *
  * The plain-text case is the one that protects the owner: a text paste must not
  * be `preventDefault()`ed and must not touch the draft — and it is proved
@@ -52,8 +55,17 @@ const UPLOADED_URL = '/api/app/upload/sam/abc.png'
 
 const png = (name: string) =>
   new File([new Uint8Array([137, 80, 78, 71])], name, { type: 'image/png' })
+const blob = (name: string, type: string) => new File([new Uint8Array([1, 2, 3, 4])], name, { type })
 const pasteEvent = (dt: DataTransfer) =>
   new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true })
+
+/**
+ * A clipboard that populates ONLY `files` — the engines the `items` loop cannot
+ * serve. happy-dom derives `files` FROM `items`, so its real `DataTransfer` can
+ * never produce this shape and the fallback branch would otherwise go unrun.
+ */
+const filesOnlyClipboard = (files: readonly File[], types: readonly string[]): DataTransfer =>
+  ({ items: [], files, types }) as unknown as DataTransfer
 
 describe('paste-to-attach on the chat surface (happy-dom)', () => {
   /** Mount a live ChatApp over a fake socket + fake upload endpoint. */
@@ -166,14 +178,15 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
    * Paste ON THE BODY — the focus-on-page case. A body-dispatched event never
    * propagates through `<main>`, so only a document-level listener sees it.
    */
-  const pasteOnBody = async (ev: ClipboardEvent): Promise<void> => {
+  const pasteOn = async (target: EventTarget, ev: ClipboardEvent): Promise<void> => {
     const { act } = await import('react')
     await act(async () => {
-      document.body.dispatchEvent(ev)
+      target.dispatchEvent(ev)
       await tick()
       await tick()
     })
   }
+  const pasteOnBody = (ev: ClipboardEvent): Promise<void> => pasteOn(document.body, ev)
 
   it('pasting an image on the page attaches it through the funnel; blank names get stable synthesized names; consecutive pastes never collide', async () => {
     const { act } = await import('react')
@@ -192,17 +205,140 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     expect(draft().hasReady).toBe(true)
     expect(container.textContent).toContain(generated)
 
-    // One paste carrying TWO files with identical names → two separate items.
+    // A SECOND blank-named paste right after: the synthesized name must be a
+    // fresh one, not a reused constant (two chips a user can tell apart).
     const dt2 = new DataTransfer()
-    dt2.items.add(png('image.png'))
-    dt2.items.add(png('image.png'))
+    dt2.items.add(png(''))
     await pasteOnBody(pasteEvent(dt2))
+    expect(draft().items.length).toBe(2)
+    const generated2 = draft().items[1]!.name
+    expect(generated2).toMatch(/^pasted-\d+\.png$/)
+    expect(generated2).not.toBe(generated)
+    expect(container.textContent).toContain(generated2)
+
+    // One paste carrying TWO files, both under the engines' generic screenshot
+    // name → two separate items with two DISTINCT labels (card req 5).
+    const dt3 = new DataTransfer()
+    dt3.items.add(png('image.png'))
+    dt3.items.add(png('image.png'))
+    await pasteOnBody(pasteEvent(dt3))
 
     const items = draft().items
-    expect(items.length).toBe(3)
-    expect(new Set(items.map((i) => i.id)).size).toBe(3)
-    expect(items[1]!.name).toBe('image.png')
-    expect(items[2]!.name).toBe('image.png')
+    expect(items.length).toBe(4)
+    expect(new Set(items.map((i) => i.id)).size).toBe(4)
+    expect(new Set(items.map((i) => i.name)).size).toBe(4)
+    expect(items[2]!.name).toMatch(/^pasted-\d+\.png$/)
+    expect(items[3]!.name).toMatch(/^pasted-\d+\.png$/)
+
+    // A name a real file carries is NOT rewritten.
+    const dt4 = new DataTransfer()
+    dt4.items.add(png('diagram.png'))
+    await pasteOnBody(pasteEvent(dt4))
+    expect(draft().items[4]!.name).toBe('diagram.png')
+
+    // The synthesized extension comes off the MIME subtype, with a structured
+    // suffix dropped: `image/svg+xml` is `.svg`, never `.svgxml`.
+    const dt5 = new DataTransfer()
+    dt5.items.add(blob('', 'image/svg+xml'))
+    await pasteOnBody(pasteEvent(dt5))
+    expect(draft().items[5]!.name).toMatch(/^pasted-\d+\.svg$/)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('pasting with focus IN the composer attaches exactly once (req 1; the library’s own paste path stays pinned off)', async () => {
+    const { act } = await import('react')
+    const { container, root, draft } = await mount()
+
+    const input = container.querySelector('.car-input')
+    expect(input).not.toBeNull()
+    ;(input as HTMLTextAreaElement).focus()
+
+    const dt = new DataTransfer()
+    dt.items.add(png('shot.png'))
+    await pasteOn(input!, pasteEvent(dt))
+
+    // Exactly ONE item: the surface funnel attached it, and assistant-ui's
+    // built-in paste-to-attachment did not add a second along the way.
+    expect(draft().items.length).toBe(1)
+    expect(draft().items[0]!.name).toBe('shot.png')
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('an image-only paste IS defaulted away (nothing may smear a placeholder into the composer)', async () => {
+    const { act } = await import('react')
+    const { root, draft } = await mount()
+
+    const dt = new DataTransfer()
+    dt.items.add(png('shot.png'))
+    const ev = pasteEvent(dt)
+    await pasteOnBody(ev)
+
+    expect(draft().items.length).toBe(1)
+    expect(ev.defaultPrevented).toBe(true)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('a clipboard that populates only `files` (no `items`) still attaches', async () => {
+    const { act } = await import('react')
+    const { root, draft } = await mount()
+
+    const ev = pasteEvent(filesOnlyClipboard([png('shot.png')], ['Files']))
+    await pasteOnBody(ev)
+
+    expect(draft().items.length).toBe(1)
+    expect(draft().items[0]!.name).toBe('shot.png')
+    expect(ev.defaultPrevented).toBe(true)
+
+    // …and the same shape carrying a NON-image file is ignored outright.
+    const evDoc = pasteEvent(filesOnlyClipboard([blob('notes.pdf', 'application/pdf')], ['Files']))
+    await pasteOnBody(evDoc)
+    expect(draft().items.length).toBe(1)
+    expect(evDoc.defaultPrevented).toBe(false)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('pasting a NON-image file is left entirely alone — no chip, no import banner, no preventDefault', async () => {
+    const { act } = await import('react')
+    const { container, root, draft } = await mount()
+
+    const dtDeck = new DataTransfer()
+    dtDeck.items.add(
+      blob('deck.pptx', 'application/vnd.openxmlformats-officedocument.presentationml.presentation'),
+    )
+    const evDeck = pasteEvent(dtDeck)
+    await pasteOnBody(evDeck)
+
+    expect(draft().items.length).toBe(0)
+    expect(evDeck.defaultPrevented).toBe(false)
+
+    // A copied export ZIP must NOT raise the import-affordance rejection from a
+    // stray Cmd-V (drag-and-drop is where a ZIP legitimately arrives).
+    const dtZip = new DataTransfer()
+    dtZip.items.add(blob('conversations.zip', 'application/zip'))
+    const evZip = pasteEvent(dtZip)
+    await pasteOnBody(evZip)
+
+    expect(draft().items.length).toBe(0)
+    expect(evZip.defaultPrevented).toBe(false)
+    expect(container.textContent ?? '').not.toContain('No history import is in progress')
+
+    // Non-vacuity: the listener is live on this same mount.
+    const dtImg = new DataTransfer()
+    dtImg.items.add(png('shot.png'))
+    await pasteOnBody(pasteEvent(dtImg))
+    expect(draft().items.length).toBe(1)
 
     await act(async () => {
       root.unmount()
@@ -247,6 +383,19 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     expect(draft().items.length).toBe(1)
     // The text still inserts: we never defaulted the paste away.
     expect(ev.defaultPrevented).toBe(false)
+
+    // Copying out of a web page ships the caption as `text/html`, with NO
+    // `text/plain` flavour. That is still text riding along, so the image
+    // attaches and the markup still inserts — a `text/plain`-only predicate
+    // cancelled this paste and silently dropped the caption.
+    const dtHtml = new DataTransfer()
+    dtHtml.setData('text/html', '<b>caption</b>')
+    dtHtml.items.add(png('shot2.png'))
+    const evHtml = pasteEvent(dtHtml)
+    await pasteOnBody(evHtml)
+
+    expect(draft().items.length).toBe(2)
+    expect(evHtml.defaultPrevented).toBe(false)
 
     await act(async () => {
       root.unmount()
