@@ -88,6 +88,17 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     expect(missing).toEqual([])
   })
 
+  test('the bun test preload does not scrub the opt-in flag', () => {
+    // The gate only works if the flag REACHES the suite. tests/support/
+    // scrub-instance-env.ts deletes NEUTRON_* to keep the run hermetic; once it
+    // took NEUTRON_PTY_E2E with it and `bash scripts/run-pty-e2e.sh` reported
+    // "0 failed" while all three suites skipped — this file's own incident,
+    // re-opened from a different direction. The preload keeps an explicit
+    // allow-list; this pins that the flag is on it.
+    const preload = readFileSync(join(REPO_ROOT, 'tests', 'support', 'scrub-instance-env.ts'), 'utf8')
+    expect(preload).toContain('NEUTRON_PTY_E2E')
+  })
+
   test('the registry lists no suite that no longer exists', () => {
     // A stale entry makes the runner report a MISSING suite at run time, which is
     // the one moment nobody is watching CI.

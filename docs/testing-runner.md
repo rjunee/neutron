@@ -95,8 +95,8 @@ bun test $(grep -lE 'installNativeHarness' app/__tests__/*.test.ts app/__tests__
 
 ## Hermeticity — the env a test run sees
 
-`bunfig.toml`'s `[test].preload` runs two scrubs before **every** `bun test`
-process, in this order:
+`bunfig.toml`'s `[test].preload` runs two scrubs, in this order, before every
+`bun test` process **started from the repo root**:
 
 1. `tests/support/scrub-substrate-env.ts` — the substrate credentials bun
    auto-loads from `.env`. A developer's live Claude Max token must never reach
@@ -121,14 +121,26 @@ error: Migration ownership refusal: the recorded owning checkout is not this run
 Measured 2026-08-31: **10 of 16 lanes / 50 files red locally on main while CI
 was green on the same commit.** Say it plainly — the guard was RIGHT, and it is
 untouched. The bug was that tests reached the live home at all. The preload
-deletes `OWNER_HOME` and every `NEUTRON_*` var **except** `NEUTRON_TEST_*`, and
-points `NEUTRON_HOME` at a fresh per-process scratch dir, so a test that boots
-without its own home can only ever reach a scratch database.
+deletes `OWNER_HOME` and every `NEUTRON_*` var except an explicit harness
+allow-list, and points `NEUTRON_HOME` at a fresh per-process scratch dir, so a
+test that boots without its own home resolves a scratch database rather than a
+live one. (Note the scope: this is what the test *process* resolves. Children it
+spawns still inherit the real environ — see the boundary below.)
 
-The `NEUTRON_TEST_*` carve-out is deliberate: those are the runner's own knobs,
-threaded into test processes by `scripts/run-tests.sh` — CI sets
-`NEUTRON_TEST_SHARD` that way. Scrubbing them would *create* a local/CI
-divergence instead of closing one.
+The allow-list is an allow-list, not a `NEUTRON_TEST_*` prefix rule, because
+scrubbing an opt-in gate does not go **red** — it makes the gated suite
+**skip**, and a skip reports green:
+
+| Kept | Set by | What scrubbing it would have done |
+|---|---|---|
+| `NEUTRON_TEST_*` | `scripts/run-tests.sh`, CI (`NEUTRON_TEST_SHARD`) | *create* a local/CI divergence instead of closing one |
+| `NEUTRON_PTY_E2E` | `scripts/run-pty-e2e.sh` | all three PTY acceptance suites skip forever while the runner prints `0 failed` |
+| `NEUTRON_E2E_NETWORK` | a human, for `cores/free/research/__tests__/web-fetch.test.ts` | the opt-in real-fetch case never runs |
+| `NEUTRON_BUN_BIN` | `scripts/run-tests.sh`, the `scripts/ci/` guard tests | a non-default toolchain silently becomes bare `bun` |
+
+None of those names a database, a home, an identity or a credential. Add a var
+to the list only if that stays true of it. `tests/support/scrub-instance-env-probe.ts`
+pins both halves: the live-instance vars die, the harness vars survive.
 
 **The boundary: a preload cannot reach CHILD processes.** A default-env spawn
 hands the child the environ the process **started** with — measured on bun
@@ -163,12 +175,16 @@ is usually toolchain skew, not suite rot.**
 
 ### What a preload can NOT make hermetic
 
-Two residual non-hermeticities remain, and each needs its own card:
+Three residual non-hermeticities remain, and each needs its own card:
 
 - **the box's filesystem** — a live deployment installs real `gbrain` / `codex`
   binaries, which the tests that assert their *absence* then find;
 - **the real environ spawned children inherit** — e.g. the owner's `GH_TOKEN`,
-  per the child-process boundary above.
+  per the child-process boundary above;
+- **a `bun test` started from a subdirectory** — `bunfig.toml` is resolved from
+  the process CWD, so `cd gateway && bun test …` loads **neither** preload and
+  reads the live `NEUTRON_DB_PATH`. Measured 2026-08-31. `scripts/run-tests.sh`
+  always runs from the repo root; a file-scoped run by hand should too.
 
 ## Knobs
 
