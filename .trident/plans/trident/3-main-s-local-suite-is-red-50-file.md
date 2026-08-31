@@ -288,3 +288,56 @@ spawned test child, and equally why the self-test's poisoned-env probe must (and
 explicit `env:{…}`. That boundary is now a comment block in `tests/support/scrub-instance-env.ts`
 itself, next to the delete list, so the next reader tries the fix at the spawn site instead of a
 fifth time here. No behaviour changed: comment-only, plus this record.
+
+### (j) Fifth re-entry — the positive control redone over the REAL declared set (A/B, same shard)
+
+T3 was dispatched a fifth time onto the same committed tip. Everything above stands and is not
+re-derived. The one soft spot left in the record was the positive control: control A ran the real
+runner over a `NEUTRON_TEST_ROOT` scratch fixture and control B ran a temp failing file through
+bare `bun test`. Neither proved the thing the card actually asks — that a failing file **inside
+the repo's own declared set** still reds `scripts/run-tests.sh`, with the coverage audit counting
+it. That is now measured, as an exact A/B.
+
+Method (fresh worktree of the branch tip, own `bun install`, 2503 packages, exit 0, bun 1.3.13,
+box's naturally inherited env). Discovery is `find`-derived (`scripts/lib/discover-test-files.sh`),
+so a temp file in the tree is declared automatically — no index entry needed. The shard packer
+weights a file by `BASE_COST_MS + MIG_COST_MS * <count of applyMigrations( matches>` and breaks
+ties on path, so a **byte-length-preserving** edit inside the temp file leaves the partition
+bit-identical. `NEUTRON_TEST_PLAN_ONLY=1` located it: shard **47/64**, 24 files.
+
+```
+A  tests/support/tmp-positive-control.test.ts = expect(1).toBe(1)
+   declared files: 1406   bun-discovered: 1406   assigned here: 24 (shard 47/64)   files executed: 24 (23 general + 0 PGLite + 1 device)
+   lanes: 1 general chunks + device lane   failed: 0
+   run-tests: PASS — all 24/1406 files across 2 bounded-memory lane(s) are green.
+   SUITE_EXIT=0
+
+B  same file, same 181 bytes, one character changed = expect(1).toBe(2)
+   tests/support/tmp-positive-control.test.ts:
+   5 |   expect(1).toBe(2)
+   error: expect(received).toBe(expected)   Expected: 2   Received: 1
+   (fail) t3 positive control [2.00ms]
+   declared files: 1406   bun-discovered: 1406   assigned here: 24 (shard 47/64)   files executed: 24 (23 general + 0 PGLite + 1 device)
+   lanes: 1 general chunks + device lane   failed: 1 (1)
+   run-tests: FAIL — 1/2 lane(s) contained failing tests (see output above).
+   SUITE_EXIT=1
+```
+
+One character is the whole difference between exit 0 and exit 1 over an identical 24-file
+partition: **the runner can still go red, and a red still propagates through both preloads, the
+audit and the lane roll-up.** The temp file was deleted afterwards; `git status` in the
+verification worktree is clean and the planner reports `declared files: 1405` again — the
+branch's own count, still up from the 1399 baseline, never down.
+
+Stage-1 blast radius re-run this round, 40 files (own install, from the inherited env):
+
+```
+tests/support/* + memory-swap-seam.depcruise + persona-loader + 16 gbrain-memory   221 pass / 0 fail  EXIT=0
+remaining gbrain-memory + gateway/wiring/__tests__ slice                           246 pass / 4 fail  EXIT=1
+```
+
+The 4 reds are `FOLLOW-UP-A` again and none is in `git diff 34995c68..HEAD`: resolve-gbrain-command's
+"nothing anywhere → null" and "a non-executable file at a probe path is NOT accepted", plus
+build-gbrain-memory's DISABLED-warning case and its per-connect-key sibling (5000 ms timeout) —
+this box carries `/usr/local/bin/gbrain` and `/usr/bin/codex` as real deployment symlinks, a
+filesystem leak no `bun test` preload can close. Everything this branch touches is green.
