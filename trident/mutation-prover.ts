@@ -1065,6 +1065,11 @@ export interface MutationGateInput {
    * isolation, so the mismatch is refused here rather than discovered never.
    * Null/absent → the caller has no second pin (local mode, a legacy row); the
    * tip is then the only commit in play, exactly as before.
+   *
+   * It ALSO serves as the LAST-RESORT head resolution when neither the local nor
+   * the remote-tracking ref exists — object-verified in this repo, never trusted
+   * as a name. A tip that DOES resolve from a ref and disagrees with this value
+   * still refuses, so the fallback can never bypass the mismatch check.
    */
   expected_head?: string | null
   /** Runner for the nominated argv. Defaults to the real, killable spawner. */
@@ -1075,13 +1080,182 @@ export interface MutationGateInput {
   proof_budget_ms?: number
 }
 
+/**
+ * EXPLICIT REJECTIONS FIRST (review round 3): a leading "-" is git reading the
+ * name as an OPTION (`--upload-pack=…` runs a local program), and a ":" is git
+ * reading it as a REFSPEC (`feat-x:refs/heads/injected-by-branch` writes a
+ * LOCAL branch — the wrong-base-guard trap this card exists not to spring).
+ * Those two are named checks by review order; the allowlist below subsumes them
+ * and the rest of the reviewer's enumerated set (`?*[`, whitespace, control
+ * characters, `..`, a trailing `.lock`). This check is PURE on purpose — the
+ * resolver must be able to reject a name without handing it to any process.
+ * The gate ADDITIONALLY delegates git's full rule set to
+ * `check-ref-format --branch` (see branchNameRejection); this is the fast
+ * pre-filter, not the authority.
+ */
+export function isPlainBranchName(branch: string): boolean {
+  if (branch.startsWith('-')) return false // explicit: an option, never a name
+  if (branch.includes(':')) return false // explicit: a refspec, never a name
+  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return false
+  return (
+    !branch.includes('..') &&
+    !branch.includes('//') &&
+    !branch.endsWith('/') &&
+    !branch.endsWith('.') &&
+    !branch.endsWith('.lock')
+  )
+}
+
+/**
+ * The gate's branch-name check: the pure pre-filter above, then git's OWN rule
+ * set via `check-ref-format --branch` — delegated rather than hand-rolled
+ * (review round 3) so names the allowlist cannot judge (`a/.hidden`, a
+ * mid-path `.lock` component, …) are judged by the interpreter that would
+ * receive them. Only a name the pure filter already passed reaches the
+ * delegation, so its operand can never begin with "-" or carry a ":". Returns
+ * a human-readable rejection, or null when the name is safe. A failing
+ * delegation RUN rejects — fail closed: "git could not vouch for it" is not a
+ * pass.
+ */
+export async function branchNameRejection(
+  run_host: RunHostCommand,
+  repo_path: string,
+  branch: string,
+): Promise<string | null> {
+  if (!isPlainBranchName(branch)) {
+    return (
+      'it is not a plain branch name (a leading "-" reads as an option, ":" reads as a refspec, and ' +
+      '"?*[", whitespace, control characters, "..", and a trailing ".lock" are all ref syntax)'
+    )
+  }
+  const check = await run_host(['git', '-C', repo_path, 'check-ref-format', '--branch', branch], repo_path)
+  if (!check.ok) {
+    const detail = check.stderr.trim().slice(0, 120)
+    return `git check-ref-format --branch rejects it${detail.length > 0 ? `: ${detail}` : ''}`
+  }
+  return null
+}
+
+/**
+ * Resolve the head the MERGE would take, without requiring the run's LOCAL
+ * branch ref to still exist. A run's worktree — which is what holds the local
+ * branch — is routinely cleaned up before this gate runs (#482 refused an
+ * APPROVED build exactly this way); the commit itself is still in the object
+ * store and reachable through the remote-tracking ref. Resolution order:
+ *   1. the local ref, as a bare name — byte-identical to the pre-existing
+ *      behaviour whenever the worktree is live;
+ *   2. `refs/remotes/origin/<branch>`, and ONLY after a fetch that SUCCEEDED
+ *      with an explicit forced refspec (see below);
+ *   3. the caller's `expected_head` — accepted ONLY as a 40-hex sha, never as
+ *      a name, and ONLY when `cat-file -e <sha>^{commit}` proves the object
+ *      exists in this repo.
+ * Creating the local branch instead is NOT an option: a local branch carrying
+ * commits not on origin/main trips the wrong-base guard on the next dispatch.
+ * Returns the lowercased sha, or null when nothing resolves — unresolvable
+ * stays a refusal at every call site; only the RESOLUTION is widened here.
+ *
+ * DRIFT, on the `expected_head` path: when no ref resolves there is no ref to
+ * observe moving, so the callers' did-the-branch-move re-reads can only return
+ * the pin again. That is the honest answer — the branch is gone — and it is
+ * fail-safe rather than fail-open: `merge.ts` re-pins the reviewed head and
+ * passes `--match-head-commit`, so a head that moved is refused by GitHub.
+ */
+export async function resolveMergeHeadSha(
+  run_host: RunHostCommand,
+  repo_path: string,
+  branch: string | null,
+  expected_head: string | null | undefined,
+): Promise<string | null> {
+  // A REJECTED NAME RESOLVES NOTHING (review round 3): it does not reach git —
+  // not even rev-parse — and it does not fall back to `expected_head`. The gate
+  // refuses such a name with its own reason before ever calling this; returning
+  // null here keeps every other caller on the same rule. `null` (a legacy row
+  // with no branch) is NOT a rejected name: it takes the HEAD path exactly as
+  // it always has. No trimming: a whitespace-carrying name is rejected raw,
+  // never tidied into a usable one.
+  if (branch !== null && !isPlainBranchName(branch)) return null
+
+  // `--verify --quiet` is not cosmetic: PLAIN `rev-parse` echoes
+  // `--end-of-options` itself as the first output line and, on a name it cannot
+  // resolve, echoes the name too. `--verify` prints one sha or nothing.
+  const local = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', branch ?? 'HEAD'],
+    repo_path,
+  )
+  const localSha = local.stdout.trim().toLowerCase()
+  // `local.ok` is load-bearing: a failing `git rev-parse <name>` can still print
+  // to stdout, and on a 40-hex-shaped branch name that print is hex — the exit
+  // code is the only thing that says git actually resolved it.
+  if (local.ok && HEX40.test(localSha)) return localSha
+
+  if (branch !== null) {
+    // EXPLICIT, FORCED REFSPEC — never `git fetch origin <branch>`. That short
+    // form's contract is FETCH_HEAD; whether it also advances
+    // `refs/remotes/origin/<branch>` depends on the remote's configured fetch
+    // refspec, so on a --no-tags/mirror/partial clone — or a remote with no
+    // fetch refspec at all — a STALE tracking ref survives a "successful" fetch
+    // and this resolver would pin a commit the review never saw, refusing an
+    // approved build forever on the caller-pin check. `merge.ts` documents the
+    // same trap for the same reason. `+` forces the update so a force-pushed
+    // branch does not fail the fetch and thereby hold forever; `--no-tags`
+    // matches every other fetch in trident — this runs in the SHARED repo and
+    // tag auto-following would drag tags into it.
+    const fetched = await run_host(
+      [
+        'git',
+        '-C',
+        repo_path,
+        'fetch',
+        '--no-tags',
+        '--end-of-options',
+        'origin',
+        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
+      ],
+      repo_path,
+    )
+    // A FAILED fetch leaves the tracking ref at whatever it happened to be, so
+    // "fetch succeeded" has to MEAN "that ref is current" or reading it is a
+    // guess. Skipping it is not a refusal: `expected_head` below is the head the
+    // review actually looked at, and it is object-verified — a strictly better
+    // answer than an unrefreshed ref.
+    if (fetched.ok) {
+      const remote = await run_host(
+        [
+          'git',
+          '-C',
+          repo_path,
+          'rev-parse',
+          '--verify',
+          '--quiet',
+          '--end-of-options',
+          `refs/remotes/origin/${branch}`,
+        ],
+        repo_path,
+      )
+      const remoteSha = remote.stdout.trim().toLowerCase()
+      if (remote.ok && HEX40.test(remoteSha)) return remoteSha
+    }
+  }
+
+  const expected = expected_head?.trim().toLowerCase() ?? ''
+  if (HEX40.test(expected)) {
+    // `^{commit}` is the whole check: without the peel, `cat-file -e <sha>` says
+    // yes to a tree or a blob, and the gate would pin a sha that can never merge.
+    const present = await run_host(['git', '-C', repo_path, 'cat-file', '-e', `${expected}^{commit}`], repo_path)
+    if (present.ok) return expected
+  }
+  return null
+}
+
 /** Is the branch still on the commit the gate pinned? */
 async function headStillAt(input: MutationGateInput, pinnedSha: string): Promise<boolean> {
-  const res = await input.run_host(
-    ['git', '-C', input.run.repo_path, 'rev-parse', input.run.branch ?? 'HEAD'],
+  const head = await resolveMergeHeadSha(
+    input.run_host,
     input.run.repo_path,
+    input.run.branch ?? null,
+    input.expected_head,
   )
-  return res.ok && res.stdout.trim().toLowerCase() === pinnedSha
+  return head === pinnedSha
 }
 
 /**
@@ -1093,6 +1267,28 @@ async function headStillAt(input: MutationGateInput, pinnedSha: string): Promise
  * convincing its prose — can put one on this path.
  */
 export async function runMutationProofGate(input: MutationGateInput): Promise<MutationGateOutcome> {
+  // REJECT THE NAME BEFORE ANY GIT INVOCATION (review round 3). `run.branch` is
+  // the inner loop's own UNTRUSTED nomination — nothing upstream checks its
+  // shape — and as a git operand it is a live primitive: `--upload-pack=…` runs
+  // a local program, `x:refs/heads/y` writes a LOCAL branch. A rejected name is
+  // a REFUSAL with its own reason, never a silent fallback: `expected_head`
+  // being perfectly valid does not rescue a run whose branch field is trying to
+  // be an argument.
+  const nominatedBranch = input.run.branch ?? null
+  if (nominatedBranch !== null) {
+    const rejection = await branchNameRejection(input.run_host, input.run.repo_path, nominatedBranch)
+    if (rejection !== null) {
+      return {
+        ok: false,
+        reason:
+          `mutation proof refused: the run's branch name ${JSON.stringify(nominatedBranch).slice(0, 80)} ` +
+          `is rejected — ${rejection}. It was not passed to git, and no proof can be bound through it.`,
+        exempt: false,
+        evidence: null,
+      }
+    }
+  }
+
   // PIN THE COMMIT FIRST, and read everything else off the PIN. A branch is a
   // mutable ref, and this phase used to resolve it three separate times: once
   // for the diff that binds the proof to this PR, once inside `prove`, and once
@@ -1101,12 +1297,17 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   // the prose-only path, which returned before any sha was resolved at all, a
   // branch that was docs-only when the diff was read could pick up code
   // afterwards and merge with no proof ever run.
-  const pinned = await input.run_host(
-    ['git', '-C', input.run.repo_path, 'rev-parse', input.run.branch ?? 'HEAD'],
+  // The RESOLUTION of that one pin is widened (local ref → remote-tracking ref →
+  // object-verified `expected_head`) because worktree cleanup deletes the local
+  // branch and was refusing APPROVED builds over ref bookkeeping (#482); a head
+  // that resolves nowhere is still a refusal.
+  const pinnedSha = await resolveMergeHeadSha(
+    input.run_host,
     input.run.repo_path,
+    input.run.branch ?? null,
+    input.expected_head,
   )
-  const pinnedSha = pinned.stdout.trim().toLowerCase()
-  if (!pinned.ok || !HEX40.test(pinnedSha)) {
+  if (pinnedSha === null) {
     return {
       ok: false,
       reason: 'mutation proof required but the branch head could not be resolved — a proof cannot be bound to it',
@@ -1194,12 +1395,13 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   // THE HEAD THE MERGE WILL TAKE, re-read AFTER the proof. A proof is bound to
   // one commit; if the branch moved while it ran, the commit that would merge is
   // not the commit that was proved, and this refuses rather than merges it.
-  const head = await input.run_host(
-    ['git', '-C', input.run.repo_path, 'rev-parse', input.run.branch ?? 'HEAD'],
+  const headSha = await resolveMergeHeadSha(
+    input.run_host,
     input.run.repo_path,
+    input.run.branch ?? null,
+    input.expected_head,
   )
-  const headSha = head.stdout.trim().toLowerCase()
-  if (!head.ok || !HEX40.test(headSha)) {
+  if (headSha === null) {
     return {
       ok: false,
       reason: 'mutation proof rejected: could not re-read the branch head to bind the proof to it',
