@@ -3509,17 +3509,20 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
     expect(after?.failure_reason ?? '').not.toContain('suspected agent hang')
-    // NOTHING WAS WRITTEN. `TridentRunUpdate` re-stamps `last_advanced_at` on every
-    // save, so a re-stamp here would have landed as now() — inventing liveness and
-    // buying a wedged run a fresh full threshold. The clock stays where it was and
-    // the reprieve is recomputed from the evidence on the next tick.
-    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+    // THE CLOCK MOVED (T4). A spare authorised by RUN-SCOPED evidence — here a stage
+    // row inside the window — persists the unmodified snapshot, and `saveIfActive`
+    // re-stamps `last_advanced_at` to now() as a matter of course. That is what stops
+    // display consumers reporting phantom staleness and makes the probes fire once per
+    // hang window instead of once per tick. The watchdog still never READS this column
+    // as evidence: the next window's reprieve is re-earned from live evidence.
+    expect(after?.last_advanced_at).toBe(new Date(90_000).toISOString())
   })
 
   test('the reprieve EXPIRES on its own once the evidence stops', async () => {
-    // The other half: a stand-down must not become immortality. The re-stamp moves
-    // the clock to the last event, so a run that goes quiet is reaped on schedule
-    // measured from THAT moment.
+    // The other half: a stand-down must not become immortality. A run-scoped spare
+    // re-stamps the clock (T4), so expiry is measured one full window from the last
+    // SPARE — not from the last event, and not from the run's fire. Each window must
+    // RE-EARN the reprieve from fresh evidence, and a run that has gone quiet cannot.
     let t = 0
     let stageAt: string | null = null
     const h = buildHarness({
@@ -3537,9 +3540,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).not.toBe('failed')
 
-    // Events stop. Because nothing was persisted, the very next tick past the
-    // threshold measured from the LAST event reaps as designed.
-    t = 111_000
+    // Events stop. The spare at t=90s re-stamped the clock to 90s, so the run is
+    // reaped one full window after THAT — and the stage row is by then 105 s old,
+    // outside the 60 s window, so there is nothing left to re-earn the reprieve with.
+    t = 155_000
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
@@ -3642,8 +3646,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     // The probe was actually CONSULTED — a stand-down that happened for some other
     // reason would pass the assertion above while proving nothing.
     expect(probed).toBeGreaterThan(0)
-    // NOTHING WAS WRITTEN, same property as the stage-event reprieve: the clock stays
-    // where it was, so the reprieve is recomputed from evidence on the next tick.
+    // NOTHING WAS WRITTEN, and deliberately so (T4). The launcher probe answers about a
+    // shared launcher GENERATION, not about this run, so it spares the run but does not
+    // move its clock; only RUN-SCOPED evidence re-stamps. That split is exactly what
+    // keeps the 2 h ceiling reachable for a forever-alive launcher (see N4).
     expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
   })
 
@@ -3792,8 +3798,9 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
 
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
-    // NOTHING WAS WRITTEN — the reprieve is recomputed from evidence every tick.
-    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+    // THE CLOCK MOVED: this run was spared by THIS run's own ticker row — run-scoped
+    // evidence — so the spared tick re-stamped `last_advanced_at` (T4).
+    expect(after?.last_advanced_at).toBe(new Date(90 * 60_000 + 60_000).toISOString())
   })
 
   test('NEGATIVE (N2d): the override window is BOUNDED — the 2 h ceiling still reaps through it', async () => {
@@ -3862,7 +3869,10 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     t = 20 * 60_000
 
     const outcome = await h.step(store.get(run.id)!)
-    expect(outcome.changed).toBe(false)
+    // A fresh stage row is RUN-SCOPED evidence, so this spare re-stamps the clock (T4)
+    // and the note says which of the two clock decisions was taken.
+    expect(outcome.changed).toBe(true)
+    expect(outcome.note ?? '').toContain('advancement clock re-stamped')
     expect(outcome.note ?? '').toContain('hang watchdog STOOD DOWN')
     // THE SAME CONCRETE DISCLOSURE THE REAP CARRIES — both clocks and the probe's
     // answer, never a boolean.
@@ -3932,7 +3942,7 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     expect(after?.failure_reason ?? '').toContain('ceiling outranks any liveness reprieve')
   })
 
-  test('NEGATIVE (N5): when the heartbeat STOPS, the reprieve expires from the LAST beat', async () => {
+  test('NEGATIVE (N5): when the heartbeat STOPS, the reprieve expires from the LAST SPARED TICK', async () => {
     // The sibling of "the reprieve EXPIRES on its own", for the ticker case: a heartbeat
     // that dies while the exec hangs must not leave the run un-reapable. The probe is
     // pinned 'unknown' so ONLY the heartbeat is under test — a live-launcher answer
@@ -3950,21 +3960,26 @@ describe('orchestrator — per-agent hang watchdog (item 2)', () => {
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     await h.loop.runOnce()
 
-    // The ticker beats twice, 30 s apart, each one sparing the run.
-    for (const beat of [70_000, 100_000]) {
+    // The ticker beats twice, one hang window apart, each beat landing on a tick where
+    // the watchdog TRIPS — so each one is a run-scoped spare that re-stamps the clock
+    // (T4). The spacing is deliberate: after the first spare moves the clock to t=71 s,
+    // a beat sooner than one window later would not even reach the watchdog.
+    for (const beat of [70_000, 140_000]) {
       lastBeat = new Date(beat).toISOString()
       t = beat + 1_000
       await h.loop.runOnce()
       expect(store.get(run.id)?.phase).not.toBe('failed')
     }
 
-    // Then it dies. 59 s after the last beat: still spared, measured from THAT moment.
-    t = 159_000
+    // Then it dies. 58 s after the last SPARED TICK (t=141 s) the watchdog does not even
+    // trip — the reprieve now runs from the spare, not from the run's fire.
+    t = 199_000
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).not.toBe('failed')
 
-    // Past the threshold measured from the last beat: reaped, on schedule.
-    t = 161_000
+    // One full window past that LAST SPARED TICK: the watchdog trips, the newest beat is
+    // by now 62 s old — outside the window — and nothing re-earns the reprieve. Reaped.
+    t = 202_000
     await h.loop.runOnce()
     const after = store.get(run.id)
     expect(after?.phase).toBe('failed')
@@ -4037,14 +4052,21 @@ describe('orchestrator — run-scoped hang evidence (three probes)', () => {
     const outcome = await h.step(store.get(run.id)!)
 
     expect(consulted).toBeGreaterThan(0) // the seam really was asked, not defaulted past
-    expect(outcome.changed).toBe(false)
+    // A live process is the strongest RUN-SCOPED answer there is, so the spare re-stamps
+    // the advancement clock (T4) and says so.
+    expect(outcome.changed).toBe(true)
+    expect(outcome.note ?? '').toContain('advancement clock re-stamped')
     expect(outcome.note ?? '').toContain('hang watchdog STOOD DOWN')
     expect(outcome.note ?? '').toContain('run process=live')
     const after = store.get(run.id)
     expect(after?.phase).not.toBe('failed')
-    // NOTHING WAS WRITTEN — the reprieve is recomputed from evidence every tick and
-    // expires the moment the evidence does. (T4 revisits this deliberately.)
-    expect(after?.last_advanced_at).toBe(new Date(0).toISOString())
+
+    // AND IT ACTUALLY PERSISTS. `changed: true` is only half the claim — the tick's
+    // `saveIfActive` is what carries it to the column (the orchestrator never touches
+    // `last_advanced_at` itself; callers cannot pass it). Same instant, through the real
+    // seam: this is the unit half of T4's verification.
+    await h.loop.runOnce()
+    expect(store.get(run.id)?.last_advanced_at).toBe(new Date(90_000).toISOString())
   })
 
   test('SPARED BY A FRESH ARTIFACT: an mtime inside the window is activity', async () => {

@@ -174,12 +174,12 @@ describe('trident external liveness composition wiring', () => {
  */
 describe('trident hang-watchdog wiring — the composed orchestrator consults the launcher probe', () => {
   /** Age a run's advancement clock past the 90-minute hang threshold, in SQL — the
-   *  store deliberately re-stamps `last_advanced_at` on every save. */
-  const ageBeyondHangThreshold = (id: string): void => {
-    db.raw().run('UPDATE code_trident_runs SET last_advanced_at = ? WHERE id = ?', [
-      new Date(Date.now() - 100 * 60_000).toISOString(),
-      id,
-    ])
+   *  store deliberately re-stamps `last_advanced_at` on every save. Returns the stamp
+   *  it wrote, so a test can assert whether the composed tick MOVED it. */
+  const ageBeyondHangThreshold = (id: string): string => {
+    const aged = new Date(Date.now() - 100 * 60_000).toISOString()
+    db.raw().run('UPDATE code_trident_runs SET last_advanced_at = ? WHERE id = ?', [aged, id])
+    return aged
   }
 
   test('an ALIVE launcher spares a run the 90-minute reaper would have killed', async () => {
@@ -194,13 +194,18 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
     try {
       await instance.loop.stop()
       await seedRunning('watchdog-alive', 'gen-watchdog-1')
-      ageBeyondHangThreshold('watchdog-alive')
+      const aged = ageBeyondHangThreshold('watchdog-alive')
       await instance.loop.runOnce()
 
       const after = new TridentRunStore(db).get('watchdog-alive')!
       expect(probed).toBeGreaterThan(0)
       expect(after.phase).not.toBe('failed')
       expect(after.failure_reason ?? '').not.toContain('suspected agent hang')
+      // AND THE CLOCK DID NOT MOVE. The real gatherer answers nothing/nothing/unknown
+      // for this run, so the only thing sparing it is the launcher — a SHARED
+      // GENERATION, not this run — and a generation-scoped answer must not renew this
+      // run's window (T4), or the 2 h ceiling would never be reachable.
+      expect(after.last_advanced_at).toBe(aged)
     } finally {
       await mods.tridentModule.shutdown!(instance)
     }
@@ -257,7 +262,7 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
     try {
       await instance.loop.stop()
       await seedRunning(id, 'gen-watchdog-3')
-      ageBeyondHangThreshold(id)
+      const aged = ageBeyondHangThreshold(id)
       const artifact = join(tmpdir(), `trident-${id}.out`)
       scratchFiles.push(artifact)
       writeFileSync(artifact, 'forge is writing this second\n')
@@ -266,6 +271,11 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
       const after = new TridentRunStore(db).get(id)!
       expect(after.phase).not.toBe('failed')
       expect(after.failure_reason ?? '').not.toContain('suspected agent hang')
+      // AND THE COMPOSED STALENESS CLOCK MOVED. The artifact is RUN-SCOPED evidence, so
+      // the spare re-stamps `last_advanced_at` end to end (T4) — this is the phantom
+      // staleness fix, observable through the real composition rather than at a seam.
+      expect(after.last_advanced_at).not.toBe(aged)
+      expect(Date.parse(after.last_advanced_at)).toBeGreaterThan(Date.parse(aged))
     } finally {
       await mods.tridentModule.shutdown!(instance)
     }
@@ -282,13 +292,16 @@ describe('trident hang-watchdog wiring — the composed orchestrator consults th
     try {
       await instance.loop.stop()
       await seedRunning(id, 'gen-watchdog-4')
-      ageBeyondHangThreshold(id)
+      const aged = ageBeyondHangThreshold(id)
       await instance.loop.runOnce()
 
       const after = new TridentRunStore(db).get(id)!
       expect(after.phase).toBe('ralph-task')
       expect(after.subagent_status).toBe('running')
       expect(after.failure_reason).toBeNull()
+      // AND NOTHING WAS WRITTEN. A DEFER never re-stamps the clock (T4): an unknown
+      // check must not manufacture progress the run never demonstrated.
+      expect(after.last_advanced_at).toBe(aged)
     } finally {
       await mods.tridentModule.shutdown!(instance)
     }

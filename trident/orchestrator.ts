@@ -4197,15 +4197,31 @@ export function buildTridentOrchestrator(
       //     MID-phase, so one that is NEWER than the hang threshold is proof the run
       //     advanced inside the window the watchdog just called dead.
       //
-      //     NOTHING IS WRITTEN, DELIBERATELY. The obvious implementation re-stamps
-      //     `last_advanced_at` to the event's timestamp — but `TridentRunUpdate`
-      //     documents that the field "is always re-stamped by `save`/`update` so
-      //     callers never pass it", so that write would silently land as `now()`:
-      //     liveness the run never demonstrated, and a fresh full threshold bought
-      //     by an event that may be 89 minutes old. Returning `changed: false`
-      //     instead means the reprieve is RECOMPUTED FROM THE EVIDENCE on every
-      //     tick and expires the moment the events stop, with no stored state to
-      //     go stale and no timestamp invented anywhere.
+      //     A RUN-SCOPED SPARE RE-STAMPS THE CLOCK; NOTHING ELSE DOES (T4). The
+      //     column is caller-unpassable — `TridentRunUpdate` documents that
+      //     `last_advanced_at` "is always re-stamped by `save`/`update` so callers
+      //     never pass it" — so the stand-down below never touches it and never
+      //     invents a timestamp: it returns the run snapshot UNMODIFIED with
+      //     `changed: true`, and the tick's `saveIfActive` stamps `now()` as a
+      //     matter of course.
+      //
+      //     WHY re-stamp at all: display consumers read that column and nothing
+      //     else — the `STALLED_WARN_MS` badge computed in `tick.ts`
+      //     `progressSignature`, and run-driving — so a run this watchdog has
+      //     positively established is alive kept rendering as hours stale. It also
+      //     costs: the probes re-fire on EVERY tick of a spared run instead of once
+      //     per hang window, and the 2 h `maxInflightMs` ceiling false-kills a
+      //     healthy long Forge round that never crosses a phase boundary.
+      //
+      //     WHAT IS PRESERVED. The watchdog still never READS this column as
+      //     evidence (the defect this card names): every window's reprieve is
+      //     re-earned from live evidence at decision time, so the re-stamp moves
+      //     expiry from next-tick to next-window — exactly the latency the
+      //     phase-transition stamp always had. A DEFER never re-stamps (an unknown
+      //     check must not manufacture progress), and a spare carried SOLELY by a
+      //     live shared launcher never re-stamps either: that answer is
+      //     GENERATION-scoped, not run-scoped, which is what keeps the 2 h ceiling
+      //     reachable for a forever-alive launcher.
       //
       //     ABSENCE IS NOT EVIDENCE: a null reader (not wired), an unparseable
       //     timestamp, or a run with no events at all falls straight through to the
@@ -4302,6 +4318,12 @@ export function buildTridentOrchestrator(
       //     an endlessly-heartbeating ticker or a launcher that outlives its build
       //     would hold one of ~6 lanes forever. That is a WORSE failure than the
       //     false kill this card fixes, not a quieter one.
+      //
+      //     AFTER T4 THE CEILING BOUNDS EXACTLY ONE CLASS OF RUN: the one whose only
+      //     reprieve is a shared launcher or a deferral, neither of which re-stamps
+      //     the advancement clock. A run spared by RUN-SCOPED evidence renews the
+      //     window by design (the card's re-stamp ask), and its expiry is pinned by
+      //     the reprieve-EXPIRES test rather than by this bound.
       const overCeiling = elapsedSinceAdvance(run) > maxInflightMs
 
       // (1b-i) STAND DOWN ON POSITIVE EVIDENCE, BEFORE KILLING ANYTHING.
@@ -4335,6 +4357,14 @@ export function buildTridentOrchestrator(
           ? stageBeatsDeath || runEvidenceBeatsDeath
           : stageFresh || probe === 'alive' || runDecision?.action === 'stand-down'
       if (standDown) {
+        // WHICH SPARES MOVE THE CLOCK (T4). Run-scoped evidence only. When
+        // `probe === 'dead'` the stand-down can only have come from
+        // `stageBeatsDeath || runEvidenceBeatsDeath`, both run-scoped; otherwise a
+        // fresh stage row or a run-evidence stand-down is run-scoped, and if
+        // neither holds the spare came solely from `probe === 'alive'` — an answer
+        // about a SHARED launcher generation, which must not renew this run's
+        // window or a forever-alive launcher would never reach the 2 h ceiling.
+        const restamp = probe === 'dead' || stageFresh || runDecision?.action === 'stand-down'
         const sparedBy =
           probe === 'dead'
             ? stageBeatsDeath
@@ -4357,11 +4387,15 @@ export function buildTridentOrchestrator(
         // so a run that survived is as auditable as one that did not.
         return {
           run,
-          changed: false,
+          changed: restamp,
           waiting: true,
           note:
             `hang watchdog STOOD DOWN: last_advanced_at is ${staleMins} min stale but ${sparedBy}` +
-            ` — ${disclosure}`,
+            ` — ${disclosure}` +
+            (restamp
+              ? ' — advancement clock re-stamped (run-scoped evidence)'
+              : ' — advancement clock NOT re-stamped (a live shared launcher is generation evidence,' +
+                ' not run-scoped)'),
         }
       }
 
