@@ -234,3 +234,31 @@ half of it inside every `bun test` process (that is what took 10 red lanes to 5 
 50 originally-reported files' env cluster); what remains is a toolchain pin and a
 host-is-a-deployment problem, each with a measured cause and neither fixable inside T3's
 prohibitions.
+
+### (h) Third re-entry — stage-1 blast radius re-measured (2026-08-31, later round)
+
+T3 was re-dispatched onto the already-committed branch tip. No further work is available inside
+T3's prohibitions: the full-suite verification, both positive controls and the four follow-up
+triages above stand as committed, and the full-suite re-run is deferred to this plan's terminal
+task by the runner contract. This round re-measured the blast radius file-scoped from the same
+naturally inherited (dirty) shell env, own `bun install` (2503 packages, exit 0), bun 1.3.13:
+
+```
+tests/support/* + persona-loader + build-gbrain-memory + memory-swap-seam.depcruise (6 files)
+                                                            116 pass / 2 fail   EXIT=1
+gbrain-memory/__tests__ (21 files)                          225 pass / 2 fail   EXIT=1
+```
+
+Every one of the 4 reds is `FOLLOW-UP-A` and none is in `git diff 34995c68..HEAD`:
+
+- `gateway/wiring/__tests__/build-gbrain-memory.test.ts` — `expect(warnings.some(w =>
+  w.includes('DISABLED'))).toBe(true)` receives `false`, because the resolver finds a real
+  `gbrain`; the sibling "per-connect key coherence" case then times out at 5000ms for the same
+  reason (it reaches a real executable instead of the absent-binary path).
+- `gbrain-memory/__tests__/resolve-gbrain-command.test.ts` — "nothing anywhere → null" and
+  "a non-executable file at a probe path is NOT accepted".
+
+Re-confirmed on the box: `/usr/local/bin/gbrain -> ../install/global/node_modules/gbrain/src/cli.ts`
+and `/usr/bin/codex -> ../lib/node_modules/@openai/codex/bin/codex.js` are both real symlinks from
+the deployment. Everything this branch actually touches is green: `persona-loader.test.ts`,
+`memory-swap-seam.depcruise.test.ts` and `tests/support/*` all pass. T3 stays `- [x]`.
