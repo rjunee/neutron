@@ -1628,6 +1628,12 @@ function Composer({
         />
         <ComposerPrimitive.Input
           className="car-input"
+          // Paste is owned by the surface-level document listener (the
+          // handleFiles funnel). assistant-ui's built-in paste-to-attachment is
+          // inert today (no attachments adapter → capabilities.attachments is
+          // false) — pin it OFF so a future adapter can't open a second
+          // attachment path that bypasses ZIP routing and the upload limits.
+          addAttachmentOnPaste={false}
           placeholder="Message Neutron…"
           autoFocus
           rows={1}
@@ -1669,6 +1675,53 @@ function Composer({
       </ComposerPrimitive.Root>
     </div>
   )
+}
+
+/**
+ * Collect the File payloads a paste carries. Prefers `items` (Chromium exposes a
+ * pasted screenshot as a single `kind === 'file'` item); falls back to `files`
+ * for engines that only populate the list. Returns [] for a text/HTML-only
+ * paste — the caller must then NOT interfere with the default paste at all.
+ */
+function clipboardFiles(dt: DataTransfer): File[] {
+  const out: File[] = []
+  for (let i = 0; i < dt.items.length; i += 1) {
+    const item = dt.items[i]
+    if (item !== undefined && item.kind === 'file') {
+      const f = item.getAsFile()
+      if (f !== null) out.push(f)
+    }
+  }
+  if (out.length === 0) {
+    for (let i = 0; i < dt.files.length; i += 1) {
+      const f = dt.files[i]
+      if (f !== undefined) out.push(f)
+    }
+  }
+  return out
+}
+
+/** Monotonic per-page counter for synthesized paste filenames. */
+let pasteNameSeq = 0
+
+/**
+ * Clipboard image files frequently arrive with an EMPTY name (and Chromium names
+ * every screenshot `image.png`). The draft keys items by generated id, so even
+ * duplicate names never collide as items — but a blank name renders a blank chip
+ * and a blank upload-error message, so synthesize a stable, unique one. Non-blank
+ * names (duplicates included) pass through untouched.
+ */
+function withPasteName(f: File): File {
+  if (f.name !== '') return f
+  pasteNameSeq += 1
+  const subtype = f.type.split('/')[1] ?? ''
+  const ext = subtype.replace(/[^a-z0-9]/gi, '')
+  const name = `pasted-${pasteNameSeq}.${ext !== '' ? ext : 'png'}`
+  try {
+    return new File([f], name, { type: f.type })
+  } catch {
+    return f // exotic engine without new File(File) — a blank chip beats a lost paste
+  }
 }
 
 /**
@@ -1811,6 +1864,44 @@ function ChatSurface({
     onDrop,
   }
 
+  // Paste-to-attach (owner, 2026-08-31): a pasted screenshot must behave exactly
+  // like a dropped one — same handleFiles funnel, so ZIP routing, the
+  // import-affordance error and the upload limits keep working unchanged. The
+  // listener is DOCUMENT-level: the screenshot-then-Cmd-V flow often pastes with
+  // focus on <body>, and that event dispatches on <body>/document — it never
+  // propagates through this <main>, so a React onPaste here would miss it.
+  //
+  // GATE (load-bearing): up to MAX_MOUNTED_CONVERSATIONS ChatSurfaces stay
+  // mounted sharing ONE draft — inactive ones under `.car-conv[hidden]`, and a
+  // non-Chat tab hides the whole `.car-tabpanel`. Each surface registers its own
+  // document listener, so without the closest('[hidden]') bail a single paste
+  // would attach once per mounted surface (and attach from other tabs).
+  //
+  // A text-only paste is untouched: no files → return WITHOUT preventDefault, so
+  // ordinary text pastes into the composer exactly as before. When text rides
+  // along WITH an image (some tools ship both), the image attaches AND the text
+  // still inserts (no preventDefault); only an image-only paste is defaulted
+  // away, so no engine can smear e.g. a filename into the input.
+  const mainRef = useRef<HTMLElement | null>(null)
+  const handleFilesRef = useRef(handleFiles)
+  handleFilesRef.current = handleFiles
+  useEffect(() => {
+    const onPaste = (e: ClipboardEvent): void => {
+      const el = mainRef.current
+      if (el === null || el.closest('[hidden]') !== null) return
+      const dt = e.clipboardData
+      if (dt === null) return
+      const files = clipboardFiles(dt)
+      if (files.length === 0) return
+      if (!dt.types.includes('text/plain')) e.preventDefault()
+      handleFilesRef.current(files.map(withPasteName))
+    }
+    document.addEventListener('paste', onPaste)
+    return () => {
+      document.removeEventListener('paste', onPaste)
+    }
+  }, [])
+
   // SEV1 chat project-switch race (2026-07-02) — the assistant-ui message
   // primitives resolve a message/part by INDEX into the runtime's live list, so
   // a runtime shared across a project switch (whose `msgs` empties IN-PLACE)
@@ -1824,6 +1915,7 @@ function ChatSurface({
   // of a dead black screen; it should essentially never fire on a normal switch.
   return (
     <main
+      ref={mainRef}
       className={`car-main${dragOver && !importActive ? ' car-dragover' : ''}`}
       {...dragProps}
     >
