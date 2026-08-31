@@ -14,6 +14,7 @@ import {
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
   proofWorktreePath,
+  resolveMergeHeadSha,
   runMutationProofGate,
   spawnGuardCommand,
   type MutationClaim,
@@ -1086,7 +1087,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: null,
       base_branch: 'main',
-      run_host: async () => res(1),
+      run_host: async (cmd) => (cmd.includes('check-ref-format') ? res(0) : res(1)),
     })
     expect(out.ok).toBe(false)
     expect(out.exempt).toBe(false)
@@ -1133,5 +1134,306 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     const out = await runMutationProofGate(smuggler)
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('nominated no mutation')
+  })
+
+  test('a cleaned-up worktree does not strand an APPROVED build: the remote-tracking ref resolves the head', async () => {
+    // THE #482 FAILURE. The run's worktree — which held the LOCAL branch — is
+    // torn down before this gate runs, so the bare name resolves nowhere. The
+    // commit is still in the object store, reachable through origin/<branch>.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const scripted = scriptedHost()
+    const calls: string[][] = []
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      run_host: async (cmd, cwd) => {
+        calls.push(cmd)
+        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('fetch')) return res(0) // the tracking ref is read ONLY after a fetch that succeeded
+        if (cmd.includes('rev-parse')) {
+          return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
+        }
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
+      fs,
+    })
+    expect(out.ok).toBe(true)
+    expect(out.exempt).toBe(false)
+    expect(out.evidence?.proved).toBe(true)
+    expect(out.evidence?.observed?.head_sha).toBe(HEAD)
+    expect(calls.some((c) => c[c.length - 1] === 'refs/remotes/origin/feat-x')).toBe(true)
+    // The no-ref-written / no-program-run evidence lives in mutation-prover-realgit.test.ts against REAL git repository state — an argv scan here passed while both round-3 defects were live, so it proves nothing.
+  })
+
+  test('the tracking ref is refreshed by an EXPLICIT forced refspec, not `git fetch origin <branch>`', async () => {
+    // The short form's contract is FETCH_HEAD. On a remote with no matching
+    // fetch refspec it leaves `refs/remotes/origin/<b>` exactly where it was,
+    // so the resolver would pin a STALE sha and lose the caller-pin comparison.
+    const calls: string[][] = []
+    const sha = await resolveMergeHeadSha(
+      async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('fetch')) return res(0)
+        return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
+      },
+      '/repo',
+      'feat-x',
+      null,
+    )
+    expect(sha).toBe(HEAD)
+    const fetch = calls.find((c) => c.includes('fetch'))
+    expect(fetch).toEqual([
+      'git',
+      '-C',
+      '/repo',
+      'fetch',
+      '--no-tags',
+      '--end-of-options',
+      'origin',
+      '+refs/heads/feat-x:refs/remotes/origin/feat-x',
+    ])
+  })
+
+  test('a FAILED fetch does not license the tracking ref — the stale sha is never read', async () => {
+    const STALE = 'b'.repeat(40)
+    const calls: string[][] = []
+    const sha = await resolveMergeHeadSha(
+      async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('fetch')) return res(1)
+        if (cmd.includes('cat-file')) return res(0)
+        return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, STALE) : res(1)
+      },
+      '/repo',
+      'feat-x',
+      HEAD,
+    )
+    expect(sha).toBe(HEAD)
+    expect(calls.some((c) => c[c.length - 1] === 'refs/remotes/origin/feat-x')).toBe(false)
+    expect(calls.some((c) => c.includes('cat-file') && c.includes(`${HEAD}^{commit}`))).toBe(true)
+  })
+
+  test('a rev-parse that FAILED is not a resolution, even when it printed a sha-shaped line', async () => {
+    // `git rev-parse <unknown-name>` prints the name back and exits non-zero. A
+    // 40-hex-shaped branch name makes that echo look exactly like a resolution,
+    // so the exit code is the only thing that can tell them apart.
+    const sha = await resolveMergeHeadSha(
+      async (cmd) => {
+        if (cmd.includes('rev-parse')) {
+          return { ok: false, stdout: `${'c'.repeat(40)}\n`, stderr: 'ambiguous argument', exit_code: 128 }
+        }
+        return res(0)
+      },
+      '/repo',
+      'feat-x',
+      HEAD,
+    )
+    expect(sha).toBe(HEAD)
+  })
+
+  test('a rejected branch name resolves NOTHING — no git invocation, no expected_head fallback', async () => {
+    for (const hostile of [
+      '--upload-pack=touch /scratch/upload-pack-executed',
+      'feat-x:refs/heads/injected-by-branch',
+      'feat x',
+      '../../etc',
+      'feat-x.lock',
+      '',
+    ]) {
+      const calls: string[][] = []
+      // The host answers SUCCESS to everything: the rejection must be the name's
+      // doing, never an artifact of a failing command.
+      const sha = await resolveMergeHeadSha(
+        async (cmd) => {
+          calls.push(cmd)
+          return res(0, HEAD)
+        },
+        '/repo',
+        hostile,
+        HEAD,
+      )
+      expect(sha).toBeNull()
+      expect(calls.length).toBe(0)
+    }
+  })
+
+  test('the gate REFUSES a hostile branch name with its own reason — a valid expected_head does not rescue it', async () => {
+    for (const hostile of ['--upload-pack=touch /scratch/upload-pack-executed', 'feat-x:refs/heads/injected-by-branch']) {
+      const calls: string[][] = []
+      const out = await runMutationProofGate({
+        run: { ...RUN, branch: hostile },
+        claim: CLAIM,
+        base_branch: 'main',
+        expected_head: HEAD,
+        run_host: async (cmd) => {
+          calls.push(cmd)
+          return res(0, HEAD)
+        },
+      })
+      expect(out.ok).toBe(false)
+      expect(out.exempt).toBe(false)
+      expect(out.evidence).toBeNull()
+      expect(out.reason).toContain('is rejected')
+      expect(out.reason).not.toContain('could not be resolved')
+      expect(calls.length).toBe(0)
+    }
+  })
+
+  test('a name only git can judge is delegated to check-ref-format — and its rejection refuses', async () => {
+    const calls: string[][] = []
+    const out = await runMutationProofGate({
+      run: { ...RUN, branch: 'a/.hidden' }, // passes the pure allowlist; a component may not start with '.'
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: HEAD,
+      run_host: async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('check-ref-format')) {
+          return { ok: false, stdout: '', stderr: "fatal: 'a/.hidden' is not a valid branch name", exit_code: 1 }
+        }
+        return res(0, HEAD)
+      },
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('check-ref-format')
+    expect(calls).toEqual([['git', '-C', '/repo', 'check-ref-format', '--branch', 'a/.hidden']])
+  })
+
+  test('drift is still caught when the head resolves through the REMOTE ref', async () => {
+    // The widened resolution must not widen the binding: a branch that moves
+    // between the pin and the re-read is still refused when the only ref that
+    // resolves is the remote-tracking one.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const scripted = scriptedHost()
+    let remoteReads = 0
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('fetch')) return res(0)
+        if (cmd.includes('rev-parse')) {
+          if (cmd[cmd.length - 1] !== 'refs/remotes/origin/feat-x') return res(1)
+          remoteReads += 1
+          return res(0, remoteReads === 1 ? HEAD : 'f'.repeat(40))
+        }
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain(`the branch moved from ${HEAD.slice(0, 8)} to ffffffff`)
+  })
+
+  test('an unverifiable expected_head is never a resolution — and a name-shaped one is not even tried', async () => {
+    // The fallback must not become a way to hand the gate a sha nothing can see.
+    const calls: string[][] = []
+    const absent = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: 'e'.repeat(40),
+      run_host: async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('fetch')) return res(0)
+        if (cmd.includes('cat-file')) return res(1) // the object is not in this repo
+        if (cmd.includes('rev-parse')) return res(1)
+        return res(0)
+      },
+    })
+    expect(absent.ok).toBe(false)
+    expect(absent.evidence).toBeNull()
+    expect(absent.reason).toContain('could not be resolved')
+    expect(calls.some((c) => c.includes('cat-file'))).toBe(true)
+
+    const nameCalls: string[][] = []
+    const named = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: 'refs/heads/main',
+      run_host: async (cmd) => {
+        nameCalls.push(cmd)
+        if (cmd.includes('fetch')) return res(0)
+        if (cmd.includes('cat-file')) return res(1)
+        if (cmd.includes('rev-parse')) return res(1)
+        return res(0)
+      },
+    })
+    expect(named.ok).toBe(false)
+    expect(named.reason).toContain('could not be resolved')
+    // A NAME is never handed to git at all — only a 40-hex sha is ever checked.
+    expect(nameCalls.some((c) => c.includes('cat-file'))).toBe(false)
+  })
+
+  test('the fallback cannot bypass the caller-pin mismatch', async () => {
+    const calls: string[][] = []
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: 'd'.repeat(40),
+      run_host: async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('fetch')) return res(0)
+        if (cmd.includes('rev-parse')) {
+          return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
+        }
+        return res(0)
+      },
+    })
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain(`the merge would take dddddddd but the branch tip is ${HEAD.slice(0, 8)}`)
+    expect(out.evidence).toBeNull()
+    // Refused BEFORE the diff and before any worktree, like any caller-pin mismatch.
+    expect(calls.some((c) => c.includes('--name-only'))).toBe(false)
+    expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+  })
+
+  test('when no ref exists at all, expected_head binds the proof — after the object is proven present', async () => {
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const scripted = scriptedHost()
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: HEAD,
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('fetch')) return res(1)
+        if (cmd.includes('cat-file')) return res(0) // the commit IS here
+        if (cmd.includes('rev-parse')) return res(1)
+        return scripted.run(cmd, cwd)
+      },
+      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
+      fs,
+    })
+    expect(out.ok).toBe(true)
+    expect(out.evidence?.proved).toBe(true)
+    expect(out.evidence?.observed?.head_sha).toBe(HEAD)
+  })
+
+  test('a docs-only diff is still exempt when only the remote-tracking ref resolves', async () => {
+    // The prose-only path re-reads the head through `headStillAt`; a local-only
+    // resolution there would refuse "the branch moved" on a live, unmoved branch.
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        if (cmd.includes('fetch')) return res(0)
+        if (cmd.includes('rev-parse')) {
+          return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
+        }
+        return res(0)
+      },
+    })
+    expect(out.ok).toBe(true)
+    expect(out.exempt).toBe(true)
   })
 })
