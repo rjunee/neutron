@@ -171,3 +171,66 @@ None of these four is caused by anything on this branch; all four reproduce on `
 own condition. No test was skipped, emptied or deleted; the migration ownership guard, the
 PGLite lane's isolation, `scripts/`, `.github/` and `scripts/ci/` are byte-identical to
 `origin/main` on this branch.
+
+### (g) Independent re-verification in a SECOND fresh worktree (2026-08-31, later round)
+
+The T3 evidence above was re-checked from a brand-new worktree of the branch tip with its own
+`bun install` (2503 packages, exit 0), under the same naturally inherited (dirty) shell env and
+the same local bun **1.3.13**. This is an independent reproduction, not a re-quote.
+
+File-scoped blast-radius re-run of everything this branch touches plus both neighbouring test
+directories — 25 files, all from the poisoned shell:
+
+```
+persona-loader + memory-swap-seam.depcruise + tests/support/*        47 pass / 0 fail   EXIT=0
+gbrain-memory/__tests__ (first 10)                                  139 pass / 0 fail   EXIT=0
+gbrain-memory/__tests__ (remaining 10)                               78 pass / 2 fail   EXIT=1
+```
+
+The only red is `resolve-gbrain-command.test.ts`, i.e. `FOLLOW-UP-A`, reproduced verbatim:
+
+```
+75 |  const env = { PATH: join(scratch, 'empty'), HOME: join(scratch, 'emptyhome') }
+76 |  expect(resolveGbrainCommand(env)).toBeNull()
+error: expect(received).toBeNull()   Received: "/usr/local/bin/gbrain"
+```
+
+and `ls -l /usr/local/bin/gbrain` on this box is a real symlink into the deployment's global
+install (likewise `/usr/bin/codex`). `git diff 34995c68..HEAD` touches NEITHER
+`gbrain-memory/resolve-gbrain-command.ts` NOR its test, and the test passes an explicit `env`
+object, so no preload on this branch can reach it: the red is byte-identically main's.
+
+`FOLLOW-UP-D`'s revert was re-measured too, because a preload fix would have been in T3's scope
+had it worked. Under bun 1.3.13, in one process, spawning `sh -c 'echo "[${VAR-MISSING}]"'`:
+
+```
+baseline              "[secret123]"
+after set-empty       "[secret123]"
+after delete          "[secret123]"
+with explicit env:{…} "[MISSING]"
+```
+
+Deleting (or emptying) `process.env.X` does NOT reach `Bun.spawnSync`'s default child environ —
+only an explicit `env` object does. Confirms no preload can strip `GH_TOKEN` from spawned test
+children; the fix belongs at the spawn site or the runner, both outside T3.
+
+### T3 conclusion — where the local/CI gap now actually lives
+
+After T1+T2 the gap is no longer "composition/wiring resolution". The 5 surviving red lanes split
+cleanly into two non-branch families:
+
+- **bun version skew (`FOLLOW-UP-B`, `FOLLOW-UP-C` — 9 of 14 files):** local bun 1.3.13 bundler
+  EBADF under lane concurrency, and 1.3.13's `Requested module is already fetched` in the
+  single-process device lane. CI's pinned **1.3.9** is green on both, and every one of those files
+  is green file-scoped here. Nothing in the repo is wrong; the local toolchain is newer than the
+  pin. A repo-level bun pin is the candidate fix and needs its own card.
+- **this box is a live deployment (`FOLLOW-UP-A`, `FOLLOW-UP-D` — 5 of 14 files):** the real
+  `gbrain`/`codex` binaries exist on the filesystem, and the owner's `GH_TOKEN` is in the real
+  environ that children inherit. Same family as root cause 1, but the leak is the FILESYSTEM and
+  the child environ, neither of which a `bun test` preload can close.
+
+So the answer to the card's "close the CI/local gap" is now precise: T1 closed the environment
+half of it inside every `bun test` process (that is what took 10 red lanes to 5 and cleared all
+50 originally-reported files' env cluster); what remains is a toolchain pin and a
+host-is-a-deployment problem, each with a measured cause and neither fixable inside T3's
+prohibitions.
