@@ -1689,10 +1689,23 @@ function Composer({
  * ordinary file paste carries no text flavour) the paste would be
  * `preventDefault()`ed too. Returns [] for those, and for a text/HTML-only
  * paste; the caller must then NOT interfere with the default paste at all.
+ *
+ * Two consequences of that filter, stated so nobody reads more into it:
+ * an `image/*` subtype the upload allow-list rejects (bmp, tiff, heic, svg+xml)
+ * IS still collected and still produces the same failed chip a DROPPED bmp
+ * produces — the filter narrows the listener to images, it does not pre-validate
+ * them; and a paste carrying an image PLUS an attachable non-image (a PDF) takes
+ * only the image, where a drop of both would take both. Both are deliberate:
+ * this card is paste-an-image, and widening it is tracked separately.
+ *
+ * `items` is read defensively (`?.length ?? 0`): an engine that exposes only
+ * `files` and leaves `items` undefined must fall through to the fallback, not
+ * throw inside a document-level listener.
  */
 function clipboardImages(dt: DataTransfer): File[] {
   const out: File[] = []
-  for (let i = 0; i < dt.items.length; i += 1) {
+  const itemCount = (dt.items as DataTransferItemList | undefined)?.length ?? 0
+  for (let i = 0; i < itemCount; i += 1) {
     const item = dt.items[i]
     if (item !== undefined && item.kind === 'file' && item.type.startsWith('image/')) {
       const f = item.getAsFile()
@@ -1700,7 +1713,8 @@ function clipboardImages(dt: DataTransfer): File[] {
     }
   }
   if (out.length === 0) {
-    for (let i = 0; i < dt.files.length; i += 1) {
+    const fileCount = (dt.files as FileList | undefined)?.length ?? 0
+    for (let i = 0; i < fileCount; i += 1) {
       const f = dt.files[i]
       if (f !== undefined && f.type.startsWith('image/')) out.push(f)
     }
@@ -1722,7 +1736,38 @@ function clipboardImages(dt: DataTransfer): File[] {
  * non-empty".
  */
 function clipboardHasText(dt: DataTransfer): boolean {
-  return Array.from(dt.types).some((t) => t.startsWith('text/'))
+  return Array.from((dt.types as readonly string[] | undefined) ?? []).some((t) =>
+    t.startsWith('text/'),
+  )
+}
+
+/**
+ * Every editable element, and the one that is allowed to feed the chat draft.
+ * `.car-input` is the composer textarea (`ComposerPrimitive.Input`).
+ */
+const EDITABLE_SELECTOR = 'input, textarea, [contenteditable=""], [contenteditable="true"]'
+const COMPOSER_INPUT_SELECTOR = '.car-input'
+
+/**
+ * Is this paste aimed at SOMEONE ELSE'S text field?
+ *
+ * The listener has to be document-level (card req 2: the screenshot → Cmd-V flow
+ * pastes with focus on `<body>`), which means it also sees every paste destined
+ * for the other editors on the page — the rail's project-name input
+ * (`.car-rail-input`), the in-place message editor (`.car-edit-input`), any
+ * field added later. Stealing those is strictly worse than the missing feature:
+ * the paste would be cancelled out of the field the user was typing in, the
+ * image dropped into the chat draft and uploaded immediately.
+ *
+ * So the rule is by TARGET, not by geometry: a paste that lands inside an
+ * editable element is ours only if that editable is the composer input. A paste
+ * with no editable ancestor — `<body>`, the thread, the document itself, i.e.
+ * the case req 2 exists for — is the page-level paste and stays ours.
+ */
+function isForeignEditorPaste(target: EventTarget | null): boolean {
+  if (!(target instanceof Element)) return false
+  const editable = target.closest(EDITABLE_SELECTOR)
+  return editable !== null && editable.closest(COMPOSER_INPUT_SELECTOR) === null
 }
 
 /** Monotonic per-page counter for synthesized paste filenames. */
@@ -1909,6 +1954,13 @@ function ChatSurface({
   // `display:none`, so matching on computed style would buy no coverage and cost
   // a layout read on every paste.
   //
+  // TARGET GATE (also load-bearing): a document listener sees pastes aimed at
+  // every OTHER text field on the page too — the rail's project-name input, the
+  // in-place message editor. {@link isForeignEditorPaste} bails on those, so an
+  // image pasted into one of them is neither cancelled nor stolen into the chat
+  // draft; only the composer input and the no-editor (page-level) case are ours.
+  // An event another handler already cancelled is left alone for the same reason.
+  //
   // WHAT IS INTERCEPTED: only a paste that actually carries IMAGE data. Anything
   // else — text, HTML, a copied .pptx, a copied .zip — returns before touching
   // the event, so ordinary pastes behave exactly as before.
@@ -1927,6 +1979,8 @@ function ChatSurface({
   })
   useEffect(() => {
     const onPaste = (e: ClipboardEvent): void => {
+      if (e.defaultPrevented) return
+      if (isForeignEditorPaste(e.target)) return
       const el = mainRef.current
       if (el === null || el.closest('[hidden]') !== null) return
       const dt = e.clipboardData

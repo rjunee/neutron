@@ -68,8 +68,13 @@ const filesOnlyClipboard = (files: readonly File[], types: readonly string[]): D
   ({ items: [], files, types }) as unknown as DataTransfer
 
 describe('paste-to-attach on the chat surface (happy-dom)', () => {
-  /** Mount a live ChatApp over a fake socket + fake upload endpoint. */
-  const mount = async (): Promise<{
+  /**
+   * Mount a live chat over a fake socket + fake upload endpoint. `shell: 'project'`
+   * mounts the real {@link ProjectShell} instead of a bare `ChatApp`, which is
+   * what puts the REAL other-editor surfaces on the page (the rail's
+   * `.car-rail-input`) and the REAL `.car-tabpanel` ancestor around `<main>`.
+   */
+  const mount = async (opts?: { shell?: 'chat' | 'project' }): Promise<{
     container: HTMLDivElement
     root: { unmount: () => void }
     draft: () => AttachmentDraft
@@ -82,6 +87,8 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
     const { useNeutronChat } = await import('../useNeutronChat.ts')
     const { useAttachmentDraft } = await import('../useAttachmentDraft.ts')
     const { ChatApp } = await import('../ChatApp.tsx')
+    const { ProjectShell } = await import('../ProjectShell.tsx')
+    const Shell = opts?.shell === 'project' ? ProjectShell : ChatApp
     const React = await import('react')
 
     const fakeFetch = async (url: string, init?: RequestInit): Promise<Response> => {
@@ -92,6 +99,16 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
           { status: 200 },
         )
       }
+      // Shell chrome the `shell: 'project'` mount resolves on mount (tab set,
+      // work board, usage meter). Served empty so the rail/tab band render.
+      const json = (body: unknown): Response =>
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'content-type': 'application/json' },
+        })
+      if (url.endsWith('/tabs')) return json({ ok: true, tabs: [] })
+      if (url.includes('/work-board')) return json({ ok: true, items: [], project_id: 'general' })
+      if (url.includes('/api/app/usage')) return json({ available: false, reason: 'no_credential' })
       return new Response('not found', { status: 404 })
     }
 
@@ -155,7 +172,7 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
       const { runtime, vm } = useNeutronChat(controller, config.origin, draft)
       return (
         <AssistantRuntimeProvider runtime={runtime}>
-          <ChatApp vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fakeFetch} />
+          <Shell vm={vm} controller={controller} config={config} draft={draft} fetchImpl={fakeFetch} />
         </AssistantRuntimeProvider>
       )
     }
@@ -396,6 +413,155 @@ describe('paste-to-attach on the chat surface (happy-dom)', () => {
 
     expect(draft().items.length).toBe(2)
     expect(evHtml.defaultPrevented).toBe(false)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('an image pasted into ANOTHER field (the rail project-name input) is neither cancelled nor stolen', async () => {
+    const { act } = await import('react')
+    const { container, root, draft } = await mount({ shell: 'project' })
+
+    // Open the rail's inline create form — a REAL live editor that sits OUTSIDE
+    // the composer and outside the chat tabpanel, exactly where the owner might
+    // paste a logo or a screenshot while naming a project.
+    const newp = container.querySelector('.car-rail-newp') as HTMLButtonElement | null
+    expect(newp).not.toBeNull()
+    await act(async () => {
+      newp!.click()
+      await tick()
+    })
+    const railInput = container.querySelector('.car-rail-input') as HTMLInputElement | null
+    expect(railInput).not.toBeNull()
+    railInput!.focus()
+
+    const dt = new DataTransfer()
+    dt.items.add(png('logo.png'))
+    const ev = pasteEvent(dt)
+    await pasteOn(railInput!, ev)
+
+    // The field's own paste is left completely alone: no cancel (so the browser
+    // still does whatever it does there), no chip, and NO upload kicked off.
+    expect(draft().items.length).toBe(0)
+    expect(ev.defaultPrevented).toBe(false)
+
+    // Non-vacuity: the surface listener is live on this same mount — a paste on
+    // the page still attaches.
+    const dtPage = new DataTransfer()
+    dtPage.items.add(png('shot.png'))
+    const evPage = pasteEvent(dtPage)
+    await pasteOnBody(evPage)
+    expect(draft().items.length).toBe(1)
+    expect(evPage.defaultPrevented).toBe(true)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('an editable INSIDE the chat surface that is not the composer is foreign too', async () => {
+    const { act } = await import('react')
+    const { container, root, draft } = await mount()
+
+    // Stand-in for `.car-edit-input`, the in-place message editor: it renders
+    // inside <main>, between the thread and the composer, but is not the
+    // composer. (The real one is reachable only when `canMutate` is true, which
+    // the app currently pins off — the gate must hold for it regardless, and for
+    // any field added inside the surface later.)
+    const main = container.querySelector('main')
+    expect(main).not.toBeNull()
+    const editor = document.createElement('textarea')
+    editor.className = 'car-edit-input'
+    main!.appendChild(editor)
+    editor.focus()
+
+    const dt = new DataTransfer()
+    dt.items.add(png('shot.png'))
+    const ev = pasteEvent(dt)
+    await pasteOn(editor, ev)
+
+    expect(draft().items.length).toBe(0)
+    expect(ev.defaultPrevented).toBe(false)
+
+    // Non-vacuity: same mount, same file, pasted at the page level → attaches.
+    const dtPage = new DataTransfer()
+    dtPage.items.add(png('shot.png'))
+    await pasteOnBody(pasteEvent(dtPage))
+    expect(draft().items.length).toBe(1)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('a paste already handled by someone else (defaultPrevented) is left alone', async () => {
+    const { act } = await import('react')
+    const { root, draft } = await mount()
+
+    const dt = new DataTransfer()
+    dt.items.add(png('shot.png'))
+    const ev = pasteEvent(dt)
+    ev.preventDefault()
+    await pasteOnBody(ev)
+    expect(draft().items.length).toBe(0)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('text + image pasted INTO the composer attaches the image and leaves the caption\u2019s insert alone', async () => {
+    const { act } = await import('react')
+    const { container, root, draft } = await mount()
+
+    const input = container.querySelector('.car-input') as HTMLTextAreaElement | null
+    expect(input).not.toBeNull()
+    input!.focus()
+    const before = input!.value
+
+    const dt = new DataTransfer()
+    dt.setData('text/plain', 'caption')
+    dt.items.add(png('shot.png'))
+    const ev = pasteEvent(dt)
+    await pasteOn(input!, ev)
+
+    // Exactly one attachment, and the caption's default insert survives: we did
+    // not cancel it, and we did not write into the composer ourselves either.
+    // (A synthetic paste performs no default insertion under happy-dom, so
+    // "not cancelled + not touched by us" is the whole app-side contract here.)
+    expect(draft().items.length).toBe(1)
+    expect(draft().items[0]!.name).toBe('shot.png')
+    expect(ev.defaultPrevented).toBe(false)
+    expect(input!.value).toBe(before)
+
+    await act(async () => {
+      root.unmount()
+    })
+  })
+
+  it('a paste under a REAL hidden `.car-tabpanel` does not attach', async () => {
+    const { act } = await import('react')
+    const { container, root, draft } = await mount({ shell: 'project' })
+
+    // The gate's real coupling: ProjectShell parks the chat surface under a
+    // `.car-tabpanel[hidden]` when another tab is selected.
+    const main = container.querySelector('main')
+    expect(main).not.toBeNull()
+    const panel = main!.closest('.car-tabpanel') as HTMLElement | null
+    expect(panel).not.toBeNull()
+
+    panel!.hidden = true
+    const dtHidden = new DataTransfer()
+    dtHidden.items.add(png('shot.png'))
+    await pasteOnBody(pasteEvent(dtHidden))
+    expect(draft().items.length).toBe(0)
+
+    panel!.hidden = false
+    const dtVisible = new DataTransfer()
+    dtVisible.items.add(png('shot.png'))
+    await pasteOnBody(pasteEvent(dtVisible))
+    expect(draft().items.length).toBe(1)
 
     await act(async () => {
       root.unmount()
