@@ -2,6 +2,45 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-09-01 — switching back into a conversation lands at the bottom again
+
+A kept-alive conversation surface is `.car-conv[hidden]`, and `chat-react.html` gives that
+`display: none`. A display:none element has no layout box, so its viewport's `scrollTop` is not
+preserved — it comes back 0 on re-show. Nothing in `ChatApp.tsx` restored it, and assistant-ui's
+`useThreadViewportAutoScroll` is `isAtBottom`-gated, so from scrollTop 0 it deliberately declines
+to act. The surface's own docblock claimed the opposite ("its scroll position + composer draft
+survive"), which is how this went unnoticed: the prose asserted a property the code never had.
+Both lying sites now say what is true — the draft and the runtime survive; the scroll position is
+captured and restored explicitly.
+
+The transcript window (#481) did not cause this, it made it visible. Before, a surface mounted the
+whole history and re-activation landed at the very beginning; now it mounts the trailing 100, so
+the same missing restore lands you ~100 messages back, staring at "Load older messages". The
+window is not the bug and was not touched.
+
+`ViewportActivationRestore` lives inside `ThreadPrimitive.Viewport` beside `LoadOlderMessages`. It
+CAPTURES `{scrollTop, atBottom, count}` into a ref from a passive scroll listener while the surface
+is active — capture on the way OUT, because by the deactivation commit the DOM already reads 0 —
+and RESTORES pre-paint in a `useLayoutEffect` on the `active: false → true` edge. The effect is
+keyed on the RUNTIME's rendered message count, the same way `LoadOlderMessages` is, because
+`useExternalStoreRuntime` applies a changed transcript one commit after the parent render; a
+restore keyed on the parent would measure the old height. The target is the user's prior position
+when they had deliberately scrolled back and the mounted content is unchanged, and otherwise the
+bottom — never an arbitrary offset over content that has since changed. The bottom target stays
+armed until the runtime count settles to the live windowed length so the adapter's late apply
+re-pins it, then clears, so an arrival later on never yanks a reader who has scrolled up.
+
+`activation-scroll-restore.test.tsx` carries the required must-fail control (switch away from the
+bottom, switch back, assert the bottom) which was red at `scrollTop` 0 against the pre-change tree,
+plus the scrolled-back sibling that asserts the exact position AND asserts it is not the bottom, so
+neither case can be satisfied by the other's path. happy-dom has no layout engine, so the tests
+supply the geometry, dispatch `scroll` by hand, and zero `scrollTop` themselves to model the
+browser's box teardown — without that last line the control would have passed vacuously.
+`transcript-window.test.tsx` and `switch-render-cost.test.tsx` pass unmodified: the sentinel span
+is not a `.car-row`, and the only new prop with churn lands on the un-memoized `ChatSurface` inside
+an already-re-rendering surface.
+
+
 ## 2026-08-17 — a stale rollout is not evidence, and a healthy reading must be able to release a seat (#418)
 
 PR #418, follow-up to #407. Review found three ways for the Codex seat pool to shrink to

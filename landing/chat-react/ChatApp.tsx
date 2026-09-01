@@ -976,6 +976,112 @@ function LoadOlderMessages({
   )
 }
 
+/** Bottom-proximity epsilon (px): within this of the bottom counts as "following the tail". */
+const AT_BOTTOM_EPSILON_PX = 4
+
+/**
+ * Restores the viewport scroll position when this kept-alive surface re-activates.
+ *
+ * `.car-conv[hidden]` is `display: none` — the scroll box is destroyed, `scrollTop`
+ * reads 0 on re-show, and assistant-ui's `useThreadViewportAutoScroll` is
+ * `isAtBottom`-gated so it deliberately declines to act from scrollTop 0. So:
+ * CAPTURE on the way out (a passive scroll listener — by the deactivation commit the
+ * DOM already reads 0), and RESTORE pre-paint on the active edge, keyed on the
+ * RUNTIME's rendered count exactly like {@link LoadOlderMessages}, because
+ * `useExternalStoreRuntime` applies a changed transcript one commit after the parent
+ * render.
+ *
+ * Target: the user's prior position when they had deliberately scrolled back and the
+ * mounted content is unchanged; otherwise the bottom. A position over CHANGED content
+ * is not restored — bottom instead, never an arbitrary offset.
+ *
+ * The hidden sentinel span exists only to reach `.car-viewport` via `.closest()`, the
+ * same trick `LoadOlderMessages` uses with its `btnRef`. It is not a `.car-row`, so it
+ * does not disturb the transcript-window row counts.
+ */
+function ViewportActivationRestore({
+  active,
+  windowLength,
+}: {
+  active: boolean
+  /** Length of the LIVE windowed list this surface's runtime is converging to. */
+  windowLength: number
+}): React.JSX.Element {
+  const markRef = useRef<HTMLElement | null>(null)
+  const posRef = useRef<{ scrollTop: number; atBottom: boolean; count: number } | null>(null)
+  const renderedCount = useAuiState((s) => s.thread.messages.length)
+  // Render-phase ref write, the same sanctioned pattern as `windowRef`: the capture
+  // effect must read the CURRENT rendered count without re-subscribing.
+  const renderedCountRef = useRef(renderedCount)
+  renderedCountRef.current = renderedCount
+  const prevActiveRef = useRef(false)
+  const pendingRef = useRef<
+    { kind: 'bottom' } | { kind: 'position'; scrollTop: number; count: number } | null
+  >(null)
+
+  // THE RESTORE — layout effect (pre-paint, no visible jump). React removes the
+  // `hidden` attribute in the mutation phase before layout effects run, so
+  // `scrollHeight` is live here.
+  useLayoutEffect(() => {
+    const wasActive = prevActiveRef.current
+    prevActiveRef.current = active
+    if (!active) {
+      pendingRef.current = null
+      return
+    }
+    if (!wasActive) {
+      const pos = posRef.current
+      pendingRef.current =
+        pos !== null && !pos.atBottom
+          ? { kind: 'position', scrollTop: pos.scrollTop, count: pos.count }
+          : { kind: 'bottom' }
+    }
+    const p = pendingRef.current
+    if (p === null) return
+    const viewport = markRef.current?.closest('.car-viewport')
+    if (!(viewport instanceof HTMLElement)) return
+    if (p.kind === 'position') {
+      // Valid only over the same mounted content it was captured against (an
+      // evicted/remounted surface has no capture at all and lands on 'bottom'
+      // above). New arrivals AFTER this applies shift the trailing window under the
+      // position by the dropped rows' height; that drift is accepted — the
+      // alternative (yanking to bottom on the settle commit) discards the place the
+      // reader deliberately held.
+      viewport.scrollTop = renderedCount === p.count ? p.scrollTop : viewport.scrollHeight
+      pendingRef.current = null
+      return
+    }
+    viewport.scrollTop = viewport.scrollHeight // bottom; the browser clamps to max scroll
+    // Stay armed until the runtime has caught up with the live windowed list, so the
+    // adapter's one-commit-late apply re-pins the bottom; then clear, so a later
+    // arrival while the user reads scrolled-up content never yanks them down.
+    if (renderedCount === windowLength) pendingRef.current = null
+  }, [active, renderedCount, windowLength])
+
+  // THE DEPARTURE CAPTURE — plain effect (post-paint) so on an activation commit the
+  // restore above has ALREADY run and the initial capture records the restored spot,
+  // not the stale 0. Do NOT promote this to a layout effect: the ordering with the
+  // restore is the whole point.
+  useEffect(() => {
+    if (!active) return
+    const viewport = markRef.current?.closest('.car-viewport')
+    if (!(viewport instanceof HTMLElement)) return
+    const capture = (): void => {
+      posRef.current = {
+        scrollTop: viewport.scrollTop,
+        atBottom:
+          viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - AT_BOTTOM_EPSILON_PX,
+        count: renderedCountRef.current,
+      }
+    }
+    capture()
+    viewport.addEventListener('scroll', capture, { passive: true })
+    return () => viewport.removeEventListener('scroll', capture)
+  }, [active])
+
+  return <span ref={markRef} hidden data-viewport-restore="" />
+}
+
 function TypingIndicator({
   activity,
   onOpenActivity,
@@ -1952,6 +2058,8 @@ function ChatSurface({
   config,
   draft,
   uploadAffordance,
+  active,
+  windowLength,
   olderHiddenCount,
   onLoadOlder,
   showPane,
@@ -1965,6 +2073,12 @@ function ChatSurface({
   config: BootstrapConfig
   draft: AttachmentDraft
   uploadAffordance: ChatMessageUploadAffordance | null
+  /** Whether this kept-alive surface is the VISIBLE one (see
+   *  {@link ViewportActivationRestore}, which restores scroll on the activation edge). */
+  active: boolean
+  /** `windowedMessages.length` — the rendered length this surface's runtime is
+   *  converging to (see {@link ViewportActivationRestore}). */
+  windowLength: number
   /** How many of this conversation's messages are OUTSIDE the mounted transcript
    *  window (see {@link TRANSCRIPT_WINDOW_MESSAGES}); 0 hides the control. */
   olderHiddenCount: number
@@ -2174,6 +2288,7 @@ function ChatSurface({
         <div className="car-chatstage">
         <div className="car-chatmain">
         <ThreadPrimitive.Viewport className="car-viewport">
+          <ViewportActivationRestore active={active} windowLength={windowLength} />
           <LoadOlderMessages hiddenCount={olderHiddenCount} onLoadOlder={onLoadOlder} />
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
@@ -2344,8 +2459,12 @@ const HYDRATION_GRACE_MS = 600
  * NEVER fed another project's messages and its list is never emptied in place by
  * a foreign switch. That structural guarantee is what preserves the SEV1
  * switch-race fix (no `useClientLookup` index-out-of-bounds) while letting the
- * surface stay MOUNTED across switches: hidden when inactive, so its scroll
- * position + composer draft survive and switching back is instant.
+ * surface stay MOUNTED across switches: hidden when inactive, so its composer draft
+ * and its runtime survive and switching back is instant. The scroll POSITION does
+ * NOT survive on its own — `.car-conv[hidden]` is `display: none`, which destroys
+ * the scroll box and zeroes the live `scrollTop`; {@link ViewportActivationRestore}
+ * captures the position on the way out and restores it (bottom by default) on
+ * re-activation.
  */
 function MountedConversationImpl({
   hostVm,
@@ -2502,6 +2621,8 @@ function MountedConversationImpl({
           config={config}
           draft={draft}
           uploadAffordance={uploadAffordance}
+          active={active}
+          windowLength={windowedMessages.length}
           olderHiddenCount={olderHiddenCount}
           onLoadOlder={onLoadOlder}
           // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
@@ -2599,7 +2720,10 @@ export function ChatApp({
   // MountedConversation (its own runtime); only the active one is visible. This
   // preserves the SEV1 switch-race fix structurally (each surface's runtime only
   // ever sees ITS conversation's messages — never emptied in place by a foreign
-  // switch), keeps per-project scroll + draft, and makes switching back instant.
+  // switch), keeps the per-project draft, and makes switching back instant. The
+  // scroll position is NOT kept by mounting alone — `display: none` zeroes the live
+  // scrollTop — so it is captured and restored explicitly on re-activation (see
+  // ViewportActivationRestore).
   const convId = conversationIdOf(vm.projectId)
 
   // REF-STABILIZED CALLBACKS. Every mounted surface takes these as props, and
