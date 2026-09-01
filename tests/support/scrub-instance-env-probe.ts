@@ -32,10 +32,20 @@ for (const key of [
   }
 }
 
-if (process.env['NEUTRON_TEST_SHARD'] !== 'sentinel-1/1') {
-  throw new Error(
-    `expected NEUTRON_TEST_SHARD to SURVIVE the scrub, got ${String(process.env['NEUTRON_TEST_SHARD'])}`,
-  )
+// The harness allow-list. Scrubbing one of these does not FAIL a run — it makes
+// the gated suite SKIP, and a skip reports green, so nothing downstream would
+// ever notice. These assertions are the only thing that would.
+for (const [key, expectedValue] of [
+  ['NEUTRON_TEST_SHARD', 'sentinel-1/1'],
+  ['NEUTRON_PTY_E2E', '1'],
+  ['NEUTRON_E2E_NETWORK', '1'],
+  ['NEUTRON_BUN_BIN', '/sentinel/bun'],
+] as const) {
+  if (process.env[key] !== expectedValue) {
+    throw new Error(
+      `expected ${key} to SURVIVE the scrub as ${expectedValue}, got ${String(process.env[key])}`,
+    )
+  }
 }
 
 const home = process.env['NEUTRON_HOME']
