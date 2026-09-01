@@ -6338,8 +6338,10 @@ deleted, no dual path):
   `ralph-progress-unknown`). What the seed recovers in a governed repo is the
   `outer-published:<oid>:<remaining>:<round>` and `fix-round-N` window — the shapes that DO carry
   a reviewable commit and a recorded remaining-task count — and what the verdict honesty fixes
-  everywhere, Ralph included, is the RECORDING: those 33 rows now read `REVIEW_NOT_RUN` at
-  `forge-done` instead of inflating the rejection count. Readers follow the
+  everywhere, Ralph included, is the RECORDING: a run of the shape those 33 rows have — terminal
+  at `forge-done`, no review, no findings — is now recorded `REVIEW_NOT_RUN` rather than
+  inflating the rejection count. FROM NOW ON, not retroactively: the 33 measured rows still say
+  what they said. Readers follow the
   RECORDED verdict in both directions (`trident/delivery.ts` `interpretFailure`; both Work Board
   clients render REVIEW_NOT_RUN as "Review never ran — the work was not rejected."). `round` is
   derived from round-carrying checkpoint names at BOTH write seams (`checkpointRound` in the TS

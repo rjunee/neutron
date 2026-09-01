@@ -2586,10 +2586,8 @@ export function buildTridentOrchestrator(
     // there and as a `rename` header on the fallback. That is the deliberate cost
     // of not dropping a rename's source: the contract is that the whole change is
     // present and reordered, never that the two renderings match byte for byte.
-    const changedFiles = changed.stdout
-      .split('\n')
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
+    const changedLines = changed.stdout.split('\n').filter((l) => l.trim().length > 0)
+    const changedFiles = changedLines.map((l) => l.trim())
     let groups: string[][] | null = null
     const seenPin = (run.reviewed_head ?? reviewedHeadOid(run) ?? '').trim().toLowerCase()
     // A C-QUOTED PATH IS NOT A PATHSPEC. `core.quotePath=false` above unquotes the
@@ -2602,7 +2600,20 @@ export function buildTridentOrchestrator(
     // renders every path correctly. (It also covers the pathological embedded
     // newline: git quotes those too, so the split fragment still starts with `"`.)
     const quoted = changedFiles.some((f) => f.startsWith('"'))
-    if (/^[0-9a-f]{40}$/.test(seenPin) && !quoted && changedFiles.length <= 500) {
+    // AND A TRIMMED PATH IS NOT THE PATH EITHER (Argus r21, latent). git prints an
+    // unquoted path VERBATIM, so a tracked name with a leading or trailing space —
+    // legal on every filesystem this runs on, and printed bare because
+    // `core.quotePath` only quotes non-ASCII/control bytes — survives the listing
+    // intact and is then destroyed by the `trim()` above: `:(literal)<trimmed>`
+    // matches nothing, `git diff` writes no hunks, exits 0, and the file vanishes
+    // from the reviewer's artifact with no error anywhere. The trim itself stays
+    // (it is what makes the `\r` and blank-line cases safe); what changes is that a
+    // line the trim ALTERED means at least one path cannot be expressed as a
+    // pathspec here, so the reorder stands down to the single unrestricted command
+    // exactly as a C-quoted path does. Zero such paths are tracked today — this
+    // closes the shape before a reviewer reads a diff that is quietly incomplete.
+    const padded = changedLines.some((l) => l !== l.trim())
+    if (/^[0-9a-f]{40}$/.test(seenPin) && !quoted && !padded && changedFiles.length <= 500) {
       const unseenRes = await opts.run_host(
         ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', `${seenPin}..${headToPublish}`],
         run.repo_path,
@@ -2646,8 +2657,14 @@ export function buildTridentOrchestrator(
           run.repo_path,
         )
         if (!partDiff.ok) throw new Error('outer publisher could not materialize the review diff')
-        // A group whose files produce no hunks writes no file; that is not an
-        // error, it is an empty contribution.
+        // A group whose files produce no hunks contributes nothing, and that is not
+        // an error. MEASURED (Argus r22, scratch repo, git 2.43.0): `--output=` CREATES
+        // the file regardless — 0 bytes — so on this git the branch below always runs
+        // and appends nothing. The note that stood here said the file is not written,
+        // which would have made the `existsSync` load-bearing; it is a stand-down for a
+        // git that behaves the other way, and appending 0 bytes is the same artifact
+        // either way. It also has to be safe against a part left by an earlier run,
+        // which is why the file is removed after it is folded in.
         if (existsSync(part)) {
           appendFileSync(diffFile, readFileSync(part))
           rmSync(part, { force: true })

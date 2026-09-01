@@ -229,6 +229,89 @@ applied to the real source inside the test and asserted RED, next to an assertio
 counting equality still holds under it — the guard carries its own falsification, since this
 exact seam has now shipped inert twice.
 
+AND THE SITE SET IS DERIVED FROM THE CHOKEPOINT'S OWN SHAPE, NOT FROM THE PROPERTY UNDER TEST
+(Argus r21 blocker, reproduced). Anchoring the per-literal scan on `landedProbe` still let the
+mutant choose what got checked: delete BOTH properties from the ▶ dispatch site and re-spell the
+PAIR in a decoy `void { … }` beside the definitions, and every count stays equal AND every
+anchored literal is validly paired — the unwired site simply no longer carries the anchor the
+scan looks for, so it is not looked at. An anchor-driven scan can only ever check the sites that
+still carry the anchor, which is the one thing the mutant removes. The test now enumerates the
+dispatch-deps literals by the fields `dispatchBoardBoundBuild` REQUIRES — a direct `store:` and a
+direct `repo_path:`, which no mutant can drop without failing to compile, and which a decoy
+object does not have — pins that there are exactly FOUR of them (`/code`'s `resolve_context`, the
+app's ▶ `boardStartBuild`, the hold sweep's `makeDispatchDeps`, and the agent-native
+`trident_build_dispatch`), and requires each to carry the probe AND the runner as direct
+properties of itself. Both reviewers' mutants are applied to the real source and asserted RED,
+and the whole-site one is asserted INVISIBLE to the anchored scan beside it, so the reason the
+weaker scan was replaced cannot quietly stop being true.
+
+AND THE PRESENCE OF THE LINE IS NOT THE VALUE OF THE PROPERTY (Argus r22 blocker, codex's
+executed mutant — the one that DELETES NOTHING). `...{ hostRunner: undefined }` spliced in after
+the wired property leaves the spelling exactly where it is: every count equal, every literal
+"paired", and the site nevertheless binding `hostRunner` to `undefined` and falling back to the
+uncredentialed reader. A plain duplicate key is the same override without the spread. A site is
+now wired only when the LAST thing anywhere in that literal that so much as NAMES the property is
+the wired property line itself — last-mention-wins, which is what JS itself does. It cannot catch
+a legitimate site: each half is named exactly once at all four, including the hold sweep's, which
+does carry conditional spreads and mentions neither half in them. Both override forms are applied
+to the real source and asserted RED, beside an assertion that the counting AND the per-literal
+scans are blind to them.
+
+AND THE CLEARING WRITE IS AN ERASURE TOO (Argus r21). `checkpoint.sh` froze the findings column
+and the `REQUEST_CHANGES`/`REVIEW_NOT_RUN`/any-other-verdict writes against a settled terminal
+row, but `inner_verdict ''` — the CLEARING write — NULLed the verdict unconditionally while the
+findings column kept the reviewer's words, leaving one atomic write's two guarded columns
+disagreeing about whether a review happened, which this script's own docblock says cannot occur.
+`terminalRunDisposition` reads that row as died-before-build, i.e. as a card to rebuild from
+scratch. It is now frozen on exactly the terms its `REVIEW_NOT_RUN` sibling is: only a TERMINAL,
+already-settled row, and only when the write brings no findings of its own. No production path
+emits it, which is the point of putting the rule at the WRITE SITE rather than in a caller — the
+shape is closed before something reaches for it. A live row, a terminal row that never claimed a
+rejection, and a clear carrying real findings all clear to NULL exactly as before.
+
+AND A TRIMMED PATH IS NOT THE PATH (Argus r21, latent). The reorder's file listing is `trim()`ed
+per line, so a tracked name with a leading or trailing space — printed bare, since `core.quotePath`
+only quotes non-ASCII/control bytes — became a `:(literal)` pathspec that matches nothing: no
+hunks, exit 0, the file silently absent from what the reviewers read. A line the trim ALTERED now
+stands the reorder down to the single unrestricted command, exactly as a C-quoted path does. No
+such path is tracked today; the artifact's completeness must not depend on that staying true.
+
+ALL FOUR OF THOSE R21 FIXES WERE LOST ONCE AND ARE RESTORED HERE (Argus r22 blocker, confirmed by
+two reviewers). A rebase replay published a head whose commit MESSAGE described this work while
+its tree did not contain it: 266 deletions against its own pre-rebase commit, taking the erasure
+guard, the site-derived wiring scan, the padded-path stand-down — and the tests that pinned all
+three, which is why every suite stayed green over the regression. The lesson is recorded, not just
+the code: a replayed commit is verified by DIFFING IT AGAINST THE COMMIT IT REPLAYS, because a
+suite cannot fail over a test that was deleted with the code it guarded.
+
+THE NUL CLAUSE IS THE THIRD COPY OF ONE PREDICATE, NOT TWO (Argus r22, nit). The canonical
+counting statements carry `INSTR(…, CHAR(0)) = 0` — SQLite's JSON functions stop at an embedded
+NUL while `JSON.parse` reads on and throws — and `checkpoint.sh`'s `findings_case` did not, while
+`settled_rejection` applies that CASE to the STORED column. A historical row holding such a value
+was therefore "a settled rejection" to the shell and "legacy" to the count: one predicate with two
+answers. Bash strips NULs on ingest, so no write from that script can create the shape; the clause
+is parity over rows that already exist, and it is pinned textually in all three copies.
+
+TWO COMMENTS THAT STATED FALSE BEHAVIOUR ARE RETRACTED, MEASURED (Argus r22, nits). `store.ts`
+told readers to keep question marks out of a SQL comment because the driver counts them as bind
+parameters — bun:sqlite binds three values through a statement whose comment holds two. And
+`orchestrator.ts` said a group producing no hunks writes no file, which would make its `existsSync`
+load-bearing — `git diff --output=` creates the file regardless (0 bytes, git 2.43.0), so that
+check is a stand-down for a git that behaves otherwise. Both are harmless in effect and were
+corrected rather than left as rules a reader would obey for a reason that is not true. The same
+round retracts the last surviving copy of the SQLite BOM-divergence claim, in `inner-loop.test.ts`:
+over a value whose stored bytes begin EF BB BF, BOTH engines answer `json_valid = 0`; the reported
+disagreement came from BINDING the marked text, which strips the mark before SQLite sees it.
+
+ONE CARD PER SHAPE IN THE NON-QUALIFYING TABLE (Argus r22, codex, with an equal-timestamp repro).
+The four-shape table in `board-dispatch.test.ts` reused a single task, so every iteration's
+demoted prior stayed inside the same `latestTerminalBySlug` window — and that read orders by
+`started_at DESC, id DESC`, which on same-second rows tie-breaks on a RANDOM id. The row actually
+consulted could be an earlier iteration's leftover, also non-qualifying, and all three assertions
+would stay green without the shape under test ever being looked at. Each shape now owns its slug,
+as the link-boundary table already did, and the table closes with a positive control: the one
+qualifying prior, through the same helpers, DOES seed and DOES pay for exactly one branch-tip read.
+
 THE PUBLISHED REVIEW DIFF LEADS WITH THE FILES NO REVIEWER HAS SEEN. Measured on this card
 (Argus r16, three reviewers): a 6,692-line artifact read by a cross-model reviewer that stops at
 `ARGUS_DIFF_LINE_LIMIT` (3,000) and reports `CODEX_REVIEW_DIFF_TRUNCATED`. Default git order is

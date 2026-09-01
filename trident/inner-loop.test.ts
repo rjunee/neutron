@@ -117,13 +117,20 @@ describe('parseCheckpointFindings — a resumed fix round fixes RECORDED finding
     expect(parseCheckpointFindings('['.repeat(1001) + '0' + ']'.repeat(1001))).toEqual([])
   })
 
-  test('a BOM-prefixed array → [], the one shape the two SQLite builds disagree about', () => {
-    // Measured on this host (Argus r1, minor): for `'\uFEFF[1]'` the sqlite3 CLI
-    // `checkpoint.sh` invokes (3.45.1) answers `json_valid = 0` while the bun:sqlite
-    // the store and the canonical counting SQL use (3.51.2) answers `json_valid = 1`,
-    // `json_type = 'array'`. Today's pairing fails safe only because `JSON.parse`
-    // happens to throw; the reject is now explicit so a CLI upgrade cannot flip the
-    // direction and leave the counting SQL scoring these bytes as a real rejection.
+  test('a BOM-prefixed array → [], refused by construction rather than by version', () => {
+    // THE RATIONALE THAT STOOD HERE WAS FALSE AND IS RETRACTED (Argus r22; the same
+    // retraction already sits at the write site, `checkpoint-findings.ts`, and in
+    // `as-built-disposition-sql.test.ts`). It claimed the two engines DISAGREE about
+    // `'\uFEFF[1]'` — `json_valid = 0` on the sqlite3 CLI `checkpoint.sh` invokes
+    // (3.45.1) and 1 on the bun:sqlite the store and the counting SQL use (3.51.2).
+    // They do not: over a value whose STORED BYTES begin EF BB BF, BOTH answer 0. The
+    // reported 1 came from BINDING the marked text as a parameter, which strips the
+    // mark before SQLite sees it, so the stored value carried no mark at all.
+    // The assertion is unchanged and still the right one: the three copies of this
+    // rule agree today BY VERSION, and refusing the mark explicitly here, in
+    // `checkpoint.sh`'s `findings_case` and in the canonical counting SQL makes them
+    // agree BY CONSTRUCTION — an engine that started tolerating the mark still could
+    // not score these bytes as a real rejection.
     expect(parseCheckpointFindings('\uFEFF[{"severity":"blocker"}]')).toEqual([])
     // POSITIVE CONTROL: the SAME bytes without the mark are real findings, so this
     // test cannot pass on a decoder that has stopped decoding anything.

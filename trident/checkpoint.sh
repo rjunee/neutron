@@ -39,7 +39,10 @@
 #                              which is written only when the row is left carrying
 #                              a non-empty JSON array of findings and is otherwise
 #                              REFUSED and recorded as `REVIEW_NOT_RUN` (see "THE
-#                              VERDICT WRITE")
+#                              VERDICT WRITE"). AN EMPTY `<str>` CLEARS the column
+#                              to NULL — except on a settled terminal row, where a
+#                              write bringing no findings may not erase the review
+#                              it cannot justify, and the recorded verdict stands.
 #   inner_result_file <path> → inner_result=<the file's bytes as a SQL literal, or
 #                              NULL when it is missing>,
 #                              subagent_status=CASE WHEN length(<those same bytes>)
@@ -158,12 +161,22 @@ read_file_literal() {
 # rejection here while the parser still read it as empty. The expression is a
 # materialised literal, so mentioning it once more costs nothing and re-evaluates
 # nothing.
+# AND THE NUL CLAUSE MIRRORS THE COUNTING SQL'S (Argus r22, nit). The canonical
+# statements in `docs/AS_BUILT.md` also carry `INSTR(…, CHAR(0)) = 0`, because
+# SQLite's JSON functions stop at an embedded NUL while `JSON.parse` sees the whole
+# value and throws on the trailing bytes. Without it here, a historical row holding
+# such a value is "a settled rejection" to `settled_rejection` below — which applies
+# the clause to the STORED column — and "legacy" to the counting SQL, i.e. the three
+# copies of one predicate stop being one predicate. Bash cannot even carry a NUL
+# through an argument, so no write from THIS script can produce the shape; the clause
+# is parity for the rows that already exist, and it costs one more mention of a
+# materialised literal.
 #   $1 — the findings SQL expression (a literal, per read_file_literal above)
 #   $2 — SQL value when the findings are a real, non-empty rejection
 #   $3 — SQL value otherwise
 findings_case() {
-  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
-    "$1" "$1" "$1" "$1" "$2" "$3" "$3"
+  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) AND INSTR(%s, CHAR(0)) = 0 THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
+    "$1" "$1" "$1" "$1" "$1" "$2" "$3" "$3"
 }
 
 # A TERMINAL ROW'S LIVENESS COLUMNS ARE FROZEN — and ONLY those two.
@@ -621,7 +634,30 @@ if [ "$verdict_given" = 1 ]; then
     sets+=("inner_verdict=$guarded_verdict")
     guarded_rejection=1
   elif [ -z "$verdict_value" ]; then
-    sets+=('inner_verdict=NULL')
+    # AND THE CLEARING WRITE IS NOT AN EXIT EITHER (Argus r21). `inner_verdict ''`
+    # was the one shape that walked straight past both guards: on a settled
+    # terminal row it NULLed the verdict while the findings column — guarded by the
+    # erasure block above — kept the real findings, leaving the two columns
+    # disagreeing about whether a review happened, which is exactly the state this
+    # script's docblock promises can never occur. `terminalRunDisposition` then
+    # reads a reviewed rejection as died-before-build and the card is re-dispatched
+    # from scratch: the same waste this card removes, reached by clearing instead
+    # of overwriting. Frozen on the SAME terms as its `REVIEW_NOT_RUN` sibling —
+    # only a TERMINAL, already-settled row, and only when the write brings no
+    # findings of its own. A live row, and a clear that carries REAL findings, both
+    # land unchanged.
+    #
+    # No production path emits it today (`inner-workflow.mjs` writes only
+    # APPROVE/REQUEST_CHANGES/REVIEW_NOT_RUN), so this closes the shape rather than
+    # a live regression — which is the point of putting the rule at the WRITE SITE:
+    # a future caller cannot reach the erasure by choosing a different argument.
+    sets+=("inner_verdict=CASE WHEN $settled_rejection AND $brings_no_findings THEN inner_verdict ELSE NULL END")
+    frozen_no_review=1
+    if [ "$findings_given" = 1 ]; then
+      frozen_label='a verdict-clearing write with an emptying findings file'
+    else
+      frozen_label='a bare verdict-clearing write'
+    fi
   elif [ "$verdict_value" = 'REVIEW_NOT_RUN' ]; then
     # AND THE ERASURE GUARD COVERS THE VERDICT-ONLY WRITE TOO (Argus r18). The block
     # above arms `$erasure` only when a findings file accompanies the write, so a BARE

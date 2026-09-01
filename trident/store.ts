@@ -1305,8 +1305,11 @@ export class TridentRunStore {
               -- COALESCE, NOT A PLAIN ASSIGNMENT, exactly as in saveIfActive: a bare
               -- assignment would let every snapshot save blank the column, while
               -- COALESCE writes only when the caller actually brought findings.
-              -- (Keep this comment free of question marks: the driver counts every one
-              -- in the statement text as a bind parameter, comments included.)
+              -- (The note that stood here said the driver counts a question mark inside
+              -- a comment as a bind parameter. MEASURED, Argus r22: it does not --
+              -- bun:sqlite binds three values through a statement whose comment holds two
+              -- question marks. Nothing depends on the claim; it is corrected rather than
+              -- left as a rule a reader would obey for a false reason.)
               inner_checkpoint_findings = COALESCE(?, inner_checkpoint_findings),
               base_sha = ?, base_behind = ?,
               last_advanced_at = ?
@@ -1401,8 +1404,8 @@ export class TridentRunStore {
                 -- satisfied. But most callers of saveIfActive never touch findings, and a
                 -- bare assignment would let each of them blank the column on an unrelated
                 -- save. COALESCE writes only when the caller actually brought something.
-                -- (Keep this comment free of question marks: the driver counts every one
-                -- in the statement text as a bind parameter, comments included.)
+                -- (Same correction as in save() above: a question mark inside a comment
+                -- is NOT a bind parameter -- measured on bun:sqlite, Argus r22.)
                 inner_checkpoint_findings = COALESCE(?, inner_checkpoint_findings),
                 base_sha = ?, base_behind = ?,
                 last_advanced_at = ?

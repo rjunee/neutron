@@ -470,33 +470,182 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(camelPairs(src).every((paired) => paired)).toBe(true)
     expect(snakePairs(src).every((paired) => paired)).toBe(true)
 
-    // THE REVIEWER'S MUTANT, APPLIED TO THE REAL SOURCE: unwire ONE dispatch site
-    // and re-spell the property in a decoy object beside the runner's definition.
+    // AND THE ANCHOR CANNOT SAY *WHICH LITERALS HAD TO CARRY IT* (Argus r21
+    // blocker, with a working mutant). Every scan above starts from the landed
+    // probe, so a mutant that deletes BOTH properties from a dispatch site and
+    // re-spells the PAIR in a decoy `void { … }` beside the definitions keeps the
+    // counts equal AND leaves every anchored literal validly paired — the site is
+    // simply no longer looked at. An anchor-driven scan can only ever check the
+    // sites that still carry the anchor, which is the one thing the mutant
+    // removes.
+    //
+    // So the site set is derived from the shape the CHOKEPOINT REQUIRES, not from
+    // the property under test: `dispatchBoardBoundBuild`'s deps (and the
+    // composition's `trident_build_dispatch`, its snake-cased twin) are the object
+    // literals carrying a direct `store:` AND a direct `repo_path:`. Those are
+    // required fields — a mutant cannot drop them to hide from this scan without
+    // failing to compile — and a decoy `void { … }` has neither, so it is not a
+    // site. Every site must then carry the probe AND the runner as direct
+    // properties of ITSELF.
+    interface DepsSite {
+      /** Everything between the literal's braces, nesting included. */
+      body: string
+      /** The lines of that body that are its DIRECT properties. */
+      lines: string[]
+    }
+    const dispatchDepsSites = (text: string): DepsSite[] => {
+      const re = /^[ \t]*repo_path:[ \t]/gm
+      const out: DepsSite[] = []
+      for (let m = re.exec(text); m !== null; m = re.exec(text)) {
+        const body = enclosingObject(text, m.index)
+        if (body === null) continue
+        const lines = directPropertyLines(body)
+        // Self-check, as above: the anchor line must come back as a DIRECT
+        // property of the literal the scan found, or the scan mis-parsed.
+        if (!lines.some((l) => /^[ \t]*repo_path:[ \t]/.test(l))) continue
+        if (!lines.some((l) => /^[ \t]*store:[ \t]/.test(l))) continue
+        out.push({ body, lines })
+      }
+      return out
+    }
+    /**
+     * The property is BOUND to the wired value when the last thing anywhere in the
+     * literal that so much as NAMES it is the wired property line itself.
+     *
+     * AND THE PRESENCE OF A LINE IS NOT THE VALUE OF THE PROPERTY (Argus r22
+     * blocker, codex's executed mutant). `...{ hostRunner: undefined }` spliced in
+     * AFTER the wired property deletes nothing: every count stays equal, every
+     * literal stays "paired", the spelling is still right there — it is simply
+     * overwritten, and production takes the uncredentialed fallback again. A plain
+     * duplicate key (`hostRunner: undefined,`) is the same override without the
+     * spread. Last-mention-wins covers both, and it covers them wherever in the
+     * literal they are written, because a later key is what JS itself honours.
+     * These literals name each half exactly once today, so nothing legitimate is
+     * caught by it — including the hold sweep's site, which DOES carry conditional
+     * spreads, none of which mention either half.
+     */
+    const boundTo = (site: DepsSite, prop: string, value: string): boolean => {
+      const named = new RegExp(`\\b${prop}\\b`)
+      const mentions = site.body.split('\n').filter((l) => named.test(l))
+      const last = mentions[mentions.length - 1]
+      return (
+        last !== undefined &&
+        propLine(prop, value).test(last) &&
+        site.lines.some((l) => propLine(prop, value).test(l))
+      )
+    }
+    const siteIsWired = (site: DepsSite): boolean => {
+      const has = (prop: string, value: string): boolean =>
+        site.lines.some((l) => propLine(prop, value).test(l))
+      if (has('landedProbe', 'tridentLandedProbe')) {
+        return (
+          boundTo(site, 'landedProbe', 'tridentLandedProbe') &&
+          boundTo(site, 'hostRunner', 'tridentHostRunner')
+        )
+      }
+      if (has('landed_probe', 'tridentLandedProbe')) {
+        return (
+          boundTo(site, 'landed_probe', 'tridentLandedProbe') &&
+          boundTo(site, 'host_runner', 'tridentHostRunner')
+        )
+      }
+      // Neither half — the site takes the uncredentialed fallback for both reads.
+      return false
+    }
+
+    // The four production entries into the chokepoint, in file order: `/code`'s
+    // `resolve_context`, the app's ▶ `boardStartBuild`, the hold sweep's
+    // `makeDispatchDeps`, and the agent-native `trident_build_dispatch`. Pinned
+    // exactly, so a FIFTH entry cannot be added without being wired here too —
+    // and so a site that quietly disappears cannot read as "all sites paired".
+    expect(dispatchDepsSites(src).length).toBe(4)
+    expect(dispatchDepsSites(src).filter((site) => !siteIsWired(site)).length).toBe(0)
+
+    // THE REVIEWERS' MUTANTS, APPLIED TO THE REAL SOURCE. Both unwire the app's ▶
+    // dispatch site — the second camel-cased entry — and re-spell what they took
+    // in a decoy object beside the runner's definition.
     const lines = src.split('\n')
     const anchorAt = lines.reduce<number[]>(
       (acc, l, i) => (propLine('landedProbe', 'tridentLandedProbe').test(l) ? [...acc, i] : acc),
       [],
     )
     expect(anchorAt.length).toBeGreaterThanOrEqual(2)
-    const victim = lines.findIndex(
-      (l, i) => i > anchorAt[1]! && propLine('hostRunner', 'tridentHostRunner').test(l),
+    const victimProbe = anchorAt[1]!
+    const victimRunner = lines.findIndex(
+      (l, i) => i > victimProbe && propLine('hostRunner', 'tridentHostRunner').test(l),
     )
-    expect(victim).toBeGreaterThan(anchorAt[1]!)
+    expect(victimRunner).toBeGreaterThan(victimProbe)
     const decoyAt = lines.findIndex((l) => l.includes('const tridentHostRunner ='))
     expect(decoyAt).toBeGreaterThan(-1)
-    const mutant = lines
-      .filter((_, i) => i !== victim)
-      .flatMap((l, i) => (i === decoyAt ? [l, 'void {', '  hostRunner: tridentHostRunner,', '}'] : [l]))
-      .join('\n')
+    /**
+     * Delete `drop` and splice a decoy in after `decoyAt` IN ONE PASS over the
+     * ORIGINAL array. Argus r21 (minor) caught the two-pass form: it compared a
+     * post-`filter` index against a `decoyAt` computed before the filter, so the
+     * decoy landed one line off the moment the definition sat below the victim —
+     * silently changing what the mutant proved.
+     */
+    const mutate = (drop: number[], decoy: string[]): string =>
+      lines
+        .flatMap((l, i) =>
+          drop.includes(i) ? [] : i === decoyAt ? [l, 'void {', ...decoy, '}'] : [l],
+        )
+        .join('\n')
 
-    // The count this test used to rest on is STILL EQUAL under that mutant — which
-    // is exactly why counting is no longer the assertion.
-    expect(count('hostRunner', 'tridentHostRunner', mutant)).toBe(
-      count('landedProbe', 'tridentLandedProbe', mutant),
+    // r20 — unwire the RUNNER only, and re-spell it beside the definition.
+    const runnerMutant = mutate([victimRunner], ['  hostRunner: tridentHostRunner,'])
+    // The count this test used to rest on is STILL EQUAL under it — which is
+    // exactly why counting is not the assertion.
+    expect(count('hostRunner', 'tridentHostRunner', runnerMutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe', runnerMutant),
     )
-    // …and the pairing says what the count cannot: one dispatch site now takes the
-    // landed probe WITHOUT the credentialed runner beside it.
-    expect(camelPairs(mutant).filter((paired) => !paired).length).toBe(1)
+    // …and the per-literal pairing says what the count cannot: one anchored
+    // literal now takes the landed probe WITHOUT the credentialed runner beside it.
+    expect(camelPairs(runnerMutant).filter((paired) => !paired).length).toBe(1)
+    expect(dispatchDepsSites(runnerMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // r21 — unwire the WHOLE site: take BOTH properties and re-spell the pair in
+    // the decoy. This is the mutant the anchored scan cannot see.
+    const siteMutant = mutate(
+      [victimProbe, victimRunner],
+      ['  landedProbe: tridentLandedProbe,', '  hostRunner: tridentHostRunner,'],
+    )
+    expect(count('landedProbe', 'tridentLandedProbe', siteMutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe'),
+    )
+    expect(count('hostRunner', 'tridentHostRunner', siteMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    // The anchored scan is BLIND to it — every literal it finds is validly paired,
+    // because the unwired one no longer carries the anchor it scans for.
+    expect(camelPairs(siteMutant).every((paired) => paired)).toBe(true)
+    // The site-derived scan is not: the ▶ deps literal still has `store:` and
+    // `repo_path:`, and now carries neither half of the credentialed pair.
+    expect(dispatchDepsSites(siteMutant).length).toBe(4)
+    expect(dispatchDepsSites(siteMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // r22 — codex's mutant, the one that DELETES NOTHING. The wired property stays
+    // exactly where it is and a spread OVERRIDES it one line below, so every count
+    // and every per-literal pairing is untouched while JS binds `hostRunner` to
+    // `undefined` and the site falls back to the uncredentialed reader.
+    const splice = (at: number, added: string[]): string =>
+      lines.flatMap((l, i) => (i === at ? [l, ...added] : [l])).join('\n')
+    const spreadMutant = splice(victimRunner, ['        ...{ hostRunner: undefined },'])
+    expect(count('hostRunner', 'tridentHostRunner', spreadMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    // Both scans that read PRESENCE are blind to it — which is why the site scan
+    // now reads the last line that can BIND the property instead.
+    expect(camelPairs(spreadMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(spreadMutant).length).toBe(4)
+    expect(dispatchDepsSites(spreadMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // …and the same override spelled as a plain duplicate key, no spread involved.
+    const overrideMutant = splice(victimRunner, ['        hostRunner: undefined,'])
+    expect(count('hostRunner', 'tridentHostRunner', overrideMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(camelPairs(overrideMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(overrideMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
   })
 
   test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {

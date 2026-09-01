@@ -1119,19 +1119,37 @@ describe('dispatch seeds a resume from a built-but-never-reviewed prior run', ()
       ['died before the build', { checkpoint: 'inner-error' }],
       ['no recorded head', { head: null }],
     ]
+    // ONE CARD PER SHAPE (Argus r22, codex, with an equal-timestamp repro). Reusing
+    // ONE slug left every earlier iteration's demoted prior inside the same
+    // `latestTerminalBySlug` window, and that read orders by `started_at DESC, id
+    // DESC` — rows written in the same second tie-break on a RANDOM id, so the row
+    // actually consulted could be a previous iteration's (also non-qualifying)
+    // leftover and all three assertions below would stay green without the shape
+    // under test ever being looked at. A distinct task per shape makes the intended
+    // prior the only row in its slug, exactly as the link-boundary table above does.
     for (const [name, shape] of shapes) {
-      const prior = await priorRun(shape)
-      const { result, tipReads } = await dispatchSeeding(async () => HEAD)
+      const task = `${TASK} for the ${name} shape`
+      await priorRun({ ...shape, task })
+      const { result, tipReads } = await dispatchSeeding(async () => HEAD, { task })
       expect(result.ok).toBe(true)
       if (!result.ok) return
       expect({ [name]: result.run.inner_checkpoint }).toEqual({ [name]: null })
       expect({ [name]: result.run.pr }).toEqual({ [name]: null })
       // The git read is paid ONLY when a qualifying seed already exists.
       expect({ [name]: tipReads }).toEqual({ [name]: [] })
-      // Clear the way for the next shape: only one LIVE row per (project, slug).
       await store.update(result.run.id, { phase: 'stopped' })
-      await store.update(prior.id, { phase: 'stopped', inner_verdict: null, inner_checkpoint: 'inner-error' })
     }
+
+    // POSITIVE CONTROL for the table: the same helpers, on their own fresh slug,
+    // with the ONE prior that qualifies — so a loop that had stopped seeding for
+    // some reason of its own could not read as four correct refusals.
+    const qualifyingTask = `${TASK} for the qualifying shape`
+    await priorRun({ task: qualifyingTask, findings: FINDINGS })
+    const seeded = await dispatchSeeding(async () => HEAD, { task: qualifyingTask })
+    expect(seeded.result.ok).toBe(true)
+    if (!seeded.result.ok) return
+    expect(seeded.result.run.inner_checkpoint).toBe('forge-done')
+    expect(seeded.tipReads).toHaveLength(1)
   })
 
   test('PR MODE: the proof is taken against the ref the LAUNCH will read, not the local one', async () => {

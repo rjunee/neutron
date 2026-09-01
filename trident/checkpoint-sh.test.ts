@@ -726,6 +726,17 @@ describe('checkpoint.sh — a REJECTION MUST STATE A REASON (the write-site prec
     expect(findingsCase).toContain('CHAR(65279)')
     // …and it is the SAME clause the parser carries, not an unrelated mention.
     expect(findingsCase).toContain('SUBSTR')
+    // AND THE NUL CLAUSE IS THE THIRD COPY OF ITS OWN PREDICATE (Argus r22, nit).
+    // The counting statements in `docs/AS_BUILT.md` — pinned textually by
+    // `as-built-disposition-sql.test.ts` — carry `INSTR(…, CHAR(0)) = 0` because
+    // SQLite's JSON functions stop at an embedded NUL while `JSON.parse` reads on
+    // and throws. `settled_rejection` in this script applies `findings_case` to the
+    // STORED column, so without this clause a historical row holding such a value
+    // was "settled" to the shell and "legacy" to the count: one predicate with two
+    // answers. Bash strips NULs on ingest, so no write from here can create the
+    // shape — this is parity over the rows that already exist.
+    expect(findingsCase).toContain('INSTR')
+    expect(findingsCase).toContain('CHAR(0)')
   })
 
   test("THIS invocation's findings win over the row's, so a rejection cannot ride on a stale non-empty column", () => {
@@ -952,6 +963,59 @@ describe('checkpoint.sh — a REJECTION MUST STATE A REASON (the write-site prec
     // simply stopped accepting verdicts on terminal rows.
     expect(sh([dbPath, 'run-1', 'inner_verdict', 'APPROVE']).code).toBe(0)
     expect(row('run-1').inner_verdict).toBe('APPROVE')
+  })
+
+  test('nor can a CLEARING write erase it -- `inner_verdict \'\'` is the same erasure, spelled shorter', () => {
+    // Argus r21. `inner_verdict ''` was the last shape that walked past both
+    // guards: the findings column was frozen by the erasure block, the verdict
+    // column was NULLed unconditionally, and the row came out of a single atomic
+    // write with its two guarded columns DISAGREEING -- real findings, no verdict --
+    // which the script's own docblock says can never happen.
+    // `terminalRunDisposition` then reads a reviewed rejection as
+    // died-before-build, i.e. as a card to re-dispatch from scratch.
+    for (const [i, withEmptyFile] of [false, true].entries()) {
+      const id = 'run-1'
+      const db0 = new Database(dbPath)
+      db0.run("UPDATE code_trident_runs SET phase = 'forge-init', inner_verdict = NULL WHERE id = ?", [id])
+      db0.close()
+      terminalRejection(id, REAL)
+
+      const args = [dbPath, id, 'inner_verdict', '']
+      // The same clear, once bare and once with an emptying findings file stapled
+      // on -- the exemption its `REVIEW_NOT_RUN` sibling had to have closed twice.
+      if (withEmptyFile) args.push('inner_findings_file', findingsFile(`clear-${i}.json`, '[]'))
+      const res = sh(args)
+
+      expect(res.code).toBe(0)
+      expect(res.stderr).toContain('FROZE')
+      const r = row(id)
+      expect(r.inner_verdict).toBe('REQUEST_CHANGES')
+      expect(r.inner_checkpoint_findings).toBe(REAL)
+      // The two guarded columns still agree, which is the whole claim.
+      expect(terminalRunDisposition(makeTridentRun({
+        phase: 'failed',
+        inner_verdict: r.inner_verdict as TridentVerdict,
+        inner_checkpoint: 'forge-done',
+        inner_checkpoint_findings: r.inner_checkpoint_findings as string,
+      }))).toBe('reviewed-rejected')
+    }
+  })
+
+  test('the CLEARING write still clears every row that is not a settled rejection', () => {
+    // Positive control for the freeze above -- without it that test would pass on a
+    // script that had simply stopped honouring `inner_verdict ''`. A LIVE row and a
+    // terminal row that never claimed a rejection both clear to NULL as before.
+    expect(sh([dbPath, 'run-1', 'inner_verdict', 'REQUEST_CHANGES', 'inner_findings_file', findingsFile('live-real.json', REAL)]).code).toBe(0)
+    expect(row('run-1').inner_verdict).toBe('REQUEST_CHANGES') // live, and settled-looking
+    expect(sh([dbPath, 'run-1', 'inner_verdict', '']).code).toBe(0)
+    expect(row('run-1').inner_verdict).toBe(null) // ...but not terminal, so it clears
+
+    expect(sh([dbPath, 'run-other', 'inner_verdict', 'APPROVE']).code).toBe(0)
+    const db = new Database(dbPath)
+    db.run("UPDATE code_trident_runs SET phase = 'done' WHERE id = 'run-other'")
+    db.close()
+    expect(sh([dbPath, 'run-other', 'inner_verdict', '']).code).toBe(0)
+    expect(row('run-other').inner_verdict).toBe(null) // terminal, but nothing was rejected
   })
 
   test('a terminal row holding REAL findings keeps them whatever verdict it claims', () => {

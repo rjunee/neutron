@@ -335,12 +335,20 @@ export interface BoardBoundBuildDeps {
    * composition root's own (`open/composer.ts` `tridentHostRunner`, the same one
    * behind `landedProbe`), handed in because the token lives THERE, not here.
    *
-   * Only the built-never-reviewed seed's branch-tip probe consults it today, and
-   * that probe is why it exists: `git ls-remote origin` over a bare process env
-   * exits non-zero against a PRIVATE origin, which collapses to `''` — no seed,
-   * a silent rebuild of work that was already built (Argus r16 blocker). A
-   * caller that omits it keeps the uncredentialed `spawnCapture` default, so
-   * this cannot change behaviour on a public origin or in a test seam.
+   * The built-never-reviewed seed's branch-tip probe is why it exists: `git
+   * ls-remote origin` over a bare process env exits non-zero against a PRIVATE
+   * origin, which collapses to `''` — no seed, a silent rebuild of work that was
+   * already built (Argus r16 blocker). A caller that omits it keeps the
+   * uncredentialed `spawnCapture` default, so this cannot change behaviour on a
+   * public origin or in a test seam.
+   *
+   * IT IS NOT THE ONLY READ IT FEEDS (Argus r20/r21 — the docblock said "only the
+   * seed's branch-tip probe consults it today" and that stopped being true when
+   * the merged-PR fallback was widened). It also seeds `credentialedRunner`, from
+   * which a caller that supplies `hostRunner` and NO `landedProbe` is handed a
+   * manufactured merged-PR probe — the coupling adjudicated at that call site
+   * below. Every production site passes BOTH, pinned by the dispatch-site scan in
+   * `open/__tests__/open-trident-prod-boot-wiring.test.ts`.
    */
   hostRunner?: EnvCapableHostRunner
   /** Credential source for direct callers that do not inject a merge-mode resolver. */

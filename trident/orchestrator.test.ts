@@ -840,6 +840,52 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(outputs[0]).toContain(`${baseTip}..${head}`)
   })
 
+  test('a WHITESPACE-PADDED path in the listing stands the reorder down rather than dropping that file', async () => {
+    // Argus r21 (minor, latent): the same disappearance as the C-quoted case,
+    // reached from the other side. git prints an unquoted path VERBATIM, so a
+    // tracked name with a leading or trailing space arrives intact and is then
+    // destroyed by the publisher's own `trim()` — `:(literal)<trimmed>` matches
+    // nothing, the group's `git diff` writes no hunks, exits 0, and the file is
+    // silently missing from what the reviewers read. No such path is tracked
+    // today; the point is that the artifact's completeness must not depend on
+    // that staying true.
+    const reviewed = 'e'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '7'.repeat(40)
+    const outputs: string[][] = []
+    let remotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'fix-round-2', publishRequested: true, publishHead: head, reviewedHead: reviewed },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++remotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes(`${reviewed}..${head}`)) return ok('z-new.ts\n')
+        // A tracked path whose name really does end in a space, printed bare.
+        if (joined.includes('--name-only')) return ok('trailing-space.ts \nz-new.ts\n')
+        if (cmd.some((c) => c.startsWith('--output='))) outputs.push(cmd)
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: null, bound_pr: null, fenced_paths: null })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    // ONE unordered command, no pathspecs — the whole change, correctly rendered.
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0]!.includes('--')).toBe(false)
+    expect(outputs[0]).toContain(`${baseTip}..${head}`)
+    rmSync(`/tmp/trident-outer-published-${run.id}.diff`, { force: true })
+  })
+
   test('with NO reviewed-head pin the artifact is produced by the single unordered command, exactly as before', async () => {
     // The falsification for the test above and the safety property of the change:
     // a FIRST round has no pin, so nothing is reordered and the publisher runs the
