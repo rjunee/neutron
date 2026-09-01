@@ -2307,8 +2307,17 @@ ${plan.executionSpec}
 //
 // `opts.findings` (the synthesised findings this checkpoint was recorded with) is
 // written the same way and for the same reason — always, so it is never stale —
-// through the temp-file + `readfile()` indirection `writeTerminalResult` uses, so
-// the JSON's own quotes cannot break the sqlite argument.
+// through the temp-file indirection `writeTerminalResult` uses, so the JSON's own
+// quotes cannot break the statement (`checkpoint.sh` materialises the file's bytes
+// ONCE as a SQL literal and sends the statement on stdin; it does not call
+// `readfile()`).
+//
+// THE `[]` HERE IS WHY `checkpoint.sh` PROTECTS A TERMINAL ROW'S FINDINGS: this
+// command empties the findings on EVERY phase checkpoint, and a cancelled build's
+// workflow keeps running and keeps checkpointing (rjunee/neutron#177), so one of
+// these can land on a row that already recorded a real, findings-carrying
+// REQUEST_CHANGES. The writer refuses that erasure rather than demoting the
+// verdict — see "AND A SETTLED REJECTION IS NOT ERASED BY AN ORPHAN" there.
 function artifactCheckpointCommand(name) {
   if (!dbPath || !runId) return null
   const findingsTmp = `/tmp/trident-checkpoint-findings-${runId}.json`
@@ -2355,17 +2364,19 @@ function shSingleQuote(s) {
 // synthesis-phase `checkpoint()` already wrote — this row is only the typed
 // payload, never the provenance of record. The JSON is written to a temp file
 // and pulled in via the script's `inner_result_file` field, which keeps the
-// `readfile()` (CAST AS TEXT) indirection so the JSON's own double quotes can
-// never break the sqlite argument. The UPDATE itself runs through
+// file indirection so the JSON's own double quotes can never break the sqlite
+// argument (the script reads the file ONCE, in bash, and emits its bytes as a
+// single SQL literal). The UPDATE itself runs through
 // trident/checkpoint.sh (P10: PRAGMA busy_timeout=5000 retry-under-lock, no
 // LLM-transcribed SQL — a lost terminal write meant no harvest until the 25m
 // reaper). No-ops when the launcher did not thread a dbPath/runId (a dry
 // source check).
 //
 // COLUMN CONSISTENCY (harvest-gap defense): `subagent_status` flips to
-// 'completed' ONLY inside a CASE guarded on the SAME `readfile()` actually
-// yielding non-empty text (checkpoint.sh emits that exact CASE for
-// `inner_result_file`). If the temp file is missing/unreadable/empty at
+// 'completed' ONLY inside a CASE guarded on the SAME bytes the same statement
+// stores actually being non-empty text (checkpoint.sh emits that exact CASE for
+// `inner_result_file`, over one materialised literal rather than two `readfile()`
+// evaluations that could see different bytes). If the temp file is missing/unreadable/empty at
 // UPDATE time, `inner_result` lands NULL and `subagent_status` is LEFT UNCHANGED
 // (stays 'running') — so a `completed` status can never be committed alongside a
 // null/unparseable result (which would strand the run at forge-init, the hang
@@ -2395,6 +2406,36 @@ async function writeTerminalResult(result) {
     `inner_verdict ${shSingleQuote(verdict)}`,
     `branch ${shSingleQuote(forgeBranch)}`,
   ]
+  // THE REJECTION CARRIES ITS REASONS INTO THE SAME UPDATE AS THE VERDICT.
+  // `checkpoint.sh` refuses a `REQUEST_CHANGES` whose effective findings are not a
+  // non-empty JSON array and records `REVIEW_NOT_RUN` instead — a write-site
+  // precondition, so this is the caller's job to satisfy, not to work around. It is
+  // also simply the honest row: the terminal write is what the count reads, and a
+  // rejection whose findings column was last written by an intervening `fix-round-N`
+  // checkpoint (which writes `[]`) would state no reason for the verdict beside it.
+  // Only on the REQUEST_CHANGES branch — every other verdict leaves the column
+  // exactly as the last checkpoint set it.
+  //
+  // THE FINDINGS TRAVEL TWICE IN THIS PROMPT, and that is a WEIGHED choice, not an
+  // oversight (Argus r15, minor): `json` below is `JSON.stringify(result)`, which
+  // already contains `result.findings`, and this file re-serialises the same array.
+  // The bound that killed the write before was argv's MAX_ARG_STRLEN (128 KiB per
+  // element) and it is gone — the statement travels on stdin — so what is left is
+  // the transcription budget of the model seat that must copy this command
+  // verbatim. Halving it is possible (write the findings file first, then assemble
+  // the result file as prefix + `cat` + suffix, splitting `json` at the findings
+  // substring), and it was REJECTED: it trades bytes for shell syntax at exactly the
+  // seat whose failure mode is mistranscription, and every extra command in the
+  // chain is another way to arrive at a MISSING findings file — which `checkpoint.sh`
+  // reads as no findings, refuses the rejection for, and records REVIEW_NOT_RUN
+  // instead. That is the very outcome this card exists to stop, so the duplication is
+  // paid deliberately and the honest row is bought with it.
+  const terminalFindingsTmp = `/tmp/trident-terminal-findings-${runId}.json`
+  const terminalFindingsJson =
+    verdict === 'REQUEST_CHANGES' ? JSON.stringify(result.findings) : null
+  if (terminalFindingsJson !== null) {
+    fields.push(`inner_findings_file ${shSingleQuote(terminalFindingsTmp)}`)
+  }
   // Same rule as `checkpoint()`: only a positive integer is a PR number. The terminal
   // write is the LAST chance to erase a known pr, and it is where run f384460d's zero
   // became the row's final answer.
@@ -2404,7 +2445,7 @@ async function writeTerminalResult(result) {
   }
   await agent(
     `Terminal-result step (idempotent; must NOT fail the build). Run EXACTLY this single Bash command and nothing else, then report "terminal-result ok":
-printf '%s' ${shSingleQuote(json)} > ${tmp} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${fields.join(' ')}`,
+printf '%s' ${shSingleQuote(json)} > ${tmp}${terminalFindingsJson === null ? '' : ` && printf '%s' ${shSingleQuote(terminalFindingsJson)} > ${terminalFindingsTmp}`} && bash ${shSingleQuote(checkpointSh)} ${shSingleQuote(dbPath)} ${shSingleQuote(runId)} ${fields.join(' ')}`,
     withModel({ label: 'terminal-result', phase: 'Synthesis' }),
   )
 }
@@ -6580,7 +6621,31 @@ ${task}${reflectionGuidance}`,
     if (isPr) {
       // Best-effort claim, same as the build handoff: the branch name is the
       // handoff, `publishHead` is only a cross-check for the publisher.
-      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead: fixClaim, remainingTasks: ralphRemaining }
+      //
+      // AND THE HEAD THE LAST REVIEW ACTUALLY JUDGED TRAVELS WITH IT (Argus r18
+      // blocker). The outer publisher orders the reviewer-facing diff
+      // never-reviewed-first, and the pin it reads is `reviewedHead` in this very
+      // result (`reviewedHeadOid`, orchestrator.ts). Omitting the field made that
+      // reorder INERT in production: `seenPin` was always '' and every publish took
+      // the unordered fallback, so the round's new work stayed buried past the
+      // reviewer's 3,000-line window — which is the whole defect the reorder exists
+      // to fix, shipped without its input.
+      //
+      // The value is TRUE here and only here. `reviewedHead` still holds
+      // `recordedResumeHead` at this line — the OID the previous round's panel read,
+      // set by the resume and NOT yet overwritten by this round's `fixHead` (that
+      // assignment is below, on the non-pr path). A pr-mode fix round is reachable
+      // only through that resume, so there is always a real previous review behind
+      // it. The round-1 `forge-done` handoff deliberately still omits the field:
+      // nothing has been reviewed there, and naming a head as reviewed when no
+      // reviewer has seen it is the lie `mergedTerminalResult` refuses for the same
+      // reason.
+      //
+      // SAFE FOR THE MERGE PIN, which is the other reader of this field: this result
+      // carries `verdict: 'REQUEST_CHANGES'`, which never reaches `applyResult`'s
+      // merge branch, and the outer's publish path nulls `inner_result` the moment it
+      // has published — so the value cannot outlive the publish it was written for.
+      const publishResult = { ok: true, prNumber: pr, branch: forgeBranch, verdict: 'REQUEST_CHANGES', round, checkpoint: `fix-round-${round}`, publishRequested: true, publishHead: fixClaim, remainingTasks: ralphRemaining, ...(normalizeOid(reviewedHead) === '' ? {} : { reviewedHead: normalizeOid(reviewedHead) }) }
       await writeTerminalResult(publishResult)
       return publishResult
     }

@@ -698,7 +698,12 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
         ? p.prNumber
         : null,
     branch: typeof p.branch === 'string' ? p.branch : null,
-    round: typeof p.round === 'number' && Number.isFinite(p.round) ? p.round : 0,
+    // INTEGER, like `pr_number` above — `round` lands in a STRICT-table INTEGER
+    // column (`code_trident_runs.round`), and bun:sqlite raises "cannot store REAL
+    // value in INTEGER column" on the harvest UPDATE for a fractional one. A
+    // malformed report is a report of nothing, so it degrades to 0 (= "no round
+    // reported") rather than crashing the write that records the run's outcome.
+    round: typeof p.round === 'number' && Number.isSafeInteger(p.round) ? p.round : 0,
     checkpoint: typeof p.checkpoint === 'string' ? p.checkpoint : null,
     // A MERGE IS TERMINAL (#563). The EXACT boolean only: a string 'true', a 1, or
     // any other truthy stand-in is a field that did not arrive in the shape the

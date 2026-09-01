@@ -33,7 +33,7 @@ import {
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import { isTerminalPhase } from './state-machine.ts'
-import { detectMergeMode, type GitModeProbe } from './git-mode.ts'
+import { detectMergeMode, type EnvCapableHostRunner, type GitModeProbe } from './git-mode.ts'
 import { workBoardScopeKey } from '@neutronai/work-board/store.ts'
 import type { WorkBoardChatAck } from '@neutronai/work-board/chat-ack.ts'
 import type { TridentRunStore } from './store.ts'
@@ -115,6 +115,14 @@ export interface TridentBuildToolDeps {
   merge_mode_probe: GitModeProbe
   /** Shared outer-loop merged-PR probe from the composition root. */
   landed_probe?: DispatchLandedProbe
+  /**
+   * The composition root's CREDENTIALED host runner, forwarded to the dispatch
+   * chokepoint (`BoardBoundBuildDeps.hostRunner`). Same object as the one behind
+   * `landed_probe`; without it the built-never-reviewed seed's `ls-remote` probe
+   * runs uncredentialed and answers `''` on a private origin — no seed, and the
+   * finished commit is rebuilt from scratch (Argus r16).
+   */
+  host_runner?: EnvCapableHostRunner
   resolveRalph?: () => Promise<boolean>
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
@@ -252,6 +260,7 @@ export function registerTridentBuildToolSurface(
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
         ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
+        ...(deps.host_runner !== undefined ? { hostRunner: deps.host_runner } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),
@@ -371,6 +380,15 @@ export function registerTridentBuildToolSurface(
         ...(deps.resolveBuildRepo !== undefined ? { resolveBuildRepo: deps.resolveBuildRepo } : {}),
         resolveMergeMode: (path) => detectMergeMode(path, deps.merge_mode_probe),
         ...(deps.landed_probe !== undefined ? { landedProbe: deps.landed_probe } : {}),
+        // THE CREDENTIAL TRAVELS ON THE RETRY PATH TOO (Argus r17 blocker). This
+        // spread was present on the dispatch tool above and MISSING here, so the
+        // agent-native ▶ START/RETRY — the one path a re-dispatched card actually
+        // takes — fell through to bare `spawnCapture` for the seed tip probe. On a
+        // private origin that read exits non-zero, collapses to '' and seeds
+        // NOTHING: the built-never-reviewed commit is rebuilt from scratch, which
+        // is the exact waste this card exists to remove, failing closed so nothing
+        // ever looked wrong.
+        ...(deps.host_runner !== undefined ? { hostRunner: deps.host_runner } : {}),
         ...(deps.resolveRalph !== undefined ? { resolveRalph: deps.resolveRalph } : {}),
         ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
         ...(delivery !== undefined ? { chat_id: delivery.chat_id, thread_id: delivery.thread_id } : {}),

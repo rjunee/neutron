@@ -193,6 +193,36 @@ describe('parseWorkBoardItems', () => {
     expect(failed[0]!.run_progress?.step_label).toBe('failed');
   });
 
+  it('carries REVIEW_NOT_RUN through verbatim, and still nulls an unknown verdict', () => {
+    // The no-review terminal is a REAL recorded verdict now; collapsing it to null here
+    // erased the one thing a reasonless failed card could honestly say.
+    const base = {
+      run_id: 'run_1',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 1,
+      started_at: '',
+      last_advanced_at: '',
+      elapsed_ms: 0,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      failure_reason: null,
+    };
+    const out = parseWorkBoardItems([
+      {
+        ...item({ id: 'a', linked_run_id: 'run_1' }),
+        run_progress: { ...base, verdict: 'REVIEW_NOT_RUN' },
+      },
+      // An unrecognised string is still refused — the widening is exactly one value.
+      {
+        ...item({ id: 'b', linked_run_id: 'run_1' }),
+        run_progress: { ...base, verdict: 'BOGUS' },
+      },
+    ]);
+    expect(out.map((i) => i.run_progress?.verdict)).toEqual(['REVIEW_NOT_RUN', null]);
+  });
+
   it('is undefined when run_progress is absent/malformed', () => {
     const out = parseWorkBoardItems([item({ id: 'a' })]);
     expect(out[0]!.run_progress).toBeUndefined();

@@ -72,6 +72,15 @@ const CHECKPOINT_NAMES: readonly string[] = [
   'fix-round-2',
   'fix-round-5',
   'fix-round-10',
+  // THE FOUR-DIGIT BOUNDARY. The Bash mirror enumerated one-, two- and
+  // three-digit globs, so `fix-round-1000` left `phase` untouched there while the
+  // TypeScript table (`/^fix-round-\d+$/`) answered `argus` — a divergence in the
+  // one table whose whole claim is TOTAL equivalence, and one the corpus could not
+  // see because it stopped at round 10 (Argus r8).
+  'fix-round-999',
+  'fix-round-1000',
+  'argus-request-changes-round-999',
+  'argus-request-changes-round-1000',
   // terminal-adjacent — the OUTER loop stamps the terminal phase, not us
   'pr-merged',
   'inner-error',
@@ -101,6 +110,11 @@ describe('phaseForCheckpoint — the canonical table', () => {
     // progress snapshot asserted both at once.
     expect(phaseForCheckpoint('fix-round-1')).toBe('argus')
     expect(phaseForCheckpoint('fix-round-10')).toBe('argus')
+    // The digit run is UNBOUNDED here, and the round parser's nine-digit bound is
+    // deliberately NOT copied across: that bound exists because `checkpointRound`
+    // does arithmetic on the value, and naming a phase does not.
+    expect(phaseForCheckpoint('fix-round-1000')).toBe('argus')
+    expect(phaseForCheckpoint('fix-round-1234567890')).toBe('argus')
   })
 
   test('a change request is the fix round that follows it', () => {
@@ -196,6 +210,10 @@ describe('checkpoint.sh writes the phase — against a real sqlite database', ()
       id TEXT PRIMARY KEY,
       phase TEXT NOT NULL DEFAULT 'forge-init'
         CHECK (phase IN (${ALL_PHASES.map((p) => `'${p}'`).join(', ')})),
+      -- Schema mirror only (migrations/expected-schema.txt:592): checkpoint.sh now
+      -- also derives \`round\` from a round-carrying name, and the fix-round-N walk
+      -- below would error 'no such column' against a table that lacks it.
+      round INTEGER NOT NULL DEFAULT 1,
       pr INTEGER,
       branch TEXT,
       brief_alert TEXT,

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { spawnSync } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
@@ -382,6 +383,19 @@ describe('orchestrator — wave child built terminal', () => {
 // assertions that mattered here (zero build fires, zero host commands) against
 // the new outcome, and is joined there by a CONTROL proving an unbound run still
 // fires the ordinary build workflow — so the build path cannot quietly die.
+/**
+ * A pathspec the split-diff publisher passed, with its `:(literal)` magic asserted
+ * and stripped (Argus r20, nit). A BARE path is glob-matched as well as
+ * literal-matched, so a changed path holding `[`, `*` or `?` — this repo tracks 13,
+ * e.g. `app/app/projects/[id]/backups.tsx` — also drags in whatever siblings its
+ * brackets match, and a file caught by both groups renders TWICE in the artifact.
+ * Asserting the prefix here is what makes deleting it from `orchestrator.ts` red.
+ */
+const literalPath = (pathspec: string): string => {
+  expect(pathspec.startsWith(':(literal)')).toBe(true)
+  return pathspec.slice(':(literal)'.length)
+}
+
 describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
   test('pr mode publishes in the outer loop and confirms origin before re-firing review', async () => {
     const head = 'abcdef0123456789abcdef0123456789abcdef01'
@@ -539,12 +553,338 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     await h.complete()
     await h.loop.runOnce()
     const calls = h.hostCalls.map((c) => c.join(' '))
-    const diffs = calls.filter((c) => c.includes(' diff ') && c.includes(`..${head}`))
+    // EVERY diff about this head is taken against the observed base — except the
+    // ONE probe whose entire job is to name what the reviewers already saw, which
+    // is `reviewed-pin..head` by construction (see the never-reviewed-first
+    // ordering below; the workflow records that pin on every terminal result, so a
+    // production-shaped run always pays for this probe).
+    const diffs = calls.filter(
+      (c) => c.includes(' diff ') && c.includes(`..${head}`) && !c.includes(SIM_REVIEWED_HEAD),
+    )
     expect(diffs.length).toBeGreaterThan(0)
     for (const c of diffs) expect(c).toContain(`${baseTip}..${head}`)
+    // …and the excluded probe really is only that probe: a LISTING, never the
+    // artifact. Nothing with `--output=` may be taken against the pin.
+    expect(calls.some((c) => c.includes(SIM_REVIEWED_HEAD) && c.includes('--output='))).toBe(false)
     // The positive control for the defect: not one of them names the local ref.
     expect(calls.some((c) => c.includes(`main..${head}`))).toBe(false)
     expect(calls.some((c) => c.includes(`--output=/tmp/trident-outer-published-${run.id}.diff`))).toBe(true)
+  })
+
+  /**
+   * THE PUBLISHED ARTIFACT IS ORDERED NEVER-REVIEWED-FIRST.
+   *
+   * MEASURED (Argus r16, three reviewers): a 6,692-line artifact against a reader
+   * that stops at ARGUS_DIFF_LINE_LIMIT (3,000) and says so
+   * (`CODEX_REVIEW_DIFF_TRUNCATED`). Default git order is alphabetical, which on a
+   * fix round puts the docs and tests of the ALREADY-REVIEWED rounds first and the
+   * round's own write sites past the window — that round's six write-site files all
+   * started after line 3,400, so the new work had no cross-model coverage at all.
+   */
+  test('the published diff leads with the files no reviewer has seen, and still contains the whole change', async () => {
+    const reviewed = 'e'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '7'.repeat(40)
+    // Alphabetically `a-old.ts` sorts FIRST and is the one already reviewed, so
+    // "unseen first" and "default git order" disagree — without that they could
+    // both pass.
+    const ALL = ['a-old.ts', 'z-new.ts']
+    const outputs: Array<{ path: string; paths: string[] }> = []
+    let remotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++remotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        // What the REVIEWER already saw ends at `reviewed`; only z-new.ts is new.
+        if (joined.includes(`--name-only ${reviewed}..${head}`)) return ok('z-new.ts\n')
+        if (joined.includes('diff --name-only')) return ok(`${ALL.join('\n')}\n`)
+        const out = cmd.find((c) => c.startsWith('--output='))
+        if (out !== undefined) {
+          const sep = cmd.indexOf('--')
+          const paths = (sep === -1 ? [] : cmd.slice(sep + 1)).map(literalPath)
+          outputs.push({ path: out.slice('--output='.length), paths })
+          // A real `git diff --output=` writes the file; the concatenation reads it
+          // back, so the fake has to behave like git here or it proves nothing.
+          writeFileSync(out.slice('--output='.length), paths.map((f) => `diff --git a/${f} b/${f}\n`).join(''))
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: reviewed, bound_pr: null, fenced_paths: null })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    // TWO scoped diffs, unseen group first — not one unordered command.
+    expect(outputs.map((o) => o.paths)).toEqual([['z-new.ts'], ['a-old.ts']])
+    // The artifact itself: the never-reviewed file leads it, and the reviewed one
+    // is still IN it (the content is the whole `base..head` change, only reordered).
+    const artifact = readFileSync(`/tmp/trident-outer-published-${run.id}.diff`, 'utf8')
+    expect(artifact.indexOf('z-new.ts')).toBeGreaterThanOrEqual(0)
+    expect(artifact.indexOf('a-old.ts')).toBeGreaterThan(artifact.indexOf('z-new.ts'))
+    // The scratch parts are cleaned up — the reviewers are handed one artifact.
+    for (const o of outputs) expect(existsSync(o.path)).toBe(false)
+    // Every part diff is still taken against the OBSERVED BASE, not against the
+    // pin: the reviewer reads the WHOLE change, reordered, never a truncated one.
+    const diffCalls = h.hostCalls.map((c) => c.join(' ')).filter((c) => c.includes('--output='))
+    for (const c of diffCalls) expect(c).toContain(`${baseTip}..${head}`)
+    rmSync(`/tmp/trident-outer-published-${run.id}.diff`, { force: true })
+  })
+
+  /**
+   * THE PIN COMES FROM WHERE PRODUCTION ACTUALLY WRITES IT.
+   *
+   * Argus r17 blocker: the test above sets the `reviewed_head` COLUMN, and no
+   * production path ever does — `store.create` accepts it, `update()` has no branch
+   * for it, and no non-test caller supplies a value, so the whole reorder was live
+   * in tests and INERT in the loop it was written for. What the workflow really
+   * records is `reviewedHead` inside `inner_result` (the OID the merge pins with
+   * `--match-head-commit`), and on a FIX round that field still names the head the
+   * reviewers judged while `publishHead` carries the new commit. This is that row,
+   * to the byte: column NULL, result pinned, publish head elsewhere.
+   */
+  test('a FIX ROUND with no reviewed_head COLUMN still leads with the unseen files — the pin is read off inner_result', async () => {
+    const reviewed = 'e'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '7'.repeat(40)
+    const ALL = ['a-old.ts', 'z-new.ts']
+    const outputs: Array<{ path: string; paths: string[] }> = []
+    let remotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES',
+          branch: 'feat-x',
+          checkpoint: 'fix-round-2',
+          publishRequested: true,
+          publishHead: head,
+          // What the resumed workflow carries out of a fix round.
+          reviewedHead: reviewed,
+        },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++remotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes(`--name-only ${reviewed}..${head}`)) return ok('z-new.ts\n')
+        if (joined.includes('diff --name-only')) return ok(`${ALL.join('\n')}\n`)
+        const out = cmd.find((c) => c.startsWith('--output='))
+        if (out !== undefined) {
+          const sep = cmd.indexOf('--')
+          const paths = (sep === -1 ? [] : cmd.slice(sep + 1)).map(literalPath)
+          outputs.push({ path: out.slice('--output='.length), paths })
+          writeFileSync(out.slice('--output='.length), paths.map((f) => `diff --git a/${f} b/${f}\n`).join(''))
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: null, bound_pr: null, fenced_paths: null })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    // The column really is empty — this row could only have been ordered by the
+    // pin the WORKFLOW wrote, which is the whole point of the test.
+    expect(store.get(run.id)?.reviewed_head ?? null).toBeNull()
+    expect(outputs.map((o) => o.paths)).toEqual([['z-new.ts'], ['a-old.ts']])
+    const artifact = readFileSync(`/tmp/trident-outer-published-${run.id}.diff`, 'utf8')
+    expect(artifact.indexOf('a-old.ts')).toBeGreaterThan(artifact.indexOf('z-new.ts'))
+    // …and the artifact is still the WHOLE change against the observed base.
+    for (const o of outputs) expect(existsSync(o.path)).toBe(false)
+    const diffCalls = h.hostCalls.map((c) => c.join(' ')).filter((c) => c.includes('--output='))
+    for (const c of diffCalls) expect(c).toContain(`${baseTip}..${head}`)
+    rmSync(`/tmp/trident-outer-published-${run.id}.diff`, { force: true })
+  })
+
+  /**
+   * A RENAME'S SOURCE DELETION MUST SURVIVE THE SPLIT.
+   *
+   * Argus r17 (two reviewers, independent real-git repros): the `--no-renames` that
+   * makes the split safe was on the GROUP diffs but not on the `--name-only` that
+   * BUILDS the path universe. With rename detection on, that listing names only the
+   * rename's DESTINATION — so the source path is in neither group's pathspec and its
+   * deletion is rendered in neither group. The artifact then shows the destination as
+   * `new file mode` and never mentions the file that disappeared.
+   *
+   * The premise is not assumed here: it is measured against the real `git` on this
+   * box first, and only then driven through the publisher.
+   */
+  test('the path universe is listed with --no-renames, so a rename’s SOURCE deletion cannot vanish', async () => {
+    // ── PREMISE, measured on real git ───────────────────────────────────────
+    const repo = mkdtempSync(join(tmpdir(), 'trident-rename-'))
+    const git = (...args: string[]) => spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' })
+    git('init', '-q', '-b', 'main')
+    git('config', 'user.email', 'trident@example.invalid')
+    git('config', 'user.name', 'trident')
+    writeFileSync(join(repo, 'a-old.ts'), 'export const x = 1\n'.repeat(20))
+    git('add', '-A')
+    git('commit', '-q', '-m', 'one')
+    const rBase = git('rev-parse', 'HEAD').stdout.trim()
+    renameSync(join(repo, 'a-old.ts'), join(repo, 'z-new.ts'))
+    git('add', '-A')
+    git('commit', '-q', '-m', 'two')
+    const rHead = git('rev-parse', 'HEAD').stdout.trim()
+    const listed = (extra: string[]) =>
+      git('diff', '--name-only', ...extra, `${rBase}..${rHead}`)
+        .stdout.trim()
+        .split('\n')
+        .sort()
+    // Rename detection HIDES the source; `--no-renames` is what lists both sides.
+    expect(listed([])).toEqual(['z-new.ts'])
+    expect(listed(['--no-renames'])).toEqual(['a-old.ts', 'z-new.ts'])
+    rmSync(repo, { recursive: true, force: true })
+
+    // ── AND THE PUBLISHER PAYS FOR THAT, through the loop ───────────────────
+    const reviewed = 'e'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '7'.repeat(40)
+    const outputs: string[][] = []
+    let remotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'fix-round-2', publishRequested: true, publishHead: head, reviewedHead: reviewed },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++remotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        // The unseen-set probe: only the round's new file is unreviewed.
+        if (joined.includes(`${reviewed}..${head}`)) return ok('z-new.ts\n')
+        // THE FAKE ANSWERS EXACTLY AS THE REAL GIT ABOVE DID: the destination only
+        // when renames are detected, both sides when they are not.
+        if (joined.includes('--name-only')) {
+          return ok(joined.includes('--no-renames') ? 'a-old.ts\nz-new.ts\n' : 'z-new.ts\n')
+        }
+        const out = cmd.find((c) => c.startsWith('--output='))
+        if (out !== undefined) {
+          const sep = cmd.indexOf('--')
+          outputs.push((sep === -1 ? [] : cmd.slice(sep + 1)).map(literalPath))
+          writeFileSync(out.slice('--output='.length), '')
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: null, bound_pr: null, fenced_paths: null })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    // The DELETED source is in the pathspecs — without `--no-renames` on the
+    // listing the universe is `['z-new.ts']` and `a-old.ts` is in no group at all.
+    expect(outputs.flat().sort()).toEqual(['a-old.ts', 'z-new.ts'])
+    rmSync(`/tmp/trident-outer-published-${run.id}.diff`, { force: true })
+  })
+
+  test('a C-QUOTED path in the listing stands the reorder down rather than dropping that file', async () => {
+    // Argus r17 (minor): `--name-only` C-quotes a path git cannot print raw, and
+    // that quoted token fed back as a PATHSPEC matches nothing — `git diff` then
+    // writes no hunks for it, exits 0, and the file disappears from the artifact
+    // with no error to fall back on. `core.quotePath=false` unquotes the common
+    // non-ASCII case; anything still quoted (a quote, a backslash, a control
+    // character, an embedded newline) means the universe cannot be expressed as
+    // pathspecs at all, so the publisher takes the single command that renders
+    // every path correctly. Ordering is a convenience; completeness is not.
+    const reviewed = 'e'.repeat(40)
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '7'.repeat(40)
+    const outputs: string[][] = []
+    let remotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'fix-round-2', publishRequested: true, publishHead: head, reviewedHead: reviewed },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++remotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes(`${reviewed}..${head}`)) return ok('z-new.ts\n')
+        // What git prints for a path it had to quote — the literal bytes include
+        // the surrounding double quotes.
+        if (joined.includes('--name-only')) return ok('"a-\\303\\251.ts"\nz-new.ts\n')
+        if (cmd.some((c) => c.startsWith('--output='))) outputs.push(cmd)
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: null, bound_pr: null, fenced_paths: null })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    // ONE unordered command, no pathspecs — the whole change, correctly rendered.
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0]!.includes('--')).toBe(false)
+    expect(outputs[0]).toContain(`${baseTip}..${head}`)
+  })
+
+  test('with NO reviewed-head pin the artifact is produced by the single unordered command, exactly as before', async () => {
+    // The falsification for the test above and the safety property of the change:
+    // a FIRST round has no pin, so nothing is reordered and the publisher runs the
+    // one command it always ran.
+    //
+    // NO PIN NOW MEANS NEITHER SOURCE (Argus r17): the publisher reads the column
+    // and falls back to the `reviewedHead` the workflow recorded in `inner_result`,
+    // so the result must ALSO carry none — `reviewedHead: null` is the sim's model
+    // of a workflow that recorded no head at all.
+    const head = 'abcdef0123456789abcdef0123456789abcdef01'
+    const baseTip = '7'.repeat(40)
+    const outputs: string[][] = []
+    let remotes = 0
+    const h = buildHarness({
+      plan: () => ({
+        result: { verdict: 'REQUEST_CHANGES', branch: 'feat-x', checkpoint: 'forge-done', publishRequested: true, publishHead: head, reviewedHead: null },
+      }),
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (/rev-parse (--verify )?refs\/heads\/feat-x/.test(joined)) return ok(head)
+        if (joined.includes('ls-remote --heads origin refs/heads/main')) return ok(`${baseTip}\trefs/heads/main`)
+        if (joined.includes('ls-remote --heads origin refs/heads/feat-x')) {
+          return ok(`${++remotes === 1 ? '9'.repeat(40) : head}\trefs/heads/feat-x`)
+        }
+        if (joined.includes('merge-base --is-ancestor')) return ok()
+        if (joined.includes('gh pr list')) return ok('42')
+        if (joined.includes('diff --name-only')) return ok('a-old.ts\nz-new.ts\n')
+        if (cmd.some((c) => c.startsWith('--output='))) outputs.push(cmd)
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, reviewed_head: null, bound_pr: null, fenced_paths: null })
+    await h.loop.runOnce()
+    await h.complete()
+    await h.loop.runOnce()
+
+    expect(outputs).toHaveLength(1)
+    expect(outputs[0]).toContain(`${baseTip}..${head}`)
+    expect(outputs[0]!.includes('--')).toBe(false)
+    // …and no unseen-set probe was paid for either: exactly ONE `--name-only` call,
+    // the listing that builds the path universe, taken against the observed base.
+    const listings = h.hostCalls.map((c) => c.join(' ')).filter((c) => c.includes('--name-only'))
+    expect(listings).toHaveLength(1)
+    expect(listings[0]).toContain(`${baseTip}..${head}`)
+    expect(run.reviewed_head).toBeNull()
   })
 
   test('a successful push without a matching origin witness fails closed', async () => {
@@ -1052,9 +1392,14 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // (asserted above, at the `${baseTip}..${head}` test) and the REPLAY, this one — and
     // only the first was pinned. A replay that returned the pre-rebase base would hand
     // reviewers the ~87%-already-merged artifact this card exists to stop.
-    const replayDiffs = calls.filter((c) => c.includes(' diff ') && c.includes(`..${newHead}`))
+    // (The one exception is the same as on the already-contains path: the probe that
+    // names what the reviewers already saw is `reviewed-pin..head` by construction.)
+    const replayDiffs = calls.filter(
+      (c) => c.includes(' diff ') && c.includes(`..${newHead}`) && !c.includes(SIM_REVIEWED_HEAD),
+    )
     expect(replayDiffs.length).toBeGreaterThan(0)
     for (const c of replayDiffs) expect(c).toContain(`${newBaseSha}..${newHead}`)
+    expect(calls.some((c) => c.includes(SIM_REVIEWED_HEAD) && c.includes('--output='))).toBe(false)
     expect(calls.some((c) => c.includes(`main..${newHead}`))).toBe(false)
     // The lease observation still precedes the push it certifies.
     const observeAt = calls.findIndex((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))
@@ -2974,6 +3319,53 @@ describe('orchestrator — REQUEST_CHANGES (maxRounds exhausted) → failed', ()
     const final = await runToTerminal(h, run.id)
     expect(final.inner_checkpoint).toBe('inner-error')
     expect(final.failure_reason).toContain('inner-error')
+  })
+})
+
+describe('orchestrator — the terminal row records the round the WORKFLOW reported', () => {
+  // THE MEASUREMENT: 215 of 224 runs sat at round 1 while their checkpoints named
+  // fix-round-2..7. `run.round` is the row's copy, stamped at launch; a run that
+  // crashes (or whose live bumps predate the bash seam's derivation) leaves it
+  // there, so every terminal shape spread from `run` recorded a lie. `applyResult`
+  // now folds the REPORTED round in before any of those spreads happen.
+  test('a terminal result reporting round 3 lands round 3 on the row', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', round: 3, prNumber: 7, branch: 'feat-x', checkpoint: 'inner-error' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    expect(store.get(run.id)?.round).toBe(1) // precondition: born at 1
+
+    const final = await runToTerminal(h, run.id)
+
+    expect(final.phase).toBe('failed')
+    expect(final.round).toBe(3) // RED before the fold: 1
+    expect(store.get(run.id)?.round).toBe(3) // persisted, not just returned
+  })
+
+  test('a result reporting round 0 does not lower the row', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', round: 0, prNumber: 7, branch: 'feat-x', checkpoint: 'inner-error' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    const final = await runToTerminal(h, run.id)
+
+    expect(final.round).toBe(1)
+  })
+
+  test('a row already at a HIGHER round is never walked back by a lower report', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'REQUEST_CHANGES', round: 2, prNumber: 7, branch: 'feat-x', checkpoint: 'inner-error' } }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // An explicit patch.round wins over any derivation — this is the live seam's
+    // high-water mark arriving before the harvest.
+    await store.update(run.id, { round: 5 })
+
+    const final = await runToTerminal(h, run.id)
+
+    expect(final.round).toBe(5)
+    expect(store.get(run.id)?.round).toBe(5)
   })
 })
 
@@ -5247,6 +5639,498 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(final.failure_reason).toContain('already carries 3 commit(s) not on origin/')
     expect(final.failure_reason).toContain("refusing to build on another lane's work")
     expect(final.failure_reason).toContain('branch -D')
+  })
+
+  /**
+   * THE OTHER END OF THE SALVAGE-RESUME SEED (`board-dispatch.ts`). The dispatch
+   * chokepoint creates a row already carrying a prior run's built-but-unreviewed
+   * checkpoint once it has proven the branch tip is still that exact commit. This
+   * pins what `launch()` then does with that row — and it is the row shape, not a
+   * new code path, that does the work: `freshLaunch` is `inner_checkpoint === null`,
+   * so a seeded row skips the base RE-PIN (it carries the prior run's pin) and
+   * threads the resume args instead; the leftover-branch ownership check still RUNS
+   * for it — armed for `freshLaunch || seeded_resume` — and passes via the
+   * `ownCrashLeftover` descent exemption, which the assertions below pin.
+   * Without the seed this identical branch state
+   * ends the run `failed` with "refusing to build on another lane's work" — which
+   * is precisely how a re-dispatched card's own committed work used to be thrown
+   * away.
+   */
+  test('a DISPATCH-SEEDED row resumes to review instead of hitting the leftover-branch refusal', async () => {
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      // The prior run's own commits are still sitting on the branch — the exact
+      // state the fresh-launch guard refuses.
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${HEAD}\trefs/heads/trident/add-thing\n`)
+        }
+        // NOT contained in the pinned base (it is the salvaged build)…
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${'d'.repeat(40)}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        // …but descended FROM it, which is this lane's own leftover.
+        return ok()
+      },
+    })
+    // EXACTLY the row `dispatchBoardBoundBuild` writes when it seeds: a brand-new
+    // forge-init row, no subagent, no base pin, carrying the prior run's evidence.
+    const SEEDED_BASE = 'd'.repeat(40)
+    const run = await createRun({
+      slug: 'seeded-resume',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      // THE BASE PIN IS CARRIED BY THE SEED, and this row is where the reason shows.
+      // `freshBuild = freshLaunch && base_sha === null`, and `freshLaunch` is false
+      // for any seeded row — so `launch()` will NEVER pin a base here. A seed that
+      // omitted `base_sha` would leave it null forever, and the publish-time
+      // "does not contain the origin/<base> tip pinned at launch" refusal is gated
+      // on `run.base_sha !== null`: it could never fire for a salvaged run, nor for
+      // any run re-seeded off one. The dispatch chokepoint carries the PRIOR run's
+      // pin, which describes this exact head — it only seeds after proving the
+      // branch still holds that run's recorded commit.
+      base_sha: SEEDED_BASE,
+    })
+    expect(store.get(run.id)!.base_sha).toBe(SEEDED_BASE)
+
+    await launchOnce(h)
+
+    // It FIRED, with the resume evidence — no rebuild-from-scratch dispatch.
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
+    expect(h.inputs[0]!.resume_checkpoint_head).toBe(HEAD)
+    expect(h.inputs[0]!.resume_live_head).toBe(HEAD)
+    // Not the fresh-launch path: no base fetch, no re-pin.
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+    // The ownership probe DOES run (it runs for every row that has not fired), and
+    // this branch passes it: the tip is not contained in the pinned base — it is the
+    // salvaged commit — but it DESCENDS from that pin, which is what `ownCrashLeftover`
+    // reads as "this lane's own leftover". That exemption is why arming the check for
+    // seeded rows refuses nothing that was previously fine.
+    expect(
+      h.hostCalls.some((c) =>
+        c.join(' ').includes('rev-parse --verify --quiet refs/heads/trident/add-thing'),
+      ),
+    ).toBe(true)
+    expect(store.get(run.id)!.failure_reason).toBeNull()
+    // …and the pin SURVIVES the launch it is not re-computed by, which is the whole
+    // point of seeding it: the publish gate has something to compare against.
+    expect(store.get(run.id)!.base_sha).toBe(SEEDED_BASE)
+  })
+
+  test('a SEEDED row whose branch MOVED since dispatch drops the seed and launches fresh', async () => {
+    // THE TOCTOU THIS CLOSES. The seed's proof is taken at DISPATCH and consumed
+    // here, one process later. A seeded row skips both the base re-pin and the
+    // leftover-branch refusal, and the ONLY thing that makes that safe is the
+    // branch still holding this lane's recorded commit. If it moved — another
+    // lane, a human, a slug collision the task-text check could not see — the
+    // premise is false, and building on the strength of a falsified proof is
+    // exactly the "another lane's work" hazard the guard exists for.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        // The branch has MOVED off the seeded head since the dispatch proved it.
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${TIP}	refs/heads/trident/add-thing
+`)
+        }
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'seeded-stale',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      base_sha: 'd'.repeat(40),
+    })
+    // PRECONDITION: `workflow_run_id` null is what marks this a row that was HANDED
+    // a checkpoint rather than one that earned it by firing.
+    expect(store.get(run.id)!.workflow_run_id).toBeNull()
+
+    await launchOnce(h)
+
+    // Byte-identical to the fresh dispatch this card would have had without the
+    // seed: it re-pinned a base, ran the leftover-branch probe, and REFUSED.
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain("refusing to build on another lane's work")
+    expect(h.hostCalls.some((c) => c.join(' ').includes('fetch --no-tags origin main'))).toBe(true)
+  })
+
+  test('a SEEDED row runs the local-branch ownership check — an ABSENT remote does not excuse it', async () => {
+    // THE BLOCKER THIS CLOSES. The seed is a proof about the ref the launch reads,
+    // which in `pr` mode is the REMOTE; the leftover-branch refusal is about the
+    // LOCAL branch, which Forge re-enters. An `'absent'` remote says the branch is
+    // gone from origin and says NOTHING about the local ref — yet it left the seed
+    // in place, `freshLaunch` false, and the ownership check skipped, so the rebuild
+    // adopted whatever commits were sitting on the local branch. Pre-seed this same
+    // card refused loudly. The check now runs for any row that has NOT FIRED.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      // Another lane's commits are sitting on the LOCAL branch.
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        // The remote answers SUCCESSFULLY that the branch is not there.
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) return ok('')
+        // Neither contained in this row's pinned base nor descended from it: not
+        // this lane's work by either test.
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${PRIOR_BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${TIP}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${PRIOR_BASE}..${TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'seeded-absent',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+    })
+
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain("refusing to build on another lane's work")
+    // The check really is the thing that ran — the probe is in the transcript.
+    expect(
+      h.hostCalls.some((c) =>
+        c.join(' ').includes('rev-parse --verify --quiet refs/heads/trident/add-thing'),
+      ),
+    ).toBe(true)
+  })
+
+  test('a seed the REMOTE proves is still no proof about the LOCAL branch', async () => {
+    // The sharper half of the same gap: in `pr` mode a MATCHING ls-remote proves the
+    // remote branch holds the recorded commit, and still says nothing about the local
+    // ref Forge re-enters. So the ownership check is armed for every unfired row, not
+    // merely for the ones whose remote read came back unproven.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${HEAD}\trefs/heads/trident/add-thing\n`)
+        }
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${PRIOR_BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${TIP}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${PRIOR_BASE}..${TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'seeded-proven-foreign-local',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+    })
+
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)!.failure_reason).toContain("refusing to build on another lane's work")
+  })
+
+  test('a GENUINE mid-run resume is untouched by the seed revalidation', async () => {
+    // The discriminator has to be narrow. A run that has already FIRED owns its
+    // branch, and its head legitimately advances past the last checkpoint with its
+    // own commits — revalidating that one would turn every crash-resume into a
+    // rebuild. `workflow_run_id` is non-null there, so it is never treated as a
+    // seed however far the head has moved.
+    const MOVED = 'e'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes('ls-remote --heads origin refs/heads/trident/add-thing')
+          ? ok(`${MOVED}	refs/heads/trident/add-thing
+`)
+          : ok(),
+    })
+    const run = await createRun({
+      slug: 'genuine-resume',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+    })
+    await store.update(run.id, { workflow_run_id: 'launcher-session-1' })
+
+    await launchOnce(h)
+
+    // It fired WITH its checkpoint — the resume decision stays `classifyResume`'s,
+    // which is what answers `head-moved` for this shape.
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
+    expect(h.inputs[0]!.resume_live_head).toBe(MOVED)
+    expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
+  })
+
+  test('a CRASH-RECOVERED run is not a seed — built through store.beginCrashRecovery, it keeps its checkpoint AND its base pin', async () => {
+    // THE BLOCKER THIS CLOSES (Argus r4). `beginCrashRecovery` NULLS
+    // `workflow_run_id` on a row that EARNED its checkpoint by firing, so
+    // "checkpoint present + workflow_run_id null" also describes a legitimately
+    // recovered run — and checkpoint.sh writes `fix-round-N` BEFORE that round's
+    // commits, so a launcher that dies after a commit always leaves live head !=
+    // recorded head. Read as a falsified seed, that run lost its checkpoint AND its
+    // base pin, the leftover-branch guard then had no pin to exempt its own commits
+    // with, and the run ended `failed` over the very work this card exists to keep.
+    //
+    // The row is built through the REAL store method, not by hand: the prior
+    // negative control set `workflow_run_id` non-null, which is precisely the column
+    // recovery clears, so the suite could not see this.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const MOVED = 'e'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: MOVED,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${MOVED}\trefs/heads/trident/add-thing\n`)
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'crash-recovered',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+    })
+    await store.update(run.id, {
+      inner_checkpoint: 'fix-round-1',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+      subagent_status: 'running',
+      subagent_run_id: 'wf-1',
+      workflow_run_id: 'gen-dead',
+    })
+    await store.crashRunningByLauncher('gen-dead', 'pooled child exited')
+    const claimed = (await store.beginCrashRecovery(run.id))!
+    // PRECONDITION: recovery produced the exact shape the seed test also matches.
+    expect(claimed.workflow_run_id).toBeNull()
+    expect(claimed.inner_checkpoint).toBe('fix-round-1')
+    expect(claimed.crash_recoveries).toBe(1)
+
+    await launchOnce(h)
+
+    // It FIRED, with its checkpoint intact — the resume decision stays
+    // `classifyResume`'s, which is what answers `head-moved` for this shape.
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('fix-round-1')
+    expect(h.inputs[0]!.resume_live_head).toBe(MOVED)
+    const final = store.get(run.id)!
+    expect(final.phase).not.toBe('failed')
+    // The base pin survived: the falsification branch nulls it, and without it the
+    // ownership guard has nothing to exempt this run's own commits with.
+    expect(final.base_sha).toBe(PRIOR_BASE)
+  })
+
+  test('an INFRA-RETRIED run is not a seed either — the same column, the same claim, the same survival', async () => {
+    // `beginInfraRetry` nulls `workflow_run_id` for the same reason
+    // `beginCrashRecovery` does. One discriminator, both recovery lanes.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const MOVED = 'e'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: MOVED,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${MOVED}\trefs/heads/trident/add-thing\n`)
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'infra-retried',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+    })
+    await store.update(run.id, {
+      inner_checkpoint: 'fix-round-2',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+      subagent_status: 'running',
+      workflow_run_id: 'gen-1',
+    })
+    const claimed = (await store.beginInfraRetry(run.id))!
+    expect(claimed.workflow_run_id).toBeNull()
+    expect(claimed.infra_retries).toBe(1)
+
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('fix-round-2')
+    const final = store.get(run.id)!
+    expect(final.phase).not.toBe('failed')
+    expect(final.base_sha).toBe(PRIOR_BASE)
+  })
+
+  test('a SIBLING lane cut from the same base is refused — descent from the pin is not ownership', async () => {
+    // THE SECOND BLOCKER (Argus r4). `ownCrashLeftover` exempted ANY tip descending
+    // from this row's prior base pin, and a different lane that cut the same branch
+    // name from the same base satisfies that exactly — so a seeded resume could be
+    // told to re-enter a branch holding somebody else's commits. The recorded
+    // checkpoint head is the commit this row DOES own; a sibling's tip cannot
+    // contain it, and that is the comparison the guard was missing.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const SIBLING_TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: SIBLING_TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        // The remote still holds the seeded head, so the seed itself is not falsified.
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${HEAD}\trefs/heads/trident/add-thing\n`)
+        }
+        // Not contained in the base…
+        if (joined.includes(`merge-base --is-ancestor ${SIBLING_TIP} ${PRIOR_BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        // …but it DOES descend from it: the sibling cut from the same commit.
+        if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${SIBLING_TIP}`)) return ok()
+        if (joined.includes(`cat-file -e ${HEAD}^{commit}`)) return ok()
+        // The recorded head is NOT in it — these are not this run's commits.
+        if (joined.includes(`merge-base --is-ancestor ${HEAD} ${SIBLING_TIP}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`rev-list --count ${PRIOR_BASE}..${SIBLING_TIP}`)) return ok('3')
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'seeded-sibling',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+    })
+
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain("refusing to build on another lane's work")
+  })
+
+  test('a seeded resume whose branch CONTAINS its recorded head proceeds — that leftover really is this run\'s', async () => {
+    // The positive control for the check above: same descent from the same pin, and
+    // the recorded checkpoint head IS an ancestor of the tip (the launcher committed
+    // after writing the checkpoint). That is this lane's own work, and it must still
+    // be handed back to Forge rather than refused.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const OWN_TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: OWN_TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${HEAD}\trefs/heads/trident/add-thing\n`)
+        }
+        if (joined.includes(`merge-base --is-ancestor ${OWN_TIP} ${PRIOR_BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${OWN_TIP}`)) return ok()
+        if (joined.includes(`cat-file -e ${HEAD}^{commit}`)) return ok()
+        if (joined.includes(`merge-base --is-ancestor ${HEAD} ${OWN_TIP}`)) return ok()
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'seeded-own-leftover',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+    })
+
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(h.inputs[0]!.resume_checkpoint).toBe('forge-done')
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+  })
+
+  test('an UNREADABLE recorded head does not cost the run its leftover — the pin stays the answer', async () => {
+    // `merge-base --is-ancestor` cannot tell "not an ancestor" from "unknown
+    // object", so the ownership comparison is only made when the recorded commit is
+    // actually readable here. Refusing a run because an object could not be READ
+    // would discard built work on evidence the guard does not have.
+    const PRIOR_BASE = 'd'.repeat(40)
+    const OWN_TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: OWN_TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('ls-remote --heads origin refs/heads/trident/add-thing')) {
+          return ok(`${HEAD}\trefs/heads/trident/add-thing\n`)
+        }
+        if (joined.includes(`merge-base --is-ancestor ${OWN_TIP} ${PRIOR_BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${PRIOR_BASE} ${OWN_TIP}`)) return ok()
+        // The recorded commit is not in this repo at all.
+        if (joined.includes(`cat-file -e ${HEAD}^{commit}`)) {
+          return { ok: false, stdout: '', stderr: 'Not a valid object name', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({
+      slug: 'seeded-head-unreadable',
+      merge_mode: 'pr' as MergeMode,
+      branch: 'trident/add-thing',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      base_sha: PRIOR_BASE,
+    })
+
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)!.phase).not.toBe('failed')
   })
 
   test('an ancestor-only local branch leftover proceeds', async () => {

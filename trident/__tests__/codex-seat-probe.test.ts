@@ -1061,7 +1061,18 @@ describe('dispatch preflight (P4)', () => {
       'trident/work-board-build-tool.ts',
     ])
     for (const file of callers) {
-      expect(`${file}: ${readFileSync(join(REPO, file), 'utf8')}`).toContain('preflight')
+      const src = `${file}: ${readFileSync(join(REPO, file), 'utf8')}`
+      expect(src).toContain('preflight')
+      // …AND THE CREDENTIAL, on the same enumeration (Argus r17). `hostRunner` is
+      // the seam the built-never-reviewed seed's `ls-remote` probe reads, and it
+      // had been wired on `work_board_dispatch_build` while `work_board_start` —
+      // the RETRY path the card exists for — dropped it, so every re-dispatch
+      // probed uncredentialed and adopted nothing. Textual here for the same
+      // reason `preflight` is (these entries are closures inside a composition);
+      // the BEHAVIOUR is proven against a private origin, per tool entry, in
+      // `work-board-build-tool.test.ts`, and `dispatch-holds.ts` additionally
+      // demands it in the TYPE so the compiler backs this word up.
+      expect(src).toContain('hostRunner')
     }
     // …and the ▶ closure specifically: the same shared object, by name, inside
     // the `boardStartBuild` dispatch call.

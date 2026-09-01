@@ -262,6 +262,33 @@ export interface CreateTridentRunInput {
   /** Both-or-neither; `create` refuses a half-declared pair. */
   parent_run_id?: string | null
   wave_task_id?: string | null
+  /**
+   * SALVAGE-RESUME SEED — a PRIOR terminal run's built-but-never-reviewed
+   * evidence, carried onto this fresh row so `launch()` takes the resume path and
+   * routes the existing commit to REVIEW instead of rebuilding it. Written only by
+   * the dispatch chokepoint, and only after it has verified the live branch tip
+   * still resolves to exactly this head. Omitted → null, which is the byte-
+   * identical fresh-dispatch shape every other caller keeps.
+   */
+  inner_checkpoint?: string | null
+  /** Salvage-resume seed — see `inner_checkpoint`. The recorded commit the seeded
+   *  checkpoint was stamped against; the resume comparison is meaningless without it. */
+  inner_checkpoint_head?: string | null
+  /** Salvage-resume seed — see `inner_checkpoint`. Carried verbatim, because the
+   *  workflow reads these back on resume exactly as the prior round recorded them. */
+  inner_checkpoint_findings?: string | null
+  /**
+   * Salvage-resume seed — see `inner_checkpoint`. The origin/<base> tip the SEEDED
+   * head was cut from, carried from the prior run.
+   *
+   * Required, not optional, for a seeded row: `launch()` pins a base only on a
+   * FRESH build (`inner_checkpoint === null && base_sha === null`), so a seeded row
+   * would be born with a null pin forever — and the publish-time refusal "branch
+   * does not contain the origin/<base> tip pinned at launch" is gated on
+   * `base_sha !== null`, so it could never fire for a salvaged run or any re-seed
+   * chained off one. Seeding the prior run's pin keeps that gate live.
+   */
+  base_sha?: string | null
 }
 
 /**
@@ -351,11 +378,16 @@ export const COLS =
   'reviewed_head, bound_pr, fenced_paths, base_sha, base_behind, parent_run_id, wave_task_id, ' +
   'claimed_paths'
 
-// The nullable launch-pin columns deliberately backfill through their database
-// NULL default; all inserted columns still derive their placeholders here. A
-// hand-miscounted `?` list silently corrupts every insert and no type error
-// catches it — so the list is never typed by hand.
-const INSERT_COLS = COLS.split(', ').filter((col) => col !== 'base_sha' && col !== 'base_behind')
+// `base_behind` deliberately backfills through its database NULL default; all
+// inserted columns still derive their placeholders here. A hand-miscounted `?`
+// list silently corrupts every insert and no type error catches it — so the list
+// is never typed by hand.
+//
+// `base_sha` USED to backfill the same way and no longer can: the salvage-resume
+// seed has to write it AT CREATE, because a seeded row is not a fresh launch and
+// `launch()` therefore never re-pins it (see `CreateTridentRunInput.base_sha`).
+// It stays NULL for every other caller, which is the shape they already had.
+const INSERT_COLS = COLS.split(', ').filter((col) => col !== 'base_behind')
 const INSERT_PLACEHOLDERS = INSERT_COLS
   .map(() => '?')
   .join(', ')
@@ -413,8 +445,20 @@ export class TridentRunStore {
       claimed_paths: input.claimed_paths ?? [],
       slug: input.slug,
       project_slug: input.project_slug,
+      // A SALVAGE-SEEDED row is born at `forge-init` LIKE ANY OTHER, and
+      // `phaseForCheckpoint` is deliberately NOT applied to `input.inner_checkpoint`
+      // here (Argus r3 nit). That mapping exists for the INNER workflow's own
+      // checkpoints — the phase a run has REACHED — while this row has reached
+      // nothing: it has not fired, and `launch()` is what advances a `forge-init`
+      // row. Deriving `argus` from a seeded `fix-round-N` would create a row the
+      // launcher's own phase handling has to be taught about, to describe a phase
+      // that has not happened yet. The seeded checkpoint is the resume evidence;
+      // the phase is where this row IS.
       phase: input.phase ?? 'forge-init',
-      round: 1,
+      // The ROUND, by contrast, IS taken from the seeded checkpoint: the row is
+      // resuming that round's work, not starting over. A fresh run seeds no
+      // checkpoint and stays at 1.
+      round: Math.max(1, checkpointRound(input.inner_checkpoint ?? null) ?? 1),
       // THE EFFECTIVE REVIEW-ROUND CAP. This is the value the fix loop actually
       // bounds on: it is written to the run row, `buildWorkflowArgs` threads it to
       // the inner workflow as `maxRounds`, and `round < maxRounds` gates re-Forge.
@@ -427,8 +471,17 @@ export class TridentRunStore {
       ralph_round: 0,
       max_ralph_rounds: input.max_ralph_rounds ?? 20,
       branch: input.branch ?? null,
-      base_sha: null,
+      // SALVAGE-RESUME SEED (see `CreateTridentRunInput`): normally null, and
+      // non-null only when the dispatch chokepoint has proven a prior terminal run
+      // of this card built work that was never reviewed and the branch tip still
+      // holds exactly that commit — in which case the prior run's base pin
+      // describes this row's head too, and is what keeps the publish-time
+      // cut-from-origin refusal armed on a row `launch()` will not re-pin.
+      base_sha: input.base_sha ?? null,
       base_behind: null,
+      // NEVER seeded: `launch()` resolves the PR with
+      // `run.pr ?? await detectExistingPr(run)`, and a carried-over number would
+      // short-circuit that probe onto a PR that may since have been closed.
       pr: null,
       merge_mode: input.merge_mode ?? 'local',
       subagent_run_id: null,
@@ -442,9 +495,10 @@ export class TridentRunStore {
       failure_reason: null,
       brief_alert: null,
       workflow_run_id: null,
-      inner_checkpoint: null,
-      inner_checkpoint_head: null,
-      inner_checkpoint_findings: null,
+      inner_checkpoint: input.inner_checkpoint ?? null,
+      inner_checkpoint_head: input.inner_checkpoint_head ?? null,
+      inner_checkpoint_findings: input.inner_checkpoint_findings ?? null,
+      // NEVER seeded: a verdict belongs to a review THIS run has not had yet.
       inner_verdict: null,
       inner_result: null,
       started_at: ts,
@@ -498,6 +552,9 @@ export class TridentRunStore {
         run.reviewed_head,
         run.bound_pr,
         run.fenced_paths,
+        // COLS order: base_sha sits here, between fenced_paths and parent_run_id
+        // (base_behind, the only filtered column, is skipped).
+        run.base_sha,
         run.parent_run_id,
         run.wave_task_id,
         // Stored as JSON, matching COLS order. The placeholder count is DERIVED from
@@ -594,6 +651,36 @@ export class TridentRunStore {
     const row = this.db
       .prepare<TridentRunDbRow, [string, string]>(
         `SELECT ${COLS} FROM code_trident_runs WHERE project_slug = ? AND slug = ?`,
+      )
+      .get(project_slug, slug)
+    return row === null ? null : rowToRun(row)
+  }
+
+  /**
+   * The MOST RECENT FINISHED run of this card, or null if the card has only ever
+   * had live rows. Read-only, and the one input the dispatch chokepoint needs to
+   * decide whether a re-dispatch is resuming built work or starting fresh:
+   * `getBySlug` is uniqueness-scoped to LIVE rows, so it cannot answer "what
+   * happened last time".
+   *
+   * `started_at, id` DESC because two rows can share a timestamp on a fast clock
+   * (and do, in tests) — the id tiebreak makes "latest" total rather than
+   * whichever row SQLite happened to visit first.
+   *
+   * LATEST-STARTED, not latest-FINISHED, and that bound is deliberate: a long run
+   * started before a short one can finish after it, and this returns the short
+   * one. Ordering on a finish timestamp would need one that every terminal path
+   * writes, which no column guarantees. The consequence is bounded to a stale
+   * PICK, never a wrong action — the caller re-reads the live branch tip and a
+   * head that does not match the picked row seeds nothing at all.
+   */
+  latestTerminalBySlug(project_slug: string, slug: string): TridentRun | null {
+    const row = this.db
+      .prepare<TridentRunDbRow, [string, string]>(
+        `SELECT ${COLS} FROM code_trident_runs
+          WHERE project_slug = ? AND slug = ? AND phase IN ${TERMINAL_PHASE_SQL}
+          ORDER BY started_at DESC, id DESC
+          LIMIT 1`,
       )
       .get(project_slug, slug)
     return row === null ? null : rowToRun(row)
@@ -1156,20 +1243,57 @@ export class TridentRunStore {
    * `update({inner_result})` for the workflow-sim result write in tests;
    * `brief_alert` is written by `trident/checkpoint.sh`.
    *
-   * `inner_checkpoint_head`/`inner_checkpoint_findings` (0122) are excluded for the
-   * same reason AND a sharper one: they are only meaningful PAIRED with the
-   * `inner_checkpoint` they were written beside. The workflow writes all three in
+   * `inner_checkpoint_head` (0122) is excluded for the
+   * same reason AND a sharper one: it is only meaningful PAIRED with the
+   * `inner_checkpoint` it was written beside. The known cost of that exclusion
+   * (Argus r3, minor): a save carrying a NULL checkpoint — the launcher's dropped
+   * salvage seed is the one live producer — leaves the head of the seed
+   * behind it, so the persisted row is a null name beside a stale OID. It is not
+   * corrected HERE, because "checkpoint null → null the pair" cannot tell that write
+   * from an outer-loop snapshot whose in-memory checkpoint is merely STALE (the
+   * workflow writes checkpoints out of band, through checkpoint.sh), and nulling a
+   * live head on one of those would destroy evidence rather than tidy it. No reader
+   * is affected: `terminalRunDisposition` and every resume path key off the
+   * checkpoint NAME, which is null, so the orphaned OID is inert.
+   * The workflow writes all three in
    * ONE atomic UPDATE; an outer-loop snapshot that carried a checkpoint name
    * forward without them could pair a fresh name with a stale OID, and that pair is
    * exactly what a resumed run reads to decide whether prior review work — up to
    * and including an APPROVE — may be trusted.
+   *
+   * `inner_checkpoint_findings` is the ONE of that trio this writer does touch, and
+   * only through `COALESCE` — see the guard below. A snapshot that brings no
+   * findings still leaves the column alone, so the exclusion above holds for every
+   * caller that has one; a snapshot that brings a REJECTION must be able to bring
+   * its evidence in the same statement, or the guard it has to satisfy is
+   * unanswerable.
    */
   async save(run: TridentRun): Promise<void> {
     if (run.inner_verdict === 'REQUEST_CHANGES') {
+      // SAME PRECEDENCE AS saveIfActive — incoming findings first, the stored row
+      // as the fallback (Argus r1, nit). Reading only the STORED column while this
+      // writer never populated it made the guard unsatisfiable by construction: a
+      // caller arriving WITH findings had no way to satisfy it, and `tick.ts`
+      // swallows the throw as `advance_failed`, so the run would retry forever.
+      // The COALESCE below is the other half — the verdict and the evidence for it
+      // land in the SAME statement, which is what makes the guard answerable.
       // save() has no production callers, so its non-transactional pre-read is acceptable.
-      const row = this.get(run.id)
-      if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
-        throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+      //
+      // PATCH-WINS, exactly as `update()` at the top of this class already does (Argus
+      // r1, blocker). The stored row is a fallback ONLY when the incoming column is
+      // NULL, because NULL is the one value the COALESCE below leaves the stored
+      // evidence alone for. A NON-null incoming value — `'[]'` above all — OVERWRITES
+      // that column, so judging it against evidence it is about to erase let a caller
+      // clear the guard and then land the exact `REQUEST_CHANGES` + `[]` row this whole
+      // card exists to make unwritable.
+      if (parseCheckpointFindings(run.inner_checkpoint_findings).length === 0) {
+        if (run.inner_checkpoint_findings !== null) {
+          throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+        }
+        const row = this.get(run.id)
+        if (row !== null && parseCheckpointFindings(row.inner_checkpoint_findings).length === 0) {
+          throw new TridentEmptyFindingsRejectionError(run.id, 'save')
+        }
       }
     }
     await this.db.run(
@@ -1178,6 +1302,12 @@ export class TridentRunStore {
               merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
               worktree = ?, failure_reason = ?, workflow_run_id = ?,
               inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+              -- COALESCE, NOT A PLAIN ASSIGNMENT, exactly as in saveIfActive: a bare
+              -- assignment would let every snapshot save blank the column, while
+              -- COALESCE writes only when the caller actually brought findings.
+              -- (Keep this comment free of question marks: the driver counts every one
+              -- in the statement text as a bind parameter, comments included.)
+              inner_checkpoint_findings = COALESCE(?, inner_checkpoint_findings),
               base_sha = ?, base_behind = ?,
               last_advanced_at = ?
         WHERE id = ?`,
@@ -1197,6 +1327,7 @@ export class TridentRunStore {
         run.inner_checkpoint,
         run.inner_verdict,
         run.harvested_at,
+        run.inner_checkpoint_findings,
         run.base_sha,
         run.base_behind,
         this.now(),
@@ -1237,8 +1368,18 @@ export class TridentRunStore {
         // against the evidence already on record. Both empty is still a refusal — that is
         // the thesis and it is intact: an empty finding set is an approval or an
         // infrastructure failure, never a rejection.
+        //
+        // PATCH-WINS, exactly as `update()` does (Argus r1, blocker). The stored row is
+        // consulted ONLY when the incoming column is NULL — the one value the COALESCE
+        // below leaves the stored evidence alone for. A NON-null incoming value, `'[]'`
+        // above all, OVERWRITES that column in this same statement, so weighing it
+        // against evidence it is about to erase cleared the guard and then landed the
+        // exact `REQUEST_CHANGES` + `[]` row this card exists to make unwritable.
         const incoming = parseCheckpointFindings(run.inner_checkpoint_findings)
         if (incoming.length === 0) {
+          if (run.inner_checkpoint_findings !== null) {
+            throw new TridentEmptyFindingsRejectionError(run.id, 'saveIfActive')
+          }
           const row = tx
             .prepare<{ inner_checkpoint_findings: string | null }, [string]>(
               'SELECT inner_checkpoint_findings FROM code_trident_runs WHERE id = ?',

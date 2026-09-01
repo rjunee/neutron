@@ -89,7 +89,7 @@ export interface RunProgress {
   stalled: boolean;
   stalled_ms: number | null;
   pr: number | null;
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null;
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null;
   failure_reason: string | null;
   /** Added after the base progress shape; optional for rolling-deploy frames. */
   brief_alert?: string | null;
@@ -382,7 +382,13 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     stalled: r['stalled'] === true,
     stalled_ms: typeof r['stalled_ms'] === 'number' ? (r['stalled_ms'] as number) : null,
     pr: typeof r['pr'] === 'number' ? (r['pr'] as number) : null,
-    verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
+    // `REVIEW_NOT_RUN` is a RECORDED terminal verdict, not an absent one — collapsing
+    // it to null here threw away the only thing a reasonless failed card can say.
+    // Every other unknown string still degrades to null.
+    verdict:
+      verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' || verdict === 'REVIEW_NOT_RUN'
+        ? verdict
+        : null,
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
     brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,
   };

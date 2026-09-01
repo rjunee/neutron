@@ -234,6 +234,10 @@ export interface RunNotice {
 export function runNotice(rp: RunProgress | undefined): RunNotice | null {
   const failure = failureReasonText(rp);
   if (failure !== null) return { text: failure, tone: 'failure' };
+  // A failed run that recorded REVIEW_NOT_RUN and no reason: say the one thing the
+  // row proves instead of a blank. A null verdict (legacy frame) claims nothing.
+  if (rp !== undefined && resolveStepLabel(rp) === 'failed' && rp.verdict === 'REVIEW_NOT_RUN')
+    return { text: 'Review never ran — the work was not rejected.', tone: 'failure' };
   // A recovered integrity incident is evidence, not a substitute outcome. If a
   // terminal failure has no recorded reason, do not relabel the earlier alert
   // as though it caused that failure.

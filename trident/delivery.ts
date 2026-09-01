@@ -38,6 +38,7 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { terminalRunDisposition } from './run-disposition.ts'
 import {
   TRIDENT_SALVAGE_MARKER,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
@@ -213,6 +214,7 @@ function salvageRecoveryTrail(run: TridentRun): string {
 export function interpretFailure(run: TridentRun): FailureInterpretation {
   const reason = authoredFailureReason((run.failure_reason ?? '').trim())
   const r = reason.toLowerCase()
+  const disposition = terminalRunDisposition(run)
   const retry = 'Reply to retry the build, or take it from here manually.'
   const saved = 'Your progress is saved.'
 
@@ -327,7 +329,19 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
   //
   // THE TWO HALVES MUST MOVE TOGETHER — a reason that stops matching this string silently
   // reverts the operator to the old, wrong story.
-  if (r.includes('inner workflow ended at round')) {
+  //
+  // AND THE RECORDED VERDICT STILL OUTRANKS THIS PROSE (Argus r5). This sentence is the
+  // orchestrator's FALL-THROUGH (`innerTerminalFailureReason`, orchestrator.ts) — it is what
+  // a terminal `argus-request-changes` exit with findings and no terminal cause says too,
+  // which is the COMMON exhaustion shape. Matching it blind would have classified a genuine,
+  // findings-carrying rejection as `unknown` and left the `reviewed-rejected` arm below dead
+  // for exactly the rows it was written for. So the string decides only for rows the columns
+  // cannot judge: a `reviewed-rejected` disposition means a reviewer really did speak (the
+  // write site refuses a findings-free `REQUEST_CHANGES`), and it falls through to the review
+  // branch. Every never-reviewed row — `REVIEW_NOT_RUN` or the legacy null verdict, whether it
+  // died before the build or built and was never judged — still lands here, which is the
+  // whole point of the branch.
+  if (disposition !== 'reviewed-rejected' && r.includes('inner workflow ended at round')) {
     return {
       klass: 'unknown',
       summary: 'The build ended without an approved review, so I did not merge it.',
@@ -335,8 +349,45 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE ROUND-BUDGET EXIT OF A ROW THAT WAS NEVER REVIEWED, same rule, different string
+  // (Argus r1, minor). `state-machine.ts` writes `reached max_rounds (N) without Argus
+  // APPROVE` verbatim, and for a never-reviewed terminal row that reason matched nothing
+  // above and nothing in the review branch below, so it reached the generic fallback at
+  // the end of this function — short, no `failed:` token — and was echoed to the operator
+  // as internal machine prose. The classification was already right; only the phrasing
+  // regressed. A `reviewed-rejected` row is excluded for the same reason as the branch
+  // above: there a reviewer really did speak, and the review branch is the true story.
+  if (disposition !== 'reviewed-rejected' && r.includes('reached max_rounds')) {
+    return {
+      klass: 'unknown',
+      summary: 'The build used up its rounds without ever getting an approved review, so I did not merge it.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   // Argus still had blocking findings after the round budget — a review outcome.
-  if (r.includes('without argus approve') || r.includes('request_changes') || r.includes('exhausted')) {
+  //
+  // THE RECORDED VERDICT OUTRANKS THE PROSE, IN BOTH DIRECTIONS. A terminal
+  // `REQUEST_CHANGES` — which the write site guarantees carries findings — IS a review
+  // outcome even when the reason wording drifts past the string matches below; and a
+  // never-reviewed row (`REVIEW_NOT_RUN`, or the legacy null verdict) must never be
+  // narrated as one, so a stray 'exhausted' token in an infra or budget reason can no
+  // longer claim blocking findings that never existed. That was the measured lie: of 160
+  // recorded rejections, 97 carried no findings at all.
+  //
+  // BOTH DIRECTIONS MEANS BOTH, so the prose fallback survives only for a row the
+  // classifier cannot judge (`not-terminal` — no terminal phase recorded). An
+  // APPROVED row is the direction the first version of this branch still got wrong:
+  // a merge failure KEEPS `inner_verdict = 'APPROVE'` and its reason can carry
+  // 'exhausted' (retries exhausted), which took the review-unresolved branch and
+  // told the owner a reviewer that had actually APPROVED "still had blocking
+  // findings". Those rows fall through to the merge-mechanics class below, which is
+  // what actually happened to them.
+  if (
+    disposition === 'reviewed-rejected' ||
+    (disposition === 'not-terminal' &&
+      (r.includes('without argus approve') || r.includes('request_changes') || r.includes('exhausted')))
+  ) {
     return {
       klass: 'review-unresolved',
       summary: `The build ran its review rounds but the reviewer still had blocking findings, so I did not merge it.`,

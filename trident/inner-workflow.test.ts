@@ -483,7 +483,16 @@ describe('inner-workflow.mjs — per-phase SQLite checkpointing (C1)', () => {
     // busy_timeout is per-connection: the PRAGMA must share the sqlite3
     // invocation with the UPDATE, so writes retry under lock (was 0 → a lost
     // terminal write meant no harvest until the 25m reaper).
-    expect(CHECKPOINT_SH).toContain('PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET')
+    //
+    // The statement is COMPOSED and then piped: since Argus r1 it reaches sqlite3
+    // on STDIN rather than as an argv element, because the materialised findings
+    // literal appears in it five times and Linux caps ONE argument at 128 KiB —
+    // a 33 KB findings file killed the entire terminal write with E2BIG. So the
+    // pin is on the composition and the pipe that carries it (same invocation,
+    // same connection), not on a single-line argv string.
+    expect(CHECKPOINT_SH).toContain('update_sql="PRAGMA busy_timeout=5000;')
+    expect(CHECKPOINT_SH).toContain('UPDATE code_trident_runs SET $set_clause')
+    expect(CHECKPOINT_SH).toContain('printf \'%s\\n\' "$update_sql" | sqlite3 -init /dev/null -bail')
     // Row selection is still WHERE id — the terminal freeze lives in the SET
     // expressions, so it never narrows which row the UPDATE addresses.
     expect(CHECKPOINT_SH).toContain('quoted_run="$(sql_quote "$run")"')
@@ -1745,19 +1754,25 @@ describe('inner-workflow.mjs — worktree cleanup on ALL paths, destructive on N
 // harvests `inner_result` from the DB (no process/stdout). So the workflow must
 // persist its TYPED terminal result on EVERY terminal path — incl. a throw.
 describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () => {
-  test('writes inner_result via checkpoint.sh inner_result_file → readfile() CAST AS TEXT (JSON-safe sqlite write)', () => {
+  test('writes inner_result via checkpoint.sh inner_result_file → ONE materialised literal (JSON-safe sqlite write)', () => {
     expect(SRC).toContain('async function writeTerminalResult(')
-    // The workflow passes the temp-file PATH; the readfile()+CAST that dodges
+    // The workflow passes the temp-file PATH; the file indirection that dodges
     // the JSON double-quotes vs the sqlite argument lives in checkpoint.sh,
     // together with the COLUMN-CONSISTENCY CASE (subagent_status flips to
-    // 'completed' ONLY when the SAME readfile() yields non-empty text).
+    // 'completed' ONLY when the SAME bytes just stored are non-empty text).
     expect(SRC).toContain('inner_result_file ${shSingleQuote(tmp)}')
-    expect(CHECKPOINT_SH).toContain("inner_result=CAST(readfile('$f') AS TEXT)")
+    // READ ONCE, IN BASH (Argus r8). This used to be `CAST(readfile('$f') AS TEXT)`
+    // written out twice — and `readfile()` is a FUNCTION, re-evaluated per mention,
+    // so a file swapped between the two evaluations could flip subagent_status to
+    // 'completed' beside an EMPTY inner_result. `$f` is now the file's bytes as a
+    // single SQL literal, so both mentions are provably the same value.
+    expect(CHECKPOINT_SH).toContain('f="$(read_file_literal "$value")"')
+    expect(CHECKPOINT_SH).toContain('sets+=("inner_result=$f")')
     // Two nested guards, terminal freeze OUTERMOST: a cancelled run's surviving
     // workflow records its result but never flips the liveness column to
     // 'completed' (the result is inert on a terminal row — nothing harvests it).
     expect(CHECKPOINT_SH).toContain(
-      "subagent_status=CASE WHEN phase IN $terminal_phases THEN subagent_status WHEN length(CAST(readfile('$f') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END",
+      "subagent_status=CASE WHEN phase IN $terminal_phases THEN subagent_status WHEN length($f) > 0 THEN 'completed' ELSE subagent_status END",
     )
     // The harvest-ready signal is written on the SUCCESS path before returning.
     expect(SRC).toContain('await writeTerminalResult(terminalResult)')

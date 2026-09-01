@@ -28,7 +28,7 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -216,8 +216,17 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         // no network. The credential half is proven below through the store.
         resolveMergeMode: (path) => detectMergeMode(path, tbd.merge_mode_probe),
         resolveRalph: async () => false,
+        // THE COMPOSED RUNNER, by VALUE and not by a count of its spelling (Argus
+        // r17). This is the object both dispatch tools hand the seed's branch-tip
+        // probe; a boot that left it undefined puts every re-dispatch back on the
+        // uncredentialed `spawnCapture` this seam exists to replace. The per-entry
+        // BEHAVIOUR against a private origin is proven in
+        // `trident/work-board-build-tool.test.ts`.
+        hostRunner: tbd.host_runner!,
       },
     )
+    expect(typeof tbd.host_runner).toBe('function')
+    expect(typeof tbd.landed_probe).toBe('function')
     expect(res.ok).toBe(true)
     // The run row exists and the Plan item is bound (fork ⑂ lit).
     expect(board.get('owner', item.id)?.linked_run_id).toBe(res.ok ? res.run.id : '')
@@ -272,6 +281,22 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // string comparison would have accepted — returns `{}` here.
     expect((await tbd.merge_mode_probe.credential.load())['GH_TOKEN']).toBe(PLANTED_TOKEN)
 
+    // AND THE DISPATCH SEAM CARRIES THE CREDENTIALED HOST RUNNER (Argus r16
+    // blocker). The built-never-reviewed salvage — the whole point of the seed —
+    // probes the build branch's tip with `git ls-remote origin`. That read was
+    // credentialed ONLY when a caller passed `secretsStore` + `owner_handle`, and
+    // no production caller does: they inject `resolveMergeMode` instead, because
+    // the composition root owns the token. So the probe ran on a bare process env
+    // and, against a PRIVATE origin, answered '' — no seed, and a commit that was
+    // already built got rebuilt from scratch. Proven by RUNNING the wired runner
+    // and reading back the token it exports, not by `typeof`: the pre-fix
+    // composition has no such property at all, and one wired to any other source
+    // prints nothing here.
+    expect(typeof tbd.host_runner).toBe('function')
+    const runnerEnv = await tbd.host_runner!(['sh', '-c', 'printf %s "$GH_TOKEN"'], tmpDir)
+    expect(runnerEnv.ok).toBe(true)
+    expect(runnerEnv.stdout).toBe(PLANTED_TOKEN)
+
     // Part B — the Connect Codex surface + agent-tool service are wired, and the
     // trident loop threads the per-project CODEX_HOME (resolveCodexHome). Anti
     // "built-but-not-wired": connect a subscription auth via the wired service →
@@ -295,6 +320,184 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       }
     }
   }, 20_000)
+
+  test('EVERY dispatch site that gets the landed probe gets the host runner with it', () => {
+    // The boot assertion above reaches ONE of the four production entries into
+    // `dispatchBoardBoundBuild` — the agent-native tool deps, the only one the
+    // composition exposes as an object. The other three (`/code`'s context, the
+    // app's ▶ `boardStartBuild`, and the hold sweep's `makeDispatchDeps`) are
+    // closures built inside the composer, and wiring a shared credential
+    // per-entry is exactly how this repo has repeatedly shipped a seam that was
+    // live on one path and inert on the rest (see the `preflight` and `holds`
+    // notes in `board-dispatch.ts`).
+    //
+    // So the pin is the PAIRING: `landedProbe` and `hostRunner` are the same
+    // credentialed object serving the same class of remote read, and a site that
+    // takes one without the other is the drift this catches. Textual because
+    // these sites are unreachable except by booting each surface, and a shape
+    // assertion on a closure could not tell a wired site from an unwired one.
+    // COMMENTS ARE NOT WIRING (Argus r17). The count used to run over the raw
+    // file, so commenting the live `hostRunner: tridentHostRunner` out and
+    // re-adding it as a comment kept every count equal — a mutant that unwires
+    // production and leaves this green. Line comments are stripped first, so only
+    // executable spellings are counted.
+    //
+    // AND A STRING IS NOT A PROPERTY EITHER (Argus r18, with a working mutant).
+    // Counting the bare SUBSTRING also survived
+    // `['hostRunner: tridentHostRunner']: undefined,` — executable, so the comment
+    // strip above does not touch it, and it keeps the count equal while removing
+    // the property production reads. So the count is now line-ANCHORED: the
+    // spelling has to be a real object property, i.e. begin its line after nothing
+    // but whitespace. The mutant's line begins with `[` and no longer counts, and
+    // every genuine site in `composer.ts` is written exactly this way.
+    const src = readFileSync(join(HERE, '..', 'composer.ts'), 'utf8')
+      .split('\n')
+      .filter((l) => {
+        const t = l.trimStart()
+        return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
+      })
+      .join('\n')
+    const propLine = (prop: string, value: string): RegExp =>
+      new RegExp(`^[ \\t]*${prop}: ${value},?[ \\t]*$`)
+    const count = (prop: string, value: string, text: string = src): number =>
+      (text.match(new RegExp(propLine(prop, value).source, 'gm')) ?? []).length
+    // Positive control: the anchors themselves are still spelled this way, so an
+    // equality of two zeroes cannot pass this test.
+    expect(count('landedProbe', 'tridentLandedProbe')).toBeGreaterThanOrEqual(3)
+    expect(count('landed_probe', 'tridentLandedProbe')).toBeGreaterThanOrEqual(1)
+    expect(count('hostRunner', 'tridentHostRunner')).toBe(count('landedProbe', 'tridentLandedProbe'))
+    expect(count('host_runner', 'tridentHostRunner')).toBe(count('landed_probe', 'tridentLandedProbe'))
+
+    // AND A COUNT CANNOT SAY *WHICH OBJECT* CARRIES THE PROPERTY (Argus r20
+    // blocker, with a working mutant). Deleting `hostRunner: tridentHostRunner`
+    // from the ▶ dispatch site and re-spelling it in a decoy object beside the
+    // runner's definition keeps every count above equal, so production goes
+    // unwired with this test green — and the compiler does not object either,
+    // because `BoardBoundBuildDeps.hostRunner` is OPTIONAL (it falls back to the
+    // uncredentialed reader, which is exactly the silent failure this seam is
+    // about). So the real assertion is per OBJECT LITERAL: each literal carrying
+    // the landed probe must carry the host runner as a DIRECT property of ITSELF.
+    // A sibling object elsewhere in the file is not an answer. The reviewer's own
+    // mutant is applied to the real source at the bottom of this test and must
+    // come out RED.
+
+    /** The `{ … }` body enclosing `text[idx]`, by bracket depth. */
+    const enclosingObject = (text: string, idx: number): string | null => {
+      let depth = 0
+      let end = -1
+      for (let k = idx; k < text.length; k++) {
+        const c = text[k]
+        if (c === '{' || c === '(' || c === '[') depth++
+        else if (c === ')' || c === ']') depth--
+        else if (c === '}') {
+          if (depth === 0) {
+            end = k
+            break
+          }
+          depth--
+        }
+      }
+      depth = 0
+      let start = -1
+      for (let k = idx; k >= 0; k--) {
+        const c = text[k]
+        if (c === '}' || c === ')' || c === ']') depth++
+        else if (c === '(' || c === '[') depth--
+        else if (c === '{') {
+          if (depth === 0) {
+            start = k
+            break
+          }
+          depth--
+        }
+      }
+      return start === -1 || end === -1 ? null : text.slice(start + 1, end)
+    }
+
+    /** The lines of `body` that sit at ITS top level — i.e. its direct properties. */
+    const directPropertyLines = (body: string): string[] => {
+      const out: string[] = []
+      let depth = 0
+      let lineDepth = 0
+      let lineStart = 0
+      for (let k = 0; k <= body.length; k++) {
+        const c = body[k]
+        if (c === undefined || c === '\n') {
+          if (lineDepth === 0) out.push(body.slice(lineStart, k))
+          lineStart = k + 1
+          lineDepth = depth
+          continue
+        }
+        if (c === '{' || c === '(' || c === '[') depth++
+        else if (c === '}' || c === ')' || c === ']') depth--
+      }
+      return out
+    }
+
+    /**
+     * One entry per object literal carrying `<anchor>` as a direct property: true
+     * when that SAME literal carries `<sibling>` as a direct property too.
+     */
+    const pairedSites = (
+      text: string,
+      anchor: string,
+      anchorValue: string,
+      sibling: string,
+      siblingValue: string,
+    ): boolean[] => {
+      const anchorRe = new RegExp(propLine(anchor, anchorValue).source, 'gm')
+      const out: boolean[] = []
+      for (let m = anchorRe.exec(text); m !== null; m = anchorRe.exec(text)) {
+        const body = enclosingObject(text, m.index)
+        const lines = body === null ? [] : directPropertyLines(body)
+        // Self-check: the anchor must come back as a DIRECT property of the literal
+        // the scan found, or the scan mis-parsed and its answer means nothing.
+        expect(lines.some((l) => propLine(anchor, anchorValue).test(l))).toBe(true)
+        out.push(lines.some((l) => propLine(sibling, siblingValue).test(l)))
+      }
+      return out
+    }
+
+    const camelPairs = (text: string): boolean[] =>
+      pairedSites(text, 'landedProbe', 'tridentLandedProbe', 'hostRunner', 'tridentHostRunner')
+    const snakePairs = (text: string): boolean[] =>
+      pairedSites(text, 'landed_probe', 'tridentLandedProbe', 'host_runner', 'tridentHostRunner')
+
+    // Positive control again: the sites are FOUND, by count, before anything is
+    // asserted about their pairing — an empty scan cannot read as a pass.
+    expect(camelPairs(src).length).toBe(count('landedProbe', 'tridentLandedProbe'))
+    expect(snakePairs(src).length).toBe(count('landed_probe', 'tridentLandedProbe'))
+    expect(camelPairs(src).every((paired) => paired)).toBe(true)
+    expect(snakePairs(src).every((paired) => paired)).toBe(true)
+
+    // THE REVIEWER'S MUTANT, APPLIED TO THE REAL SOURCE: unwire ONE dispatch site
+    // and re-spell the property in a decoy object beside the runner's definition.
+    const lines = src.split('\n')
+    const anchorAt = lines.reduce<number[]>(
+      (acc, l, i) => (propLine('landedProbe', 'tridentLandedProbe').test(l) ? [...acc, i] : acc),
+      [],
+    )
+    expect(anchorAt.length).toBeGreaterThanOrEqual(2)
+    const victim = lines.findIndex(
+      (l, i) => i > anchorAt[1]! && propLine('hostRunner', 'tridentHostRunner').test(l),
+    )
+    expect(victim).toBeGreaterThan(anchorAt[1]!)
+    const decoyAt = lines.findIndex((l) => l.includes('const tridentHostRunner ='))
+    expect(decoyAt).toBeGreaterThan(-1)
+    const mutant = lines
+      .filter((_, i) => i !== victim)
+      .flatMap((l, i) => (i === decoyAt ? [l, 'void {', '  hostRunner: tridentHostRunner,', '}'] : [l]))
+      .join('\n')
+
+    // The count this test used to rest on is STILL EQUAL under that mutant — which
+    // is exactly why counting is no longer the assertion.
+    expect(count('hostRunner', 'tridentHostRunner', mutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe', mutant),
+    )
+    // …and the pairing says what the count cannot: one dispatch site now takes the
+    // landed probe WITHOUT the credentialed runner beside it.
+    expect(camelPairs(mutant).filter((paired) => !paired).length).toBe(1)
+  })
 
   test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {
     delete process.env['ANTHROPIC_API_KEY']

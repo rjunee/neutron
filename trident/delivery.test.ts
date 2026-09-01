@@ -18,6 +18,7 @@ import {
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
 import {
+  innerTerminalFailureReason,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_SNAPSHOT_MARKER,
 } from './orchestrator.ts'
@@ -119,6 +120,10 @@ describe('composeTerminalDelivery', () => {
       runWith({
         phase: 'failed',
         branch: 'trident/add-flag',
+        // The honest row shape for a REAL review exhaustion: the verdict is recorded
+        // and carries findings, which is what makes this a review outcome.
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
         failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE',
       }),
     )
@@ -292,13 +297,174 @@ describe('interpretFailure (#352) — plain-language classification, never a raw
     assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
   })
 
-  test('review-unresolved → plain "blocking findings" + review the branch', () => {
+  test("a never-reviewed max_rounds exhaustion does not echo the state machine's own prose at the operator", () => {
+    // `state-machine.ts` writes `reached max_rounds (N) without Argus APPROVE`
+    // verbatim. For a terminal row that was never reviewed, that string matched
+    // nothing in the classifier and fell through to the generic tail, which echoes a
+    // short reason as-is — so the operator was shown an internal identifier and a
+    // machine sentence about a reviewer that never ran (Argus r1, minor). The
+    // CLASSIFICATION was already right; only the phrasing regressed.
     const interp = interpretFailure(
-      runWith({ phase: 'failed', failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE' }),
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'REVIEW_NOT_RUN',
+        failure_reason: 'reached max_rounds (8) without Argus APPROVE',
+      }),
+    )
+    expect(interp.klass).not.toBe('review-unresolved')
+    expect(interp.summary).not.toContain('max_rounds')
+    expect(interp.summary).not.toContain('Argus')
+    expect(interp.summary.toLowerCase()).toContain('rounds')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('POSITIVE CONTROL: the SAME reason on a genuinely REJECTED row is still told as a review outcome', () => {
+    // The branch above must not swallow the common exhaustion shape. A terminal
+    // REQUEST_CHANGES carries findings by construction (the write site refuses any
+    // other shape), so a reviewer really did speak and the review branch is the true
+    // story — the same reason text, the opposite class.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
+        failure_reason: 'reached max_rounds (8) without Argus APPROVE',
+      }),
     )
     expect(interp.klass).toBe('review-unresolved')
     expect(interp.summary.toLowerCase()).toContain('blocking findings')
     assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('review-unresolved → plain "blocking findings" + review the branch', () => {
+    // The honest post-0138 row shape: a terminal REQUEST_CHANGES ALWAYS carries
+    // findings (the write site refuses the findings-free rejection), and that
+    // recorded verdict — not the reason's wording — is what makes this a review
+    // outcome.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
+        failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE',
+      }),
+    )
+    expect(interp.klass).toBe('review-unresolved')
+    expect(interp.summary.toLowerCase()).toContain('blocking findings')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('a REVIEW_NOT_RUN row is never told as a rejection, whatever its reason says', () => {
+    // THE MEASURED FAILURE. 97 of 160 recorded rejections carried no findings, and the
+    // reader guessed the class off the reason's prose — so a budget death whose text
+    // happens to carry 'exhausted' was narrated as "the reviewer still had blocking
+    // findings" about work no reviewer ever opened. The RECORDED verdict decides now.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'REVIEW_NOT_RUN',
+        failure_reason: 'run budget exhausted after 12 turns',
+      }),
+    )
+    expect(interp.klass).not.toBe('review-unresolved')
+    // Asserted positively too, so a reordering that moves this row into some OTHER
+    // wrong class fails loudly instead of passing on the negative alone.
+    expect(interp.klass).toBe('unknown')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test("a BUILT but never-reviewed row carrying 'request_changes' prose is not a rejection either", () => {
+    // The 33-run shape: `forge-done` reached, nothing judged it. The reason may even
+    // name the verdict string; the row still records no review.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'REVIEW_NOT_RUN',
+        inner_checkpoint: 'forge-done',
+        failure_reason: 'the lane recorded request_changes but no reviewer ever spoke',
+      }),
+    )
+    expect(interp.klass).not.toBe('review-unresolved')
+    expect(interp.klass).toBe('unknown')
+    expect(interp.summary.toLowerCase()).not.toContain('blocking findings')
+  })
+
+  test('a RECORDED rejection stays a review outcome even when the reason prose is reworded', () => {
+    // The other direction: the class must not be lost when the failure sentence drifts
+    // past every string match. This reason matches NO prose branch in the function.
+    const interp = interpretFailure(
+      runWith({
+        phase: 'failed',
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint: 'fix-round-2',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
+        failure_reason: 'the review left blocking notes on the branch',
+      }),
+    )
+    expect(interp.klass).toBe('review-unresolved')
+    expect(interp.summary.toLowerCase()).toContain('blocking findings')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+  })
+
+  test('the ORCHESTRATOR\'S OWN generic sentence does not demote a recorded rejection to unknown', () => {
+    // Argus r5 BLOCKER. The reworded-prose test above passes on wording no writer emits.
+    // The reason a real exhausted rejection carries is the orchestrator's FALL-THROUGH,
+    // and `interpretFailure` matched its 'inner workflow ended at round' branch FIRST —
+    // so the common shape (terminal argus-request-changes, findings present, no terminal
+    // cause) was classified `unknown` and the `reviewed-rejected` arm was dead for it.
+    //
+    // BOUND TO THE WRITER, not to a copy of its words: the sentence is BUILT here by the
+    // very function the orchestrator calls, so a rewording on either side keeps this
+    // honest instead of silently passing.
+    const reason = innerTerminalFailureReason(
+      { max_rounds: 10, round: 10, inner_checkpoint: 'argus-request-changes' },
+      {
+        ok: false,
+        verdict: 'REQUEST_CHANGES',
+        round: 10,
+        checkpoint: 'argus-request-changes',
+        block_kind: 'code',
+        terminal_cause: null,
+        findings_present: true,
+      },
+    )
+    // The precondition the blocker rests on: this IS the generic sentence.
+    expect(reason).toContain('inner workflow ended at round')
+
+    const rejected = runWith({
+      phase: 'failed',
+      round: 10,
+      max_rounds: 10,
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
+      failure_reason: reason,
+    })
+    const interp = interpretFailure(rejected)
+    expect(interp.klass).toBe('review-unresolved')
+    expect(interp.summary.toLowerCase()).toContain('blocking findings')
+    assertNoRawLeak(interp.summary + ' ' + interp.input_needed)
+
+    // NEGATIVE CONTROL, same sentence, same checkpoint, no recorded review: the branch
+    // still owns every never-reviewed row, so the fix narrows the string match by the
+    // verdict rather than deleting the honest `unknown` class.
+    const neverReviewed = interpretFailure(
+      runWith({ ...rejected, inner_verdict: 'REVIEW_NOT_RUN', inner_checkpoint_findings: null }),
+    )
+    expect(neverReviewed.klass).toBe('unknown')
+    expect(neverReviewed.summary.toLowerCase()).not.toContain('blocking findings')
+
+    // And the same sentence on a BUILT-but-unjudged row (the 33-run shape) stays unknown
+    // too — `built-never-reviewed` is not a rejection.
+    const built = interpretFailure(
+      runWith({
+        ...rejected,
+        inner_verdict: 'REVIEW_NOT_RUN',
+        inner_checkpoint: 'forge-done',
+        inner_checkpoint_findings: null,
+      }),
+    )
+    expect(built.klass).toBe('unknown')
   })
 
   test('crash-recovery budget → the SUPERVISOR died, never "the reviewer had findings"', () => {
@@ -487,6 +653,9 @@ describe('infra-only block delivers as infrastructure', () => {
     const run = runWith({
       phase: 'failed',
       harvested_at: 1755300000000,
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
       inner_result: JSON.stringify({
         ok: false,
         verdict: 'REQUEST_CHANGES',
@@ -506,6 +675,9 @@ describe('infra-only block delivers as infrastructure', () => {
     const bare = composeTerminalDelivery(
       runWith({
         phase: 'failed',
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint: 'argus-request-changes',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
         failure_reason: 'inner loop exhausted 8 round(s) without Argus APPROVE',
       }),
     )

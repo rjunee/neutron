@@ -22,19 +22,33 @@
 #   pr <int>                 → pr=<int>                          (numeric)
 #   branch <str>             → branch='<str>'
 #   brief_alert <str>        → brief_alert='<str>'
-#   inner_checkpoint <str>   → inner_checkpoint='<str>'
+#   inner_checkpoint <str>   → inner_checkpoint='<str>', and DERIVES two more
+#                              columns from that NAME: `phase`
+#                              (phase_for_checkpoint, frozen on a terminal row)
+#                              and `round` (round_for_checkpoint, monotonic MAX,
+#                              deliberately NOT frozen)
 #   inner_checkpoint_head <str>
 #                            → inner_checkpoint_head='<str>'
 #   inner_findings_file <path>
-#                            → inner_checkpoint_findings=CAST(readfile('<path>')
-#                                                             AS TEXT)
+#                            → inner_checkpoint_findings=<the file's bytes as a
+#                              SQL literal, or NULL when it is missing>, and
+#                              DEMOTES a stored `REQUEST_CHANGES` to
+#                              `REVIEW_NOT_RUN` when it empties the findings
 #   subagent_status <str>    → subagent_status='<str>'          (LIVENESS: frozen)
-#   inner_verdict <str>      → inner_verdict='<str>'
-#   inner_result_file <path> → inner_result=CAST(readfile('<path>') AS TEXT),
-#                              subagent_status=CASE WHEN
-#                                length(CAST(readfile('<path>') AS TEXT)) > 0
-#                                THEN 'completed' ELSE subagent_status END
+#   inner_verdict <str>      → inner_verdict='<str>', EXCEPT `REQUEST_CHANGES`,
+#                              which is written only when the row is left carrying
+#                              a non-empty JSON array of findings and is otherwise
+#                              REFUSED and recorded as `REVIEW_NOT_RUN` (see "THE
+#                              VERDICT WRITE")
+#   inner_result_file <path> → inner_result=<the file's bytes as a SQL literal, or
+#                              NULL when it is missing>,
+#                              subagent_status=CASE WHEN length(<those same bytes>)
+#                                > 0 THEN 'completed' ELSE subagent_status END
 #                                                               (LIVENESS: frozen)
+#
+# BOTH `*_file` FIELDS ARE READ ONCE, in bash (`read_file_literal`), rather than
+# through `readfile()` in the SQL: `readfile()` is re-evaluated at every mention,
+# and the verdict CASE mentions the findings five times.
 #
 # Every value above is wrapped in `frozen()` when it targets one of the two
 # LIVENESS columns — see the block above the field loop for what that means.
@@ -54,11 +68,11 @@
 #   * same column/value SET pairs (SET order is irrelevant in SQLite — every
 #     RHS sees the OLD row, incl. the `ELSE subagent_status` in the CASE);
 #   * idempotent: re-running the same checkpoint yields the same row state.
-#   * `inner_result_file` keeps the readfile()-CAST-AS-TEXT indirection so the
-#     JSON's own quotes can never break the sqlite argument, and keeps the
-#     COLUMN-CONSISTENCY guard: subagent_status flips to 'completed' ONLY when
-#     the SAME readfile() yields non-empty text (a missing/empty temp file
-#     leaves inner_result NULL and subagent_status untouched).
+#   * `inner_result_file` keeps the file indirection so the JSON's own quotes can
+#     never break the sqlite argument, and keeps the COLUMN-CONSISTENCY guard:
+#     subagent_status flips to 'completed' ONLY when the SAME bytes just stored
+#     are non-empty text (a missing/empty temp file leaves inner_result NULL and
+#     subagent_status untouched).
 #
 # Values are SQL-escaped (' → '') — strictly safer than the raw interpolation
 # it replaces; the values that actually occur (uuids, slugs, enum names,
@@ -82,6 +96,74 @@ sql_quote() {
   local s="$1"
   local q="'"
   printf '%s' "${s//$q/$q$q}"
+}
+
+# READ A FILE ONCE, AS A SQL LITERAL — the replacement for `CAST(readfile(<path>)
+# AS TEXT)` appearing more than once in a single statement (Argus r8 blocker).
+#
+# `readfile()` is a FUNCTION, not a value: SQLite re-evaluates it at every
+# occurrence, and the verdict CASE below mentions the findings expression five
+# times (once for the column, four more inside `json_valid`/the BOM `SUBSTR`/
+# `json_type`/`json_array_length`). A writer that replaced the file between two of those
+# evaluations therefore got a row whose `inner_verdict` was decided from DIFFERENT
+# bytes than the ones stored in `inner_checkpoint_findings` — reproduced by Argus
+# at iteration 132 of a 300-write alternating-file run, which persisted exactly the
+# `REQUEST_CHANGES` + `[]` row this script exists to make unwritable. Materialising
+# the contents HERE makes every mention of the expression the SAME constant, so the
+# check and the write can no longer see different bytes however the file moves.
+#
+# THE readfile() SEMANTICS ARE PRESERVED EXACTLY, because two tests pin them:
+#   * a missing (or unreadable, or non-regular) path yields SQL NULL, not '' —
+#     "a MISSING findings file leaves the column NULL and never fails the build";
+#   * the bytes round-trip verbatim, INCLUDING a trailing newline, which plain
+#     `$(cat)` would strip — hence the `printf X` sentinel.
+# Embedded NUL bytes are the one difference, and they cannot occur: both files
+# hold `JSON.stringify` output, which escapes every control character.
+read_file_literal() {
+  local path="$1" content
+  if [ ! -f "$path" ] || [ ! -r "$path" ]; then
+    printf 'NULL'
+    return 0
+  fi
+  content="$(cat -- "$path" 2>/dev/null; printf X)"
+  content="${content%X}"
+  # THE SENTINEL IS NEEDED TWICE, not once (Argus r1). `$(...)` strips trailing
+  # newlines from its OUTPUT as well as from what it captures, so quoting through
+  # a bare `$(sql_quote "$content")` re-stripped exactly the bytes the `printf X`
+  # above had just preserved: a file holding `abc\n` emitted `'abc'`. Escaping
+  # stays in `sql_quote` — one copy of the ' → '' rule — and the sentinel is
+  # re-applied around it.
+  local quoted
+  quoted="$(sql_quote "$content"; printf X)"
+  quoted="${quoted%X}"
+  printf "'%s'" "$quoted"
+}
+
+# The findings test — `parseCheckpointFindings` (trident/checkpoint-findings.ts)
+# expressed in SQL: well-formed JSON, an ARRAY, at least one element. Emitted as a
+# CASE so this script has ONE copy of the predicate rather than one per write site.
+#
+# THE NESTING IS DELIBERATE, not style: `json_type`/`json_array_length` RAISE on
+# malformed text, so they are reached only under `json_valid`. `json_valid(NULL)`
+# is NULL, which falls to the ELSE. `json_array_length` answers 0 for a non-array,
+# so the inner AND is safe whatever order SQLite evaluates it in.
+#
+# THE BOM CLAUSE MIRRORS THE PARSER'S (Argus r15). `parseCheckpointFindings` pins a
+# leading U+FEFF as "not findings" explicitly rather than leaning on `JSON.parse`
+# throwing; this is the same pin in SQL, so the two dialects answer alike BY
+# CONSTRUCTION. Measured over a value whose stored bytes really do begin EF BB BF,
+# `json_valid` already answers 0 on BOTH engines this project runs (sqlite3 CLI
+# 3.45.1 and bun:sqlite 3.51.2) — so the clause changes no answer today and exists
+# so an engine that started tolerating the mark could not quietly promote it to a
+# rejection here while the parser still read it as empty. The expression is a
+# materialised literal, so mentioning it once more costs nothing and re-evaluates
+# nothing.
+#   $1 — the findings SQL expression (a literal, per read_file_literal above)
+#   $2 — SQL value when the findings are a real, non-empty rejection
+#   $3 — SQL value otherwise
+findings_case() {
+  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
+    "$1" "$1" "$1" "$1" "$2" "$3" "$3"
 }
 
 # A TERMINAL ROW'S LIVENESS COLUMNS ARE FROZEN — and ONLY those two.
@@ -136,19 +218,113 @@ frozen() {
 # (`pr-merged`, and the throw-path `inner-error`/`awaiting-trailer`), for the
 # outer loop's own markers, and for any name this table has never seen — an
 # unrecognised checkpoint must not assert a phase nobody chose.
+#
+# THE ROUND-CARRYING SHAPES ARE MATCHED BY REGEX, NOT BY GLOB, AND THE DIGIT RUN IS
+# UNBOUNDED (Argus r8). The three enumerated globs this replaces —
+# `fix-round-[0-9]`, `[0-9][0-9]`, `[0-9][0-9][0-9]` — stopped at three digits,
+# so `fix-round-1000` left `phase` untouched here while `phaseForCheckpoint`
+# (`/^fix-round-\d+$/`) answered `argus`: a silent divergence at the four-digit
+# boundary in a table whose whole claim is that the two copies are TOTALLY
+# equivalent, not equivalent over the corpus someone happened to write. The bound
+# that DOES belong is `round_for_checkpoint`'s nine digits, and it belongs there
+# alone: that parser does arithmetic (`10#N` wraps at 2^63) and this one does not —
+# it only names a phase. Bash `case` cannot express "one or more digits" without
+# `extglob`, which must be enabled before the `case` is PARSED and so cannot be
+# scoped to a function the equivalence test extracts and runs on its own; `[[ =~ ]]`
+# with the pattern in a variable is the same construct `round_for_checkpoint` uses
+# for the same reason (macOS bash 3.2 treats a quoted `=~` pattern as literal).
 phase_for_checkpoint() {
-  case "$1" in
-    forge-done | argus-approved) printf 'argus' ;;
-    fix-round-[0-9] | fix-round-[0-9][0-9] | fix-round-[0-9][0-9][0-9]) printf 'argus' ;;
-    argus-request-changes) printf 'forge-fix' ;;
-    argus-request-changes-round-[0-9] | argus-request-changes-round-[0-9][0-9] | argus-request-changes-round-[0-9][0-9][0-9]) printf 'forge-fix' ;;
-    ralph-task-built) printf 'ralph-task' ;;
-    *) printf '' ;;
+  local name="$1"
+  case "$name" in
+    forge-done | argus-approved) printf 'argus' ; return ;;
+    argus-request-changes) printf 'forge-fix' ; return ;;
+    ralph-task-built) printf 'ralph-task' ; return ;;
   esac
+  local fix_re='^fix-round-[0-9]+$'
+  local rc_re='^argus-request-changes-round-[0-9]+$'
+  if [[ "$name" =~ $fix_re ]]; then
+    printf 'argus'
+  elif [[ "$name" =~ $rc_re ]]; then
+    printf 'forge-fix'
+  else
+    printf ''
+  fi
+}
+
+# THE CANONICAL CHECKPOINT -> ROUND PARSER, mirrored from
+# `trident/checkpoint-round.ts` (`checkpointRound`) and pinned against it by the
+# equivalence suite in `trident/checkpoint-round.test.ts`, exactly the way
+# `phase_for_checkpoint` above is pinned by `checkpoint-phase.test.ts`.
+#
+# EXACTLY TWO SHAPES CARRY A ROUND - everything else prints empty, meaning "this
+# checkpoint implies NOTHING about the round" and the column is left untouched:
+#   `fix-round-N`                                                      -> N
+#   `outer-published:<40-lowercase-hex>:<remaining>:<round>[:deviated]` -> <round>
+# The round is the LAST numeric field of the published shape (the publisher builds
+# outer-published:<head>:<remaining_tasks>:<round>), never the first.
+# `argus-request-changes-round-N` also names a round and is DELIBERATELY not
+# parsed: the TS copy enumerates those two shapes and forbids guessing, so this
+# one must forbid the same.
+#
+# AT MOST NINE DIGITS, matching the TS copy's identical bound. `$(( 10#N ))` WRAPS
+# at 2^63 - `fix-round-9223372036854775808` evaluated to -9223372036854775808 and
+# that minus sign went straight into `round=MAX(round, -N)`, while the TS copy
+# returned the mathematical value. Clamping the DOMAIN in the pattern is what makes
+# the cross-language equivalence total rather than true only over the test corpus:
+# outside nine digits neither copy matches and the column is left untouched. A real
+# round is bounded by `max_rounds`, so nothing legitimate is excluded.
+#
+# The regexes live in VARIABLES because macOS bash 3.2 treats a quoted `=~`
+# pattern as literal text.
+round_for_checkpoint() {
+  local name="$1"
+  # TRIMMED FIRST, because the TypeScript copy trims (`checkpoint-round.ts`) and
+  # the equivalence claim is TOTAL, not "total over the names a writer happens to
+  # emit today": ' fix-round-3 ' answered 3 there and '' here.
+  #
+  # THE SIX ASCII CHARACTERS ARE SPELLED OUT, not `[[:space:]]` (Argus r4). That
+  # class is LOCALE-DEPENDENT: measured on glibc en_US.UTF-8, it also matches
+  # U+2003 EM SPACE, so this copy answered 3 for a name `checkpoint-round.ts`
+  # (narrowed to `[\t\n\v\f\r ]`) and the canonical disposition SQL (`TRIM(col,
+  # ' '||CHAR(9)||CHAR(10)||CHAR(11)||CHAR(12)||CHAR(13))`) both decline — and the
+  # answer changed with the ambient LANG, which is not a property a durable write
+  # rule may have. Spelled out, all three copies trim the same set on every host.
+  local ws_re=$'^[ \t\n\v\f\r]*(.*[^ \t\n\v\f\r])?[ \t\n\v\f\r]*$'
+  if [[ "$name" =~ $ws_re ]]; then name="${BASH_REMATCH[1]}"; fi
+  local fix_re='^fix-round-([0-9]{1,9})$'
+  local pub_re='^outer-published:[0-9a-f]{40}:[0-9]+:([0-9]{1,9})(:deviated)?$'
+  if [[ "$name" =~ $fix_re ]] || [[ "$name" =~ $pub_re ]]; then
+    # `10#` normalizes leading zeros (base-10, not octal), so `fix-round-007`
+    # answers 7 - the same value Number('007') gives the TypeScript copy.
+    printf '%s' "$(( 10#${BASH_REMATCH[1]} ))"
+  else
+    printf ''
+  fi
 }
 
 sets=()
 derived_phase=''
+derived_round=''
+verdict_value=''
+verdict_given=0
+findings_given=0
+guarded_rejection=0
+demoted_rejection=0
+# A verdict that BRINGS NO FINDINGS was asked for (a bare `REVIEW_NOT_RUN`, or a
+# verdict paired with an emptying findings file); the row may already hold a
+# settled rejection, in which case the write is frozen and has to say so.
+frozen_no_review=0
+# How that frozen write described itself, for the report at the end.
+frozen_label=''
+# The EFFECTIVE findings this write leaves on the row, as a SQL expression. Default
+# is the row's own column: SQLite evaluates every RHS against the OLD row, so this
+# reads what is already recorded when the invocation does not bring findings of its
+# own — exactly the precedence the store's guard uses (`patch ?? row`).
+findings_expr='inner_checkpoint_findings'
+# The "this write would erase a settled rejection" SQL predicate, built below the
+# loop (it needs to know whether a verdict was also given). Empty means the guard
+# does not apply to this invocation at all.
+erasure=''
 stamps_liveness=0
 while [ "$#" -gt 0 ]; do
   field="$1"
@@ -179,7 +355,15 @@ while [ "$#" -gt 0 ]; do
       # not make a stalled build look as though its workflow advanced.
       sets+=("brief_alert='$(sql_quote "$value")'")
       ;;
-    branch | inner_checkpoint | inner_verdict | inner_checkpoint_head)
+    inner_verdict)
+      stamps_liveness=1
+      # DEFERRED to the block below the loop, NOT written here: a REQUEST_CHANGES
+      # verdict is only legal alongside findings, and the findings may be supplied
+      # by a LATER argument in this same invocation. See "THE VERDICT WRITE".
+      verdict_given=1
+      verdict_value="$value"
+      ;;
+    branch | inner_checkpoint | inner_checkpoint_head)
       stamps_liveness=1
       # `inner_checkpoint_head` is the branch head OID the checkpoint APPLIES TO,
       # and the workflow writes it in the SAME invocation as `inner_checkpoint`
@@ -191,26 +375,36 @@ while [ "$#" -gt 0 ]; do
       # below the loop for why this script is the only place that can.
       if [ "$field" = inner_checkpoint ]; then
         derived_phase="$(phase_for_checkpoint "$value")"
+        derived_round="$(round_for_checkpoint "$value")"
       fi
       ;;
     inner_findings_file)
       stamps_liveness=1
-      # The synthesised findings the checkpoint was recorded with, loaded through
-      # the same readfile()-CAST-AS-TEXT indirection `inner_result_file` uses so
-      # the JSON's own quotes can never break the sqlite argument. A missing file
-      # makes readfile() yield NULL → no recorded findings → a resume re-reviews
-      # rather than fixing blind. NOT a liveness column: no freeze, and no
-      # `subagent_status` side effect (a mid-run checkpoint is not a result).
-      sets+=("inner_checkpoint_findings=CAST(readfile('$(sql_quote "$value")') AS TEXT)")
+      # The synthesised findings the checkpoint was recorded with, materialised
+      # ONCE by `read_file_literal` (see there for why re-reading is not an option:
+      # the verdict CASE below mentions this expression five times). A missing file
+      # yields SQL NULL → no recorded findings → a resume re-reviews rather than
+      # fixing blind. NOT a liveness column: no freeze, and no `subagent_status`
+      # side effect (a mid-run checkpoint is not a result).
+      findings_given=1
+      findings_expr="$(read_file_literal "$value")"
+      # The column write itself is DEFERRED to the verdict block below, for the
+      # same reason the verdict write is: what this write may do to a terminal
+      # row's recorded findings depends on whether the invocation also carries a
+      # verdict, and that is not known until the whole argument list is read.
       ;;
     inner_result_file)
       stamps_liveness=1
-      f="$(sql_quote "$value")"
-      sets+=("inner_result=CAST(readfile('$f') AS TEXT)")
+      # Materialised once, for the same reason the findings are: the column and the
+      # status CASE below both read it, and two `readfile()` evaluations of one path
+      # inside one UPDATE can see different bytes — which here would flip
+      # `subagent_status` to 'completed' beside an EMPTY `inner_result`.
+      f="$(read_file_literal "$value")"
+      sets+=("inner_result=$f")
       # Two guards, outermost first: the terminal freeze, then the original
-      # column-consistency CASE (flip to 'completed' ONLY when the SAME readfile()
-      # yields non-empty text).
-      sets+=("subagent_status=CASE WHEN phase IN $terminal_phases THEN subagent_status WHEN length(CAST(readfile('$f') AS TEXT)) > 0 THEN 'completed' ELSE subagent_status END")
+      # column-consistency CASE (flip to 'completed' ONLY when the SAME bytes just
+      # stored are non-empty text).
+      sets+=("subagent_status=CASE WHEN phase IN $terminal_phases THEN subagent_status WHEN length($f) > 0 THEN 'completed' ELSE subagent_status END")
       ;;
     *)
       echo "checkpoint.sh: unknown field '$field'" >&2
@@ -237,6 +431,251 @@ done
 # invented: identical terminal set, identical CASE, one thing to keep true.
 if [ -n "$derived_phase" ]; then
   sets+=("phase=$(frozen phase "'$(sql_quote "$derived_phase")'")")
+fi
+
+# THE ROUND WRITE - monotonic, and NOT frozen on a terminal row.
+#
+# Same rule as the store's TypeScript seam (`trident/store.ts` update() derives it
+# via `checkpointRound` and writes `round = MAX(round, ?)`, never lowering it).
+# That seam was the ONLY one deriving anything: the live inner workflow does not
+# go through `TridentRunStore.update` - it invokes THIS script - so `round` stayed
+# at its launch value for 215 of the 224 runs measured in the 30 days to
+# 2026-08-31 while their own `inner_checkpoint` recorded fix-round-2..7.
+#
+# The regex above proved `$derived_round` is at most nine digits, so `10#` cannot
+# wrap it negative and the bare interpolation is SQL-safe pure digits.
+#
+# DELIBERATELY NOT FROZEN, unlike `phase`: `round` is EVIDENCE - the same class as
+# `branch`/`pr`/`inner_checkpoint`, which this script records on a terminal row on
+# purpose so an orphaned workflow (rjunee/neutron#177) leaves a readable trail. It
+# drives no control flow here, and MAX means it can only ever rise.
+if [ -n "$derived_round" ]; then
+  sets+=("round=MAX(round, $derived_round)")
+fi
+
+# THE VERDICT WRITE — a REJECTION MUST STATE A REASON, enforced HERE because this
+# script is a WRITE SITE, not a caller.
+#
+# The measurement this closes: 97 of 160 recorded `REQUEST_CHANGES` rows in the 30
+# days to 2026-08-31 carried NO findings — the verdict was what got stamped when a
+# run ended any other way. `trident/store.ts` already refuses that shape for
+# in-process writers (`TridentEmptyFindingsRejectionError`), but the LIVE inner
+# workflow does not go through the store: it invokes THIS script, which accepted
+# `inner_verdict REQUEST_CHANGES` as a plain settable and left the findings column
+# NULL. A precondition only one of two write sites honours is not a precondition.
+#
+# REFUSED, NOT FAILED, and the difference is the whole point: the run really did
+# end, and losing the rest of this write (branch, checkpoint, result) to an error
+# exit would trade one bad column for a blind row. So the rejection is refused and
+# THE TRUE STATE IS RECORDED INSTEAD — `REVIEW_NOT_RUN`, the distinct terminal for
+# "no reviewer spoke about this code". Never APPROVE: that would merge unreviewed
+# work, which is far worse than the waste being fixed.
+#
+# The test is `parseCheckpointFindings` (trident/checkpoint-findings.ts) expressed
+# in SQL by `findings_case` above — well-formed JSON, an ARRAY, at least one
+# element — evaluated inside the SAME atomic UPDATE, so no other writer can slip
+# between the check and the write. The findings expression is a MATERIALISED
+# LITERAL (`read_file_literal`), so the four places it appears are provably the
+# same bytes; a bare `readfile()` was re-evaluated per mention and let a
+# concurrently-swapped file persist the exact `REQUEST_CHANGES` + `[]` row this
+# block exists to make unwritable (Argus r8 blocker, reproduced).
+# THE FIELD WAS GIVEN, not merely non-empty: an EMPTY `inner_verdict ''` is a
+# CLEARING write, exactly as it is for `inner_checkpoint_head`, and deferring the
+# write must not quietly turn it into a no-op the way an `-n` test on the value did.
+#
+# A CLEARING WRITE IS SQL NULL, NOT THE EMPTY STRING (Argus r4). The production
+# schema constrains the column — `CHECK (inner_verdict IS NULL OR inner_verdict IN
+# ('APPROVE','REQUEST_CHANGES','REVIEW_NOT_RUN'))`, migrations/expected-schema.txt —
+# so `inner_verdict=''` is not a value the column can hold: SQLite aborts the WHOLE
+# atomic UPDATE with "CHECK constraint failed", and branch/checkpoint/round/result
+# go down with it. That is precisely the blind row this script refuses to trade one
+# bad column for, so "cleared" is expressed the only way the schema accepts it.
+#
+# AND `json_valid` CARRIES A NESTING BOUND THE TS SIDE HAD TO BE TOLD ABOUT:
+# SQLite enforces JSON_MAX_DEPTH (1000 at the default compile) — depth 1000 is
+# valid and depth 1001 measures `json_valid(...) = 0` on 3.45.1, while JSON.parse
+# has no such limit. `parseCheckpointFindings` (trident/checkpoint-findings.ts)
+# now enforces the SAME bound explicitly, so this writer, the store's write-site
+# guard and the canonical counting SQL agree at the boundary instead of splitting
+# one row three ways — pinned by the corpus in as-built-disposition-sql.test.ts
+# and by the deep-nesting entry in the checkpoint-sh empties.
+#
+# AND THE PRECONDITION IS ON THE ROW, NOT ON THE INVOCATION (Argus r8 blocker).
+# Guarding only the invocations that CARRY a verdict left a second way to the same
+# forbidden row: record a real rejection, then write findings ALONE that empty the
+# set, and `REQUEST_CHANGES` sits beside `[]` — the state the whole card exists to
+# make unreachable, reached in two legal steps. `TridentRunStore.update` already
+# refuses that shape (it re-reads the row and tests the EFFECTIVE verdict against
+# the EFFECTIVE findings), so leaving it writable here is exactly the "precondition
+# only one of two write sites honours" this block was added to end. A findings-only
+# write therefore DEMOTES a stored `REQUEST_CHANGES` the same way a verdict write is
+# refused — same test, same `REVIEW_NOT_RUN`, same never-APPROVE. The demotion is
+# conditioned on the OLD `inner_verdict` inside the same atomic UPDATE, so it can
+# only ever touch a row that is currently claiming a rejection: an `APPROVE` row and
+# a null-verdict row are left exactly alone.
+#
+# AND A SETTLED REJECTION IS NOT ERASED BY AN ORPHAN (Argus r1). The demotion above
+# is right for a LIVE row and wrong for a terminal one, because of who writes on
+# each. `artifactCheckpointCommand` (trident/inner-workflow.mjs) opens EVERY phase
+# checkpoint with `printf '%s' '[]' > <findings tmp>` and passes it as
+# `inner_findings_file` with no verdict — a findings-only write that empties the
+# set. Cancelling a build does not kill the workflow building it
+# (rjunee/neutron#177), so one of those lands on a row that has already recorded a
+# REAL, findings-carrying REQUEST_CHANGES: the demotion then rewrites a genuine
+# rejection to `REVIEW_NOT_RUN` and drops the reviewer's own words, and the
+# resulting no-review row is what `terminalRunDisposition` reads as
+# built-never-reviewed and re-dispatches. The reviewer decided; an orphan may not
+# undecide it.
+#
+# So on a TERMINAL row, an EMPTYING findings-only write is refused ON BOTH COLUMNS
+# TOGETHER — the findings stay, and so does the verdict they justify. Both are
+# guarded by ONE expression evaluated inside the same atomic UPDATE, so the pair
+# can never disagree; this is the same reasoning as the `phase` freeze rather than
+# the liveness one, since `inner_verdict` is what the disposition reads to decide
+# whether the work is replayed. It is deliberately NARROW:
+#   * a LIVE row demotes exactly as before (the live shape a `fix-round-N`
+#     checkpoint has, and the case the existing tests pin);
+#   * findings that are REALLY there still land on a terminal row — only ERASURE is
+#     refused, so an orphan may still add evidence, never delete it;
+#   * an invocation carrying a verdict OTHER than `REQUEST_CHANGES` is a caller
+#     deciding something new, and is left on the rules above.
+#
+# A VERDICT-CARRYING ORPHAN IS STILL AN ORPHAN (Argus r16). The guard first armed
+# only when NO verdict was given, so `inner_verdict REQUEST_CHANGES` + `[]` — the
+# same emptying write with a verdict stapled on — walked straight past it and
+# demoted a settled terminal rejection to `REVIEW_NOT_RUN` with its findings
+# erased, which is the exact row `terminalRunDisposition` re-reads as
+# built-never-reviewed, i.e. as work to re-dispatch. That write asks for the ONE
+# verdict this script refuses to write findings-free, so it can never be a caller
+# deciding anything: it is either the orphan again or a caller re-asserting what
+# the row already says. Either way the settled row is left alone. `APPROVE` and a
+# clearing write are untouched — a real decision still lands.
+#
+# AND THE EVIDENCE IS PROTECTED WHATEVER THE ROW CLAIMS. A terminal row whose
+# stored findings PARSE non-empty keeps them even when its verdict is
+# `REVIEW_NOT_RUN` or `APPROVE`: `orchestrator.ts` (`recordedTerminalVerdict`)
+# promises exactly that — "the findings themselves are still PRESERVED on the
+# row" — and `builtButNeverReviewedSeed` carries the stored findings forward into
+# the seeded run, so an orphan's `[]` did not just blank a display column, it
+# handed the next round a review with nothing in it (Argus r16). Adding evidence
+# is still allowed; only ERASURE is refused.
+#
+# AND THE GUARD ARMS ON THE ROW'S CLAIM, NOT ON ITS EVIDENCE (Argus r15). It first
+# also required the STORED findings to parse non-empty, which left the whole legacy
+# population — the 70 `REQUEST_CHANGES` + `[]` and 27 `REQUEST_CHANGES` + NULL rows
+# this card measured — outside it: an orphan `[]` write demoted a settled terminal
+# rejection to `REVIEW_NOT_RUN`, and `terminalRunDisposition` then re-read that row
+# as built-never-reviewed, i.e. as work to re-dispatch. Those rows are the
+# measurement's evidence base and the card forbids rewriting them, so a TERMINAL row
+# CLAIMING `REQUEST_CHANGES` is left exactly as history wrote it whatever it holds:
+# an emptying orphan write changes neither column. Nothing here creates the
+# forbidden shape — a row can only reach terminal-REQUEST_CHANGES-with-no-findings
+# through history or raw SQL, because both write sites refuse to write it — this
+# only declines to REWRITE one, and it stays countable as legacy by the canonical
+# SQL either way.
+# WHAT "SETTLED" MEANS, read from the OLD row inside the same atomic UPDATE: a
+# TERMINAL row that either CLAIMS a rejection or HOLDS findings that really parse.
+# Both erasure guards below are this predicate plus "…and what this write brings is
+# not findings".
+settled_rejection="phase IN $terminal_phases AND (inner_verdict = 'REQUEST_CHANGES' OR $(findings_case inner_checkpoint_findings 1 0) = 1)"
+# "…and what this write BRINGS is not findings" — the second half of every guard
+# below. An invocation with no findings file of its own brings nothing by
+# definition; one with a file brings nothing when that file does not parse as a
+# non-empty array. Same expression for both erasure guards, so the findings column
+# and the verdict column can never disagree about whether this write had evidence.
+brings_no_findings='1 = 1'
+# AND THE VERDICT IT CARRIES DOES NOT EXEMPT IT (Argus r20, two independent
+# repros). The arming used to require the verdict be ABSENT or `REQUEST_CHANGES`,
+# so `inner_verdict APPROVE` + `[]` and `inner_verdict REVIEW_NOT_RUN` + `[]` —
+# the same emptying write with any other verdict stapled on — walked past it and
+# blanked a settled rejection's findings, contradicting the invariant stated right
+# above ("only ERASURE is refused"). The findings column is now guarded for EVERY
+# shape that brings no findings; which verdicts additionally freeze is decided
+# per-verdict below.
+if [ "$findings_given" = 1 ]; then
+  brings_no_findings="$(findings_case "$findings_expr" 1 0) = 0"
+  # "This write would ERASE a settled review": the row is terminal, it is either
+  # claiming REQUEST_CHANGES or holding findings that really parse, and what this
+  # write brings is not findings. Both halves of the OR are read from the OLD row
+  # inside the same atomic UPDATE, so the pair cannot disagree with each other or
+  # with the columns they guard.
+  erasure="$settled_rejection AND $brings_no_findings"
+fi
+
+if [ "$findings_given" = 1 ]; then
+  if [ -n "$erasure" ]; then
+    sets+=("inner_checkpoint_findings=CASE WHEN $erasure THEN inner_checkpoint_findings ELSE $findings_expr END")
+  else
+    sets+=("inner_checkpoint_findings=$findings_expr")
+  fi
+fi
+
+if [ "$verdict_given" = 1 ]; then
+  if [ "$verdict_value" = 'REQUEST_CHANGES' ]; then
+    guarded_verdict="$(findings_case "$findings_expr" "'REQUEST_CHANGES'" "'REVIEW_NOT_RUN'")"
+    # …unless this write would erase a settled review, in which case the row keeps
+    # both columns exactly as it recorded them (see the erasure block above).
+    if [ -n "$erasure" ]; then
+      guarded_verdict="CASE WHEN $erasure THEN inner_verdict ELSE $guarded_verdict END"
+    fi
+    sets+=("inner_verdict=$guarded_verdict")
+    guarded_rejection=1
+  elif [ -z "$verdict_value" ]; then
+    sets+=('inner_verdict=NULL')
+  elif [ "$verdict_value" = 'REVIEW_NOT_RUN' ]; then
+    # AND THE ERASURE GUARD COVERS THE VERDICT-ONLY WRITE TOO (Argus r18). The block
+    # above arms `$erasure` only when a findings file accompanies the write, so a BARE
+    # `inner_verdict REVIEW_NOT_RUN` slipped past it and overwrote a settled terminal
+    # rejection — and that is not a hypothetical shape: `writeTerminalResult`
+    # (inner-workflow.mjs) emits exactly it for every non-code terminal, so a late
+    # duplicate terminal write on an already-settled row demoted a real review to
+    # "no review happened". `terminalRunDisposition` then re-reads that row as
+    # built-never-reviewed, i.e. as work to re-dispatch — the precise waste this card
+    # exists to remove, arrived at from the other direction.
+    #
+    # Scoped exactly like its twin: only with NO findings to bring, and only against
+    # a TERMINAL row that is already settled. A non-terminal row, a clearing write
+    # and a `REVIEW_NOT_RUN` that carries REAL findings all land unchanged, and the
+    # FIRST honest `REVIEW_NOT_RUN` — the one on a row that never claimed a
+    # rejection — is exactly what still gets written.
+    #
+    # AND A FINDINGS FILE STAPLED ON DOES NOT EXEMPT IT EITHER (Argus r20). The
+    # arming above also required `findings_given = 0`, so `REVIEW_NOT_RUN` + `[]`
+    # fell through to the unguarded write below and demoted the same settled row —
+    # the identical erasure, one argument longer. The freeze now asks the same
+    # question the findings column asks: does this write BRING findings? A
+    # `REVIEW_NOT_RUN` carrying REAL findings is adding evidence and still lands,
+    # verdict and findings both.
+    sets+=("inner_verdict=CASE WHEN $settled_rejection AND $brings_no_findings THEN inner_verdict ELSE 'REVIEW_NOT_RUN' END")
+    frozen_no_review=1
+    if [ "$findings_given" = 1 ]; then
+      frozen_label='a REVIEW_NOT_RUN with an emptying findings file'
+    else
+      frozen_label='a bare REVIEW_NOT_RUN'
+    fi
+  elif [ -n "$erasure" ]; then
+    # EVERY OTHER VERDICT, WHEN THE WRITE BRINGS NO FINDINGS (Argus r20). In
+    # practice this is `APPROVE` + `[]`, which a reviewer reproduced turning a
+    # settled `REQUEST_CHANGES` into an APPROVE with its findings blanked. No
+    # production path emits it: `writeTerminalResult` attaches a findings file
+    # ONLY on its REQUEST_CHANGES branch, and `artifactCheckpointCommand` never
+    # sends a verdict at all — so a verdict arriving WITH an emptying findings file
+    # is an orphan or a re-assertion, never a review deciding something new. A real
+    # APPROVE carries no findings file and lands exactly as before (the branch
+    # below), which is why freezing here relaxes nothing and un-decides nothing.
+    sets+=("inner_verdict=CASE WHEN $erasure THEN inner_verdict ELSE '$(sql_quote "$verdict_value")' END")
+    frozen_no_review=1
+    frozen_label="the verdict '$verdict_value' with an emptying findings file"
+  else
+    sets+=("inner_verdict='$(sql_quote "$verdict_value")'")
+  fi
+elif [ "$findings_given" = 1 ]; then
+  demotion="CASE WHEN inner_verdict = 'REQUEST_CHANGES' THEN $(findings_case "$findings_expr" "'REQUEST_CHANGES'" "'REVIEW_NOT_RUN'") ELSE inner_verdict END"
+  if [ -n "$erasure" ]; then
+    demotion="CASE WHEN $erasure THEN inner_verdict ELSE $demotion END"
+  fi
+  sets+=("inner_verdict=$demotion")
+  demoted_rejection=1
 fi
 
 # Both legacy progress UPDATEs unconditionally re-stamped last_advanced_at. It is
@@ -269,6 +708,16 @@ set_clause="${set_clause%, }"
 
 quoted_run="$(sql_quote "$run")"
 
+# The verdict this row carried BEFORE the write, read only when a findings-only
+# demotion is armed, and used only to decide whether the demotion diagnostic below
+# is true. Diagnostics only — like the phase re-read further down, it is a separate
+# statement and a concurrent writer can make it stale; the UPDATE's own CASE reads
+# the OLD row inside the atomic statement and is the authority on what happens.
+prior_verdict=''
+if [ "$demoted_rejection" -eq 1 ]; then
+  prior_verdict="$(sqlite3 -init /dev/null -list "$db" "PRAGMA busy_timeout=5000; SELECT COALESCE(inner_verdict, '') FROM code_trident_runs WHERE id='$quoted_run'" 2>/dev/null | tail -1 || true)"
+fi
+
 # A frozen write is not an error, but a missing row IS: callers must be able to
 # distinguish "recorded" from "zero rows changed" even when diagnostics are
 # intentionally suppressed. `changes()` cannot distinguish a freeze from a match
@@ -297,13 +746,58 @@ quoted_run="$(sql_quote "$run")"
 # `-init <file>`, but a `HOME` override does not make the CLI pick one up — so the
 # failure is unreachable there and untestable without writing to a real home dir
 # (see the note in trident/checkpoint-sh.test.ts). Other builds do read it.
-outcome="$(sqlite3 -init /dev/null -list -separator '|' "$db" "PRAGMA busy_timeout=5000; UPDATE code_trident_runs SET $set_clause WHERE id='$quoted_run'; SELECT changes(), COALESCE((SELECT CASE WHEN phase IN $terminal_phases THEN 'terminal' ELSE 'active' END FROM code_trident_runs WHERE id='$quoted_run'), 'gone')" | tail -1)"
+#
+# THE SQL TRAVELS ON STDIN, NOT IN argv (Argus r1 blocker). `read_file_literal`
+# materialises the findings/result bytes INTO this statement, and the verdict CASE
+# mentions the findings five times — so a 33 KB findings file became a 132 KB single
+# argv element. Linux caps ONE argument at MAX_ARG_STRLEN (128 KiB), independent of
+# the far larger total `ARG_MAX`, and `execve` answers E2BIG: `/usr/bin/sqlite3:
+# Argument list too long`, exit 126, the WHOLE terminal write lost under `set -e` —
+# recreating the blind "built, never reviewed" row this script exists to prevent, on
+# exactly the runs whose reviews found the most to say. Reproduced by two reviewers,
+# threshold bisected at ~32 KB of findings; the live corpus already holds 13,995-byte
+# rows. A pipe has no such limit (SQLITE_MAX_SQL_LENGTH is 1e9 by default), and
+# nothing else changes: the PRAGMA still runs on the SAME connection as the UPDATE,
+# and `printf` is a bash BUILTIN, so the bytes never cross an `execve` boundary at
+# all.
+#
+# `-bail` preserves the argv form's stop-at-first-error semantics: reading a script
+# from stdin, sqlite3 otherwise CONTINUES past a failed statement (it would run the
+# trailing SELECT after an aborted UPDATE and print a plausible outcome line). With
+# `-bail` the process stops and exits non-zero, and `pipefail` + `set -e` fail the
+# script exactly as they did before.
+update_sql="PRAGMA busy_timeout=5000;
+UPDATE code_trident_runs SET $set_clause WHERE id='$quoted_run';
+SELECT changes(), COALESCE((SELECT CASE WHEN phase IN $terminal_phases THEN 'terminal' ELSE 'active' END FROM code_trident_runs WHERE id='$quoted_run'), 'gone');"
+outcome="$(printf '%s\n' "$update_sql" | sqlite3 -init /dev/null -bail -list -separator '|' "$db" | tail -1)"
 case "$outcome" in
   0'|'*)
     echo "checkpoint.sh: run '$run' not found — checkpoint NOT applied" >&2
     exit 3
     ;;
   *'|terminal')
-    echo "checkpoint.sh: run '$run' is already terminal — liveness (subagent_status, last_advanced_at) FROZEN; branch/pr/checkpoint/result still recorded" >&2
+    echo "checkpoint.sh: run '$run' is already terminal — liveness (subagent_status, last_advanced_at) FROZEN; branch/pr/checkpoint/round/result still recorded" >&2
     ;;
 esac
+
+# A REFUSED rejection must not be silent — it is the one case where the column does
+# not hold what the caller asked for. Read back rather than re-deriving: the CASE
+# above is the authority and this only reports what it decided. A separate
+# statement on purpose (the UPDATE has already landed atomically), best-effort, and
+# it can never fail the write it is describing.
+if [ "$guarded_rejection" -eq 1 ] || [ "$demoted_rejection" -eq 1 ] || [ "$frozen_no_review" -eq 1 ]; then
+  recorded_verdict="$(sqlite3 -init /dev/null -list "$db" "PRAGMA busy_timeout=5000; SELECT COALESCE(inner_verdict, '') FROM code_trident_runs WHERE id='$quoted_run'" 2>/dev/null | tail -1 || true)"
+  if [ "$guarded_rejection" -eq 1 ] && [ "$recorded_verdict" != 'REQUEST_CHANGES' ]; then
+    echo "checkpoint.sh: REFUSED a findings-free REQUEST_CHANGES for run '$run' — a rejection must carry at least one finding; recorded '$recorded_verdict' instead" >&2
+  elif [ "$guarded_rejection" -eq 0 ] && [ "$prior_verdict" = 'REQUEST_CHANGES' ] && [ "$recorded_verdict" != 'REQUEST_CHANGES' ]; then
+    # The findings-only half. Reported only when the demotion REALLY fired — the
+    # row was claiming a rejection before this write and is not any more. A row
+    # that was never REQUEST_CHANGES, and one whose new findings are real, are both
+    # silent, because nothing was refused on them.
+    echo "checkpoint.sh: DEMOTED a REQUEST_CHANGES whose findings this write emptied for run '$run' — a rejection must carry at least one finding; recorded '$recorded_verdict' instead" >&2
+  elif [ "$frozen_no_review" -eq 1 ] && [ "$recorded_verdict" != "$verdict_value" ]; then
+    # The verdict half. Same rule as its two siblings: reported only when the
+    # freeze REALLY fired, i.e. the column does not hold what the caller asked for.
+    echo "checkpoint.sh: FROZE $frozen_label for run '$run' — the row already records a settled review and a write bringing no findings may not erase it; kept '$recorded_verdict'" >&2
+  fi
+fi

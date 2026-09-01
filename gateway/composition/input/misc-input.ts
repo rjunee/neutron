@@ -406,6 +406,15 @@ export interface MiscCompositionInput {
      * to rebuild work that is already on main.
      */
     landed_probe?: import('@neutronai/trident/board-dispatch.ts').DispatchLandedProbe
+    /**
+     * The CREDENTIALED host runner — the same object `landed_probe` closes over,
+     * handed to the dispatch chokepoint as `BoardBoundBuildDeps.hostRunner`. The
+     * built-never-reviewed seed probes the build branch's tip with
+     * `git ls-remote origin`, which exits non-zero over a bare process env
+     * against a PRIVATE origin and collapses to `''` — no seed, so a commit that
+     * was already built is rebuilt from scratch (Argus r16).
+     */
+    host_runner?: import('@neutronai/trident/git-mode.ts').EnvCapableHostRunner
     resolveRalph?: () => Promise<boolean>
     channel_kind?: import('@neutronai/channels/types.ts').Topic['channel_kind']
     max_rounds?: number
