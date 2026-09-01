@@ -5,6 +5,39 @@ pieces live. Keep this short; deep detail belongs in `docs/AS_BUILT.md` (and the
 archived history in `docs/research/AS-BUILT-archive-2026-07.md`) and the
 per-module headers.
 
+## The spine — how to reach the rest of this file
+
+Added 2026-08-31. This file is ~8,900 lines. Reading it end to end costs more than the orientation
+it buys — that is a fact about the document, not a complaint about it. Until it is split, navigate
+by the seven strata below: they name **where each kind of truth lives**, so a question resolves to
+a layer first and to a `## ` heading second (`grep '^## ' docs/SYSTEM-OVERVIEW.md` lists them).
+
+The rule that makes this a tower rather than a diagram: a layer may depend only downward, and no
+layer may emit a fact of higher grade than the lowest-grade fact it consumed
+(`docs/INVARIANTS.md` #121).
+
+| | Layer | Owns | Where it is today |
+|---|---|---|---|
+| L0 | **Substrate** | git, SQLite, GitHub, the filesystem, the process table | deliberately has no section of its own — nothing above should read it except through L1 |
+| L1 | **Producers** | one named probe per substrate, emitting a *graded* observation (`activity` / `nothing` / `unknown`) | `trident/run-evidence-probes.ts`, `watchdog/detectors.ts` — see "Supervisor watchdog" |
+| L2 | **Ledger** | the durable fact, and the producer that observed it | `code_trident_runs` (`trident/store.ts`), the subagent registry (`runtime/subagent/`), the Work Board store — see "Foundational Trident", "Work Board", "Agent-dispatch reliability" |
+| L3 | **Derivations** | pure judgements computed over L2 — no I/O, and never a stored column | `trident/run-evidence.ts`; the Work Board's derived inline-activity — see "Work Board", "Activity Inspector" |
+| L4 | **Actions & commissions** | every state change, and every delegation to another agent | the MCP tool surfaces — see "Native-MCP tool transport"; delegation — see "Agent dispatch family" |
+| L5 | **Guards** | executable predicates, and their delivery at the moment of the mistake | `scripts/ci/`, and the persistent adapter's `PreToolUse` hooks — see "Testing & CI" |
+| L6 | **Orientation** | one bounded, graded answer to "what is happening right now" | **does not exist.** Assembling it today means reading ~10 substrates by hand; do not look for it below |
+
+Two things to read *before* trusting anything below:
+
+- **`GLOSSARY.md` → "Names whose plain reading is false".** Several names used throughout this
+  file mean something narrower than they say — `last_advanced_at`, `finished`, `connected`,
+  `mergeable`, `REVIEW_NOT_RUN`, `capability_gate`, `isolation: 'worktree'`.
+- **`docs/INVARIANTS.md` §12 (the honesty contract) and §13 (the action contract).** These are the
+  rules L1–L4 are being moved toward. Most are not enforced yet and each line says so on its own
+  `Protects:` line, so the contract is never mistaken for the present behaviour.
+
+Deep build history belongs in `docs/AS_BUILT.md`, which no branch may edit — stage one entry under
+`.trident/as-built/` instead (see `CONTRIBUTING.md`).
+
 ## Boot path
 
 The shared shell is `gateway/index.ts:boot()`: it opens the per-instance
