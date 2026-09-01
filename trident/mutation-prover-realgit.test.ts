@@ -1,10 +1,15 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
-import { resolveMergeHeadSha, runMutationProofGate } from './mutation-prover.ts'
+import {
+  changedFilesOnBranch,
+  proofWorktreePath,
+  resolveMergeHeadSha,
+  runMutationProofGate,
+} from './mutation-prover.ts'
 
 /**
  * THE FETCH CONTRACT AND THE HOSTILE NAME, against REAL git.
@@ -87,6 +92,109 @@ async function seedWorld(label: string): Promise<World> {
   return { root, origin, consumer, stale, current }
 }
 
+/**
+ * A repo whose branch changes ONLY files under `tests/`: a support library, the
+ * separate test that asserts its behaviour, and an unrelated control test.
+ *
+ * With `alias`, it ALSO commits `tests/alias.test.ts` as a SYMLINK to the
+ * library — a test-shaped name that is the library, byte for byte.
+ */
+async function seedSupportLib(opts: { alias?: boolean } = {}): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-support-lib-'))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
+
+  await git(repo, 'switch', '-q', '-c', 'trident/support-lib-proof')
+  mkdirSync(join(repo, 'tests', 'support'), { recursive: true })
+  writeFileSync(join(repo, 'tests', 'support', 'clamp.ts'), 'export function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n')
+  writeFileSync(
+    join(repo, 'tests', 'support', 'clamp.test.ts'),
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from './clamp.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n  expect(clamp(2, 3)).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'tests', 'other-control.test.ts'),
+    "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated library', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  if (opts.alias === true) symlinkSync('support/clamp.ts', join(repo, 'tests', 'alias.test.ts'))
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the support library and its separate test')
+  return repo
+}
+
+/**
+ * A repo whose branch adds a LIBRARY whose NAME a runner collects but no
+ * convention declares a test — `src/thing_test.ts` — plus the separate test
+ * that asserts it and an unrelated control. This is the shape a bare substring
+ * FILTER exploits: the library is a legal mutation target, and `bun test
+ * thing_test.ts` names no file at all, so bun runs everything whose path
+ * contains that string — the mutated library included.
+ */
+async function seedCollectibleLib(opts: { decoys?: boolean } = {}): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-collectible-'))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
+
+  await git(repo, 'switch', '-q', '-c', 'trident/collectible-lib-proof')
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  mkdirSync(join(repo, 'tests'), { recursive: true })
+  writeFileSync(
+    join(repo, 'src', 'thing_test.ts'),
+    'export const CEILING = 3\nexport function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n',
+  )
+  writeFileSync(
+    join(repo, 'tests', 'thing.test.ts'),
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/thing_test.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n  expect(clamp(2, 3)).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'tests', 'other-control.test.ts'),
+    "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated library', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  if (opts.decoys === true) {
+    // THE TWO SPELLINGS THAT RESOLVE. A root `thing_test.ts` makes `bun test
+    // thing_test.ts` name a real file — and bun STILL reads the positional as a
+    // substring filter and runs `src/thing_test.ts` too. A committed
+    // `out/report.test.ts` makes `--reporter-outfile out/report.test.ts`
+    // resolve — and it is still a file bun writes during a whole-suite run.
+    writeFileSync(
+      join(repo, 'thing_test.ts'),
+      "import { expect, test } from 'bun:test'\n\ntest('the decoy asserts nothing about the library', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+    )
+    mkdirSync(join(repo, 'out'), { recursive: true })
+    writeFileSync(join(repo, 'out', 'report.test.ts'), 'placeholder\n')
+  }
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the collectible library and its separate test')
+  return repo
+}
+
+/** A repo whose branch carries `seed(repo)`'s changes on top of main — for the
+ *  tests that are about what `changedFilesOnBranch` READS out of real git,
+ *  rather than about running a proof. */
+async function seedDiffRepo(label: string, seed: (repo: string) => Promise<void>): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), `mutation-prover-realgit-${label}-`))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  writeFileSync(join(repo, 'src', 'limit.ts'), 'export const LIMIT = 3\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
+  await git(repo, 'switch', '-q', '-c', BRANCH)
+  await seed(repo)
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the branch')
+  return repo
+}
+
 describe('the mutation-proof gate against real git', () => {
   test('the short form leaves the tracking ref STALE; the resolver returns the true origin tip anyway', async () => {
     const w = await seedWorld('stale-ref')
@@ -150,6 +258,512 @@ describe('the mutation-proof gate against real git', () => {
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('check-ref-format')
   })
+
+  test('a support LIBRARY under tests/ proves red-then-green against REAL git and bun', async () => {
+    // THE #489 CLASS, end to end. `tests/support/clamp.ts` declares no test
+    // cases: it is a library whose behaviour is asserted by the SEPARATE
+    // `tests/support/clamp.test.ts`. Mutating it and watching that separate test
+    // go red — while an unrelated control stays green — is a genuine proof, not
+    // the tautology the old path rule banned. Note the guard argv element
+    // `tests/support/clamp.test.ts` differs from claim.file
+    // `tests/support/clamp.ts`, so the tautology check correctly permits it.
+    const lib = await seedSupportLib()
+    const out = await runMutationProofGate({
+      run: { id: 'run-lib', slug: 'support-lib', repo_path: lib, branch: 'trident/support-lib-proof' },
+      claim: {
+        file: 'tests/support/clamp.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/support/clamp.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(true)
+    expect(out.exempt).toBe(false)
+    expect(out.evidence?.proved).toBe(true)
+
+    // Positive control against a silently-empty extraction: there really are
+    // observations, and they are asserted NON-optionally.
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+    // 120s, not 30s: this test spawns THREE real `bun test` processes plus a
+    // `git worktree add`, and CI runs eight shards' worth of files four-abreast
+    // on a shared runner. A 30s cap was a timing bet on the machine, and the
+    // budget the prover itself works to is 15 MINUTES — a cap tighter than the
+    // thing under test only ever buys a red that means "the box was busy".
+  }, 120_000)
+
+  test('the mutated file under an ABSOLUTE or ..-and-back name is still its own guard, and is refused', async () => {
+    // THE BYPASS, against real git and the real path the proof worktree lands
+    // at. The guard below runs `tests/support/clamp.ts` — the MUTATED file —
+    // as its own test, spelled so no comparison against a repo-relative
+    // `claim.file` can ever match it. Before this rule the gate ran it, watched
+    // the file it had just broken fail to parse its own assertions, and
+    // recorded `proved: true` off a test that never asserted the behaviour.
+    const lib = await seedSupportLib()
+    const run = { id: 'run-abs', slug: 'support-lib', repo_path: lib, branch: 'trident/support-lib-proof' }
+    const worktree = proofWorktreePath(lib, run)
+    const spellings = [
+      `${worktree}/tests/support/clamp.ts`,
+      `../${worktree.split('/').pop() as string}/tests/support/clamp.ts`,
+    ]
+    for (const spelling of spellings) {
+      const out = await runMutationProofGate({
+        run,
+        claim: {
+          file: 'tests/support/clamp.ts',
+          find: 'n > max ? max : n',
+          replace: 'n',
+          guard: ['bun', 'test', spelling],
+          control: ['bun', 'test', 'tests/other-control.test.ts'],
+        },
+        base_branch: 'main',
+        run_host: spawnCapture,
+      })
+      expect([spelling, out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([spelling, false, false, false])
+      expect(out.reason).toContain('must be a repo-relative path inside the worktree')
+      // Nothing was executed, so nothing was left behind either.
+      expect(existsSync(worktree)).toBe(false)
+    }
+  }, 60_000)
+
+  test('an option that CARRIES the mutated file runs it as its own guard, and is refused', async () => {
+    // THE REPRO A REVIEWER PERSISTED. `--preload=./tests/support/clamp.ts` is
+    // ONE argv element, so the whole-element comparison matched nothing; it is
+    // repo-relative, so the escapes-the-worktree rule matched nothing either —
+    // and bun LOADS the mutated file into the very process that runs the guard.
+    // Red under the mutation, green restored, "proved", with the separate test
+    // never asserting the behaviour at all.
+    const lib = await seedSupportLib()
+    const run = { id: 'run-preload', slug: 'support-lib', repo_path: lib, branch: 'trident/support-lib-proof' }
+    const worktree = proofWorktreePath(lib, run)
+    const out = await runMutationProofGate({
+      run,
+      claim: {
+        file: 'tests/support/clamp.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', '--preload=./tests/support/clamp.ts', 'tests/other-control.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(out.reason).toContain('tautology')
+    // Refused BEFORE anything ran, so no proof worktree was ever created.
+    expect(existsSync(worktree)).toBe(false)
+  }, 60_000)
+
+  test('a `file://` URL is the third spelling of an absolute path, and is refused', async () => {
+    // THE REVIEWER'S REPRO. `file://` starts with no `/`, carries no `=/` and
+    // has no `..` segment, so every lexical arm of the escape rule passed it —
+    // and `carriedValue` normalizes `file:///a/tests/support/clamp.ts` to
+    // `file:/a/tests/support/clamp.ts`, which equals no repo-relative target.
+    // Bun preloaded the MUTATED file into the guard process, where it threw and
+    // became its own RED against an assertion-free "separate" test.
+    const lib = await seedSupportLib()
+    const run = { id: 'run-url', slug: 'support-lib', repo_path: lib, branch: 'trident/support-lib-proof' }
+    const worktree = proofWorktreePath(lib, run)
+    const guards = [
+      ['bun', 'test', `--preload=file://${worktree}/tests/support/clamp.ts`, 'tests/other-control.test.ts'],
+      ['bun', 'test', `file://${worktree}/tests/support/clamp.ts`],
+    ]
+    for (const guard of guards) {
+      const out = await runMutationProofGate({
+        run,
+        claim: {
+          file: 'tests/support/clamp.ts',
+          find: 'n > max ? max : n',
+          replace: 'n',
+          guard,
+          control: ['bun', 'test', 'tests/other-control.test.ts'],
+        },
+        base_branch: 'main',
+        run_host: spawnCapture,
+      })
+      expect([guard.join(' '), out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([
+        guard.join(' '),
+        false,
+        false,
+        false,
+      ])
+      expect(out.reason).toContain('must be a repo-relative path inside the worktree')
+      // Refused before anything ran, so nothing was mutated and nothing spawned.
+      expect(existsSync(worktree)).toBe(false)
+    }
+  }, 60_000)
+
+  test('a guard argument that is a SYMLINK to the mutated file is still that file, and is refused', async () => {
+    // THE REVIEWER'S SECOND REPRO, against real git and real bun.
+    // `tests/alias.test.ts` is committed as a symlink to
+    // `tests/support/clamp.ts`. The two SPELLINGS differ, so the static
+    // tautology check — which compares strings — waved it through, and bun
+    // followed the link and ran the MUTATED library as its own assertion-free
+    // guard: red mutated, green restored, "proved".
+    const lib = await seedSupportLib({ alias: true })
+    const run = { id: 'run-alias', slug: 'support-lib', repo_path: lib, branch: 'trident/support-lib-proof' }
+    // The mutation BREAKS THE PARSE deliberately: that is what makes the forged
+    // proof complete without the fix. The mutated library cannot be loaded, so
+    // bun exits non-zero on the alias (RED); restored, the alias parses, holds
+    // no test cases, and exits zero (GREEN). Red-then-green off a file that
+    // asserted nothing — which is exactly the tautology, wearing a test's name.
+    const claim = {
+      file: 'tests/support/clamp.ts',
+      find: 'return n > max ? max : n',
+      replace: 'return n > max ? max : n +',
+      guard: ['bun', 'test', 'tests/alias.test.ts'],
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+    const out = await runMutationProofGate({ run, claim, base_branch: 'main', run_host: spawnCapture })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(out.reason).toContain('tautology')
+    expect(out.reason).toContain('resolves to the same file')
+    // Refused BEFORE the mutation was written: the proof made no observations.
+    expect(out.evidence?.observed ?? null).toBeNull()
+
+    // POSITIVE CONTROL, in the SAME repo: the honest guard — a real separate
+    // test of the library — still proves. So the refusal above is about the
+    // alias, not about a repo the prover simply cannot prove anything in.
+    const honest = await runMutationProofGate({
+      run: { ...run, id: 'run-alias-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/support/clamp.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([honest.ok, honest.exempt, honest.evidence?.proved ?? null]).toEqual([true, false, true])
+  }, 120_000)
+
+  test('a guard argument the runner reads as a FILTER is refused — RESOLVING does not make it a selection', async () => {
+    // THE REVIEWER'S REPRO, end to end against real git and real bun, in the
+    // shape that beat the first fix. `src/thing_test.ts` classifies PRODUCTION
+    // (a runner collects that name; no convention declares it a test), so it is
+    // a legal nomination. The first cut refused these guards only when the
+    // argument existed in NO tree — but the branch under proof writes the tree,
+    // so both spellings can be made to RESOLVE and neither becomes a selection:
+    //
+    //  • this repo commits a root `thing_test.ts`, so `bun test thing_test.ts`
+    //    names a real file — and bun still reads the positional as a SUBSTRING
+    //    FILTER, so the whole-suite discovery run reaches the mutated file and
+    //    lets it be its own guard;
+    //  • it commits `out/report.test.ts`, so `--reporter-outfile
+    //    out/report.test.ts` resolves — and it is still a file bun WRITES
+    //    during a whole-suite run, dressed as a selection well enough to
+    //    suppress the no-path arm.
+    //
+    // Both are matching semantics, not existence, so both are refused
+    // lexically. The last case keeps the resolution seam covered: an argument
+    // no tree holds AND no filter explains is still refused for not existing.
+    const lib = await seedCollectibleLib({ decoys: true })
+    const run = { id: 'run-filter', slug: 'collectible-lib', repo_path: lib, branch: 'trident/collectible-lib-proof' }
+    const worktree = proofWorktreePath(lib, run)
+    // The decoys really are in the tree — otherwise the first two cases would
+    // be passing for the OLD reason (nothing on disk) and prove nothing new.
+    expect(existsSync(join(lib, 'thing_test.ts'))).toBe(true)
+    expect(existsSync(join(lib, 'out', 'report.test.ts'))).toBe(true)
+    for (const [guard, expected] of [
+      [['bun', 'test', 'thing_test.ts'], 'tautology'],
+      [['bun', 'test', '--reporter-outfile', 'out/report.test.ts'], 'tautology'],
+      [['bun', 'test', '--reporter', 'junit', '--reporter-outfile', '.output/report.test.ts'], 'tautology'],
+      [['bun', 'test', 'tests/nothing-holds-this.test.ts'], 'does not exist at'],
+    ] as [string[], string][]) {
+      const out = await runMutationProofGate({
+        run,
+        claim: {
+          file: 'src/thing_test.ts',
+          // A PARSE-breaking mutation, which is what makes the forgery work:
+          // the mutated file cannot even load, so the discovery run that
+          // collects it goes red — and goes green again once it is restored.
+          find: 'CEILING = 3',
+          replace: 'CEILING =',
+          guard,
+          control: ['bun', 'test', 'tests/other-control.test.ts'],
+        },
+        base_branch: 'main',
+        run_host: spawnCapture,
+      })
+      expect([guard.join(' '), out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([
+        guard.join(' '),
+        false,
+        false,
+        false,
+      ])
+      expect(out.reason).toContain(expected)
+      // Refused before the file was ever mutated, and the throwaway worktree
+      // was removed either way.
+      expect(existsSync(worktree)).toBe(false)
+    }
+
+    // POSITIVE CONTROL — the SAME target, mutated for real, with a guard naming
+    // the separate test the tree actually holds: red under the mutation, green
+    // restored, control green throughout. Without this the refusals above could
+    // be refusing this whole class of honest nomination.
+    const ok = await runMutationProofGate({
+      run: { ...run, id: 'run-filter-ok' },
+      claim: {
+        file: 'src/thing_test.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/thing.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([ok.ok, ok.exempt, ok.evidence?.proved ?? null]).toEqual([true, false, true])
+    const obs = ok.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
+
+  test('ONE EXTRA TOKEN beside an honest selector is still the mutated file running as its own guard', async () => {
+    // THE REPRO, end to end against real git and real bun. Every argv below
+    // carries a REAL selector — `tests/other-control.test.ts`, an unrelated test
+    // that passes — so the whole-suite arm has nothing to say. The second token
+    // is what does the work: bun reads `thing` as a substring filter and
+    // `--coverage`'s operand as another positional, and either one drags
+    // `src/thing_test.ts` — the file the prover has just broken so badly it
+    // cannot parse — into the same run. Red under the mutation, green restored,
+    // and the "proof" is the mutated file failing to load itself.
+    const lib = await seedCollectibleLib()
+    const run = { id: 'run-token', slug: 'collectible-lib', repo_path: lib, branch: 'trident/collectible-lib-proof' }
+    const worktree = proofWorktreePath(lib, run)
+    for (const guard of [
+      ['bun', 'test', 'tests/other-control.test.ts', 'thing'],
+      ['bun', 'test', 'tests/other-control.test.ts', '--coverage', 'thing_test.ts'],
+    ]) {
+      const out = await runMutationProofGate({
+        run,
+        claim: {
+          file: 'src/thing_test.ts',
+          find: 'CEILING = 3',
+          replace: 'CEILING =',
+          guard,
+          control: ['bun', 'test', 'tests/other-control.test.ts'],
+        },
+        base_branch: 'main',
+        run_host: spawnCapture,
+      })
+      expect([guard.join(' '), out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([
+        guard.join(' '),
+        false,
+        false,
+        false,
+      ])
+      expect(out.reason).toContain('tautology')
+      // Refused on the spelling, so the file was never broken and the throwaway
+      // worktree was never left behind.
+      expect(existsSync(worktree)).toBe(false)
+    }
+
+    // POSITIVE CONTROL — the same target, really mutated, guarded by the
+    // separate test that asserts it, with an option carrying a NUMBER beside it.
+    // Without this the refusals above could be refusing every argv that has more
+    // than two elements, which would close the class this card exists to open.
+    const ok = await runMutationProofGate({
+      run: { ...run, id: 'run-token-ok' },
+      claim: {
+        file: 'src/thing_test.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/thing.test.ts', '--timeout=30000'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([ok.ok, ok.exempt, ok.evidence?.proved ?? null]).toEqual([true, false, true])
+    const obs = ok.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
+
+  test('a RENAME shows both source and destination, so a renamed production file cannot buy the exemption', async () => {
+    // `git mv src/limit.ts src/limit.test.ts` under default rename detection
+    // prints ONLY the destination — a declared test — and the whole diff would
+    // then classify as "no production file changed" and merge unproved. The
+    // mocked test can only see the `--no-renames` flag in an argv; this sees
+    // what real git DOES with it.
+    const repo = await seedDiffRepo('rename', async (r) => {
+      await git(r, 'mv', 'src/limit.ts', 'src/limit.test.ts')
+    })
+    const head = await git(repo, 'rev-parse', 'HEAD')
+    const files = await changedFilesOnBranch(spawnCapture, repo, 'main', head)
+    expect([...(files ?? [])].sort()).toEqual(['src/limit.test.ts', 'src/limit.ts'])
+
+    // …and the gate REFUSES rather than exempting: the source is production.
+    const out = await runMutationProofGate({
+      run: { id: 'run-rename', slug: 'rename', repo_path: repo, branch: BRANCH },
+      claim: null,
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt]).toEqual([false, false])
+    expect(out.reason).toContain('src/limit.ts')
+
+    // POSITIVE CONTROL on the reader itself: a branch that renames NOTHING
+    // still reads its own files, so the assertion above cannot be passing on a
+    // reader that returns everything under the sun.
+    const plain = await seedDiffRepo('rename-control', async (r) => {
+      writeFileSync(join(r, 'src', 'limit.ts'), 'export const LIMIT = 4\n')
+    })
+    expect(await changedFilesOnBranch(spawnCapture, plain, 'main', await git(plain, 'rev-parse', 'HEAD'))).toEqual([
+      'src/limit.ts',
+    ])
+  }, 60_000)
+
+  test('a NON-ASCII path arrives as itself — git quotes it by default and every classifier then misreads it', async () => {
+    // #489's own deadlock, one encoding further out: by default git C-quotes any
+    // path with a byte outside ASCII, so `tests/süß.test.ts` arrives as
+    // `"tests/s\303\274\303\237.test.ts"`. That basename matches no test
+    // convention, so a declared test classifies as PRODUCTION, the exemption
+    // cannot fire, and the gate refuses an all-test diff — blaming the build for
+    // an omission it did not make.
+    const name = 'tests/süß.test.ts'
+    const repo = await seedDiffRepo('non-ascii', async (r) => {
+      mkdirSync(join(r, 'tests'), { recursive: true })
+      writeFileSync(join(r, name), "import { expect, test } from 'bun:test'\n\ntest('x', () => expect(1).toBe(1))\n")
+    })
+    const files = await changedFilesOnBranch(spawnCapture, repo, 'main', await git(repo, 'rev-parse', 'HEAD'))
+    expect(files).toEqual([name])
+    // The literal quoted spelling, so a reader knows exactly what this prevents.
+    expect((files ?? []).join('')).not.toContain('\\303')
+
+    const out = await runMutationProofGate({
+      run: { id: 'run-non-ascii', slug: 'non-ascii', repo_path: repo, branch: BRANCH },
+      claim: null,
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt]).toEqual([true, true])
+    expect(out.reason).toContain(name)
+  }, 60_000)
+
+  test('a TRAILING SPACE survives the read — real git, and the file is production, not a test', async () => {
+    // The reader used to `.trim()` every line of `--name-only`. `src/logic.test.ts `
+    // — a legal git path, and a PRODUCTION file — arrived as `src/logic.test.ts`,
+    // a DECLARED TEST, and a diff of it alone bought the no-production-file
+    // exemption and merged unproved. The mocked test can only show the parser;
+    // this shows what real git actually writes and what the gate then does.
+    const spaced = 'src/logic.test.ts '
+    const repo = await seedDiffRepo('trailing-space', async (r) => {
+      writeFileSync(join(r, spaced), 'export const LIMIT = 4\n')
+    })
+    const files = await changedFilesOnBranch(spawnCapture, repo, 'main', await git(repo, 'rev-parse', 'HEAD'))
+    expect(files).toEqual([spaced])
+
+    // The consequence: no claim, and the gate REFUSES rather than exempting.
+    const out = await runMutationProofGate({
+      run: { id: 'run-trailing-space', slug: 'trailing-space', repo_path: repo, branch: BRANCH },
+      claim: null,
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt]).toEqual([false, false])
+    expect(out.reason).toContain('a legal mutation target existed')
+  }, 60_000)
+
+  test('a LEADING SPACE survives too — the host seam trims the whole stdout, and the status letter blocks it', async () => {
+    // THE BUG THIS CLOSES, and it needs REAL git plus the REAL host seam:
+    // `spawnCapture` returns `stdout.trim()`, and that runs before the reader
+    // sees a byte. Under `--name-only` the first record WAS the first path, so a
+    // branch whose only changed file is ` README.md` — a legal git path, and NOT
+    // README.md — arrived as `README.md`, classified as prose, and took the
+    // prose-only exemption. The trailing side never had this problem because the
+    // record ends in NUL and NUL is not whitespace; `--name-status` gives the
+    // front of the stream the same protection, with a status letter.
+    const spaced = ' README.md'
+    const repo = await seedDiffRepo('leading-space', async (r) => {
+      writeFileSync(join(r, spaced), 'not the readme\n')
+    })
+    const files = await changedFilesOnBranch(spawnCapture, repo, 'main', await git(repo, 'rev-parse', 'HEAD'))
+    expect(files).toEqual([spaced])
+
+    // The consequence, not just the string: the odd name is not prose, so the
+    // gate REFUSES rather than exempting.
+    const out = await runMutationProofGate({
+      run: { id: 'run-leading-space', slug: 'leading-space', repo_path: repo, branch: BRANCH },
+      claim: null,
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt]).toEqual([false, false])
+
+    // POSITIVE CONTROL — the space is the only difference: the same name
+    // without it reads back exactly and DOES buy the prose-only exemption, so
+    // this test cannot be passing on a reader that mangles every path.
+    const plain = await seedDiffRepo('leading-space-control', async (r) => {
+      writeFileSync(join(r, 'README.md'), 'edited\n')
+    })
+    expect(await changedFilesOnBranch(spawnCapture, plain, 'main', await git(plain, 'rev-parse', 'HEAD'))).toEqual([
+      'README.md',
+    ])
+    const exempt = await runMutationProofGate({
+      run: { id: 'run-leading-space-ok', slug: 'leading-space-ok', repo_path: plain, branch: BRANCH },
+      claim: null,
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([exempt.ok, exempt.exempt]).toEqual([true, true])
+    expect(exempt.reason).toContain('prose-only')
+  }, 60_000)
+
+  test('a DELETION-ONLY production diff is refused, and the refusal does not name the file it cannot mutate', async () => {
+    // THE DEADLOCK, both halves, against real git: the branch deletes its only
+    // production file and edits a test. The refusal used to say "a legal
+    // mutation target existed: src/limit.ts" — and the second half below is why
+    // that was a closed loop.
+    const repo = await seedDiffRepo('deletion-only', async (r) => {
+      rmSync(join(r, 'src', 'limit.ts'))
+      writeFileSync(join(r, 'src', 'limit.test.ts'), "import { test } from 'bun:test'\n\ntest('x', () => {})\n")
+    })
+    const head = await git(repo, 'rev-parse', 'HEAD')
+    // git really does report the deletion, and the reader really does keep it.
+    expect([...(await changedFilesOnBranch(spawnCapture, repo, 'main', head) ?? [])].sort()).toEqual([
+      'src/limit.test.ts',
+      'src/limit.ts',
+    ])
+    const run = { id: 'run-deletion-only', slug: 'deletion-only', repo_path: repo, branch: BRANCH }
+    const out = await runMutationProofGate({ run, claim: null, base_branch: 'main', run_host: spawnCapture })
+    // NOT exempt — a deletion is a production change, and exempting it would
+    // hand `git mv src/limit.ts src/limit.test.ts` the pass `--no-renames`
+    // exists to deny (the rename test above).
+    expect([out.ok, out.exempt]).toEqual([false, false])
+    expect(out.reason).toContain('DELETIONS')
+    expect(out.reason).toContain('src/limit.ts')
+    expect(out.reason).not.toContain('nominated no mutation')
+
+    // THE OTHER HALF OF THE LOOP, so this is not taken on trust: nominating the
+    // very file the OLD refusal pointed at is refused by the prover for being
+    // absent at the head. Two refusals with no way out is why the message had
+    // to stop sending the build after it.
+    const nominated = await runMutationProofGate({
+      run: { ...run, id: 'run-deletion-only-claim' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'LIMIT = 3',
+        replace: 'LIMIT = 4',
+        guard: ['bun', 'test', 'src/limit.test.ts'],
+        control: ['bun', 'test', 'src/other.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([nominated.ok, nominated.evidence?.proved ?? null]).toEqual([false, false])
+    expect(nominated.reason).toContain('does not exist at')
+  }, 60_000)
 
   test('an expected_head that names a TREE is refused — only the `^{commit}` peel says so', async () => {
     const w = await seedWorld('tree-sha')

@@ -18,6 +18,7 @@ import {
   resolveResumeLiveHead,
   RESUME_HEAD_RETRY_DELAYS_MS,
   sweepStrandedFailures,
+  truncateNote,
 } from './orchestrator.ts'
 import { MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -587,6 +588,170 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.inner_verdict).toBe('APPROVE')
     // …and nothing merged.
     expect(h.hostCalls.map((c) => c.join(' ')).some((c) => c.includes('merge'))).toBe(false)
+  })
+
+  // AN EXEMPTION IS NOT A SILENT PASS. An exempt outcome merges without any
+  // mutation having been run, and `proof.reason` is the only part of that fact
+  // that outlives the tick. Dropped, a merge the gate never guarded looks
+  // exactly like one it guarded and passed.
+  test('an EXEMPT mutation proof still merges — but the run record SAYS the gate never ran', async () => {
+    // DELIBERATELY LONGER THAN THE NOTE CEILING. The exemption names EVERY
+    // changed file because that list is the reviewer's evidence, so a large
+    // test-only refactor hands the tick note a multi-kilobyte string — and a
+    // note is one line a human reads, not the record. `docs/notes.md` sits LAST
+    // so the two halves can be told apart: the note must lose it, the log must
+    // keep it.
+    const exemptReason =
+      'no production file in this diff — nothing to mutate: all 12 changed files are declared tests or ' +
+      'documentation (tests/support/scrub.test.ts, gbrain-memory/__tests__/seam.test.ts, ' +
+      Array.from({ length: 9 }, (_, i) => `tests/support/filler-${i}.test.ts`).join(', ') +
+      ', docs/notes.md)'
+    const approve = () => ({ result: { verdict: 'APPROVE' as const, branch: 'feat-x' } })
+
+    // POSITIVE CONTROL FIRST — the same merge with a proof that actually RAN
+    // says nothing of the kind. Without it the assertions below would still pass
+    // if the note carried that sentence unconditionally. Settled to terminal so
+    // the exempt harness's sweep does not pick this run up again.
+    const provedStamps: Array<{ id: string; stage: string; meta: string | null | undefined }> = []
+    const proved = buildHarness({
+      plan: approve,
+      record_stage: (id, stage, meta) => void provedStamps.push({ id, stage, meta }),
+    })
+    const control = await createRun()
+    await proved.loop.runOnce()
+    await proved.complete()
+    const provedLines: string[] = []
+    const beforeLog = console.log
+    const beforeLevel = process.env.NEUTRON_LOG_LEVEL
+    process.env.NEUTRON_LOG_LEVEL = 'info'
+    console.log = (...a: unknown[]) => void provedLines.push(a.map(String).join(' '))
+    let provedOutcome!: Awaited<ReturnType<typeof proved.step>>
+    try {
+      provedOutcome = await proved.step(store.get(control.id)!)
+    } finally {
+      console.log = beforeLog
+      if (beforeLevel === undefined) delete process.env.NEUTRON_LOG_LEVEL
+      else process.env.NEUTRON_LOG_LEVEL = beforeLevel
+    }
+    expect(provedOutcome.run.phase).toBe('done')
+    expect(provedOutcome.note ?? '').not.toContain('mutation proof skipped')
+    expect(await store.saveIfActive(provedOutcome.run)).toBe(true)
+
+    const stamps: Array<{ id: string; stage: string; meta: string | null | undefined }> = []
+    const h = buildHarness({
+      plan: approve,
+      prove_mutation: buildSimMutationProofGate({ exempt: true, reason: exemptReason }),
+      record_stage: (id, stage, meta) => void stamps.push({ id, stage, meta }),
+    })
+    const run = await createRun()
+    await h.loop.runOnce()
+    await h.complete()
+
+    // THE LOG IS THE OTHER HALF, and the only half that survives a tick note
+    // nobody kept: `[trident] event=mutation_proof_exempt …`. Captured off the
+    // logger's default sink, which resolves `console.log` at emit time.
+    const lines: string[] = []
+    const realLog = console.log
+    const realLevel = process.env.NEUTRON_LOG_LEVEL
+    process.env.NEUTRON_LOG_LEVEL = 'info'
+    console.log = (...a: unknown[]) => void lines.push(a.map(String).join(' '))
+    let outcome!: Awaited<ReturnType<typeof h.step>>
+    try {
+      outcome = await h.step(store.get(run.id)!)
+    } finally {
+      console.log = realLog
+      if (realLevel === undefined) delete process.env.NEUTRON_LOG_LEVEL
+      else process.env.NEUTRON_LOG_LEVEL = realLevel
+    }
+
+    expect(outcome.run.phase).toBe('done')
+    expect(outcome.note ?? '').toContain('mutation proof skipped')
+    // WHICH exemption fired, not just that one did.
+    expect(outcome.note ?? '').toContain('no production file in this diff')
+    // …and the note is CAPPED, with a pointer to where the whole list lives. The
+    // note is a one-line summary; the log below is the record.
+    expect((outcome.note ?? '').length).toBeLessThan(exemptReason.length)
+    expect(outcome.note ?? '').not.toContain('docs/notes.md')
+    expect(outcome.note ?? '').toContain('full reason in the mutation_proof_exempt log line')
+    const logged = lines.filter((l) => l.includes('event=mutation_proof_exempt'))
+    expect(logged).toHaveLength(1)
+    expect(logged[0]).toContain('no production file in this diff')
+    expect(logged[0]).toContain(`run_id=${run.id}`)
+    // THE LOG IS THE ONLY CONSUMER IN PRODUCTION. `outcome.note` is documented
+    // "for logs / status posts" and `tick.ts` — the sole `step()` caller — never
+    // reads it, so asserting the note alone would prove nothing about what
+    // survives the tick. The names the exemption rested on have to be in HERE.
+    expect(logged[0]).toContain('tests/support/scrub.test.ts')
+    expect(logged[0]).toContain('docs/notes.md')
+    // POSITIVE CONTROL on the capture itself: a merge whose proof RAN logs no
+    // such line, so the assertion above cannot be passing on a line the
+    // orchestrator emits unconditionally — or on an empty capture matching
+    // nothing at all.
+    expect(lines.length).toBeGreaterThan(0)
+    expect(provedLines.filter((l) => l.includes('event=mutation_proof_exempt'))).toHaveLength(0)
+
+    // AND THE DURABLE HALF. A log line is read by whoever is tailing the
+    // process; the RUN RECORD the card asked for is the stage ledger, which is
+    // the one place `tick.ts` persists that survives the tick. The FULL reason
+    // goes here — that file list is the reviewer's evidence — so equality with
+    // a string deliberately longer than the note ceiling also proves the stamp
+    // is not carrying the truncated note.
+    const exemptStamps = stamps.filter((s) => s.stage === 'mutation-proof-exempt')
+    expect(exemptStamps).toHaveLength(1)
+    expect(exemptStamps[0]?.id).toBe(run.id)
+    expect(exemptStamps[0]?.meta).toBe(exemptReason)
+    // NEGATIVE CONTROL — the merge whose proof actually RAN stamps nothing, so
+    // the row above says "the gate never ran" and cannot be a stamp the
+    // orchestrator writes on every merge.
+    expect(provedStamps.filter((s) => s.stage === 'mutation-proof-exempt')).toHaveLength(0)
+  })
+
+  // A STAMP MUST NEVER FAIL A MERGE. The ledger row is a record of something
+  // that already happened; a store that refuses it must not turn an approved,
+  // exempt, mergeable run into a failure.
+  test('a stage stamp that THROWS does not block the exempt merge', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' as const, branch: 'feat-x' } }),
+      prove_mutation: buildSimMutationProofGate({
+        exempt: true,
+        reason: 'no production file in this diff — nothing to mutate: docs/x.md, tests/a.test.ts',
+      }),
+      record_stage: () => {
+        throw new Error('stage ledger unavailable')
+      },
+    })
+    const run = await createRun()
+    await h.loop.runOnce()
+    await h.complete()
+    const outcome = await h.step(store.get(run.id)!)
+
+    expect(outcome.run.phase).toBe('done')
+    expect(outcome.note ?? '').toContain('mutation proof skipped')
+  })
+
+  test('the tick note is cut on a CHARACTER — a truncated reason never ends in half of one', () => {
+    // `slice` counts UTF-16 CODE UNITS, and the exemption's reason interpolates
+    // every changed path, so where the cut lands is data rather than a choice.
+    // A cut between the halves of a surrogate pair emits a LONE surrogate into
+    // a string that goes on to a status post and the DB.
+    const pair = '🙂'
+    expect(pair.length).toBe(2)
+    // 239 filler characters, so the pair straddles units 239 and 240 — the cut.
+    const straddling = `${'a'.repeat(239)}${pair}${'b'.repeat(200)}`
+    const note = truncateNote(straddling)
+    const lone = [...note].filter((c) => {
+      const code = c.codePointAt(0) as number
+      return code >= 0xd800 && code <= 0xdfff
+    })
+    expect(lone).toEqual([])
+    expect(note.startsWith('a'.repeat(239))).toBe(true)
+    expect(note).toContain('full reason in the mutation_proof_exempt log line')
+
+    // POSITIVE CONTROLS — a cut landing on a whole character keeps all 240 of
+    // them, and a reason under the ceiling comes back untouched. Without these
+    // the assertion above would pass just as well if the note were empty.
+    expect(truncateNote('a'.repeat(300)).startsWith('a'.repeat(240))).toBe(true)
+    expect(truncateNote('short')).toBe('short')
   })
 
   test('the outer publisher refuses a commit that is not the local branch tip — naming BOTH values', async () => {

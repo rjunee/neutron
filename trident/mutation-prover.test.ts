@@ -2,14 +2,20 @@ import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
 import {
   canonicalPayload,
   changedFilesOnBranch,
+  changedFilesWithStatus,
+  classifyMutationTarget,
   createMutationProver,
+  diffHasNoLegalMutationTarget,
+  isDeclaredTestFile,
   isProseOnlyChange,
+  legalMutationTargets,
+  missingClaimRefusalReason,
   MUTATION_PROOF_SCHEMA,
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
@@ -53,6 +59,29 @@ const KILL_GRACE_CEILING = 5_000
 
 function res(exit: number, stdout = ''): HostCommandResult {
   return { ok: exit === 0, stdout, stderr: '', exit_code: exit }
+}
+
+/**
+ * `git diff -z --name-status` output for a NUL-joined path list: every path
+ * MODIFIED unless it is named in `deleted`.
+ *
+ * The reader asks git for STATUS, not just names — partly for the deletions,
+ * partly because the leading status letter is what keeps `run_host`'s
+ * whole-stdout `.trim()` off the first path. Tests still spell the thing they
+ * care about (the paths) and this puts the record shape around them.
+ */
+function nameStatus(files: string, deleted: readonly string[] = []): string {
+  return files
+    .split('\0')
+    .filter((p) => p.length > 0)
+    .map((p) => `${deleted.includes(p) ? 'D' : 'M'}\0${p}\0`)
+    .join('')
+}
+
+/** The host seam TRIMS (`git-mode.ts:run_host` returns `stdout.trim()`), and
+ *  the reader must survive that — so every mocked diff answer goes through it. */
+function diffRes(stdout: string): HostCommandResult {
+  return res(0, stdout.trim())
 }
 
 /** An in-memory worktree: one file, plus a record of every write. */
@@ -479,6 +508,1433 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     const { prover: p3 } = proverOver({ worktreeAddFails: true })
     expect((await p3.prove({ run: RUN, claim: CLAIM })).reason).toContain('proof worktree')
   })
+
+  test('a support LIBRARY under tests/ is a legal target — it declares no test cases', async () => {
+    // The old path rule refused every path with a `tests/` segment, which is how
+    // a harness library — asserted by a SEPARATE `*.test.ts` — became
+    // unmutatable. Classification is by what DECLARES a file a test, so this
+    // claim gets past validation and actually RUNS.
+    const file = 'tests/support/scrub-instance-env.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, file } })
+    expect(evidence.reason).not.toContain('is a test file')
+    // The positive control against a silently-empty run: it OBSERVED something.
+    expect(evidence.observed).not.toBeNull()
+  })
+
+  test('a guard that runs the MUTATED FILE as its own test argument is the tautology, and is refused', async () => {
+    // This is the check the path rule was standing in for, stated directly: it
+    // holds for production targets too, which the path rule never did.
+    const { prover, host } = proverOver()
+    const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', CLAIM.file] } })
+    expect(out.proved).toBe(false)
+    expect(out.observed).toBeNull()
+    expect(out.reason).toContain('tautology')
+    expect(out.reason).toContain(CLAIM.file)
+    // Refused BEFORE anything was executed.
+    expect(host.calls).toHaveLength(0)
+
+    // Positive control: the default CLAIM's guard names a DIFFERENT file, so it
+    // is permitted and the prover really runs — the assertion above cannot be
+    // passing because every claim is refused.
+    const { prover: ok } = proverOver()
+    expect((await ok.prove({ run: RUN, claim: CLAIM })).observed).not.toBeNull()
+  })
+
+  test('two characters of punctuation do not defeat the tautology check', async () => {
+    // `./src/limit.ts` and `src/limit.ts` are ONE path. Compared raw, the check
+    // is a formality anyone can step around.
+    const { prover } = proverOver()
+    const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', `./${CLAIM.file}`] } })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('tautology')
+  })
+
+  test('a guard argv that LEAVES the worktree is refused — absolute, and ..-and-back', async () => {
+    // THE BYPASS THIS CLOSES. The guard runs with the proof worktree as its cwd
+    // and that worktree's absolute path is derivable (`proofWorktreePath`), so
+    // both of these RUN the mutated file — while comparing equal to nothing,
+    // because a repo-relative `claim.file` can never match a path that starts
+    // with `/` or climbs out and walks back in. The mutated file was its own
+    // guard: red under the mutation, green restored, "proved". Refuse the SHAPE.
+    const abs = `${proofWorktreePath('/repo', RUN)}/${CLAIM.file}`
+    for (const arg of [abs, `../${basename(proofWorktreePath('/repo', RUN))}/${CLAIM.file}`, '..', `--preload=${abs}`]) {
+      const { prover, host } = proverOver()
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', arg] } })
+      // Refused BEFORE anything was executed, and the refusal NAMES the argument.
+      expect([arg, out.proved, host.calls.length]).toEqual([arg, false, 0])
+      expect(out.reason).toContain('must be a repo-relative path inside the worktree')
+      expect(out.reason).toContain(arg)
+    }
+
+    // The CONTROL argv is held to the same rule — it is executed too, and a
+    // control reaching outside the worktree is green for reasons the diff does
+    // not own.
+    const { prover: ctl } = proverOver()
+    const control = await ctl.prove({ run: RUN, claim: { ...CLAIM, control: ['bun', 'test', `${abs}`] } })
+    expect(control.proved).toBe(false)
+    expect(control.reason).toContain('claim.control argument')
+
+    // POSITIVE CONTROL — an ordinary repo-relative guard naming a DIFFERENT
+    // file is untouched, so the rule above cannot be refusing everything.
+    const { prover: ok } = proverOver()
+    const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', './src/other.test.ts'] } })
+    expect(fine.reason).not.toContain('repo-relative')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a URL is the THIRD spelling of an absolute path, and a colon in a script name is not one', async () => {
+    // THE BYPASS THIS CLOSES. `--preload=file:///<worktree>/src/limit.ts` starts
+    // with no `/`, carries no `=/` and has no `..` segment, so every lexical arm
+    // of the escape rule passed it — and `carriedValue` normalizes
+    // `file:///a/src/limit.ts` to `file:/a/src/limit.ts`, which equals no
+    // repo-relative target. The mutated file loaded into the guard process and
+    // was its own RED.
+    const abs = `${proofWorktreePath('/repo', RUN)}/${CLAIM.file}`
+    for (const arg of [`file://${abs}`, `--preload=file://${abs}`, `--preload=file:${abs}`, `--preload=FILE://${abs}`]) {
+      const { prover, host } = proverOver()
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', arg] } })
+      // Refused BEFORE anything was executed, and the refusal NAMES the argument.
+      expect([arg, out.proved, host.calls.length]).toEqual([arg, false, 0])
+      expect(out.reason).toContain('must be a repo-relative path inside the worktree')
+      expect(out.reason).toContain(arg)
+    }
+
+    // POSITIVE CONTROLS — a scheme is a scheme only when it is followed by a
+    // `/`. `npm run test:unit` and `make test:all` are honest guards whose
+    // SCRIPT NAME owns a colon, and refusing them would refuse a whole runner
+    // convention for a punctuation mark.
+    for (const guard of [
+      ['npm', 'run', 'test:unit'],
+      ['make', 'test:all'],
+    ]) {
+      const { prover } = proverOver()
+      const fine = await prover.prove({ run: RUN, claim: { ...CLAIM, guard } })
+      expect([guard.join(' '), fine.reason.includes('repo-relative')]).toEqual([guard.join(' '), false])
+      // …and it really did get as far as RUNNING them, so the assertion above
+      // cannot be passing on a claim refused for some other reason first.
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('a guard argument that RESOLVES to the mutated file is that file, whatever it is spelled', async () => {
+    // THE BYPASS THIS CLOSES. `tests/alias.test.ts` committed as a SYMLINK to
+    // `tests/support/lib.ts` is a different STRING and the same FILE, so the
+    // static tautology check — which compares spellings — waved it through and
+    // the runner ran the mutated library as its own assertion-free guard.
+    // `claim.file`'s containment was already resolved; the guard argv was not,
+    // and that asymmetry was the whole hole. Here the resolution seam is the
+    // injected `fs.realpath`; `mutation-prover-realgit.test.ts` runs the same
+    // shape against real git, a real committed symlink and real bun.
+    const wt = proofWorktreePath('/repo', RUN)
+    const file = 'tests/support/lib.ts'
+    const links: Record<string, string> = {
+      [join(wt, 'tests/alias.test.ts')]: join(wt, file),
+      [join(wt, 'tests/alias-dir')]: join(wt, 'tests/support'),
+    }
+    for (const [arg, why] of [
+      ['tests/alias.test.ts', 'resolves to the same file'],
+      ['--preload=tests/alias.test.ts', 'resolves to the same file'],
+      ['tests/alias-dir', 'resolves to a directory holding it'],
+      // …AND A QUERY SUFFIX DOES NOT HIDE THE LINK. Asked of the RAW element, a
+      // `?` reads as a GLOB, so this seam SKIPPED the one element it most
+      // needed to resolve — the specifier form a runtime actually loads.
+      // Normalising first (which cuts the suffix) is what puts it back.
+      ['tests/alias.test.ts?proof', 'resolves to the same file'],
+    ] as const) {
+      const fs = memFs({ [join(wt, file)]: SRC_BEFORE })
+      fs.realpath = async (path: string) => links[path] ?? path
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        // The argv ALSO names a separate test, so the whole-suite arm is not
+        // what refuses it: this test is about RESOLUTION, and an argv that
+        // selected nothing would be refused for naming no path before any
+        // realpath was ever taken.
+        claim: {
+          ...CLAIM,
+          file,
+          guard: ['bun', 'test', arg, 'tests/separate.test.ts'],
+          control: ['bun', 'test', 'tests/other.test.ts'],
+        },
+      })
+      expect([arg, out.proved, out.reason.includes('tautology'), out.reason.includes(why)]).toEqual([
+        arg,
+        false,
+        true,
+        true,
+      ])
+      // Refused BEFORE the mutation was written: nothing was ever broken on disk.
+      expect(fs.writes).toEqual([])
+      expect(host.calls.every((c) => !c.includes('tests/alias.test.ts'))).toBe(true)
+    }
+
+    // POSITIVE CONTROL — a guard that resolves to a DIFFERENT file is untouched,
+    // so the rule above cannot be refusing every guard once a realpath exists.
+    const fs = memFs({ [join(wt, file)]: SRC_BEFORE })
+    fs.realpath = async (path: string) => links[path] ?? path
+    const { prover } = proverOver({}, fs)
+    const fine = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/support/lib.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a dotted module RESOLVES too — `unittest tests.alias` where tests/alias.py is the mutated file', async () => {
+    // The lexical module rule compares SPELLINGS: `tests.alias` expands to
+    // `tests/alias.py`, which is not `src/limit.py`, so it passes — while the
+    // import follows a committed symlink straight into the mutated file. Same
+    // asymmetry the alias test above closed for path arguments, in the one
+    // spelling that carries no separator at all.
+    const wt = proofWorktreePath('/repo', RUN)
+    const file = 'src/limit.py'
+    const fs = memFs({ [join(wt, file)]: SRC_BEFORE })
+    fs.realpath = async (path: string) => (path === join(wt, 'tests/alias.py') ? join(wt, file) : path)
+    const { prover, host } = proverOver({}, fs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file,
+        guard: ['python3', '-m', 'unittest', 'tests.alias'],
+        control: ['python3', '-m', 'pytest', 'tests/other_test.py'],
+      },
+    })
+    expect([out.proved, out.reason.includes('tautology'), out.reason.includes('resolves to the same file')]).toEqual([
+      false,
+      true,
+      true,
+    ])
+    expect(fs.writes).toEqual([])
+    expect(host.calls.every((c) => !c.includes('tests.alias'))).toBe(true)
+
+    // POSITIVE CONTROL — a module that resolves ELSEWHERE is a separate test and
+    // still runs, so the expansion cannot be refusing every dotted selector.
+    const clean = memFs({ [join(wt, file)]: SRC_BEFORE })
+    clean.realpath = async (path: string) => path
+    const { prover: ok } = proverOver({}, clean)
+    const fine2 = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['python3', '-m', 'unittest', 'tests.test_limit'] },
+    })
+    expect(fine2.reason).not.toContain('tautology')
+    expect(fine2.observed).not.toBeNull()
+  })
+
+  test('a DISCOVERY argv wearing the shape of a targeted one is still discovery', async () => {
+    // `python3 -m unittest discover -p test*.py` NAMES nothing: `discover` is a
+    // subcommand and `test*.py` is a search, not a file. Read as path arguments
+    // they made the argv look targeted, so the no-path arm never fired and the
+    // mutated support library — which that very search collects — served as its
+    // own guard.
+    const file = 'tests/support/lib.ts'
+    for (const guard of [
+      ['python3', '-m', 'unittest', 'discover', '-p', 'test*.py'],
+      ['python3', '-m', 'unittest', 'discover'],
+      ['bun', 'test', 'tests/**/*.test.ts'],
+      // …and the same run with a pattern that is not a glob. `test_lib.py` is
+      // `-p`'s OPERAND, not a selection, and which options take one is a
+      // vocabulary this refuses to keep — so an operand after a value-less
+      // option reads as discovery. Deliberate OVER-REFUSAL (`-s other` really
+      // does confine the search), and it fails CLOSED.
+      ['python3', '-m', 'unittest', 'discover', '-s', 'other', '-p', 'test_lib.py'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+    }
+
+    // POSITIVE CONTROL — `discover` being read as a runner token must not make
+    // an honest guard for the same library disappear: a REAL test path after it
+    // is a selection, and the whole set above cannot be passing because every
+    // python guard is refused.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['python3', '-m', 'unittest', 'discover', 'tests/support/lib_test.py'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a guard that names NO path at all discovers the mutated file, and is refused', async () => {
+    // `python3 -m unittest` and a bare `bun test` name nothing: the runner
+    // discovers from the repo root, which reaches every collectible file —
+    // including this one. An argv-element match sees nothing here, and neither
+    // does the directory arm, because there is no directory argument to compare.
+    const file = 'tests/support/lib.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['python3', '-m', 'unittest'], control: ['bun', 'test', 'src/other.test.ts'] },
+    })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('tautology')
+
+    // …and `bun test test`, whose every token is a runner token, must not slip
+    // through the same hole for a library under `test/`.
+    const under = 'test/support/lib.ts'
+    const fs2 = memFs({ [join(proofWorktreePath('/repo', RUN), under)]: SRC_BEFORE })
+    const { prover: p2 } = proverOver({}, fs2)
+    const bare = await p2.prove({ run: RUN, claim: { ...CLAIM, file: under, guard: ['bun', 'test', 'test'] } })
+    expect(bare.proved).toBe(false)
+    expect(bare.reason).toContain('tautology')
+
+    // POSITIVE CONTROL — a PRODUCTION module no runner collects wholesale keeps
+    // its right to a bare-runner guard; over-refusing here would block honest
+    // proofs, and would make the assertions above vacuous.
+    const { prover: p3 } = proverOver()
+    const prod = await p3.prove({ run: RUN, claim: { ...CLAIM, guard: ['python3', '-m', 'unittest'] } })
+    expect(prod.reason).not.toContain('tautology')
+    expect(prod.observed).not.toBeNull()
+  })
+
+  test('a name a runner COLLECTS but no convention DECLARES is still refused as its own guard', async () => {
+    // `testfoo.py` is not a declared test (`*_test.py` is the convention), so it
+    // is a legal mutation TARGET — but `unittest`'s default discovery pattern is
+    // `test*.py`, so a bare runner runs it. Same class: node collects
+    // `test-*.js`, and bun collects `*_test.ts`, `*-test.ts` and `*_spec.ts`.
+    // The refusal lives on the guard side precisely so these names do NOT widen
+    // the no-production-file exemption — deleting any alternative from
+    // `RUNNER_COLLECTED_BASENAME` reddens one entry of this loop.
+    for (const file of [
+      'testfoo.py',
+      'src/test-foo.js',
+      'src/test_probe.py',
+      'src/ab-test.ts',
+      'src/thing_test.ts',
+      'src/helper_spec.ts',
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: ['python3', '-m', 'unittest'], control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([file, out.proved, out.reason.includes('tautology')]).toEqual([file, false, true])
+    }
+
+    // POSITIVE CONTROL — the same file with a guard naming a SEPARATE test runs.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'testfoo.py')]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const ok = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: 'testfoo.py', guard: ['python3', '-m', 'pytest', 'other_test.py'] },
+    })
+    expect(ok.reason).not.toContain('tautology')
+    expect(ok.observed).not.toBeNull()
+  })
+
+  test('a guard argument that names NOTHING on disk is a filter, not a selection', async () => {
+    // THE BYPASS THIS CLOSES, reproduced against the real gate. `src/thing_test.ts`
+    // is a LEGAL target — a runner COLLECTS that name, but no convention
+    // DECLARES it a test — and `bun test thing_test.ts` names a file that does
+    // not exist, so bun reads the element as a SUBSTRING FILTER, discovers the
+    // whole suite and runs the mutated file as its own guard. Every lexical arm
+    // passed it: the element has an extension and a collectible basename, so
+    // `pathArgs` counted it as a SELECTION and the no-path arm never fired,
+    // while it equals no repo-relative target, so the naming arm never fired
+    // either. Existence is not a property of a spelling — only the pinned tree
+    // can answer it, so THIS refusal lives at the resolution seam. (The two
+    // sibling shapes are lexical and are pinned in the next test: a filter the
+    // mutated path CONTAINS, and an option's separated operand.)
+    const wt = proofWorktreePath('/repo', RUN)
+    const file = 'src/thing_test.ts'
+    // A `realpath` that models a real disk: a path resolves only if the tree
+    // holds it, or holds something UNDER it (i.e. it is a directory).
+    const diskOf = (files: Record<string, string>) => {
+      const fs = memFs(files)
+      fs.realpath = async (p: string) => {
+        const path = p.replace(/\/+$/, '')
+        if (fs.files[path] !== undefined) return path
+        if (Object.keys(fs.files).some((f) => f.startsWith(`${path}/`))) return path
+        throw new Error(`ENOENT ${p}`)
+      }
+      return fs
+    }
+    const disk = (extra: Record<string, string> = {}) => diskOf({ [join(wt, file)]: SRC_BEFORE, ...extra })
+
+    for (const guard of [
+      ['bun', 'test', 'other_test.ts'],
+      ['bun', 'test', 'tests/gone.test.ts'],
+    ]) {
+      const fs = disk()
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('does not exist at')]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+      ])
+      // The refusal NAMES the phantom argument, and nothing was ever mutated.
+      expect(out.reason).toContain(guard[guard.length - 1] as string)
+      expect(fs.writes).toEqual([])
+    }
+
+    // POSITIVE CONTROL 1 — the SAME target with a guard naming a test the tree
+    // actually holds is permitted, and really runs. Without this the assertions
+    // above could be passing because every claim on this path is refused.
+    const held = disk({ [join(wt, 'tests/thing.test.ts')]: 'assertions\n' })
+    const { prover: p1 } = proverOver({}, held)
+    const ok = await p1.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/thing.test.ts'] },
+    })
+    expect(ok.reason).not.toContain('does not exist')
+    expect(ok.observed).not.toBeNull()
+
+    // POSITIVE CONTROL 2 — the rule is SCOPED to a target a runner collects.
+    // `src/limit.ts` is a production module no discovery run turns into a test,
+    // so a whole-suite guard is legal for it (see the directory-arm test above)
+    // and a guard argument the tree does not hold costs its proof nothing.
+    // Deleting the scope line reddens this.
+    const prodFs = diskOf({ [join(wt, CLAIM.file)]: SRC_BEFORE })
+    const { prover: p2 } = proverOver({}, prodFs)
+    const prod = await p2.prove({ run: RUN, claim: CLAIM })
+    expect(prod.reason).not.toContain('does not exist')
+    expect(prod.proved).toBe(true)
+  })
+
+  test('a positional the runner reads as a FILTER is not a selection, and RESOLVING does not make it one', async () => {
+    // THE BYPASS, in the two shapes that survived the resolution seam because
+    // that seam answers "does it exist" and the question is "does it select
+    // EXCLUSIVELY".
+    //
+    //  (1) A root `thing_test.ts` really committed, guarding a mutated
+    //      `src/thing_test.ts`. The argument resolves, so nothing refuses it —
+    //      but bun reads a positional as a SUBSTRING FILTER over the paths it
+    //      discovers, so the run includes the mutated file and it is its own
+    //      RED. Reproduced against real bun by a reviewer.
+    //  (2) `--reporter-outfile out/report.test.ts` with that placeholder
+    //      COMMITTED. It resolves too, and `pathArgs` counted it as a selection
+    //      — so the no-path arm never fired while the argv was in fact a
+    //      whole-suite discovery run that collects the mutated file.
+    //
+    // Both are matching semantics, not existence, so both are decided
+    // lexically: the FILTER arm of `guardRunsTheMutatedFile` and the
+    // option-operand rule in `pathArgs`.
+    const wt = proofWorktreePath('/repo', RUN)
+    const file = 'src/thing_test.ts'
+    const diskOf = (files: Record<string, string>) => {
+      const fs = memFs(files)
+      fs.realpath = async (p: string) => {
+        const path = p.replace(/\/+$/, '')
+        if (fs.files[path] !== undefined) return path
+        if (Object.keys(fs.files).some((f) => f.startsWith(`${path}/`))) return path
+        throw new Error(`ENOENT ${p}`)
+      }
+      return fs
+    }
+    for (const [label, guard, extra] of [
+      ['a filter that resolves', ['bun', 'test', 'thing_test.ts'], { [join(wt, 'thing_test.ts')]: 'assertions\n' }],
+      ['a filter that does not', ['bun', 'test', 'thing_test.ts'], {}],
+      [
+        "an option's resolving operand",
+        ['bun', 'test', '--reporter-outfile', 'out/report.test.ts'],
+        { [join(wt, 'out/report.test.ts')]: 'placeholder\n' },
+      ],
+      [
+        'the same, with a second option before it',
+        ['bun', 'test', '--reporter', 'junit', '--reporter-outfile', '.output/report.test.ts'],
+        {},
+      ],
+    ] as [string, string[], Record<string, string>][]) {
+      const fs = diskOf({ [join(wt, file)]: SRC_BEFORE, ...extra })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([label, out.proved, out.reason.includes('tautology')]).toEqual([label, false, true])
+      // Nothing was ever mutated: the refusal is made before a byte is written.
+      expect(fs.writes).toEqual([])
+    }
+
+    // POSITIVE CONTROL 1 — a selector the mutated path does NOT contain, on a
+    // tree that holds it, is a real selection and the proof runs. Without this
+    // every assertion above could be passing because the target is unprovable.
+    const held = diskOf({ [join(wt, file)]: SRC_BEFORE, [join(wt, 'tests/thing.test.ts')]: 'assertions\n' })
+    const { prover: p1 } = proverOver({}, held)
+    const ok = await p1.prove({ run: RUN, claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/thing.test.ts'] } })
+    expect(ok.reason).not.toContain('tautology')
+    expect(ok.observed).not.toBeNull()
+
+    // POSITIVE CONTROL 2 — the operand rule is about ORDER, not about options:
+    // an option that carries its OWN value has already taken one, so the path
+    // after it is still a selection, and a path BEFORE the options always is.
+    for (const guard of [
+      ['bun', 'test', '--reporter-outfile=report.xml', 'tests/thing.test.ts'],
+      ['bun', 'test', 'tests/thing.test.ts', '--bail'],
+    ]) {
+      const fs = diskOf({ [join(wt, file)]: SRC_BEFORE, [join(wt, 'tests/thing.test.ts')]: 'assertions\n' })
+      const { prover } = proverOver({}, fs)
+      const fine = await prover.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+
+    // POSITIVE CONTROL 3 — the filter arm is SCOPED to a collectible target: a
+    // production module is not turned into a test by a filter that matches its
+    // path, so `bun test limit` stays legal for `src/limit.ts`.
+    const prodFs = diskOf({ [join(wt, CLAIM.file)]: SRC_BEFORE })
+    const { prover: p3 } = proverOver({}, prodFs)
+    const prod = await p3.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', 'src/limit.test.ts'] } })
+    expect(prod.reason).not.toContain('tautology')
+    expect(prod.proved).toBe(true)
+  })
+
+  test('a DIRECTORY guard that collects the mutated support library is the same tautology', async () => {
+    // THE BYPASS: `tests/support/lib.ts` is a legal target now, and `bun test
+    // tests` collects everything under `tests/` — including, if the file were
+    // ever named so a runner picked it up, the mutated file itself. An exact
+    // argv-element match never sees this; the directory does.
+    const file = 'tests/support/lib.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests'] } })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('tautology')
+    expect(out.reason).toContain('tests')
+
+    // POSITIVE CONTROL 1 — the same library with a guard naming a SEPARATE test
+    // is permitted and actually runs. Without this the assertion above could be
+    // passing because every claim on this path is refused.
+    const fs2 = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: p2 } = proverOver({}, fs2)
+    const okOut = await p2.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/support/lib.test.ts'] },
+    })
+    expect(okOut.reason).not.toContain('tautology')
+    expect(okOut.observed).not.toBeNull()
+
+    // POSITIVE CONTROL 2 — a PRODUCTION module keeps its right to a
+    // directory-wide guard: no runner turns `src/limit.ts` into a test just
+    // because `src/` was named. Over-refusing here would block honest proofs.
+    const { prover: p3 } = proverOver()
+    const wide = await p3.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', 'src'] } })
+    expect(wide.reason).not.toContain('tautology')
+    expect(wide.observed).not.toBeNull()
+  })
+
+  test("the runner's own `test` token is not read as the directory test/", async () => {
+    // `bun test …` puts the literal string `test` in argv. Taken as a path it
+    // is the directory `test/`, and every honest guard for a library under
+    // `test/` would be refused as a tautology.
+    const file = 'test/support/lib.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'test/support/lib.test.ts'] },
+    })
+    expect(out.reason).not.toContain('tautology')
+    expect(out.observed).not.toBeNull()
+  })
+
+  test('an OPTION that carries the mutated file names it — an `=` is not a disguise', async () => {
+    // THE BYPASS: `--preload=./tests/support/lib.ts` is ONE argv element, so a
+    // whole-element comparison matches nothing, and it is repo-relative, so the
+    // escapes-the-worktree rule matches nothing either — while bun loads the
+    // mutated file into the very process that runs the guard.
+    for (const [file, arg] of [
+      ['tests/support/lib.ts', '--preload=./tests/support/lib.ts'],
+      // …and it holds for a PRODUCTION target too, which no path rule ever did.
+      ['src/limit.ts', '--preload=src/limit.ts'],
+      ['tests/support/lib.ts', '--preload=tests/support/'],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: ['bun', 'test', arg, 'tests/other.test.ts'] },
+      })
+      expect([arg, out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([arg, false, true, 0])
+    }
+
+    // POSITIVE CONTROL — an option carrying a DIFFERENT file is untouched, so
+    // the rule above cannot be refusing every `=` it sees.
+    const { prover: ok } = proverOver()
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: ['bun', 'test', '--preload=./tests/setup.ts', 'src/other.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test("an OPTION'S OPERAND is not a path — `bun test --timeout 1000` names no test", async () => {
+    // THE BYPASS: read element-wise, `1000` looked like a path argument, so the
+    // argv looked TARGETED and the no-path arm never fired — while the runner
+    // discovered the whole suite and ran the mutated file as its own guard.
+    for (const guard of [
+      ['bun', 'test', '--timeout', '1000'],
+      ['bun', 'test', '--timeout=1000'],
+      ['bun', 'test', '--reporter', 'junit'],
+    ]) {
+      const file = 'src/thing_test.ts'
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+    }
+
+    // …and an option's SEPARATED operand is the option's, not a selection.
+    // `--bail tests/support/lib.test.ts` is spelled exactly like
+    // `--reporter-outfile out/report.test.ts`, which is a file bun WRITES while
+    // it discovers everything; arity is a vocabulary, so this fails CLOSED and
+    // refuses both.
+    const file = 'tests/support/lib.ts'
+    const swallowed = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: strict } = proverOver({}, swallowed)
+    const refused = await strict.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', '--bail', 'tests/support/lib.test.ts'] },
+    })
+    expect(refused.reason).toContain('tautology')
+    expect(swallowed.writes).toEqual([])
+
+    // POSITIVE CONTROL — the over-refusal is spellable around, so the class
+    // this branch adds is not blocked: the SAME guard with the path before the
+    // options, or with the option carrying its own value, is a selection again.
+    for (const guard of [
+      ['bun', 'test', 'tests/support/lib.test.ts', '--bail'],
+      ['bun', 'test', '--bail=1', 'tests/support/lib.test.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test("a RUNNER SCRIPT NAME is not a path — `make test-py` and `npm run test-all` name no test", async () => {
+    // THE BYPASS: the runner's own leading tokens were dropped by a fixed
+    // VOCABULARY, and a script/target name is arbitrary (`test-py`, `test-all`,
+    // `test:unit`). So it sat where a path goes, the argv looked targeted, and a
+    // whole-suite discovery run served as a guard for a file it collects. Only
+    // its POSITION can identify it, which is what `runnerPrefixLength` reads.
+    const file = 'tests/support/lib.ts'
+    for (const guard of [
+      ['make', 'test-py'],
+      ['npm', 'run', 'test-all'],
+      ['yarn', 'run', 'test-ci'],
+      ['pnpm', 'run', 'test:unit'],
+      ['npm', 'test'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+    }
+
+    // POSITIVE CONTROL — the same script name FOLLOWED by a real path argument
+    // is a targeted run and stays legal.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['npm', 'run', 'test-all', 'tests/support/lib.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a RECURSIVE SELECTOR is a search, not a path — `go test ./...` names nothing', async () => {
+    // THE BYPASS: `./...` is go's whole-module selector. It normalizes to the
+    // bare element `...`, which carries no glob character, so it was pushed as
+    // a NAMED PATH — the argv looked targeted, the no-path arm never fired, and
+    // a run that compiles and tests EVERY package (the mutated support library
+    // among them) passed as a guard for that library.
+    const file = 'tests/support/lib.ts'
+    for (const guard of [
+      ['go', 'test', './...'],
+      ['go', 'test', '...'],
+      ['go', 'test', './tests/...'],
+      ['bun', 'test', './...'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+    }
+
+    // POSITIVE CONTROL — a REAL directory under the same runner is still a
+    // targeted guard, so the rule above cannot be refusing every go invocation.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard: ['go', 'test', './cmd/'] } })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('an EXTENSION is not a selection — a report file and a bare filter name no test', async () => {
+    // THE BYPASS: `looksLikeAPath` was the only filter, so anything ending in
+    // an extension counted as "a path was named". `--reporter-outfile=report.xml`
+    // and `--reporter junit.xml` are OUTPUT files of a WHOLE-SUITE run, and
+    // `bun test thing` is a substring FILTER that runs every test whose path
+    // contains it — `src/thing_test.ts` included. Each kept the no-path arm
+    // from firing while the runner discovered the mutated file and ran it.
+    for (const [file, guard] of [
+      ['tests/support/lib.ts', ['bun', 'test', '--reporter=junit', '--reporter-outfile=report.xml']],
+      ['tests/support/lib.ts', ['bun', 'test', '--reporter', 'junit.xml']],
+      ['src/thing_test.ts', ['bun', 'test', 'thing']],
+      ['src/thing_test.ts', ['make', 'test', 'FOO=bar.out']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+    }
+
+    // POSITIVE CONTROLS — the same option beside a REAL test path is targeted,
+    // and an option's own argument is still not swallowed. Without these the
+    // assertions above could be passing because every guard is refused.
+    const file = 'tests/support/lib.ts'
+    for (const guard of [
+      ['bun', 'test', '--reporter-outfile=report.xml', 'tests/support/lib.test.ts'],
+      ['bun', 'test', 'tests/support/lib.test.ts', '--bail'],
+      ['python3', '-m', 'pytest', 'tests/support/lib_test.py'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('an ATTACHED SHORT OPTION carries a path too — `-r./lib.ts` is `--preload=./lib.ts`', async () => {
+    // THE BYPASS: a short option takes its value with NO separator at all, and
+    // bun honours it (`bun test -r./tests/side.ts tests/ok.test.ts` runs the
+    // preloaded side effect). Read as a whole element `-r./tests/support/lib.ts`
+    // equals no path; read by the `=` rule it carries nothing. So the mutated
+    // file was loaded into the very process running the guard, and every
+    // defense above looked straight past it.
+    const file = 'tests/support/lib.ts'
+    for (const arg of ['-r./tests/support/lib.ts', '-rtests/support/lib.ts', '-r=tests/support/lib.ts']) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: ['bun', 'test', arg, 'tests/other.test.ts'] },
+      })
+      expect([arg, out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([arg, false, true, 0])
+    }
+
+    // …and the attached form hides an ESCAPING path just as well, behind the
+    // option letter, where the leading `/`, the `..` and the URL scheme all
+    // stop being the first character of the element.
+    const abs = `${proofWorktreePath('/repo', RUN)}/${CLAIM.file}`
+    for (const arg of [`-r${abs}`, '-r../elsewhere/lib.ts', `-rfile://${abs}`]) {
+      const { prover, host } = proverOver()
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', arg, 'src/other.test.ts'] } })
+      expect([arg, out.proved, host.calls.length]).toEqual([arg, false, 0])
+      expect(out.reason).toContain('must be a repo-relative path inside the worktree')
+    }
+
+    // POSITIVE CONTROL — an attached short option carrying a DIFFERENT,
+    // repo-relative file is untouched, so the rule cannot be refusing every
+    // short option it sees.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', '-r./tests/setup.ts', 'tests/support/lib.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.reason).not.toContain('repo-relative')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a ONE-TOKEN filter is still the mutated file — a bare word, and an operand after a value-less option', async () => {
+    // THE BYPASS, and it is the whole gate in one word. The arms that ask "does
+    // the run REACH the mutated file?" read `pathArgs` — which DROPS a bare word
+    // (no separator, no extension) and DROPS the operand after a value-less
+    // option, because as a SELECTOR neither can be recognised safely. So
+    // `bun test tests/other-control.test.ts helper_test` presented a real
+    // selector (the control test), never fired the no-path arm, and handed bun a
+    // substring filter that collects `tests/support/helper_test.ts` — the
+    // mutated file — as its own guard. Red mutated, green restored, "proved".
+    const file = 'tests/support/helper_test.ts'
+    for (const guard of [
+      ['bun', 'test', 'tests/other-control.test.ts', 'helper_test'],
+      ['bun', 'test', 'tests/other-control.test.ts', '--coverage', 'helper_test.ts'],
+      ['bun', 'test', '--coverage', 'helper_test.ts', 'tests/other-control.test.ts'],
+      ['bun', 'test', 'tests/other-control.test.ts', 'support/helper_test'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      // Refused on the SPELLING, before a byte was written or a command run.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length, fs.writes.length]).toEqual([guard.join(' '), false, true, 0, 0])
+    }
+
+    // POSITIVE CONTROLS — a bare word the mutated path does NOT contain is not a
+    // filter that reaches it, and the option operand rule is unchanged for one.
+    // Without these the assertions above would pass just as well if every extra
+    // operand refused, which would close the class this branch exists to open.
+    for (const guard of [
+      ['bun', 'test', 'tests/other-control.test.ts', 'unrelated'],
+      ['bun', 'test', 'tests/other-control.test.ts', '--coverage', 'src/'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test("an option's OPERAND reaches a DIRECTORY too — `--coverage src/` collects the mutated file", async () => {
+    // The same drop, read through the directory arm rather than the filter one:
+    // `bun test tests/a.test.ts --coverage src/` names `src/` as an operand, and
+    // the mutated `src/thing_test.ts` sits under it. Only the resolution seam
+    // caught this, and only when the directory happened to exist on disk.
+    const file = 'src/thing_test.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/a.test.ts', '--coverage', 'src/'] },
+    })
+    expect([out.proved, out.reason.includes('tautology'), out.reason.includes('directory')]).toEqual([false, true, true])
+  })
+
+  test('a NUMERIC option value is not a filter — `--timeout=1` must not refuse tests/support/v1.ts', async () => {
+    // THE OVER-REFUSAL: the filter arm compared every carried value against the
+    // target as a substring, and `--timeout=1` carries `1`, which
+    // `tests/support/v1.ts` contains. An honest nomination of that library —
+    // guarded by its own separate test — was refused for a tautology nobody
+    // wrote, and there was no spelling around it. A runner matches a filter
+    // against a PATH; an element with no letter in it is an option's argument.
+    const file = 'tests/support/v1.ts'
+    for (const guard of [
+      ['bun', 'test', '--timeout=1', 'tests/support/v1.test.ts'],
+      ['bun', 'test', 'tests/support/v1.test.ts', '--timeout=1'],
+      ['bun', 'test', '--timeout', '1', 'tests/support/v1.test.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const fine = await prover.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+
+    // …and the arm itself still fires: a filter that carries a LETTER and that
+    // the mutated path contains is the same tautology it always was.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: strict } = proverOver({}, fs)
+    const out = await strict.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/other.test.ts', 'v1'] },
+    })
+    expect([out.proved, out.reason.includes('tautology')]).toEqual([false, true])
+  })
+
+  test('a DOTTED MODULE is a path spelled with dots — `python3 -m unittest src.limit` imports the mutated file', async () => {
+    // THE BYPASS: `src.limit` is not `src/limit.py` to any string comparison, so
+    // the naming arm missed it; `src/limit.py` is PRODUCTION, so the collectible
+    // arms never ran; and it names nothing on disk, so the resolved seam dropped
+    // it too. Meanwhile unittest IMPORTS the module — a syntax-breaking mutation
+    // of the file makes the command red and its restore green, and the mutated
+    // file has served as its own guard against an assertion-free "separate"
+    // test. Every dotted PREFIX counts, because the selector keeps going after
+    // the module name (`src.limit.LimitTest.test_under` imports it just the same).
+    for (const [file, guard] of [
+      ['src/limit.py', ['python3', '-m', 'unittest', 'src.limit']],
+      ['src/limit.py', ['python3', '-m', 'unittest', 'src.limit.LimitTest.test_under']],
+      ['src/limit.py', ['python3', '-m', 'pytest', '--pyargs', 'src.limit']],
+      ['src/limit/__init__.py', ['python3', '-m', 'unittest', 'src.limit']],
+      ['limit.py', ['python3', '-m', 'unittest', 'limit']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['python3', '-m', 'pytest', 'tests/other_test.py'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([guard.join(' '), false, true, 0])
+      expect(out.reason).toContain('IMPORTS')
+    }
+
+    // POSITIVE CONTROL — a DIFFERENT module is a separate test and stays legal,
+    // as does the path spelling of one. Without these the rule above would read
+    // as "no python guard is ever accepted".
+    for (const guard of [
+      ['python3', '-m', 'unittest', 'tests.test_limit'],
+      ['python3', '-m', 'pytest', 'tests/test_limit.py'],
+    ]) {
+      const file = 'src/limit.py'
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('`node --test <path>` is a targeted guard — `--test` is the invocation, not an option', async () => {
+    // THE DEAD END: `--test` is what makes node a test runner, but it was read
+    // as an ordinary option, so the path AFTER it was dropped as that option's
+    // operand. The selector list came back empty, the no-path arm fired, and
+    // EVERY node guard for a collectible target was refused — with no other
+    // spelling available, since `node <path> --test` is not test-runner mode.
+    // That is the no-legal-nomination deadlock this card exists to remove,
+    // rebuilt for node repos.
+    const file = 'tests/support/lib.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['node', '--test', 'tests/support/lib.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+
+    // …and the arms it feeds are all still armed under the new prefix: a
+    // whole-suite node run names no path, and a directory one collects the
+    // library. Without these the fix above would read as "node is exempt".
+    for (const guard of [
+      ['node', '--test'],
+      ['node', '--test', 'tests/'],
+      ['node', '--test', '--concurrency', '2'],
+    ]) {
+      const swallowed = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, swallowed)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+    }
+  })
+
+  test('a QUERY, a FRAGMENT and a pytest NODE ID all name the mutated file', async () => {
+    // THE BYPASS, in three spellings no path comparison could see. Node
+    // EXECUTES a query-suffixed relative import — `node --test
+    // --import=./src/limit.mjs?proof tests/other.test.mjs` loads the MUTATED
+    // file into the very process that runs the guard (confirmed against node
+    // v22) — and pytest IMPORTS the file its node ID selects. Neither spelling
+    // equals the repo-relative target, so the naming arm missed both; both
+    // targets are production, so the collectible arms never ran; and the `?`
+    // was read as a GLOB, so even the on-disk seam skipped the element. A
+    // syntax-breaking mutation then supplied its own RED and its restore its
+    // own GREEN, and the gate recorded a proof.
+    for (const [file, guard] of [
+      ['src/limit.mjs', ['node', '--test', '--import=./src/limit.mjs?proof', 'tests/other.test.mjs']],
+      ['src/limit.mjs', ['node', '--test', '--import=./src/limit.mjs#v2', 'tests/other.test.mjs']],
+      ['src/limit.mjs', ['bun', 'test', '-r./src/limit.mjs?proof', 'tests/other.test.ts']],
+      ['src/limit.py', ['python3', '-m', 'pytest', 'src/limit.py::test_probe']],
+      ['src/limit.py', ['python3', '-m', 'pytest', 'src/limit.py::TestLimit::test_probe']],
+      ['src/limit.py', ['python3', '-m', 'pytest', './src/limit.py::test_probe']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      // Refused on the spelling, before a byte was written or a command run.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+    }
+
+    // POSITIVE CONTROLS — the same suffixes on a DIFFERENT file are untouched,
+    // and a single colon is a SCRIPT NAME, not a node ID. Without these the cut
+    // above would read as "any guard carrying punctuation is refused", which
+    // would close the class this branch exists to open.
+    for (const [file, guard] of [
+      ['src/limit.mjs', ['node', '--test', '--import=./tests/setup.mjs?once', 'tests/limit.test.mjs']],
+      ['src/limit.py', ['python3', '-m', 'pytest', 'tests/limit_test.py::test_probe']],
+      ['src/limit.ts', ['npm', 'run', 'test:unit']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard: [...guard] } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('a NUMERIC POSITIONAL is a filter too — `bun test other.test.ts 123` reaches src/123_test.ts', async () => {
+    // THE BYPASS: the filter arm required a LETTER, and asked it of every
+    // element alike. `src/123_test.ts` is a LEGAL nomination — `TEST_BASENAME`
+    // deliberately calls `_test.ts` production, so the name buys no exemption —
+    // while bun COLLECTS it and reads a bare `123` as a substring filter over
+    // the whole discovered suite (its positional filters are a union, verified
+    // against the real runner). So the mutated file ran as its own guard with
+    // nothing here able to see it.
+    const file = 'src/123_test.ts'
+    for (const guard of [
+      ['bun', 'test', 'tests/other.test.ts', '123'],
+      ['bun', 'test', 'tests/other.test.ts', '123_test'],
+      ['bun', 'test', 'tests/other.test.ts', '3_te'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('filter'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+    }
+
+    // POSITIVE CONTROL, and it is the whole of the new distinction: the SAME
+    // digits after a value-less option are that OPTION'S argument, not a filter
+    // — `--timeout 123` is not a nomination of `src/123_test.ts`. Drop the
+    // standalone test and this over-refuses every numeric option value, which
+    // is the over-refusal the letter rule was introduced to fix.
+    for (const guard of [
+      ['bun', 'test', '--timeout', '123', 'tests/other.test.ts'],
+      ['bun', 'test', '--timeout=123', 'tests/other.test.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file, guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('the no-selection refusal SAYS WHY, and names the element it dropped', async () => {
+    // THE CARD'S OWN COMPLAINT, one level down. `bun test --coverage
+    // tests/support/lib.test.ts` plainly names a path and was refused with "it
+    // names no path" — true, useless, and blaming the build for an omission it
+    // had no way to see. The rule that dropped the operand lived only in a
+    // docblock, which is not where the next build looks. Every arm now names
+    // the element and the spelling that works.
+    const file = 'tests/support/lib.ts'
+    const cases: Array<[string[], string]> = [
+      [['bun', 'test', '--coverage', 'tests/support/lib.test.ts'], 'operand of --coverage'],
+      // cargo's whole story: `--test` takes a test TARGET name, so no guard
+      // spelling selects for a collectible target under `tests/`. It fails
+      // CLOSED and now SAYS so instead of implying an omission.
+      [['cargo', 'test', '--test', 'integration'], 'operand of --test'],
+      [['go', 'test', './...'], 'names a search'],
+      // …and this one also PINS `looksLikeAPath`: without that filter `zz`
+      // counts as a selection, the no-path arm never fires, and a whole-suite
+      // run that collects the mutated library is accepted as its guard.
+      [['bun', 'test', 'zz'], 'neither a directory separator nor an extension'],
+      [['bun', 'test', 'report.xml'], 'not a name an allowlisted runner would RUN'],
+      [['bun', 'test'], 'it names no path at all'],
+    ]
+    for (const [guard, why] of cases) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), out.reason.includes(why)]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        true,
+      ])
+    }
+
+    // The actionable half: the refusal carries the spelling that IS accepted…
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const dropped = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', '--coverage', 'tests/support/lib.test.ts'] },
+    })
+    expect(dropped.reason).toContain('put the path BEFORE the options')
+
+    // …and that spelling really is accepted. POSITIVE CONTROL: without it the
+    // message above would be advice that does not work.
+    const ok = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: reordered } = proverOver({}, ok)
+    const fine = await reordered.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/support/lib.test.ts', '--coverage'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a SEARCH beside a selector still searches — `go test ./cmd/ ./...` reaches the mutated file', async () => {
+    // THE BLOCKER. A search was dropped from every comparison that compares a
+    // SPELLING (`pathArgs`, `argumentOperands`, `guardPathCandidates`) on the
+    // reasoning that the no-selection arm catches it — and that reasoning only
+    // holds while the search is the ONLY selector. Put `./cmd/` beside `./...`
+    // and `pathArgs` is non-empty, so the arm never fires, while the directory
+    // and filter arms compare `cmd` against a target under `tests/` and see
+    // nothing. `go test ./...` compiles the mutated package all the same, so
+    // the mutated file supplied its own RED and its restore its own GREEN.
+    const helper = 'tests/support/helper.go'
+    const goFs = memFs({ [join(proofWorktreePath('/repo', RUN), helper)]: SRC_BEFORE })
+    const { prover, host } = proverOver({}, goFs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: helper, guard: ['go', 'test', './cmd/', './...'] },
+    })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('tautology')
+    // …and it says WHICH element reaches, and how far: `./...` is rooted at the
+    // repo root, so it reaches every collectible file there is.
+    expect(out.reason).toContain('names a search rooted at the repo root')
+    expect(out.observed).toBeNull()
+    expect(host.calls).toHaveLength(0)
+
+    // A SEARCH CARRIED BY AN OPTION is the same reach with an `=` on it, and it
+    // is read out of the option's value rather than off the element.
+    const util = 'tests/support/util.ts'
+    const carriedFs = memFs({ [join(proofWorktreePath('/repo', RUN), util)]: SRC_BEFORE })
+    const { prover: carried, host: carriedHost } = proverOver({}, carriedFs)
+    const outCarried = await carried.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: util, guard: ['bun', 'test', 'app/other.test.ts', '--coverage-dir=tests/**'] },
+    })
+    expect(outCarried.proved).toBe(false)
+    expect(outCarried.reason).toContain('names a search rooted at tests')
+    expect(outCarried.observed).toBeNull()
+    expect(carriedHost.calls).toHaveLength(0)
+
+    // POSITIVE CONTROL — the fail-open half, and the whole reason a search is
+    // read by ROOT rather than refused wholesale. `app/*.test.ts` is a search
+    // too, and it reaches nothing under `tests/`, so it stays a legal guard for
+    // a support library. Without this the arm above reads as "any glob in the
+    // argv is a tautology", which closes the class this branch exists to open.
+    const okFs = memFs({ [join(proofWorktreePath('/repo', RUN), util)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, okFs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: util, guard: ['bun', 'test', 'app/other.test.ts', 'app/*.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a percent-encoded spelling is the mutated file — the loader decodes what the comparison must too', async () => {
+    // `--preload=./src/limit%2Ets` is `--preload=./src/limit.ts`: node resolves
+    // a module specifier as a URL and loads the encoded spelling (reproduced
+    // end-to-end on node v22), while it equals no repo-relative target, matches
+    // no arm, and ENOENTs out of `guardPathCandidates`. The mutated file was
+    // loaded into the very process that ran its own guard and the gate recorded
+    // `proved: true`.
+    const { prover, host } = proverOver()
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: ['bun', 'test', '--preload=./src/limit%2Ets', 'src/other.test.ts'] },
+    })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('tautology')
+    expect(out.reason).toContain(CLAIM.file)
+    expect(out.observed).toBeNull()
+    expect(host.calls).toHaveLength(0)
+
+    // POSITIVE CONTROL — a MALFORMED `%` is not an encoding. `100%` throws in
+    // `decodeURIComponent`, and a decoder that threw would fail the nomination
+    // rather than refuse it; the literal spelling is kept, it matches nothing,
+    // and the guard is permitted.
+    const { prover: ok } = proverOver()
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: ['bun', 'test', 'src/other.test.ts', '--test-name-pattern=100%'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a URL inside an option VALUE still leaves the worktree', async () => {
+    // The scheme test was anchored at `(^|=)`, so in
+    // `--import=data:text/javascript,import("file:///…")` the value at the `=`
+    // is `data:` — a colon followed by a letter, which is deliberately allowed
+    // for `npm run test:unit` — and the `file:///` that actually loads the
+    // mutated file sits mid-element, where no arm looked. A guard runs IN the
+    // worktree and never needs a URL to name a file in it.
+    for (const escape of [
+      '--import=data:text/javascript,import("file:///pw/lib.ts")',
+      // …and the same shape with NO scheme on it at all: an absolute path
+      // opening a token mid-element is that same absolute path.
+      '--outfile=report;/pw/leak.ts',
+    ]) {
+      const { prover, host } = proverOver()
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, guard: ['bun', 'test', 'src/other.test.ts', escape] },
+      })
+      expect([escape, out.proved, out.reason.includes('must be a repo-relative path inside the worktree')]).toEqual([
+        escape,
+        false,
+        true,
+      ])
+      expect(out.observed).toBeNull()
+      expect(host.calls).toHaveLength(0)
+    }
+
+    // POSITIVE CONTROL — a SCRIPT NAME's colon is not a scheme. `npm run
+    // test:unit` is an honest guard and stays one.
+    const { prover: ok } = proverOver()
+    const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, guard: ['npm', 'run', 'test:unit'] } })
+    expect(fine.reason).not.toContain('must be a repo-relative path inside the worktree')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a query-suffixed specifier is one file, not a search — and the refusal says which', async () => {
+    // `pathArgs` asked `namesASearch` of the RAW element while
+    // `guardPathCandidates` normalised first, and `./report.mjs?probe` has a
+    // `?` in it. Read raw it "named a search" and the refusal told the build its
+    // guard was a whole-repo discovery run — an argv nobody wrote. It fails
+    // CLOSED either way; what it got wrong is WHY, which is what the next build
+    // reads. Normalise first, in both places, and the element is what it is: one
+    // file's specifier, which no allowlisted runner would RUN.
+    const file = 'tests/support/lib.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover } = proverOver({}, fs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', './report.mjs?probe'] },
+    })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('is not a name an allowlisted runner would RUN')
+    expect(out.reason).not.toContain('names a search')
+
+    // POSITIVE CONTROL — normalise-then-classify also keeps a query-suffixed
+    // REAL selector selectable, so the same fix does not turn every `?` into a
+    // dropped element and a no-selection refusal.
+    const okFs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, okFs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', './src/other.test.ts?probe'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+})
+
+describe('a mutation target is classified by what DECLARES it a test', () => {
+  const TABLE: Array<[string, 'test' | 'prose' | 'production']> = [
+    ['tests/support/scrub-instance-env.ts', 'production'],
+    ['tests/support/scrub-instance-env-probe.ts', 'production'],
+    ['tests/support/scrub-instance-env.test.ts', 'test'],
+    ['tests/integration/pty-e2e-registered.test.ts', 'test'],
+    ['gbrain-memory/__tests__/foo.test.ts', 'test'],
+    ['gbrain-memory/__tests__/memory-swap-seam.depcruise.test.ts', 'test'],
+    ['src/__tests__/limit.ts', 'test'], // DIRECT child of __tests__
+    ['a/__tests__/support/helper.ts', 'production'], // nested below __tests__/<subdir>: matches neither declaration; the tautology check, not the path, is the defense
+    ['src/foo_test.go', 'test'],
+    ['app/bar.spec.tsx', 'test'],
+    // THE NAMES A RUNNER COLLECTS BUT NO CONVENTION DECLARES. They stay
+    // `production` ON PURPOSE, and this is the boundary that may not move
+    // silently: this classifier feeds the no-production-file EXEMPTION, and
+    // file names are written by the BUILD, so every name admitted here is a
+    // name a build could give a production file to buy itself an exemption.
+    // `src/ab-test.ts` was exactly that hole. The tautology these names could
+    // otherwise buy — mutate one, then let a directory or bare-runner guard run
+    // it as its own test — is refused on the GUARD side instead
+    // (`RUNNER_COLLECTED_BASENAME`), where a wrong answer only ever costs a
+    // nomination its guard.
+    ['tests/self_test.ts', 'production'],
+    ['tests/support/helper_spec.ts', 'production'],
+    ['tests/support/helper-test.ts', 'production'],
+    ['scripts/tools_test.mjs', 'production'],
+    ['tests/test_probe.py', 'production'],
+    ['src/ab-test.ts', 'production'],
+    ['src/thing_test.ts', 'production'],
+    ['testfoo.py', 'production'],
+    ['src/test-foo.js', 'production'],
+    ['test.ts', 'production'],
+    ['tests/test.ts', 'production'],
+    ['src/limit.ts', 'production'],
+    ['docs/limits.md', 'prose'],
+  ]
+
+  test('the table holds, path by path', () => {
+    // A FULL-LITERAL comparison, so an extraction that returned nothing at all
+    // cannot silently pass.
+    expect(TABLE.map(([p]) => [p, classifyMutationTarget(p)])).toEqual(TABLE)
+    expect(TABLE.length).toBeGreaterThanOrEqual(17)
+    const kinds = TABLE.map(([, k]) => k)
+    expect(kinds).toContain('production')
+    expect(kinds).toContain('test')
+  })
+
+  test('the declaration predicate is the basename or a DIRECT __tests__ parent', () => {
+    expect(isDeclaredTestFile('tests/support/scrub-instance-env.test.ts')).toBe(true)
+    expect(isDeclaredTestFile('src/__tests__/limit.ts')).toBe(true)
+    expect(isDeclaredTestFile('tests/support/scrub-instance-env.ts')).toBe(false)
+    expect(isDeclaredTestFile('a/__tests__/support/helper.ts')).toBe(false)
+  })
+
+  test('only the CONVENTIONAL declarations count — the looser names a runner collects do not', () => {
+    // Deleting any alternative from TEST_BASENAME reddens one of these.
+    for (const p of ['a/b.test.ts', 'a/b.spec.tsx', 'a/b.test.mjs', 'src/foo_test.go', 'src/foo_test.py', 'src/foo_test.rs']) {
+      expect([p, isDeclaredTestFile(p)]).toEqual([p, true])
+    }
+    // …and these are NOT declarations, however freely a runner would collect
+    // them. Widening TEST_BASENAME back to `[._-](test|spec)\.` or to
+    // `test_*.py` reddens this loop — which is the point: this regex is what
+    // the no-production-file exemption is measured with, and the names are the
+    // build's own. A support library keeps its right to be mutated for the same
+    // reason.
+    for (const p of [
+      'src/ab-test.ts',
+      'src/thing_test.ts',
+      'tests/support/helper_spec.ts',
+      'tests/test_probe.py',
+      'tests/support/scrub-instance-env.ts',
+      'tests/support/env-probe.ts',
+      'src/testing.ts',
+    ]) {
+      expect([p, isDeclaredTestFile(p)]).toEqual([p, false])
+    }
+  })
+})
+
+describe('diffHasNoLegalMutationTarget — the exemption predicate, including its unreachable arms', () => {
+  test('null and EMPTY are not exempt — a diff we know nothing about fails closed', () => {
+    // `changedFilesOnBranch` collapses empty into null today, so the gate cannot
+    // reach `[]`. Pinned HERE precisely because of that: `[].every(…)` is
+    // vacuously true, so dropping the emptiness guard would exempt a diff the
+    // gate could not read a single file of.
+    expect(diffHasNoLegalMutationTarget(null)).toBe(false)
+    expect(diffHasNoLegalMutationTarget([])).toBe(false)
+  })
+
+  test('all-test/all-prose is exempt; ONE production file is not', () => {
+    expect(diffHasNoLegalMutationTarget(['tests/a.test.ts', 'docs/x.md'])).toBe(true)
+    expect(diffHasNoLegalMutationTarget(['tests/a.test.ts', 'docs/x.md', 'src/limit.ts'])).toBe(false)
+    // The support library IS production for this purpose — that is the whole
+    // #489 fix: its diff must still be proved.
+    expect(diffHasNoLegalMutationTarget(['tests/support/scrub-instance-env.ts'])).toBe(false)
+    // …and so is a name a runner would COLLECT but no convention DECLARES. The
+    // exemption is bought with names the build writes, so widening the
+    // classifier to cover every collectible name would widen this — which is why
+    // that breadth lives on the guard side instead.
+    expect(diffHasNoLegalMutationTarget(['testfoo.py', 'src/test-foo.js', 'docs/x.md'])).toBe(false)
+  })
+})
+
+describe('missingClaimRefusalReason — the refusal names WHY, and never blames the build unfairly', () => {
+  const UNREADABLE = 'mutation proof required but the branch diff could not be read — a proof cannot be bound to it'
+
+  test('an unreadable diff and an EMPTY one say different things, and neither blames the build', () => {
+    expect(missingClaimRefusalReason(null)).toBe(UNREADABLE)
+    const empty = missingClaimRefusalReason([])
+    expect(empty).not.toBe(UNREADABLE)
+    expect(empty).toContain('empty')
+    expect(empty).not.toContain('nominated no mutation')
+  })
+
+  test('a legal target that existed is NAMED', () => {
+    const reason = missingClaimRefusalReason(['tests/a.test.ts', 'src/limit.ts'])
+    expect(reason).toContain('nominated no mutation')
+    expect(reason).toContain('src/limit.ts')
+  })
+
+  test('no legal target at all is a gate defect, and says which file it considered', () => {
+    const reason = missingClaimRefusalReason(['tests/a.test.ts', 'docs/x.md'])
+    expect(reason).not.toContain('nominated no mutation')
+    expect(reason).toContain('tests/a.test.ts')
+    expect(reason).toContain('a declared test file')
+    expect(reason).toContain('gate defect')
+  })
+
+  test('a DELETED production file is never named as the target the build should have nominated', () => {
+    // THE DEADLOCK THIS ENDS. The refusal used to read "a legal mutation target
+    // existed: src/gone.ts changed in this diff" — and nominating exactly that
+    // file was refused by the prover with "does not exist at <sha> — the
+    // mutation cannot apply". Two refusals in a closed loop, and a reader left
+    // to re-derive why. Both reviewers reproduced it with real git.
+    const files = ['src/gone.ts', 'tests/a.test.ts']
+    const reason = missingClaimRefusalReason(files, ['src/gone.ts'])
+    expect(reason).not.toContain('nominated no mutation')
+    expect(reason).toContain('DELETIONS')
+    expect(reason).toContain('src/gone.ts')
+    expect(reason).toContain('absent at the head being proved')
+    // …and it is NOT reported as a gate defect: this branch is reachable and
+    // the classifiers agree — a deletion is a production change with no
+    // mutatable referent.
+    expect(reason).not.toContain('gate defect')
+
+    // POSITIVE CONTROL 1 — the SAME file list with nothing deleted still blames
+    // the build, so the assertion above is about the status and nothing else.
+    const modified = missingClaimRefusalReason(files)
+    expect(modified).toContain('nominated no mutation')
+    expect(modified).toContain('src/gone.ts')
+
+    // POSITIVE CONTROL 2 — a diff that deletes one production file and MODIFIES
+    // another still names the modifiable one: there is a nomination to make.
+    const mixed = missingClaimRefusalReason(['src/gone.ts', 'src/limit.ts'], ['src/gone.ts'])
+    expect(mixed).toContain('nominated no mutation')
+    expect(mixed).toContain('src/limit.ts')
+    expect(mixed).not.toContain('DELETIONS')
+  })
+
+  test('a deletion is a changed file and a production change — it just is not a TARGET', () => {
+    // The two halves this branch deliberately keeps apart. `claim.file` must
+    // appear in the diff, so a deletion stays in the list; and the exemption
+    // must NOT fire for it, or `git mv src/limit.ts src/limit.test.ts` (which
+    // `--no-renames` reports as a deletion plus a test-shaped addition) would
+    // buy the free pass that flag exists to deny.
+    expect(legalMutationTargets(['src/gone.ts'], ['src/gone.ts'])).toEqual([])
+    expect(diffHasNoLegalMutationTarget(['src/gone.ts'])).toBe(false)
+    expect(diffHasNoLegalMutationTarget(['src/limit.ts', 'src/limit.test.ts'])).toBe(false)
+    // POSITIVE CONTROL — the exemption still fires when the diff really has no
+    // production file at all, so the assertions above are about deletions.
+    expect(diffHasNoLegalMutationTarget(['tests/a.test.ts', 'docs/x.md'])).toBe(true)
+  })
+
+  test('the target it NAMES is one a runner could actually redden, and it says so when none is', () => {
+    // Every legal target is legal by CLASSIFICATION — not prose, not a declared
+    // test — and that admits files no allowlisted runner executes. A
+    // `.github/workflows` YAML is not prose (`PROSE_DIR_DENYLIST` keeps it out),
+    // so a workflow-plus-README diff was told, confidently, that `ci.yml` was
+    // the mutation the build should have nominated. It is not a nomination
+    // anyone can make; it is a finding for the reviewer, and the message now
+    // says which of the two it is.
+    const unprovable = missingClaimRefusalReason(['.github/workflows/ci.yml', 'README.md'])
+    expect(unprovable).toContain('ci.yml')
+    expect(unprovable).toContain('if no allowlisted runner can execute it, that is a finding for the reviewer')
+
+    // …and a SOURCE file in the same diff is preferred over it — `ci.yml` FIRST
+    // in the list, so this proves the preference and not the order of the array.
+    const provable = missingClaimRefusalReason(['.github/workflows/ci.yml', 'src/limit.ts'])
+    expect(provable).toContain('src/limit.ts')
+    expect(provable).not.toContain('if no allowlisted runner can execute it, that is a finding for the reviewer')
+  })
 })
 
 describe('NO AGENT MAY COMPOSE THE EVIDENCE BLOCK', () => {
@@ -819,11 +2275,158 @@ describe('the prose-only exemption FAILS CLOSED', () => {
   })
 
   test('the file list comes from git, and an unreadable diff reads as null', async () => {
-    const files = await changedFilesOnBranch(async () => res(0, 'README.md\ndocs/a.md\n'), '/repo', 'main', 'feat-x')
+    const payload = nameStatus('README.md\0docs/a.md\0')
+    const files = await changedFilesOnBranch(async () => res(0, payload), '/repo', 'main', 'feat-x')
     expect(files).toEqual(['README.md', 'docs/a.md'])
     expect(await changedFilesOnBranch(async () => res(1), '/repo', 'main', 'feat-x')).toBeNull()
-    expect(await changedFilesOnBranch(async () => res(0, ''), '/repo', 'main', 'feat-x')).toBeNull()
-    expect(await changedFilesOnBranch(async () => res(0, 'a.md'), '/repo', 'main', null)).toBeNull()
+    expect(await changedFilesOnBranch(async () => res(0, payload), '/repo', 'main', null)).toBeNull()
+    // AN EMPTY DIFF IS AN ANSWER, NOT A FAILURE, and the two must not share a
+    // return value: git exiting 0 with nothing to print is `[]`, git FAILING is
+    // null. Collapsed together, the gate reported "the branch diff could not be
+    // read" about a diff it read perfectly — sending the reader after a git
+    // problem that never happened, and leaving the refusal that names the real
+    // condition unreachable. Both still fail closed (see the gate tests below).
+    expect(await changedFilesOnBranch(async () => res(0, ''), '/repo', 'main', 'feat-x')).toEqual([])
+    expect(await changedFilesWithStatus(async () => res(0, ''), '/repo', 'main', 'feat-x')).toEqual([])
+    // A MALFORMED ANSWER IS NOT A FILE LIST. A status/path stream that does not
+    // pair up, a record not terminated by its NUL, or a status field that is
+    // not the single letter `--no-renames` guarantees (`R100` carries TWO
+    // paths, and reading it as one would drop the source) all read as null,
+    // i.e. REQUIRE THE PROOF — never as a shorter list that quietly exempts.
+    for (const bad of ['M\0a.md', 'M\0a.md\0M\0', 'R100\0src/a.ts\0src/b.ts\0', 'M\0\0', 'a.md\0']) {
+      expect(await changedFilesOnBranch(async () => res(0, bad), '/repo', 'main', 'feat-x')).toBeNull()
+    }
+    // …AND A TRUNCATED STREAM, which is the one the pairing check above cannot
+    // catch: `M\0a.md\0D` has an even field count once the unterminated tail is
+    // sliced off, so without the terminator check it parses as the SHORTER list
+    // `['a.md']` and the truncated deletion vanishes. `M` alone — a stream with
+    // no NUL at all — slices to nothing and would read as an EMPTY diff. Both
+    // must be null: a stream we cannot read whole REQUIRES THE PROOF.
+    expect(await changedFilesOnBranch(async () => res(0, 'M\0a.md\0D'), '/repo', 'main', 'feat-x')).toBeNull()
+    expect(await changedFilesOnBranch(async () => res(0, 'M'), '/repo', 'main', 'feat-x')).toBeNull()
+    // POSITIVE CONTROL: the same stream, well-formed, is read.
+    expect(await changedFilesOnBranch(async () => res(0, 'M\0a.md\0'), '/repo', 'main', 'feat-x')).toEqual(['a.md'])
+  })
+
+  test('the status comes back with the path, so a DELETION is not mistaken for a mutation target', async () => {
+    // A deleted path really did change and stays in the list — `claim.file` must
+    // appear there — but it is absent at the pinned head, so the prover refuses
+    // any nomination of it. Reading the status is what tells the two apart.
+    const entries = await changedFilesWithStatus(
+      async () => res(0, nameStatus('src/gone.ts\0src/limit.ts\0', ['src/gone.ts'])),
+      '/repo',
+      'main',
+      'feat-x',
+    )
+    expect(entries).toEqual([
+      { path: 'src/gone.ts', deleted: true },
+      { path: 'src/limit.ts', deleted: false },
+    ])
+    // The deletion is a changed file…
+    expect(await changedFilesOnBranch(async () => res(0, nameStatus('src/gone.ts\0', ['src/gone.ts'])), '/repo', 'main', 'x')).toEqual(
+      ['src/gone.ts'],
+    )
+    // …and it is NOT a legal mutation target, while the same path modified is.
+    expect(legalMutationTargets(['src/gone.ts', 'src/limit.ts'], ['src/gone.ts'])).toEqual(['src/limit.ts'])
+    expect(legalMutationTargets(['src/gone.ts'], ['src/gone.ts'])).toEqual([])
+    expect(legalMutationTargets(['src/gone.ts'], [])).toEqual(['src/gone.ts'])
+  })
+
+  test("a LEADING SPACE survives the host seam's trim — `--name-status` is what protects the first path", async () => {
+    // THE BUG THIS CLOSES. `run_host` returns `stdout.trim()` (git-mode.ts), and
+    // that runs before this parser sees a byte. Under `--name-only` the first
+    // record WAS the first path, so a branch whose only changed file is
+    // ` README.md` (leading space — a legal git path, and NOT README.md)
+    // arrived as `README.md`, classified as prose, and bought the prose-only
+    // exemption — defeating the byte-exactness this same parser fails closed on.
+    const spaced = ' README.md'
+    const trimming = async (): Promise<HostCommandResult> => diffRes(nameStatus(`${spaced}\0`))
+    expect(await changedFilesOnBranch(trimming, '/repo', 'main', 'feat-x')).toEqual([spaced])
+    // The consequence, not just the string: the odd name is not prose, so the
+    // exemption cannot fire on it.
+    expect(isProseOnlyChange([spaced])).toBe(false)
+    // POSITIVE CONTROL — the space is the only difference: the same name
+    // without it reads back identically and IS prose.
+    expect(await changedFilesOnBranch(async () => diffRes(nameStatus('README.md\0')), '/repo', 'main', 'x')).toEqual([
+      'README.md',
+    ])
+    expect(isProseOnlyChange(['README.md'])).toBe(true)
+  })
+
+  test('the diff is asked for with --no-renames, so a rename cannot hide its SOURCE', async () => {
+    // Rename detection prints only the DESTINATION. `git mv src/limit.ts
+    // src/limit.test.ts` would then show the diff as touching nothing but a
+    // declared test — and carry the whole change into the new exemption. The
+    // source path is a production file that really did change.
+    const argv: string[][] = []
+    await changedFilesOnBranch(
+      async (cmd) => {
+        argv.push([...cmd])
+        return diffRes(nameStatus('src/limit.ts\0'))
+      },
+      '/repo',
+      'main',
+      'feat-x',
+    )
+    expect(argv).toHaveLength(1)
+    expect(argv[0]).toContain('--no-renames')
+    // …and with `-z`, which is the flag that actually keeps the bytes: it turns
+    // C-QUOTING off as well as line-splitting, so a path with a byte outside
+    // ASCII arrives as itself rather than as `"tests/s\303\274\303\237.test.ts"`
+    // — a spelling that matches no test convention, classifies a declared test
+    // as production, and can never equal `claim.file` either. (What real git
+    // does with it is asserted in the real-git suite.)
+    expect(argv[0]).toContain('-z')
+    // …and with `--name-status`, which is not cosmetic: the leading status
+    // letter is what stops `run_host`'s whole-stdout trim from eating a leading
+    // space off the FIRST path, and it is how a deletion is told from an edit.
+    expect(argv[0]).toContain('--name-status')
+    // `core.quotePath=false` is belt and braces and is INERT under `-z` —
+    // pinned as argv shape only, so that a future reader who drops `-z` does
+    // not silently reintroduce quoting. It is not the mechanism.
+    expect(argv[0]).toContain('core.quotePath=false')
+  })
+
+  test('a path is BYTES: NUL-separated and never trimmed, so trailing space cannot forge a test name', async () => {
+    // THE BUG THIS CLOSES. The reader used to split on newlines and `.trim()`
+    // every line. `src/logic.test.ts ` — trailing space, a legal git path, and
+    // a PRODUCTION file — arrived trimmed to `src/logic.test.ts`, which is a
+    // DECLARED TEST. That is the very input the no-production-file exemption is
+    // decided on, so a diff of one such file bought itself an exemption and
+    // merged with no proof at all.
+    const spaced = 'src/logic.test.ts '
+    const files = await changedFilesOnBranch(
+      async () => diffRes(nameStatus(`${spaced}\0src/limit.ts\0`)),
+      '/repo',
+      'main',
+      'feat-x',
+    )
+    expect(files).toEqual([spaced, 'src/limit.ts'])
+    // The consequence, not just the string: it classifies as PRODUCTION, so the
+    // exemption cannot fire on it.
+    expect(classifyMutationTarget(spaced)).toBe('production')
+    expect(diffHasNoLegalMutationTarget([spaced])).toBe(false)
+    // POSITIVE CONTROL — the untrimmed name really is the only difference: the
+    // same path WITHOUT the space is a declared test and does buy the exemption.
+    expect(diffHasNoLegalMutationTarget([spaced.trim()])).toBe(true)
+
+    // A path may also CONTAIN a newline. Splitting on lines tore it into two
+    // half-paths, neither of which is any file; NUL keeps it one.
+    const newlined = 'src/od\nd.ts'
+    expect(
+      await changedFilesOnBranch(async () => diffRes(nameStatus(`${newlined}\0`)), '/repo', 'main', 'feat-x'),
+    ).toEqual([newlined])
+  })
+
+  test('prose is BYTES too — `README.md ` is not README.md, and does not buy the prose exemption', async () => {
+    // The same non-preservation, one classifier over: trimming here let a file
+    // whose name ends in a space carry a whole diff into the prose-only
+    // exemption. Fails CLOSED — an odd name means "require the proof".
+    expect(isProseOnlyChange(['README.md '])).toBe(false)
+    expect(isProseOnlyChange([' README.md'])).toBe(false)
+    // POSITIVE CONTROL: the exact name is still prose, so the rule above is
+    // about the whitespace and nothing else.
+    expect(isProseOnlyChange(['README.md'])).toBe(true)
   })
 })
 
@@ -837,7 +2440,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     const scripted = scriptedHost(script)
     return {
       run_host: async (cmd: string[], cwd?: string): Promise<HostCommandResult> => {
-        if (cmd.includes('diff') && cmd.includes('--name-only')) return res(0, files)
+        if (cmd.includes('diff') && cmd.includes('--name-status')) return diffRes(nameStatus(files))
         return scripted.run(cmd, cwd)
       },
       run_guard: async (argv: string[], cwd: string): Promise<HostCommandResult> => scripted.run(argv, cwd),
@@ -850,7 +2453,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: CLAIM,
       base_branch: 'main',
-      ...gateDeps('src/limit.ts\n'),
+      ...gateDeps('src/limit.ts\0'),
       fs,
     })
     expect(out.ok).toBe(true)
@@ -866,7 +2469,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     // touches. It proves red-then-green perfectly, and says nothing about the
     // merge — so one boilerplate nomination would satisfy the phase forever.
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
-    const deps = gateDeps('trident/merge.ts\n')
+    const deps = gateDeps('trident/merge.ts\0')
     const out = await runMutationProofGate({ run: RUN, claim: CLAIM, base_branch: 'main', ...deps, fs })
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('is not in this branch')
@@ -880,7 +2483,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     // refused at the CLAIM, before either one is executed.
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
     const ran: string[][] = []
-    const deps = gateDeps('src/limit.ts\n')
+    const deps = gateDeps('src/limit.ts\0')
     const out = await runMutationProofGate({
       run: RUN,
       claim: { ...CLAIM, guard: ['bash', '-c', 'grep -q "n < LIMIT" src/limit.ts'], control: ['sh', '-c', 'echo ok'] },
@@ -906,7 +2509,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       claim: CLAIM,
       base_branch: 'main',
       run_host: async (cmd, cwd) => {
-        if (cmd.includes('diff') && cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('diff') && cmd.includes('--name-status')) return diffRes(nameStatus('src/limit.ts\0'))
         if (cmd.includes('rev-parse')) {
           headReads += 1
           // The proof reads the head first; a push lands before the gate re-reads it.
@@ -940,9 +2543,9 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       claim: CLAIM,
       base_branch: 'main',
       run_host: async (cmd, cwd) => {
-        if (cmd.includes('--name-only')) {
+        if (cmd.includes('--name-status')) {
           diffRanges.push(cmd[cmd.length - 1] ?? '')
-          return res(0, 'src/limit.ts\n')
+          return diffRes(nameStatus('src/limit.ts\0'))
         }
         if (cmd.includes('rev-parse')) return res(0, HEAD)
         return scripted.run(cmd, cwd)
@@ -968,7 +2571,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       claim: CLAIM,
       base_branch: 'main',
       run_host: async (cmd, cwd) => {
-        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('src/limit.ts\0'))
         if (cmd.includes('rev-parse')) {
           heads += 1
           return res(0, heads === 1 ? HEAD : 'c'.repeat(40))
@@ -987,10 +2590,12 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: null,
       base_branch: 'main',
-      ...gateDeps('src/limit.ts\n'),
+      ...gateDeps('src/limit.ts\0'),
     })
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('nominated no mutation')
+    // The refusal now names the legal target that existed and was not nominated.
+    expect(out.reason).toContain('src/limit.ts')
     expect(out.evidence).toBeNull()
   })
 
@@ -1010,7 +2615,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run_host: async (cmd) => {
         calls.push(cmd)
         if (cmd.includes('rev-parse')) return res(0, HEAD)
-        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('src/limit.ts\0'))
         return res(0)
       },
       fs,
@@ -1019,7 +2624,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.reason).toContain(`the merge would take dddddddd but the branch tip is ${HEAD.slice(0, 8)}`)
     expect(out.evidence).toBeNull()
     // Nothing was read and nothing was provisioned for the wrong commit.
-    expect(calls.some((c) => c.includes('--name-only'))).toBe(false)
+    expect(calls.some((c) => c.includes('--name-status'))).toBe(false)
     expect(calls.some((c) => c.includes('worktree'))).toBe(false)
   })
 
@@ -1031,7 +2636,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       // Same commit, spelled the way git would NOT: the comparison normalises.
       expected_head: `  ${HEAD.toUpperCase()}  `,
-      ...gateDeps('src/limit.ts\n'),
+      ...gateDeps('src/limit.ts\0'),
       fs,
     })
     expect(out.ok).toBe(true)
@@ -1046,7 +2651,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       run_host: async (cmd) => {
         calls.push(cmd)
-        if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('README.md\0docs/a.md\0'))
         // The gate PINS the commit before it reads the diff, and re-reads it to
         // confirm the branch has not moved under the exemption.
         if (cmd.includes('rev-parse')) return res(0, HEAD)
@@ -1069,7 +2674,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       claim: null,
       base_branch: 'main',
       run_host: async (cmd) => {
-        if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('README.md\0docs/a.md\0'))
         if (cmd.includes('rev-parse')) {
           heads += 1
           return res(0, heads === 1 ? HEAD : 'b'.repeat(40))
@@ -1080,6 +2685,153 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.ok).toBe(false)
     expect(out.exempt).toBe(false)
     expect(out.reason).toContain('moved while the prose-only exemption')
+  })
+
+  test('a diff of only DECLARED TESTS plus prose is exempt, with its OWN reason', async () => {
+    // The #489 class: every changed file is a declared test or documentation, so
+    // the set of nominations that could pass is EMPTY. git — not the agent —
+    // says no production file changed, so no production behaviour regressed.
+    const calls: string[][] = []
+    const host = async (cmd: string[]): Promise<HostCommandResult> => {
+      calls.push(cmd)
+      if (cmd.includes('--name-status')) {
+        return diffRes(nameStatus('tests/support/scrub.test.ts\0gbrain-memory/__tests__/seam.depcruise.test.ts\0docs/notes.md\0'))
+      }
+      if (cmd.includes('rev-parse')) return res(0, HEAD)
+      return res(0)
+    }
+    const out = await runMutationProofGate({ run: RUN, claim: null, base_branch: 'main', run_host: host })
+    expect(out.ok).toBe(true)
+    expect(out.exempt).toBe(true)
+    expect(out.reason).toContain('no production file in this diff — nothing to mutate')
+    // NOT the prose-only exemption: the run record must show WHICH one fired.
+    expect(out.reason).not.toContain('prose-only')
+    // …and WHICH NAMES bought it. The file list comes from git but the names are
+    // the build's, so an exemption whose reason is only a count cannot be
+    // second-guessed afterwards. Both, so a reason naming just the first file
+    // does not pass — and the PROSE file too, because a reason filtered to the
+    // declared tests leaves the reader to guess what the other entries were.
+    expect(out.reason).toContain('tests/support/scrub.test.ts')
+    expect(out.reason).toContain('gbrain-memory/__tests__/seam.depcruise.test.ts')
+    expect(out.reason).toContain('docs/notes.md')
+    expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+
+    // Claim-independent for the same reason the prose path is: the premise is
+    // about the diff, not about the nomination.
+    const withClaim = await runMutationProofGate({ run: RUN, claim: CLAIM, base_branch: 'main', run_host: host })
+    expect(withClaim.exempt).toBe(true)
+    expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+  })
+
+  test('the exemption reason names EVERY file that bought it — no truncation, no filtering', async () => {
+    // The audit trail is the point of the reason string, and a truncated list
+    // hides exactly the entry a reviewer is here for: five ordinary names and a
+    // sixth that a reader would want to look at twice. A cap of five put that
+    // sixth behind a `+1 more`; a filter to the declared TESTS dropped the prose
+    // entries out of a mixed diff and left the count unexplained. Deliberately
+    // uncapped: the list is bounded by the diff, which git wrote.
+    const names = ['a', 'b', 'c', 'd', 'e'].map((n) => `tests/${n}.test.ts`)
+    const all = [...names, 'src/z-suspicious.spec.ts', 'docs/notes.md', 'README.md']
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-status')) return diffRes(nameStatus(`${all.join('\0')}\0`))
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        return res(0)
+      },
+    })
+    expect(out.exempt).toBe(true)
+    // A FULL-LITERAL comparison of the named set, so a reason that named none of
+    // them — or that dropped the last one — cannot pass.
+    const named = (out.reason.split('documentation (')[1] ?? '').replace(/\)$/, '').split(', ')
+    expect(named).toEqual(all)
+    expect(out.reason).not.toContain('more)')
+  })
+
+  test('a test-only diff whose branch MOVES under the new exemption is not exempt', async () => {
+    let heads = 0
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-status')) {
+          return diffRes(nameStatus('tests/support/scrub.test.ts\0gbrain-memory/__tests__/seam.depcruise.test.ts\0docs/notes.md\0'))
+        }
+        if (cmd.includes('rev-parse')) {
+          heads += 1
+          return res(0, heads === 1 ? HEAD : 'b'.repeat(40))
+        }
+        return res(0)
+      },
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('moved while the no-production-file exemption')
+  })
+
+  test('THE LOAD-BEARING NEGATIVE: a diff that still has a production file and no claim is REFUSED', async () => {
+    // The new exemption must not widen into "no claim, no problem". One
+    // production file in the diff and the proof is still required — and the
+    // refusal names the target the build could have nominated.
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      ...gateDeps('tests/support/scrub.test.ts\0src/limit.ts\0docs/notes.md\0'),
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('nominated no mutation')
+    expect(out.reason).toContain('src/limit.ts')
+  })
+
+  test('a DELETION-ONLY production diff is refused, and the refusal does not send the build after a ghost', async () => {
+    // The unreachable-nomination deadlock, at the gate. `src/gone.ts` is a
+    // production change (so no exemption) that no mutation can apply to (so no
+    // nomination can pass). What this fixes is the MESSAGE: it used to name
+    // `src/gone.ts` as "a legal mutation target [that] existed", and the prover
+    // then refused that very nomination for being absent at the head.
+    const deleting = (files: string, deleted: readonly string[]) => async (cmd: string[]) => {
+      if (cmd.includes('--name-status')) return diffRes(nameStatus(files, deleted))
+      if (cmd.includes('rev-parse')) return res(0, HEAD)
+      return res(0)
+    }
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: deleting('src/gone.ts\0tests/a.test.ts\0', ['src/gone.ts']),
+    })
+    // STILL REFUSED — exempting this would be the rename bypass in a new coat.
+    expect([out.ok, out.exempt]).toEqual([false, false])
+    expect(out.reason).toContain('DELETIONS')
+    expect(out.reason).toContain('src/gone.ts')
+    expect(out.reason).not.toContain('nominated no mutation')
+
+    // POSITIVE CONTROL 1 — the same paths MODIFIED rather than deleted still
+    // blame the build, so the refusal above is about the status git reported.
+    const modified = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: deleting('src/gone.ts\0tests/a.test.ts\0', []),
+    })
+    expect([modified.ok, modified.exempt]).toEqual([false, false])
+    expect(modified.reason).toContain('nominated no mutation')
+
+    // POSITIVE CONTROL 2 — a deletion beside a MODIFIED production file names
+    // the one that can actually be nominated.
+    const mixed = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: deleting('src/gone.ts\0src/limit.ts\0', ['src/gone.ts']),
+    })
+    expect(mixed.reason).toContain('nominated no mutation')
+    expect(mixed.reason).toContain('src/limit.ts')
   })
 
   test('an unreadable diff takes the PROOF path, not the exempt path', async () => {
@@ -1093,13 +2845,62 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.exempt).toBe(false)
   })
 
+  test('an EMPTY diff is refused as EMPTY — not as a diff that could not be read', async () => {
+    // The two conditions had one return value, so the gate said "the branch diff
+    // could not be read" about a diff git read perfectly and reported as empty —
+    // a diagnosis that sends the reader after a git failure that never happened,
+    // and a refusal string ("the branch diff is empty") that nothing could reach.
+    const empty = await runMutationProofGate({ run: RUN, claim: null, base_branch: 'main', ...gateDeps('') })
+    expect([empty.ok, empty.exempt]).toEqual([false, false])
+    expect(empty.reason).toContain('the branch diff is empty')
+    expect(empty.reason).not.toContain('could not be read')
+
+    // THE OTHER SIDE OF THE SPLIT, through the same harness: a diff git could
+    // not read at all still says so. Without this the assertion above would hold
+    // just as well if "could not be read" had simply stopped being reachable.
+    const scripted = scriptedHost()
+    const unreadable = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd, cwd) =>
+        cmd.includes('diff') && cmd.includes('--name-status') ? res(1) : scripted.run(cmd, cwd),
+    })
+    expect([unreadable.ok, unreadable.exempt]).toEqual([false, false])
+    expect(unreadable.reason).toContain('could not be read')
+
+    // AND IT IS STILL CLOSED. An empty list is not "nothing changed, so nothing
+    // to mutate": `[].every(…)` is vacuously true, so the no-production-file
+    // exemption would swallow it, and a nomination cannot bind to a diff with no
+    // files either.
+    expect(diffHasNoLegalMutationTarget([])).toBe(false)
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const claimed = await runMutationProofGate({ run: RUN, claim: CLAIM, base_branch: 'main', ...gateDeps(''), fs })
+    expect([claimed.ok, claimed.exempt]).toEqual([false, false])
+    expect(claimed.reason).toContain('is not in this branch')
+    expect(fs.writes).toEqual([])
+
+    // POSITIVE CONTROL on the same seam: a NON-empty diff through the identical
+    // harness reaches the proof, so the refusals above are about emptiness and
+    // not about `gateDeps` refusing everything.
+    const live = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
+    const proved = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      ...gateDeps('src/limit.ts\0'),
+      fs: live,
+    })
+    expect([proved.ok, proved.evidence?.proved ?? null]).toEqual([true, true])
+  })
+
   test('a guard that does not go red blocks the merge, and says why', async () => {
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
     const out = await runMutationProofGate({
       run: RUN,
       claim: CLAIM,
       base_branch: 'main',
-      ...gateDeps('src/limit.ts\n', { guardMutated: 0 }),
+      ...gateDeps('src/limit.ts\0', { guardMutated: 0 }),
       fs,
     })
     expect(out.ok).toBe(false)
@@ -1128,7 +2929,8 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run: RUN,
       claim: null,
       base_branch: 'main',
-      run_host: async (cmd: string[]) => (cmd.includes('rev-parse') ? res(0, HEAD) : res(0, 'src/limit.ts\n')),
+      run_host: async (cmd: string[]) =>
+        cmd.includes('rev-parse') ? res(0, HEAD) : diffRes(nameStatus('src/limit.ts\0')),
       evidence: { schema: MUTATION_PROOF_SCHEMA, proved: true, proof_token: 'a'.repeat(64) },
     } as unknown as MutationGateInput
     const out = await runMutationProofGate(smuggler)
@@ -1149,7 +2951,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       run_host: async (cmd, cwd) => {
         calls.push(cmd)
-        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('src/limit.ts\0'))
         if (cmd.includes('fetch')) return res(0) // the tracking ref is read ONLY after a fetch that succeeded
         if (cmd.includes('rev-parse')) {
           return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
@@ -1313,7 +3115,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       claim: CLAIM,
       base_branch: 'main',
       run_host: async (cmd, cwd) => {
-        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('src/limit.ts\0'))
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('rev-parse')) {
           if (cmd[cmd.length - 1] !== 'refs/remotes/origin/feat-x') return res(1)
@@ -1390,7 +3192,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.reason).toContain(`the merge would take dddddddd but the branch tip is ${HEAD.slice(0, 8)}`)
     expect(out.evidence).toBeNull()
     // Refused BEFORE the diff and before any worktree, like any caller-pin mismatch.
-    expect(calls.some((c) => c.includes('--name-only'))).toBe(false)
+    expect(calls.some((c) => c.includes('--name-status'))).toBe(false)
     expect(calls.some((c) => c.includes('worktree'))).toBe(false)
   })
 
@@ -1403,7 +3205,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       expected_head: HEAD,
       run_host: async (cmd, cwd) => {
-        if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('src/limit.ts\0'))
         if (cmd.includes('fetch')) return res(1)
         if (cmd.includes('cat-file')) return res(0) // the commit IS here
         if (cmd.includes('rev-parse')) return res(1)
@@ -1425,7 +3227,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       claim: null,
       base_branch: 'main',
       run_host: async (cmd) => {
-        if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        if (cmd.includes('--name-status')) return diffRes(nameStatus('README.md\0docs/a.md\0'))
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('rev-parse')) {
           return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)

@@ -134,8 +134,52 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
   return argv[1] === 'run' && typeof argv[2] === 'string' && argv[2].startsWith('test')
 }
 
-/** A source file whose name says it is a test — never a valid mutation target. */
-const TEST_FILE = /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rs)$/
+/**
+ * A basename that DECLARES a test. The rule this replaces was path-prefix-based
+ * and over-broad: it refused any path containing a `tests/`, `test/` or
+ * `__tests__/` segment, and so refused a harness LIBRARY that declares no test
+ * cases at all. Mutating such a library and watching a SEPARATE `*.test.ts` go
+ * red is a genuine red-then-green proof, not the tautology the rule was written
+ * to ban — and the tautology itself is now stated directly, as the guard-argv
+ * check in `validateClaim`, which the path rule was only ever standing in for.
+ *
+ * WHAT THIS COVERS — the card's spec EXACTLY and nothing wider: `*.test.*` /
+ * `*.spec.*` for the JS/TS runners, `*_test.go|py|rs` for go, pytest and cargo.
+ *
+ * WHAT IT DELIBERATELY DOES NOT COVER: every LOOSER name a runner still picks
+ * up — `ab-test.ts`, `thing_test.ts`, `helper_spec.ts`, `test_probe.py`,
+ * `test*.py` for `unittest discover`, `test.js`/`test-*.js` for node. Those
+ * live in `RUNNER_COLLECTED_BASENAME` instead, because this regex has a SECOND
+ * consumer: `classifyMutationTarget`, and through it the no-production-file
+ * EXEMPTION — where the file NAMES are written by the build. Every name added
+ * here is a name a build could give a production file to buy itself an
+ * exemption (`src/ab-test.ts` was exactly that: production logic, a test's
+ * name, an exemption for free); every name added there only ever REFUSES a
+ * guard. The tautology the looser names would otherwise open — classify
+ * `production`, then let a directory or bare-runner guard run the mutated file
+ * as its own test — is closed on the guard side, in `guardRunsTheMutatedFile`,
+ * which is where the tautology actually happens.
+ */
+const TEST_BASENAME = /\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rs)$/
+
+/** What DECLARES a file a test: its basename, or being a DIRECT child of a
+ *  `__tests__/` directory. A support library under `tests/` (or nested below
+ *  `__tests__/<subdir>/`) matches neither declaration and is a LEGAL mutation
+ *  target — its behaviour is asserted by a separate declared test. */
+export function isDeclaredTestFile(path: string): boolean {
+  const segments = path.split('/')
+  const base = segments[segments.length - 1] ?? ''
+  if (TEST_BASENAME.test(base)) return true
+  return segments.length >= 2 && segments[segments.length - 2] === '__tests__'
+}
+
+export type MutationTargetKind = 'test' | 'prose' | 'production'
+/** test → rejected as a target; prose → rejected as a target; production → legal. */
+export function classifyMutationTarget(path: string): MutationTargetKind {
+  if (isDeclaredTestFile(path)) return 'test'
+  if (isProseOnlyChange([path])) return 'prose'
+  return 'production'
+}
 
 /**
  * The UNTRUSTED nomination: which production behaviour to break, and which
@@ -361,7 +405,7 @@ function validateClaim(claim: MutationClaim | null | undefined): string | null {
   }
   // Breaking a test and watching that test fail is a tautology, not a proof:
   // the schema says a PRODUCTION file and this is where that is enforced.
-  if (TEST_FILE.test(claim.file)) {
+  if (isDeclaredTestFile(claim.file)) {
     return `claim.file ${claim.file} is a test file — the mutation must break PRODUCTION behaviour`
   }
   // Nor does mutating documentation prove anything: nothing executes it, so a
@@ -379,7 +423,722 @@ function validateClaim(claim: MutationClaim | null | undefined): string | null {
   if (JSON.stringify(claim.guard) === JSON.stringify(claim.control)) {
     return 'claim.control is the same command as claim.guard — one command cannot be both the RED and the GREEN'
   }
+  // Running the mutated file as the guard's own test argument is the tautology
+  // the old path rule was defending against — stated directly, and it holds for
+  // production targets too.
+  const tautology = guardRunsTheMutatedFile(claim.guard, claim.file)
+  if (tautology !== null) {
+    return `claim.guard ${tautology} the mutated file ${claim.file} as its own test — a tautology, not a proof: the guard must be a separate test OF the behaviour`
+  }
   return null
+}
+
+/**
+ * THE TRAILING NON-PATH A SPECIFIER MAY CARRY: node's query/fragment suffix
+ * (`./src/limit.mjs?proof`, `./src/limit.mjs#v2`) and pytest's node ID
+ * (`src/limit.py::test_probe`). Both name THE SAME FILE the bare spelling names
+ * — node executes the query-suffixed `--import` (verified on node v22), pytest
+ * imports the file its node ID selects — while equalling no repo-relative
+ * target, so the tautology check never fired and the mutated file supplied its
+ * own RED and GREEN.
+ *
+ * THE `?` WAS WORSE THAN INVISIBLE: it also made `namesASearch` read the
+ * specifier as a GLOB, so even the on-disk seam skipped the element rather than
+ * resolving it. Cut the suffix off HERE, in the one canonicaliser every
+ * comparison goes through, so no seam has to remember to.
+ *
+ * It only ever REFUSES: a shortened spelling can match the mutated file, never
+ * un-match it, and a selector is resolved on disk afterwards — `x.py::case`
+ * resolves as `x.py`, which is the file the runner really opens.
+ */
+const SPECIFIER_SUFFIX = /[?#]|::/
+
+/** `./a/b.ts`, `a/b/` and `a/b` are ONE path. Compared as raw strings the
+ *  tautology check below is defeated by two characters of punctuation.
+ *
+ *  `..` does NOT collapse here and does not need to: `argvEscapesTheWorktree`
+ *  REFUSES any argv element carrying a `..` segment (or a leading `/`) before
+ *  the comparison is ever reached. Collapsing was the weaker answer — a `..`
+ *  that climbs OUT of the worktree has nothing to pop, so it survived
+ *  normalisation and could never equal a repo-relative target, which is
+ *  precisely how `../<worktree-dir>/tests/support/lib.ts` re-entered the
+ *  worktree and ran the mutated file as its own guard. */
+/**
+ * THE SPELLING A LOADER DECODES AND A COMPARISON DOES NOT: percent-encoding.
+ * `--import=./tests/support/clamp%2Emjs` is the SAME FILE as
+ * `./tests/support/clamp.mjs` — node resolves module specifiers as URLs and
+ * loads the `%2E` spelling (reproduced end-to-end on node v22) — while equalling
+ * no repo-relative target, so every arm of `guardRunsTheMutatedFile` missed it
+ * and `guardPathCandidates` ENOENTed on the encoded name and dropped it. The
+ * mutated file supplied its own RED and GREEN and the gate recorded
+ * `proved: true`.
+ *
+ * Decoded HERE, in the one canonicaliser, and again for the escape check — so
+ * `%2F` and `%2E%2E` cannot smuggle a separator or a climb past it either. It
+ * only ever REFUSES: a decoded spelling can match the mutated file or look like
+ * an escape, never un-match one. A malformed `%` (`--grep=100%`) throws in
+ * `decodeURIComponent` and keeps its literal spelling rather than failing the
+ * nomination.
+ */
+function percentDecoded(arg: string): string {
+  if (!arg.includes('%')) return arg
+  try {
+    return decodeURIComponent(arg)
+  } catch {
+    return arg
+  }
+}
+
+function normalizeArg(arg: string): string {
+  const trimmed = percentDecoded(arg.trim())
+  const cut = trimmed.search(SPECIFIER_SUFFIX)
+  const joined = (cut === -1 ? trimmed : trimmed.slice(0, cut))
+    .split('/')
+    .filter((seg) => seg.length > 0 && seg !== '.')
+    .join('/')
+  return joined.length === 0 ? '.' : joined
+}
+
+/**
+ * A name a runner on `TEST_COMMAND_SHAPES` COLLECTS, beyond what DECLARES a
+ * test. Deliberately BROADER than `TEST_BASENAME`, and used ONLY here: bun and
+ * jest collect `*_test.ts` and `*_spec.ts`, node --test also collects
+ * `*-test.js`, `*-spec.js`, `test.js` and `test-*.js`, and `python3 -m
+ * unittest` discovers `test*.py` (not just `test_*.py`).
+ *
+ * WHY IT IS NOT FOLDED INTO `TEST_BASENAME`: that regex also drives
+ * `classifyMutationTarget`, and through it the no-production-file EXEMPTION —
+ * where file NAMES are build-controlled, so every name added there is a name a
+ * build could use to buy itself an exemption. The extra breadth belongs on this
+ * side, where its only effect is to REFUSE a guard.
+ */
+const RUNNER_COLLECTED_BASENAME = /^test[^/]*\.(py|[cm]?[jt]sx?)$|[._-](test|spec)\.[cm]?[jt]sx?$/
+
+/** True of a path a runner may pick up WHOLESALE — because its NAME is one a
+ *  runner collects, or because it lives under a directory a runner collects
+ *  (which is the class this branch newly made mutatable: a support library
+ *  under `tests/`). Elsewhere a directory argument does not run the mutated
+ *  file, and a production module keeps its right to a directory-wide guard. */
+function aRunnerMayCollect(path: string): boolean {
+  const segments = path.split('/')
+  if (RUNNER_COLLECTED_BASENAME.test(segments[segments.length - 1] ?? '')) return true
+  return segments.slice(0, -1).some((seg) => seg === 'tests' || seg === 'test' || seg === '__tests__')
+}
+
+/**
+ * The path an OPTION ELEMENT CARRIES, normalized — `--preload=./tests/support/lib.ts`
+ * carries `tests/support/lib.ts` — or '' for an element that carries nothing.
+ *
+ * WITHOUT THIS THE TAUTOLOGY CHECK IS BYPASSABLE BY AN `=`. The comparison
+ * below is over WHOLE argv elements, and `--preload=./tests/support/lib.ts` is
+ * one element that equals no path at all — while `bun test
+ * --preload=./tests/support/lib.ts other.test.ts` loads the mutated file into
+ * the very process that runs the guard. It is repo-relative, so
+ * `argvEscapesTheWorktree` does not refuse it either. Splitting the value off
+ * before normalising is what makes the option form compare equal to the bare
+ * one.
+ *
+ * AN `=` IS NOT THE ONLY SEPARATOR, AND THE ABSENCE OF ONE IS THE FOURTH
+ * SPELLING: a SHORT option carries its value ATTACHED, with no separator at all
+ * — `-r./tests/support/lib.ts` is `--preload=./tests/support/lib.ts` in two
+ * characters less, and bun honours it (verified on bun 1.3.x: the preloaded
+ * side effect runs). Read as a whole element it equals no path; read by the `=`
+ * rule it carries nothing. So the attached form is split at the option LETTER.
+ * `--long` is excluded by the second character, and `-r=x` still splits on `=`.
+ */
+const SHORT_OPTION_WITH_ATTACHED_VALUE = /^-[A-Za-z][^-=]/
+
+function carriedValue(arg: string): string {
+  if (!arg.startsWith('-')) return ''
+  const eq = arg.indexOf('=')
+  const value = eq !== -1 ? arg.slice(eq + 1) : SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg) ? arg.slice(2) : ''
+  return value.length === 0 ? '' : normalizeArg(value)
+}
+
+/**
+ * How the guard runs the mutated file as its own test, or null if it does not.
+ *
+ * FIVE SHAPES, because an exact argv-element match is only a fifth of it.
+ * `bun test tests/support/lib.ts` names the file (as does the option form that
+ * CARRIES it, `--preload=./tests/support/lib.ts`); `python3 -m unittest
+ * src.limit` names the same file as a MODULE, which imports it; `bun test
+ * tests` names a DIRECTORY that collects it; `bun test lib.ts` names a FILTER
+ * the mutated path contains, which the runner matches as a substring; and
+ * `python3 -m unittest` names NOTHING and so discovers from the repo root,
+ * which reaches every collectible file there is. The last three only matter for
+ * a file a runner may collect wholesale (`aRunnerMayCollect`), so `bun test
+ * trident/` stays a legal guard for a production module — but the first two
+ * hold for ANY target, because naming the mutated file is the tautology whether
+ * or not a runner would have collected it on its own.
+ *
+ * The no-path arm over-refuses a whole-suite guard for a support library. That
+ * is deliberate: it fails CLOSED, and a nomination can always name the separate
+ * test it means instead.
+ *
+ * THE TWO ARMS ASK DIFFERENT QUESTIONS, so they read different sets. The
+ * no-path arm asks "does this argv SELECT anything, or does it discover?" — and
+ * an option's carried value never selects a test: `bun test
+ * --reporter-outfile=report.xml` is a whole-suite discovery run, and counting
+ * `report.xml` as "a path was named" was exactly what kept the arm from firing.
+ * The directory arm asks "is the mutated file underneath something this argv
+ * REACHES?" — and a carried value does reach (`--preload=tests/support/`), as
+ * does an operand `pathArgs` deliberately could not recognise. So the no-path
+ * arm reads `pathArgs`, and the directory and filter arms read
+ * `argumentOperands` plus carried values.
+ *
+ * KNOWN RESIDUAL, argv-invisible: a runner's CONFIG can load the mutated file
+ * with nothing in the argv saying so — `bunfig.toml`'s `[test].preload`, jest's
+ * `setupFiles`, pytest's `conftest.py`. This function reads argv, so a branch
+ * that commits such a config makes any guard load the mutated file. It is not
+ * closed here and could not be: the config is part of the branch under proof.
+ * The class pre-dates this rule for production files, and the same answer holds
+ * for both — a proof is evidence for a reviewer, not a substitute for one.
+ */
+function guardRunsTheMutatedFile(guard: readonly string[], file: string): string | null {
+  const target = normalizeArg(file)
+  if (guard.some((a) => normalizeArg(a) === target || carriedValue(a) === target)) return 'names'
+  // A DOTTED MODULE IS THE FIFTH SPELLING, and it reaches a PRODUCTION target,
+  // so it is asked BEFORE the collectible gate below — see `modulePathsOf`.
+  const asModule = guard.slice(runnerPrefixLength(guard)).find((a) => modulePathsOf(a).includes(target))
+  if (asModule !== undefined) return `names the module ${asModule}, which IMPORTS`
+  if (!aRunnerMayCollect(target)) return null
+  const selectors = pathArgs(guard)
+  if (selectors.length === 0) {
+    return `collects (${whyNoSelection(guard)}, so the runner discovers from the repo root and reaches)`
+  }
+  // A SEARCH THAT SHARES ITS ARGV WITH A SELECTOR WAS INVISIBLE TO EVERY ARM.
+  // `go test ./cmd/ ./...` is a whole-module run, and `./...` reaches
+  // `tests/support/helper.go` — the mutated file — as surely as `go test ./...`
+  // alone does. But a search is DROPPED everywhere a spelling is compared
+  // (`pathArgs`, `argumentOperands`, `guardPathCandidates`) on the reasoning
+  // that the no-selection arm above catches it; that reasoning only holds while
+  // the search is the ONLY selector. Add `./cmd/` beside it and `pathArgs` is
+  // non-empty, so the arm never fires, while the directory and filter arms
+  // compare `cmd` against a target under `tests/` and see nothing. Red-then-green
+  // forged out of the mutated file's own compilation.
+  //
+  // So a search is READ HERE, as what it is: a root plus "everything
+  // collectible under it". `./...` and `*.test.ts` are rooted at `.`;
+  // `tests/...` and `tests/**/*_test.go` at `tests`. A search rooted somewhere
+  // ELSE still selects nothing of the mutated file and is left alone, which is
+  // what keeps `bun test app/*.test.ts` a legal guard for a library under
+  // `tests/`.
+  const search = searchesReaching(guard, target)
+  if (search !== null) return search
+  // WHAT THE RUN REACHES IS EVERY OPERAND, NOT ONLY EVERY SELECTOR, and reading
+  // `pathArgs` here was a hole big enough to drive the whole tautology through.
+  // `pathArgs` answers a DIFFERENT question — "does this argv target anything?"
+  // — and to answer it safely it DROPS what it cannot recognise: a bare word
+  // (`helper_test`) and an operand sitting after a value-less option
+  // (`--coverage helper_test.ts`). Both were then invisible to the two arms
+  // below, while bun reads each of them as a live filter: `bun test
+  // other.test.ts helper_test` runs `tests/support/helper_test.ts` — the
+  // mutated file — as its own guard, and the gate called it proved. So the arms
+  // that ask "does the run REACH the mutated file?" read every operand the
+  // runner itself reads (`argumentOperands`), plus every option's carried value.
+  const operands = argumentOperands(guard)
+  const carried = guard.map(carriedValue).filter((v) => v.length > 0)
+  const reached = [...operands.map((o) => o.path), ...carried]
+  const dir = reached.find((a) => a === '.' || target.startsWith(`${a}/`))
+  if (dir !== undefined) return `collects (via the directory ${dir})`
+  // AND THE OPERAND THAT IS A SUBSTRING OF THE TARGET. A positional is not a
+  // path to every runner: `bun test thing_test.ts` runs every discovered test
+  // whose PATH CONTAINS `thing_test.ts` — including `src/thing_test.ts`, the
+  // mutated file — whether or not a file of that exact spelling exists. That is
+  // the runner's real matching semantics, so it is decided HERE, lexically,
+  // rather than left to the resolution seam: a bare `thing_test.ts` at the repo
+  // root resolves perfectly well AND still filters the mutated file into the
+  // same run, which is how this shape survived `guardSelectsNothingOnDisk`.
+  //
+  // A FILTER HAS TO BE ABLE TO NAME SOMETHING, which is why the letter is
+  // required — OF A CARRIED VALUE ONLY. The letter was there because
+  // `--timeout=1` carries `1`, an option's numeric argument and not a name,
+  // while `1` is a substring of `tests/support/v1.ts`, so an honest nomination
+  // of that library was refused for a tautology nobody wrote. But it was
+  // applied to every element alike, and a bare POSITIONAL is not an option's
+  // value: `bun test tests/other.test.ts 123` reads `123` as a live filter and
+  // runs `src/123_test.ts` — a name `TEST_BASENAME` deliberately calls
+  // production, so it is a legal nomination — as its own guard, with nothing
+  // here to see it. Bun's positional filter semantics are a union, verified
+  // against the real runner.
+  //
+  // So the letter is asked of everything EXCEPT an operand STANDING WHERE A
+  // SELECTOR GOES. `--timeout=1` and `--timeout 1` hand their `1` to the
+  // option; a positional hands it to the suite, and digits filter as well as
+  // letters do.
+  const filter =
+    operands.find((o) => o.standalone && o.path !== '.' && target.includes(o.path))?.path ??
+    reached.find((a) => a !== '.' && /[A-Za-z]/.test(a) && target.includes(a))
+  return filter === undefined
+    ? null
+    : `collects (the runner reads ${filter} as a filter, and the mutated path contains it, so the run reaches)`
+}
+
+/**
+ * The SEARCH in this argv that reaches the mutated file, said in the caller's
+ * words, or null if none does.
+ *
+ * A search is the one element shape whose reach is not its spelling: `./...`
+ * names no path and reaches every package under the cwd, `tests/**` reaches
+ * every file under `tests/`. So it is compared by ROOT — everything before the
+ * first segment carrying a glob character or go's `...` — and the target being
+ * under that root is the tautology, whatever else the argv also selects.
+ *
+ * Read at OPERAND positions and out of OPTION VALUES alike, and deliberately
+ * without `pathArgs`' "is it the operand of a value-less option?" rule: that
+ * rule exists to keep an option's argument from counting as a SELECTION, while
+ * this asks what the run REACHES, where an unrecognised element has to count as
+ * reaching. `--reporter-outfile ./...` is not a shape anyone writes; refusing it
+ * costs a nomination one respelling and fails closed.
+ */
+function searchesReaching(argv: readonly string[], target: string): string | null {
+  for (let i = runnerPrefixLength(argv); i < argv.length; i += 1) {
+    const arg = argv[i] as string
+    if (arg.length === 0) continue
+    const value = arg.startsWith('-') ? carriedValue(arg) : normalizeArg(arg)
+    if (value.length === 0 || !namesASearch(value)) continue
+    const segments = value.split('/')
+    const cut = segments.findIndex((seg) => seg === '...' || /[*?]/.test(seg))
+    const root = segments.slice(0, cut).join('/')
+    if (root.length === 0 || target === root || target.startsWith(`${root}/`)) {
+      const where = root.length === 0 ? 'the repo root' : root
+      return `collects (${arg} names a search rooted at ${where}, which reaches every collectible file under it, including)`
+    }
+  }
+  return null
+}
+
+/**
+ * Every argv element the RUNNER ITSELF reads as an argument: the runner's own
+ * invocation dropped, options dropped, searches dropped, and NOTHING else —
+ * deliberately looser than `pathArgs`, and for the opposite reason.
+ *
+ * The two functions answer opposite questions and so must fail closed in
+ * opposite directions. `pathArgs` asks "does this argv SELECT anything, or does
+ * it discover?", and an element it cannot recognise has to count as NOT a
+ * selection or a discovery run wearing a targeted argv slips through. This asks
+ * "what does the run REACH?", and there an unrecognised element has to count as
+ * reaching, because the runner will do something with it — bun reads a leftover
+ * positional as a substring filter over the whole discovered suite.
+ *
+ * A SEARCH IS STILL DROPPED, and only because it is handled harder elsewhere:
+ * keeping it here would only ever compare a literal `*` against a path, so it
+ * is read by ROOT instead, in `searchesReaching`. "Elsewhere" used to mean the
+ * no-path arm alone, and that was the mixed-selector hole — `go test ./cmd/
+ * ./...` has a selector, so that arm never fired, and the search was dropped
+ * from every comparison that remained.
+ *
+ * EACH OPERAND CARRIES WHETHER IT STANDS ALONE — whether it sits where a
+ * SELECTOR goes, or immediately after a value-less option where it may be that
+ * option's argument. Both still REACH (bun reads `--coverage helper_test.ts` as
+ * a live filter, which is why they are all returned), but only a standalone one
+ * may be read as a filter when it is spelled in DIGITS: `--timeout 1` really
+ * does hand `1` to the option, while `bun test x.test.ts 123` hands `123` to
+ * the suite.
+ */
+function argumentOperands(argv: readonly string[]): { path: string; standalone: boolean }[] {
+  const out: { path: string; standalone: boolean }[] = []
+  const start = runnerPrefixLength(argv)
+  for (let i = start; i < argv.length; i += 1) {
+    const arg = argv[i] as string
+    if (arg.length === 0 || arg.startsWith('-')) continue
+    const path = normalizeArg(arg)
+    if (namesASearch(path)) continue
+    const prev = i > start ? (argv[i - 1] as string) : ''
+    out.push({ path, standalone: !(prev.startsWith('-') && carriedValue(prev).length === 0) })
+  }
+  return out
+}
+
+/** A dotted module selector: `src.limit`, or the bare `limit`. Every segment is
+ *  a python identifier, and there is no separator — the spelling that made the
+ *  bypass below invisible to a path comparison. */
+const DOTTED_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/
+
+/**
+ * The files a DOTTED MODULE SELECTOR names — `src.limit` is `src/limit.py` (or
+ * `src/limit/__init__.py`), and `src.limit.CaseName` is still that file with a
+ * test case appended.
+ *
+ * THE BYPASS THIS CLOSES, reproduced end-to-end. `python3 -m unittest src.limit`
+ * IMPORTS the mutated module, so a syntax-breaking mutation of `src/limit.py`
+ * makes that command red and its restore green — the mutated file serving as
+ * its own guard, with an assertion-free "separate" test and an unrelated
+ * control, and the gate recorded `proved: true`. Nothing above could see it: a
+ * dot is not a slash, so no comparison of SPELLINGS matched; `src/limit.py` is
+ * production so the collectible arms never ran; and `src.limit` names nothing
+ * on disk, so the resolved seam dropped it too.
+ *
+ * EVERY PREFIX, because unittest's selector keeps going after the module:
+ * `src.limit.LimitTest.test_under` imports `src/limit.py` all the same. So each
+ * dotted prefix is expanded and compared, and a match anywhere is the tautology.
+ *
+ * Applied to every runner rather than only to python: the expansion always ends
+ * in `.py`, so the only thing it can ever match is a python target, and a `.py`
+ * file named by its module path in a non-python argv is not a shape worth
+ * admitting either. It only ever REFUSES — a dotted module is never read as a
+ * SELECTION (`pathArgs` drops it), so no guard becomes legal because of this.
+ */
+function modulePathsOf(arg: string): string[] {
+  const raw = arg.startsWith('-') ? carriedValue(arg) : arg
+  if (raw.length === 0 || !DOTTED_MODULE.test(raw)) return []
+  const segments = raw.split('.')
+  const out: string[] = []
+  for (let i = 1; i <= segments.length; i += 1) {
+    const stem = segments.slice(0, i).join('/')
+    out.push(`${stem}.py`, `${stem}/__init__.py`)
+  }
+  return out
+}
+
+/**
+ * Every guard argv element that could NAME SOMETHING ON DISK, paired with the
+ * element it came from — for the RESOLVED tautology check in the prover, which
+ * follows symlinks and so cannot be done from a spelling alone.
+ *
+ * DELIBERATELY BROADER THAN `pathArgs`: no `looksLikeAPath` filter, because
+ * resolution decides. There an unrecognised operand had to fail CLOSED into
+ * "names nothing" (it feeds the no-path arm, which REFUSES on emptiness); here
+ * the only consequence of admitting an element is that it gets `realpath`-ed,
+ * and an element that resolves to the mutated file IS the mutated file whatever
+ * argv position it occupies. The runner's own invocation is still dropped — a
+ * repo with a top-level `test/` directory would otherwise see `bun test`'s own
+ * `test` word resolve to it and refuse every honest guard for a library inside.
+ */
+function guardPathCandidates(guard: readonly string[]): { arg: string; path: string }[] {
+  const out: { arg: string; path: string }[] = []
+  for (let i = runnerPrefixLength(guard); i < guard.length; i += 1) {
+    const arg = guard[i] as string
+    const raw = arg.startsWith('-') ? carriedValue(arg) : arg
+    if (raw.length === 0) continue
+    // NORMALISE BEFORE ASKING WHETHER IT IS A SEARCH. Asked of the RAW element,
+    // `./src/limit.mjs?proof` answered yes — a `?` is a glob character — so the
+    // one specifier node actually loads was the one element this seam never
+    // resolved. `normalizeArg` cuts the query first, and a real glob still
+    // carries its `*`/`?` inside the path part.
+    const path = normalizeArg(raw)
+    if (namesASearch(path)) continue
+    out.push({ arg, path })
+    // …AND WHAT A DOTTED MODULE SELECTOR WOULD IMPORT. `src.limit` resolves to
+    // nothing, so on its own it is dropped here — while `python3 -m unittest
+    // src.limit` imports `src/limit.py`, and a committed symlink is enough to
+    // make that a different file from the one the spelling names. The lexical
+    // arm compares spellings; this is the same question asked of the disk.
+    for (const path of modulePathsOf(raw)) out.push({ arg, path })
+  }
+  return out
+}
+
+/**
+ * How many LEADING argv elements are the RUNNER'S OWN INVOCATION rather than
+ * arguments to it — read POSITIONALLY, off the same shapes `TEST_COMMAND_SHAPES`
+ * admits, because the thing that selects the suite is not a fixed vocabulary.
+ *
+ * A TOKEN SET WAS THE WRONG ANSWER AND LEAKED. Dropping a leading run of known
+ * words left `make test-py`, `npm run test-all` and `yarn run test-ci` with
+ * their SCRIPT NAME sitting where a path goes — so `paths` came back non-empty,
+ * the no-path arm never fired, and a whole-suite discovery run that collects the
+ * mutated file passed as a targeted guard. The script name is arbitrary
+ * (`test:unit`, `test-ci`), so only its POSITION can identify it.
+ *
+ * THE `run` ARM IS DEFENCE IN DEPTH and is not independently pinned: every
+ * script name a project actually writes (`test:unit`, `test-ci`, `test-all`)
+ * carries neither a separator nor an extension, so `looksLikeAPath` drops it
+ * even when this returns 2 instead of 3. Reading the position correctly is
+ * still the honest rule — the arm is unobservable only because a second filter
+ * happens to catch the same class, and pinning it would take a script name no
+ * project writes.
+ */
+function runnerPrefixLength(argv: readonly string[]): number {
+  switch (argv[0]) {
+    case 'bun':
+    case 'go':
+    case 'cargo':
+    // `make <target>` — the target NAME, whatever it is called.
+    case 'make':
+      return 2
+    // `npm test` vs `npm run <script>`: the script name is one element further.
+    case 'npm':
+    case 'pnpm':
+    case 'yarn':
+      return argv[1] === 'run' ? 3 : 2
+    // `python3 -m pytest|unittest`, plus `unittest`'s own DISCOVERY subcommand —
+    // `discover` is not a path, and read as one it emptied the no-path arm of
+    // meaning for `python3 -m unittest discover -p 'test*.py'`.
+    case 'python3':
+      return argv[2] === 'unittest' && argv[3] === 'discover' ? 4 : 3
+    // `node --test <path>` — `--test` is WHAT MAKES NODE A TEST RUNNER, exactly
+    // as `test` does in `bun test`, so it belongs to the INVOCATION and not to
+    // the options. Read as an option it took the path after it as its operand
+    // (see `pathArgs`), which emptied the selector list and refused EVERY node
+    // guard for a collectible target — with no other spelling available, since
+    // `node <path> --test` is not test-runner mode at all. A dead end for node
+    // repos on the very class this gate exists to unblock. Only the canonical
+    // leading spelling counts; anything else keeps the program-only prefix and
+    // fails closed as before.
+    case 'node':
+      return argv[1] === '--test' ? 2 : 1
+    default:
+      return 1
+  }
+}
+
+/** Whether a string is plainly a path at all: it has a directory separator or a
+ *  file extension. The FIRST of the two filters an element must pass to count
+ *  as a SELECTION — it is what keeps `bun test --timeout 1000` from presenting
+ *  `1000` as "a path was named" and dodging the no-path arm. Fails CLOSED: an
+ *  unrecognised element is not a path, so the argv counts as naming nothing. */
+function looksLikeAPath(arg: string): boolean {
+  return arg.includes('/') || /\.[A-Za-z0-9]+$/.test(arg)
+}
+
+/** A SEARCH rather than a name: a glob, or a `...` segment — go's recursive
+ *  selector. `go test ./...` normalizes to the bare element `...`, which read
+ *  as a named path made a WHOLE-MODULE run look targeted and kept the no-path
+ *  arm from ever firing for a collectible target. A search rooted anywhere in
+ *  the worktree reaches every collectible file under it. */
+function namesASearch(arg: string): boolean {
+  return /[*?]/.test(arg) || arg.split('/').includes('...')
+}
+
+/** A basename a runner would RUN — either convention DECLARES it a test, or a
+ *  runner on the allowlist COLLECTS it. The second of the two filters an
+ *  element must pass to count as a SELECTION. */
+function namesATestFile(base: string): boolean {
+  return TEST_BASENAME.test(base) || RUNNER_COLLECTED_BASENAME.test(base)
+}
+
+/**
+ * The elements of an argv that SELECT what runs — what is left once the
+ * runner's own invocation, every option, every option's carried value, and
+ * everything that selects nothing are dropped. Feeds the caller's no-path arm,
+ * whose question is "does this argv target anything, or does it discover?".
+ *
+ * A SEARCH IS NOT A SELECTION. `test*.py` and `./...` name no file, they name a
+ * SEARCH, and a search rooted at the worktree reaches every collectible file in
+ * it. Dropping them here is what makes the no-path arm fire on `python3 -m
+ * unittest discover -p test*.py` and on `go test ./...` — discovery runs
+ * wearing the argv of a targeted one.
+ *
+ * AN OPTION'S CARRIED VALUE IS NOT ONE EITHER, and neither is an OPERAND that
+ * does not name something a runner would RUN. `bun test --timeout 1000` selects
+ * no test; nor does `bun test --reporter junit.xml`, nor `bun test
+ * --reporter-outfile=report.xml` — yet each once presented an element that
+ * "looked like a path" and so kept the whole-suite arm from firing while the
+ * runner discovered everything, mutated file included. Two filters, both
+ * lexical, both failing CLOSED: the element must look like a path AND must name
+ * either a DIRECTORY (no extension on its basename) or a file a runner would
+ * run. `python3 -m pytest other_test.py` keeps its argument; `junit.xml` and
+ * `report.xml` lose theirs.
+ *
+ * NOR IS AN OPTION'S SEPARATED OPERAND, and that one is decided by POSITION
+ * because arity is a vocabulary. `--reporter-outfile out/report.test.ts` names
+ * a file bun WRITES, and it is spelled exactly like `--bail tests/x.test.ts`
+ * naming a test bun RUNS: nothing lexical tells them apart, so the operand
+ * after a value-less option is dropped and the argv reads as discovery. The
+ * cost is an OVER-REFUSAL a nomination can always spell around — put the path
+ * before the options (`bun test tests/x.test.ts --bail`) or attach the value
+ * (`--reporter-outfile=x`), and the selection is seen again.
+ *
+ * A BARE WORD IS A FILTER, NOT A PATH. `bun test thing` runs every test whose
+ * path CONTAINS `thing` — including `src/thing_test.ts`, the mutated file — so
+ * it is discovery with a sieve on it, and the first filter drops it. The cost
+ * is that a directory guard must be spelled `bun test app/`, not `bun test
+ * app`.
+ *
+ * WHAT THE LEXICAL FILTERS CANNOT DECIDE, recorded so this docblock is not read
+ * as promising more than it holds: whether anything on disk answers to a word
+ * that wears a path's shape. `bun test thing_test.ts` passes both filters here
+ * and is a whole-suite discovery run with a substring filter on it — that one
+ * is caught by the FILTER arm of `guardRunsTheMutatedFile` whenever the mutated
+ * path contains the word, which is the only case where it matters. What remains
+ * is a selector naming a path no tree has: existence is not a property of a
+ * spelling, so it is decided where the pinned tree is,
+ * `guardSelectsNothingOnDisk`.
+ */
+function pathArgs(argv: readonly string[]): string[] {
+  const paths: string[] = []
+  const start = runnerPrefixLength(argv)
+  for (let i = start; i < argv.length; i += 1) {
+    const arg = argv[i] as string
+    if (arg.startsWith('-')) continue
+    // AN OPTION'S SEPARATED OPERAND IS THE OPTION'S, NOT A SELECTION — and
+    // which options take one is a VOCABULARY, so this reads POSITION and fails
+    // CLOSED. `bun test --reporter-outfile out/report.test.ts` is a whole-suite
+    // discovery run whose one operand is test-shaped enough to pass both
+    // filters below; counting it as a selection is what kept the no-path arm
+    // from firing while the runner collected the mutated file. An option that
+    // carries its OWN value (`--reporter-outfile=x`, `-rx`) has already taken
+    // one, so the operand after it IS a selection and survives.
+    const prev = i > start ? (argv[i - 1] as string) : ''
+    if (prev.startsWith('-') && carriedValue(prev).length === 0) continue
+    if (arg.length === 0) continue
+    // NORMALISE BEFORE ASKING WHETHER IT IS A SEARCH — the same order
+    // `guardPathCandidates` uses, and asking the RAW element was the
+    // inconsistency between them. `./src/limit.mjs?proof` is one file's
+    // specifier, not a glob: read raw it "named a search" and dropped into the
+    // no-selection arm, which fails closed but describes an argv nobody wrote.
+    const path = normalizeArg(arg)
+    if (namesASearch(path) || !looksLikeAPath(arg)) continue
+    const base = path.split('/').pop() as string
+    if (/\.[A-Za-z0-9]+$/.test(base) && !namesATestFile(base)) continue
+    paths.push(path)
+  }
+  return paths
+}
+
+/**
+ * WHY an argv selected nothing — the sentence the NEXT BUILD reads, and the one
+ * thing the no-path refusal was missing.
+ *
+ * "It names no path" is true and useless when the argv plainly names one:
+ * `bun test --coverage tests/support/lib.test.ts` is refused because the
+ * operand after a value-less option is that option's, so `pathArgs` drops it
+ * and the argv reads as discovery. The spelling that works
+ * (`bun test tests/support/lib.test.ts --coverage`) lived only in a docblock,
+ * which is not where a build looks — the card's own complaint, that a refusal
+ * blames the build for an omission it had no way to see, reproduced one level
+ * down. Every arm below mirrors exactly one `pathArgs` filter, in the same
+ * order, and names the element it dropped.
+ *
+ * `cargo test --test integration` lands on the first arm too, and that is the
+ * whole of cargo's story: `--test`'s operand is a test TARGET name rather than
+ * a path, so for a cargo repo a collectible target under `tests/` has no guard
+ * spelling that selects. It fails CLOSED and it now SAYS SO instead of implying
+ * the build forgot something.
+ *
+ * GO HAS THE SAME DEAD END, recorded here for the same reason. A support
+ * library `tests/support/lib.go` is a legal TARGET (`TEST_BASENAME` only
+ * declares `*_test.go`), and `aRunnerMayCollect` calls it collectible for its
+ * `tests` parent — so every spelling go offers is refused: `go test
+ * ./tests/support` is the DIRECTORY arm, `go test ./...` (with or without a
+ * second selector) is the search, and naming `lib.go` is the exact-name arm.
+ * Go's file-list mode cannot run `lib_test.go` alone either — same-package
+ * symbols would be undefined. So a same-package Go library under `tests/` has
+ * no provable guard. It is an OVER-refusal, never a forged proof, and the
+ * available answers are a reviewer's judgement or moving the library out of
+ * `tests/` — where it stops being collectible and every guard spelling works.
+ */
+function whyNoSelection(argv: readonly string[]): string {
+  const start = runnerPrefixLength(argv)
+  for (let i = start; i < argv.length; i += 1) {
+    const arg = argv[i] as string
+    if (arg.length === 0 || arg.startsWith('-')) continue
+    const prev = i > start ? (argv[i - 1] as string) : ''
+    if (prev.startsWith('-') && carriedValue(prev).length === 0) {
+      return (
+        `${arg} is read as the operand of ${prev} rather than as a selection — ` +
+        `put the path BEFORE the options, or attach the option's own value (${prev}=…)`
+      )
+    }
+    // Normalised first, mirroring `pathArgs` element for element.
+    if (namesASearch(normalizeArg(arg))) {
+      return `${arg} names a search, which reaches every collectible file under its root`
+    }
+    if (!looksLikeAPath(arg)) {
+      return `${arg} has neither a directory separator nor an extension, so a runner reads it as a substring filter`
+    }
+    const base = normalizeArg(arg).split('/').pop() as string
+    if (/\.[A-Za-z0-9]+$/.test(base) && !namesATestFile(base)) {
+      return `${base} is not a name an allowlisted runner would RUN, so it selects no test`
+    }
+  }
+  return 'it names no path at all'
+}
+
+/**
+ * The SAME rule `claim.file` lives under (repo-relative, no `..`), applied to
+ * every guard/control argv element.
+ *
+ * WITHOUT IT THE TAUTOLOGY CHECK IS BYPASSABLE BY PUNCTUATION. The guard runs
+ * with the proof worktree as its cwd, and that worktree's absolute path is
+ * derivable by the build (`proofWorktreePath`). So
+ * `bun test /<absolute worktree path>/tests/support/lib.ts` and
+ * `bun test ../<worktree-dir>/tests/support/lib.ts` both RUN the mutated file —
+ * and neither can EVER equal the repo-relative `claim.file`, so the comparison
+ * in `guardRunsTheMutatedFile` never sees the match. The file becomes its own
+ * guard: red under the mutation, green restored, "proved".
+ *
+ * Refuse the SHAPE rather than trying to resolve it: a guard that runs in the
+ * worktree never needs to leave it, so nothing honest is lost. Applied to the
+ * WHOLE element, not just to bare path arguments, so an option that CARRIES an
+ * ESCAPING path (`--preload=/abs/lib.ts`, `--preload=../x/lib.ts`) is refused
+ * too. An option carrying a repo-RELATIVE path is a different problem and is
+ * NOT this function's: `--preload=./tests/support/lib.ts` never leaves the
+ * worktree and is legitimate punctuation, so it is the tautology check that has
+ * to see through it — see `carriedValue`.
+ *
+ * A URL IS THE THIRD SPELLING OF AN ABSOLUTE PATH, and it wore neither of the
+ * first two: `--preload=file:///<absolute worktree path>/src/limit.ts` does not
+ * START with `/`, contains no `=/` (it is `=file:`) and has no `..` segment, so
+ * every lexical arm above passed it — while bun loaded the MUTATED file into
+ * the guard process, where it threw at preload and became its own RED against
+ * an assertion-free "separate" test. `carriedValue` could not see it either:
+ * `file:///a/src/limit.ts` normalizes to `file:/a/src/limit.ts`, which equals
+ * no repo-relative target. So refuse the SCHEME — a guard runs in the worktree
+ * and never needs a URL to name a file in it.
+ *
+ * KNOWN OVER-REFUSAL, recorded so the next reader does not read it as a bug:
+ * `=/` also refuses innocuous option values like `make test ARGS=/tmp/out` and
+ * `--grep=/foo/`. It fails CLOSED — the cost is that one nomination must spell
+ * its guard differently, and no proof is ever accepted that should not be.
+ */
+function argvEscapesTheWorktree(arg: string): boolean {
+  // THE PERCENT-DECODED SPELLING IS THE SAME ELEMENT to every loader that
+  // resolves a specifier as a URL, so both spellings are asked — `%2Fabs%2Fx.js`
+  // and `%2E%2E/x` are the leading `/` and the `..` with two characters of
+  // punctuation on them.
+  const decoded = percentDecoded(arg)
+  for (const spelling of decoded === arg ? [arg] : [arg, decoded]) {
+    if (elementEscapes(spelling)) return true
+    // AND THE ATTACHED SHORT OPTION IS THE FOURTH SPELLING: `-r/abs/lib.ts`,
+    // `-r../x/lib.ts` and `-rfile:///abs/lib.ts` hide the leading `/`, the `..`
+    // and the scheme behind the option LETTER, where none of the arms above can
+    // see them — while the runtime preloads the file all the same. Re-read the
+    // attached value as if it stood alone.
+    if (SHORT_OPTION_WITH_ATTACHED_VALUE.test(spelling) && elementEscapes(spelling.slice(2))) return true
+  }
+  return false
+}
+
+/**
+ * A SCHEME A RUNTIME WILL LOAD, anywhere in the element: the named ones a
+ * JS/python runner actually resolves, plus any scheme followed by `/`.
+ *
+ * `data:` earns its place beside `file:`. `--import=data:text/javascript,…`
+ * carries a MODULE BODY, and that body can name the mutated file in any
+ * spelling it likes — `import("file:///<absolute worktree path>/lib.ts")` (the
+ * reproduced bypass) or a plain relative `import("./tests/support/lib.ts")`,
+ * which is neither absolute nor `..`-escaping and normalises to nothing any
+ * comparison recognises. There is no honest guard that needs to inline a module
+ * body, so the whole shape is refused rather than parsed.
+ *
+ * A bare `word:word` is untouched — `npm run test:unit`, `make test:all` and
+ * pytest's `x.py::test_a` are honest guards whose names own a colon.
+ */
+const LOADABLE_SCHEME = /(^|[^A-Za-z0-9+.-])(?:file|data|node|blob|https?|ftp):|[A-Za-z][A-Za-z0-9+.-]*:\//i
+
+function elementEscapes(arg: string): boolean {
+  if (arg.startsWith('/') || arg.includes('=/') || arg.split(/[/=]/).includes('..')) return true
+  // A scheme — `file:` in any form, or any scheme followed by `/` (`file:/…`,
+  // `file:///…`, `http://…`) — ANYWHERE IN THE ELEMENT, not only at its head or
+  // straight after its `=`. Anchoring it there was a hole: in
+  // `--import=data:text/javascript,import("file:///<absolute worktree
+  // path>/tests/support/lib.ts")` the value at the `=` is `data:`, whose colon
+  // is followed by a letter, and the `file:///` that actually loads the mutated
+  // file sits mid-element where no arm looked. A guard runs IN the worktree and
+  // never needs a URL to name a file in it, so the scheme is refused wherever it
+  // appears. A bare `word:word` is still fine — `npm run test:unit` and `make
+  // test:all` are honest guards whose script name owns a colon.
+  if (LOADABLE_SCHEME.test(arg)) return true
+  // …AND AN ABSOLUTE PATH EMBEDDED IN A VALUE, with no scheme on it at all:
+  // `--import=data:text/javascript,import("/<absolute worktree path>/lib.ts")`
+  // carries a leading `/` that is not the ELEMENT'S leading `/` and follows no
+  // `=`. A `/` opening a token anywhere in the element is that same absolute
+  // path, so it is refused too. An ordinary relative path is untouched: every
+  // separator in `tests/support/lib.ts` and `./tests/x.ts` follows a path
+  // character.
+  return /(^|[^A-Za-z0-9._~+-])\/[A-Za-z0-9._~-]/.test(arg)
 }
 
 function validateArgv(argv: unknown, which: string): string | null {
@@ -394,6 +1153,15 @@ function validateArgv(argv: unknown, which: string): string | null {
   }
   if (!shape.ok(argv as string[])) {
     return `claim.${which} must be a test invocation (${shape.shape}), not ${argv.join(' ')}`
+  }
+  // AFTER the program and shape checks, so `rm -rf /` is still refused as "not
+  // a test runner" — the more informative answer — rather than as a path.
+  const escaping = (argv as string[]).find(argvEscapesTheWorktree)
+  if (escaping !== undefined) {
+    return (
+      `claim.${which} argument ${escaping} must be a repo-relative path inside the worktree — ` +
+      'an absolute, ..-escaping or URL-scheme path re-enters the worktree under a name the tautology check cannot see'
+    )
   }
   return null
 }
@@ -621,6 +1389,105 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     return leaf === root || leaf.startsWith(root.endsWith(sep) ? root : root + sep)
   }
 
+  /**
+   * How the guard runs the mutated file THROUGH A SYMLINK, or null if it does
+   * not. The RESOLVED half of `guardRunsTheMutatedFile`, which compares
+   * SPELLINGS only and therefore cannot see an alias.
+   *
+   * THE BYPASS THIS CLOSES, reproduced end-to-end against the real prover:
+   * commit `tests/alias.test.ts` as a symlink to `tests/support/lib.ts`, mutate
+   * the library, and nominate `bun test tests/alias.test.ts` as the guard with
+   * an assertion-free control. The two spellings differ, so the static check
+   * passed — and bun followed the link and ran the MUTATED file as its own
+   * guard: red mutated, green restored, "proved", with nothing having asserted
+   * anything. `claim.file`'s own containment is already resolved a few lines
+   * above (`withinWorktree`); the guard argv was not, and that asymmetry was
+   * the whole hole.
+   *
+   * Resolved on BOTH sides for the same reason `withinWorktree` is: the proof
+   * worktree can sit under a symlinked prefix.
+   */
+  async function guardResolvesToTheMutatedFile(claim: MutationClaim, wt: string): Promise<string | null> {
+    const rp = fs.realpath ?? (async (p: string) => p)
+    let leaf: string
+    try {
+      leaf = resolve(await rp(join(wt, claim.file)))
+    } catch {
+      // Unresolvable: the "does it exist" refusal below is the better answer.
+      return null
+    }
+    const collectible = aRunnerMayCollect(normalizeArg(claim.file))
+    for (const candidate of guardPathCandidates(claim.guard)) {
+      let resolved: string
+      try {
+        resolved = resolve(await rp(join(wt, candidate.path)))
+      } catch {
+        // Names nothing on disk — it cannot be running the mutated file.
+        continue
+      }
+      if (resolved === leaf) return `names it as ${candidate.arg}, which resolves to the same file`
+      if (collectible && leaf.startsWith(resolved.endsWith(sep) ? resolved : resolved + sep)) {
+        return `collects it via ${candidate.arg}, which resolves to a directory holding it`
+      }
+    }
+    return null
+  }
+
+  /**
+   * The SELECTOR that names nothing on disk, or null if every one of them does
+   * — the last spelling of a discovery run wearing a targeted argv, and the one
+   * no lexical rule can see.
+   *
+   * THE BYPASS THIS CLOSES, reproduced end-to-end against the real gate. A
+   * target whose name a runner COLLECTS but whose basename does not DECLARE a
+   * test (`src/thing_test.ts`: `RUNNER_COLLECTED_BASENAME` yes, `TEST_BASENAME`
+   * no, so it classifies `production` and is a legal nomination) plus a guard of
+   * `bun test other_test.ts` — a bare word that happens to LOOK like a test
+   * file. `pathArgs` counts it as a selection (it has an extension and a
+   * collectible basename), so the no-path arm never fires; it equals no
+   * repo-relative target, so the naming arm never fires; and there is no such
+   * file, so bun reads it as a SUBSTRING FILTER over a discovery run that
+   * collects `src/thing_test.ts` — the mutated file — and runs it as its own
+   * guard. Red mutated, green restored, "proved", with nothing having asserted
+   * anything.
+   *
+   * A SELECTION THAT SELECTS NOTHING IS NOT A SELECTION. Only here, with the
+   * pinned tree on disk, can that be decided — the spelling alone cannot say
+   * whether a path exists. So every selector is resolved, and one that names
+   * nothing is refused rather than believed. It fails CLOSED: the cost is that
+   * a nomination must spell its guard's argument the way the tree spells it,
+   * and a guard whose file does not exist was never going to prove anything
+   * anyway.
+   *
+   * WHAT THIS DOES *NOT* DECIDE, stated because reading it as "resolution
+   * closes the filter class" is exactly the mistake that shipped: RESOLVING IS
+   * NOT SELECTING EXCLUSIVELY. A `thing_test.ts` really sitting at the repo
+   * root resolves here and STILL filters `src/thing_test.ts` into the same bun
+   * run, and an operand that resolves because the branch committed it
+   * (`--reporter-outfile out/report.test.ts`) is a file the runner WRITES while
+   * it discovers everything. Both are matching semantics, not existence, so
+   * both are decided lexically instead — the FILTER arm of
+   * `guardRunsTheMutatedFile` and the option-operand rule in `pathArgs`. This
+   * check is the third leg, and only the third.
+   *
+   * SCOPED TO A COLLECTIBLE TARGET, deliberately. Discovery only reaches the
+   * mutated file when a runner would collect it wholesale; for a production
+   * module a whole-suite guard is legal (see `guardRunsTheMutatedFile`), so a
+   * phantom argument there costs the proof nothing it is owed.
+   */
+  async function guardSelectsNothingOnDisk(claim: MutationClaim, wt: string): Promise<string | null> {
+    if (!aRunnerMayCollect(normalizeArg(claim.file))) return null
+    const rp = fs.realpath ?? (async (p: string) => p)
+    for (const selector of pathArgs(claim.guard)) {
+      try {
+        await rp(join(wt, selector))
+      } catch {
+        return selector
+      }
+    }
+    return null
+  }
+
   async function proveInWorktree(
     run_id: string,
     claim: MutationClaim,
@@ -640,6 +1507,32 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     const contained = await withinWorktree(target, wt)
     if (!contained) {
       return refuse(run_id, claim, `${claim.file} resolves outside the proof worktree (a symlink) — refusing to mutate it`)
+    }
+
+    // THE TAUTOLOGY, RESOLVED. Before a single byte is mutated: does any guard
+    // argument resolve to the file about to be broken? `validateClaim` asked
+    // the same question of the SPELLINGS; only here, with the worktree on
+    // disk, can a symlink be followed.
+    const aliased = await guardResolvesToTheMutatedFile(claim, wt)
+    if (aliased !== null) {
+      return refuse(
+        run_id,
+        claim,
+        `claim.guard ${aliased} — a tautology, not a proof: the guard must be a separate test OF the behaviour of ${claim.file}`,
+      )
+    }
+
+    // AND THE SELECTOR THAT NAMES NOTHING. A guard argument that exists in no
+    // tree is not selecting a test, it is a filter over a discovery run — which
+    // reaches the mutated file when a runner collects it. Same seam, same
+    // reason it cannot be decided lexically.
+    const phantom = await guardSelectsNothingOnDisk(claim, wt)
+    if (phantom !== null) {
+      return refuse(
+        run_id,
+        claim,
+        `claim.guard names ${phantom}, which does not exist at ${headSha.slice(0, 8)} — a selector that selects nothing is a filter over a whole-suite discovery run, and that run collects the mutated file ${claim.file}: name the separate test you mean, spelled as the tree spells it`,
+      )
     }
 
     let before: string
@@ -952,8 +1845,12 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
   if (!Array.isArray(files) || files.length === 0) return false
   return files.every((raw) => {
     if (typeof raw !== 'string') return false
-    const path = raw.trim()
-    if (path.length === 0) return false
+    // BYTE-EXACT, deliberately: a surrounding-whitespace path is NOT trimmed
+    // into prose. `README.md ` (trailing space) is a different file from
+    // `README.md`, and trimming let it carry a whole diff into the prose-only
+    // exemption. Fails CLOSED — an odd name means "require the proof".
+    const path = raw
+    if (path.length === 0 || path.trim().length !== path.length) return false
     const segments = path.split('/')
     if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
     const base = segments[segments.length - 1] ?? ''
@@ -963,15 +1860,120 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
   })
 }
 
+/** One entry of the branch diff: the path git wrote, and whether the branch
+ *  DELETES it. A deleted path really did change, so it stays in the diff — but
+ *  it is absent at the pinned head, so no mutation can ever apply to it. */
+export interface ChangedFile {
+  path: string
+  deleted: boolean
+}
+
 /**
- * The files this branch changes against `base`, per git — NEVER per an agent's
- * account of them. Returns null when the diff could not be read, which
- * `isProseOnlyChange` treats as "require the proof".
+ * The files this branch changes against `base`, WITH their status, per git —
+ * NEVER per an agent's account of them. Returns null when the diff could not be
+ * read or came back malformed, which every consumer treats as "require the
+ * proof".
  *
  * `ref` should be a PINNED commit sha wherever the answer is going to be used to
  * decide something (the gate passes one): given a branch NAME this re-resolves
  * the ref, and a branch that moves between two such resolutions yields a file
  * list for a commit nobody is proving.
+ */
+export async function changedFilesWithStatus(
+  run_host: RunHostCommand,
+  repo_path: string,
+  base_branch: string,
+  ref: string | null,
+): Promise<ChangedFile[] | null> {
+  if (ref === null || ref.trim().length === 0) return null
+  // `--no-renames`: rename detection prints ONLY the destination, so a
+  // production file `git mv`-ed to a test-shaped name would appear in this list
+  // as a declared test and could carry the whole diff into the exemption below.
+  // Without it the source path — the production file that actually changed —
+  // is invisible to every classifier downstream.
+  // `-z` IS THE FLAG THAT KEEPS THE PATHS: it turns off C-QUOTING as well as
+  // line-splitting, so `tests/süß.test.ts` arrives as itself rather than as
+  // `"tests/s\303\274\303\237.test.ts"` — a spelling whose basename matches
+  // `TEST_BASENAME` no longer (a declared test would classify `production`, and
+  // the exemption could not fire) and which `files.includes(claim.file)` can
+  // never match either, so the gate would refuse and blame the build for an
+  // omission it did not make. `core.quotePath=false` is belt and braces: under
+  // `-z` it is INERT (deleting it leaves the real-git non-ASCII behaviour
+  // unchanged), and it is kept only so a future reader who drops `-z` does not
+  // silently reintroduce quoting.
+  // NUL parsing with NO per-record `.trim()`: a path is BYTES, and a split that
+  // trims is not byte-preserving. `src/logic.test.ts ` (trailing space — a
+  // legal git path, and a production file) trimmed to `src/logic.test.ts`
+  // classifies as a DECLARED TEST, which is exactly the input the
+  // no-production-file exemption is decided on. The same trim also hid a path
+  // containing a newline, which `\n`-splitting tore into two half-paths that
+  // classify as neither. Matches `listConflictedFiles` in merge.ts, which reads
+  // git the same way for the same reason.
+  // `--name-status` RATHER THAN `--name-only`, and that is not cosmetic on
+  // either count:
+  //   (a) IT MAKES THE PARSE TRIM-PROOF. `run_host` returns `stdout.trim()`
+  //       (git-mode.ts), which runs BEFORE this function sees a byte — so under
+  //       `--name-only` a first path spelled ` README.md` (leading space, a
+  //       legal git path) arrived as `README.md` and bought the prose-only
+  //       exemption, defeating the byte-exactness this parse promises. Trailing
+  //       whitespace already survived because the record ends in NUL and NUL is
+  //       not whitespace; a leading STATUS LETTER gives the front of the stream
+  //       the same protection, and there is no untrimmed host seam to reach for.
+  //   (b) IT DISTINGUISHES A DELETION. A path the branch DELETES is a real
+  //       change and belongs in this list, but it is absent at the pinned head,
+  //       so nominating it is refused ("does not exist at <sha>") — and calling
+  //       it a legal target made a deletion-only diff an unreachable-nomination
+  //       deadlock: the refusal named the one file that could not be named back.
+  const res = await run_host(
+    [
+      'git',
+      '-C',
+      repo_path,
+      '-c',
+      'core.quotePath=false',
+      'diff',
+      '-z',
+      '--no-renames',
+      '--name-status',
+      `${base_branch}...${ref}`,
+    ],
+    repo_path,
+  )
+  if (!res.ok) return null
+  // AN EMPTY DIFF IS AN ANSWER, NOT A FAILURE — and collapsing the two made the
+  // gate say "the branch diff could not be read" about a branch whose diff was
+  // read perfectly and was empty. git exits 0 and prints nothing; the reader
+  // then split '' into [''] and reported the same null a git FAILURE reports,
+  // which left the dedicated "the branch diff is empty" refusal unreachable and
+  // the operator chasing a git problem that never happened. Both still fail
+  // closed — `[]` is not exempt (`diffHasNoLegalMutationTarget`) and carries no
+  // `claim.file`, so the proof is still required — they just say which is true.
+  if (res.stdout.length === 0) return []
+  // `<status>NUL<path>NUL…`, so a well-formed answer has an EVEN number of
+  // records and a trailing empty token after the final NUL. Anything else — a
+  // truncated stream, a status field that is not the single letter
+  // `--no-renames` guarantees (a rename score `R100` would carry two paths) —
+  // reads as null, i.e. REQUIRE THE PROOF. Fails closed at every step, like
+  // every other reader on this path.
+  const records = res.stdout.split('\0')
+  if (records.length < 3 || records[records.length - 1] !== '') return null
+  const fields = records.slice(0, -1)
+  if (fields.length % 2 !== 0) return null
+  const out: ChangedFile[] = []
+  for (let i = 0; i < fields.length; i += 2) {
+    const status = fields[i] as string
+    const path = fields[i + 1] as string
+    if (!/^[A-Z]$/.test(status) || path.length === 0) return null
+    out.push({ path, deleted: status === 'D' })
+  }
+  return out
+}
+
+/**
+ * The PATHS this branch changes — `changedFilesWithStatus` with the status
+ * dropped. Deletions are INCLUDED: `claim.file` must appear in this list, and a
+ * branch that deletes a file really did change it. Whether a path can be
+ * MUTATED is a separate question, answered off the status.
  */
 export async function changedFilesOnBranch(
   run_host: RunHostCommand,
@@ -979,14 +1981,8 @@ export async function changedFilesOnBranch(
   base_branch: string,
   ref: string | null,
 ): Promise<string[] | null> {
-  if (ref === null || ref.trim().length === 0) return null
-  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${ref}`], repo_path)
-  if (!res.ok) return null
-  const files = res.stdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-  return files.length === 0 ? null : files
+  const entries = await changedFilesWithStatus(run_host, repo_path, base_branch, ref)
+  return entries === null ? null : entries.map((e) => e.path)
 }
 
 /**
@@ -1045,7 +2041,12 @@ export interface MutationGateOutcome {
    * a later reader needs in order to spot a "guard" that tested nothing.
    */
   reason: string
-  /** True when the prose-only predicate exempted the diff (no proof run). */
+  /**
+   * True when the diff itself made the proof moot and none was run — either
+   * because it is prose-only, or because git says it changed no production
+   * file at all. `reason` says WHICH; the two strings are deliberately
+   * distinct so a run record never has to guess.
+   */
   exempt: boolean
   /** The machine-emitted block, for the caller to inspect. Null when exempt. */
   evidence: MutationEvidence | null
@@ -1259,6 +2260,104 @@ async function headStillAt(input: MutationGateInput, pinnedSha: string): Promise
 }
 
 /**
+ * THE NO-PRODUCTION-FILE EXEMPTION, as a predicate — exported so the empty-list
+ * arm is REACHABLE and pinned. An empty list DOES arrive from the gate now that
+ * `changedFilesWithStatus` tells an empty diff apart from an unreadable one,
+ * and it is NOT exempt: `[].every(…)` is vacuously true, which would turn "this
+ * branch changes nothing" into "nothing to mutate, merge it". A diff with no
+ * files has no production change to certify and no claim to bind, so it fails
+ * closed into requiring the proof and is refused by name.
+ */
+export function diffHasNoLegalMutationTarget(files: readonly string[] | null): boolean {
+  if (files === null || files.length === 0) return false
+  return files.every((f) => classifyMutationTarget(f) !== 'production')
+}
+
+/**
+ * The changed paths a mutation could actually be APPLIED to: production by
+ * classification, AND still present at the head being proved.
+ *
+ * THE SECOND HALF IS WHY THIS EXISTS. A path this branch DELETES is a real
+ * change and stays in the diff — `claim.file` must appear there — but the
+ * prover reads the file out of the pinned worktree and refuses what is not
+ * there ("does not exist at <sha> — the mutation cannot apply"). Naming a
+ * deletion as the target the build SHOULD have nominated therefore closed a
+ * loop on the reader: the refusal named the one file that could not be named
+ * back. So the refusal is written off THIS list, and a diff whose only
+ * production changes are deletions is told exactly that instead.
+ *
+ * IT IS NOT AN EXEMPTION, and that is deliberate. `git mv src/limit.ts
+ * src/limit.test.ts` reaches the reader as a DELETION plus a test-shaped
+ * addition (`--no-renames`, so the source is visible) — the code is still in
+ * the tree, still running, and "no production file changed" would be a lie
+ * about it. Treating deletions as absent targets for the EXEMPTION would hand
+ * that rename the free pass `--no-renames` exists to deny. So the proof is
+ * still required, and the refusal says why none can be run.
+ */
+export function legalMutationTargets(files: readonly string[] | null, deleted: readonly string[] = []): string[] {
+  if (files === null) return []
+  return files.filter((f) => classifyMutationTarget(f) === 'production' && !deleted.includes(f))
+}
+
+/**
+ * Why a required proof with NO claim is refused — split so the message never
+ * blames the build for an omission it could not avoid. The no-legal-target
+ * branch is defense-in-depth: the exemption above uses the same classifier,
+ * so reaching it means the two disagreed — a gate defect, and the message
+ * says so, naming a file it considered and why it was disqualified.
+ */
+/** A source extension an allowlisted runner actually executes — used ONLY to
+ *  pick which legal target the refusal names, never to decide legality. */
+const EXECUTABLE_SOURCE = /\.([cm]?[jt]sx?|go|py|rs)$/
+
+export function missingClaimRefusalReason(files: readonly string[] | null, deleted: readonly string[] = []): string {
+  if (files === null) {
+    return 'mutation proof required but the branch diff could not be read — a proof cannot be bound to it'
+  }
+  if (files.length === 0) {
+    return 'mutation proof required but the branch diff is empty — a proof cannot be bound to a diff with no files'
+  }
+  const legal = legalMutationTargets(files, deleted)
+  // NAME A TARGET A RUNNER COULD ACTUALLY REDDEN, when the diff has one. Every
+  // legal target is legal by CLASSIFICATION — not prose, not a declared test —
+  // and that admits files no allowlisted runner executes: a `.github/workflows`
+  // YAML is not prose (`PROSE_DIR_DENYLIST`), so a workflow-plus-README diff was
+  // told, confidently, that the YAML was the mutation it should have nominated.
+  // Requiring a proof for that class is older than this branch and is left
+  // alone; naming an unprovable file as the answer is what this fixes. So a
+  // source file is preferred, and when none exists the message says the target
+  // it names may not be reddenable at all.
+  const executable = legal.find((f) => EXECUTABLE_SOURCE.test(f))
+  const named = executable ?? legal[0]
+  if (named !== undefined) {
+    const caveat =
+      executable === undefined
+        ? ' — if no allowlisted runner can execute it, that is a finding for the reviewer rather than a nomination the build can make'
+        : ''
+    return `mutation proof required but the build nominated no mutation to run — a legal mutation target existed: ${named} changed in this diff and is neither a declared test nor documentation${caveat}`
+  }
+  // THE DELETION-ONLY DIFF, said out loud. This branch is REACHABLE and is not
+  // a gate defect: a deleted production file is a production change (so no
+  // exemption fires) that no mutation can be applied to (so no nomination can
+  // pass). The old message called the deleted file "a legal mutation target
+  // [that] existed" and told the build to nominate it — which the prover then
+  // refused for being absent. Naming the deadlock is the whole fix available
+  // here: exempting it would be the rename bypass in a new coat.
+  const gone = files.filter((f) => deleted.includes(f) && classifyMutationTarget(f) === 'production')
+  if (gone.length > 0) {
+    return (
+      `mutation proof required but NO mutation of this diff can be run: its only production changes are DELETIONS ` +
+      `(${gone.join(', ')}), which are absent at the head being proved — nominating one is refused because the ` +
+      `mutation cannot apply, and nothing else in the diff is a legal target. This diff needs a reviewer's ` +
+      `judgement, not a proof.`
+    )
+  }
+  const first = files[0] as string
+  const why = classifyMutationTarget(first) === 'test' ? 'a declared test file' : 'documentation'
+  return `mutation proof required but no file in this diff is a legal mutation target — e.g. ${first} is ${why} — yet no exemption fired; that disagreement is a gate defect, not a build omission`
+}
+
+/**
  * THE PHASE. Runs after a verdict reaches APPROVE and BEFORE the merge.
  *
  * Note the shape of the API: there is no way to hand this function an evidence
@@ -1332,7 +2431,10 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     }
   }
 
-  const files = await changedFilesOnBranch(input.run_host, input.run.repo_path, input.base_branch, pinnedSha)
+  const entries = await changedFilesWithStatus(input.run_host, input.run.repo_path, input.base_branch, pinnedSha)
+  const files = entries === null ? null : entries.map((e) => e.path)
+  // The paths this branch DELETES: still part of the diff, never mutatable.
+  const deleted = (entries ?? []).filter((e) => e.deleted).map((e) => e.path)
   if (isProseOnlyChange(files)) {
     // The exemption is bound to the pinned commit like any other outcome: if the
     // branch moved since the pin, THIS is no longer the diff that would merge.
@@ -1348,13 +2450,73 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     return { ok: true, reason: 'prose-only diff — mutation proof not required', exempt: true, evidence: null }
   }
 
-  if (input.claim === null || input.claim === undefined) {
+  // A DIFF WITH NO LEGAL MUTATION TARGET: every changed file is a declared test
+  // or documentation, so the set of nominations that could pass is EMPTY, and
+  // requiring a proof is asking for one with no referent. Sound because `files`
+  // comes from git (changedFilesWithStatus), never from the agent: if no
+  // production file changed, no production behaviour can have regressed.
+  // Recorded exactly like the prose-only exemption (`exempt: true` + its OWN
+  // reason string) so the run record shows WHICH exemption fired; bound to the
+  // pinned commit the same way, and claim-independent for the same reason the
+  // prose path is: the premise is about the diff, not the nomination.
+  //
+  // THE SOFT EDGES, stated so a reader does not have to find them.
+  //
+  // (1) The file LIST comes from git, but the file NAMES are written by the
+  // build, and a name is what makes a file a "declared test". So a build that
+  // put production logic in `src/limit.test.ts` — or in `src/__tests__/impl.ts`,
+  // the DIRECTORY route to the same declaration — would buy this exemption.
+  // `TEST_BASENAME` is held to the CONVENTIONAL declarations exactly to keep
+  // that surface as small as it can be (a looser name like `src/ab-test.ts`
+  // stays `production` and buys nothing), and the rest is VISIBILITY: the reason
+  // below names EVERY changed file, so the run record shows the reviewer exactly
+  // which names to disbelieve.
+  //
+  // (2) An all-declared-test diff is exempt whatever it does to those tests —
+  // including a PR that deletes assertions. That is the honest consequence of
+  // the premise: this gate proves that PRODUCTION behaviour did not silently
+  // regress, and it has no opinion on test content. A weakened suite is a
+  // REVIEW finding (Argus reads the diff), not something a mutation of a
+  // production file that nobody changed could ever have caught.
+  //
+  // (3) A production file this branch DELETES is still a production change, so
+  // this exemption does NOT fire for it — even though no mutation can be
+  // applied to a file that is absent at the pinned head. That asymmetry is
+  // deliberate: `git mv src/limit.ts src/limit.test.ts` arrives as a deletion
+  // plus a test-shaped addition, and exempting deletions would hand that rename
+  // the free pass `--no-renames` exists to deny. What the deletion changes is
+  // the REFUSAL: it no longer names an unnominatable file as the target the
+  // build should have picked (see `missingClaimRefusalReason`).
+  if (diffHasNoLegalMutationTarget(files)) {
+    const stillThere = await headStillAt(input, pinnedSha)
+    if (!stillThere) {
+      return {
+        ok: false,
+        reason: 'mutation proof rejected: the branch moved while the no-production-file exemption was being decided',
+        exempt: false,
+        evidence: null,
+      }
+    }
+    const changed = files as string[]
+    // NAME THEM ALL — every changed file, not just the declared tests. These
+    // are the names the exemption rests on, and this string is the only place
+    // they outlive the run. A truncated list hides exactly the entry a reviewer
+    // is here for — five ordinary `*.test.ts` names and a sixth that is
+    // production logic wearing a test's name — and a list FILTERED to the tests
+    // hides the rest of the diff the exemption also covered. So "the reason
+    // names the files" has to mean all of them or it means nothing. Bounded by
+    // the diff, which git wrote and the agent did not; deliberately uncapped,
+    // and the cost of that is one long log line on a large rename.
     return {
-      ok: false,
-      reason: 'mutation proof required but the build nominated no mutation to run',
-      exempt: false,
+      ok: true,
+      reason: `no production file in this diff — nothing to mutate: all ${changed.length} changed files are declared tests or documentation (${changed.join(', ')})`,
+      exempt: true,
       evidence: null,
     }
+  }
+
+  if (input.claim === null || input.claim === undefined) {
+    return { ok: false, reason: missingClaimRefusalReason(files, deleted), exempt: false, evidence: null }
   }
 
   // BIND THE PROOF TO THIS PR. Without this the gate certifies nothing about the

@@ -891,10 +891,19 @@ const FORGE_SCHEMA = {
       additionalProperties: false,
       required: ['file', 'find', 'replace', 'guard', 'control'],
       properties: {
-        file: { type: 'string', description: 'repo-relative PRODUCTION file to mutate (never a test file)' },
+        file: {
+          type: 'string',
+          description:
+            'repo-relative file whose PRODUCTION behaviour to break. Not a DECLARED test (a *.test.*/*.spec.* basename, a *_test.go/py/rs basename, or a direct child of __tests__/) and not documentation. A support LIBRARY under tests/ that declares no test cases IS a legal target — mutate it and let the separate test that asserts it go red.',
+        },
         find: { type: 'string', description: 'exact substring occurring EXACTLY ONCE, whose behaviour the PR relies on' },
         replace: { type: 'string', description: 'what replaces it — the break' },
-        guard: { type: 'array', items: { type: 'string' }, description: 'argv that MUST go RED under the mutation' },
+        guard: {
+          type: 'array',
+          items: { type: 'string' },
+          description:
+            'argv that MUST go RED under the mutation. A SEPARATE test OF the behaviour: it may not run the mutated file itself — not by naming it (in an argument or inside an option such as --preload=…), and, whenever a runner could collect the mutated file wholesale, not via a directory that collects it, not via a glob or `unittest discover`, and not by naming no path at all (a bare `bun test` / `python3 -m unittest` / `npm run test-all` discovers from the repo root). That is a tautology and is refused before anything runs. NAME THE SEPARATE TEST FILE: an argv whose only arguments are options (`bun test --timeout 1000`) counts as naming nothing. Every argument is repo-relative: an absolute path or one containing `..` is refused outright.',
+        },
         control: { type: 'array', items: { type: 'string' }, description: 'argv that MUST stay GREEN under the mutation' },
         rationale: { type: 'string', description: 'why this is the behaviour worth proving (recorded, not parsed)' },
       },
