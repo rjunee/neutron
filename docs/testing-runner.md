@@ -145,6 +145,31 @@ pinned `1.3.9`, and the same coverage audit (`declared == bun-discovered ==
 executed`, drift fatal) gates both. There is no hidden skip list. "CI is green"
 and "the local suite passes" now mean the same thing, up to toolchain version.
 
+### A skip is not a pass, and an empty check is not a clean check
+
+The parity above is about *files*: every discovered file runs in both places. It is not
+automatically true of *assertions*, and two shapes have produced a green reading over a check that
+never ran.
+
+- **Environment-gated guards.** Some checks only do their work when the CI event environment is
+  present. `scripts/ci/as-built-write-guard.sh:59-80` resolves its base/head shas from
+  `GITHUB_EVENT_NAME` + `GITHUB_EVENT_PATH`; with neither set it prints
+  `… is not a branch proposal … Nothing to guard` and exits **0**. That exit is correct for a bare
+  local invocation and wrong to read as a pass. Drive such a guard the way its own tests do — set
+  `GUARD_BASE_SHA` / `GUARD_HEAD_SHA`, or the event env — before quoting it as green, and read what
+  a run SKIPPED before quoting its summary line.
+- **A check whose extraction matched nothing.** At the exit code, a gate that parsed no input and
+  reported clean is indistinguishable from a gate that parsed everything and found nothing wrong.
+  A check that could not run has to say so: the leak gate exits **3** with
+  `LEAK GATE: INCOMPLETE` when its PII rule has no denylist, and that behaviour is pinned by a
+  control that must fail — `scripts/ci/leak-gate-selftest.test.ts:451`, "a local run with NO
+  denylist is INCOMPLETE (exit 3), never green".
+
+**So: a new gate ships with a must-fail control in the same commit** — an input it MUST reject —
+and a zero-match extraction fails loudly rather than passing quietly. This is
+`docs/INVARIANTS.md` #119 ("an EMPTY check must never read as a PASSING check") applied to the test
+and CI surface. A gate with no failing case is an empty check wearing a green tick.
+
 ### The toolchain-skew gotcha
 
 That last clause is load-bearing: CI pins bun `1.3.9`, and a newer local bun can

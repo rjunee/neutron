@@ -18,6 +18,11 @@ file is the decoder ring for the codenames they use.
 > module, package, or API in this repo — every shipped surface is under the
 > `neutron` / `@neutronai/*` namespace.
 
+> Second decoder, added 2026-08-31: ["Names whose plain reading is
+> false"](#names-whose-plain-reading-is-false) at the foot of this file covers the opposite
+> problem — **live** names whose plain English reading asserts something the system does not
+> mean. Read it before trusting any status column or terminal token.
+
 ---
 
 ## Nova
@@ -117,3 +122,80 @@ Neutron lifts several of its runtime patterns:
   (doc comments + `SDK-CONTRACT.md`), where "Topline" was confusing residue with
   no in-repo pointer to follow; the concrete reference Core (`dtc-analytics`) is
   named directly instead.
+
+---
+
+## Names whose plain reading is false
+
+Everything above decodes **lineage** codenames — names from predecessor systems that no longer
+name anything live. This section decodes the opposite hazard: **live** names, in this repo, whose
+plain English reading asserts something the system does not mean. They are collected here because
+an agent driving this system reads a status column or a token and acts on what it says; a name
+that lies is an incident with a delay fuse.
+
+Each entry gives the name, what a competent reader assumes, and what it actually means. Where a
+fix exists it is named; otherwise assume the false reading is still load-bearing. The contract
+these entries are being moved toward is `docs/INVARIANTS.md` §12 (the honesty contract) and §13
+(the action contract); a name below that survives is a line in §12 that is not yet closed.
+
+- **`last_advanced_at`** (`code_trident_runs`) — reads as "when this run last showed life".
+  Means "when this run last crossed a checkpoint boundary". It is "stale by construction during a
+  long Forge step, so a reaper keyed on it asks 'has a phase ended recently', not 'is anything
+  alive'" (`trident/store.ts:562-567`; same reasoning at `trident/liveness.ts:24`). Mid-phase
+  stage events are the positive liveness evidence this column is not.
+- **`inner_verdict = 'REQUEST_CHANGES'`** (`trident/store.ts:49`) — reads as "a reviewer read this
+  work and rejected it". On historical rows it is also written when the run never reached a
+  reviewer at all. New writes with an empty findings list are now refused at the store
+  (`TridentEmptyFindingsRejectionError`, `trident/store.ts:58`); rows written before that guard
+  are deliberately not rewritten, because they are the measurement evidence
+  (`migrations/0138_code_trident_runs_review_not_run.sql:4-8`).
+- **`REVIEW_NOT_RUN`** (`trident/store.ts:49`) — reads as "the run failed before it built
+  anything". Means only "no reviewer produced a verdict on this row": per `trident/store.ts:147-152`
+  it covers crash, infrastructure stop, provenance reject or a lost round, and "it is never a
+  judgement about the code". It appears on runs that built and published successfully.
+- **empty `inner_checkpoint_findings`** (`trident/store.ts:146`) — reads as "the review found
+  nothing wrong". Means "no findings were recorded", which is most often "the run never reached
+  review". An empty finding set is an approval or an infrastructure outcome, never a rejection —
+  that sentence is the refusal message itself at `trident/store.ts:60`.
+- **`finished`** (`SubagentStatus`, `runtime/subagent/registry.ts:18`) — reads as "the dispatched
+  agent did the job". Means "the process ended without crashing or being cancelled":
+  `agent-dispatch/service.ts:538-547` maps a completed turn to `finished` with no reference to any
+  artefact, and `:654` supplies the summary "Dispatch finished (no summary text returned)". A
+  dispatch that produced nothing at all is recorded `finished`.
+- **`connected`** (`gateway/cores/integrations.ts:155`) — reads as "this credential works right
+  now". For API-key slots it is a presence check against the stored rows, not a probe — see the
+  docblock at `:409-413`. A revoked key reads `connected: true` until something exercises it.
+  (OAuth slots do a live read, so the same field carries two different grades.)
+- **`mergeable` / `MERGEABLE`** (GitHub PR field; read via `trident/gh-authed.ts:46-52`) — reads
+  as "safe to merge". Means "no textual conflict, when GitHub last computed it". It says nothing
+  about whether the checks attached to the PR still describe the current head.
+- **`phase = 'done'`** (`code_trident_runs`) — reads as "this run's work shipped". Means "this run
+  reached its own terminal success phase". The two diverge in both directions: work lands in
+  `main` from runs recorded failed, because the merged PR was squashed and ancestry no longer
+  finds the run's head. Shipping is membership of the run's head in the commit list of a merged
+  PR the run claims, not `git merge-base --is-ancestor` (`docs/INVARIANTS.md` #127).
+- **`isolation: 'worktree'`** (`trident/inner-workflow.mjs:6199`, `:6520`) — reads as "the build
+  runs in isolation". Means "the build runs in a separate working tree inside the same
+  repository": `trident/merge.ts:906` places it at `<repo>/.trident-worktrees/<slug>-<id8>`, so it
+  shares the git object store, the ref namespace, `node_modules`, the process environment and the
+  temp directory with the checkout it was cut from. It is a directory boundary, not a sandbox.
+- **`CODEX_BUILD_BRANCH_UNBOUND`** (`trident/codex-build.sh:1165`) — reads as an executor fault
+  ("the build could not bind its branch"). Means "another worktree already holds this branch, so
+  we refused before spending anything". The message names the holding worktree; the token still
+  sends the reader to the wrong subsystem.
+- **`capability_gate`** (`mcp/server.ts:78`) — reads as a gate. Is not one: the default is
+  `?? (() => true)` and the sole production construction site passes no gate
+  (`gateway/composition/build-core-modules.ts:360-364`). The source says so — "LOG-ONLY … it does
+  NOT gate dispatch" (`:125-128`), "Allow-all in production today" (`:169`). The throw at `:138-141`
+  is unreachable in production. Do not read a tool call as authorised because this exists.
+- **`declared_surfaces`** (`work-board/store.ts:70-71`) — reads as "the paths this card declares it
+  will write". Its own comment says "Null means undeclared (and later gates fail safe)", and it is
+  null on the live cards. An optional declaration field is an empty declaration field.
+- **a bare `{ ok: true }`** (`work-board/agent-tool.ts:153-155`) — reads as "the change was
+  applied". Means "no error was thrown". The same value is returned when a write landed and when
+  it did not, and at `:456-457` the reorder path discards the store's result entirely. See
+  `docs/INVARIANTS.md` #129.
+- **`outer-published:<head>:<remaining>:<round>`** (`trident/orchestrator.ts:3659`) — reads as a
+  checkpoint name. Is four facts packed into one colon-delimited string in a TEXT column, in a
+  database with a schema; a fifth (`:deviated`) is an optional suffix. Anything parsing it is
+  re-deriving state that should have been read.

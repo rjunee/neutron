@@ -146,6 +146,33 @@ queue, never a second place to read the log.
 - Match the style of the surrounding code (formatting, naming, comment density).
 - Write clear commit messages explaining the why, not just the what.
 
+### If your change adds a status, a guard, or a delegation
+
+Three obligations, from `docs/INVARIANTS.md` §12 (the honesty contract) and §13 (the action
+contract). They are written down because the same defect has landed here repeatedly under
+different names.
+
+- **A status a caller reads must be able to say "I don't know."** If a value is stored rather than
+  probed, it carries when it was observed; a probe that could not conclude reports UNKNOWN with a
+  reason, never an implicit negative and never an implicit pass. The precedent is already in this
+  file: the leak gate exits **3** with `LEAK GATE: INCOMPLETE`, because "I could not check" must
+  not look like "I checked and it was clean". `GLOSSARY.md` → "Names whose plain reading is false"
+  lists the names that got this wrong. Do not add to it.
+- **A new guard ships with its honest sibling and a must-fail control.** Naming the shape you
+  refuse is half the work; the other half is naming the row that gets written *instead*, and
+  showing in a test that a writer can actually produce it. A refusal with no writable alternative
+  is a deadlock, not a safeguard — `trident/store.ts:1225-1245` records the one this repo already
+  shipped, a run that "retried forever" against a guard reading a column its own writer could not
+  populate. On the must-fail control, see `docs/testing-runner.md`.
+- **A no-op must be distinguishable from a success.** Do not return a bare `{ ok: true }` from a
+  write path. Say what changed, or that it was already so, or that it was correctly a no-op — or
+  refuse, naming the precondition that failed and the layer that refused.
+
+And when you fix a defect, prefer the fix that binds to the **class of construction site** over the
+one that patches the caller that taught you about it. A guard bolted onto one caller is a note; a
+requirement at the site where the object is built is a floor the next contributor inherits without
+having read this file.
+
 ## Reporting bugs
 
 Open a GitHub issue with: what you did, what you expected, what happened, and

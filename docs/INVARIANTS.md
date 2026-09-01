@@ -866,6 +866,202 @@ with cross-references noted inline.
      Protects: **S2** (WS origin + fail-closed guards) — the unit that replaces this gap, not an
      invariant to keep forever.
 
+## 12. The honesty contract (agent-legible architecture, 2026-08-31)
+
+Sections 1–11 above are per-dimension findings. §12 and §13 are different in kind: they are one
+rule and its consequence for actions, added because a 30-day measurement of the build loop showed
+the same defect at unrelated sites. The rule:
+
+> **Every recorded fact names the producer that observed it and the evidence it observed. Where
+> no producer looked, or looked and could not tell, the fact is `unknown`; `unknown` authorises
+> nothing; and every refusal must name the honest row that is written instead.**
+
+The final clause is what makes the contract satisfiable rather than a deadlock, and it is not
+theoretical — see #128.
+
+Status convention, unchanged from the rest of this file: a line marked **unprotected — covered by
+review only** has no automated guard today. Most of §12–§13 is in that state deliberately; it is
+recorded here so a build touching a named site closes the gap rather than widening it. Two lines
+(#124, #128) are already enforced in code and are the pattern the rest are moved toward.
+Numbering starts at 119 because #118 is claimed by the in-flight trident verdict-honesty change
+and is not reused here.
+
+119. EVERY OBSERVATION IS THREE-VALUED and the third value is the whole point. A status is
+     OBSERVED (a named probe looked, just now), RECORDED (stored, carrying the time of the
+     observation it came from), or UNKNOWN (no probe ran, or one ran and could not conclude). No
+     component may return a two-valued answer where the third value is possible — in particular
+     "I looked and there was nothing" and "I could not look" are different facts and an EMPTY
+     check must never read as a PASSING check. Already typed:
+     `trident/run-evidence.ts:44-47` (`observed: 'activity' | 'nothing' | 'unknown'`), with the
+     doctrine at `:21-26`. Representative violating site: `gateway/cores/integrations.ts:155`
+     (`connected` is a stored presence check for API-key slots — see the note at `:409-413` — so
+     a revoked credential reads healthy).
+     Protects: `trident/run-evidence.test.ts` (the type and the watchdog's use of it); every
+     other consumer is **unprotected — covered by review only**.
+120. A recorded fact names its producer. A stored value that cannot say which probe observed it
+     is UNKNOWN however confident it looks, and provenance columns are required at the file, not
+     offered as optional metadata — an optional provenance field is an empty provenance field.
+     The pattern to copy is `migrations/provenance.ts:24-26` (`applied_by_commit` — "NULL
+     otherwise, and NULL is a first-class answer") and `:40-45` (a check "returns a REASON rather
+     than an empty answer, because 'we cannot check' and 'nothing is tracked' have opposite
+     consequences at the call site"). The measured counter-example is
+     `work-board/store.ts:70-71`, whose own comment says "Null means undeclared (and later gates
+     fail safe)" — it is null on every live card.
+     Protects: **unprotected — covered by review only.**
+121. A derivation's output grade is the MINIMUM of its inputs' grades: a conclusion drawn from an
+     UNKNOWN is UNKNOWN. This is the whole discipline of the derived layer and it is checkable in
+     a pure module, which is why derivations must stay pure (`trident/run-evidence.ts` is the
+     existing example — no I/O, so its grade arithmetic is testable without a substrate).
+     Protects: **unprotected — covered by review only.**
+122. UNKNOWN never authorises an irreversible action — merge, deploy, delete, force-push, or
+     terminating a run. It may defer or refuse, and nothing else. One site already conforms:
+     external launcher liveness acts only on positive death evidence (§9's external-launcher
+     liveness invariant, `trident/liveness.ts`).
+     Protects: `trident/liveness-death-e2e.test.ts` for that one site; everywhere else
+     **unprotected — covered by review only.**
+123. A fact is STORED only if it was observed; anything that is a JUDGEMENT about observations is
+     DERIVED and names its inputs. Freezing a judgement into a column is how a derived answer
+     acquires the authority of an observation. The canonical failure is `last_advanced_at` read
+     as liveness: it moves only at checkpoint boundaries and is "stale by construction during a
+     long Forge step, so a reaper keyed on it asks 'has a phase ended recently', not 'is anything
+     alive'" (`trident/store.ts:562-567`; the same reasoning at `trident/liveness.ts:24`). The
+     stored/derived split, per entity: a run stores phase, checkpoint, verdict, built commit,
+     published ref and findings and DERIVES is-hung / is-stale / is-mergeable; a credential stores
+     the last probe result and when, and DERIVES is-connected; a PR stores its head sha and the
+     checks bound to that sha, and DERIVES is-green.
+     Protects: `trident/tick-liveness.test.ts` (the stage-event evidence that replaces the column
+     for one consumer); the general rule is **unprotected — covered by review only.**
+124. Honesty is enforced at the LEDGER WRITE SITE — the narrow waist every path must pass through
+     — never by convention at call sites. A guard at a caller is one more guard among many; a
+     guard at the waist is the contract. The enforced instance: `inner_verdict='REQUEST_CHANGES'`
+     with an empty findings list is a write the store REJECTS
+     (`TridentEmptyFindingsRejectionError`, `trident/store.ts:58`, thrown at `:1026`, `:1172`,
+     `:1248`). The write site is chosen precisely because it is unavoidable, and the store says so
+     about its own residual gap at `trident/store.ts:1019-1021`: the guard "makes findings-free
+     rejection structurally unwritable by in-process writers; `checkpoint.sh` remains
+     out-of-process SQL and bypasses it by construction". That residue is why #125 exists.
+     Protects: `trident/store.test.ts:918` ("empty-findings rejection guard — an empty finding set
+     is never a rejection").
+125. An enforcement point must be UNWIREABLE-OFF. Only two qualify, and each covers the other's
+     blind spot exactly: (a) the TYPE at the construction site — always on, a missing field is a
+     compile error, blind to out-of-process writers such as `trident/checkpoint.sh:300`, which
+     issues raw `sqlite3 ... UPDATE code_trident_runs` no TypeScript type will ever see; and
+     (b) the SCHEMA at the file — always on for every writer including that shell script, blind to
+     whether a value was observed rather than typed. A separately-wired runtime gate is NOT an
+     enforcement point: `capability_gate` computes a verdict, journals it and throws
+     (`mcp/server.ts:123-141`), and has never denied anything, because its default is
+     `options.capability_gate ?? (() => true)` (`mcp/server.ts:78`) and the sole production
+     construction site passes no gate (`gateway/composition/build-core-modules.ts:360-364`); the
+     source states it plainly at `:125-128` ("LOG-ONLY … it does NOT gate dispatch") and `:169`
+     ("Allow-all in production today"). Contrast the required-at-the-type half, which works:
+     `capability_required` on `ToolRegistration` (`tools/registry.ts:97-112`) is populated on
+     every registered surface.
+     Protects: **unprotected — covered by review only** (and #125 is the reason the other lines
+     name write sites and columns rather than call sites).
+126. A TERMINAL RECORD NAMES THE PRODUCER OF ITS TERMINAL JUDGEMENT AND THE ARTEFACT THAT
+     JUDGEMENT IS ABOUT. Where it can name neither, the record is UNKNOWN whatever its status
+     column says. This is one predicate with two instantiations, and they are the same defect:
+     for a build run the producer is a reviewer and the artefact is a findings list (#124); for a
+     dispatched agent the producer is a filesystem probe and the artefact is the declared
+     deliverable. The dispatch half is not enforced today — `agent-dispatch/service.ts:538-547`
+     maps a completed turn to `'finished'` with no reference to any artefact and `:654` supplies
+     the fallback summary "Dispatch finished (no summary text returned)", while
+     `runtime/subagent/registry.ts:18` defines `finished` as a process-status value. Activity is
+     not output: a non-zero cost, a fresh timestamp and a process that replied are proxies for
+     aliveness, which is exactly the mistake `last_advanced_at` encodes (#123).
+     Protects: `trident/store.test.ts:918` for the run half; the dispatch half is
+     **unprotected — covered by review only.**
+127. A DERIVED JUDGEMENT PINS THE IDENTITY OF ITS INPUTS. "Is this PR green" is computed only
+     from checks bound to the CURRENT head sha, never from a check list that does not say which
+     sha it describes — a green reading that belongs to a superseded head is not a stale fact, it
+     is a derivation whose input identity was never pinned. Likewise "did this run ship" is
+     membership of the run's recorded head in the commit list of a merged PR the run claims,
+     never ancestry against `main`: a squash-merge severs ancestry while the work is in `main`.
+     The consumed field `mergeable` names the hazard in the other direction — it is
+     "no textual conflict when GitHub last computed it" and says nothing about whether the checks
+     are still valid (`trident/gh-authed.ts:46-52` documents the read).
+     Protects: **unprotected — covered by review only.**
+128. SATISFIABILITY IS PART OF THE GUARD. A guard that refuses a dishonest encoding must name the
+     honest sibling row that is written instead, and it does not ship until a test enumerates the
+     terminal states it constrains and shows each is reachable by a writer that exists. A refusal
+     with no writable alternative converts a lie into a deadlock, and this repository has already
+     paid that bill: `trident/store.ts:1225-1245` records a run that "retried forever without
+     leaving `forge-init`" and states the rule in the source — "A guard that reads a column its
+     own writer cannot populate is unsatisfiable by construction." The same obligation applies to
+     every check that reports a verdict, and the conforming precedent outside the store is the
+     leak gate, which exits **3** with `LEAK GATE: INCOMPLETE` rather than `SILENT ✅` when its
+     rule could not run, because "I could not check" must not look like "I checked and it was
+     clean" (`CONTRIBUTING.md`, "Git hooks").
+     Protects: `trident/store.test.ts:918` (the one guard that shipped with its honest sibling);
+     the general obligation is **unprotected — covered by review only**, and no totality test
+     exists yet.
+
+## 13. The action contract (agent-legible architecture, 2026-08-31)
+
+§12's rule, applied to the surfaces an agent invokes. An action whose failure is silent is a fact
+that was never recorded, so these are the same contract seen from the write side.
+
+129. EVERY STATE CHANGE RETURNS A CLOSED UNION that distinguishes four outcomes: it happened
+     (naming what changed), it was already so (nothing written), it was correctly a no-op (naming
+     why), or it was REFUSED (naming the precondition). A bare success value that covers more than
+     one of those is the defect. `work-board/agent-tool.ts:153-155` is the pattern to eliminate —
+     `ok()` returns `{ ok: true }` both when a write landed and when it did not — and `:456-457`
+     is the worse case: the reorder path discards `store.reorder()`'s result entirely and returns
+     the bare shape unconditionally. An agent that cannot distinguish "reordered" from "did
+     nothing" re-fires the call.
+     Protects: **unprotected — covered by review only.**
+130. NO ACTION MAY SILENTLY DO NOTHING: a call whose precondition is unmet is structurally
+     incapable of returning success. The reference implementation already exists in this tree, in
+     shell, because its author could not get it from a type — `trident/checkpoint.sh:300-303` runs
+     the UPDATE, reads `changes()`, and on zero prints
+     `checkpoint.sh: run '<id>' not found — checkpoint NOT applied` and exits **3**, a distinct
+     code for a distinct outcome. That is the whole contract in four lines; the job is to make it
+     the default rather than a thing each author reinvents.
+     Protects: `trident/checkpoint-sh.test.ts` (this one site); everywhere else **unprotected —
+     covered by review only.**
+131. A REFUSAL NAMES THE LAYER THAT REFUSED AND THE PRECONDITION THAT FAILED, and where the
+     refusal followed from an UNKNOWN it names the probe that produced it. A message that
+     attributes a refusal to the layer below is worse than no message: it sends the reader to the
+     wrong subsystem. `agent-dispatch/tool.ts:127-133` is the shape to copy — the missing
+     `board_item_id` refusal names the missing thing and what to do about it.
+     `trident/codex-build.sh:1165` is the shape to fix: a refusal that names the holding worktree
+     in its prose while its token, `CODEX_BUILD_BRANCH_UNBOUND`, still points the reader at the
+     executor.
+     Protects: **unprotected — covered by review only.**
+132. IDENTITY IS RESOLVED, NEVER TYPED. An action that takes a branch, a card, a project or a PR
+     resolves the name to an identity and reports what it resolved to, before acting. A typed
+     branch name and a card id belonging to another scope are the same defect — an unresolved
+     name accepted as an identity — and one of them force-updates a ref.
+     Protects: **unprotected — covered by review only.**
+133. PRECONDITIONS AND EFFECT ARE VISIBLE IN THE DECLARATION, BEFORE THE CALL — never discovered
+     from the call's silence or its wreckage. If a relaunch derives its branch from a card's
+     design-doc slug rather than from the failed run's branch, the declaration says so, because
+     the agent has to know that before the call cuts a new branch off `main`.
+     Protects: **unprotected — covered by review only.**
+134. A COMMISSION DECLARES ITS ARTEFACT, AND ITS GRANT IS RECORDED BY THE SPAWNER. A delegation to
+     another agent is a state change like any other, so: (a) the request declares the artefact it
+     will produce, and is REFUSED before anything is spawned when the grant cannot satisfy the
+     declaration; (b) the granted tool surface is recorded BY THE SPAWNER, as the argv it actually
+     constructed — never as the child's own report that it started, which is `last_advanced_at`
+     in new clothing (#123); and (c) terminal state is decided by observing the artefact, per
+     #126. The live defect: `agent-dispatch/substrate-turn.ts:61-63` maps an absent `tools` input
+     to `[]`, deliberately per its comment at `:56-60`, and
+     `agent-dispatch/service.ts:122-128` confirms "The dispatch family (Atlas/Sentinel/adhoc)
+     passes NOTHING" — while `prompts/atlas.md:16` tells the spawned agent its tools "are exactly
+     read, write, edit, bash, grep, glob" and `:25` instructs it to "Write the full deliverable to
+     a file (you have write access)". The prompt describes a grant the spawn seam does not make,
+     and the record still says `finished`.
+     THE REQUIREMENT BINDS TO THE CLASS OF CONSTRUCTION SITE, NEVER TO THE CALLER THAT TAUGHT US.
+     The same invariant was already learned once and bound too narrowly:
+     `reminders/rituals.ts:257-261` throws on an empty `tool_surface` with the comment
+     "#361 toolless-class pin: a ritual with no tools is a silent no-op" — bound to rituals rather
+     than to everything that constructs an `AgentSpec`. The class predicate is NOT "no `AgentSpec`
+     may have empty tools": `open/composer.ts:7124-7130` legitimately prewarms with `tools: []`.
+     It is that EVERY `AgentSpec` construction site must state its grant explicitly, and an empty
+     grant is legal only when it is declared empty at the site.
+     Protects: `reminders/rituals.test.ts:84` ("empty tool_surface throws (#361 toolless
+     class)") for the one ritual site; the class is **unprotected — covered by review only.**
+
 ---
 
 ## Coverage summary
@@ -889,6 +1085,16 @@ with cross-references noted inline.
 - `verified-findings.json` (the raw adversarial-verification workflow log) was consulted but not
   separately itemized — its 24/24 confirmed findings are already folded into the critic reports
   this file distills.
+- **#119–#134** (2026-08-31) are §12 (the honesty contract) and §13 (the action contract). They
+  are different in kind from #1–#117: those distill a point-in-time audit, these state one rule
+  and are written to be closed over time. Apart from #124 (the store's empty-findings refusal),
+  #122 (one liveness site) and #130 (one shell site), they are **unprotected — covered by review
+  only**, and each line says so on its own `Protects:` line so this file never describes the
+  target as the present. #118 is claimed by the in-flight trident verdict-honesty change and is
+  deliberately not reused. The mechanism that would close them — an executable, numbered
+  invariant corpus that CI runs, each entry shipping a must-fail control — does not exist yet;
+  today the only CI reference to this file is its appearance in
+  `scripts/ci/leak-gate-allowlist.txt`, i.e. CI knows the file exists and evaluates none of it.
 
 This file should be re-run/re-checked at Fable synthesis time for each merged unit: if a unit
 closes an "unprotected" item by adding a test, update its line here to name that test.
