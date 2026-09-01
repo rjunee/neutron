@@ -4383,15 +4383,61 @@ function classifyCi(probe) {
  * change it. Each failing check names itself and carries its link, because the
  * reviewers cannot see any of this from the diff.
  */
-function ciBlockerFindings(ci) {
-  return ci.failing.map((f) => ({
-    severity: 'blocker',
-    title: `CI FAILING: ${f.name}`,
-    evidence:
-      `The \`${f.name}\` check is ${f.state} on this PR. No reviewer can see this from the diff, ` +
-      `and the branch cannot merge while it is red — fix it in this round.` +
-      (f.link !== null ? `\n${f.link}` : ''),
-  }))
+function ciBlockerFindings(ci, preexisting = null) {
+  const priorRed = preexisting instanceof Set ? preexisting : new Set()
+  const at = typeof ci.baseRef === 'string' && ci.baseRef !== '' ? ci.baseRef : 'the base branch'
+  return ci.failing.map((f) => {
+    if (!priorRed.has(f.name)) {
+      return {
+        severity: 'blocker',
+        title: `CI FAILING: ${f.name}`,
+        evidence:
+          `The \`${f.name}\` check is ${f.state} on this PR. No reviewer can see this from the diff, ` +
+          `and the branch cannot merge while it is red — fix it in this round.` +
+          (f.link !== null ? `\n${f.link}` : ''),
+      }
+    }
+    return {
+      severity: 'major',
+      // The SAME hatch the full-suite gate has, earned the SAME way — by a measurement
+      // of the base, not by a claim. `isNonBlockingFinding` reads this key.
+      advisory: true,
+      title: `CI RED FOR PRE-EXISTING REASONS: ${f.name}`,
+      evidence:
+        `The \`${f.name}\` check is ${f.state} on this PR — AND it is already failing at ${at}, ` +
+        'which this branch did not touch. A round spent "fixing" it would edit code to repair a ' +
+        'red that predates the diff, and then pay a full panel to re-derive that it was never ' +
+        'this change. Surface it, do not block on it.' +
+        (f.link !== null ? `\n${f.link}` : '') +
+        '\nIf this check\'s failure at the base looks like a DIFFERENT failure from the one here, ' +
+        'or the diff touches the code it exercises, treat it as a BLOCKER in your own words.',
+    }
+  })
+}
+
+/**
+ * Does this round's CI have anything for Forge to DO?
+ *
+ * Mirrors `suiteFindingsBlock` exactly, and for the same reason: a red that predates the
+ * branch is not a defect of the branch. The predicate is `isNonBlockingFinding`, so the
+ * two hatches cannot drift apart.
+ */
+function ciFindingsBlock(ciFindings) {
+  return Array.isArray(ciFindings) && ciFindings.some((f) => !isNonBlockingFinding(f))
+}
+
+/**
+ * The names failing AT THE BASE — the only input that can turn a CI blocker advisory.
+ *
+ * FAIL-CLOSED IN EVERY DIRECTION THAT IS NOT A MEASURED RED. `unknown` (unparseable),
+ * `pending` (the base's own checks still running) and `none` all yield the EMPTY set, so
+ * every failing check on the PR stays a blocker. Only a base we could read, and read as
+ * red, may excuse anything — and it excuses a check BY NAME, so a branch that reds a
+ * check the base does not still pays its round.
+ */
+function ciPreexistingNames(base) {
+  if (!base || base.status !== 'red' || !Array.isArray(base.failing)) return new Set()
+  return new Set(base.failing.map((f) => f.name).filter((n) => typeof n === 'string' && n !== ''))
 }
 
 /**
@@ -4727,6 +4773,42 @@ ${cmd}`,
     ),
   )
   return classifyCi(res)
+}
+
+/**
+ * Ask GitHub what the SAME checks are doing AT THE BASE — the measurement that earns
+ * the pre-existing hatch.
+ *
+ * SPENT ONLY WHEN THE PR IS RED. A green/pending/absent PR has nothing to excuse, and a
+ * probe seat per round for a question that cannot change the outcome is the kind of cost
+ * this whole card is about.
+ *
+ * `--jq` reshapes the check-runs payload into exactly `gh pr checks --json name,state`'s
+ * shape — `{name, state}` rows — so `classifyCi` parses BOTH and there is one parser, not
+ * two that can drift. `.conclusion // .status` is deliberate: a check still running at the
+ * base has no conclusion, so it lands as QUEUED/IN_PROGRESS and `classifyCi` calls the
+ * base `pending`, which excuses NOTHING (see `ciPreexistingNames`).
+ *
+ * The ref is the LAUNCH-PINNED base sha when there is one — the commit the branch was
+ * actually cut from — and the base branch name otherwise. Reading `main`'s head instead
+ * of the pinned sha would compare against a base that has moved since the build started.
+ */
+async function probeCiBase(round) {
+  if (!isPr) return { status: 'none', failing: [] }
+  const ref = pinnedBase !== null ? pinnedBase : baseBranch
+  const api = `api repos/{owner}/{repo}/commits/${ref}/check-runs?per_page=100 --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(api)} 2>&1; echo "___EXIT=$?"`
+  const res = await seatAttempt(`ci-base-probe-round-${round}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
+${cmd}`,
+      withModel({ label: `ci-base-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+    ),
+  )
+  // A dead probe seat is `null`, which `classifyCi` reads as 'unknown' — and an unknown
+  // base excuses nothing. The failure direction here is "everything stays a blocker",
+  // never "everything is forgiven".
+  return { ...classifyCi(res), baseRef: ref }
 }
 
 /**
@@ -5681,12 +5763,28 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
   // blockers without setting the verdict would have produced an APPROVE carrying a
   // "CI FAILING" finding, and merged a red build. That is precisely the bug this gate
   // exists to prevent, and it is asserted below rather than left to reading.
+  //
+  // A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER. The base is measured (one probe
+  // seat, spent only when the PR is red) and a failing check that is ALSO failing there
+  // becomes an advisory finding instead of a blocker — the same hatch the full-suite gate
+  // has, earned the same way. `ciFindingsBlock` is what decides whether the verdict is
+  // forced, so a check red only on the BRANCH still forces it, and so does a base we
+  // could not read.
+  const ciBase = ci.status === 'red' ? await probeCiBase(round) : null
+  const ciFindings = ci.status === 'red' ? ciBlockerFindings({ ...ci, baseRef: ciBase?.baseRef }, ciPreexistingNames(ciBase)) : []
+  if (ci.status === 'red') {
+    log(
+      `trident-v2 CI gate: round=${round} failing=${ci.failing.length} base=${ciBase?.status ?? 'unmeasured'} — ${ciFindingsBlock(ciFindings) ? 'at least one red is NEW to this branch, forcing REQUEST_CHANGES' : 'every red is already failing at the base; surfaced without forcing'}`,
+    )
+  }
   const withCi =
     ci.status === 'red'
-      ? {
-          verdict: 'REQUEST_CHANGES',
-          findings: [...ciBlockerFindings(ci), ...(severityGated?.findings ?? [])],
-        }
+      ? ciFindingsBlock(ciFindings)
+        ? {
+            verdict: 'REQUEST_CHANGES',
+            findings: [...ciFindings, ...(severityGated?.findings ?? [])],
+          }
+        : { ...severityGated, findings: [...ciFindings, ...(severityGated?.findings ?? [])] }
       : severityGated
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can

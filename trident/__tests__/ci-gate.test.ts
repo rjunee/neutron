@@ -44,8 +44,13 @@ function grab(name: string): string {
 
 function loadReal(): {
   classifyCi: (probe: unknown) => CiResult
-  ciBlockerFindings: (ci: CiResult) => Array<{ severity: string; title: string; evidence: string }>
+  ciBlockerFindings: (
+    ci: CiResult,
+    preexisting?: Set<string> | null,
+  ) => Array<{ severity: string; title: string; evidence: string; advisory?: unknown }>
   ciDeferredPeer: (ci: CiResult) => { name: string; title: string; evidence: string }
+  ciFindingsBlock: (findings: unknown[]) => boolean
+  ciPreexistingNames: (base: unknown) => Set<string>
 } {
   // The state sets are consts the functions close over, so they come along.
   const consts = SRC.slice(
@@ -60,8 +65,17 @@ function loadReal(): {
   if (!consts.includes('function probeCause(') || !consts.includes('function redactProbeText(')) {
     throw new Error('probeCause/redactProbeText are no longer inside the classifyCi const slice')
   }
+  // `ciFindingsBlock` delegates to `isNonBlockingFinding`, the ONE predicate the severity
+  // gate and the full-suite gate also ask. Lifted, not re-declared, for the same reason
+  // every other loader in this repo lifts it: a local copy stays green through a change
+  // to the real one.
+  const advisoryKey = SRC.split('\n').find((l) => l.startsWith('const ADVISORY_FINDING_KEY ='))
+  const severitySet = SRC.split('\n').find((l) => l.startsWith('const NON_BLOCKING_SEVERITIES ='))
+  if (advisoryKey === undefined || severitySet === undefined) {
+    throw new Error('ADVISORY_FINDING_KEY / NON_BLOCKING_SEVERITIES are no longer top-level consts')
+  }
   const factory = new Function(
-    `${consts}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer }`,
+    `${consts}\n${severitySet}\n${advisoryKey}\n${grab('isNonBlockingFinding')}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciFindingsBlock')}\n${grab('ciPreexistingNames')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer, ciFindingsBlock, ciPreexistingNames }`,
   ) as () => ReturnType<typeof loadReal>
   return factory()
 }
@@ -257,11 +271,32 @@ describe('the gate is WIRED, not merely written', () => {
     // UNTOUCHED when there are no deferred peers, so attaching CI blockers without
     // setting the verdict would have produced an APPROVE carrying a "CI FAILING"
     // finding — merging a red build, the exact bug the gate exists to prevent.
+    //
+    // The forcing is now CONDITIONAL on `ciFindingsBlock`, which is the pre-existing-red
+    // hatch. That is a narrower gate, so the assertion is correspondingly narrower AND
+    // pins the condition itself: a `withCi` that forced unconditionally would pass the
+    // old check, and so would one that never forced at all.
     const at = code.indexOf('const withCi =')
     expect(at).toBeGreaterThan(-1)
     const block = code.slice(at, code.indexOf('const peers =', at))
     expect(block.includes("verdict: 'REQUEST_CHANGES'")).toBe(true)
-    expect(block.includes('ciBlockerFindings(ci)')).toBe(true)
+    expect(block.includes('ciFindingsBlock(ciFindings)')).toBe(true)
+    // The findings are attached on BOTH sides of that condition — an unforced red that
+    // dropped its findings would tell no one anything.
+    expect(block.split('...ciFindings').length - 1).toBe(2)
+  })
+
+  test('the base is measured before any red is excused, and only when the PR is red', () => {
+    // `ciPreexistingNames` is the ONLY thing that can turn a blocker advisory, and it is
+    // fail-closed on every non-red base — so the wiring to pin is that its input comes
+    // from a real probe rather than from a default.
+    expect(code.includes("const ciBase = ci.status === 'red' ? await probeCiBase(round) : null")).toBe(
+      true,
+    )
+    expect(code.includes('ciPreexistingNames(ciBase)')).toBe(true)
+    const at = code.indexOf('async function probeCiBase(')
+    expect(at).toBeGreaterThan(-1)
+    expect(code.slice(at, code.indexOf('\n}', at)).includes('if (!isPr)')).toBe(true)
   })
 
   test('an unusable CI answer joins the EXISTING peer list — one gate, peers as data', () => {
@@ -2578,5 +2613,109 @@ describe('truncation is unreadable, not short', () => {
 
   test('the cost of that safety is written down where the guard is', () => {
     expect(SRC).toContain('SAY WHAT THAT COSTS, BECAUSE IT IS NOT FREE AND IT IS INVISIBLE')
+  })
+})
+
+
+// A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER.
+//
+// Owner-reported, and the exact sibling of the full-suite `failed-preexisting` hatch: a
+// check that is already failing on the base costs this branch a full fix round, in which
+// Forge edits code to repair a red its diff did not cause, and then a full panel is paid
+// to re-derive that it was never this change.
+//
+// The hatch is earned by MEASUREMENT (a probe of the base), never by a claim, and it
+// excuses a check BY NAME. Everything that is not a base we could read, and read as red,
+// fails CLOSED.
+describe('the pre-existing CI hatch — earned by measuring the base, by name', () => {
+  const red = (...names: string[]): CiResult =>
+    ({
+      status: 'red',
+      failing: names.map((name) => ({ name, state: 'FAILURE', link: null })),
+    }) as unknown as CiResult
+
+  test('a check red ONLY on the branch is a blocker and forces the round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings(red('ci'), new Set(['some-other-check']))
+    expect(f).toHaveLength(1)
+    expect(f[0]?.severity).toBe('blocker')
+    expect(f[0]?.advisory).toBeUndefined()
+    expect(String(f[0]?.title)).toBe('CI FAILING: ci')
+    expect(ciFindingsBlock(f)).toBe(true)
+  })
+
+  test('a check ALSO red at the base is advisory and does NOT force the round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings(red('ci'), new Set(['ci']))
+    expect(f).toHaveLength(1)
+    expect(f[0]?.advisory).toBe(true)
+    expect(f[0]?.severity).toBe('major')
+    expect(String(f[0]?.title)).toBe('CI RED FOR PRE-EXISTING REASONS: ci')
+    expect(ciFindingsBlock(f)).toBe(false)
+    // It is SURFACED, not suppressed — the reviewers still read it, and are told when to
+    // overrule it.
+    expect(String(f[0]?.evidence)).toContain('treat it as a BLOCKER')
+  })
+
+  test('ONE new red among pre-existing ones still forces the round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings(red('ci', 'CodeQL', 'purity'), new Set(['ci', 'purity']))
+    expect(f.filter((x) => x.advisory === true)).toHaveLength(2)
+    expect(f.filter((x) => x.severity === 'blocker')).toHaveLength(1)
+    expect(ciFindingsBlock(f)).toBe(true)
+  })
+
+  test('the evidence NAMES the base it was measured against', () => {
+    const { ciBlockerFindings } = loadReal()
+    const ci = { ...red('ci'), baseRef: 'deadbee' } as unknown as CiResult
+    expect(String(ciBlockerFindings(ci, new Set(['ci']))[0]?.evidence)).toContain('deadbee')
+  })
+
+  // FAIL-CLOSED, every direction. A base we could not read, one whose own checks are
+  // still running, one with no checks, and a green one all excuse NOTHING.
+  test('only a base measured RED can excuse anything', () => {
+    const { ciPreexistingNames } = loadReal()
+    for (const status of ['unknown', 'pending', 'none', 'green']) {
+      expect(ciPreexistingNames({ status, failing: [{ name: 'ci' }] }).size).toBe(0)
+    }
+    expect(ciPreexistingNames(null).size).toBe(0)
+    expect(ciPreexistingNames(undefined).size).toBe(0)
+    expect(ciPreexistingNames({ status: 'red' }).size).toBe(0)
+    // ...and the positive control, or the four above prove only that the function
+    // returns an empty set.
+    expect([...ciPreexistingNames({ status: 'red', failing: [{ name: 'ci' }] })]).toEqual(['ci'])
+  })
+
+  test('no base measurement at all leaves every red a blocker', () => {
+    const { ciBlockerFindings, ciFindingsBlock, ciPreexistingNames } = loadReal()
+    // This is the call shape the wiring uses when the base probe seat died.
+    const f = ciBlockerFindings(red('ci'), ciPreexistingNames(null))
+    expect(f[0]?.severity).toBe('blocker')
+    expect(ciFindingsBlock(f)).toBe(true)
+    // ...and the legacy one-argument call, which must not silently forgive anything.
+    expect(ciBlockerFindings(red('ci'))[0]?.severity).toBe('blocker')
+  })
+
+  test('a green PR produces no findings and nothing to force', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings({ status: 'green', failing: [] } as unknown as CiResult, new Set(['ci']))
+    expect(f).toEqual([])
+    expect(ciFindingsBlock(f)).toBe(false)
+  })
+
+  // The base probe reuses `classifyCi`, so the check-runs payload has to parse through the
+  // SAME parser as `gh pr checks`. The `--jq` in `probeCiBase` reshapes it to {name,state}.
+  test('the base probe reshapes check-runs into the shape classifyCi already parses', () => {
+    const { classifyCi } = loadReal()
+    const reshaped = [
+      { name: 'ci', state: 'failure' },
+      { name: 'CodeQL', state: 'success' },
+      { name: 'slow', state: 'in_progress' },
+    ]
+    expect(classifyCi(probe(reshaped)).status).toBe('red')
+    expect(classifyCi(probe(reshaped)).failing.map((f) => f.name)).toEqual(['ci'])
+    // A base whose own checks have not finished is `pending`, which excuses nothing.
+    expect(classifyCi(probe([{ name: 'slow', state: 'queued' }])).status).toBe('pending')
+    expect(SRC).toContain('(.conclusion // .status)')
   })
 })
