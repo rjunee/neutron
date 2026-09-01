@@ -979,6 +979,12 @@ function LoadOlderMessages({
 /** Bottom-proximity epsilon (px): within this of the bottom counts as "following the tail". */
 const AT_BOTTOM_EPSILON_PX = 4
 
+/** How long a pending restore waits for a `display: none` viewport to be revealed,
+ *  and how often it re-checks (roughly a frame). See the `[hidden]` branch of the
+ *  restore for what it is waiting on. */
+const RESTORE_REVEAL_MS = 1000
+const RESTORE_REVEAL_POLL_MS = 16
+
 /**
  * Restores the viewport scroll position when this kept-alive surface re-activates.
  *
@@ -992,18 +998,33 @@ const AT_BOTTOM_EPSILON_PX = 4
  * render.
  *
  * Target: the user's prior position when they had deliberately scrolled back and the
- * mounted content is unchanged; otherwise the bottom. A position over CHANGED content
- * is not restored — bottom instead, never an arbitrary offset.
+ * mounted slice still STARTS at the same message; otherwise the bottom. A position
+ * over a slice that no longer starts where it did is not restored — bottom instead,
+ * never an arbitrary offset.
+ * The head id, not the rendered COUNT, is what decides that: at the transcript
+ * window's cap a slide keeps the count at exactly {@link TRANSCRIPT_WINDOW_MESSAGES}
+ * on both sides, so a count comparison is blind precisely when the window is full,
+ * which is the case this card is about. It is also what implements the card's
+ * `olderAnchorId`-resets rule: a surface the user had loaded older into comes back
+ * trimmed to the trailing window, its head changes, and the restore falls to the
+ * bottom instead of to an offset over messages that are no longer mounted.
  *
- * PRECEDENCE: deliberate position → unread → bottom. A captured unread count `n`
- * anchors the n-th-from-last non-typing `.car-row` at the viewport top, so the first
- * unread message is the first thing read; it outranks an at-bottom capture (the user
- * was following the tail, and the tail is exactly what they have not seen) but never
- * a deliberate scroll-back. THE TRAP: `controller.setProject` zeroes a project's
- * badge SYNCHRONOUSLY before publishing the switch frame, so by the activating render
- * the live count is already 0 — the count must come from a capture taken on PRIOR
- * frames. `ChatApp` keeps that in `unreadRef`, writing every project except the
- * currently-active convId; this component only reads it.
+ * Being armed is not the same as having applied: the target survives across commits
+ * until the runtime has caught up with the live windowed list, because the adapter
+ * applies a changed transcript one commit late and the head can still change on that
+ * commit — and, when the viewport is inside a `display: none` tab panel, until that
+ * panel is revealed.
+ *
+ * ⚠️ WHAT IS NOT COVERED, AND SAYING SO. `setProject` paints the topic's CACHED
+ * transcript first, so on a switch into a project that received messages while the
+ * user was away the head can match at every armed commit and change only AFTER the
+ * target has cleared — leaving a restored offset over a window that has since slid.
+ * That residual is a real-browser-only defect and it is not guarded here: every
+ * mechanism for it needs to tell a slide during the switch apart from a slide while
+ * the reader reads, and the one that arrives late is exactly the one this component
+ * cannot see. `tests/e2e-browser` is where that belongs — under happy-dom the
+ * outcome is indistinguishable anyway, because assistant-ui's auto-scroll takes an
+ * un-scrolled viewport to the bottom on the same commit.
  *
  * The hidden sentinel span exists only to reach `.car-viewport` via `.closest()`, the
  * same trick `LoadOlderMessages` uses with its `btnRef`. It is not a `.car-row`, so it
@@ -1012,35 +1033,32 @@ const AT_BOTTOM_EPSILON_PX = 4
 function ViewportActivationRestore({
   active,
   windowLength,
-  convId,
-  unreadRef,
 }: {
   active: boolean
   /** Length of the LIVE windowed list this surface's runtime is converging to. */
   windowLength: number
-  /** This surface's own conversation id — the key into `unreadRef`. */
-  convId: string
-  /** Unread counts captured on frames where the conversation was NOT active. */
-  unreadRef: { current: Map<string, number> }
 }): React.JSX.Element {
   const markRef = useRef<HTMLElement | null>(null)
-  const posRef = useRef<{ scrollTop: number; atBottom: boolean; count: number } | null>(null)
+  const posRef = useRef<{ scrollTop: number; atBottom: boolean; headId: string } | null>(null)
   const renderedCount = useAuiState((s) => s.thread.messages.length)
+  // The id of the FIRST mounted message — the identity of the mounted slice (the
+  // transcript is append-only and the window is a contiguous slice of it, so a slice
+  // that still starts at the same message still has the same content above the
+  // reader's scrollTop).
+  const headId = useAuiState((s) => s.thread.messages[0]?.id ?? '')
   // Render-phase ref write, the same sanctioned pattern as `windowRef`: the capture
-  // effect must read the CURRENT rendered count without re-subscribing.
-  const renderedCountRef = useRef(renderedCount)
-  renderedCountRef.current = renderedCount
+  // effect must read the CURRENT head without re-subscribing.
+  const headIdRef = useRef(headId)
+  headIdRef.current = headId
   const prevActiveRef = useRef(false)
   const pendingRef = useRef<
-    | { kind: 'bottom' }
-    | { kind: 'position'; scrollTop: number; count: number }
-    | { kind: 'unread'; n: number }
-    | null
+    { kind: 'bottom' } | { kind: 'position'; scrollTop: number; headId: string } | null
   >(null)
 
   // THE RESTORE — layout effect (pre-paint, no visible jump). React removes the
   // `hidden` attribute in the mutation phase before layout effects run, so
-  // `scrollHeight` is live here.
+  // `scrollHeight` is live here — for THIS surface's own `.car-conv`, at least; the
+  // tab panel wrapping it is not ours to un-hide (see the `[hidden]` branch below).
   useLayoutEffect(() => {
     const wasActive = prevActiveRef.current
     prevActiveRef.current = active
@@ -1050,62 +1068,61 @@ function ViewportActivationRestore({
     }
     if (!wasActive) {
       const pos = posRef.current
-      const unread = unreadRef.current.get(convId) ?? 0
       pendingRef.current =
         pos !== null && !pos.atBottom
-          ? { kind: 'position', scrollTop: pos.scrollTop, count: pos.count }
-          : unread >= 1
-            ? { kind: 'unread', n: unread }
-            : { kind: 'bottom' }
+          ? { kind: 'position', scrollTop: pos.scrollTop, headId: pos.headId }
+          : { kind: 'bottom' }
     }
-    const p = pendingRef.current
-    if (p === null) return
-    const viewport = markRef.current?.closest('.car-viewport')
-    if (!(viewport instanceof HTMLElement)) return
-    if (p.kind === 'position') {
-      // Valid only over the same mounted content it was captured against (an
-      // evicted/remounted surface has no capture at all and lands on 'bottom'
-      // above). New arrivals AFTER this applies shift the trailing window under the
-      // position by the dropped rows' height; that drift is accepted — the
-      // alternative (yanking to bottom on the settle commit) discards the place the
-      // reader deliberately held.
-      viewport.scrollTop = renderedCount === p.count ? p.scrollTop : viewport.scrollHeight
-      pendingRef.current = null
-      return
-    }
-    if (p.kind === 'unread') {
-      // The unread rows are, by the badge's own meaning, absent from a transcript
-      // the controller cached while this surface was away — so hold the BOTTOM until
-      // the runtime settles on the live windowed list, then anchor the n-th-from-last
-      // row so the first unread is the first thing read. Anchoring at the settle
-      // commit is right in both worlds: a stale badge means current content IS the
-      // truth, and the at-cap kept-alive path converges on the first unread as the
-      // trailing window drops as much height off the front as it appends behind the
-      // fixed scrollTop. Cold mounts can lose this race to assistant-ui's initial
-      // auto-scroll and degrade to bottom — the card's stated floor. Resolution
-      // CLEARS the target: a lingering one could yank a reader on a later arrival.
-      if (renderedCount !== windowLength || renderedCount === 0) {
-        viewport.scrollTop = viewport.scrollHeight
-        return // stay armed for the settle commit
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const revealDeadline = Date.now() + RESTORE_REVEAL_MS
+    const apply = (): void => {
+      let p = pendingRef.current
+      if (p === null) return
+      const viewport = markRef.current?.closest('.car-viewport')
+      if (!(viewport instanceof HTMLElement)) return
+      // A viewport inside a `[hidden]` subtree has NO LAYOUT BOX: `scrollHeight`
+      // reads 0 and a `scrollTop` written there is discarded. Two ancestors do that
+      // — `.car-conv[hidden]` (an inactive kept-alive surface, handled by the
+      // `active` guard above) and `.car-tabpanel[hidden]` (Chat is not the visible
+      // tab), both `display: none` in `chat-react.html`. The second is not
+      // hypothetical: on a cross-project switch made while the user is on another
+      // tab, `ProjectShell` resets the tab to Chat in a PASSIVE effect, so this
+      // LAYOUT effect runs while the Chat panel is still hidden. Applying there
+      // writes nothing and clearing there loses the target, and the reveal a moment
+      // later lands at 0 — exactly this component's bug, one wrapper further out. So
+      // nothing is applied and NOTHING is cleared: wait for the reveal, re-checking
+      // at roughly frame cadence up to {@link RESTORE_REVEAL_MS} (the reveal it is
+      // waiting on is a passive effect in the SAME tick, so this is slack, not a
+      // budget). Said honestly: that write lands in a timer callback rather than
+      // pre-paint, so the reveal can paint one frame at the old position — ~16ms,
+      // against landing 100 messages back for as long as the surface is open.
+      if (viewport.closest('[hidden]') !== null) {
+        if (Date.now() < revealDeadline) timer = setTimeout(apply, RESTORE_REVEAL_POLL_MS)
+        return
       }
-      const rows = [...viewport.querySelectorAll('.car-row')].filter(
-        (r) => r.querySelector('.car-typing') === null, // the typing row is not a message
-      )
-      const anchor = p.n >= 1 && p.n <= rows.length ? rows[rows.length - p.n] : undefined
-      if (anchor instanceof HTMLElement) {
-        viewport.scrollTop += anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top
-      } else {
-        viewport.scrollTop = viewport.scrollHeight // n outside 1..rows.length → bottom
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
       }
-      pendingRef.current = null
-      return
+      // A captured position is valid only over a slice that still STARTS at the same
+      // message; anything else falls back to the bottom, which is the floor. Checked
+      // on EVERY armed commit, not just the arming one, because the runtime applies a
+      // changed transcript one commit late — that is where the re-trim this guard
+      // exists for actually shows up.
+      if (p.kind === 'position' && p.headId !== headId) p = pendingRef.current = { kind: 'bottom' }
+      viewport.scrollTop = p.kind === 'position' ? p.scrollTop : viewport.scrollHeight
+      // Stay armed until the runtime has caught up with the live windowed list, so
+      // the adapter's one-commit-late apply is re-targeted (`>=` because assistant-ui
+      // appends a synthetic optimistic assistant message while a turn is running, so
+      // the rendered count can legitimately EXCEED the window); then clear, so a
+      // later arrival while the user reads scrolled-up content never yanks them.
+      if (renderedCount >= windowLength) pendingRef.current = null
     }
-    viewport.scrollTop = viewport.scrollHeight // bottom; the browser clamps to max scroll
-    // Stay armed until the runtime has caught up with the live windowed list, so the
-    // adapter's one-commit-late apply re-pins the bottom; then clear, so a later
-    // arrival while the user reads scrolled-up content never yanks them down.
-    if (renderedCount === windowLength) pendingRef.current = null
-  }, [active, renderedCount, windowLength])
+    apply()
+    return () => {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [active, renderedCount, windowLength, headId])
 
   // THE DEPARTURE CAPTURE — plain effect (post-paint) so on an activation commit the
   // restore above has ALREADY run and the initial capture records the restored spot,
@@ -1116,11 +1133,14 @@ function ViewportActivationRestore({
     const viewport = markRef.current?.closest('.car-viewport')
     if (!(viewport instanceof HTMLElement)) return
     const capture = (): void => {
+      // A viewport with no layout box reads 0 for everything; recording that would
+      // overwrite a real capture with a phantom at-bottom one.
+      if (viewport.closest('[hidden]') !== null) return
       posRef.current = {
         scrollTop: viewport.scrollTop,
         atBottom:
           viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - AT_BOTTOM_EPSILON_PX,
-        count: renderedCountRef.current,
+        headId: headIdRef.current,
       }
     }
     capture()
@@ -2109,7 +2129,6 @@ function ChatSurface({
   uploadAffordance,
   active,
   windowLength,
-  unreadRef,
   olderHiddenCount,
   onLoadOlder,
   showPane,
@@ -2129,9 +2148,6 @@ function ChatSurface({
   /** `windowedMessages.length` — the rendered length this surface's runtime is
    *  converging to (see {@link ViewportActivationRestore}). */
   windowLength: number
-  /** Per-conversation unread counts captured before the controller cleared them
-   *  (see {@link ViewportActivationRestore}). Identity-stable. */
-  unreadRef: { current: Map<string, number> }
   /** How many of this conversation's messages are OUTSIDE the mounted transcript
    *  window (see {@link TRANSCRIPT_WINDOW_MESSAGES}); 0 hides the control. */
   olderHiddenCount: number
@@ -2341,12 +2357,7 @@ function ChatSurface({
         <div className="car-chatstage">
         <div className="car-chatmain">
         <ThreadPrimitive.Viewport className="car-viewport">
-          <ViewportActivationRestore
-            active={active}
-            windowLength={windowLength}
-            convId={conversationIdOf(vm.projectId)}
-            unreadRef={unreadRef}
-          />
+          <ViewportActivationRestore active={active} windowLength={windowLength} />
           <LoadOlderMessages hiddenCount={olderHiddenCount} onLoadOlder={onLoadOlder} />
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
@@ -2527,7 +2538,6 @@ const HYDRATION_GRACE_MS = 600
 function MountedConversationImpl({
   hostVm,
   active,
-  unreadRef,
   controller,
   config,
   draft,
@@ -2540,10 +2550,6 @@ function MountedConversationImpl({
 }: {
   hostVm: ChatViewModel
   active: boolean
-  /** Per-conversation unread counts captured BEFORE the controller cleared them
-   *  (see {@link ViewportActivationRestore}). Identity-stable, so it never busts
-   *  {@link MountedConversation}'s memo. */
-  unreadRef: { current: Map<string, number> }
   controller: NeutronChatController
   config: BootstrapConfig
   draft: AttachmentDraft
@@ -2686,7 +2692,6 @@ function MountedConversationImpl({
           uploadAffordance={uploadAffordance}
           active={active}
           windowLength={windowedMessages.length}
-          unreadRef={unreadRef}
           olderHiddenCount={olderHiddenCount}
           onLoadOlder={onLoadOlder}
           // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
@@ -2789,20 +2794,6 @@ export function ChatApp({
   // scrollTop — so it is captured and restored explicitly on re-activation (see
   // ViewportActivationRestore).
   const convId = conversationIdOf(vm.projectId)
-
-  // UNREAD CAPTURE for ViewportActivationRestore. The controller ZEROES a
-  // project's badge synchronously inside setProject — BEFORE publishing the
-  // switch frame ("VIEWING a project marks it read") — so the render that
-  // activates a surface already reads 0. Capture every project's count on the
-  // frames where it is NOT the active conversation, and SKIP the active convId so
-  // the switch frame cannot overwrite the pre-clear value (the same semantics as
-  // the rail's `activeId === p.id ? 0` forcing). Render-phase ref write — the
-  // sanctioned pattern `cacheRef` below already uses (idempotent, StrictMode-safe).
-  const unreadRef = useRef<Map<string, number>>(new Map())
-  for (const p of vm.projects) {
-    const cid = conversationIdOf(p.id)
-    if (cid !== convId) unreadRef.current.set(cid, p.unread ?? 0)
-  }
 
   // REF-STABILIZED CALLBACKS. Every mounted surface takes these as props, and
   // `MountedConversation` is memoized — so a caller that passes an inline arrow (as
@@ -2918,7 +2909,6 @@ export function ChatApp({
             key={`${id}#${epochRef.current.get(id) ?? 0}`}
             hostVm={hostVm}
             active={active}
-            unreadRef={unreadRef}
             controller={controller}
             config={config}
             draft={draft}

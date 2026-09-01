@@ -32,11 +32,23 @@
  * it 2 (must-pass sibling): a surface the user had DELIBERATELY scrolled back in
  *      returns to that exact position, not to the bottom — asserted both as an
  *      equality and as an explicit "this is not the bottom path" bound.
- * it 3 (must-fail control for the unread anchor): a switch-back with a captured
- *      unread badge anchors the FIRST UNREAD message at the top of the viewport,
- *      outranking an at-bottom capture. It also proves the trap live: the
- *      controller has already zeroed the live count by the time the surface
- *      activates, so only the render-phase capture still knows it.
+ * it 3: the same switch made from ANOTHER TAB. `ProjectShell` resets the tab to Chat
+ *      in a PASSIVE effect, so the restore's layout effect runs while
+ *      `.car-tabpanel[hidden]` still makes the viewport `display: none` — no layout
+ *      box, `scrollHeight` 0, a `scrollTop` write discarded. The restore must WAIT
+ *      for the reveal instead of spending itself on a box that does not exist.
+ * it 4: the mounted slice was RE-TRIMMED while the user was away. They had loaded
+ *      older (window pinned at message 100, 200 rows) and switching away resets
+ *      `olderAnchorId`, so they come back to the trailing 100 and their offset is
+ *      into a slice that no longer exists. The card's rule for that is the BOTTOM,
+ *      not an arbitrary offset. Note what the oracle CANNOT be: a rendered-count
+ *      comparison sees 200 on the way out and 200 again on the activating commit
+ *      (the runtime applies the trimmed list one commit later), so it declares the
+ *      position valid — which is why the check is the mounted slice's HEAD MESSAGE,
+ *      re-checked when the runtime catches up.
+ *
+ * The harness wraps `ChatApp` in a `.car-tabpanel` exactly as `ProjectShell` does, so
+ * the `[hidden]` ancestor it 3 is about is the real one and not a test fiction.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
@@ -199,9 +211,25 @@ async function mountApp(controller: import('../controller.ts').NeutronChatContro
   document.body.appendChild(container)
   const root = createRoot(container)
   await act(async () => {
-    root.render(<Harness />)
+    // The `.car-tabpanel` wrapper is not decoration: it is the element ProjectShell
+    // toggles `hidden` on (ProjectShell.tsx renders exactly this around ChatApp), and
+    // `chat-react.html` gives `.car-tabpanel[hidden]` `display: none`. `hidden` is
+    // never passed as a JSX prop here, so a test may set the attribute by hand and
+    // React will not reconcile it away.
+    root.render(
+      <div className="car-tabpanel" role="tabpanel">
+        <Harness />
+      </div>,
+    )
   })
   return { container, root, act }
+}
+
+/** The `.car-tabpanel` ProjectShell hides when Chat is not the visible tab. */
+function tabPanel(container: HTMLElement): HTMLElement {
+  const el = container.querySelector('.car-tabpanel')
+  expect(el).not.toBeNull()
+  return el as HTMLElement
 }
 
 /** Alpha's surface, found by its CONTENT rather than by DOM order — the surface is
@@ -223,10 +251,23 @@ function viewportOf(surface: HTMLElement): HTMLElement {
 
 /** happy-dom reports 0 for every layout-derived box. Supply the geometry the
  *  restore reasons about: a 1000px-tall scroll content in a 100px-tall window, so
- *  "the bottom" is scrollTop 900. */
+ *  "the bottom" is scrollTop 900.
+ *
+ *  A `[hidden]` ancestor reports ZERO, because that is what a browser does: `display:
+ *  none` leaves the element with no layout box at all, so `scrollHeight` is 0 and a
+ *  `scrollTop` written there is discarded. happy-dom models none of that, and without
+ *  it modelled here it 3 would pass vacuously against the unfixed code — the stub
+ *  would hand a hidden viewport a 1000px scroll height it does not have. */
 function stubGeometry(viewport: HTMLElement): void {
-  Object.defineProperty(viewport, 'scrollHeight', { configurable: true, get: () => 1000 })
-  Object.defineProperty(viewport, 'clientHeight', { configurable: true, get: () => 100 })
+  const laidOut = (): boolean => viewport.closest('[hidden]') === null
+  Object.defineProperty(viewport, 'scrollHeight', {
+    configurable: true,
+    get: () => (laidOut() ? 1000 : 0),
+  })
+  Object.defineProperty(viewport, 'clientHeight', {
+    configurable: true,
+    get: () => (laidOut() ? 100 : 0),
+  })
 }
 
 describe('switching back into a kept-alive conversation restores its scroll position', () => {
@@ -366,11 +407,10 @@ describe('switching back into a kept-alive conversation restores its scroll posi
     }
   }, 60_000)
 
-  it('a captured unread badge anchors the first unread message at the top', async () => {
-    const { controller, sinksByTopic } = await freshWorld()
+  it('a switch made from another tab waits for the Chat panel to be revealed', async () => {
+    const { controller } = await freshWorld()
     const { container, root, act } = await mountApp(controller)
     try {
-      // Visit alpha so its surface mounts and stays kept-alive.
       await act(async () => {
         controller.start()
         controller.setProject('alpha')
@@ -381,52 +421,20 @@ describe('switching back into a kept-alive conversation restores its scroll posi
         await tick()
         await tick()
       })
+
       const surface = alphaSurface(container)
       expect(surface.hasAttribute('hidden')).toBe(false)
       expect(surface.querySelectorAll('.car-row').length).toBe(100)
       const viewport = viewportOf(surface)
-      stubGeometry(viewport) // scrollHeight 1000 / clientHeight 100
+      stubGeometry(viewport)
+      const panel = tabPanel(container)
 
-      // Rect stubs for the anchor math (happy-dom has no layout): 100 rows, 10px
-      // each — consistent with the 1000px scrollHeight. Instance-level, so no
-      // prototype surgery and no restore needed. Rows are the SAME elements on
-      // switch-back (the surface is kept alive, its content is unchanged).
-      viewport.getBoundingClientRect = () =>
-        ({
-          top: 0,
-          bottom: 100,
-          left: 0,
-          right: 100,
-          width: 100,
-          height: 100,
-          x: 0,
-          y: 0,
-          toJSON: () => ({}),
-        }) as DOMRect
-      const rows = [...surface.querySelectorAll('.car-row')] as HTMLElement[]
-      rows.forEach((r, i) => {
-        r.getBoundingClientRect = () =>
-          ({
-            top: i * 10 - viewport.scrollTop,
-            bottom: i * 10 - viewport.scrollTop + 10,
-            left: 0,
-            right: 100,
-            width: 100,
-            height: 10,
-            x: 0,
-            y: i * 10 - viewport.scrollTop,
-            toJSON: () => ({}),
-          }) as DOMRect
-      })
-
-      // The user was following the tail (at-bottom capture) — pins that unread
-      // OUTRANKS an at-bottom capture, while a deliberate scroll-back (it 2) still wins.
+      // Following the tail, as in it 1.
       await act(async () => {
         viewport.scrollTop = 900
         viewport.dispatchEvent(new Event('scroll'))
       })
 
-      // Away to beta…
       await act(async () => {
         controller.setProject('beta')
         await tick()
@@ -436,24 +444,15 @@ describe('switching back into a kept-alive conversation restores its scroll posi
         await tick()
         await tick()
       })
-      viewport.scrollTop = 0 // models the browser's display:none box teardown (see header)
+      viewport.scrollTop = 0 // models the browser's display:none box teardown
 
-      // …and while away the server fans a badge: alpha has 30 unread. Delivered
-      // through the ACTIVE (beta) session's sinks — the controller ignores frames
-      // from inactive sessions.
-      await act(async () => {
-        sinksByTopic.get(topicFor('beta'))!.onFrame({
-          type: 'projects_changed',
-          projects: [
-            { id: 'alpha', label: 'Alpha', unread: 30 },
-            { id: 'beta', label: 'Beta' },
-          ],
-        })
-        await tick()
-      })
-      expect(controller.getViewModel().projects.find((p) => p.id === 'alpha')?.unread).toBe(30)
+      // The user is on some OTHER tab (Documents, Plan, …) when the switch happens,
+      // so ProjectShell has the Chat panel hidden. It resets the tab back to Chat in
+      // a PASSIVE effect — i.e. strictly AFTER the activating commit's layout
+      // effects, which is where the restore lives.
+      panel.setAttribute('hidden', '')
+      expect(viewport.scrollHeight).toBe(0) // no layout box, exactly as in a browser
 
-      // Back into alpha.
       await act(async () => {
         controller.setProject('alpha')
         await tick()
@@ -464,16 +463,105 @@ describe('switching back into a kept-alive conversation restores its scroll posi
         await tick()
       })
 
-      // THE TRAP, proven live: setProject zeroed the badge synchronously, so any
-      // restore that reads the live count sees 0 and falls to bottom. Only the
-      // render-phase capture still knows 30.
-      expect(controller.getViewModel().projects.find((p) => p.id === 'alpha')?.unread ?? 0).toBe(0)
+      // Nothing could have been applied yet — and nothing may have been SPENT either.
       expect(alphaSurface(container).hasAttribute('hidden')).toBe(false)
-      // 30th-from-last of 100 rows = index 70 ('alpha message 270' — the window is
-      // messages 200..299); anchoring its top to the viewport top puts scrollTop at
-      // exactly 700. The unfixed code lands at the bottom (scrollTop 1000 unclamped).
-      expect(rows[70]!.textContent ?? '').toContain('alpha message 270')
-      expect(viewport.scrollTop).toBe(700)
+      expect(viewport.scrollTop).toBe(0)
+
+      // ProjectShell's passive effect lands: Chat becomes the visible tab. The
+      // restore re-checks at frame cadence (RESTORE_REVEAL_POLL_MS), so give it a
+      // few frames' worth of real time rather than a bare microtask turn.
+      await act(async () => {
+        panel.removeAttribute('hidden')
+        await new Promise((r) => setTimeout(r, 80))
+      })
+
+      expect(viewport.scrollHeight).toBe(1000) // the box is back
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(900)
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+      container.remove()
+    }
+  }, 60_000)
+
+  it('a position whose window has been re-trimmed falls back to the bottom', async () => {
+    const { controller } = await freshWorld()
+    const { container, root, act } = await mountApp(controller)
+    try {
+      await act(async () => {
+        controller.start()
+        controller.setProject('alpha')
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+
+      const surface = alphaSurface(container)
+      expect(surface.querySelectorAll('.car-row').length).toBe(100)
+      const viewport = viewportOf(surface)
+      stubGeometry(viewport)
+
+      // The user loads older, so the window is PINNED by id at message 100 and grows
+      // to 200 rows. Switching away resets `olderAnchorId` (ChatApp trims a hidden
+      // surface back to the trailing window), so the slice they were reading is not
+      // the slice they come back to — the card's own case: "the message they were
+      // reading may no longer be mounted, so an ID-anchored restore must fall back to
+      // bottom rather than to an arbitrary offset".
+      const loadOlder = surface.querySelector('.car-load-older')
+      expect(loadOlder).not.toBeNull()
+      await act(async () => {
+        ;(loadOlder as HTMLButtonElement).click()
+        await tick()
+      })
+      expect(surface.querySelectorAll('.car-row').length).toBe(200)
+      expect(surface.textContent ?? '').toContain('alpha message 100')
+
+      // Deliberately scrolled back inside that larger window.
+      await act(async () => {
+        viewport.scrollTop = 300
+        viewport.dispatchEvent(new Event('scroll'))
+      })
+
+      await act(async () => {
+        controller.setProject('beta')
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+      viewport.scrollTop = 0 // models the browser's display:none box teardown
+
+      await act(async () => {
+        controller.setProject('alpha')
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+
+      // ── Positive controls: the window really WAS re-trimmed to the trailing 100,
+      // so the message the offset was measured against is no longer mounted.
+      const after = alphaSurface(container)
+      expect(after.querySelectorAll('.car-row').length).toBe(100)
+      expect(after.textContent ?? '').toContain('alpha message 299')
+      expect(after.textContent ?? '').not.toContain('alpha message 100')
+
+      // 300 is a live offset into a slice that no longer exists, so it is abandoned
+      // for the floor rather than restored over messages the reader never chose.
+      expect(viewport.scrollTop).not.toBe(300)
+      expect(viewport.scrollTop).toBeGreaterThanOrEqual(900)
     } finally {
       await act(async () => {
         root.unmount()
