@@ -159,8 +159,19 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
  * `production`, then let a directory or bare-runner guard run the mutated file
  * as its own test — is closed on the guard side, in `guardRunsTheMutatedFile`,
  * which is where the tautology actually happens.
+ *
+ * THE EXTENSION IS SPELLED OUT RATHER THAN COMPOSED. `[cm]?[jt]sx?` reads as
+ * eight extensions and matches TWELVE: it also admits the hybrids `.cjsx`,
+ * `.mjsx`, `.ctsx` and `.mtsx`, which no runner collects (verified on bun
+ * 1.3.x: a lone `payments.test.cjsx` gives "Ran 1 test across 1 file" — the
+ * OTHER file). A name a runner does not collect must not DECLARE a test here,
+ * because a build could then park behaviour in `src/payments.test.cjsx` and buy
+ * the no-production-file exemption with a file nothing would ever run. So the
+ * two real families are listed: a `[cm]` prefix takes no `x` (`.cjs`, `.cts`,
+ * `.mjs`, `.mts`) and the bare form takes an optional one (`.js`, `.jsx`,
+ * `.ts`, `.tsx`).
  */
-const TEST_BASENAME = /\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rs)$/
+const TEST_BASENAME = /\.(test|spec)\.(?:[cm][jt]s|[jt]sx?)$|_test\.(go|py|rs)$/
 
 /** What DECLARES a file a test: its basename, or being a DIRECT child of a
  *  `__tests__/` directory. A support library under `tests/` (or nested below
@@ -1115,11 +1126,36 @@ function argvEscapesTheWorktree(arg: string): boolean {
  *
  * A bare `word:word` is untouched — `npm run test:unit`, `make test:all` and
  * pytest's `x.py::test_a` are honest guards whose names own a colon.
+ *
+ * BOTH ALTERNATIVES SHARE ONE LEFT TOKEN BOUNDARY, and that is not cosmetic.
+ * `|` binds across the WHOLE pattern, so the leading group used to guard only
+ * the named-scheme branch; the any-scheme branch `[A-Za-z][A-Za-z0-9+.-]*:\/`
+ * floated free and was retried from every offset of a long run of
+ * scheme-characters that never reaches a `:/` — quadratic, and CodeQL's
+ * `js/polynomial-redos` (HIGH) on argv this gate reads from an untrusted
+ * nomination. Inside the boundary only ONE start position can begin the scan.
+ * Semantics are preserved for every spelling that can load anything: a scheme
+ * is meaningful only where a token starts, and a run of scheme-characters
+ * starts either at the element's head or straight after a character the
+ * boundary class already admits — `--import=data:…` after the `=`, the embedded
+ * `file:///…` after `(` or `"`, and `x.file://…` consumed from the boundary
+ * through the letter-prefixed run.
  */
-const LOADABLE_SCHEME = /(^|[^A-Za-z0-9+.-])(?:file|data|node|blob|https?|ftp):|[A-Za-z][A-Za-z0-9+.-]*:\//i
+const LOADABLE_SCHEME = /(^|[^A-Za-z0-9+.-])(?:(?:file|data|node|blob|https?|ftp):|[A-Za-z][A-Za-z0-9+.-]*:\/)/i
 
 function elementEscapes(arg: string): boolean {
   if (arg.startsWith('/') || arg.includes('=/') || arg.split(/[/=]/).includes('..')) return true
+  // A PACKAGE-IMPORTS ALIAS IS A NAME ONLY package.json CAN RESOLVE, and it
+  // resolves to whatever that file says. `"imports": {"#target":
+  // "./src/limit.mjs"}` turns `node --test --import=#target
+  // tests/other.test.mjs` into a preload of the MUTATED file (reproduced on
+  // node v22): red under the mutation, green restored, and no test of the
+  // behaviour anywhere. `normalizeArg` could not see it — `#` is node's
+  // FRAGMENT delimiter there, so a leading one cuts the whole specifier away
+  // and `#target` reduces to `.`, equalling no repo-relative target. Refuse the
+  // SHAPE, at a token boundary so only a specifier that BEGINS with `#` is
+  // caught: a guard that runs in the worktree can spell the file it wants.
+  if (/(^|=)#/.test(arg)) return true
   // A scheme — `file:` in any form, or any scheme followed by `/` (`file:/…`,
   // `file:///…`, `http://…`) — ANYWHERE IN THE ELEMENT, not only at its head or
   // straight after its `=`. Anchoring it there was a hole: in
@@ -1160,7 +1196,7 @@ function validateArgv(argv: unknown, which: string): string | null {
   if (escaping !== undefined) {
     return (
       `claim.${which} argument ${escaping} must be a repo-relative path inside the worktree — ` +
-      'an absolute, ..-escaping or URL-scheme path re-enters the worktree under a name the tautology check cannot see'
+      'an absolute, ..-escaping, URL-scheme or #package-imports-alias path re-enters the worktree under a name the tautology check cannot see'
     )
   }
   return null

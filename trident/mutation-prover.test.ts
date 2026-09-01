@@ -592,7 +592,21 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     // repo-relative target. The mutated file loaded into the guard process and
     // was its own RED.
     const abs = `${proofWorktreePath('/repo', RUN)}/${CLAIM.file}`
-    for (const arg of [`file://${abs}`, `--preload=file://${abs}`, `--preload=file:${abs}`, `--preload=FILE://${abs}`]) {
+    for (const arg of [
+      `file://${abs}`,
+      `--preload=file://${abs}`,
+      `--preload=file:${abs}`,
+      `--preload=FILE://${abs}`,
+      // A LETTER-PREFIXED RUN reaching the scheme, and a scheme no name in the
+      // list knows: neither is caught by the NAMED alternative, and both had to
+      // survive the any-scheme alternative's move inside the shared left
+      // boundary (the anchoring that answers CodeQL below). Recorded honestly:
+      // the embedded-absolute arm backs both of them up, so these two pin the
+      // BEHAVIOUR of the refusal, not one arm of it — the branch-sensitive pin
+      // for the anchoring itself is the timing one at the end of this test.
+      `x.file://${abs}`,
+      `--preload=custom://${abs}`,
+    ]) {
       const { prover, host } = proverOver()
       const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', arg] } })
       // Refused BEFORE anything was executed, and the refusal NAMES the argument.
@@ -616,6 +630,54 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       // cannot be passing on a claim refused for some other reason first.
       expect(fine.observed).not.toBeNull()
     }
+
+    // AND THE SCHEME TEST IS LINEAR IN THE ELEMENT IT READS. `|` binds across
+    // the whole pattern, so the any-scheme alternative used to sit OUTSIDE the
+    // leading token boundary and was retried from every offset of a long run of
+    // scheme-characters that never reaches a `:/` — quadratic, and CodeQL
+    // js/polynomial-redos (HIGH) on argv that arrives from an unbounded,
+    // agent-authored nomination. Measured unanchored on this box: 80k
+    // characters took ~7s and each doubling cost 4x, so 200k is tens of
+    // seconds; anchored it is sub-millisecond. This assertion fails if the
+    // boundary is taken back off the second alternative.
+    const started = Date.now()
+    const { prover: long } = proverOver()
+    const scanned = await long.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', 'a'.repeat(200_000)] } })
+    expect(Date.now() - started).toBeLessThan(5_000)
+    // …and a run of letters is no scheme, so it was not refused as one — the
+    // measurement above is of the scan, not of an early exit.
+    expect(scanned.reason).not.toContain('repo-relative')
+  })
+
+  test('a #package-imports alias is a name only package.json resolves, so it is refused', async () => {
+    // THE BYPASS THIS CLOSES. `"imports": { "#target": "./src/limit.ts" }` in
+    // package.json makes `--import=#target` a preload of the MUTATED file, and
+    // no arm could see it: `#` is node's FRAGMENT delimiter to `normalizeArg`,
+    // so a specifier that BEGINS with one cuts away to nothing and reduces to
+    // `.`, equalling no repo-relative target. Reproduced on node v22 — red
+    // mutated, green control, green restored, and not one assertion about the
+    // behaviour. The alias names its file inside package.json, where this gate
+    // does not read, so the SHAPE is refused.
+    for (const guard of [
+      ['node', '--test', '--import=#target', 'tests/other.test.mjs'],
+      ['node', '--test', '#target', 'tests/other.test.mjs'],
+      ['bun', 'test', '-r#target', 'src/other.test.ts'],
+    ]) {
+      const { prover, host } = proverOver()
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, guard } })
+      expect([guard.join(' '), out.proved, host.calls.length]).toEqual([guard.join(' '), false, 0])
+      expect(out.reason).toContain('must be a repo-relative path inside the worktree')
+      expect(out.reason).toContain('#package-imports-alias')
+    }
+
+    // POSITIVE CONTROL — a `#` that is a real FRAGMENT, mid-specifier, is
+    // untouched: it names the file its bare spelling names and the suffix rule
+    // already handles it. Anchoring the refusal at a token boundary is what
+    // keeps this one legal, so deleting the `(^|=)` reddens this line.
+    const { prover } = proverOver()
+    const fine = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', './src/other.test.ts#case'] } })
+    expect(fine.reason).not.toContain('repo-relative')
+    expect(fine.observed).not.toBeNull()
   })
 
   test('a guard argument that RESOLVES to the mutated file is that file, whatever it is spelled', async () => {
@@ -1773,6 +1835,14 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
     ['tests/test_probe.py', 'production'],
     ['src/ab-test.ts', 'production'],
     ['src/thing_test.ts', 'production'],
+    // THE HYBRID EXTENSIONS NO RUNNER COLLECTS. `[cm]?[jt]sx?` reads as eight
+    // extensions and admits twelve; the four extra (`.cjsx`, `.mjsx`, `.ctsx`,
+    // `.mtsx`) are spellings bun ignores — a lone `payments.test.cjsx` gives
+    // "Ran 1 test across 1 file", the other one. A name nothing runs must not
+    // DECLARE a test, or a build parks behaviour in one and buys the
+    // no-production-file exemption for free.
+    ['src/payments.test.cjsx', 'production'],
+    ['a/b.test.mtsx', 'production'],
     ['testfoo.py', 'production'],
     ['src/test-foo.js', 'production'],
     ['test.ts', 'production'],
@@ -1800,7 +1870,17 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
 
   test('only the CONVENTIONAL declarations count — the looser names a runner collects do not', () => {
     // Deleting any alternative from TEST_BASENAME reddens one of these.
-    for (const p of ['a/b.test.ts', 'a/b.spec.tsx', 'a/b.test.mjs', 'src/foo_test.go', 'src/foo_test.py', 'src/foo_test.rs']) {
+    for (const p of [
+      'a/b.test.ts',
+      'a/b.spec.tsx',
+      'a/b.test.mjs',
+      'a/b.test.cjs',
+      'a/b.spec.mts',
+      'a/b.test.jsx',
+      'src/foo_test.go',
+      'src/foo_test.py',
+      'src/foo_test.rs',
+    ]) {
       expect([p, isDeclaredTestFile(p)]).toEqual([p, true])
     }
     // …and these are NOT declarations, however freely a runner would collect
@@ -1817,6 +1897,12 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
       'tests/support/scrub-instance-env.ts',
       'tests/support/env-probe.ts',
       'src/testing.ts',
+      // The hybrid extensions again, at the predicate itself: collapsing the
+      // two families back to `[cm]?[jt]sx?` reddens these four.
+      'src/payments.test.cjsx',
+      'a/b.test.mjsx',
+      'a/b.spec.ctsx',
+      'a/b.test.mtsx',
     ]) {
       expect([p, isDeclaredTestFile(p)]).toEqual([p, false])
     }
