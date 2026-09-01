@@ -1020,6 +1020,11 @@ function loadRealGate(): {
       // source for the same reason as LANE_FINDING_KIND: re-declaring {minor,nit}
       // here would let the classifier and the severity gate drift apart green.
       grabConst('NON_BLOCKING_SEVERITIES'),
+      // `classifyBlock` asks `isNonBlockingFinding`, not the severity set directly,
+      // so the predicate and the key it reads are lifted too. Restating either here
+      // is how the classifier and the severity gate drift apart green.
+      grabConst('ADVISORY_FINDING_KEY'),
+      grab('isNonBlockingFinding'),
       // `usableStatus` is the ONE "did this field answer" predicate the lane retry and
       // `hasUsableVerdict` now share; `CORE_SEAT_STATUS_KEY` is the field it reads for a
       // core seat. Both are lifted rather than restated for the same reason as the two
@@ -1935,5 +1940,191 @@ describe('#568 — the head-probe seat is wrapped, and this test EXISTS because 
     expect(body).toContain('trident.seat-died')
     expect(body).toContain('seat=')
     expect(body).toContain('reason=')
+  })
+})
+
+// ── The severity gate must not re-Forge over a finding this file already called
+//    non-blocking ────────────────────────────────────────────────────────────────
+//
+// MEASURED DEFECT (6 review rounds, 54 findings, 4 cards). `fullSuiteFindings` emits
+// the `failed-preexisting` entry at severity 'major' while its own evidence ends "it
+// does not by itself prevent approval", and `suiteFindingsBlock` agrees only a blocker
+// forces the verdict. But 'major' is not in NON_BLOCKING_SEVERITIES, so the severity
+// gate refused the downgrade and `classifyBlock` re-Forged a whole round — four
+// reviewers and a fresh diff — to re-derive "not mine". TWO OF THE SIX ROUNDS PRODUCED
+// THAT AS THEIR ONLY FINDING, and it dragged the round's UNVERIFIED minors and nits
+// back in with it.
+//
+// Everything here is lifted from the shipped .mjs, like every other loader in this
+// file, because a re-implementation of a gate cannot fail when the gate changes.
+function loadSeverityGate(): {
+  enforceSeverityGate: (s: unknown) => { verdict: string; findings: unknown[] } | null
+  isNonBlockingFinding: (f: unknown) => boolean
+  classifyBlock: (s: unknown, peers: unknown[]) => string
+  fullSuiteFindings: (
+    report: unknown,
+    scope?: string,
+  ) => Array<{ severity: string; title: string; evidence: string; advisory?: unknown }>
+} {
+  const grabConstLine = (name: string): string => {
+    const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
+    if (line === undefined) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
+    return line
+  }
+  return new Function(
+    [
+      grabConstLine('NON_BLOCKING_SEVERITIES'),
+      grabConstLine('ADVISORY_FINDING_KEY'),
+      grabConstLine('LANE_FINDING_KIND'),
+      grabFunction('isNonBlockingFinding'),
+      grabFunction('enforceSeverityGate'),
+      grabFunction('classifyBlock'),
+      // `fullSuiteFindings` closes over the module-scope `testStrategy`; an empty
+      // strategy means "no suite was asked for" and returns []. Bind it to a
+      // non-empty value so the real body runs.
+      "const testStrategy = 'full'",
+      grabFunction('fullSuiteFindings'),
+      'return { enforceSeverityGate, isNonBlockingFinding, classifyBlock, fullSuiteFindings }',
+    ].join('\n'),
+  )() as ReturnType<typeof loadSeverityGate>
+}
+
+describe('inner-workflow.mjs — a finding declared non-blocking may not cost a round', () => {
+  const load = (): ReturnType<typeof loadSeverityGate> => loadSeverityGate()
+
+  // A loader that cannot load must FAIL, not delete the suite below it — the same
+  // guard-cannot-fail shape the cross-model loader documents.
+  test('the severity gate is actually extractable from the .mjs', () => {
+    const g = load()
+    expect(typeof g.enforceSeverityGate).toBe('function')
+    expect(typeof g.isNonBlockingFinding).toBe('function')
+    expect(typeof g.fullSuiteFindings).toBe('function')
+  })
+
+  const preexisting = (
+    evidence = 'base tree materialized from bee6dfd9; 14 files run at base AND head; identical 142/23',
+  ): Record<string, unknown> => {
+    const g = load()
+    const out = g.fullSuiteFindings({
+      testsPassed: false,
+      suiteOutcome: 'failed-preexisting',
+      suiteEvidence: evidence,
+    })
+    expect(out).toHaveLength(1)
+    return out[0] as unknown as Record<string, unknown>
+  }
+
+  // ACCEPTANCE 1 — the headline. Must-PASS.
+  test('a round whose only finding is failed-preexisting APPROVES and does not re-Forge', () => {
+    const { enforceSeverityGate, classifyBlock } = load()
+    const findings = [preexisting()]
+    expect(findings[0]?.severity).toBe('major')
+    expect(findings[0]?.advisory).toBe(true)
+
+    const out = enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings })
+    expect(out?.verdict).toBe('APPROVE')
+    // …and the fix loop must not read it as code work. `classifyBlock` only ever
+    // returns 'infra-only' when a peer deferred, so the peer is the precondition
+    // being held constant here; the variable under test is the finding.
+    expect(classifyBlock(out, [{ name: 'codex' }])).toBe('infra-only')
+  })
+
+  // ACCEPTANCE 1 — must-FAIL control. The blocker siblings still block.
+  test('FULL SUITE NOT PROVEN still REQUEST_CHANGES and still re-Forges', () => {
+    const { enforceSeverityGate, classifyBlock, fullSuiteFindings } = load()
+    const findings = fullSuiteFindings({ testsPassed: false, suiteOutcome: 'ran' })
+    expect(findings).toHaveLength(1)
+    expect(findings[0]?.severity).toBe('blocker')
+    expect(findings[0]?.advisory).toBeUndefined()
+
+    const out = enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings })
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    expect(classifyBlock(out, [{ name: 'codex' }])).toBe('code')
+  })
+
+  // ACCEPTANCE 2 — must-PASS.
+  test('failed-preexisting plus UNVERIFIED minor and nit terminates APPROVE', () => {
+    const { enforceSeverityGate, classifyBlock } = load()
+    const findings = [
+      preexisting(),
+      { severity: 'minor', title: 'UNVERIFIED (single reviewer, A): a latent shell guard', evidence: 'x' },
+      { severity: 'nit', title: 'UNVERIFIED (single reviewer, B): O(n^2) on a bounded path', evidence: 'y' },
+    ]
+    const out = enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings })
+    expect(out?.verdict).toBe('APPROVE')
+    expect(classifyBlock(out, [{ name: 'codex' }])).toBe('infra-only')
+  })
+
+  // ACCEPTANCE 2 — must-FAIL control. One genuine major still costs the round.
+  test('one genuine major code finding in the same round still re-Forges', () => {
+    const { enforceSeverityGate, classifyBlock } = load()
+    const findings = [
+      preexisting(),
+      { severity: 'minor', title: 'UNVERIFIED (single reviewer, A)', evidence: 'x' },
+      { severity: 'major', title: 'the new arm drops ./... from pathArgs', evidence: 'traced at :894' },
+    ]
+    const out = enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings })
+    expect(out?.verdict).toBe('REQUEST_CHANGES')
+    expect(classifyBlock(out, [{ name: 'codex' }])).toBe('code')
+  })
+
+  // ACCEPTANCE 3 — the hatch is still earned by evidence.
+  test('FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE is still a blocker and still blocks', () => {
+    const { enforceSeverityGate, fullSuiteFindings } = load()
+    const findings = fullSuiteFindings({
+      testsPassed: false,
+      suiteOutcome: 'failed-preexisting',
+      suiteEvidence: '   ',
+    })
+    expect(findings).toHaveLength(1)
+    expect(findings[0]?.severity).toBe('blocker')
+    expect(findings[0]?.title).toContain('CLAIMED WITHOUT EVIDENCE')
+    expect(findings[0]?.advisory).toBeUndefined()
+    expect(enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings })?.verdict).toBe('REQUEST_CHANGES')
+    // Control for the same pair: non-empty evidence is the advisory one.
+    expect(preexisting().advisory).toBe(true)
+  })
+
+  // ACCEPTANCE 5 — fail-closed. Every near-miss spelling is BLOCKING.
+  test('an unknown, absent or misspelled marker or severity is still blocking', () => {
+    const { isNonBlockingFinding, enforceSeverityGate } = load()
+    const blocking: unknown[] = [
+      { severity: 'major', title: 't', evidence: 'e' },
+      { severity: 'major', advisory: 'true', title: 't', evidence: 'e' },
+      { severity: 'major', advisory: 1, title: 't', evidence: 'e' },
+      { severity: 'major', advisory: 'yes', title: 't', evidence: 'e' },
+      { severity: 'major', nonblockng: true, title: 't', evidence: 'e' },
+      { severity: 'major', advisory: false, title: 't', evidence: 'e' },
+      { severity: 'major', Advisory: true, title: 't', evidence: 'e' },
+      null,
+      'advisory',
+    ]
+    for (const f of blocking) {
+      expect(isNonBlockingFinding(f)).toBe(false)
+      expect(enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings: [f] })?.verdict).toBe(
+        'REQUEST_CHANGES',
+      )
+    }
+    // POSITIVE CONTROL — an assertion loop that passes because everything is refused
+    // is no evidence at all. The exact spellings DO pass.
+    expect(isNonBlockingFinding({ severity: 'major', advisory: true })).toBe(true)
+    expect(isNonBlockingFinding({ severity: 'nit' })).toBe(true)
+    expect(isNonBlockingFinding({ severity: 'minor' })).toBe(true)
+    // A correctly-spelled marker outranks an unrecognised severity ON PURPOSE: the
+    // marker is set by a producer that knows the answer, and the severity cannot say
+    // whether a finding is about THIS diff. A misspelled MARKER still blocks (above).
+    expect(isNonBlockingFinding({ severity: 'majorr', advisory: true })).toBe(true)
+  })
+
+  // The gate's pre-existing invariants must survive the rewrite.
+  test('the gate still refuses to touch a findings-free rejection or a non-rejection', () => {
+    const { enforceSeverityGate } = load()
+    expect(enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings: [] })?.verdict).toBe(
+      'REQUEST_CHANGES',
+    )
+    expect(enforceSeverityGate({ verdict: 'APPROVE', findings: [{ severity: 'blocker' }] })?.verdict).toBe(
+      'APPROVE',
+    )
+    expect(enforceSeverityGate(null)).toBeNull()
   })
 })

@@ -2482,6 +2482,46 @@ function normalizeVerdict(v) {
 //     direction only; it vetoes nothing.
 const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
 
+// A SECOND, NARROWER WAY TO BE NON-BLOCKING: the producer says so, per finding.
+//
+// THE DEFECT THIS CLOSES (measured over 6 rounds / 54 findings / 4 cards). Some
+// findings are emitted by THIS FILE and are declared non-blocking by THIS FILE in
+// the same breath — `fullSuiteFindings`' `failed-preexisting` entry ends its own
+// evidence with "it does not by itself prevent approval", and `suiteFindingsBlock`
+// agrees that only a blocker forces the verdict. But it carries `severity: 'major'`,
+// and major is not in `NON_BLOCKING_SEVERITIES`, so `enforceSeverityGate` refused the
+// downgrade and `classifyBlock` read the round as 'code' and re-Forged a whole round
+// — four reviewers and a fresh diff — to re-derive "not mine". TWO OF SIX MEASURED
+// ROUNDS PRODUCED THAT FINDING AS THEIR ONLY FINDING. Worse, it dragged every
+// `UNVERIFIED (single reviewer, …)` minor and nit in the same round back in with it,
+// because the gates are all-or-nothing over the finding list.
+//
+// WHY NOT SIMPLY ADD 'major' TO `NON_BLOCKING_SEVERITIES`. That set is a severity
+// allowlist read by both gates, and widening it would declare EVERY major finding in
+// the system non-blocking — including real ones a reviewer raised about the diff.
+// That is the dangerous direction: it silently passes defects. The severity says how
+// bad a finding is; it cannot say whether THIS finding is about THIS diff, which is
+// the actual question. So the marker is per finding, set by the producer that already
+// knows the answer, and it never widens a severity class.
+//
+// FAIL-CLOSED, in the same direction as `NON_BLOCKING_SEVERITIES`. The test is
+// `=== true` against one exact key, so absent, null, `'true'`, `1`, `'yes'`, a
+// misspelled key and a malformed finding are all BLOCKING. A marker that has to be
+// set correctly to weaken a gate can only fail towards blocking, which is the only
+// failure direction this harness permits a downgrade path to have.
+const ADVISORY_FINDING_KEY = 'advisory'
+
+// The ONE predicate both gates ask, so they cannot drift apart. `enforceSeverityGate`
+// and `classifyBlock` previously each spelled out `NON_BLOCKING_SEVERITIES.has(...)`
+// inline; a second reason to be non-blocking added to one and forgotten in the other
+// is how a finding stops costing a round in the verdict and keeps costing one in the
+// fix loop.
+function isNonBlockingFinding(f) {
+  if (!f || typeof f !== 'object') return false
+  if (f[ADVISORY_FINDING_KEY] === true) return true
+  return NON_BLOCKING_SEVERITIES.has(f.severity)
+}
+
 // DID THIS FIELD ACTUALLY ANSWER? Returns the status STRING, or '' for anything that
 // is not one — the single notion of "answered" shared by the lane retry and the
 // completeness gate.
@@ -2557,7 +2597,7 @@ function enforceSeverityGate(synthesis) {
   if (!synthesis || synthesis.verdict !== 'REQUEST_CHANGES') return synthesis
   const findings = Array.isArray(synthesis.findings) ? synthesis.findings : []
   if (findings.length === 0) return synthesis
-  if (!findings.every((f) => f && NON_BLOCKING_SEVERITIES.has(f.severity))) return synthesis
+  if (!findings.every((f) => isNonBlockingFinding(f))) return synthesis
   return { ...synthesis, verdict: 'APPROVE' }
 }
 
@@ -2710,7 +2750,7 @@ function classifyBlock(synthesis, deferredPeers) {
   const findings = (synthesis && synthesis.findings) || []
   const codeFindings = findings.filter((f) => {
     if (f && f.kind === LANE_FINDING_KIND) return false
-    if (f && NON_BLOCKING_SEVERITIES.has(f.severity)) return false
+    if (isNonBlockingFinding(f)) return false
     return true
   })
   return codeFindings.length === 0 ? 'infra-only' : 'code'
@@ -4855,6 +4895,15 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
     return [
       {
         severity: 'major',
+        // ADVISORY BY CONSTRUCTION — see `isNonBlockingFinding`. This entry's own
+        // evidence ends "it does not by itself prevent approval", and
+        // `suiteFindingsBlock` already agrees it does not force the verdict. Without
+        // the marker the two gates disagreed with the text above them and re-Forged a
+        // whole round to re-derive that the red predates the branch. The `blocker`
+        // siblings in this function — FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE and
+        // FULL SUITE NOT PROVEN — deliberately carry NO marker and keep blocking: the
+        // hatch is earned by evidence, and an unearned or unproven claim is not this.
+        advisory: true,
         title: 'FULL SUITE RED FOR PRE-EXISTING REASONS — the build says the failures are not its diff',
         evidence:
           'The build ran the FULL suite (stage 2), reported testsPassed=false, and reported ' +
