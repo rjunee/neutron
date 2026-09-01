@@ -32,6 +32,11 @@ describe('scrub-instance-env preload', () => {
         NEUTRON_INSTANCE_SLUG: 'poison',
         NEUTRON_IDENTITY_JWKS_URL: 'https://poison.invalid/jwks.json',
         NEUTRON_TEST_SHARD: 'sentinel-1/1',
+        // Opt-in gates + harness knobs: these must SURVIVE. A scrubbed gate
+        // does not go red, it silently skips — see the preload's allow-list.
+        NEUTRON_PTY_E2E: '1',
+        NEUTRON_E2E_NETWORK: '1',
+        NEUTRON_BUN_BIN: '/sentinel/bun',
       },
       stdout: 'pipe',
       stderr: 'pipe',

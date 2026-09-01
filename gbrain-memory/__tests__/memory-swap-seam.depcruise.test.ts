@@ -50,13 +50,18 @@ const ROOT = join(HERE, '..', '..') // gbrain-memory/__tests__ → gbrain-memory
 const CONFIG = join(ROOT, '.dependency-cruiser.cjs')
 /**
  * The workspace-local dependency-cruiser binary — the exact thing `bunx
- * depcruise` resolves to when node_modules is installed, minus the launcher.
- * Measured 2026-08-31: on a box where bun is installed as a bare
+ * depcruise` resolves to when node_modules is installed, minus the `bunx`
+ * launcher. Measured 2026-08-31: on a box where bun is installed as a bare
  * `/usr/local/bin/bun` there is no sibling `bunx`, so `execFileSync('bunx', …)`
  * threw ENOENT, `stdout` fell through as '' and every probe died in
  * `JSON.parse` with "Unexpected EOF" — a red that says nothing about the seam.
  * Calling the installed binary directly is hermetic (no launcher, no network)
  * and `scripts/run-tests.sh` already refuses to run an uninstalled tree.
+ *
+ * TOOLCHAIN NOTE: this shells out, so it is NOT bun-only. `node_modules/.bin/
+ * depcruise` starts `#!/usr/bin/env node`, so a box without `node` on PATH
+ * cannot run these probes — `cruiseViolations` says so by name rather than
+ * failing in the JSON parse.
  */
 const DEPCRUISE = join(ROOT, 'node_modules', '.bin', 'depcruise')
 
@@ -85,8 +90,18 @@ function cruiseViolations(relPath: string): Violation[] {
   } catch (err) {
     // depcruise exits non-zero when it finds error-severity violations; the JSON
     // report is still written to stdout, so recover it from the thrown error.
-    const e = err as { stdout?: Buffer | string }
+    const e = err as { stdout?: Buffer | string; message?: string }
     stdout = e.stdout ? e.stdout.toString() : ''
+    // NO stdout means the run never happened — a missing binary (uninstalled
+    // tree) or a missing `node` for its shebang. That used to reach JSON.parse
+    // as '' and die with "Unexpected EOF", which names neither cause.
+    if (stdout.trim() === '') {
+      throw new Error(
+        `depcruise produced no output for ${relPath}; the seam was NOT checked. ` +
+          `Binary: ${DEPCRUISE} (needs \`node\` on PATH for its shebang). ` +
+          `Underlying: ${e.message ?? String(err)}`,
+      )
+    }
   }
   const parsed = JSON.parse(stdout) as { summary?: { violations?: Violation[] } }
   return parsed.summary?.violations ?? []
