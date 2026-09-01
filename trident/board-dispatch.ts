@@ -292,13 +292,15 @@ export type BoardBoundBuildRejectionCode =
   | 'underspecified'
   | 'already_landed'
   // Something LIVE already holds this card's branch — a non-terminal run row,
-  // or a linked-worktree lock naming a live pid. REFUSED, not held: resolving
-  // the holder is a judgment call (watch it, stop it, or verify its PR), not a
-  // queue position, and a hold would auto-fire a second lane onto the same
-  // branch the instant the holder terminalizes. Measured origin (2026-09-01):
-  // a launcher settle timeout mislabeled a run `failed` while its detached
-  // workflow kept building the branch; only the wrong-base guard's SHAPE check
-  // stopped the relaunch. This code refuses on LIVENESS.
+  // or a linked-worktree lock naming a live pid. REFUSED *AND* QUEUED: nothing
+  // was dispatched now, and the card is parked in `code_trident_dispatch_holds`
+  // so the sweep re-asks. It is its own code rather than `held` because the
+  // operator-facing sentence is different (resolve the holder, never delete the
+  // branch) — but it carries a `hold` exactly like `held` does, because it is
+  // one. Measured origin (2026-09-01): a launcher settle timeout mislabeled a
+  // run `failed` while its detached workflow kept building the branch; only the
+  // wrong-base guard's SHAPE check stopped the relaunch. This code refuses on
+  // LIVENESS.
   | 'branch_live'
   | 'executor_unavailable'
   | 'backend_error'
@@ -307,13 +309,20 @@ export type BoardBoundBuildResult =
   | { ok: true; run: TridentRun; merge_mode: MergeMode; ralph: boolean }
   | {
       ok: false
-      code: 'held'
+      // BOTH QUEUEING CODES CARRY THE HOLD. `branch_live` used to return a bare
+      // code+message while the same block upserted a hold row — a refusal that
+      // told the caller "nothing is queued" about a queued card. The `kind`
+      // discriminator is the SURFACE's, not the column's: the stored `hold_kind`
+      // stays `'path'` (migration 0139 pins that CHECK), and nothing reads the
+      // stored kind to decide behaviour.
+      code: 'held' | 'branch_live'
       message: string
       hold: {
-        kind: 'blocker' | 'path'
+        kind: 'blocker' | 'path' | 'branch'
         blocker_id?: string
         holding_run_id?: string
         path?: string
+        branch?: string
       }
     }
   | { ok: false; code: BoardBoundBuildRejectionCode; message: string }
@@ -594,7 +603,8 @@ export async function dispatchBoardBoundBuild(
       message =
         `Refused: branch ${branch} is already being built by live run ${holdingRun.id.slice(0, 8)} ` +
         `(${holdingRun.slug}, phase ${holdingRun.phase}). Resolve that run first — watch it finish, or stop it ` +
-        `explicitly if it is truly dead — and never delete the branch under it. Nothing was dispatched.`
+        `explicitly if it is truly dead — and never delete the branch under it. Nothing was dispatched now; ` +
+        `this card is QUEUED and dispatches automatically once nothing live holds the branch.`
     } else {
       let holder: BranchHolderProbe | null = null
       try {
@@ -609,7 +619,8 @@ export async function dispatchBoardBoundBuild(
           ` — a lane appears to be building this branch right now even though no live run row says so ` +
           `(a launcher timeout may have mislabeled its run as failed). Resolve the holder first: check ` +
           '`git worktree list --porcelain` and that pid; never delete the branch under a live lock. ' +
-          `Re-dispatch only once nothing live holds the branch. Nothing was dispatched.`
+          `Nothing was dispatched now; this card is QUEUED and re-checked on every sweep, so it dispatches ` +
+          `automatically once nothing live holds the branch.`
       }
     }
     if (message !== null) {
@@ -644,7 +655,19 @@ export async function dispatchBoardBoundBuild(
         branch,
         held_on_run_id,
       })
-      return { ok: false, code: 'branch_live', message }
+      return {
+        ok: false,
+        code: 'branch_live',
+        message,
+        // SAY IT IS QUEUED IN THE SHAPE, NOT ONLY IN THE PROSE. `held` and the
+        // path-claim refusal both carry this; a `branch_live` without it made a
+        // queued card look dropped to every structured consumer.
+        hold: {
+          kind: 'branch',
+          branch,
+          ...(held_on_run_id !== null ? { holding_run_id: held_on_run_id } : {}),
+        },
+      }
     }
   }
 

@@ -362,6 +362,45 @@ describe('BRANCH LIVE IS TRANSIENT — the sweep keeps the hold queued', () => {
     expect(runCount()).toBe(1)
     expect(holds.getByItem(SLUG, 'A')).toBeNull()
   })
+
+  // ARGUS r4 (major): the WORKTREE-ONLY holder (held_on_run_id null) has no run
+  // whose terminalization could fire the observer, so on a quiet instance the
+  // card queued indefinitely. `TridentTickLoop.drain_dispatch_holds` calls this
+  // same sweep with NO run at all — this pins that the call shape works and that
+  // it is a real drain, not a decoration.
+  test('the sweep drains with NO run argument at all — the tick-cadence trigger', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'the only card, whose branch a bare live pid already holds', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const first = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'A' },
+      deps(board, {
+        branchHolderProbe: async () => ({
+          worktree_basename: 'wf_live',
+          lock_reason: 'claude agent wf_live (pid 4242 start 99)',
+          pid: 4242,
+          pid_live: true,
+          mtime_ms: 0,
+        }),
+      }),
+    )
+    expect(first.ok).toBe(false)
+    if (first.ok || first.code !== 'branch_live') return
+    // NOTHING owns this hold — the holder is a pid, not a run.
+    expect(holds.getByItem(SLUG, 'A')?.held_on_run_id ?? null).toBeNull()
+    expect(runCount()).toBe(0)
+
+    // The pid exits. No run terminalized; the ONLY trigger left is the cadence.
+    const sweep = buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })
+    await sweep()
+
+    expect(runCount()).toBe(1)
+    expect(holds.getByItem(SLUG, 'A')).toBeNull()
+  })
 })
 
 describe('UNMET BLOCKER REFUSED — a declared dependency holds the card', () => {

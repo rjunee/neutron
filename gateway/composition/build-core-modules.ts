@@ -796,6 +796,12 @@ export function buildCoreModules(
           // landings, credential blinks, restarts). Wired ONLY here: the stub branch
           // runs no builds, so it has nothing staged to fold.
           fold_staged_as_built: buildAsBuiltCatchup(runHost),
+          // THE HOLD QUEUE'S SECOND TRIGGER. Wired ONLY on the real-orchestrator
+          // branch, for the same reason as `fold_staged_as_built`: the stub branch
+          // dispatches nothing, so it has nothing queued to drain.
+          ...(tridentWiring?.drain_dispatch_holds !== undefined
+            ? { drain_dispatch_holds: tridentWiring.drain_dispatch_holds }
+            : {}),
           ...transitionOpt,
           ...watchOpt,
           ...livenessOpt,

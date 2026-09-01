@@ -3499,6 +3499,58 @@ describe('orchestrator — fire did not settle → failed', () => {
     expect(after.workflow_run_id).toBeNull()
   })
 
+  // ARGUS r4 (BLOCKER): carrying `observed` forward NARROWS the clobber window —
+  // it does not close it. The gatherer's last re-read and the tick's
+  // `saveIfActive` are two statements, and the detached workflow writes between
+  // them. The step now hands the store the values it READ, and the store writes
+  // those two columns only while they still hold them.
+  test('a checkpoint that lands BETWEEN the gatherer and the save survives the spared lane', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        await store.update(input.run.id, { inner_checkpoint: 'forge-done' })
+        const observed = pickWorkflowOwned(store.get(input.run.id)!)
+        // …and THEN the workflow moves again, after the gatherer has answered and
+        // before the tick's save. Simulated here because the real gap IS those two
+        // statements.
+        await store.update(input.run.id, { inner_checkpoint: 'argus-approved' })
+        return { kind: 'launched', detail: 'run row moved since the fire (inner_checkpoint)', observed }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    // WITHOUT THE CAS this reads 'forge-done' — the save regresses the row past
+    // the workflow's newest write, which is the misreporting-write class the card
+    // exists to remove.
+    expect(after.inner_checkpoint).toBe('argus-approved')
+  })
+
+  test('a verdict that lands between the gatherer and the save is not stamped over by the published arm', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        const observed = pickWorkflowOwned(store.get(input.run.id)!)
+        // The review lands its verdict in the gap.
+        await store.update(input.run.id, { inner_verdict: 'APPROVE' })
+        return { kind: 'published', detail: 'published', checkpoint: PUBLISHED_CHECKPOINT, observed }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { inner_checkpoint: PUBLISHED_CHECKPOINT })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    // The published arm normally demotes the verdict to REVIEW_NOT_RUN. It must
+    // not do so over a verdict that arrived after it looked.
+    expect(after.inner_verdict).toBe('APPROVE')
+  })
+
   test('a THROWING gatherer cannot spare the run and cannot crash the launch', async () => {
     const h = buildHarness({
       plan: () => ({ fire: TIMEOUT_FIRE }),

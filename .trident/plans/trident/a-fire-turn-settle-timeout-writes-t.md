@@ -2,6 +2,52 @@
 
 Card: `buildSubstrateWorkflowFire` (trident/inner-loop.ts) resolves `{status:'failed', error:'fire turn did not settle within the budget'}` on launcher-settle timeout, and the orchestrator (`orchestrator.ts` `outcome.status !== 'fired'` branch) unconditionally terminalized the run — but "not settled" does NOT imply "not fired". Measured: 8 of 33 runs in 7 days; the wake then invites a second lane onto a branch a live lane holds (stopped only by wrong-base-guard luck), and twice the timeout wrote `failed` over a run whose own row said `outer-published:*` (built, pushed, CI green). Fix in four layers: (1) never write plain `failed` on settle-timeout without checking positive evidence the workflow started — the run's own `inner_checkpoint` first, filesystem probes second; (2) a distinct launched-but-launcher-unobserved outcome that holds the lane instead of terminalizing, expressed over EXISTING columns only (no new column, no new phase); (3) the terminal-build wake must not tell an agent to relaunch for this failure shape — resolve the branch holder first; (4) dispatch must refuse on branch LIVENESS (live worktree lock / non-terminal run on the branch), not only on branch shape.
 
+## Resume state (round 8, 2026-09-01 — ARGUS ROUND-4 FINDINGS ADDRESSED; T1–T6 unchanged in shape)
+
+Round 8 repaired the seams Argus round 4 measured. No new column, no new phase, no new module.
+**Decision 10 was AMENDED this round** (see the decision record below) to record the deviation
+round 7 had already shipped without reporting; `deviatedFromSpec: true` is reported for that
+amendment alone.
+
+- **BLOCKER — the lost-update race survived the final row re-read.** Carrying `observed`
+  forward NARROWS the window between the gatherer's last read and `saveIfActive`; it cannot
+  close it, because those are two statements. `saveIfActive` now takes an OPTIONAL
+  `workflow_columns_seen` (`store.ts`, the exported `WorkflowColumnsSeen` type) and writes
+  `inner_checkpoint` / `inner_verdict` as `CASE WHEN <col> IS ?seen THEN ?new ELSE <col> END` —
+  a per-column compare-and-swap. `AdvanceOutcome.workflow_columns_seen` carries it from the
+  orchestrator's two evidence arms through `tick.ts`. A caller that loses the CAS still commits
+  every other column, so no save is ever dropped; every caller that passes nothing is
+  byte-identical.
+- **MAJOR — a worktree-only `branch_live` hold had no self-drain.** Its holder is a bare pid,
+  and a pid exiting fires no terminal observer. `buildDispatchHoldSweep`'s run argument is now
+  optional and `TridentTickLoop` gained `drain_dispatch_holds`, called once per tick body
+  (failure-contained exactly like the as-built catch-up), wired composition-root →
+  `open/composer.ts`. The sweep re-runs EVERY gate, so a still-live branch simply refreshes its
+  row.
+- **MAJOR — the published classifier ignored `remaining`.** `outer-published:<sha>:1:1` — a
+  governed round pushed with tasks still UNBUILT — was terminalized as finished-and-published,
+  which forbids the rebuild the card actually needs. `classifyFireTimeoutRow` now requires
+  `remaining === 0`; anything else falls through to `none` and the ordinary recoverable `failed`.
+- **MAJOR — decision 10 contradicted without truth-sync.** Amended below; the in-code comment
+  at the gate already defended the ordering, and the hold is now recorded as intended, not as
+  an accident.
+- **MINOR — the `branch_live` refusal contradicted its own behaviour.** It said "Nothing was
+  dispatched … Re-dispatch only once…" while the same block queued the card. The message now
+  says QUEUED, and the result carries a `hold` field like the other two queueing refusals.
+- **MINOR — the wake forbade the resume it should ask for.** "…and no published work exists"
+  is unsatisfiable for a published row, and `inner-workflow.mjs`'s `resumeOnUnchangedHead`
+  resumes an `outer-published` head as mode `review`. The instruction now says so.
+- **MINOR — owner-facing delivery led a finished, pushed build with ❌.** New
+  `FailureClass 'published-unreviewed'` with its own `composeTerminalDelivery` arm (📦), the
+  same carve-out shape `infra-blocked` already had; every other class keeps ❌ byte-identical.
+- **Recorded, not fixed (unchanged from round 7):** the flagship run (`9663fed7`) would still
+  land `failed` at t=181 s — at that instant no worktree existed and the row could not have
+  moved. The as-built entry says so plainly.
+- **NITs left alone, deliberately:** the live-holder wait path's per-tick `git worktree list`
+  (churn, matching the existing per-tick `probe_run_alive` design) and dispatch's advisory
+  (non-atomic) branch read (the claimed-paths transaction remains the only serializer). Both
+  are pre-existing design shapes, not defects this diff introduces.
+
 ## Resume state (round 7, 2026-09-01 — ARGUS ROUND-1 FINDINGS ADDRESSED; T1–T6 unchanged in shape)
 
 The four layers stand exactly as specced; round 7 repaired the seams Argus measured, all
@@ -65,7 +111,26 @@ Branch `trident/a-fire-turn-settle-timeout-writes-t` (LOCAL ONLY — not on orig
 7. **Evidence sources are the row re-read + branch-holding worktree, not scratch `.part` files** (run id spans rounds; an old-round artifact would fabricate launch evidence).
 8. **A live lock outranks mtime staleness**; a recycled pid (starttime mismatch) is NOT live.
 9. **Fire gatherer wired unconditionally, default-constructed except `read_run`**; probes carry their own 15 s host bound.
-10. **T4 is a REFUSAL (`branch_live`), not a hold, immediately after branch computation, BEFORE `already_landed`** — two positive checks (non-terminal same-branch row; branch-holding worktree under live lock pid), no mtime at dispatch, refusal names the holder and never advises deleting the branch.
+10. **T4 refuses with `branch_live` — AND QUEUES — AFTER `already_landed`.** AMENDED round 8;
+    the original text read *"a REFUSAL, not a hold, immediately after branch computation, BEFORE
+    `already_landed`"* and round 7 shipped the opposite without reporting the deviation. What is
+    locked now, and why:
+    - **Order: after `already_landed`.** Both refuse and both dispatch nothing, so the only thing
+      at stake is which sentence the operator reads — and "already merged as #N, verify the card"
+      is strictly more actionable than "something is building this branch" for a card whose work
+      has SHIPPED. Cost of the swap is one `gh` call on the rarer path. The in-code comment at the
+      gate carries this argument.
+    - **It queues.** Without a hold row the card is dropped on the floor and only a human
+      re-dispatching revives it, while the path-claim gate twenty lines below — refusing on the
+      SAME fact, "a live run owns this" — has always queued. The sweep re-runs EVERY gate, so a
+      still-live branch refreshes the row and a freed one dispatches; nothing auto-fires onto a
+      live branch. Stored `hold_kind` stays `'path'` (migration 0139 pins that CHECK); the result's
+      `hold.kind` is `'branch'` and is a SURFACE discriminator only.
+    - Unchanged from the original: two positive checks (non-terminal same-branch row;
+      branch-holding worktree under a live lock pid), no mtime at dispatch, the refusal names the
+      holder and never advises deleting the branch.
+    - The refusal text must MATCH the behaviour (it says QUEUED) and carry a `hold` field, like
+      the other two queueing refusals.
 11. **`WorkBoardStartResult` union widened in the same commit as any rejection-code change** (done in `4483cd46`).
 12. **T5 keys on SUBSTRING containment of the two shared constants in `run.failure_reason` (null → no match), edits ONLY instruction 2, and the non-matching prompt stays byte-identical** — pinned by asserting the exact original instruction-2 line survives verbatim for other reasons. (Confirmed this round: implementation matches decision exactly; all 10 tests in `terminal-build-wake.test.ts` green, including the two new red-first controls and the byte-identical-elsewhere pin.)
 
@@ -73,7 +138,7 @@ Branch `trident/a-fire-turn-settle-timeout-writes-t` (LOCAL ONLY — not on orig
 - [x] **T1 — settle-timeout evidence gate at the orchestrator's fire-fail seam** (committed `91e85cd2`). Pure `trident/fire-evidence.ts` + tests; `inner-loop.ts` literals → shared constant; orchestrator's optional `gather_fire_evidence` seam consulted only on the settle-timeout error; red-first controls passed; unwired seam byte-identical.
 - [x] **T2 — production evidence gatherer** (committed `afb97906`). `trident/fire-evidence-probes.ts` (fresh-row re-read first, then the branch-holding linked worktree; live-lock pid with recycled-pid starttime check; positive-only; basenames + pids only) + exported `parseWorktreeList`/`probeBranchHolder`/`parseProcStartTime`, full unit suite.
 - [x] **T3 — wire the gatherer at the composition root** (committed `76a85ebb`). `build-core-modules.ts` passes `gather_fire_evidence` beside `gather_run_evidence`; composed wiring test proves A (live lock → lane held), B (`outer-published:*` row → published/review-not-run), C (no evidence → byte-identical `failed`); A and B recorded red first.
-- [x] **T4 — dispatch refuses on branch liveness (card req 4)** (committed `4483cd46`). `branch_live` gate in `trident/board-dispatch.ts` per decision 10; `defaultBranchHolderProbe` exported from fire-evidence-probes; `work-board-surface.ts` union widened; full red-first refusal suite in `board-dispatch.test.ts`; `dispatch-holds.test.ts` path-hold intent preserved via differentiated task text.
+- [x] **T4 — dispatch refuses on branch liveness (card req 4)** (committed `4483cd46`). `branch_live` gate in `trident/board-dispatch.ts` per decision 10 AS AMENDED IN ROUND 8 (it runs after `already_landed` and it QUEUES — the plan text now matches the code); `defaultBranchHolderProbe` exported from fire-evidence-probes; `work-board-surface.ts` union widened; full red-first refusal suite in `board-dispatch.test.ts`; `dispatch-holds.test.ts` path-hold intent preserved via differentiated task text.
 - [x] **T5 — the wake stops inviting a relaunch for this failure shape (card req 3)** (committed this commit). `gateway/proactive/terminal-build-wake.ts` `buildTerminalBuildWakePrompt`: when `run.failure_reason` contains `FIRE_SETTLE_TIMEOUT_ERROR` or `FIRE_PUBLISHED_REASON_MARKER` (imported from the pure `trident/fire-evidence.ts` leaf), instruction 2 is replaced with do-NOT-relaunch-yet guidance: resolve the branch holder first (`git worktree list --porcelain` lock + live pid, the run row's `inner_checkpoint`, the PR state); for the published marker, verify the PR and dispatch a REVIEW round, never a rebuild; re-dispatch via `work_board_start` only when nothing live holds the branch and no published work exists. Every other failure_reason (including null) renders a byte-identical prompt — pinned by asserting the exact original instruction-2 line verbatim. New tests recorded red first.
 - [x] **T6 — record it** (committed this commit)**.** Staged the `.trident/as-built/trident/a-fire-turn-settle-timeout-writes-t.md` entry (`docs/AS_BUILT.md` untouched, per the one-writer rule) covering the four layers + the measured evidence; truth-synced this plan and the `.trident/plans` card doc.
 

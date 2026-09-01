@@ -265,6 +265,25 @@ export interface CreateTridentRunInput {
 }
 
 /**
+ * The two WORKFLOW-OWNED columns `saveIfActive` assigns plainly, as the caller
+ * ACTUALLY READ THEM — the compare-and-swap half of {@link TridentRunStore.saveIfActive}.
+ *
+ * WHY IT EXISTS. The tick pins a run row, `await`s a long `step`, and saves the
+ * pinned snapshot back. `inner_checkpoint` / `inner_verdict` are written by the
+ * DETACHED inner workflow (`checkpoint.sh`), so any value that lands during that
+ * gap is overwritten by the outer loop's plainly-assigned snapshot — a lost
+ * update that silently un-does a live workflow's progress, and the exact class
+ * the fire settle-timeout gate exists to remove. Re-reading the row before the
+ * save NARROWS the window; it cannot close it, because the write is a separate
+ * statement.
+ *
+ * So a caller that cares passes what it read. The UPDATE then writes each of the
+ * two columns only while the stored value still equals it, and keeps the stored
+ * value otherwise. Callers that do not pass it are byte-identical to before.
+ */
+export type WorkflowColumnsSeen = Pick<TridentRun, 'inner_checkpoint' | 'inner_verdict'>
+
+/**
  * Partial update applied by the state machine + spawn layer. Every field
  * is optional; only the provided columns are written. `last_advanced_at`
  * is always re-stamped by `save`/`update` so callers never pass it.
@@ -1219,8 +1238,33 @@ export class TridentRunStore {
    * makes terminal a SINK state: whoever transitions the row first wins, and no
    * later writer (tick or terminate) moves it back out. A loser (`false`) tells
    * the tick to skip its observer fire entirely.
+   *
+   * `opts.workflow_columns_seen` — the OPTIONAL compare-and-swap on the two
+   * workflow-owned columns this statement assigns plainly. See
+   * {@link WorkflowColumnsSeen}: when supplied, `inner_checkpoint` /
+   * `inner_verdict` are written ONLY while the stored value still equals what
+   * the caller read; a value the inner workflow moved in between survives. Every
+   * other column is written exactly as without the option, and the terminal-sink
+   * predicate is untouched — a caller that lost the CAS still commits its own
+   * columns, so no save is ever silently dropped.
    */
-  async saveIfActive(run: TridentRun): Promise<boolean> {
+  async saveIfActive(run: TridentRun, opts?: { workflow_columns_seen?: WorkflowColumnsSeen }): Promise<boolean> {
+    // The two columns are written under a NULL-safe `IS` compare when the caller
+    // brought the values it read. `?` COUNT MATTERS: the driver binds by
+    // position, so each arm below carries its own bind pair in the same order.
+    const seen = opts?.workflow_columns_seen
+    const checkpointAssign =
+      seen === undefined
+        ? 'inner_checkpoint = ?'
+        : 'inner_checkpoint = CASE WHEN inner_checkpoint IS ? THEN ? ELSE inner_checkpoint END'
+    const verdictAssign =
+      seen === undefined
+        ? 'inner_verdict = ?'
+        : 'inner_verdict = CASE WHEN inner_verdict IS ? THEN ? ELSE inner_verdict END'
+    const checkpointBinds: (string | null)[] =
+      seen === undefined ? [run.inner_checkpoint] : [seen.inner_checkpoint, run.inner_checkpoint]
+    const verdictBinds: (string | null)[] =
+      seen === undefined ? [run.inner_verdict] : [seen.inner_verdict, run.inner_verdict]
     return this.db.transaction((tx) => {
       if (run.inner_verdict === 'REQUEST_CHANGES') {
         // VALIDATE WHAT WILL BE PERSISTED, NOT ONLY WHAT IS ALREADY THERE. This used to
@@ -1254,7 +1298,7 @@ export class TridentRunStore {
             SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
-                inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+                ${checkpointAssign}, ${verdictAssign}, harvested_at = ?,
                 -- COALESCE, NOT A PLAIN ASSIGNMENT. The verdict and the evidence for it
                 -- must land in the SAME statement or the guard above can never be
                 -- satisfied. But most callers of saveIfActive never touch findings, and a
@@ -1288,8 +1332,8 @@ export class TridentRunStore {
           run.worktree,
           run.failure_reason,
           run.workflow_run_id,
-          run.inner_checkpoint,
-          run.inner_verdict,
+          ...checkpointBinds,
+          ...verdictBinds,
           run.harvested_at,
           run.inner_checkpoint_findings,
           run.base_sha,

@@ -41,7 +41,7 @@
  * ─────────────────────────────────────────────────────────────────────
  */
 
-import type { TridentPhase, TridentRun } from './store.ts'
+import type { TridentPhase, TridentRun, WorkflowColumnsSeen } from './store.ts'
 
 /** The phases the loop never advances out of. */
 export const TERMINAL_PHASES: readonly TridentPhase[] = ['done', 'failed', 'stopped']
@@ -94,6 +94,16 @@ export interface AdvanceOutcome {
   waiting: boolean
   /** Human-readable description of what happened (for logs / status posts). */
   note: string
+  /**
+   * OPTIONAL lost-update guard for the two workflow-owned columns (see
+   * {@link WorkflowColumnsSeen}). Set it when this outcome was computed from a
+   * row the step RE-READ mid-flight and whose `inner_checkpoint` /
+   * `inner_verdict` it is carrying forward rather than authoring: the caller
+   * hands it to `saveIfActive`, which then writes those two columns only while
+   * the store still holds what the step saw. Omitted by every step that authors
+   * them outright — those saves are unchanged.
+   */
+  workflow_columns_seen?: WorkflowColumnsSeen
 }
 
 /**

@@ -99,6 +99,18 @@ describe('terminal build wake', () => {
     expect(prompt).toContain('REVIEW round')
     expect(reason).toContain(FIRE_PUBLISHED_REASON_MARKER)
   })
+  // ARGUS r4 (minor): the rewritten instruction ended "…ONLY once nothing live
+  // holds the branch and no published work exists" — unsatisfiable for a
+  // published row, which steered the agent away from the CHEAPEST correct
+  // recovery. `inner-workflow.mjs` resumes an `outer-published` head as mode
+  // 'review', so `work_board_start` on that row is a resume-to-review, not a
+  // rebuild. The instruction must say so.
+  test('the published instruction does not forbid the resume-to-review it should ask for', () => {
+    const reason = publishedFailureReason(`outer-published:${'a'.repeat(40)}:0:3`)
+    const prompt = buildTerminalBuildWakePrompt({ run: run({ phase: 'failed', failure_reason: reason }), board_item_id: 'item' })
+    expect(prompt).not.toContain('no published work exists')
+    expect(prompt).toContain('resumes an `outer-published:` head into a REVIEW round')
+  })
   test('every other failure reason keeps instruction 2 byte-identical', () => {
     const ORIGINAL_INSTRUCTION_2 =
       '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'

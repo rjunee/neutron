@@ -89,14 +89,45 @@ describe('classifyFireTimeoutRow — an outer-published row is finished work', (
   })
 
   test('the :deviated suffix and surrounding whitespace still classify', () => {
-    const messy = `  outer-published:${SHA}:2:5:deviated \n`
+    const messy = `  outer-published:${SHA}:0:5:deviated \n`
     const evidence = classifyFireTimeoutRow(
       columns({ inner_checkpoint: messy }),
       columns({ inner_checkpoint: messy }),
     )
     expect(evidence.kind).toBe('published')
     if (evidence.kind !== 'published') throw new Error('unreachable')
-    expect(evidence.checkpoint).toBe(`outer-published:${SHA}:2:5:deviated`)
+    expect(evidence.checkpoint).toBe(`outer-published:${SHA}:0:5:deviated`)
+  })
+
+  // ARGUS r4 (major): the classifier tested the SHAPE and ignored the `remaining`
+  // field, so `outer-published:<sha>:1:1` — a governed round pushed with tasks
+  // STILL UNBUILT — was terminalized as finished-and-published. Downstream that
+  // reason tells delivery "do not rebuild it" and tells the wake to dispatch a
+  // review, so an unfinished card is forbidden the rebuild it actually needs.
+  // Delete the `Number(...) === 0` predicate and this goes RED.
+  test('a published checkpoint with tasks STILL REMAINING is not published — it is no evidence', () => {
+    for (const remaining of ['1', '7', '42']) {
+      const name = `outer-published:${SHA}:${remaining}:3`
+      const evidence = classifyFireTimeoutRow(columns({ inner_checkpoint: name }), columns({ inner_checkpoint: name }))
+      expect(evidence.kind).toBe('none')
+      expect(evidence.detail).toContain(`${remaining} task(s) remaining`)
+    }
+  })
+
+  test('the :deviated suffix does not smuggle a remaining>0 row into published', () => {
+    const name = `outer-published:${SHA}:2:5:deviated`
+    expect(classifyFireTimeoutRow(columns({ inner_checkpoint: name }), columns({ inner_checkpoint: name })).kind).toBe(
+      'none',
+    )
+  })
+
+  test('every all-zero spelling of remaining is still zero', () => {
+    for (const remaining of ['0', '00', '000']) {
+      const name = `outer-published:${SHA}:${remaining}:3`
+      expect(
+        classifyFireTimeoutRow(columns({ inner_checkpoint: name }), columns({ inner_checkpoint: name })).kind,
+      ).toBe('published')
+    }
   })
 })
 
@@ -232,7 +263,7 @@ describe('round-2 findings — the carried columns and the length contract', () 
   // column, so the row the caller PERSISTS said one thing while the
   // failure_reason quoted another.
   test('published carries the TRIMMED checkpoint in observed, matching the quoted one', () => {
-    const messy = `  outer-published:${SHA}:2:5:deviated \n`
+    const messy = `  outer-published:${SHA}:0:5:deviated \n`
     const evidence = classifyFireTimeoutRow(
       columns({ inner_checkpoint: messy, inner_verdict: 'REVIEW_NOT_RUN' }),
       columns({ inner_checkpoint: messy, inner_verdict: 'REVIEW_NOT_RUN' }),
@@ -240,7 +271,7 @@ describe('round-2 findings — the carried columns and the length contract', () 
     expect(evidence.kind).toBe('published')
     if (evidence.kind !== 'published') throw new Error('unreachable')
     expect(evidence.observed?.inner_checkpoint).toBe(evidence.checkpoint)
-    expect(evidence.observed?.inner_checkpoint).toBe(`outer-published:${SHA}:2:5:deviated`)
+    expect(evidence.observed?.inner_checkpoint).toBe(`outer-published:${SHA}:0:5:deviated`)
     // Every OTHER workflow-owned column is still carried verbatim.
     expect(evidence.observed?.inner_verdict).toBe('REVIEW_NOT_RUN')
   })

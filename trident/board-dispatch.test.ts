@@ -525,6 +525,47 @@ describe('branch liveness refusal (branch_live)', () => {
     expect(store.listNonTerminalByRepo(repoDir)).toHaveLength(1)
   })
 
+  // ARGUS r4 (minor): the refusal said "Nothing was dispatched … Re-dispatch only
+  // once nothing live holds the branch" while the SAME block upserted a hold row
+  // and the sweep re-asks automatically — the sentence contradicted the
+  // behaviour — and it returned no `hold` field, unlike the two other refusals
+  // that queue. Both halves are pinned here.
+  test('the branch_live refusal SAYS it is queued and carries the hold, for a worktree-only holder', async () => {
+    const repoDir = makeCommittedRepo('repo-queued-wt')
+    addLockedWorktree(repoDir, 'wt-queued', `claude agent test (pid ${process.pid})`)
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('QUEUED')
+    // The old sentence told the operator to re-dispatch by hand. The sweep does it.
+    expect(result.message).not.toContain('Re-dispatch only once')
+    if (result.code !== 'branch_live') return
+    expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH })
+  })
+
+  test('the branch_live hold names the holding RUN when there is one', async () => {
+    const repoDir = makeCommittedRepo('repo-queued-row')
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(false)
+    if (result.ok || result.code !== 'branch_live') return
+    expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH, holding_run_id: live.id })
+    expect(result.message).toContain('QUEUED')
+  })
+
   test('an injected probe reporting a live pid refuses (seam shape)', async () => {
     const repoDir = makeCommittedRepo('repo-stub')
 

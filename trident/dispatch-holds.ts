@@ -18,6 +18,14 @@
  * is already written when its dependents re-evaluate. Re-dispatch goes back
  * through `dispatchBoardBoundBuild` itself, so EVERY gate re-runs and a card that
  * is still held simply refreshes its hold row.
+ *
+ * AND ON THE TICK'S OWN CADENCE, because a terminal event is not the only way a
+ * hold clears. A `branch_live` hold can be created for a holder that is NOT a
+ * run at all — a live worktree lock naming a bare pid, held_on_run_id null. That
+ * pid exiting fires no terminal observer, so on an instance with nothing else
+ * running the card would sit queued indefinitely. `TridentTickLoop`'s
+ * `drain_dispatch_holds` therefore calls the same sweep once per tick, sharing
+ * the tick's single-flight and cadence rather than adding a timer.
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -267,8 +275,15 @@ export function buildDispatchHoldSweep(deps: {
   makeDispatchDeps: (hold: DispatchHold) => BoardBoundBuildDeps & {
     preflight: NonNullable<BoardBoundBuildDeps['preflight']>
   }
-}): (run: TridentRun) => Promise<void> {
-  return async (_run: TridentRun): Promise<void> => {
+}): (run?: TridentRun) => Promise<void> {
+  // THE RUN ARGUMENT IS OPTIONAL BECAUSE THE SWEEP HAS TWO TRIGGERS. As a
+  // terminal observer it is handed the run that just terminalized (and ignores
+  // it — the queue is re-evaluated whole). The tick's per-cadence drain calls it
+  // with NO run at all, which is the only trigger a WORKTREE-ONLY holder can
+  // ever have: a `branch_live` hold whose `held_on_run_id` is null is waiting on
+  // a pid, and a pid exiting emits no terminal event, so on a quiet instance the
+  // observer alone would never fire again and the card would queue forever.
+  return async (_run?: TridentRun): Promise<void> => {
     const queued = deps.holds.list()
     for (const hold of queued) {
       try {

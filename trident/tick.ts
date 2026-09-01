@@ -315,6 +315,21 @@ export interface TridentTickOptions {
    */
   fold_staged_as_built?: TridentAsBuiltFold
   /**
+   * DISPATCH-HOLD SELF-DRAIN. When supplied, the tick calls it once per sweep
+   * (production wires `buildDispatchHoldSweep`'s function, the same one the
+   * terminal observer chain calls).
+   *
+   * WHY A SECOND TRIGGER EXISTS. The hold queue was drained ONLY by a run going
+   * terminal, which is the right event for a blocker card or a file claim —
+   * both are owned by a run. It is not an event at all for the `branch_live`
+   * hold a live WORKTREE LOCK creates: its holder is a bare pid with no run row,
+   * and a pid exiting fires nothing. On an instance with no other builds the
+   * card queued indefinitely. Sharing the ordinary tick's single-flight and
+   * cadence keeps that to one extra call per tick and adds no timer; without
+   * this option the loop behaves exactly as before.
+   */
+  drain_dispatch_holds?: () => Promise<void>
+  /**
    * Injectable clock (ms) for the transition fan's stall detection. Defaults to
    * `Date.now`. Tests pass a fixed clock to exercise the stall-crossing fan
    * deterministically.
@@ -343,6 +358,7 @@ export class TridentTickLoop {
   private readonly livenessLoop: SupervisedLoop | null
   /** null when catch-up is not production-wired. */
   private readonly foldStagedAsBuilt: TridentAsBuiltFold | null
+  private readonly drainDispatchHolds: (() => Promise<void>) | null
   /** Last observed change signature; null = nothing observed yet (first observation records, never wakes). */
   private lastChangeSig: string | null = null
   /**
@@ -427,6 +443,7 @@ export class TridentTickLoop {
             },
           })
     this.foldStagedAsBuilt = options.fold_staged_as_built ?? null
+    this.drainDispatchHolds = options.drain_dispatch_holds ?? null
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
@@ -786,7 +803,17 @@ export class TridentTickLoop {
             // result nor fire our own terminal delivery (a double-notify). Drop
             // the live-progress signature and move on; the winner already handled
             // save + observers.
-            const committed = await this.store.saveIfActive(outcome.run)
+            // THE CAS RIDES ALONG WHEN THE STEP BROUGHT ONE. A step that carries
+            // workflow-owned columns forward (the fire settle-timeout evidence
+            // gate) hands us what it READ; `saveIfActive` then refuses to write
+            // those two columns over a value the detached workflow moved in
+            // between. Every other step passes nothing and saves exactly as before.
+            const committed = await this.store.saveIfActive(
+              outcome.run,
+              outcome.workflow_columns_seen !== undefined
+                ? { workflow_columns_seen: outcome.workflow_columns_seen }
+                : undefined,
+            )
             if (!committed) {
               this.lastSig.delete(run.id)
               continue
@@ -873,6 +900,18 @@ export class TridentTickLoop {
       // failure-contained per repository. Terminal runs are intentionally included
       // by listDistinctRepos: a missed post-merge fold belongs to a run already done.
       await this.asBuiltBody()
+      // The hold queue's per-cadence drain, failure-contained exactly like the
+      // as-built catch-up: a sweep that throws must not cost the tick its
+      // baseline settle.
+      if (this.drainDispatchHolds !== null) {
+        try {
+          await this.drainDispatchHolds()
+        } catch (err) {
+          log.error('dispatch_hold_drain_failed', {
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
+        }
+      }
       this.advancedCount += advanced
     } finally {
       // A sweep that read its rows settles the baseline and clears the debt; one that

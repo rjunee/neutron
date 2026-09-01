@@ -237,6 +237,66 @@ describe('TridentRunStore', () => {
     expect(store.get(run.id)?.brief_alert).toBe(second)
   })
 
+  // ── saveIfActive's workflow-column CAS ───────────────────────────────────
+  //
+  // The lost-update class the fire settle-timeout gate exists to remove. The tick
+  // pins a row, `await`s a long step, and saves the pinned snapshot; the DETACHED
+  // inner workflow writes `inner_checkpoint`/`inner_verdict` in that gap. Re-reading
+  // the row before the save narrows the window but cannot close it — the read and
+  // the write are two statements. `workflow_columns_seen` closes it.
+  test('saveIfActive() with workflow_columns_seen refuses to write a checkpoint the workflow moved in between', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-checkpoint', project_slug: 't1', repo_path: '/r', task: 't' })
+    // What the caller READ (and would carry forward).
+    await store.update(run.id, { inner_checkpoint: 'forge-done', inner_verdict: 'REVIEW_NOT_RUN' })
+    const seenRow = store.get(run.id)!
+    // The detached workflow advances the row AFTER that read.
+    await store.update(run.id, { inner_checkpoint: 'argus-approved', inner_verdict: 'APPROVE' })
+
+    expect(
+      await store.saveIfActive(
+        { ...seenRow, phase: 'argus', failure_reason: 'carried forward' },
+        {
+          workflow_columns_seen: {
+            inner_checkpoint: seenRow.inner_checkpoint,
+            inner_verdict: seenRow.inner_verdict,
+          },
+        },
+      ),
+    ).toBe(true)
+
+    const after = store.get(run.id)!
+    // The workflow's newer values SURVIVE …
+    expect(after.inner_checkpoint).toBe('argus-approved')
+    expect(after.inner_verdict).toBe('APPROVE')
+    // … and the caller's own columns still landed: the CAS narrows the write, it
+    // never drops the save.
+    expect(after.failure_reason).toBe('carried forward')
+  })
+
+  test('saveIfActive() with workflow_columns_seen still writes when nothing moved (and without the option it clobbers)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-unmoved', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'forge-done', inner_verdict: 'REVIEW_NOT_RUN' })
+    const seen = store.get(run.id)!
+
+    // Nothing moved → the CAS holds and the caller's value lands.
+    expect(
+      await store.saveIfActive(
+        { ...seen, inner_verdict: 'APPROVE' },
+        { workflow_columns_seen: { inner_checkpoint: seen.inner_checkpoint, inner_verdict: seen.inner_verdict } },
+      ),
+    ).toBe(true)
+    expect(store.get(run.id)?.inner_verdict).toBe('APPROVE')
+
+    // THE CONTROL — the same stale snapshot WITHOUT the option is the plain
+    // assignment every other caller uses, and it does overwrite. This pins that the
+    // guard is opt-in and that nothing else changed shape.
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+    expect(await store.saveIfActive({ ...seen, phase: 'argus' })).toBe(true)
+    expect(store.get(run.id)?.inner_checkpoint).toBe('forge-done')
+  })
+
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })

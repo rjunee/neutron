@@ -3526,6 +3526,19 @@ export function buildTridentOrchestrator(
             error: err instanceof Error ? (err.stack ?? err.message) : String(err),
           })
         }
+        // WHAT THE GATHERER ACTUALLY SAW IN THE TWO WORKFLOW-OWNED COLUMNS —
+        // the CAS token for the save. `observed` narrows the clobber window to
+        // the gap between the gatherer's last re-read and the tick's
+        // `saveIfActive`; it cannot close it, because those are two statements.
+        // Handing the seen values down makes the store write those two columns
+        // only while they still hold what we read, so a checkpoint the detached
+        // workflow lands INSIDE that gap survives the save that spares its lane.
+        // Absent `observed` the pinned row is what we read, and it is the token.
+        const seenRow = { ...pinnedRun, ...(evidence.kind === 'none' ? {} : (evidence.observed ?? {})) }
+        const workflow_columns_seen = {
+          inner_checkpoint: seenRow.inner_checkpoint,
+          inner_verdict: seenRow.inner_verdict,
+        }
         if (evidence.kind === 'launched') {
           // HOLD THE LANE. A deliberate mirror of the `fired` return MINUS the
           // `fire-settled` stamp — the launcher never confirmed. The minted `id`
@@ -3535,14 +3548,16 @@ export function buildTridentOrchestrator(
           fired.add(run.id)
           return {
             run: {
-              ...pinnedRun,
-              // THE FRESH WORKFLOW-OWNED COLUMNS, NOT THE PINNED ONES. `pinnedRun`
-              // is the row as it looked BEFORE the fire, and `saveIfActive`
-              // assigns `inner_checkpoint`/`inner_verdict` plainly — so saving the
-              // pinned snapshot would write the detached workflow's own progress
-              // back to its pre-fire value, destroying the very delta that proved
-              // the lane was live. `observed` is what the gatherer actually read.
-              ...(evidence.observed ?? {}),
+              // THE FRESH WORKFLOW-OWNED COLUMNS, NOT THE PINNED ONES (`seenRow`
+              // is `pinnedRun` with the gatherer's `observed` spread over it).
+              // `pinnedRun` is the row as it looked BEFORE the fire, and
+              // `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly
+              // — so saving the pinned snapshot would write the detached
+              // workflow's own progress back to its pre-fire value, destroying
+              // the very delta that proved the lane was live. The residual gap
+              // between that read and the save is closed by the CAS below
+              // (`workflow_columns_seen`), not by this spread.
+              ...seenRow,
               // AND THE PHASE THAT CHECKPOINT IMPLIES. `phase` is NOT a
               // workflow-owned column — the tick owns it — but `checkpoint.sh`
               // derives it from `inner_checkpoint` at the inner workflow's write
@@ -3553,6 +3568,10 @@ export function buildTridentOrchestrator(
               // assigns `phase` plainly and applies no derivation of its own, so
               // the derivation has to happen HERE. `null` from the table means
               // the checkpoint implies nothing — the pinned phase stands.
+              // Derived from what the gatherer OBSERVED, never from the pinned
+              // checkpoint: absent an observation there is no new checkpoint to
+              // derive from, and a prior round's carried-forward checkpoint must
+              // not drag the phase backwards.
               phase:
                 phaseForCheckpoint(evidence.observed?.inner_checkpoint ?? null) ?? pinnedRun.phase,
               subagent_run_id: id,
@@ -3573,6 +3592,7 @@ export function buildTridentOrchestrator(
             changed: true,
             waiting: true,
             note: `fire launcher unobserved (settle timeout) but the workflow shows life — ${evidence.detail}; holding the lane, no relaunch`,
+            workflow_columns_seen,
           }
         }
         if (evidence.kind === 'published') {
@@ -3583,10 +3603,15 @@ export function buildTridentOrchestrator(
           return {
             // Same rule as the held lane: terminalize over what the gatherer
             // actually READ, never over the pre-fire snapshot.
-            run: failedRun({ ...pinnedRun, ...(evidence.observed ?? {}) }, publishedFailureReason(evidence.checkpoint), false),
+            run: failedRun(seenRow, publishedFailureReason(evidence.checkpoint), false),
             changed: true,
             waiting: false,
             note: `${run.phase} → failed (launcher timeout over already-published work — review not run)`,
+            // The verdict demotion to REVIEW_NOT_RUN is a REAL write here (it is
+            // what stops a stale REQUEST_CHANGES being stamped over finished
+            // work), so it is CAS'd rather than skipped: it lands while the
+            // verdict is still the one we read, and yields to a newer one.
+            workflow_columns_seen,
           }
         }
         // `none` falls through to the unchanged path below.

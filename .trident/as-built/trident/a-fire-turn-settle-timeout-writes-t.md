@@ -26,7 +26,8 @@ changes nothing, and with no evidence the `failed` path stays byte-identical:
 - `trident/fire-evidence.ts` plus the orchestrator's `gather_fire_evidence` seam,
   consulted only when the fire fails with exactly the settle-timeout error. The
   cheapest evidence is the run's OWN row read twice: any workflow-owned column moved
-  since the fire → `launched`; else an `outer-published:…` checkpoint → `published`;
+  since the fire → `launched`; else an `outer-published:<sha>:0:<round>` checkpoint
+  WITH `remaining` ZERO → `published`;
   a live delta OUTRANKS the published checkpoint, because a prior round's published
   row can sit under a live current round. `launched` HOLDS the lane non-terminal —
   a mirror of the `fired` return minus the settle stamp, stamped
@@ -34,7 +35,11 @@ changes nothing, and with no evidence the `failed` path stays byte-identical:
   liveness from there. `published` terminalizes honestly: `failed` with a
   failure_reason saying the work was already built and published, review not run,
   and the verdict normalizes to REVIEW_NOT_RUN rather than replaying a stale
-  REQUEST_CHANGES.
+  REQUEST_CHANGES. `remaining` is a PREDICATE, not decoration: a published
+  checkpoint whose `remaining` is non-zero is a governed round pushed with tasks
+  still unbuilt, so it classifies as NO evidence and takes the ordinary
+  recoverable `failed` — otherwise an unfinished card would be told "the work is
+  already published, do not rebuild".
 - `trident/fire-evidence-probes.ts`: the production gatherer — fresh row re-read
   first (no filesystem), then the linked worktree holding the run's branch under a
   lock naming a live pid, checked with signal-0 plus, WHEN `/proc/<pid>/stat` can be
@@ -74,7 +79,15 @@ changes nothing, and with no evidence the `failed` path stays byte-identical:
   Detection is deliberately wider than carry-forward: `inner_checkpoint_head` and
   `inner_result` prove a launch but have no column in that save, and they stay in
   the set because blinding the detection to match the save would be the worse
-  trade. The held row also carries `workflow_run_id: null` rather than a minted
+  trade. Carrying the fresh columns forward NARROWS that clobber window; it does
+  not close it, because the gatherer's last read and the store's write are two
+  statements and the detached workflow writes between them. So `saveIfActive`
+  gained an OPTIONAL compare-and-swap: a caller may pass the two workflow-owned
+  values it actually read, and the UPDATE writes each of them only while the
+  stored value still equals what was read, keeping the workflow's newer value
+  otherwise. The step carries that token through `AdvanceOutcome`; a caller that
+  loses the CAS still commits every other column, so no save is dropped, and
+  every caller that passes nothing behaves exactly as before. The held row also carries `workflow_run_id: null` rather than a minted
   or inherited generation: this lane has no confirmed launcher, and a stale
   generation would let the liveness probe latch a live lane as crashed.
 - Dispatch refuses on branch LIVENESS, not only branch shape
@@ -90,14 +103,23 @@ changes nothing, and with no evidence the `failed` path stays byte-identical:
   held branch is the same "a live run owns a resource this dispatch needs" the kind
   already records) and logs `dispatch_branch_live`. Without that row a first-ever
   dispatch onto a live branch vanished with no run, no queue entry and no log,
-  while the path-claim gate refusing on the same fact had always queued.
+  while the path-claim gate refusing on the same fact had always queued. The
+  refusal SAYS it is queued and carries a `hold` field, like the other two
+  queueing refusals — it previously said "Nothing was dispatched … Re-dispatch
+  only once nothing live holds the branch" while the same block queued the card,
+  and returned no `hold` at all, so every structured consumer read a queued card
+  as dropped.
 - The terminal-build wake (`gateway/proactive/terminal-build-wake.ts`) stops
   inviting a relaunch for this failure shape: when the failure_reason carries the
   settle-timeout error or the published marker, instruction 2 becomes
   resolve-the-branch-holder-first (worktree lock and live pid, the run row's
   `inner_checkpoint`, the PR state; a published reason steers to a REVIEW round,
   never a rebuild). Every other failure_reason renders byte-identically, pinned by
-  asserting the original instruction survives verbatim.
+  asserting the original instruction survives verbatim. The published branch does
+  NOT forbid `work_board_start`: `inner-workflow.mjs`'s `resumeOnUnchangedHead`
+  resumes an unchanged `outer-published` head as mode `review`, so that call IS
+  the resume-to-review — the cheapest correct recovery — and the instruction says
+  so rather than ruling it out.
 
 The owner-facing copy moved with it. `interpretFailure` (`trident/delivery.ts`) now
 matches the published marker explicitly instead of falling to the generic tail,
@@ -107,7 +129,21 @@ dispatch-hold sweep (`trident/dispatch-holds.ts`) treats the new `branch_live`
 refusal as TRANSIENT — the hold stays queued for the next sweep — because deleting it
 would silently drop a queued card that nothing re-dispatches, and it logs each
 re-refusal with the hold's age, since a hold that keeps re-refusing is the signal
-that the "live" holder is a stale lock nothing will ever release.
+that the "live" holder is a stale lock nothing will ever release. That sweep also
+DRAINS ON THE TICK'S OWN CADENCE, not only on a terminal run: a `branch_live` hold
+created for a worktree-only holder has `held_on_run_id` null — its holder is a bare
+pid, and a pid exiting fires no terminal observer — so on a quiet instance the card
+queued indefinitely. `TridentTickLoop.drain_dispatch_holds` calls the same sweep once
+per tick body, failure-contained exactly like the as-built catch-up, sharing the
+tick's single-flight and cadence rather than adding a timer.
+
+And a finished, pushed build is no longer ANNOUNCED as a failure. It is recorded under
+phase `failed` because there is no other terminal phase for "not merged", but
+`interpretFailure` gives it its own class and `composeTerminalDelivery` its own arm —
+the same carve-out shape the infra-block deferral already had — so the owner reads
+"built and pushed; the review never ran" under a package glyph instead of ❌ over
+words saying the work finished. Every other failure class keeps the ❌ line
+byte-identical.
 
 What still holds, asserted in both directions: a settle timeout with NO positive
 evidence records `failed` exactly as before, byte-identical when the seam is

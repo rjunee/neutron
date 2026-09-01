@@ -102,6 +102,15 @@ export type FailureClass =
    * from the `failure_reason` string, and the only one composed with 🚧 instead of ❌.
    */
   | 'infra-blocked'
+  /**
+   * THE WORK WAS BUILT AND PUSHED; ONLY THE REVIEW NEVER RAN. A launcher settle
+   * timeout landed on a row that already carried an `outer-published:<sha>:0:<round>`
+   * checkpoint (`fire-evidence.ts`), so the branch is on origin and the PR exists at
+   * that sha. Recorded under phase `failed` because there is no other terminal phase
+   * for "not merged", but it is NOT a failure and must not wear ❌ — the second class
+   * (with `infra-blocked`) composed under its own glyph.
+   */
+  | 'published-unreviewed'
   | 'underspecified'
   | 'unknown'
 
@@ -266,7 +275,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
   // exported from `fire-evidence.ts` and imported here rather than retyped.
   if (r.includes(FIRE_PUBLISHED_REASON_MARKER)) {
     return {
-      klass: 'unknown',
+      klass: 'published-unreviewed',
       summary:
         'This build finished and pushed its work — the review round never ran, so I did not merge it.',
       input_needed:
@@ -505,6 +514,15 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       if (interp.klass === 'infra-blocked') {
         return {
           text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}\n${interp.input_needed}${trail}`,
+        }
+      }
+      // A FINISHED, PUSHED BUILD IS NOT A FAILURE EITHER. The words already said
+      // "this build finished and pushed its work"; leading them with ❌ told the
+      // owner the opposite of the sentence underneath. Same carve-out shape as
+      // `infra-blocked` above — every other class keeps the ❌ line byte-identical.
+      if (interp.klass === 'published-unreviewed') {
+        return {
+          text: `📦 ${title} — built and pushed; the review never ran, so it is not merged.\n${interp.summary}\n${interp.input_needed}${trail}`,
         }
       }
       return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }

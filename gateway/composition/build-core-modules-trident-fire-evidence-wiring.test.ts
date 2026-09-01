@@ -108,6 +108,30 @@ async function seedFreshRun(id: string, repo_path: string, branch: string): Prom
  * `buildCoreModules` and assert the evidence was CONSULTED and ACTED ON, so they fail
  * on any tree where the gatherer exists but is never handed to the orchestrator.
  */
+// ARGUS r4 (major): the `branch_live` hold created for a WORKTREE-ONLY holder has
+// no run whose terminalization fires the hold sweep, so on a quiet instance the
+// queued card never drains. The composed tick loop now drives the same sweep on
+// its own cadence — this proves the option is WIRED at the composition root, not
+// merely accepted by the type.
+describe('trident hold-drain composition wiring — the composed tick drains the dispatch-hold queue', () => {
+  test('drain_dispatch_holds is called by the composed loop on an ordinary tick', async () => {
+    let drained = 0
+    const input = timeoutFireInput(PLAIN_HOST)
+    input.trident!.drain_dispatch_holds = async () => {
+      drained += 1
+    }
+    const mods = buildCoreModules(input)
+    const instance = await mods.tridentModule.init(fakeCtx)
+    try {
+      await instance.loop.stop()
+      await instance.loop.runOnce()
+      expect(drained).toBe(1)
+    } finally {
+      await mods.tridentModule.shutdown!(instance)
+    }
+  }, 20_000)
+})
+
 describe('trident fire-evidence composition wiring — the composed orchestrator consults settle-timeout evidence', () => {
   test('a settle-timeout fire over a branch held by a LIVE worktree lock holds the lane instead of terminalizing it', async () => {
     const id = crypto.randomUUID()

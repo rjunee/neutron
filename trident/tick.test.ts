@@ -91,6 +91,46 @@ describe('TridentTickLoop.runOnce', () => {
     expect(store.get(a.id)?.phase).toBe('forge-init')
   })
 
+  // ARGUS r4 (major): the dispatch-hold queue drained ONLY when some run went
+  // terminal. That is the right event for a blocker card or a file claim — both
+  // owned by a run — but a `branch_live` hold created for a WORKTREE-ONLY holder
+  // (held_on_run_id null) waits on a bare pid, and a pid exiting emits no
+  // terminal event. On a quiet instance the card queued forever. The tick now
+  // drives the same sweep on its own cadence.
+  test('drain_dispatch_holds runs on EVERY tick, including a tick with no runs at all', async () => {
+    const store = new TridentRunStore(db)
+    let drained = 0
+    const loop = new TridentTickLoop({
+      store,
+      deps: stubAdvanceDeps(() => fixedNow),
+      drain_dispatch_holds: async () => {
+        drained += 1
+      },
+    })
+
+    await loop.runOnce()
+    expect(drained).toBe(1)
+    await loop.runOnce()
+    expect(drained).toBe(2)
+  })
+
+  test('a throwing hold drain never fails the tick', async () => {
+    const store = new TridentRunStore(db)
+    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 't' })
+    const loop = new TridentTickLoop({
+      store,
+      deps: depsWith({ status: 'completed', result: {} }),
+      drain_dispatch_holds: async () => {
+        throw new Error('sweep exploded')
+      },
+    })
+
+    const res = await loop.runOnce()
+
+    expect(res.advanced).toBe(1)
+    expect(store.get(a.id)?.phase).toBe('argus')
+  })
+
   test('per_tick_limit caps the per-tick advance count', async () => {
     const store = new TridentRunStore(db)
     for (let i = 0; i < 5; i++) {

@@ -43,7 +43,7 @@ import {
   publishFailureReason,
   redactPushError,
 } from './orchestrator.ts'
-import { infraDeathSentence, interpretFailure } from './delivery.ts'
+import { composeTerminalDelivery, infraDeathSentence, interpretFailure } from './delivery.ts'
 import { publishedFailureReason } from './fire-evidence.ts'
 import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
@@ -476,6 +476,24 @@ describe('interpretFailure — built-and-published must never invite a rebuild',
   test('an UNRELATED reason still reaches the generic retry copy (the control)', () => {
     const out = interpretFailure(run({ failure_reason: 'something nobody classified' }))
     expect(out.input_needed.toLowerCase()).toContain('retry')
+  })
+
+  // ARGUS r4 (minor): the words said "this build finished and pushed its work"
+  // and the line above them said ❌. `composeTerminal` carved out only
+  // `infra-blocked` for the non-rejection glyph, so a built-pushed-CI-green run
+  // was announced to the owner as a failure.
+  test('the owner-facing message does NOT lead a finished, pushed build with the failure glyph', () => {
+    const composed = composeTerminalDelivery(run({ phase: 'failed', failure_reason: REASON }))
+    expect(composed).not.toBeNull()
+    expect(composed?.text.startsWith('❌')).toBe(false)
+    expect(composed?.text).toContain('built and pushed')
+    // The words underneath are unchanged — this is a glyph/framing fix only.
+    expect(composed?.text).toContain('finished and pushed its work')
+  })
+
+  test('every OTHER failure class keeps the ❌ line (the control)', () => {
+    const composed = composeTerminalDelivery(run({ phase: 'failed', failure_reason: 'something nobody classified' }))
+    expect(composed?.text.startsWith('❌')).toBe(true)
   })
 })
 

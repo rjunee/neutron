@@ -67,8 +67,9 @@ export const OUTER_PUBLISHED_CHECKPOINT = /^outer-published:([0-9a-f]{40}):(\d+)
  *   • `launched`  — the workflow is believed LIVE. Distinct from `fired`: the
  *     launcher never confirmed. The lane is HELD, not terminalized.
  *   • `published` — the work is FINISHED and pushed; the row's own
- *     `inner_checkpoint` says so. Terminal, but as built-and-published /
- *     review-not-run, never as a failed fire.
+ *     `inner_checkpoint` says so, WITH `remaining` zero. Terminal, but as
+ *     built-and-published / review-not-run, never as a failed fire. A published
+ *     checkpoint with tasks still remaining is NOT this state — it is `none`.
  *   • `none`      — nothing positive was observed (including "could not look").
  *     Today's plain `failed`, byte-identical.
  *
@@ -160,8 +161,20 @@ export function pickWorkflowOwned(row: WorkflowOwnedColumns): WorkflowOwnedColum
  * no git. Rules, IN ORDER:
  *
  *   1. any workflow-owned column MOVED since the fire → `launched`;
- *   2. else the effective row carries an `outer-published:…` checkpoint → `published`;
+ *   2. else the effective row carries an `outer-published:…` checkpoint WHOSE
+ *      `remaining` FIELD IS ZERO → `published`;
  *   3. else → `none`.
+ *
+ * `remaining` IS A PREDICATE, NOT DECORATION. The checkpoint's shape is
+ * `outer-published:<sha>:<remaining>:<round>`, and a NON-ZERO `remaining` means
+ * the outer loop pushed a governed round with tasks still unbuilt — work in
+ * progress, not finished work. Classifying that as `published` would render
+ * `publishedFailureReason`'s "the work is already published … not a rebuild",
+ * which `delivery.ts` and `terminal-build-wake.ts` both act on, and a card with
+ * unbuilt tasks would be forbidden the rebuild it actually needs. Only
+ * `remaining === 0` is the SECOND SHAPE the card measured (both incidents:
+ * `outer-published:<sha>:0:<round>`); anything else falls through to `none` and
+ * the ordinary recoverable `failed`, which a re-run re-fires.
  *
  * A LIVE DELTA OUTRANKS `outer-published` BY DESIGN. A row can carry a published
  * checkpoint from a PRIOR round while the round just fired is live; terminalizing
@@ -190,11 +203,14 @@ export function classifyFireTimeoutRow(
   // Plain `String.trim()` is enough here: the regex is anchored and rejects
   // anything the trims could disagree about.
   const name = (effective.inner_checkpoint ?? '').trim()
-  if (OUTER_PUBLISHED_CHECKPOINT.test(name)) {
+  const published = OUTER_PUBLISHED_CHECKPOINT.exec(name)
+  // `Number` on the captured `\d+` cannot be NaN, and any all-zero spelling
+  // ('0', '000') is zero — the only value that means "nothing left to build".
+  if (published !== null && Number(published[2]) === 0) {
     return {
       kind: 'published',
       checkpoint: name,
-      detail: 'run row already carries an outer-published checkpoint',
+      detail: 'run row already carries an outer-published checkpoint with no tasks remaining',
       // THE TRIMMED NAME, not the raw column. `checkpoint` above (and the
       // failure_reason rendered from it) quote the trimmed form, and `observed`
       // is what the caller PERSISTS — so carrying the untrimmed value here would
@@ -202,7 +218,15 @@ export function classifyFireTimeoutRow(
       ...(fresh !== null ? { observed: { ...pickWorkflowOwned(fresh), inner_checkpoint: name } } : {}),
     }
   }
-  return { kind: 'none', detail: 'row unchanged and not published' }
+  return {
+    kind: 'none',
+    detail:
+      published === null
+        ? 'row unchanged and not published'
+        : // BOUNDED: `remaining` is `\d+` (unbounded) in the pattern, and this
+          // string can reach a stamp/note, so cap the digits rather than paste them.
+          `row unchanged and its published checkpoint still has ${published[2]!.slice(0, 9)} task(s) remaining`,
+  }
 }
 
 /**
