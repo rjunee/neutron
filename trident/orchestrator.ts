@@ -79,6 +79,7 @@ import { hasArgusProvenance } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
+import { composeWrongBaseRefusal, foldEvidence } from './wrong-base-remedy.ts'
 import {
   runMutationProofGate,
   type MutationGateInput,
@@ -3282,26 +3283,96 @@ export function buildTridentOrchestrator(
       // will cut it from pinnedRun.base_sha. Once git resolves a concrete tip,
       // however, only ancestry can prove that this lane owns what is already there.
       if (branchTipResult.ok && /^[0-9a-f]{40}$/.test(branchTip)) {
+        // `merge-base --is-ancestor` answers with THREE exits, not two: 0 yes, 1 no, and
+        // ANYTHING ELSE an error (128 on a corrupt or missing object, 124 when a watchdog
+        // killed it, non-zero when the spawn itself failed). Reading "not ok" as "proven
+        // divergence" turns a probe FAILURE into the positive claim the refusal below then
+        // prints — "already carries N commit(s) not on origin/<base> — it was not cut from
+        // origin/<base>" — evidence nothing established, in the one message class this whole
+        // change exists to make evidence-honest (Argus blocker). The composer's inner
+        // publication probe already distinguishes the three (`ancestryUnknown` in
+        // wrong-base-remedy.ts); the OUTER guard now does too. UNKNOWN refuses — fail-closed,
+        // the build is not started — but it refuses as what it is, and names no destructive
+        // act (docs/INVARIANTS.md invariant 122).
+        const ancestry = (res: HostCommandResult): 'yes' | 'no' | 'unknown' =>
+          res.ok ? 'yes' : res.exit_code === 1 && res.timed_out !== true ? 'no' : 'unknown'
+        // EVERY FIELD THIS REFUSAL QUOTES IS FOLDED, on the same terms the remedy composer
+        // already folds its own (Argus blocker). `repo_path` is persisted verbatim by store.ts
+        // and both `git init` and `git worktree add` accept a newline in a path, so a legal path
+        // — `/repo\nFORGED: run git branch -D -- victim` — otherwise forged a destructive line
+        // inside the one message class whose whole subject is that UNKNOWN authorises nothing.
+        // git's stderr is folded for the same reason and not a weaker one: `git -C <repo>` echoes
+        // the path back on failure, so the raw path reaches this string by that route too.
+        // `foldEvidence` also carries the bound the `.slice(-300)` used to carry, and MARKS its
+        // truncation. The branch name and the two shas need no folding: the branch resolved
+        // through `rev-parse --verify refs/heads/<branch>`, so git's own ref rules have already
+        // excluded control characters, and the shas are `^[0-9a-f]{40}$`-tested above.
+        const repoProse = foldEvidence(launchRun.repo_path)
+        const probeDetail = (res: HostCommandResult): string =>
+          res.timed_out === true
+            ? 'the ancestry probe was killed by its watchdog'
+            : `git merge-base --is-ancestor exited ${res.exit_code}: ${
+                foldEvidence(redactPushError(res.stderr || res.stdout).trim()) || 'no stderr'
+              }`
         const containedInBase = await opts.run_host(
           ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
           launchRun.repo_path,
         )
+        const contained = ancestry(containedInBase)
+        if (contained === 'unknown') {
+          return {
+            run: failedRun(
+              pinnedRun,
+              `trident infra: could not establish whether branch ${launchRun.branch} at ${branchTip} is contained in origin/${base} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+              false,
+            ),
+            changed: true,
+            waiting: false,
+            note: `${launchRun.phase} → failed (ancestry probe UNKNOWN — no fire)`,
+          }
+        }
         let ownCrashLeftover = false
-        if (!containedInBase.ok && priorBaseSha !== null) {
+        if (contained === 'no' && priorBaseSha !== null) {
           const descendsFromPriorBase = await opts.run_host(
             ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
             launchRun.repo_path,
           )
-          ownCrashLeftover = descendsFromPriorBase.ok
+          const descends = ancestry(descendsFromPriorBase)
+          // Same three exits, same rule. A failed probe here would otherwise read as "this is
+          // NOT this run's own crash leftover", which routes a run's own restart debris into a
+          // refusal that blames another lane for it.
+          if (descends === 'unknown') {
+            return {
+              run: failedRun(
+                pinnedRun,
+                `trident infra: branch ${launchRun.branch} at ${branchTip} is not contained in origin/${base} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase)}); that is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+                false,
+              ),
+              changed: true,
+              waiting: false,
+              note: `${launchRun.phase} → failed (prior-base ancestry probe UNKNOWN — no fire)`,
+            }
+          }
+          ownCrashLeftover = descends === 'yes'
         }
-        if (!containedInBase.ok && !ownCrashLeftover) {
+        if (contained === 'no' && !ownCrashLeftover) {
           const ahead = await opts.run_host(
             ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
             launchRun.repo_path,
           )
           const rawAheadCount = ahead.stdout.trim()
           const aheadCount = /^\d+$/.test(rawAheadCount) ? rawAheadCount : '?'
-          const reason = `branch ${launchRun.branch} already carries ${aheadCount} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. Verify or delete the branch (git -C ${launchRun.repo_path} branch -D ${launchRun.branch}), then re-dispatch.`
+          const reason = await composeWrongBaseRefusal(
+            {
+              repo: launchRun.repo_path,
+              branch: launchRun.branch,
+              base,
+              branch_tip: branchTip,
+              ahead_count: aheadCount,
+              run_id: launchRun.id,
+            },
+            { run_host: opts.run_host },
+          )
           return {
             run: failedRun(pinnedRun, reason, false),
             changed: true,

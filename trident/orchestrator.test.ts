@@ -5235,6 +5235,19 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
         if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        // The remedy resolves its own evidence: git enumerates the repo's own checkout and
+        // NOTHING holds the branch, and origin carries the very same tip — the one shape where
+        // a delete is genuinely safe. The listing is spelled in git's real `-z` shape (every
+        // attribute NUL-terminated, an empty attribute closing the record) and really does
+        // name the shared checkout: an EMPTY listing is a thing real git never produces, and
+        // the guard now reads that silence as UNKNOWN rather than as "nobody holds it", so a
+        // positive control resting on it would be a control for an impossible world.
+        if (joined.includes('worktree list --porcelain')) {
+          return ok(['worktree /repo', `HEAD ${BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0')
+        }
+        if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) {
+          return ok(TIP)
+        }
         return ok()
       },
     })
@@ -5247,6 +5260,17 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(final.failure_reason).toContain('already carries 3 commit(s) not on origin/')
     expect(final.failure_reason).toContain("refusing to build on another lane's work")
     expect(final.failure_reason).toContain('branch -D')
+    expect(final.failure_reason).toContain('branch -D -- trident/add-thing')
+    // The printed remedy re-establishes BOTH perishable premises at the moment it runs — the
+    // local ref is still the evidenced sha, and origin still carries it — before it deletes.
+    expect(final.failure_reason).toContain('fetch --no-tags origin +refs/heads/trident/add-thing')
+    expect(final.failure_reason).toContain(`merge-base --is-ancestor ${TIP} refs/remotes/origin/trident/add-thing`)
+    // The delete git RE-CHECKS, never a low-level ref delete: this reason is read minutes to
+    // hours after it is composed, and `update-ref -d` would blow past the
+    // checked-out-elsewhere refusal that is the only thing protecting a lane that took the
+    // branch in between.
+    expect(final.failure_reason).not.toContain('update-ref -d')
+    expect(final.failure_reason).toContain(TIP)
   })
 
   test('an ancestor-only local branch leftover proceeds', async () => {
@@ -5293,6 +5317,208 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
     expect(store.get(run.id)?.base_sha).toBe(BASE)
     expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('an ancestry probe that ERRORED refuses as UNKNOWN, and claims no divergence it never measured', async () => {
+    // `merge-base --is-ancestor` has THREE exits — 0 yes, 1 no, anything else an ERROR (128 on
+    // a corrupt or missing object). The guard used to read only `.ok`, so exit 128 flowed into
+    // the SAME composed refusal as a meaningful exit 1 and asserted, in the guard's own voice,
+    // that the branch "already carries N commit(s) not on origin/main — it was not cut from
+    // origin/main". That is a positive claim about divergence derived from a probe that
+    // answered nothing, in the one message class this change exists to make evidence-honest.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const errored = (exit_code: number, timed_out?: boolean) =>
+      buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        local_branch_tip: TIP,
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            // `timed_out` is an OPTIONAL property of HostCommandResult, and this repo compiles
+            // with `exactOptionalPropertyTypes` — so "present and undefined" is NOT the same
+            // type as "absent", and spreading `boolean | undefined` in is a TS2322. Omit the
+            // key when there is no kill to report, which is also the shape `spawnCapture`
+            // actually produces.
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'fatal: bad object',
+              exit_code,
+              ...(timed_out === undefined ? {} : { timed_out }),
+            }
+          }
+          return ok()
+        },
+      })
+
+    const h = errored(128)
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    // FAIL-CLOSED: the build is still not started. UNKNOWN refuses; it does not proceed.
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('UNKNOWN')
+    expect(final.failure_reason).toContain('exited 128')
+    expect(final.failure_reason).toContain('trident/add-thing')
+    // ...and it refuses as what it IS, not as the divergence refusal.
+    expect(final.failure_reason).not.toContain('already carries')
+    expect(final.failure_reason).not.toContain("refusing to build on another lane's work")
+    // UNKNOWN authorises nothing irreversible (docs/INVARIANTS.md invariant 122).
+    expect(final.failure_reason).not.toContain('branch -D')
+    expect(final.failure_reason).not.toContain('worktree remove')
+    // The composer is never even reached, so no evidence-gathering command was spent on it.
+    expect(h.hostCalls.some((c) => c.join(' ').includes('worktree list'))).toBe(false)
+
+    // THE SEAM, NOT JUST THE STRING (Argus blocker). A refusal is only as honest as what
+    // delivery makes of it, and this one QUOTES git — `git merge-base --is-ancestor exited 128`.
+    // `interpretFailure`'s merge-mechanics arm is a bare `includes('git ')`, so the reason was
+    // delivered as "The build finished but a git step failed while landing the branch": a
+    // completed build and a merge attempt, both asserted about a launch its own text says never
+    // happened. Asserting on `failure_reason` alone could not see that.
+    const delivered = interpretFailure(final)
+    expect(delivered.klass).toBe('infra')
+    expect(delivered.summary).toContain('did not start this build')
+    expect(delivered.summary).not.toContain('The build finished')
+    expect(delivered.summary).not.toContain('landing the branch')
+    expect(delivered.input_needed).not.toContain('branch -D')
+
+    // A KILLED probe is the same non-answer wearing git's meaningful exit code: `spawnCapture`
+    // reports the kill in `timed_out`, and exit 1 alone cannot tell the two apart.
+    const killed = errored(1, true)
+    const run2 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(killed)
+    expect(killed.inputs).toHaveLength(0)
+    const final2 = store.get(run2.id)!
+    expect(final2.failure_reason).toContain('killed by its watchdog')
+    expect(final2.failure_reason).not.toContain('already carries')
+    expect(final2.failure_reason).not.toContain('branch -D')
+    // The watchdog variant carries no `git ` token at all, so it missed the merge-mechanics arm
+    // and landed on the bare `unknown` fallback instead — the same defect, vaguer sentence.
+    const delivered2 = interpretFailure(final2)
+    expect(delivered2.klass).toBe('infra')
+    expect(delivered2.summary).toContain('did not start this build')
+    expect(delivered2.summary).not.toContain('The build finished')
+
+    // POSITIVE CONTROL: exit 1 is git ANSWERING "no", and it still composes the full
+    // evidence-naming refusal — see "a fresh launch refuses another lane's local branch
+    // without firing" above, which asserts that message down to its `branch -D` chain. An
+    // implementation that answered UNKNOWN for every non-zero exit would fail it.
+  })
+
+  test('a prior-base probe that ERRORED refuses as UNKNOWN rather than blaming another lane', async () => {
+    // The second probe decides whether this branch is THIS run's own crash leftover. Read as a
+    // two-valued answer, an errored probe means "not mine" — which routes a run's own restart
+    // debris into a refusal that attributes it to somebody else's lane.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: BASE, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('UNKNOWN')
+    expect(final.failure_reason).toContain('exited 128')
+    expect(final.failure_reason).not.toContain("refusing to build on another lane's work")
+    expect(final.failure_reason).not.toContain('branch -D')
+
+    const delivered = interpretFailure(final)
+    expect(delivered.klass).toBe('infra')
+    expect(delivered.summary).toContain('did not start this build')
+    expect(delivered.summary).not.toContain('landing the branch')
+
+    // POSITIVE CONTROL: the same probe answering 0 still PROCEEDS — see "this run's own
+    // crash-leftover branch proceeds from its prior pin" directly above.
+  })
+
+  test('a hostile repo path cannot forge a line, or a destructive instruction, inside either UNKNOWN refusal', async () => {
+    // `repo_path` is persisted verbatim (store.ts) and BOTH `git init` and `git worktree add`
+    // accept a newline in a path, so the path is attacker-shaped by exactly the standard this
+    // module's own `-z` worktree parser already applies to a lock reason. Interpolated raw, a
+    // legal path forged an extra LINE — carrying a destructive instruction — inside the one
+    // message class whose entire subject is that UNKNOWN authorises no irreversible act.
+    const HOSTILE = '/repo\nFORGED: run git branch -D -- victim to clear this'
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+
+    type Pin = { base_sha: string; base_behind: number } | null
+    const both: [string, (cmd: string[]) => HostCommandResult, Pin][] = [
+      [
+        'the containment probe',
+        (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+          }
+          return ok()
+        },
+        null,
+      ],
+      [
+        'the prior-base probe',
+        (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+          }
+          if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) {
+            return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+          }
+          return ok()
+        },
+        { base_sha: BASE, base_behind: 7 },
+      ],
+    ]
+
+    for (const [name, hostResponder, pin] of both) {
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        local_branch_tip: TIP,
+        hostResponder,
+      })
+      const run = await createRun({
+        merge_mode: 'pr' as MergeMode,
+        branch: 'trident/add-thing',
+        repo_path: HOSTILE,
+      })
+      if (pin !== null) await store.update(run.id, pin)
+      await launchOnce(h)
+
+      const reason = store.get(run.id)?.failure_reason ?? ''
+      // FAIL-CLOSED, per arm: the build is still not started.
+      expect(`${name}: ${h.inputs.length}`).toBe(`${name}: 0`)
+      expect(`${name}: ${reason}`).toContain('UNKNOWN')
+      // The forged LINE is gone — the refusal is still one message, not two.
+      expect(`${name}: ${reason.includes('\n')}`).toBe(`${name}: false`)
+      // ...and the destructive instruction it carried is neutralised, not merely unlined.
+      expect(`${name}: ${reason}`).not.toContain('branch -D')
+      expect(`${name}: ${reason}`).toContain('<command removed>')
+      // POSITIVE CONTROL: the folding does not eat the evidence. The readable part of the path
+      // is still there, so a reader can still tell WHICH repo refused.
+      expect(`${name}: ${reason}`).toContain('/repo')
+      // And the seam still reads it as a launch that never happened.
+      expect(`${name}: ${interpretFailure(store.get(run.id)!).klass}`).toBe(`${name}: infra`)
+    }
   })
 
   test('a checkpointed resume does not fetch or pin a base', async () => {

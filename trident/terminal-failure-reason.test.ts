@@ -45,6 +45,8 @@ import {
 } from './orchestrator.ts'
 import { infraDeathSentence, interpretFailure } from './delivery.ts'
 import { parseInnerResult } from './inner-loop.ts'
+import { composeWrongBaseRefusal, type TreeOccupancy } from './wrong-base-remedy.ts'
+import type { HostCommandResult } from './git-mode.ts'
 import type { TridentRun } from './store.ts'
 
 const run = (over: Partial<TridentRun> = {}): TridentRun =>
@@ -479,6 +481,309 @@ describe('interpretFailure — an early stop must not be told as a review outcom
     expect(out.summary).toContain('blocking findings')
   })
 
+  test("the wrong-base refusal is delivered as a stand-down, never as \"reply to retry\"", () => {
+    // MEASURED on the composed reason: it carries no `git ` command in the live-holder arm,
+    // so every keyword branch missed it and the FALLBACK answered — and the fallback drops any
+    // reason over 200 characters and then invites a retry. The delivered message therefore
+    // said "Reply to retry the build" about a refusal whose entire content is "another lane
+    // owns this branch; do not re-dispatch".
+    const reason =
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+      'the branch checked out in worktree /repo/.claude/worktrees/wf_a, whose lock names pid 4242, ' +
+      'and that process is ALIVE — another lane owns this branch. Stand down: do not delete the ' +
+      'branch, and do not re-dispatch this card until that worktree releases it.'
+    const out = interpretFailure(run({ failure_reason: reason }))
+    expect(out.klass).toBe('branch-held')
+    expect(out.summary).toContain('not cut from the base')
+    // ...and it does NOT re-assert the attribution the composer deliberately RETRACTED. The
+    // guard's args carry the refusing run's id but not its own worktree path, and this card's
+    // second measured instance was held by its OWN relocked tree, so "another lane's commits"
+    // was a claim the evidence beneath this summary withdrew — two layers of one message
+    // disagreeing about what was established. The refusal's own premise is what is stated.
+    expect(out.summary).not.toContain("another lane's commits")
+    // ...and the delivered text never pastes the raw evidence at the owner.
+    expect(out.summary).not.toContain('/repo/.claude')
+    expect(out.summary).not.toContain('4242')
+
+    // The DEAD-holder arm carries `git ` commands, so it would otherwise be told as a merge
+    // step that failed while landing the branch — about a build that never started.
+    const dead = interpretFailure(
+      run({
+        failure_reason:
+          "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+          "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+          'the branch checked out in worktree /repo/wt, whose lock names pid 4242; that process is ' +
+          'DEAD. Release the stale worktree first — git -C /repo worktree unlock /repo/wt.',
+      }),
+    )
+    expect(dead.klass).toBe('branch-held')
+    expect(dead.summary).not.toContain('git step failed')
+
+    // POSITIVE CONTROL: an ordinary git-mechanics failure is still told as one.
+    expect(interpretFailure(run({ failure_reason: 'merge failed: git push rejected' })).klass).toBe(
+      'merge-mechanics',
+    )
+  })
+
+  test('a BRANCH NAME cannot buy back the retry advice this class forbids', () => {
+    // THE BLOCKER. The refusal EMBEDS the branch name, and `git check-ref-format --branch
+    // stalled` exits 0 — so a branch legally named `stalled` matched the hang arm, which used
+    // to be checked FIRST, and the refusal came back as "Reply to retry the build". Retrying
+    // is the one action this class must not suggest: the guard refused precisely because
+    // re-dispatching now would put a second lane on another lane's branch.
+    //
+    // Every token below belongs to a class that sits ahead of `branch-held` in reading order,
+    // and every one of them is a legal ref name (hyphens and underscores are legal; the
+    // multi-word ones are reachable through the quoted LOCK REASON, which git prints verbatim
+    // and this refusal quotes back).
+    const heldBy = (branch: string): string =>
+      `branch ${branch} already carries 3 commit(s) not on origin/main — it was not cut from ` +
+      `origin/main; refusing to build on another lane's work. The wrong-base launch guard found ` +
+      `the branch checked out in worktree /repo/.claude/worktrees/wf_a, whose lock names pid ` +
+      `4242, and that process is ALIVE — another lane owns this branch. Stand down: do not ` +
+      `delete the branch, and do not re-dispatch this card until that worktree releases it.`
+    for (const branch of [
+      'stalled',
+      'trident/fix-the-stalled-watchdog',
+      'trident/rounds-exhausted-early',
+      'trident/rebase-onto-main',
+      'trident/checkout-the-base-first',
+      'trident/unmerged-index-recovery',
+      'trident/missing-credential-probe',
+      'trident/request_changes-plumbing',
+    ]) {
+      const out = interpretFailure(run({ failure_reason: heldBy(branch) }))
+      expect(out.klass).toBe('branch-held')
+      expect(out.input_needed).not.toContain('Reply to retry')
+      expect(out.input_needed).not.toContain('retry')
+    }
+
+    // A LOCK REASON is quoted verbatim into the refusal and may contain SPACES, so the
+    // multi-word tokens of the classes above are forgeable through it too.
+    const lockSaid = (reason: string): string =>
+      `branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from ` +
+      `origin/main; refusing to build on another lane's work. The wrong-base launch guard found ` +
+      `the branch checked out in worktree /repo/wt, whose lock ("${reason}") names no pid, so ` +
+      `the holder's liveness is UNKNOWN — treat it as live. Stand down: do not delete the branch.`
+    for (const reason of [
+      'no progress for 90 min',
+      'suspected agent hang',
+      're-run with the other seat',
+      'crash-recovery budget note',
+      'inner workflow ended at round 3',
+    ]) {
+      const out = interpretFailure(run({ failure_reason: lockSaid(reason) }))
+      expect(out.klass).toBe('branch-held')
+      expect(out.input_needed).not.toContain('Reply to retry')
+    }
+
+    // POSITIVE CONTROLS: the classes those tokens belong to still own their own reasons, so
+    // this is ordering, not a `branch-held` branch that swallows everything.
+    expect(interpretFailure(run({ failure_reason: 'stalled: no progress for 90 min' })).klass).toBe('hang')
+    expect(interpretFailure(run({ failure_reason: 'suspected agent hang' })).klass).toBe('hang')
+    expect(
+      interpretFailure(run({ failure_reason: 'inner loop exhausted 10 round(s) without Argus APPROVE' })).klass,
+    ).toBe('review-unresolved')
+    expect(interpretFailure(run({ failure_reason: 'build infrastructure failed: stalled probe' })).klass).toBe(
+      'infra',
+    )
+  })
+
+  test('the branch-held delivery does not claim a write it makes', () => {
+    // "Nothing was changed or deleted" was false in the UNHELD arm: establishing publication
+    // fetches `+refs/heads/<b>:refs/remotes/origin/<b>`, a FORCED refspec that moves the
+    // remote-tracking ref. The reassurance the owner actually needs is that no branch,
+    // worktree, commit or file moved — so say that, and name the one write.
+    const out = interpretFailure(
+      run({
+        failure_reason:
+          "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+          "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+          'no worktree holding the branch, and origin/trident/x is at the identical commit.',
+      }),
+    )
+    expect(out.klass).toBe('branch-held')
+    expect(out.input_needed).not.toContain('Nothing was changed or deleted')
+    expect(out.input_needed).toContain('No branch, worktree, commit or file was changed or deleted')
+    expect(out.input_needed).toContain('tracking ref')
+    // ...and it counts that write correctly. "The single write it makes is refreshing this
+    // branch's own origin tracking ref" was itself an undercount: the fetch has no
+    // `--no-write-fetch-head`, so it rewrites FETCH_HEAD too and writes whatever objects it
+    // downloads (verified on a scratch repo: FETCH_HEAD recreated by that exact command).
+    // A delivery that undercounts its writes is the overclaiming this refusal exists to stop.
+    expect(out.input_needed).not.toContain('the single write')
+    expect(out.input_needed).toContain('FETCH_HEAD')
+    expect(out.input_needed).toContain('objects it downloads')
+  })
+
+  test('the fetch it names is the one the arm that fired actually made', () => {
+    // OVERCOUNTING IS THE SAME DEFECT AS UNDERCOUNTING. The sentence above was attached to
+    // EVERY branch-held delivery, and the HELD arms make no network call at all — the composer
+    // says so in as many words ("HELD: no network call in this arm"). So live, dead, prunable
+    // and shared-checkout refusals reported a write that never happened, in the one message
+    // whose subject is not claiming things nobody established.
+    const held =
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+      'the branch checked out in worktree /repo/wt, whose lock names pid 4242, and that process ' +
+      'is ALIVE — a live holder owns this branch.'
+    const out = interpretFailure(run({ failure_reason: held }))
+    expect(out.klass).toBe('branch-held')
+    expect(out.input_needed).toContain('No branch, worktree, commit or file was changed or deleted')
+    expect(out.input_needed).toContain('no network call at all')
+    expect(out.input_needed).not.toContain('FETCH_HEAD')
+
+    // POSITIVE CONTROL: the arm that DOES fetch still names the fetch and everything it writes.
+    const unheld =
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+      'no worktree holding the branch, and origin/trident/x is at the identical commit.'
+    const fetched = interpretFailure(run({ failure_reason: unheld }))
+    expect(fetched.input_needed).toContain('FETCH_HEAD')
+    expect(fetched.input_needed).not.toContain('no network call at all')
+
+    // ...and an arm that refused BEFORE establishing the holder claims neither.
+    const early =
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      "origin/main; refusing to build on another lane's work. The wrong-base launch guard could " +
+      'not enumerate worktrees to find the branch\'s holder (git died) — the holder is UNKNOWN.'
+    const before = interpretFailure(run({ failure_reason: early }))
+    expect(before.klass).toBe('branch-held')
+    expect(before.input_needed).toContain('refused before it could establish the holder')
+
+    // AND THE ARM IS READ FROM THE EVIDENCE SENTENCE, not from anywhere in the reason. A lock
+    // reason is quoted verbatim into a HELD refusal and can spell the unheld arm's opening; the
+    // held arm's sentence comes first, so the forgery loses.
+    const forged =
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+      'the branch checked out in worktree /repo/wt, whose lock ("The wrong-base launch guard ' +
+      'found no worktree holding the branch") names no pid.'
+    expect(interpretFailure(run({ failure_reason: forged })).input_needed).toContain('no network call at all')
+
+    // AND THE REBASE/BISECT-HOLDER ARM IS A HELD ARM WEARING THE UNHELD ARM'S OPENING. Its
+    // sentence begins "found no worktree WITH <branch> CHECKED OUT, but worktree ... has a
+    // REBASE in progress", so a prefix test for "found no worktree" matched it and reported a
+    // fetch — which that arm returns BEFORE making. The overcounting this conditional exists
+    // to prevent, in the arm nobody checked.
+    const rebasing =
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+      'no worktree with trident/x CHECKED OUT, but worktree /repo/wt has a REBASE in progress ' +
+      'whose head-name is trident/x — git omits the branch attribute for a worktree in that state.'
+    const held2 = interpretFailure(run({ failure_reason: rebasing }))
+    expect(held2.klass).toBe('branch-held')
+    expect(held2.input_needed).toContain('no network call at all')
+    expect(held2.input_needed).not.toContain('FETCH_HEAD')
+    expect(held2.input_needed).not.toContain('tracking ref')
+  })
+
+  test('the read-only reassurance is not asserted over the arm that fetches', () => {
+    // "No branch, worktree, commit or file was changed or deleted — THE GUARD ONLY READ STATE"
+    // was a constant, printed on every arm, and the very next sentence on the fetching arm
+    // described three writes (a tracking ref, FETCH_HEAD, downloaded objects). The pair
+    // asserted read-only and then contradicted itself, in the one message whose subject is not
+    // claiming things nobody established. The reassurance that is OWED — nothing destructive
+    // moved — is unconditional; "only read" is not, so it moved to the per-arm sentence.
+    const wrongBase = (evidence: string): string =>
+      "branch trident/x already carries 3 commit(s) not on origin/main — it was not cut from " +
+      `origin/main; refusing to build on another lane's work. ${evidence}`
+    const fetched = interpretFailure(
+      run({
+        failure_reason: wrongBase(
+          'The wrong-base launch guard found no worktree holding the branch, and origin/trident/x ' +
+            'is at the identical commit.',
+        ),
+      }),
+    )
+    expect(fetched.input_needed).toContain('No branch, worktree, commit or file was changed or deleted')
+    expect(fetched.input_needed).not.toContain('only READ state')
+    expect(fetched.input_needed).toContain('FETCH_HEAD')
+
+    // POSITIVE CONTROL: an arm that really did only read still says so.
+    const held = interpretFailure(
+      run({
+        failure_reason: wrongBase(
+          'The wrong-base launch guard found the branch checked out in worktree /repo/wt, whose ' +
+            'lock names pid 4242, and that process is ALIVE — a live holder owns this branch.',
+        ),
+      }),
+    )
+    expect(held.input_needed).toContain('only READ state')
+  })
+
+  test('a legal branch name carrying Unicode whitespace cannot shed the stand-down', () => {
+    // THE ANCHOR'S PREMISE WAS NOT GIT'S. The classifier spelled the name fields `\S+`, on the
+    // stated ground that "branch and base names cannot contain spaces". What git forbids is the
+    // ASCII space; `git check-ref-format --branch $'trident/x\u00a0stalled'` exits 0. JavaScript's
+    // `\s` INCLUDES U+00A0, so `\S` refused to match that legal name, the anchored prefix missed,
+    // and the refusal fell through to the classifiers that key on substrings like 'stalled' —
+    // and was answered with "Reply to retry the build", the one advice this class forbids,
+    // restored by nothing more than somebody's choice of branch name.
+    for (const branch of ['trident/x\u00a0stalled', 'trident/x\u2003exhausted', 'trident/x\u3000rebase']) {
+      const reason =
+        `branch ${branch} already carries 3 commit(s) not on origin/main — it was not cut from ` +
+        "origin/main; refusing to build on another lane's work. The wrong-base launch guard found " +
+        'the branch checked out in worktree /repo/wt, whose lock names pid 4242, and that process ' +
+        'is ALIVE — a live holder owns this branch.'
+      const out = interpretFailure(run({ failure_reason: reason }))
+      expect(out.klass).toBe('branch-held')
+      expect(out.input_needed).not.toContain('Reply to retry')
+      expect(out.input_needed).toContain('no network call at all')
+    }
+
+    // NEGATIVE CONTROL: the field still cannot swallow the prose around it. A reason whose
+    // "branch name" contains the ASCII space git actually forbids is not this refusal, and
+    // must not be classified as one — that is the property the anchor was bought for.
+    const spaced =
+      'branch trident/x stalled already carries 3 commit(s) not on origin/main — it was not cut ' +
+      "from origin/main; refusing to build on another lane's work. Something else entirely."
+    expect(interpretFailure(run({ failure_reason: spaced })).klass).not.toBe('branch-held')
+  })
+
+  test('a reason that merely QUOTES the refusal is not classified as one', () => {
+    // THE DISCRIMINATOR WAS AN UNANCHORED includes() OVER A FREE-FORM REASON. `orchestrator.ts`
+    // interpolates workflow error text straight into failure reasons, so an error that echoes a
+    // previous refusal — or any prose containing the phrase — was delivered as a launch refusal
+    // and lost the retry advice a real launch failure is owed. The refusal is now matched by
+    // the composer's WHOLE prefix, anchored at position 0.
+    const echoed = interpretFailure(
+      run({
+        failure_reason:
+          'build infrastructure failed: workflow error: the previous run said "refusing to ' +
+          'build on another lane\'s work" and exited 1',
+      }),
+    )
+    expect(echoed.klass).not.toBe('branch-held')
+
+    // AND THE ANCHOR ITSELF, pinned (Argus finding). The test above embeds only a FRAGMENT of
+    // the prefix, so deleting the `^` from WRONG_BASE_PREFIX left the whole suite green. This
+    // reason embeds the prefix WHOLE and INTACT, mid-string — the shape `orchestrator.ts`
+    // produces whenever workflow error text quotes a previous refusal. Unanchored, it matches,
+    // and delivery.ts then slices by `m[0].length` rather than `m.index`, so the arm is chosen
+    // from a GARBLED evidence sentence: the wrong class AND the wrong write attribution, from
+    // one deleted character.
+    const embedded =
+      'build infrastructure failed: workflow error: the previous run said "branch trident/x ' +
+      'already carries 3 commit(s) not on origin/main — it was not cut from origin/main; ' +
+      "refusing to build on another lane's work. The wrong-base launch guard found the branch " +
+      'checked out in worktree /repo/wt, whose lock names pid 4242, and that process is ALIVE." ' +
+      'and exited 1'
+    expect(interpretFailure(run({ failure_reason: embedded })).klass).not.toBe('branch-held')
+
+    // POSITIVE CONTROL: the real refusal still classifies, `?` count included — the launch
+    // guard renders that when `rev-list --count` could not be read.
+    for (const count of ['3', '?']) {
+      const real =
+        `branch trident/x already carries ${count} commit(s) not on origin/main — it was not cut ` +
+        "from origin/main; refusing to build on another lane's work. The wrong-base launch guard " +
+        'found the branch checked out in worktree /repo/wt, whose lock names pid 4242, and that ' +
+        'process is ALIVE — a live holder owns this branch.'
+      expect(interpretFailure(run({ failure_reason: real })).klass).toBe('branch-held')
+    }
+  })
+
   test('neither summary ever pastes the raw reason at the owner', () => {
     for (const reason of [
       "inner workflow ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE",
@@ -779,5 +1084,257 @@ describe('classifyPublishFailure — credential vs ref rejection, from the store
     const stored = publishFailureReason('push', 'b', raw)
     expect(stored).not.toContain('ghp_SECRET456')
     expect(classifyPublishFailure(stored)).toBe('publish-credential')
+  })
+})
+
+/**
+ * THE COMPOSER→CLASSIFIER SEAM, EXERCISED END TO END (Argus finding).
+ *
+ * `delivery.ts` recognises this refusal by a frozen copy of `composeWrongBaseRefusal`'s prefix
+ * (`WRONG_BASE_PREFIX`) and picks its write-attribution sentence from frozen copies of each
+ * arm's OPENING (`wrongBaseWrites`). Every test either side of that seam used HAND-WRITTEN
+ * reason strings — the composer's tests assert on the composer's output, the classifier's tests
+ * assert over literals typed into this file — so the two halves were pinned only to each
+ * other's TRANSCRIPTION. A wording change in the composer silently reroutes the classifier (a
+ * `branch-held` refusal falling through to "Reply to retry the build", the one advice this
+ * class exists to forbid) while both suites stay green. That is what the comments in
+ * `delivery.ts` mean when they say the two halves must move together — a rule nothing enforced.
+ *
+ * So this block runs the REAL composer, arm by arm, and feeds its ACTUAL output through
+ * `interpretFailure`. The assertions are per-arm and load-bearing — the class, and the write
+ * attribution that arm is entitled to — never whole-message equality, so wording stays free to
+ * change and the seam stays pinned.
+ */
+describe('composeWrongBaseRefusal → interpretFailure — the two halves of the seam, actually joined', () => {
+  const okRes = (stdout = ''): HostCommandResult => ({ ok: true, stdout, stderr: '', exit_code: 0 })
+  const TIP = 'c'.repeat(40)
+  const DIVERGED = 'd'.repeat(40)
+  const WT = '/repo/.claude/worktrees/wf_a'
+  const ARGS = { repo: '/repo', branch: 'feat-x', base: 'main', branch_tip: TIP, ahead_count: '3', run_id: 'run-77' }
+  const FETCH = 'fetch --no-tags origin +refs/heads/feat-x:refs/remotes/origin/feat-x'
+  const RESOLVE = 'rev-parse --verify --quiet refs/remotes/origin/feat-x'
+  const clear = (): TreeOccupancy => ({ kind: 'clear' })
+
+  /** git's real `-z` shape: every attribute NUL-terminated, an empty attribute closing a record. */
+  const zPorcelain = (...records: string[][]): string =>
+    records.map((fields) => fields.map((f) => `${f}\0`).join('') + '\0').join('')
+  const MAIN_FIELDS = ['worktree /repo', 'HEAD ' + 'a'.repeat(40), 'branch refs/heads/main']
+  const HELD_FIELDS = [
+    `worktree ${WT}`,
+    'HEAD ' + TIP,
+    'branch refs/heads/feat-x',
+    'locked claude agent wf_a (pid 4242 start 99)',
+  ]
+  const DETACHED_FIELDS = [`worktree ${WT}`, 'HEAD ' + TIP, 'detached']
+
+  const host =
+    (answers: Record<string, HostCommandResult>) =>
+    async (cmd: string[]): Promise<HostCommandResult> => {
+      const joined = cmd.join(' ')
+      for (const [key, res] of Object.entries(answers)) if (joined.includes(key)) return res
+      return okRes('')
+    }
+  const listing = (porcelain: string, extra: Record<string, HostCommandResult> = {}) =>
+    host({ 'worktree list --porcelain': okRes(porcelain), ...extra })
+  const held = listing(zPorcelain(MAIN_FIELDS, HELD_FIELDS))
+  const unheld = (originAt: HostCommandResult) =>
+    listing(zPorcelain(MAIN_FIELDS), { [FETCH]: okRes(), [RESOLVE]: originAt })
+  /** Answers the enumeration and the fetch, then throws — the catch-all arm, POST-fetch. */
+  const throwsAfterFetch = async (cmd: string[]): Promise<HostCommandResult> => {
+    const joined = cmd.join(' ')
+    if (joined.includes('worktree list --porcelain')) return okRes(zPorcelain(MAIN_FIELDS))
+    if (joined.includes(FETCH)) return okRes()
+    throw new Error('the runner exploded')
+  }
+  const rebaseDeps = {
+    run_host: listing(zPorcelain(MAIN_FIELDS, DETACHED_FIELDS)),
+    probe_tree: clear,
+    rebase_head: () => ({ kind: 'branch' as const, ref: 'refs/heads/feat-x' }),
+  }
+
+  const deliver = async (deps: Parameters<typeof composeWrongBaseRefusal>[1]) => {
+    const reason = await composeWrongBaseRefusal(ARGS, deps)
+    return { reason, out: interpretFailure(run({ failure_reason: reason })) }
+  }
+
+  test('every arm the composer can emit is classified branch-held, never as a retryable failure', async () => {
+    const arms: [string, Parameters<typeof composeWrongBaseRefusal>[1]][] = [
+      ['live holder', { run_host: held, probe_pid: () => 'alive', probe_tree: clear }],
+      ['dead holder', { run_host: held, probe_pid: () => 'dead', probe_tree: clear }],
+      ['holder whose liveness is unknown', { run_host: held, probe_pid: () => 'unknown', probe_tree: clear }],
+      [
+        'lock naming no pid',
+        {
+          run_host: listing(zPorcelain(MAIN_FIELDS, [...HELD_FIELDS.slice(0, 3), 'locked no pid here'])),
+          probe_tree: clear,
+        },
+      ],
+      [
+        'prunable holder',
+        {
+          run_host: listing(zPorcelain(MAIN_FIELDS, [...HELD_FIELDS, 'prunable gitdir file is gone'])),
+          probe_tree: clear,
+        },
+      ],
+      [
+        "the repo's own shared checkout",
+        {
+          run_host: listing(zPorcelain(['worktree /repo', 'HEAD ' + TIP, 'branch refs/heads/feat-x'])),
+          probe_tree: clear,
+        },
+      ],
+      ['a rebase standing on the branch', rebaseDeps],
+      ['unheld, origin carries the tip', { run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear }],
+      ['unheld, origin has diverged', { run_host: unheld(okRes(`${DIVERGED}\n`)), probe_tree: clear }],
+      [
+        'unheld, origin has no such branch',
+        { run_host: unheld({ ok: false, stdout: '', stderr: '', exit_code: 1 }), probe_tree: clear },
+      ],
+      [
+        'the worktree listing failed',
+        {
+          run_host: host({
+            'worktree list --porcelain': { ok: false, stdout: '', stderr: 'git died', exit_code: 128 },
+          }),
+          probe_tree: clear,
+        },
+      ],
+      ['resolution threw', { run_host: throwsAfterFetch, probe_tree: clear }],
+    ]
+
+    for (const [name, deps] of arms) {
+      const { reason, out } = await deliver(deps)
+      // The composer really did produce a refusal, and the classifier read it as one.
+      expect(reason).toContain("refusing to build on another lane's work")
+      expect(`${name}: ${out.klass}`).toBe(`${name}: branch-held`)
+      expect(`${name}: ${out.input_needed}`).toContain('No branch, worktree, commit or file was changed or deleted')
+      // The advice this class exists to forbid — a launch that never happened is not retried
+      // by replying, and the branch is not this run's to take until it is free.
+      expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
+      expect(`${name}: ${out.summary}`).toContain('not cut from the base')
+    }
+  })
+
+  test('the write each arm is credited with is the one that arm actually made', async () => {
+    // HELD: settled locally, so no network call at all — crediting it with a fetch reports a
+    // write that never happened.
+    const live = await deliver({ run_host: held, probe_pid: () => 'alive', probe_tree: clear })
+    expect(live.reason).toContain('ALIVE')
+    expect(live.reason).not.toContain('branch -D')
+    expect(live.out.input_needed).toContain('no network call at all')
+    expect(live.out.input_needed).not.toContain('FETCH_HEAD')
+
+    // The rebase holder is a HELD arm wearing the unheld arm's OPENING; it must not be credited
+    // with the fetch it returns before making.
+    const rebasing = await deliver(rebaseDeps)
+    expect(rebasing.reason).toContain('REBASE in progress')
+    expect(rebasing.out.input_needed).toContain('no network call at all')
+    expect(rebasing.out.input_needed).not.toContain('FETCH_HEAD')
+
+    // UNHELD — POSITIVE CONTROL for all of the above: this arm DID fetch, so it is credited
+    // with the fetch, and the enumeration of what that fetch wrote is complete: the tracking
+    // ref, ITS REFLOG (which the enumeration used to omit while claiming "and nothing else"),
+    // FETCH_HEAD, the objects.
+    const safe = await deliver({ run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear })
+    expect(safe.reason).toContain('branch -D')
+    expect(safe.out.input_needed).toContain('tracking ref')
+    expect(safe.out.input_needed).toContain('reflog')
+    expect(safe.out.input_needed).toContain('FETCH_HEAD')
+    expect(safe.out.input_needed).not.toContain('no network call at all')
+
+    // REFUSED UPSTREAM OF THE FETCH: neither claim.
+    const blind = await deliver({
+      run_host: host({ 'worktree list --porcelain': { ok: false, stdout: '', stderr: 'git died', exit_code: 128 } }),
+      probe_tree: clear,
+    })
+    expect(blind.reason).toContain('UNKNOWN')
+    expect(blind.out.input_needed).toContain('refused before it could establish the holder')
+    expect(blind.out.input_needed).not.toContain('FETCH_HEAD')
+
+    // THE THROW ARM SITS ON BOTH SIDES OF THE FETCH. The composer's outer catch wraps the
+    // composition AFTER the fetch too, so the fall-through's "refused before it could establish
+    // the holder" asserted a fetch did NOT happen when this fixture proves one already had.
+    // Which side it threw on is exactly what is not established, so the delivery says that.
+    const threw = await deliver({ run_host: throwsAfterFetch, probe_tree: clear })
+    expect(threw.reason).toContain('remedy resolution threw')
+    expect(threw.out.input_needed).not.toContain('refused before it could establish the holder')
+    expect(threw.out.input_needed).toContain('either side of that fetch')
+  })
+})
+
+/**
+ * THE OTHER PRE-LAUNCH REFUSALS — the ones the wrong-base composer never sees.
+ *
+ * `orchestrator.ts`'s launch path refuses in four places BEFORE any build starts, and every one
+ * of those reasons QUOTES git: the probe's exit code, its stderr, the repo path. Every keyword
+ * branch in `interpretFailure` below the launch-guard arm is a bare `includes()` over that
+ * quotation, so `git merge-base --is-ancestor exited 128` matched the merge-mechanics token
+ * `git ` and the refusal was delivered as "The build finished but a git step failed while
+ * landing the branch" — a completed build and a merge attempt, both asserted about a run whose
+ * own text says the build was NOT started (Argus blocker). The watchdog variant carries no
+ * `git ` token and fell to the bare `unknown` fallback: same defect, vaguer sentence.
+ *
+ * `orchestrator.test.ts` pins the seam against the REAL composed reasons. This table pins the
+ * classifier's own boundary — what it must catch, and just as importantly what it must not.
+ */
+describe('interpretFailure — a pre-launch refusal is never delivered as a completed build', () => {
+  const REPO = '/repo'
+  const TIP = 'c'.repeat(40)
+  const BASE = 'b'.repeat(40)
+
+  const caught: [string, string][] = [
+    [
+      'ancestry UNKNOWN, quoting git and its exit code',
+      `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (git merge-base --is-ancestor exited 128: fatal: bad object) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+    ],
+    [
+      'ancestry UNKNOWN because a watchdog killed the probe — no `git ` token at all',
+      `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (the ancestry probe was killed by its watchdog) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+    ],
+    [
+      "the prior-base probe UNKNOWN",
+      `trident infra: branch feat-x at ${TIP} is not contained in origin/main at ${BASE}, but whether it descends from this run's own prior base ${BASE} — the shape its own crash leaves behind — could NOT be established in ${REPO} (git merge-base --is-ancestor exited 128: fatal: bad object); that is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+    ],
+    [
+      'the base fetch failed',
+      `trident infra: could not fetch origin/main in ${REPO} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: fatal: unable to access`,
+    ],
+    [
+      'the base tip could not be resolved',
+      `trident infra: fetched origin/main but could not resolve its tip in ${REPO}; the build was NOT started: fatal: bad object`,
+    ],
+  ]
+
+  test('every pre-launch refusal is classified as a launch that never happened', () => {
+    for (const [name, reason] of caught) {
+      const out = interpretFailure(run({ failure_reason: reason }))
+      expect(`${name}: ${out.klass}`).toBe(`${name}: infra`)
+      expect(`${name}: ${out.summary}`).toContain('did not start this build')
+      // The two sentences this class exists to forbid: neither the build nor the merge happened.
+      expect(`${name}: ${out.summary}`).not.toContain('The build finished')
+      expect(`${name}: ${out.summary}`).not.toContain('landing the branch')
+      // Nothing was established, so nothing irreversible is proposed.
+      expect(`${name}: ${out.input_needed}`).not.toContain('branch -D')
+    }
+  })
+
+  test('the arm is ANCHORED, so a real post-launch failure keeps the advice it is owed', () => {
+    // POSITIVE CONTROLS. An over-broad rule — one that keyed on `the build was NOT started`
+    // wherever it appeared, or on a bare `trident infra` token — would swallow these, and a
+    // genuine merge failure would lose the retry that is the correct answer to it.
+    const mechanics = interpretFailure(
+      run({ failure_reason: 'merge failed: git rebase --onto main exited 1' }),
+    )
+    expect(mechanics.klass).toBe('merge-mechanics')
+
+    // The clause QUOTED inside a post-launch failure — a workflow error echoing an earlier
+    // refusal — is not itself a pre-launch refusal, because the prefix is anchored at 0.
+    const quoted = interpretFailure(
+      run({
+        failure_reason:
+          'merge failed: git push exited 1: the previous run said "trident infra: ... the build was NOT started"',
+      }),
+    )
+    expect(quoted.klass).toBe('merge-mechanics')
   })
 })
