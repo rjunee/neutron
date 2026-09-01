@@ -605,7 +605,7 @@ describe('interpretFailure — an early stop must not be told as a review outcom
     )
     expect(out.klass).toBe('branch-held')
     expect(out.input_needed).not.toContain('Nothing was changed or deleted')
-    expect(out.input_needed).toContain('No branch, worktree, commit or file was changed or deleted')
+    expect(out.input_needed).toContain('No branch, worktree, commit or file in the tree was changed or deleted')
     expect(out.input_needed).toContain('tracking ref')
     // ...and it counts that write correctly. "The single write it makes is refreshing this
     // branch's own origin tracking ref" was itself an undercount: the fetch has no
@@ -630,7 +630,7 @@ describe('interpretFailure — an early stop must not be told as a review outcom
       'is ALIVE — a live holder owns this branch.'
     const out = interpretFailure(run({ failure_reason: held }))
     expect(out.klass).toBe('branch-held')
-    expect(out.input_needed).toContain('No branch, worktree, commit or file was changed or deleted')
+    expect(out.input_needed).toContain('No branch, worktree, commit or file in the tree was changed or deleted')
     expect(out.input_needed).toContain('no network call at all')
     expect(out.input_needed).not.toContain('FETCH_HEAD')
 
@@ -697,7 +697,7 @@ describe('interpretFailure — an early stop must not be told as a review outcom
         ),
       }),
     )
-    expect(fetched.input_needed).toContain('No branch, worktree, commit or file was changed or deleted')
+    expect(fetched.input_needed).toContain('No branch, worktree, commit or file in the tree was changed or deleted')
     expect(fetched.input_needed).not.toContain('only READ state')
     expect(fetched.input_needed).toContain('FETCH_HEAD')
 
@@ -1207,7 +1207,7 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
       // The composer really did produce a refusal, and the classifier read it as one.
       expect(reason).toContain("refusing to build on another lane's work")
       expect(`${name}: ${out.klass}`).toBe(`${name}: branch-held`)
-      expect(`${name}: ${out.input_needed}`).toContain('No branch, worktree, commit or file was changed or deleted')
+      expect(`${name}: ${out.input_needed}`).toContain('No branch, worktree, commit or file in the tree was changed or deleted')
       // The advice this class exists to forbid — a launch that never happened is not retried
       // by replying, and the branch is not this run's to take until it is free.
       expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
@@ -1260,6 +1260,55 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
     expect(threw.out.input_needed).not.toContain('refused before it could establish the holder')
     expect(threw.out.input_needed).toContain('either side of that fetch')
   })
+
+  test('the write accounting is scoped to the guard, and the launcher\'s own base fetch is not hidden by it', async () => {
+    // THE GUARD IS NOT THE ONLY THING THAT RAN ON THIS PATH (Argus blocker). The held arms say
+    // the guard "made no network call at all" — true of the guard, and read by the owner as
+    // true of the refusal. It is not: a fresh PR launch fetches origin's BASE ref in
+    // `orchestrator.ts` before the composer is ever called, which moves origin's base pointer
+    // and rewrites git's own bookkeeping. A refusal whose whole subject is not claiming things
+    // nobody established cannot also say a path that made a network call made none.
+    for (const [name, deps] of [
+      ['live holder', { run_host: held, probe_pid: () => 'alive' as const, probe_tree: clear }],
+      ['rebase holder', rebaseDeps],
+      ['unheld, origin carries the tip', { run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear }],
+      [
+        'the worktree listing failed',
+        {
+          run_host: host({
+            'worktree list --porcelain': { ok: false, stdout: '', stderr: 'git died', exit_code: 128 },
+          }),
+          probe_tree: clear,
+        },
+      ],
+    ] as [string, Parameters<typeof composeWrongBaseRefusal>[1]][]) {
+      const { out } = await deliver(deps)
+      // The claim is SCOPED — "the guard itself" — and the launcher's own write is named and
+      // attributed to the launcher rather than folded into the guard's accounting or dropped.
+      expect(`${name}: ${out.input_needed}`).toContain('That accounts for the guard itself.')
+      expect(`${name}: ${out.input_needed}`).toContain("a fresh PR launch refreshes origin's base ref before this guard runs")
+      expect(`${name}: ${out.input_needed}`).toContain('that write belongs to the launcher')
+      // ...and it does not become licence to retry: the branch is still not this run's to take.
+      expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
+    }
+
+    // The held arms are still credited with NO fetch of their own — the disclosure above is
+    // about a different step, and it must not have smuggled the guard's fetch back in.
+    const live = await deliver({ run_host: held, probe_pid: () => 'alive', probe_tree: clear })
+    expect(live.out.input_needed).toContain('The guard itself only READ state')
+    expect(live.out.input_needed).not.toContain('FETCH_HEAD')
+    expect(live.out.input_needed).not.toContain('tracking ref')
+
+    // AND THE REASSURANCE IS SCOPED TO THE TREE. Unqualified, "no file was changed" sat one
+    // clause before the fetching arm naming FETCH_HEAD — a file — as one of its writes.
+    const safe = await deliver({ run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear })
+    expect(safe.out.input_needed).toContain('file in the tree was changed or deleted')
+    expect(safe.out.input_needed).toContain('FETCH_HEAD')
+    // ...and the fetching arm's enumeration no longer closes itself with a claim a config can
+    // falsify: `fetch.writeCommitGraph` writes under `.git`, outside the four items named.
+    expect(safe.out.input_needed).not.toContain('objects it downloads, and nothing else')
+    expect(safe.out.input_needed).toContain('and nothing outside .git')
+  })
 })
 
 /**
@@ -1285,15 +1334,15 @@ describe('interpretFailure — a pre-launch refusal is never delivered as a comp
   const caught: [string, string][] = [
     [
       'ancestry UNKNOWN, quoting git and its exit code',
-      `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (git merge-base --is-ancestor exited 128: fatal: bad object) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+      `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (git merge-base --is-ancestor exited 128: fatal: bad object) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted.`,
     ],
     [
       'ancestry UNKNOWN because a watchdog killed the probe — no `git ` token at all',
-      `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (the ancestry probe was killed by its watchdog) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+      `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (the ancestry probe was killed by its watchdog) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted.`,
     ],
     [
       "the prior-base probe UNKNOWN",
-      `trident infra: branch feat-x at ${TIP} is not contained in origin/main at ${BASE}, but whether it descends from this run's own prior base ${BASE} — the shape its own crash leaves behind — could NOT be established in ${REPO} (git merge-base --is-ancestor exited 128: fatal: bad object); that is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+      `trident infra: branch feat-x at ${TIP} is not contained in origin/main at ${BASE}, but whether it descends from this run's own prior base ${BASE} — the shape its own crash leaves behind — could NOT be established in ${REPO} (git merge-base --is-ancestor exited 128: fatal: bad object); that is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted.`,
     ],
     [
       'the base fetch failed',

@@ -382,6 +382,113 @@ forged an extra LINE, carrying a destructive instruction, inside the one message
 subject is that UNKNOWN authorises no irreversible act. The composer's folding function is now
 exported as `foldEvidence` and used on both sides of that seam (one function, so the two cannot
 drift), on the path AND on git's stderr — `git -C <repo>` echoes the path back on failure, so the
-raw path reached the string by that route too. The branch name and the shas need no folding and the
-code says why: the branch resolved through `rev-parse --verify refs/heads/<branch>`, so git's own
-ref rules have already excluded control characters, and the shas are `^[0-9a-f]{40}$`-tested.
+raw path reached the string by that route too. The shas need no folding and the code says why: they
+are `^[0-9a-f]{40}$`-tested. The branch name was exempted on the same terms and should not have
+been.
+
+THE BRANCH NAME WAS EVIDENCE ALL ALONG. The exemption above was wrong, and it was wrong on a premise rather than by oversight: "the branch
+resolved through `rev-parse --verify refs/heads/<branch>`, so git's own ref rules have already
+excluded control characters" is true of ASCII controls and false of everything else this guard
+folds. Reproduced in a scratch repo on git 2.43: `git branch` ACCEPTED, and `rev-parse --verify`
+RESOLVED, both `feat<U+2028>FORGED<U+00A0>run<U+00A0>git<U+00A0>branch<U+00A0>-D<U+00A0>victim` and
+`feat<U+202E>evil` — a line separator several renderers break on, and a bidi override that reorders
+what is DISPLAYED without changing a byte. Those are precisely the codepoints the remedy composer
+folds and names as forgery vectors, so the exemption made the guard contradict the threat model of
+the module it exists to protect. The branch is now folded for PROSE on both sides of the seam — the
+two pre-launch UNKNOWN refusals in `orchestrator.ts` and every arm of the composer's own prefix —
+and left RAW where it names a ref or is `sh()`-quoted, because a command naming a different branch
+than the one on disk cannot be run.
+
+`sh()` learned the same set. A quoted argument cannot be folded, so the codepoints are ENCODED
+instead: ANSI-C quoting with `\uHHHH`, which bash and zsh expand back to the true byte sequence, so
+the command still runs and the override cannot reorder the rest of the line. One constant
+(`SH_ENCODE`) now holds the set that `defang`'s first rule holds, so the two halves cannot drift.
+
+The evidence scrubber's option rule stopped being a claim about SHAPE. It spelled the option run
+inside the regex — at most ONE option token before the delete, a short cluster bounded at four
+letters per side — and both reviewers measured real, runnable spellings straight through it:
+`branch -v -q -D feat`, `branch -Dvvvvv feat`, `branch -vvvvvD feat`, `push -f origin :feat`,
+`push --force origin :feat`, `push origin -d feat` and `push -d origin feat` (`-d` is a real `push`
+delete per `git push -h`; only `--delete` and `--mirror` were neutralised there). The verb's
+arguments are now read as a bounded window of whitespace-delimited TOKENS and each token tested on
+its own, so option order, count and clustering stop mattering instead of each spelling being
+patched. The docblock's "every option ORDER collapses to one replacement" was stronger than the
+code; it is now true of the code. Still linear — four tokens of window, no nesting, both-end-anchored
+option tests, 2ms at 200k of adversarial input — and the positive controls pin that `-v -q --list`,
+`-vvvvv`, `push --force` and `push origin HEAD:refs/heads/<b>` stay quoted readably.
+
+The rule remains GIT-VERB-SCOPED, and the docblock now says so rather than implying coverage it does
+not have: `rm -rf <path>` and `git reflog expire --expire=now --all && git gc --prune=now` in forged
+evidence render verbatim. What the arms' contracts forbid is the guard appearing to instruct a REF
+DELETE, and arranging any of this needs local `git worktree lock --reason` write access.
+
+`git bisect reset` stopped being prescribed as bookkeeping. The rebase/bisect arm printed it with no
+caveat — "returns the branch to that worktree" — while the DEAD-holder arm in the same module
+discloses the identical data-loss class for `worktree remove` and the shared-checkout arm prints a
+preflight for it. Reproduced on git 2.43: mid-bisect, `git status --porcelain --ignored` showed
+`!! local.env` holding local-only content; `git bisect reset` exited 0, restored the starting branch
+and silently replaced that file with the branch's tracked copy. Both spellings now disclose that the
+operation is a CHECKOUT, name the `--ignored` read this arm already prints as the preflight, and say
+the file is moved aside BEFORE the reset or abort — after it there is nothing left to move.
+
+The two pre-launch UNKNOWN refusals stopped claiming they wrote nothing. "No branch, worktree,
+commit or file was changed or deleted" is true and is the reassurance actually owed, but on a fresh
+PR build the same path has already run `git fetch --no-tags origin <base>`, which force-updates that
+tracking ref, appends its reflog, rewrites FETCH_HEAD and writes whatever objects it downloaded —
+the exact set `delivery.ts` names for the composer's own fetch while calling an undercount "the
+overclaiming this refusal exists to stop". The sentence is now conditional on whether the fetch ran,
+because OVERcounting is the same defect in the other direction, and a run resuming from a pinned
+base is pinned by a positive control that no fetch is named.
+
+Two disclosures were added rather than fixed, because they are boundaries and not defects. A
+worktree PATH containing the banned literal still reaches the treat-as-live settle commands inside
+`sh()` quoting — that is inert (a single-quoted argument to a read-only command) and it is what
+keeps the settle runnable, and a test now pins that every surviving occurrence sits inside quotes,
+with a positive control that the helper can see the safe arm's own unquoted delete. And the
+DEAD-holder arm remains deterministically UNREACHABLE in production at non-root euid: hundreds of
+`/proc/<pid>/cwd` links are unreadable to this uid, the occupancy probe's veto is global rather than
+per-tree, so operators always get the treat-as-live UNKNOWN text and only the injected-probe fixtures
+reach the unlock/remove arm. The degradation is in the safe direction (UNKNOWN authorises nothing,
+invariant 122) and the code states it precisely — but the card's requirement 2 is, in production,
+FIXTURE-ONLY behaviour, and that belongs here and not only in a code comment.
+
+One reachable behaviour change is worth naming plainly: an ERRORING ancestry probe now fails the run
+terminally BEFORE the own-crash-leftover rescue that previously let it launch. Previously any
+non-zero exit fell through to the prior-base descent check, and a successful descent launched; now
+UNKNOWN returns first. Fail-closed, retryable (`delivery.ts` classes it `infra`), and consistent
+with invariant 122 — but it is a real change in when a run launches, not only in what a message says.
+
+The round after that one shipped its commit MESSAGE over the PRE-round CODE. A replay reverted the
+whole change: for `wrong-base-remedy.ts`, `wrong-base-remedy.test.ts`, `orchestrator.ts` and
+`orchestrator.test.ts` the published tree was byte-identical to the commit BEFORE the round, nine
+tests were gone, and the real work sat in a commit reachable from no ref — while the message on the
+published head asserted the token-window defang, the branch-name folding, the bisect disclosure and
+the fetch write-accounting as done. That is precisely the defect class this card exists to remove: a
+message claiming a property its tree does not have. It was repaired by recovering the dropped commit
+VERBATIM (`git diff <pre-round> <dropped>`, which applied clean) rather than by re-deriving it, so
+what the message claims and what the tree contains are the same artifact again.
+
+WRITE ATTRIBUTION IS SCOPED TO THE LAYER THAT MADE THE WRITE. The delivery's held arms said the
+guard "made no network call at all" — true of the guard, and read by an owner as true of the
+refusal. It is not: a fresh PR launch fetches origin's BASE ref before the composer is ever called,
+which moves origin's base pointer and rewrites git's own bookkeeping. The per-arm sentence now says
+"the guard itself", and one shared sentence attributes the launcher's base refresh to the launcher.
+It is deliberately NOT enumerated there: `delivery.ts` reads a reason STRING and cannot know whether
+that arm ran, and naming a write that may not have happened is exactly the overcounting the per-arm
+conditional exists to prevent — the launch path counts its own writes, exactly, at its own site.
+
+Both enumerations also stopped closing themselves with "and nothing else", which a config falsifies:
+`fetch.writeCommitGraph` writes `.git/objects/info/commit-graphs/*` and `gc.auto` can fire
+maintenance, neither of them in the four items named. They are bounded by the CLASS instead —
+everything a one-ref fetch can touch lives under `.git` — and the reassurance itself now scopes
+"file" to the TREE, so it no longer says no file changed one clause before naming FETCH_HEAD, which
+is a file, as one of the writes.
+
+Two smaller honesty items. A lock reason whose digits are not canonical decimal (`pid 0000123`)
+probed 123 and printed `0000123`, so the arm named a pid it had not measured; it now names both
+whenever they disagree, with the ordinary-decimal case — every lock this repo's own writer takes —
+rendering exactly as before. And `TOTAL_BUDGET_MS`'s docblock now states what it prices: SPAWNED
+commands. `probeTreeOccupancy` reads /proc synchronously without passing through the budgeted
+runner, and is bounded by different facts (a kernel pseudo-filesystem, one shallow pass, every
+failing read swallowed rather than retried) — a budget that reads as covering everything while
+pricing only the spawns is the same overclaiming in miniature.

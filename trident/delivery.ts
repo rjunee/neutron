@@ -177,13 +177,35 @@ const BUILD_NOT_STARTED = 'the build was NOT started'
  * tracking ref, FETCH_HEAD, objects), so the pair asserted read-only and then described writes,
  * in the one message whose subject is not claiming things nobody established (Argus finding).
  * Whether the arm that fired only read is now said by `wrongBaseWrites`, which knows.
+ *
+ * AND "FILE" IS SCOPED TO THE TREE (Argus finding). Unqualified, this sentence said no file was
+ * changed and the very next sentence on the fetching arm named FETCH_HEAD — a file — as one of
+ * that arm's writes, so the pair contradicted itself again one clause further along. The
+ * reassurance actually owed is about the WORKING TREE and the refs in it; git's own bookkeeping
+ * under `.git/` is what the per-arm sentence exists to enumerate.
  */
-const NO_DESTRUCTIVE_WRITE = 'No branch, worktree, commit or file was changed or deleted.'
+const NO_DESTRUCTIVE_WRITE = 'No branch, worktree, commit or file in the tree was changed or deleted.'
+
+/**
+ * THE GUARD IS NOT THE ONLY THING THAT RAN ON THIS PATH (Argus blocker). The per-arm sentences
+ * account for the WRONG-BASE GUARD's own writes, and on the held arms they say it "made no
+ * network call at all" — true of the guard, and read by the owner as true of the refusal. It is
+ * not: a fresh PR launch fetches origin's base ref in `orchestrator.ts` BEFORE the guard is ever
+ * called, which moves origin's base pointer and rewrites git's own bookkeeping. So the scope is
+ * stated, and that write is attributed to the step that made it.
+ *
+ * NOT ENUMERATED HERE, deliberately. This module reads a reason STRING and cannot know whether
+ * the fetching arm ran (only a fresh PR build fetches), and enumerating a write that may not have
+ * happened is the overcounting the per-arm conditional above exists to prevent. The launch path
+ * counts its own writes at its own site, exactly (`noWrites` in `orchestrator.ts`).
+ */
+const LAUNCH_PATH_FETCH =
+  "That accounts for the guard itself. Separately, a fresh PR launch refreshes origin's base ref before this guard runs; that write belongs to the launcher, is counted where it happens, and moves only origin's base pointer and git's own bookkeeping under .git — never the tree."
 
 /** What the guard actually wrote, per arm; see the call site for why this is not one sentence. */
 function wrongBaseWrites(evidence: string): string {
   if (evidence.startsWith('The wrong-base launch guard found the branch checked out in')) {
-    return 'The guard only READ state: it made no network call at all, because the branch has a holder and that settles the question locally.'
+    return 'The guard itself only READ state: it made no network call at all, because the branch has a holder and that settles the question locally.'
   }
   // THE REBASE/BISECT-HOLDER ARM IS A HELD ARM WEARING THE UNHELD ARM'S OPENING (Argus finding).
   // Its sentence begins "found no worktree with <branch> CHECKED OUT, but worktree ... has a
@@ -192,7 +214,7 @@ function wrongBaseWrites(evidence: string): string {
   // at the call site says this conditional exists to prevent. The fetching arms all open "found
   // no worktree HOLDING THE BRANCH", so the discriminator is that whole phrase, not its prefix.
   if (evidence.startsWith('The wrong-base launch guard found no worktree with')) {
-    return 'The guard only READ state: it made no network call at all, because a worktree mid-rebase or mid-bisect is standing on the branch and that settles the question locally.'
+    return 'The guard itself only READ state: it made no network call at all, because a worktree mid-rebase or mid-bisect is standing on the branch and that settles the question locally.'
   }
   if (evidence.startsWith('The wrong-base launch guard found no worktree holding the branch')) {
     // THE REFLOG IS ONE OF THE WRITES (Argus finding). `git fetch --no-tags origin
@@ -201,7 +223,14 @@ function wrongBaseWrites(evidence: string): string {
     // ref, FETCH_HEAD and the objects, and nothing else" was an undercount — the exact defect
     // the comment at the call site says this sentence exists to avoid. Naming it costs three
     // words and keeps the enumeration true.
-    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog), FETCH_HEAD, and any objects it downloads, and nothing else."
+    //
+    // AND THE LIST IS BOUNDED BY WHAT IT NAMES, NOT BY "NOTHING ELSE" (Argus finding). A fetch
+    // also runs whatever bookkeeping its own configuration asks for — `fetch.writeCommitGraph`
+    // writes `.git/objects/info/commit-graphs/*`, `gc.auto` can fire maintenance — so a closed
+    // "and nothing else" was falsifiable by a config this guard does not read. What is actually
+    // established is the CLASS: everything a fetch of one ref can touch lives under `.git`, and
+    // none of it is a branch, a worktree, a commit or a file in the tree.
+    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog), FETCH_HEAD, and any objects it downloads, plus whatever bookkeeping that fetch's own configuration adds under .git (fetch.writeCommitGraph writes a commit-graph, for one) — and nothing outside .git."
   }
   // THE THROW ARM CAN FIRE ON EITHER SIDE OF THE FETCH (Argus finding). The composer's outer
   // catch wraps its WHOLE body — enumeration, fetch, and the composition after it — so a throw
@@ -218,7 +247,7 @@ function wrongBaseWrites(evidence: string): string {
     return "The guard's only possible write is a fetch of this branch's own ref; resolution threw, and it can throw on either side of that fetch, so whether that one fetch was made is itself UNKNOWN — nothing else can have been written either way."
   }
   // The remaining arms refuse BEFORE the holder is established, which is upstream of the fetch.
-  return 'The guard only READ state: it refused before it could establish the holder, which is upstream of the one write it can make — a fetch of this branch\'s own ref.'
+  return 'The guard itself only READ state: it refused before it could establish the holder, which is upstream of the one write it can make — a fetch of this branch\'s own ref.'
 }
 
 /**
@@ -388,7 +417,7 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       // write that did not — in the one message whose subject is not claiming things nobody
       // established. Which arm fired is read from the evidence sentence the composer puts
       // immediately after its prefix, so a quoted lock reason further along cannot forge it.
-      input_needed: `${NO_DESTRUCTIVE_WRITE} ${wrongBaseWrites(wrongBaseRest)} The full evidence and the safe next step are in the run's failure reason; re-dispatch once the branch is free.`,
+      input_needed: `${NO_DESTRUCTIVE_WRITE} ${wrongBaseWrites(wrongBaseRest)} ${LAUNCH_PATH_FETCH} The full evidence and the safe next step are in the run's failure reason; re-dispatch once the branch is free.`,
     }
   }
 

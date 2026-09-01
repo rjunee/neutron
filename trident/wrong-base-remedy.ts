@@ -70,6 +70,15 @@ const LOCAL_TIMEOUT_MS = 15_000
  * a healthy host never notices (every call normally answers in milliseconds), and on a
  * wedged one the composition as a whole now costs at most this before degrading to UNKNOWN
  * — which authorises nothing.
+ *
+ * WHAT IT PRICES IS SPAWNED COMMANDS, and that is the whole claim (Argus nit). `probeTreeOccupancy`
+ * reads /proc SYNCHRONOUSLY — a `readdirSync` plus a `readlinkSync` per pid — and is called from
+ * inside the composition without passing through `run()`, so its cost sits OUTSIDE this budget.
+ * It is bounded by a different thing: /proc is a kernel-backed pseudo-filesystem with no remote
+ * or device I/O behind it, the walk is one shallow pass over the pid entries, and every failing
+ * read is swallowed rather than retried. It is also reached only from the pid-less-lock and
+ * dead-pid arms. Stated rather than folded in, because a budget that reads as covering everything
+ * while pricing only the spawns is the overclaiming this module exists to stop.
  */
 export const TOTAL_BUDGET_MS = 30_000
 
@@ -259,6 +268,13 @@ interface WorktreeHolder {
  * --branch 'feat;printf-INJECTED'` exits 0). Shell-safe shapes pass through unquoted so the
  * common message stays readable.
  */
+/**
+ * The codepoints a QUOTED argument still has to encode: ASCII controls plus the line separators
+ * and bidi overrides `defang` folds out of the prose. Kept as one source so the two halves of the
+ * module cannot drift apart on which characters are forgery vectors.
+ */
+const SH_ENCODE = /[\u0000-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069]/
+
 function sh(arg: string): string {
   if (arg !== '' && /^[A-Za-z0-9_@%+=:,./-]+$/.test(arg)) return arg
   // A CONTROL CHARACTER SURVIVES SINGLE QUOTES. `'a<newline>b'` is a CORRECT quoting of a path
@@ -269,13 +285,25 @@ function sh(arg: string): string {
   // has to ENCODE it rather than carry it. ANSI-C quoting does that; it is bash/zsh rather than
   // strict POSIX sh, which is what every command in this repo is run under, and it is reached
   // only for the pathological shapes — ordinary paths keep the readable `'…'` form below.
-  if (/[\u0000-\u001f\u007f]/.test(arg)) {
-    const escaped = arg.replace(/[\\']/g, '\\$&').replace(/[\u0000-\u001f\u007f]/g, (c) => {
+  //
+  // AND ASCII IS NOT THE WHOLE SET (Argus blocker, generalised). `defang` folds U+2028/U+2029 and
+  // the bidi overrides out of the PROSE because they draw a line, or reorder one, without being
+  // control characters — and a ref name carrying them is legal (measured on git 2.43: `git
+  // branch` accepts `feat<U+202E>evil` and `rev-parse --verify` resolves it). The quoted ARGUMENT
+  // cannot be folded, because a command naming a different ref than the one on disk cannot be
+  // run, so it is ENCODED by the same rule instead: bash and zsh expand a `\\uHHHH` escape inside
+  // ANSI-C quoting back to the real byte sequence, so the command still runs and the line still
+  // renders in the order it was written. The two halves of this module now agree on one set of
+  // codepoints — `SH_ENCODE` and `defang`'s first rule are that set.
+  if (SH_ENCODE.test(arg)) {
+    const escaped = arg.replace(/[\\']/g, '\\$&').replace(new RegExp(SH_ENCODE.source, 'g'), (c) => {
       const code = c.charCodeAt(0)
       if (code === 9) return '\\t'
       if (code === 10) return '\\n'
       if (code === 13) return '\\r'
-      return `\\x${code.toString(16).padStart(2, '0')}`
+      return code < 0x100
+        ? `\\x${code.toString(16).padStart(2, '0')}`
+        : `\\u${code.toString(16).padStart(4, '0')}`
     })
     return `$'${escaped}'`
   }
@@ -332,23 +360,61 @@ function samePath(a: string, b: string): boolean {
  *      not have: `branch -Dr`, `branch -fd` and `branch -dr` are real, runnable deletes on
  *      git 2.43 (measured) and every one of them passed through VERBATIM — and `-Dr` put the
  *      literal `branch -D` back into the live-holder arm whose pinned contract is that the
- *      string appears nowhere in it, falsifying that contract from outside this module. The
- *      option is therefore matched as a CLUSTER carrying a `d`/`D` anywhere in it, with one
- *      optional preceding option token (`branch -f -d`, `branch -v --delete`) — bounded
- *      repetition on the cluster and a single `\S+` token of lookahead, so the rule stays
- *      linear: measured at 200k of adversarial input, 2ms.
+ *      string appears nowhere in it, falsifying that contract from outside this module.
+ *
+ *      AND THE OPTION RUN IS NOT ONE TOKEN LONG (Argus finding, both reviewers, measured
+ *      through this composer). Spelling the run inside the regex — one optional preceding
+ *      option token, a cluster bounded at four letters per side — was a claim about SHAPE that
+ *      git does not share: `branch -v -q -D feat`, `branch -Dvvvvv feat`, `branch -vvvvvD feat`,
+ *      `push -f origin :feat`, `push --force origin :feat`, `push origin -d feat` and
+ *      `push -d origin feat` all rendered verbatim (the three `branch` spellings were verified
+ *      to really delete on git 2.43; `-d` is a real `push` delete per `git push -h`). The verb's
+ *      arguments are therefore read as a BOUNDED WINDOW OF TOKENS and each token tested on its
+ *      own, so option order, count and clustering stop mattering — the earlier docblock claimed
+ *      "every option ORDER collapses to one replacement", which was stronger than the regex and
+ *      is only now true of the code. Still LINEAR: the window is at most four tokens, tokens are
+ *      whitespace-delimited so none can nest inside another, and each option test is anchored at
+ *      both ends. Measured at 200k of adversarial input, 2ms.
+ *
+ *      AND THE RULE IS GIT-VERB-SCOPED, WHICH IS A BOUNDARY AND NOT A GAP THIS PRETENDS TO
+ *      COVER (Argus nit, both reviewers). It enumerates git's own delete verbs and nothing else,
+ *      so `rm -rf <path>` and `git reflog expire --expire=now --all && git gc --prune=now` in
+ *      forged evidence render VERBATIM. That is stated rather than implied because the earlier
+ *      docblock's "the destructive commands this class of message forbids" reads as a general
+ *      claim. What the arms' pinned contracts actually forbid is the guard appearing to
+ *      instruct a REF DELETE, and arranging any of this needs local `git worktree lock --reason`
+ *      write access — the same access every other forgery here needs.
  */
+/** One option token that spells an irreversible ref delete: `--delete`, or a short cluster with d/D. */
+const DELETE_OPTION = /^(?:--delete|-[A-Za-z]*[Dd][A-Za-z]*)$/
+/** The same for `push`, which ALSO deletes by REFSPEC (`:feat`, `+:feat`) and by `--mirror`. */
+const PUSH_DELETE = /^(?:--delete|--mirror|-[A-Za-z]*[Dd][A-Za-z]*|\+?:\S*)$/
+/** Split one bounded argument window. Whitespace-delimited, so no token nests inside another. */
+function defangTokens(tail: string): string[] {
+  return tail.split(/\s+/).filter((t) => t !== '')
+}
+
 function defang(s: string): string {
   return s
     .replace(/[\u0000-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
     .replace(/"/g, "'")
-    .replace(/\b(branch|update-ref|tag)(\s+)(?:-\S+\s+)?(?:--delete|-[A-Za-z]{0,4}[Dd][A-Za-z]{0,4})\b/g, '$1$2<command removed>')
+    // THE VERB IS MATCHED, THEN A BOUNDED WINDOW OF ITS ARGUMENTS IS READ AS TOKENS. An earlier
+    // draft spelled the option run inside the regex and allowed exactly ONE option token before
+    // the delete, with the short cluster bounded at four letters per side — and both reviewers
+    // measured real, runnable spellings straight through it: `branch -v -q -D feat`,
+    // `branch -Dvvvvv feat`, `branch -vvvvvD feat`, `push -f origin :feat`,
+    // `push --force origin :feat`, `push origin -d feat`, `push -d origin feat` (`-d` IS a delete
+    // per `git push -h`; only `--delete`/`--mirror` were neutralised). Reading the window as
+    // whitespace-delimited TOKENS removes the whole class instead of one spelling of it: order,
+    // count and clustering stop mattering, and the rule stays LINEAR — the window is at most four
+    // tokens, tokens cannot nest, and each option test is anchored at both ends.
+    .replace(/\b(branch|update-ref|tag)((?:\s+\S+){0,4})/g, (whole: string, verb: string, tail: string) =>
+      defangTokens(tail).some((t) => DELETE_OPTION.test(t)) ? `${verb} <command removed>` : whole)
     .replace(/\b(worktree)(\s+)remove\b/g, '$1$2<command removed>')
-    // The refspec delete (`push origin :branch`, `push :branch`, `push origin +:branch`) — the
-    // one destructive push that spells no option at all. At most ONE token may sit between the
-    // verb and the refspec, so the rule cannot backtrack across a long line.
-    .replace(/\bpush(?:\s+\S+)?\s+\+?:\S+/g, 'push <command removed>')
-    .replace(/\bpush(?:\s+\S+)?\s+(?:--delete|--mirror)\b/g, 'push <command removed>')
+    // `push` deletes three ways: by option (`-d`, `--delete`), by wiping the remote (`--mirror`),
+    // and by REFSPEC with no option at all (`push origin :feat`, `push origin +:feat`).
+    .replace(/\bpush((?:\s+\S+){0,4})/g, (whole: string, tail: string) =>
+      defangTokens(tail).some((t) => PUSH_DELETE.test(t)) ? 'push <command removed>' : whole)
 }
 
 /**
@@ -555,9 +621,12 @@ export function readRebaseHead(worktree: string): RebaseHead {
   return { kind: 'none' }
 }
 
-/** Every UNKNOWN exit shares one tail: name what could not be established, authorise nothing. */
-function unknownHolder(prefix: string, branch: string, what: string, detail: string): string {
-  return `${prefix}The wrong-base launch guard ${what} (${detail}) — the holder is UNKNOWN, and UNKNOWN does not authorise anything destructive. Determine by hand which worktree holds ${branch} before touching it, then re-dispatch only once it is free.`
+/**
+ * Every UNKNOWN exit shares one tail: name what could not be established, authorise nothing.
+ * `branchProse` is the FOLDED branch name — this renders prose, never a runnable command.
+ */
+function unknownHolder(prefix: string, branchProse: string, what: string, detail: string): string {
+  return `${prefix}The wrong-base launch guard ${what} (${detail}) — the holder is UNKNOWN, and UNKNOWN does not authorise anything destructive. Determine by hand which worktree holds ${branchProse} before touching it, then re-dispatch only once it is free.`
 }
 
 /**
@@ -638,7 +707,16 @@ export async function composeWrongBaseRefusal(
   deps: WrongBaseRemedyDeps,
 ): Promise<string> {
   const { repo, branch, base, branch_tip, ahead_count } = args
-  const prefix = `branch ${branch} already carries ${ahead_count} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. `
+  // THE BRANCH NAME IS EVIDENCE LIKE ANY OTHER, so it is folded for PROSE and left raw for the
+  // refs and the `sh()`-quoted arguments (a remedy that names a different branch than the one on
+  // disk cannot be run). git's ref rules exclude ASCII control characters and NOTHING ELSE this
+  // module folds: reproduced on git 2.43, `git branch` accepted and `rev-parse --verify` resolved
+  // both `feat<U+2028>FORGED<U+00A0>run<U+00A0>git<U+00A0>branch<U+00A0>-D<U+00A0>victim` — a line
+  // separator several renderers break on — and `feat<U+202E>evil`, a bidi override that reorders
+  // what is DISPLAYED without changing a byte. A legal branch name could therefore draw a line of
+  // this guard's own message, carrying the instruction the live-holder arm's contract forbids.
+  const branchProse = foldEvidence(branch)
+  const prefix = `branch ${branchProse} already carries ${ahead_count} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. `
   try {
     // PER-RUN, not per-branch (orchestrator.ts:2608 is the same namespace). A stable
     // `trident-salvage/<branch>` tag would MOVE on the next salvage of the same branch and
@@ -767,7 +845,7 @@ export async function composeWrongBaseRefusal(
     if (all.length === 0) {
       return unknownHolder(
         prefix,
-        branch,
+        branchProse,
         'got an EMPTY worktree listing, which real git never produces',
         "git worktree list exited 0 and named no worktree at all, not even the repo's own checkout",
       )
@@ -813,14 +891,26 @@ export async function composeWrongBaseRefusal(
           // sentence here — `git rebase --abort` exits 1 in a bisecting tree.
           const bisecting = head.state === 'bisect'
           const found = bisecting
-            ? `has a BISECT in progress that was started from ${branch}`
-            : `has a REBASE in progress whose head-name is ${branch}`
+            ? `has a BISECT in progress that was started from ${branchProse}`
+            : `has a REBASE in progress whose head-name is ${branchProse}`
+          // `git bisect reset` IS A CHECKOUT, AND IT HAS THE SAME IGNORED-FILE BLIND SPOT AS
+          // EVERY OTHER ONE IN THIS MODULE (Argus blocker). An earlier draft printed it as
+          // bookkeeping — "returns the branch to that worktree" — with no caveat, while the
+          // DEAD-holder arm below discloses the identical data-loss class for `worktree remove`
+          // and the shared-checkout arm above prints a preflight for it. Reproduced on git 2.43
+          // in a scratch repo: mid-bisect, `git status --porcelain --ignored` showed
+          // `!! local.env` holding local-only content; `git bisect reset` exited 0, restored the
+          // starting branch, and silently replaced that file with the branch's tracked copy. So
+          // the same read this arm already prints is named as the preflight, and the order is
+          // stated — moved aside BEFORE the reset, because after it there is nothing left to
+          // move. The rebase spelling gets it too: `git rebase --abort` restores the head-name
+          // branch by the same checkout.
           const ends = bisecting
-            ? 'That bisect is ended by whoever started it (git bisect reset returns the branch to that worktree)'
-            : 'That rebase is finished or aborted by whoever started it, and the branch returns to that worktree when it is'
+            ? 'That bisect is ended by whoever started it — but git bisect reset is a CHECKOUT and not bookkeeping: it restores the branch in that worktree, and a file that is IGNORED in the bisected state but TRACKED on the branch it returns to is silently replaced with that branch\'s copy, exit 0, no refusal (measured on git 2.43 with a gitignored local .env — the same blind spot disclosed for worktree remove elsewhere in this guard). The --ignored read above is what names such a file; move it aside BEFORE the reset, not after'
+            : 'That rebase is finished or aborted by whoever started it, and the branch returns to that worktree when it is — but the abort restores that branch by CHECKOUT, so a file IGNORED mid-rebase and TRACKED on the branch it returns to is silently replaced with that branch\'s copy, exit 0, no refusal; the --ignored read above is what names such a file, and it is moved aside BEFORE the abort'
           return standDown(
             prefix,
-            `The wrong-base launch guard found no worktree with ${branch} CHECKED OUT, but worktree ${foldEvidence(w.path)} ${found} — git omits the branch attribute for a worktree in that state, so a listing alone reads the branch as unheld while that operation is standing on it.`,
+            `The wrong-base launch guard found no worktree with ${branchProse} CHECKED OUT, but worktree ${foldEvidence(w.path)} ${found} — git omits the branch attribute for a worktree in that state, so a listing alone reads the branch as unheld while that operation is standing on it.`,
             `${settleByHand(repo, w.path)} ${ends}; nothing here authorises deleting it in the meantime.`,
             releaseKind(w),
           )
@@ -830,9 +920,9 @@ export async function composeWrongBaseRefusal(
       if (unreadable !== null) {
         return unknownHolder(
           prefix,
-          branch,
+          branchProse,
           'found a DETACHED worktree whose rebase or bisect state it could not read',
-          `worktree ${foldEvidence(unreadable)} reports no branch, and a rebase or bisect in progress there would hold ${branch} without saying so in the listing — that state could not be read, so whether it holds the branch is UNKNOWN`,
+          `worktree ${foldEvidence(unreadable)} reports no branch, and a rebase or bisect in progress there would hold ${branchProse} without saying so in the listing — that state could not be read, so whether it holds the branch is UNKNOWN`,
         )
       }
     }
@@ -930,6 +1020,14 @@ export async function composeWrongBaseRefusal(
       // for anything at or above PID_MAX_LIMIT.
       const pidText = pidMatch[1]!
       const pid = Number.parseInt(pidText, 10)
+      // ...AND WHEN THE TWO DISAGREE, BOTH ARE NAMED (Argus finding). Rendering the raw digits
+      // alone made the arm name a pid it had not measured: a lock reason spelling `pid 0000123`
+      // probes 123 and printed `0000123`, so a reader looking that number up finds nothing while
+      // the liveness verdict beside it rests on a different process entirely. This arm's whole
+      // contract is naming the evidence it measured, so the probed value is stated whenever the
+      // canonical decimal differs from what the lock wrote. The repo's own lock writer emits
+      // plain decimal, so this renders identically for every lock trident itself takes.
+      const pidShown = Number.isSafeInteger(pid) && String(pid) !== pidText ? `${pidText} (probed as ${pid})` : pidText
       let liveness: PidLiveness
       try {
         liveness = (deps.probe_pid ?? probePidLiveness)(pid)
@@ -944,7 +1042,7 @@ export async function composeWrongBaseRefusal(
           // second measured instance (run ef81d378, PR #497) was held by THIS card's own
           // relocked tree. The refusal and the remedy are identical either way; only the claim
           // about whose lane it is was unevidenced, so it is stated as the open question it is.
-          `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidText}${lockQuote}, and that process is ALIVE — a live holder owns this branch. Whose lane it is was not established here: it may be another lane, or this card's own earlier attempt that crashed and relocked.`,
+          `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}, and that process is ALIVE — a live holder owns this branch. Whose lane it is was not established here: it may be another lane, or this card's own earlier attempt that crashed and relocked.`,
         )
       }
       if (liveness === 'zombie') {
@@ -955,7 +1053,7 @@ export async function composeWrongBaseRefusal(
         // answer, and it authorises nothing.
         return standDown(
           prefix,
-          `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidText}${lockQuote}; that process is a ZOMBIE — it has exited and has not been reaped, so it still holds its pid but will never release this tree of its own accord.`,
+          `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that process is a ZOMBIE — it has exited and has not been reaped, so it still holds its pid but will never release this tree of its own accord.`,
           settle(),
         )
       }
@@ -966,7 +1064,7 @@ export async function composeWrongBaseRefusal(
         if (seen.kind === 'occupied') {
           return standDown(
             prefix,
-            `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidText}${lockQuote}; that pid is gone, but pid ${seen.pid} is standing inside that tree, so it is still occupied.`,
+            `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that pid is gone, but pid ${seen.pid} is standing inside that tree, so it is still occupied.`,
             settle(),
           )
         }
@@ -988,7 +1086,7 @@ export async function composeWrongBaseRefusal(
           // no irreversible act (docs/INVARIANTS.md invariant 122).
           return standDown(
             prefix,
-            `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidText}${lockQuote}; that pid is gone, but /proc could not be read in full to confirm the tree is unoccupied (the usual cause is processes owned by another uid, whose cwd this guard may not read), so occupancy is UNKNOWN — treat it as live.`,
+            `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that pid is gone, but /proc could not be read in full to confirm the tree is unoccupied (the usual cause is processes owned by another uid, whose cwd this guard may not read), so occupancy is UNKNOWN — treat it as live.`,
             `${settle()} ${occupancyScan(wt)} answers the part this guard could not, if run where those entries are readable; only once it names nothing, with the lock still the dead pid's, is the tree releasable.`,
           )
         }
@@ -1002,11 +1100,11 @@ export async function composeWrongBaseRefusal(
         const reaperWindow = reapable
           ? ' The unlock is itself an exposure, and this tree is named wf_*: the worktree reaper sweeps exactly those when they are NOT locked, and its dirt check ignores ignored files, so run the pair back to back — any gap is a window in which the reaper, not you, removes this tree.'
           : ''
-        return `${prefix}The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidText}${lockQuote}; that process is DEAD and no process is standing inside the tree. Release the stale worktree, and run BOTH preflights FIRST — neither needs the lock off, and that occupancy was SAMPLED when this refusal was composed and is read minutes to hours later. git -C ${sh(wt)} status --porcelain --ignored lists what is in the tree — remove DELETES ignored local-only files (build output, .env, logs) without refusing, and only refuses tracked modifications and untracked non-ignored files, a refusal that is unpushed work to salvage rather than force past. status does NOT re-check occupancy, so re-check it directly: ${occupancyScan(wt)} names any process standing in the tree right now, and it can only see processes this user may read. If either preflight names anything, stop. Only once both are clean: git -C ${sh(repo)} worktree unlock ${sh(wt)}, then git -C ${sh(repo)} worktree remove ${sh(wt)}.${reaperWindow} Only then reconsider the branch.`
+        return `${prefix}The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that process is DEAD and no process is standing inside the tree. Release the stale worktree, and run BOTH preflights FIRST — neither needs the lock off, and that occupancy was SAMPLED when this refusal was composed and is read minutes to hours later. git -C ${sh(wt)} status --porcelain --ignored lists what is in the tree — remove DELETES ignored local-only files (build output, .env, logs) without refusing, and only refuses tracked modifications and untracked non-ignored files, a refusal that is unpushed work to salvage rather than force past. status does NOT re-check occupancy, so re-check it directly: ${occupancyScan(wt)} names any process standing in the tree right now, and it can only see processes this user may read. If either preflight names anything, stop. Only once both are clean: git -C ${sh(repo)} worktree unlock ${sh(wt)}, then git -C ${sh(repo)} worktree remove ${sh(wt)}.${reaperWindow} Only then reconsider the branch.`
       }
       return standDown(
         prefix,
-        `The wrong-base launch guard found the branch checked out in worktree ${wtProse}; its lock names pid ${pidText}${lockQuote} but liveness could not be determined — treat it as live.`,
+        `The wrong-base launch guard found the branch checked out in worktree ${wtProse}; its lock names pid ${pidShown}${lockQuote} but liveness could not be determined — treat it as live.`,
         settle(),
       )
     }
@@ -1084,7 +1182,7 @@ export async function composeWrongBaseRefusal(
       )
       const oid = resolved.stdout.trim().toLowerCase()
       if (resolved.ok && /^[0-9a-f]{40}$/.test(oid)) originSha = oid
-      else unknownDetail = `fetched origin/${branch} but could not resolve refs/remotes/origin/${branch}`
+      else unknownDetail = `fetched origin/${branchProse} but could not resolve refs/remotes/origin/${branchProse}`
     }
 
     // THE PRINTED PUSHES SPELL `refs/heads/<branch>`, never the bare name — the same argument
@@ -1099,7 +1197,7 @@ export async function composeWrongBaseRefusal(
       return `${prefix}The wrong-base launch guard found no worktree holding the branch, but this repo has no reachable 'origin' remote, so publication cannot be established at all — it is UNKNOWN, and UNKNOWN does not authorise deletion. Snapshot the commits locally first, in the namespace the stranded-run salvage already uses: ${salvage()} — a plain git tag is CREATE-ONLY, so it refuses rather than overwriting an earlier salvage receipt. Never delete work no remote has seen.`
     }
     if (unknownDetail !== null) {
-      return `${prefix}The wrong-base launch guard found no worktree holding the branch, but could not read origin/${branch} (${unknownDetail}) — publication is UNKNOWN, and UNKNOWN does not authorise deletion. Salvage the branch first — ${salvage()}, which is create-only and refuses to overwrite an earlier receipt (or publish it with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)} if this lane has push rights) — before considering anything destructive.`
+      return `${prefix}The wrong-base launch guard found no worktree holding the branch, but could not read origin/${branchProse} (${unknownDetail}) — publication is UNKNOWN, and UNKNOWN does not authorise deletion. Salvage the branch first — ${salvage()}, which is create-only and refuses to overwrite an earlier receipt (or publish it with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)} if this lane has push rights) — before considering anything destructive.`
     }
     if (originSha !== null) {
       // Equality is not the only way origin can carry the local work: when origin/<branch> is
@@ -1126,7 +1224,7 @@ export async function composeWrongBaseRefusal(
         }
       }
       if (ancestryUnknown !== null) {
-        return `${prefix}The wrong-base launch guard found no worktree holding the branch and origin/${branch} at ${originSha}, but whether it contains the local tip ${branch_tip} could NOT be established (${ancestryUnknown}) — publication is UNKNOWN, and UNKNOWN does not authorise deletion. Salvage the branch first — ${salvage()}, create-only so it cannot overwrite an earlier receipt (or publish it with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)} if this lane has push rights) — then re-resolve it by hand.`
+        return `${prefix}The wrong-base launch guard found no worktree holding the branch and origin/${branchProse} at ${originSha}, but whether it contains the local tip ${branch_tip} could NOT be established (${ancestryUnknown}) — publication is UNKNOWN, and UNKNOWN does not authorise deletion. Salvage the branch first — ${salvage()}, create-only so it cannot overwrite an earlier receipt (or publish it with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)} if this lane has push rights) — then re-resolve it by hand.`
       }
       if (contained) {
         const relation = identical
@@ -1175,12 +1273,12 @@ export async function composeWrongBaseRefusal(
         // exits 0, so a legal leading-dash branch name parses as OPTIONS in the printed
         // command. It fails closed today (git errors) but the reader is told to RUN this text.
         const verify = `git -C ${sh(repo)} fetch --no-tags origin ${sh(refspec)} && test "$(git -C ${sh(repo)} rev-parse --verify ${sh(`refs/heads/${branch}`)})" = ${sh(branch_tip)} && git -C ${sh(repo)} merge-base --is-ancestor ${sh(branch_tip)} ${sh(`refs/remotes/origin/${branch}`)} && ${salvage()} && git -C ${sh(repo)} branch -D -- ${sh(branch)}`
-        return `${prefix}The wrong-base launch guard found no worktree holding the branch, and origin/${branch} ${relation} — every commit on the local branch is already on origin, so dropping the local ref loses nothing. Delete it ONLY through the chain that re-establishes both of those facts at the moment it runs: ${verify}. The fetch re-reads origin, so a force-push that dropped these commits before you run this stops the delete; the test re-compares the local ref against the evidenced tip, so a branch that moved stops it too; the ancestry check re-proves origin contained that tip as of that fetch; the tag takes a local snapshot of the evidenced commit IMMEDIATELY before the delete, and being create-only it stops the chain rather than overwriting an earlier receipt; and branch -D is the delete git RE-CHECKS holders for — it refuses ("used by worktree at ...") if a lane has taken the branch since, and that refusal is a stand-down signal, never something to route around with a low-level ref delete. What the chain does NOT close, and you should know before running it: it is compare-THEN-delete, so a commit landing on the ref in the gap between the test and the delete would be deleted with it, and the ancestry link reads a TRACKING ref that is only as fresh as this chain's own fetch, so a force-push landing after that fetch is not seen at all. Nothing in git closes either gap for a branch delete; what bounds them is that each gap is one command wide, that branch -D still refuses a branch a lane has checked out, and that the snapshot tag is taken inside the window — so if origin has since dropped these commits they are still reachable here by that tag rather than by nothing. Then re-dispatch.`
+        return `${prefix}The wrong-base launch guard found no worktree holding the branch, and origin/${branchProse} ${relation} — every commit on the local branch is already on origin, so dropping the local ref loses nothing. Delete it ONLY through the chain that re-establishes both of those facts at the moment it runs: ${verify}. The fetch re-reads origin, so a force-push that dropped these commits before you run this stops the delete; the test re-compares the local ref against the evidenced tip, so a branch that moved stops it too; the ancestry check re-proves origin contained that tip as of that fetch; the tag takes a local snapshot of the evidenced commit IMMEDIATELY before the delete, and being create-only it stops the chain rather than overwriting an earlier receipt; and branch -D is the delete git RE-CHECKS holders for — it refuses ("used by worktree at ...") if a lane has taken the branch since, and that refusal is a stand-down signal, never something to route around with a low-level ref delete. What the chain does NOT close, and you should know before running it: it is compare-THEN-delete, so a commit landing on the ref in the gap between the test and the delete would be deleted with it, and the ancestry link reads a TRACKING ref that is only as fresh as this chain's own fetch, so a force-push landing after that fetch is not seen at all. Nothing in git closes either gap for a branch delete; what bounds them is that each gap is one command wide, that branch -D still refuses a branch a lane has checked out, and that the snapshot tag is taken inside the window — so if origin has since dropped these commits they are still reachable here by that tag rather than by nothing. Then re-dispatch.`
       }
     }
     const evidence = absent
-      ? `origin has no ${branch} at all`
-      : `origin/${branch} is at ${originSha} and does not contain the local tip ${branch_tip}`
+      ? `origin has no ${branchProse} at all`
+      : `origin/${branchProse} is at ${originSha} and does not contain the local tip ${branch_tip}`
     return `${prefix}The wrong-base launch guard found no worktree holding the branch, and ${evidence} — these commits are unpublished. Salvage first: snapshot them the way the stranded-run salvage does — ${salvage()}, create-only so it cannot overwrite an earlier receipt — or, if this lane has push rights, publish them with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)}; never delete unpublished work.`
   } catch (err) {
     return unknownHolder(

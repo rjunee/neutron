@@ -3220,7 +3220,12 @@ export function buildTridentOrchestrator(
     const freshBuild = freshLaunch && priorBaseSha === null
     let base_sha: string | null = priorBaseSha
     let base_behind: number | null = null
+    // Whether the base fetch below actually RAN. The UNKNOWN refusals downstream count their
+    // own writes, and a fetch is not write-free (see `noWrites` there) — but only this arm
+    // performs one, so a flat claim either over- or under-counts depending on the path taken.
+    let fetchedBase = false
     if (freshBuild && launchRun.merge_mode === 'pr') {
+      fetchedBase = true
       const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
       let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
       if (!fetched.ok) {
@@ -3304,10 +3309,37 @@ export function buildTridentOrchestrator(
         // git's stderr is folded for the same reason and not a weaker one: `git -C <repo>` echoes
         // the path back on failure, so the raw path reaches this string by that route too.
         // `foldEvidence` also carries the bound the `.slice(-300)` used to carry, and MARKS its
-        // truncation. The branch name and the two shas need no folding: the branch resolved
-        // through `rev-parse --verify refs/heads/<branch>`, so git's own ref rules have already
-        // excluded control characters, and the shas are `^[0-9a-f]{40}$`-tested above.
+        // truncation.
+        //
+        // AND THE BRANCH NAME IS FOLDED TOO (Argus blocker). An earlier draft exempted it on the
+        // premise that "git's own ref rules have already excluded control characters" — true of
+        // ASCII controls and FALSE of everything else `defang` folds. Reproduced on git 2.43:
+        // `git branch` accepted, and `rev-parse --verify` resolved, both
+        // `feat<U+2028>FORGED<U+00A0>run<U+00A0>git<U+00A0>branch<U+00A0>-D<U+00A0>victim` and
+        // `feat<U+202E>evil` — a line separator several renderers break on, and a bidi override
+        // that reorders what is DISPLAYED without changing a byte. The remedy composer folds
+        // exactly those codepoints and names them as forgery vectors, so exempting the branch
+        // here made this seam contradict the threat model of the module it exists to guard.
+        // Only the shas stay raw, and they are `^[0-9a-f]{40}$`-tested above.
         const repoProse = foldEvidence(launchRun.repo_path)
+        const branchProse = foldEvidence(launchRun.branch)
+        // WHAT THIS PATH WROTE, COUNTED EXACTLY. `git fetch --no-tags origin <base>` above is not
+        // write-free: it force-updates that tracking ref, appends the ref's reflog, rewrites
+        // FETCH_HEAD and writes whatever objects it downloaded (delivery.ts names the same set
+        // for the composer's own fetch). None of them is a branch, a worktree, a commit or a file
+        // in the tree — which is the reassurance actually owed — but a refusal that undercounts
+        // its own writes is the overclaiming this message class exists to stop. Conditional,
+        // because OVERcounting is the same defect: only a fresh PR build fetches at all.
+        //
+        // THE LIST IS OPEN AT ITS TAIL, AND SAYS SO (Argus finding). A fetch also runs whatever
+        // bookkeeping its own configuration asks for — `fetch.writeCommitGraph` writes
+        // `.git/objects/info/commit-graphs/*`, `gc.auto` can fire maintenance — so naming four
+        // items and closing the list was falsifiable by a config this path does not read. What
+        // IS established is the class: everything that fetch can touch lives under `.git`, and
+        // "file" in the clause below means a file in the TREE, which is the reassurance owed.
+        const noWrites = fetchedBase
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${base} made under .git — refs/remotes/origin/${base}, that ref's reflog, FETCH_HEAD, the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top`
+          : 'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
         const probeDetail = (res: HostCommandResult): string =>
           res.timed_out === true
             ? 'the ancestry probe was killed by its watchdog'
@@ -3323,7 +3355,7 @@ export function buildTridentOrchestrator(
           return {
             run: failedRun(
               pinnedRun,
-              `trident infra: could not establish whether branch ${launchRun.branch} at ${branchTip} is contained in origin/${base} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+              `trident infra: could not establish whether branch ${branchProse} at ${branchTip} is contained in origin/${base} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
               false,
             ),
             changed: true,
@@ -3345,7 +3377,7 @@ export function buildTridentOrchestrator(
             return {
               run: failedRun(
                 pinnedRun,
-                `trident infra: branch ${launchRun.branch} at ${branchTip} is not contained in origin/${base} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase)}); that is UNKNOWN, and UNKNOWN authorises nothing; the build was NOT started, and no branch, worktree, commit or file was changed or deleted.`,
+                `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${base} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase)}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
                 false,
               ),
               changed: true,
