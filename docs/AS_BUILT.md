@@ -2,6 +2,84 @@
 
 Running log of what shipped, newest first. One entry per merged change.
 
+## 2026-09-01 — switching back into a conversation lands at the bottom again
+
+A kept-alive conversation surface is `.car-conv[hidden]`, and `chat-react.html` gives that
+`display: none`. A display:none element has no layout box, so its viewport's `scrollTop` is not
+preserved — it comes back 0 on re-show. Nothing in `ChatApp.tsx` restored it, and assistant-ui's
+`useThreadViewportAutoScroll` is `isAtBottom`-gated, so from scrollTop 0 it deliberately declines
+to act. The surface's own docblock claimed the opposite ("its scroll position + composer draft
+survive"), which is how this went unnoticed: the prose asserted a property the code never had.
+Both lying sites now say what is true — the draft and the runtime survive; the scroll position is
+captured and restored explicitly.
+
+The transcript window (#481) did not cause this, it made it visible. Before, a surface mounted the
+whole history and re-activation landed at the very beginning; now it mounts the trailing 100, so
+the same missing restore lands you ~100 messages back, staring at "Load older messages". The
+window is not the bug and was not touched.
+
+`ViewportActivationRestore` lives inside `ThreadPrimitive.Viewport` beside `LoadOlderMessages`. It
+CAPTURES `{scrollTop, atBottom, headId}` into a ref from a passive scroll listener while the
+surface is active — capture on the way OUT, because by the deactivation commit the DOM already
+reads 0 — and RESTORES pre-paint in a `useLayoutEffect` on the `active: false → true` edge. The
+effect is keyed on the RUNTIME's rendered message count, the same way `LoadOlderMessages` is,
+because `useExternalStoreRuntime` applies a changed transcript one commit after the parent render;
+a restore keyed on the parent would measure the old height. The target is the user's prior position
+when they had deliberately scrolled back, and otherwise the bottom, which is the floor.
+
+Two things decide whether that position is still meaningful, and both are the point of this entry.
+
+The first is WHICH SLICE it was measured against. The validity check is the id of the mounted
+slice's FIRST message, not the rendered count: at the transcript window's cap the count is exactly
+100 on both sides of a window movement, so a count comparison is blind precisely when the window is
+full — which is the case the card is about. The head id is also what implements the card's stated
+rule for `olderAnchorId`: a surface the user had loaded older into is re-trimmed to the trailing
+window when they switch away, so on return their offset points into a slice that no longer exists,
+the head no longer matches, and the restore falls back to the bottom instead of to an arbitrary
+offset over messages they never chose. It is re-checked on every armed commit, not only the arming
+one, because the runtime applies the trimmed list one commit late — which is exactly where the
+re-trim shows up.
+
+The second is WHETHER THERE IS A SCROLL BOX AT ALL. A viewport inside a `[hidden]` subtree is
+`display: none`: `scrollHeight` reads 0 and a `scrollTop` written there is discarded. Beyond this
+surface's own `.car-conv`, `ProjectShell` hides the whole `.car-tabpanel` when Chat is not the
+visible tab — and it resets the tab back to Chat in a PASSIVE effect, i.e. strictly after the
+activating commit's LAYOUT effects. So a cross-project switch made from Documents or Plan ran this
+restore against a box that did not exist, spent the target on it, and the reveal a moment later
+landed at 0: the same bug one wrapper further out. The restore now applies nothing and clears
+nothing while a `[hidden]` ancestor is present, re-checking at roughly frame cadence for up to a
+second (the reveal it waits on is a passive effect in the same tick). Said honestly: that write
+lands in a timer callback rather than pre-paint, so the reveal can paint one frame at the old
+position — ~16ms, against landing 100 messages back for as long as the surface is open.
+
+NOT COVERED, on the record. `setProject` paints the topic's CACHED transcript first, so on a switch
+into a project that received messages while the user was away the head can match at every armed
+commit and change only AFTER the target has cleared, leaving a restored offset over a window that
+has since slid. Guarding it needs a way to tell a slide during the switch from a slide while the
+reader reads, and the late one is exactly the one this component cannot see. It is left unguarded
+rather than guarded by an untestable heuristic; `tests/e2e-browser` is where it belongs, because
+under happy-dom the outcome is indistinguishable anyway (assistant-ui's auto-scroll takes an
+un-scrolled viewport to the bottom on the same commit). For the same reason the unread-message
+anchor the owner also named ("the bottom or at least the last unread message") is NOT in this
+change: the only unread signal on the client is a per-project badge COUNT of AGENT messages, the
+restore indexes ALL rows, and at the cap the two disagree by however many user messages are in the
+window. The card names the bottom as the floor and permits that anchor to land separately; it does,
+on its own card, with the trap written down (`controller.setProject` zeroes the count synchronously
+before publishing the switch frame, so it must be captured on the `false → true` edge).
+
+`activation-scroll-restore.test.tsx` carries four cases, all four assertion-level RED against
+`origin/main` @ `e651cc3e`: the required must-fail control (switch away from the bottom, switch
+back, assert the bottom), the scrolled-back sibling that asserts the exact position AND that it is
+not the bottom so neither case can be satisfied by the other's path, the cross-tab switch (the
+harness wraps `ChatApp` in the same `.car-tabpanel` ProjectShell renders, hides it across the
+switch, and asserts nothing was spent while hidden and the bottom after the reveal), and the
+re-trimmed window falling back to the bottom rather than restoring a dead offset. happy-dom has no
+layout engine, so the tests supply the geometry — including reporting ZERO for a `[hidden]`
+ancestor, which is what a browser does and without which the cross-tab case would pass vacuously —
+dispatch `scroll` by hand, and zero `scrollTop` themselves to model the browser's box teardown.
+`transcript-window.test.tsx` and `switch-render-cost.test.tsx` pass unmodified: the sentinel span
+is not a `.car-row`, and no new prop reaches a memoized surface.
+
 ## 2026-08-17 — a stale rollout is not evidence, and a healthy reading must be able to release a seat (#418)
 
 PR #418, follow-up to #407. Review found three ways for the Codex seat pool to shrink to

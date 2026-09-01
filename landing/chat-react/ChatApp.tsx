@@ -976,6 +976,181 @@ function LoadOlderMessages({
   )
 }
 
+/** Bottom-proximity epsilon (px): within this of the bottom counts as "following the tail". */
+const AT_BOTTOM_EPSILON_PX = 4
+
+/** How long a pending restore waits for a `display: none` viewport to be revealed,
+ *  and how often it re-checks (roughly a frame). See the `[hidden]` branch of the
+ *  restore for what it is waiting on. */
+const RESTORE_REVEAL_MS = 1000
+const RESTORE_REVEAL_POLL_MS = 16
+
+/**
+ * Restores the viewport scroll position when this kept-alive surface re-activates.
+ *
+ * `.car-conv[hidden]` is `display: none` — the scroll box is destroyed, `scrollTop`
+ * reads 0 on re-show, and assistant-ui's `useThreadViewportAutoScroll` is
+ * `isAtBottom`-gated so it deliberately declines to act from scrollTop 0. So:
+ * CAPTURE on the way out (a passive scroll listener — by the deactivation commit the
+ * DOM already reads 0), and RESTORE pre-paint on the active edge, keyed on the
+ * RUNTIME's rendered count exactly like {@link LoadOlderMessages}, because
+ * `useExternalStoreRuntime` applies a changed transcript one commit after the parent
+ * render.
+ *
+ * Target: the user's prior position when they had deliberately scrolled back and the
+ * mounted slice still STARTS at the same message; otherwise the bottom. A position
+ * over a slice that no longer starts where it did is not restored — bottom instead,
+ * never an arbitrary offset.
+ * The head id, not the rendered COUNT, is what decides that: at the transcript
+ * window's cap a slide keeps the count at exactly {@link TRANSCRIPT_WINDOW_MESSAGES}
+ * on both sides, so a count comparison is blind precisely when the window is full,
+ * which is the case this card is about. It is also what implements the card's
+ * `olderAnchorId`-resets rule: a surface the user had loaded older into comes back
+ * trimmed to the trailing window, its head changes, and the restore falls to the
+ * bottom instead of to an offset over messages that are no longer mounted.
+ *
+ * Being armed is not the same as having applied: the target survives across commits
+ * until the runtime has caught up with the live windowed list, because the adapter
+ * applies a changed transcript one commit late and the head can still change on that
+ * commit — and, when the viewport is inside a `display: none` tab panel, until that
+ * panel is revealed.
+ *
+ * ⚠️ WHAT IS NOT COVERED, AND SAYING SO. `setProject` paints the topic's CACHED
+ * transcript first, so on a switch into a project that received messages while the
+ * user was away the head can match at every armed commit and change only AFTER the
+ * target has cleared — leaving a restored offset over a window that has since slid.
+ * That residual is a real-browser-only defect and it is not guarded here: every
+ * mechanism for it needs to tell a slide during the switch apart from a slide while
+ * the reader reads, and the one that arrives late is exactly the one this component
+ * cannot see. `tests/e2e-browser` is where that belongs — under happy-dom the
+ * outcome is indistinguishable anyway, because assistant-ui's auto-scroll takes an
+ * un-scrolled viewport to the bottom on the same commit.
+ *
+ * The hidden sentinel span exists only to reach `.car-viewport` via `.closest()`, the
+ * same trick `LoadOlderMessages` uses with its `btnRef`. It is not a `.car-row`, so it
+ * does not disturb the transcript-window row counts.
+ */
+function ViewportActivationRestore({
+  active,
+  windowLength,
+}: {
+  active: boolean
+  /** Length of the LIVE windowed list this surface's runtime is converging to. */
+  windowLength: number
+}): React.JSX.Element {
+  const markRef = useRef<HTMLElement | null>(null)
+  const posRef = useRef<{ scrollTop: number; atBottom: boolean; headId: string } | null>(null)
+  const renderedCount = useAuiState((s) => s.thread.messages.length)
+  // The id of the FIRST mounted message — the identity of the mounted slice (the
+  // transcript is append-only and the window is a contiguous slice of it, so a slice
+  // that still starts at the same message still has the same content above the
+  // reader's scrollTop).
+  const headId = useAuiState((s) => s.thread.messages[0]?.id ?? '')
+  // Render-phase ref write, the same sanctioned pattern as `windowRef`: the capture
+  // effect must read the CURRENT head without re-subscribing.
+  const headIdRef = useRef(headId)
+  headIdRef.current = headId
+  const prevActiveRef = useRef(false)
+  const pendingRef = useRef<
+    { kind: 'bottom' } | { kind: 'position'; scrollTop: number; headId: string } | null
+  >(null)
+
+  // THE RESTORE — layout effect (pre-paint, no visible jump). React removes the
+  // `hidden` attribute in the mutation phase before layout effects run, so
+  // `scrollHeight` is live here — for THIS surface's own `.car-conv`, at least; the
+  // tab panel wrapping it is not ours to un-hide (see the `[hidden]` branch below).
+  useLayoutEffect(() => {
+    const wasActive = prevActiveRef.current
+    prevActiveRef.current = active
+    if (!active) {
+      pendingRef.current = null
+      return
+    }
+    if (!wasActive) {
+      const pos = posRef.current
+      pendingRef.current =
+        pos !== null && !pos.atBottom
+          ? { kind: 'position', scrollTop: pos.scrollTop, headId: pos.headId }
+          : { kind: 'bottom' }
+    }
+    let timer: ReturnType<typeof setTimeout> | null = null
+    const revealDeadline = Date.now() + RESTORE_REVEAL_MS
+    const apply = (): void => {
+      let p = pendingRef.current
+      if (p === null) return
+      const viewport = markRef.current?.closest('.car-viewport')
+      if (!(viewport instanceof HTMLElement)) return
+      // A viewport inside a `[hidden]` subtree has NO LAYOUT BOX: `scrollHeight`
+      // reads 0 and a `scrollTop` written there is discarded. Two ancestors do that
+      // — `.car-conv[hidden]` (an inactive kept-alive surface, handled by the
+      // `active` guard above) and `.car-tabpanel[hidden]` (Chat is not the visible
+      // tab), both `display: none` in `chat-react.html`. The second is not
+      // hypothetical: on a cross-project switch made while the user is on another
+      // tab, `ProjectShell` resets the tab to Chat in a PASSIVE effect, so this
+      // LAYOUT effect runs while the Chat panel is still hidden. Applying there
+      // writes nothing and clearing there loses the target, and the reveal a moment
+      // later lands at 0 — exactly this component's bug, one wrapper further out. So
+      // nothing is applied and NOTHING is cleared: wait for the reveal, re-checking
+      // at roughly frame cadence up to {@link RESTORE_REVEAL_MS} (the reveal it is
+      // waiting on is a passive effect in the SAME tick, so this is slack, not a
+      // budget). Said honestly: that write lands in a timer callback rather than
+      // pre-paint, so the reveal can paint one frame at the old position — ~16ms,
+      // against landing 100 messages back for as long as the surface is open.
+      if (viewport.closest('[hidden]') !== null) {
+        if (Date.now() < revealDeadline) timer = setTimeout(apply, RESTORE_REVEAL_POLL_MS)
+        return
+      }
+      if (timer !== null) {
+        clearTimeout(timer)
+        timer = null
+      }
+      // A captured position is valid only over a slice that still STARTS at the same
+      // message; anything else falls back to the bottom, which is the floor. Checked
+      // on EVERY armed commit, not just the arming one, because the runtime applies a
+      // changed transcript one commit late — that is where the re-trim this guard
+      // exists for actually shows up.
+      if (p.kind === 'position' && p.headId !== headId) p = pendingRef.current = { kind: 'bottom' }
+      viewport.scrollTop = p.kind === 'position' ? p.scrollTop : viewport.scrollHeight
+      // Stay armed until the runtime has caught up with the live windowed list, so
+      // the adapter's one-commit-late apply is re-targeted (`>=` because assistant-ui
+      // appends a synthetic optimistic assistant message while a turn is running, so
+      // the rendered count can legitimately EXCEED the window); then clear, so a
+      // later arrival while the user reads scrolled-up content never yanks them.
+      if (renderedCount >= windowLength) pendingRef.current = null
+    }
+    apply()
+    return () => {
+      if (timer !== null) clearTimeout(timer)
+    }
+  }, [active, renderedCount, windowLength, headId])
+
+  // THE DEPARTURE CAPTURE — plain effect (post-paint) so on an activation commit the
+  // restore above has ALREADY run and the initial capture records the restored spot,
+  // not the stale 0. Do NOT promote this to a layout effect: the ordering with the
+  // restore is the whole point.
+  useEffect(() => {
+    if (!active) return
+    const viewport = markRef.current?.closest('.car-viewport')
+    if (!(viewport instanceof HTMLElement)) return
+    const capture = (): void => {
+      // A viewport with no layout box reads 0 for everything; recording that would
+      // overwrite a real capture with a phantom at-bottom one.
+      if (viewport.closest('[hidden]') !== null) return
+      posRef.current = {
+        scrollTop: viewport.scrollTop,
+        atBottom:
+          viewport.scrollTop + viewport.clientHeight >= viewport.scrollHeight - AT_BOTTOM_EPSILON_PX,
+        headId: headIdRef.current,
+      }
+    }
+    capture()
+    viewport.addEventListener('scroll', capture, { passive: true })
+    return () => viewport.removeEventListener('scroll', capture)
+  }, [active])
+
+  return <span ref={markRef} hidden data-viewport-restore="" />
+}
+
 function TypingIndicator({
   activity,
   onOpenActivity,
@@ -1952,6 +2127,8 @@ function ChatSurface({
   config,
   draft,
   uploadAffordance,
+  active,
+  windowLength,
   olderHiddenCount,
   onLoadOlder,
   showPane,
@@ -1965,6 +2142,12 @@ function ChatSurface({
   config: BootstrapConfig
   draft: AttachmentDraft
   uploadAffordance: ChatMessageUploadAffordance | null
+  /** Whether this kept-alive surface is the VISIBLE one (see
+   *  {@link ViewportActivationRestore}, which restores scroll on the activation edge). */
+  active: boolean
+  /** `windowedMessages.length` — the rendered length this surface's runtime is
+   *  converging to (see {@link ViewportActivationRestore}). */
+  windowLength: number
   /** How many of this conversation's messages are OUTSIDE the mounted transcript
    *  window (see {@link TRANSCRIPT_WINDOW_MESSAGES}); 0 hides the control. */
   olderHiddenCount: number
@@ -2174,6 +2357,7 @@ function ChatSurface({
         <div className="car-chatstage">
         <div className="car-chatmain">
         <ThreadPrimitive.Viewport className="car-viewport">
+          <ViewportActivationRestore active={active} windowLength={windowLength} />
           <LoadOlderMessages hiddenCount={olderHiddenCount} onLoadOlder={onLoadOlder} />
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
@@ -2344,8 +2528,12 @@ const HYDRATION_GRACE_MS = 600
  * NEVER fed another project's messages and its list is never emptied in place by
  * a foreign switch. That structural guarantee is what preserves the SEV1
  * switch-race fix (no `useClientLookup` index-out-of-bounds) while letting the
- * surface stay MOUNTED across switches: hidden when inactive, so its scroll
- * position + composer draft survive and switching back is instant.
+ * surface stay MOUNTED across switches: hidden when inactive, so its composer draft
+ * and its runtime survive and switching back is instant. The scroll POSITION does
+ * NOT survive on its own — `.car-conv[hidden]` is `display: none`, which destroys
+ * the scroll box and zeroes the live `scrollTop`; {@link ViewportActivationRestore}
+ * captures the position on the way out and restores it (bottom by default) on
+ * re-activation.
  */
 function MountedConversationImpl({
   hostVm,
@@ -2502,6 +2690,8 @@ function MountedConversationImpl({
           config={config}
           draft={draft}
           uploadAffordance={uploadAffordance}
+          active={active}
+          windowLength={windowedMessages.length}
           olderHiddenCount={olderHiddenCount}
           onLoadOlder={onLoadOlder}
           // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
@@ -2599,7 +2789,10 @@ export function ChatApp({
   // MountedConversation (its own runtime); only the active one is visible. This
   // preserves the SEV1 switch-race fix structurally (each surface's runtime only
   // ever sees ITS conversation's messages — never emptied in place by a foreign
-  // switch), keeps per-project scroll + draft, and makes switching back instant.
+  // switch), keeps the per-project draft, and makes switching back instant. The
+  // scroll position is NOT kept by mounting alone — `display: none` zeroes the live
+  // scrollTop — so it is captured and restored explicitly on re-activation (see
+  // ViewportActivationRestore).
   const convId = conversationIdOf(vm.projectId)
 
   // REF-STABILIZED CALLBACKS. Every mounted surface takes these as props, and
