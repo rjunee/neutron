@@ -13,6 +13,7 @@ import {
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
+import type { BranchHolderProbe } from './fire-evidence-probes.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -422,5 +423,244 @@ describe('dispatch refuses a card whose work already landed', () => {
     } finally {
       process.env['PATH'] = oldPath
     }
+  })
+})
+
+describe('branch liveness refusal (branch_live)', () => {
+  const TASK = 'build the thing'
+  const BRANCH = 'trident/build-the-thing' // pinned by the 'creates the expected card branch' test above
+
+  function makeCommittedRepo(name: string): string {
+    const dir = join(tmp, name)
+    mkdirSync(dir)
+    expect(Bun.spawnSync(['git', 'init'], { cwd: dir }).exitCode).toBe(0)
+    expect(
+      Bun.spawnSync([
+        'git',
+        '-C',
+        dir,
+        '-c',
+        'user.email=t@t',
+        '-c',
+        'user.name=t',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'init',
+      ]).exitCode,
+    ).toBe(0)
+    return dir
+  }
+
+  function addLockedWorktree(repoDir: string, wtName: string, reason: string | null): string {
+    const wt = join(tmp, wtName)
+    expect(Bun.spawnSync(['git', '-C', repoDir, 'worktree', 'add', wt, '-b', BRANCH]).exitCode).toBe(0)
+    if (reason !== null) {
+      expect(Bun.spawnSync(['git', '-C', repoDir, 'worktree', 'lock', wt, '--reason', reason]).exitCode).toBe(0)
+    }
+    return wt
+  }
+
+  function livenessDeps(repoDir: string, over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
+    return {
+      store,
+      board,
+      project_slug: 'proj-1',
+      repo_path: tmp,
+      resolveBuildRepo: async () => repoDir,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+      ...over,
+    }
+  }
+
+  test('a live worktree lock on the card branch REFUSES dispatch via the REAL default probe, creating no run', async () => {
+    const repoDir = makeCommittedRepo('repo-live')
+    // No `start` in the reason → signal-0 alone decides, and this process is alive.
+    addLockedWorktree(repoDir, 'wt-live-holder', `claude agent test (pid ${process.pid})`)
+    let attachCalls = 0
+    const recordingBoard: TridentBoardBinder = {
+      ...board,
+      attachRun: async () => {
+        attachCalls += 1
+      },
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: recordingBoard }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('wt-live-holder')
+    expect(result.message).toContain(String(process.pid))
+    expect(result.message).toContain(BRANCH)
+    expect(result.message).toContain('never delete the branch')
+    expect(result.message).toContain('Nothing was dispatched')
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+    expect(attachCalls).toBe(0)
+  })
+
+  test('a NON-terminal run row on the same repo+branch refuses a second dispatch of the same slug (combined control for the launched hold)', async () => {
+    const repoDir = makeCommittedRepo('repo-row')
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain(live.id.slice(0, 8))
+    expect(result.message).toContain(BRANCH)
+    expect(store.listNonTerminalByRepo(repoDir)).toHaveLength(1)
+  })
+
+  test('an injected probe reporting a live pid refuses (seam shape)', async () => {
+    const repoDir = makeCommittedRepo('repo-stub')
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        branchHolderProbe: async (): Promise<BranchHolderProbe> => ({
+          worktree_basename: 'wt-x',
+          lock_reason: 'claude agent wf (pid 4242 start 1)',
+          pid: 4242,
+          pid_live: true,
+          mtime_ms: null,
+        }),
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('wt-x')
+    expect(result.message).toContain('4242')
+  })
+
+  test('a recycled-pid lock (live pid, starttime mismatch) does NOT refuse — and neither does the fresh mtime', async () => {
+    const repoDir = makeCommittedRepo('repo-recycled')
+    // pid alive but the RECORDED starttime cannot match the real one, so the
+    // holder is gone. The worktree was cut milliseconds ago, so this also pins
+    // that dispatch consults no mtime freshness.
+    addLockedWorktree(repoDir, 'wt-recycled', `claude agent test (pid ${process.pid} start 1)`)
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.branch).toBe(BRANCH)
+  })
+
+  test('an unparseable lock reason does NOT refuse', async () => {
+    const repoDir = makeCommittedRepo('repo-manual')
+    addLockedWorktree(repoDir, 'wt-manual', 'manual hold, do not prune')
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('no worktree and no live row proceeds exactly as before', async () => {
+    const repoDir = makeCommittedRepo('repo-plain')
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.branch).toBe(BRANCH)
+  })
+
+  test('a TERMINAL run row on the same branch does not refuse', async () => {
+    const repoDir = makeCommittedRepo('repo-terminal')
+    await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+      phase: 'failed',
+    })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('a throwing probe never blocks dispatch', async () => {
+    const repoDir = makeCommittedRepo('repo-throws')
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        branchHolderProbe: async () => {
+          throw new Error('boom')
+        },
+      }),
+    )
+
+    expect(result.ok).toBe(true)
+  })
+
+  // MINOR (round 2): the liveness gate used to run BEFORE the merged-PR gate, so
+  // a card whose work had already shipped — but whose branch still had a live
+  // worktree lock or a non-terminal run row — was told "a lane is building this
+  // branch right now" instead of "already merged as #N, verify the card". Both
+  // refuse and neither dispatches, so the whole cost is the diagnosis; the
+  // merged-PR sentence is the one the 2026-08-17 incidents were about.
+  test('a MERGED PR wins over branch liveness — the clearer refusal is the one the operator reads', async () => {
+    const repoDir = makeCommittedRepo('repo-landed-and-live')
+    // Both conditions true at once: a merged PR AND a live lock on the branch.
+    addLockedWorktree(repoDir, 'wt-landed-live', `claude agent test (pid ${process.pid})`)
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        resolveMergeMode: async () => 'pr',
+        landedProbe: async () => ({
+          pr: 336,
+          merged_at: '2026-08-16T23:27:00Z',
+          head_on_base: true,
+          base: 'main',
+        }),
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('already_landed')
+    expect(result.message).toContain('already merged as #336')
+    // Still nothing dispatched — the reorder changes the words, not the outcome.
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+  })
+
+  test('branch liveness still refuses when the PR did NOT merge', async () => {
+    const repoDir = makeCommittedRepo('repo-live-not-landed')
+    addLockedWorktree(repoDir, 'wt-live-not-landed', `claude agent test (pid ${process.pid})`)
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        resolveMergeMode: async () => 'pr',
+        landedProbe: async () => null,
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('wt-live-not-landed')
   })
 })

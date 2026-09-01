@@ -163,8 +163,9 @@ describe('OVERLAP HELD — two cards naming the same file cannot both be in flig
     // Also proves the gate never throws when NO hold store is wired.
     const holdless = deps(board)
     delete holdless.holds
+    // task text differs from A's so the branch_live liveness refusal cannot preempt the PATH hold this test pins; same-slug double dispatch is board-dispatch.test.ts territory.
     const b = await dispatchBoardBoundBuild(
-      { task: 'edit trident/foo.ts', board_item_id: 'B' },
+      { task: 'update trident/foo.ts', board_item_id: 'B' },
       holdless,
     )
     expect(b.ok).toBe(false)
@@ -243,6 +244,123 @@ describe('OVERLAP RELEASED ON TERMINAL — the sweep dispatches the held card', 
     const fired = store.listNonTerminalByRepo(REPO)[0]
     expect(fired?.chat_id).toBe('chat-7')
     expect(fired?.channel_kind).toBe('app_socket')
+  })
+})
+
+// MAJOR (round 1): the sweep DELETES the hold for every refusal code except
+// `held`, and `branch_live` is transient by construction — it says "a live lane
+// is on this branch right now", which ends when that lane finishes. Deleting the
+// hold there silently drops a queued card that nothing re-dispatches.
+describe('BRANCH LIVE IS TRANSIENT — the sweep keeps the hold queued', () => {
+  test('a branch_live refusal leaves the hold in place and writes no run', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'the first card, which claims the contended dispatcher file', design_doc_ref: null, status: 'upcoming' },
+      { id: 'B', title: 'the second card, which claims that same contended file too', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const a = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'A' },
+      deps(board),
+    )
+    expect(a.ok).toBe(true)
+    if (!a.ok) return
+    const b = await dispatchBoardBoundBuild(
+      { task: 'also edit trident/foo.ts', board_item_id: 'B' },
+      deps(board),
+    )
+    expect(b.ok).toBe(false)
+    expect(holds.getByItem(SLUG, 'B')).not.toBeNull()
+
+    // The path claim is released, so the sweep gets past the overlap gate — and
+    // straight into the liveness refusal: something live holds B's branch.
+    await store.terminalTransition(a.run.id, { phase: 'done' })
+    const sweep = buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () =>
+        deps(board, {
+          branchHolderProbe: async () => ({
+            worktree_basename: 'wf_live',
+            lock_reason: 'claude agent wf_live (pid 4242 start 99)',
+            pid: 4242,
+            pid_live: true,
+            mtime_ms: 0,
+          }),
+        }),
+    })
+    await sweep(store.get(a.run.id)!)
+
+    // NOTHING dispatched, and — the point — the card is STILL QUEUED.
+    expect(runCount()).toBe(1)
+    expect(holds.getByItem(SLUG, 'B')).not.toBeNull()
+
+    // Once the holder is gone, the very next sweep dispatches it. No human acted.
+    const sweepAgain = buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })
+    await sweepAgain(store.get(a.run.id)!)
+    expect(runCount()).toBe(2)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+  })
+
+  // MAJOR (round 2): the sweep only KEEPS a hold it already has. On the FIRST
+  // dispatch the liveness gate refused and queued nothing at all, so a card that
+  // had never been held was dropped on the floor — no run, no row, no log — and
+  // only a human re-dispatching it ever revived it. The path-claim gate twenty
+  // lines further down, refusing on the same fact ("a live run owns this"), has
+  // always queued.
+  test('a FIRST-EVER dispatch refused on branch liveness is QUEUED, and the sweep fires it later', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'the only card, whose branch a live worktree already holds', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const liveHolder = async (): Promise<{
+      worktree_basename: string
+      lock_reason: string
+      pid: number
+      pid_live: boolean
+      mtime_ms: number
+    }> => ({
+      worktree_basename: 'wf_live',
+      lock_reason: 'claude agent wf_live (pid 4242 start 99)',
+      pid: 4242,
+      pid_live: true,
+      mtime_ms: 0,
+    })
+
+    const first = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'A' },
+      deps(board, { branchHolderProbe: liveHolder }),
+    )
+    expect(first.ok).toBe(false)
+    if (first.ok) return
+    expect(first.code).toBe('branch_live')
+    // NO run — the chokepoint's "a refusal writes zero run state" invariant.
+    expect(runCount()).toBe(0)
+    // But the card is QUEUED, with the refusal's own words as the reason.
+    const hold = holds.getByItem(SLUG, 'A')
+    expect(hold).not.toBeNull()
+    expect(hold?.hold_reason).toContain('wf_live')
+
+    // Nothing terminalized the holder yet: the sweep re-refuses and REFRESHES.
+    const stuck = buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: liveHolder }),
+    })
+    await stuck({ id: 'unrelated' } as never)
+    expect(runCount()).toBe(0)
+    expect(holds.getByItem(SLUG, 'A')).not.toBeNull()
+
+    // The holder goes away; the next sweep dispatches. No human acted.
+    const sweep = buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })
+    await sweep({ id: 'unrelated' } as never)
+    expect(runCount()).toBe(1)
+    expect(holds.getByItem(SLUG, 'A')).toBeNull()
   })
 })
 

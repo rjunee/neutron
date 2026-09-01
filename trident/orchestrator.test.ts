@@ -7,6 +7,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import {
+  FIRE_PUBLISHED_REASON_MARKER,
+  FIRE_SETTLE_TIMEOUT_ERROR,
+  pickWorkflowOwned,
+} from './fire-evidence.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { interpretFailure } from './delivery.ts'
 import {
@@ -113,6 +118,11 @@ function buildHarness(opts: {
   latest_stage_event_at?: (run_id: string) => string | null
   probe_run_alive?: (run: TridentRun) => 'alive' | 'dead' | 'unknown' | Promise<'alive' | 'dead' | 'unknown'>
   gather_run_evidence?: import('./run-evidence.ts').RunEvidenceGatherer
+  gather_fire_evidence?: import('./fire-evidence.ts').FireEvidenceGatherer
+  probe_branch_holder?: (
+    repo_path: string,
+    branch: string,
+  ) => Promise<import('./fire-evidence-probes.ts').BranchHolderProbe | null>
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
@@ -240,6 +250,8 @@ function buildHarness(opts: {
   if (opts.latest_stage_event_at !== undefined) o.latest_stage_event_at = opts.latest_stage_event_at
   if (opts.probe_run_alive !== undefined) o.probe_run_alive = opts.probe_run_alive
   if (opts.gather_run_evidence !== undefined) o.gather_run_evidence = opts.gather_run_evidence
+  if (opts.gather_fire_evidence !== undefined) o.gather_fire_evidence = opts.gather_fire_evidence
+  if (opts.probe_branch_holder !== undefined) o.probe_branch_holder = opts.probe_branch_holder
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
@@ -3292,6 +3304,216 @@ describe('orchestrator — fire did not settle → failed', () => {
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).toBe('failed')
   })
+
+  // THE SETTLE-TIMEOUT EVIDENCE GATE. A launcher turn that never settles is
+  // cancelled and the fire resolves `failed` — but the workflow it fired runs
+  // DETACHED and the cancel does not reach it. Measured: 8 of 33 runs in 7 days
+  // were written off on that inference, one of them while its workflow went on
+  // building for another six minutes, and twice over a row that already said
+  // `outer-published:…`. The gate consults POSITIVE evidence only, and ONLY for
+  // this one error string.
+  const TIMEOUT_FIRE: FireOutcome = { status: 'failed', error: FIRE_SETTLE_TIMEOUT_ERROR }
+  const PUBLISHED_SHA = '7'.repeat(40)
+  const PUBLISHED_CHECKPOINT = `outer-published:${PUBLISHED_SHA}:0:3`
+  const PLAIN_FIRE_FAILURE = `inner workflow fire failed: ${FIRE_SETTLE_TIMEOUT_ERROR}`
+
+  test('evidence the workflow LAUNCHED holds the lane instead of terminalizing it', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async () => ({
+        kind: 'launched',
+        detail: 'worktree on the run branch holds a live lock',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    expect(after.subagent_status).toBe('running')
+    expect(after.failure_reason).toBeNull()
+    expect(after.subagent_run_id).not.toBeNull()
+
+    // AND THE LANE IS HELD: a second tick must not invite a second workflow onto
+    // the branch the live one holds (the relaunch this card exists to stop).
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(1)
+    expect(isTerminalPhase(store.get(run.id)!.phase)).toBe(false)
+  })
+
+  test('a row that already says outer-published is recorded as built-and-published, not as a failed fire', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      // The leftover-branch probe must resolve for the launch to reach the fire.
+      local_branch_tip: PUBLISHED_SHA,
+      gather_fire_evidence: async () => ({
+        kind: 'published',
+        checkpoint: PUBLISHED_CHECKPOINT,
+        detail: 'row already published',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // `phaseForCheckpoint` leaves outer-loop markers alone, so the row stays launchable.
+    await store.update(run.id, { inner_checkpoint: PUBLISHED_CHECKPOINT })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    // Terminal — the work is FINISHED — but the row must not read as a failed
+    // fire, and must not read as a rejection either.
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toContain(FIRE_PUBLISHED_REASON_MARKER)
+    expect(after.failure_reason).toContain('review not run')
+    expect(after.failure_reason).not.toContain('fire failed')
+    // `failedRun`'s own normalization owns this: an outer-published checkpoint
+    // carries no argus provenance, so the verdict cannot be a rejection.
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
+    // Preserved for the disposition classifier and the resume seed.
+    expect(after.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
+  })
+
+  test('NO evidence keeps today\'s failure byte-identical', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async () => ({ kind: 'none', detail: 'nothing' }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
+
+  test('an UNWIRED seam keeps today\'s failure byte-identical', async () => {
+    const h = buildHarness({ plan: () => ({ fire: TIMEOUT_FIRE }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
+
+  test('a NON-timeout fire error never consults the seam', async () => {
+    let consulted = 0
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'failed', error: 'boom' } }),
+      gather_fire_evidence: () => {
+        consulted += 1
+        throw new Error('the seam must never be consulted for a non-timeout error')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    expect(consulted).toBe(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toBe('inner workflow fire failed: boom')
+  })
+
+  // BLOCKER (round 1): the held lane returned the row PINNED BEFORE THE FIRE, and
+  // `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly — so the
+  // tick's own save wrote the workflow's progress back to its pre-fire value,
+  // destroying the very delta that proved the lane was live. The evidence now
+  // carries what the gatherer actually READ and the orchestrator applies it.
+  test('a workflow-owned column the detached workflow wrote SURVIVES the tick that spares the lane', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        // The detached workflow checkpoints WHILE the launcher is wedged — the
+        // real sequence this gate exists for. The gatherer re-reads the row, so
+        // it observes the new value; the orchestrator still holds the PINNED one.
+        await store.update(input.run.id, { inner_checkpoint: 'forge-done' })
+        const fresh = store.get(input.run.id)!
+        return {
+          kind: 'launched',
+          detail: 'run row moved since the fire (inner_checkpoint)',
+          observed: pickWorkflowOwned(fresh),
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    // THE ASSERTION THAT MATTERS: the workflow's checkpoint is still there.
+    expect(after.inner_checkpoint).toBe('forge-done')
+    // MAJOR (round 2): and so is the PHASE that checkpoint implies. `phase` is
+    // not a workflow-owned column, but `checkpoint.sh` derives it from
+    // `inner_checkpoint` at the inner workflow's write choke point — so carrying
+    // the checkpoint while restoring the PINNED phase left the row saying
+    // `forge-init` and `forge-done` at once, and reverted a run that had already
+    // reached review. `saveIfActive` applies no derivation, so the tick must.
+    expect(after.phase).toBe('argus')
+  })
+
+  // The mirror of the case above: a checkpoint that implies NOTHING (an
+  // outer-loop marker, a name the table has never seen) must leave the phase
+  // exactly as the tick set it, never guess one.
+  test('a carried checkpoint that implies no phase leaves the pinned phase alone', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        await store.update(input.run.id, { inner_checkpoint: 'a-checkpoint-nobody-mapped' })
+        return {
+          kind: 'launched',
+          detail: 'run row moved since the fire (inner_checkpoint)',
+          observed: pickWorkflowOwned(store.get(input.run.id)!),
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const before = store.get(run.id)!.phase
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.inner_checkpoint).toBe('a-checkpoint-nobody-mapped')
+    expect(after.phase).toBe(before)
+    expect(isTerminalPhase(after.phase)).toBe(false)
+  })
+
+  test('the held row carries NO launcher generation (never a minted or inherited one)', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async () => ({ kind: 'launched', detail: 'live lock on the branch' }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // A PRIOR round's generation, exactly as `persistRefireReset` leaves it.
+    await store.update(run.id, { workflow_run_id: 'generation-from-a-previous-round' })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.subagent_status).toBe('running')
+    // A stale generation under `running` is what the tick's liveness probe would
+    // latch DEAD, reaping the live lane this hold exists to protect. Null is what
+    // crash recovery itself writes here, and for the same reason.
+    expect(after.workflow_run_id).toBeNull()
+  })
+
+  test('a THROWING gatherer cannot spare the run and cannot crash the launch', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: () => {
+        throw new Error('probe host unavailable')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
 })
 
 describe('orchestrator — durable pre-build stage stamps', () => {
@@ -4340,6 +4562,74 @@ describe('orchestrator — orphan recovery', () => {
     expect(h.inputs).toHaveLength(1)
     expect(h.inputs[0]!.resume_checkpoint_head ?? null).toBeNull()
     expect(h.inputs[0]!.resume_findings ?? null).toBeNull()
+  })
+
+  // BLOCKER (round 1): the settle-timeout hold lives in the in-memory `fired` set,
+  // which a restart loses BY DESIGN — after which the default `redispatch` policy
+  // would clear the slot and fire a SECOND workflow over a lane that may still be
+  // building the branch. The filesystem survived the restart even though the set
+  // did not, so orphan recovery asks it.
+  test('an orphan whose branch is held by a LIVE worktree lock is waited on, never redispatched', async () => {
+    let probed = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' } }),
+      probe_branch_holder: async (_repo, branch) => {
+        probed += 1
+        return {
+          worktree_basename: `wf_live_${branch.slice(-3)}`,
+          lock_reason: 'claude agent wf_live (pid 4242 start 99)',
+          pid: 4242,
+          pid_live: true,
+          mtime_ms: 0,
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/held' })
+    await store.update(run.id, { subagent_run_id: 'STALE-FROM-A-PRIOR-PROCESS', subagent_status: 'running' })
+
+    await h.loop.runOnce()
+
+    expect(probed).toBe(1)
+    // NO second lane, and the row stays non-terminal (which also keeps
+    // board-dispatch's own branch-liveness refusal armed against it).
+    expect(h.inputs).toHaveLength(0)
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    expect(after.subagent_run_id).toBe('STALE-FROM-A-PRIOR-PROCESS')
+  })
+
+  test('an orphan whose branch holder is NOT live redispatches exactly as before', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' } }),
+      probe_branch_holder: async () => ({
+        worktree_basename: 'wf_dead',
+        lock_reason: 'claude agent wf_dead (pid 9 start 1)',
+        pid: 9,
+        pid_live: false,
+        mtime_ms: 0,
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/free' })
+    await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a THROWING branch-holder probe is not evidence — the orphan redispatches', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' } }),
+      probe_branch_holder: async () => {
+        throw new Error('worktree list unavailable')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/blind' })
+    await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
   })
 
   test("'wait' policy leaves the orphan untouched (no fire, no advance)", async () => {

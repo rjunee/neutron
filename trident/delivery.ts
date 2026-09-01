@@ -38,6 +38,7 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { FIRE_PUBLISHED_REASON_MARKER } from './fire-evidence.ts'
 import {
   TRIDENT_SALVAGE_MARKER,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
@@ -252,6 +253,24 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       klass: 'infra',
       summary: 'The build hit an internal configuration error and could not finish.',
       input_needed: retry,
+    }
+  }
+
+  // THE WORK WAS BUILT AND PUSHED — ONLY THE REVIEW NEVER RAN. The launcher's
+  // settle timeout fired over a row that already carried an `outer-published:…`
+  // checkpoint (`fire-evidence.ts`), so the branch is on origin and the PR exists
+  // at that sha. CHECKED EARLY and by the marker `publishedFailureReason` authors,
+  // because the generic tail would otherwise offer `retry` — inviting exactly the
+  // rebuild the rest of this seam exists to prevent, one line under a summary that
+  // says the work is already done. THE TWO HALVES MUST MOVE TOGETHER: the marker is
+  // exported from `fire-evidence.ts` and imported here rather than retyped.
+  if (r.includes(FIRE_PUBLISHED_REASON_MARKER)) {
+    return {
+      klass: 'unknown',
+      summary:
+        'This build finished and pushed its work — the review round never ran, so I did not merge it.',
+      input_needed:
+        'Check the PR at its pushed commit and send it for review. Do not rebuild it: the work is already published.',
     }
   }
 

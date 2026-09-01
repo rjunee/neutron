@@ -44,6 +44,7 @@ import {
   redactPushError,
 } from './orchestrator.ts'
 import { infraDeathSentence, interpretFailure } from './delivery.ts'
+import { publishedFailureReason } from './fire-evidence.ts'
 import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
 
@@ -447,6 +448,34 @@ describe('innerTerminalFailureReason — a THROW reports what it threw, not the 
     expect(reason).toContain('could not read the head of refs/heads/trident/x')
     expect(reason).not.toContain('review never ran')
     expect(reason).not.toContain('without Argus APPROVE')
+  })
+})
+
+// MINOR (round 1): the published settle-timeout reason fell to the generic tail,
+// whose input_needed is "Reply to retry the build, or take it from here manually"
+// — inviting exactly the rebuild this seam exists to prevent, one line under a
+// summary saying the work is already pushed.
+describe('interpretFailure — built-and-published must never invite a rebuild', () => {
+  const REASON = publishedFailureReason(`outer-published:${'7'.repeat(40)}:0:3`)
+
+  test('the owner is told to review the PR, not to retry the build', () => {
+    const out = interpretFailure(run({ failure_reason: REASON }))
+    expect(out.input_needed.toLowerCase()).not.toContain('retry')
+    expect(out.input_needed.toLowerCase()).toContain('review')
+    expect(out.input_needed.toLowerCase()).toContain('do not rebuild')
+  })
+
+  test('the summary says the work finished and was pushed, not that it failed to complete', () => {
+    const out = interpretFailure(run({ failure_reason: REASON }))
+    expect(out.summary).toContain('pushed')
+    expect(out.summary).not.toBe('The build did not complete.')
+    // And it is not told as a rejection: no reviewer judged this code.
+    expect(out.klass).not.toBe('review-unresolved')
+  })
+
+  test('an UNRELATED reason still reaches the generic retry copy (the control)', () => {
+    const out = interpretFailure(run({ failure_reason: 'something nobody classified' }))
+    expect(out.input_needed.toLowerCase()).toContain('retry')
   })
 })
 

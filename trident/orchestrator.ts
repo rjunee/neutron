@@ -75,7 +75,7 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
-import { hasArgusProvenance } from './checkpoint-phase.ts'
+import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
@@ -116,6 +116,13 @@ import {
   type RunEvidenceGatherer,
   type RunHangEvidence,
 } from './run-evidence.ts'
+import {
+  FIRE_SETTLE_TIMEOUT_ERROR,
+  publishedFailureReason,
+  type FireEvidenceGatherer,
+  type FireTimeoutEvidence,
+} from './fire-evidence.ts'
+import type { BranchHolderProbe } from './fire-evidence-probes.ts'
 
 const log = createLogger('trident')
 
@@ -504,6 +511,40 @@ export interface BuildTridentOrchestratorOptions {
    * same decisions, same disclosure strings.
    */
   gather_run_evidence?: RunEvidenceGatherer
+  /**
+   * THE SETTLE-TIMEOUT EVIDENCE GATE (see `fire-evidence.ts`). Consulted ONLY
+   * when a fire fails with EXACTLY `FIRE_SETTLE_TIMEOUT_ERROR` — the launcher
+   * turn was cancelled, but the workflow it fired runs DETACHED and the cancel
+   * never reached it, so "the launcher never settled" is not "the workflow never
+   * started". Every other fire error keeps its path untouched.
+   *
+   * POSITIVE EVIDENCE ONLY. `launched` holds the lane; `published` terminalizes
+   * honestly as built-and-published/review-not-run; `none`, a THROW, and an
+   * omitted seam all keep today's plain `failed` — omitted → BYTE-IDENTICAL to
+   * before this seam existed, same phase, same reason string, same stamps.
+   */
+  gather_fire_evidence?: FireEvidenceGatherer
+  /**
+   * BRANCH-LIVENESS PROBE for ORPHAN RECOVERY. Answers "is a linked worktree,
+   * held by a LIVE lock pid, sitting on this run's branch right now?" — the same
+   * question `board-dispatch.ts` asks before creating a run, through the same
+   * `probeBranchHolder`.
+   *
+   * WHY ORPHAN RECOVERY NEEDS IT. Hold ownership for a launched-but-unobserved
+   * lane lives in the in-memory `fired` set, which a restart loses BY DESIGN.
+   * After a restart every prior-process dispatch is an orphan, and the default
+   * `redispatch` policy clears the subagent slot and fires a SECOND workflow —
+   * over a first one that may still be building the branch. That is precisely the
+   * two-lanes-on-one-branch outcome the settle-timeout hold exists to prevent, so
+   * the hold cannot be allowed to evaporate on restart.
+   *
+   * POSITIVE EVIDENCE ONLY, and only ever to WAIT: null (nothing holds it, or the
+   * look failed), a non-live holder, a throw, and an omitted seam all redispatch
+   * exactly as before. Waiting is bounded by the same 90-min no-advance reaper and
+   * 2 h ceiling that bound every other in-flight lane, both of which are evaluated
+   * BEFORE this point in `step()`.
+   */
+  probe_branch_holder?: (repo_path: string, branch: string) => Promise<BranchHolderProbe | null>
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
@@ -2113,6 +2154,8 @@ export function buildTridentOrchestrator(
   const latestStageEventAt = opts.latest_stage_event_at ?? null
   const probeRunAlive = opts.probe_run_alive ?? null
   const gatherRunEvidence = opts.gather_run_evidence ?? null
+  const gatherFireEvidence = opts.gather_fire_evidence ?? null
+  const probeBranchHolderFor = opts.probe_branch_holder ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
@@ -3386,6 +3429,13 @@ export function buildTridentOrchestrator(
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
+    // WHEN the fire went out, on the INJECTED clock (never `Date.now()`): the
+    // evidence gatherer compares artifact/lock timestamps against it, and the
+    // tests must be able to pin it. Through `nowMs()`, NOT a bare `Date.parse` —
+    // an unparseable injected clock would otherwise yield NaN, and every
+    // `mtime >= NaN - skew` comparison is false, silently disabling the
+    // fresh-worktree evidence with no way to tell that from "nothing was found".
+    const fireStartedAtMs = nowMs()
     stamp('fire-dispatched')
     const firePromise = fireWorkflow({
       run: pinnedRun,
@@ -3453,6 +3503,94 @@ export function buildTridentOrchestrator(
     }
 
     if (outcome.status !== 'fired') {
+      // A SETTLE TIMEOUT IS NOT PROOF THE WORKFLOW NEVER STARTED. The launcher
+      // turn is cancelled on timeout; the workflow it may already have fired
+      // runs DETACHED and that cancel does not reach it. Measured: 8 of 33 runs
+      // in 7 days died here, one while its workflow kept building for another
+      // six minutes, and twice over a row that already said `outer-published:…`.
+      // So for THIS error string only, consult positive evidence first.
+      if (outcome.error === FIRE_SETTLE_TIMEOUT_ERROR && gatherFireEvidence !== null) {
+        // A THROWING gatherer must never crash the launch AND must never spare
+        // the run: no evidence is no evidence (positive-only).
+        let evidence: FireTimeoutEvidence = { kind: 'none', detail: 'evidence gatherer threw' }
+        try {
+          evidence = await gatherFireEvidence({ run: pinnedRun, fire_started_at_ms: fireStartedAtMs })
+        } catch (err) {
+          // LOG IT — silence here is indistinguishable from "looked and found
+          // nothing", which is exactly how a gatherer that throws on EVERY call
+          // would hide behind the positive-only rule forever. The sibling
+          // liveness probe logs `liveness_probe_failed` for the same reason.
+          log.error('fire_evidence_probe_failed', {
+            run: run.id,
+            slug: run.slug,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
+        }
+        if (evidence.kind === 'launched') {
+          // HOLD THE LANE. A deliberate mirror of the `fired` return MINUS the
+          // `fire-settled` stamp — the launcher never confirmed. The minted `id`
+          // is the dispatch id exactly as on the fired path, so harvest, the
+          // stall guard and orphan recovery all engage from here.
+          stamp('fire-unobserved-launch', evidence.detail.slice(0, 200))
+          fired.add(run.id)
+          return {
+            run: {
+              ...pinnedRun,
+              // THE FRESH WORKFLOW-OWNED COLUMNS, NOT THE PINNED ONES. `pinnedRun`
+              // is the row as it looked BEFORE the fire, and `saveIfActive`
+              // assigns `inner_checkpoint`/`inner_verdict` plainly — so saving the
+              // pinned snapshot would write the detached workflow's own progress
+              // back to its pre-fire value, destroying the very delta that proved
+              // the lane was live. `observed` is what the gatherer actually read.
+              ...(evidence.observed ?? {}),
+              // AND THE PHASE THAT CHECKPOINT IMPLIES. `phase` is NOT a
+              // workflow-owned column — the tick owns it — but `checkpoint.sh`
+              // derives it from `inner_checkpoint` at the inner workflow's write
+              // choke point (and `TridentRunStore.update` mirrors that table), so
+              // carrying the checkpoint forward while keeping the PINNED phase
+              // saves an incoherent row: `argus` reverted to `forge-init` while
+              // `inner_checkpoint` still says `forge-done`. `saveIfActive`
+              // assigns `phase` plainly and applies no derivation of its own, so
+              // the derivation has to happen HERE. `null` from the table means
+              // the checkpoint implies nothing — the pinned phase stands.
+              phase:
+                phaseForCheckpoint(evidence.observed?.inner_checkpoint ?? null) ?? pinnedRun.phase,
+              subagent_run_id: id,
+              subagent_status: 'running',
+              // NO LAUNCHER GENERATION — deliberately null, never `id`. This row
+              // has no confirmed launcher: minting one would make
+              // `latchLauncherCrashed` (which matches WHERE workflow_run_id = ?)
+              // key on a generation no pool will ever report, and CARRYING a
+              // previous round's key would point the tick's liveness probe at a
+              // dead generation and latch a live lane as crashed
+              // (`persistRefireReset` never clears this column). Null is what
+              // crash recovery itself writes here, for the same reason: the
+              // generation is unknown. The 90-min no-advance reaper and the 2 h
+              // ceiling still bound this lane.
+              workflow_run_id: null,
+              last_advanced_at: now(),
+            },
+            changed: true,
+            waiting: true,
+            note: `fire launcher unobserved (settle timeout) but the workflow shows life — ${evidence.detail}; holding the lane, no relaunch`,
+          }
+        }
+        if (evidence.kind === 'published') {
+          // THE WORK IS FINISHED. Terminal, but recorded HONESTLY: built and
+          // published, review not run. The verdict is NOT set by hand —
+          // `failedRun` normalizes it, and an outer-published checkpoint carries
+          // no argus provenance, so it can only become REVIEW_NOT_RUN.
+          return {
+            // Same rule as the held lane: terminalize over what the gatherer
+            // actually READ, never over the pre-fire snapshot.
+            run: failedRun({ ...pinnedRun, ...(evidence.observed ?? {}) }, publishedFailureReason(evidence.checkpoint), false),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launcher timeout over already-published work — review not run)`,
+          }
+        }
+        // `none` falls through to the unchanged path below.
+      }
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
       return {
@@ -4468,6 +4606,38 @@ export function buildTridentOrchestrator(
       }
       if (on_orphaned === 'wait' || redispatched.has(run.id)) {
         return { run, changed: false, waiting: true, note: `waiting on orphaned inner-loop dispatch ${orphanId}` }
+      }
+      // NEVER REDISPATCH OVER A LIVE HOLDER. `fired` is in-memory, so after a
+      // restart a lane that is genuinely still building looks exactly like a dead
+      // orphan — and redispatching it puts a SECOND workflow on the branch the
+      // first one is writing. Ask the filesystem, which survives the restart the
+      // set did not. Positive evidence only: anything short of a live lock pid
+      // falls through and redispatches exactly as before.
+      if (probeBranchHolderFor !== null && run.branch !== null) {
+        let holder: BranchHolderProbe | null = null
+        try {
+          holder = await probeBranchHolderFor(run.repo_path, run.branch)
+        } catch (err) {
+          holder = null
+          log.error('orphan_branch_holder_probe_failed', {
+            run: run.id,
+            slug: run.slug,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
+        }
+        if (holder !== null && holder.pid_live) {
+          // WAIT, do not reap and do not re-fire: the run row stays non-terminal
+          // (which also keeps `board-dispatch`'s own branch-liveness refusal
+          // armed), and the 90-min reaper above still bounds it.
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note:
+              `orphaned inner-loop dispatch ${orphanId}, but worktree ${holder.worktree_basename} still holds ` +
+              `the branch under a live lock (pid ${holder.pid}) — waiting rather than firing a second lane`,
+          }
+        }
       }
       // redispatch (default): clear the slot so the launch path re-fires a FRESH
       // workflow that resumes from the persisted checkpoint.

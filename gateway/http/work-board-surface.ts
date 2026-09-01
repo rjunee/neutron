@@ -98,6 +98,9 @@ export type WorkBoardStartResult =
         | 'review_needs_bound_pr'
         | 'underspecified'
         | 'already_landed'
+        // Something live already holds the card's branch (a non-terminal run, or a
+        // live worktree lock). Falls through to the 409 arm like already_landed.
+        | 'branch_live'
         // NOT A FAILURE — the build is QUEUED. The card declares an unfinished
         // blocker, or a live run already claims a file it would touch, so it was
         // parked in `code_trident_dispatch_holds` and the sweep re-dispatches it

@@ -300,6 +300,28 @@ export function buildDispatchHoldSweep(deps: {
           continue
         }
         if (result.code === 'held') continue // still blocked; the gate refreshed the row
+        // `branch_live` IS TRANSIENT, EXACTLY LIKE `held`. The dispatch gate
+        // refuses when a live worktree lock (or a non-terminal same-branch run)
+        // holds the card's branch — a condition that ends the moment that lane
+        // finishes. Deleting the hold there would silently drop a QUEUED card
+        // that nothing ever re-dispatches, converting "wait for the live lane"
+        // into "this card is gone". Keep it queued and let the next sweep ask
+        // again; the ONLY codes that delete are the permanent ones below.
+        //
+        // BUT SAY SO, WITH ITS AGE. `held` refreshes a row an operator can read;
+        // a silent `continue` made a branch-held card indistinguishable from one
+        // nobody queued. The age is the point: this sweep only runs when some
+        // run terminalizes, so a hold that keeps re-refusing is the signal that
+        // the "live" holder is a stale worktree lock nothing will ever release.
+        if (result.code === 'branch_live') {
+          log.warn('dispatch_hold_branch_live', {
+            project: hold.project_slug,
+            item: hold.board_item_id,
+            held_since: hold.created_at,
+            error: result.message,
+          })
+          continue
+        }
         log.warn('dispatch_hold_rejected', {
           project: hold.project_slug,
           item: hold.board_item_id,

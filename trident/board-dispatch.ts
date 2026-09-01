@@ -45,6 +45,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { createLogger } from '@neutronai/logger'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
@@ -66,7 +67,10 @@ import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
 import { deriveClaimedPaths } from './claimed-paths.ts'
+import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+
+const log = createLogger('trident')
 
 export interface AlreadyLandedFinding {
   pr: number
@@ -235,6 +239,13 @@ export interface BoardBoundBuildDeps {
   resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
   /** Outer-loop evidence that this card branch already has a merged PR. */
   landedProbe?: DispatchLandedProbe
+  /**
+   * BRANCH LIVENESS probe — finds the linked worktree holding a branch, if
+   * any (see `probeBranchHolder`). Default: the production probe over the
+   * real repo. Test seam. POSITIVE EVIDENCE ONLY: null (no worktree, failed
+   * look) and a non-live holder never refuse.
+   */
+  branchHolderProbe?: (repo_path: string, branch: string) => Promise<BranchHolderProbe | null>
   /** Credential source for direct callers that do not inject a merge-mode resolver. */
   secretsStore?: Pick<SecretsStore, 'get'>
   owner_handle?: string
@@ -280,6 +291,15 @@ export type BoardBoundBuildRejectionCode =
   | 'review_needs_bound_pr'
   | 'underspecified'
   | 'already_landed'
+  // Something LIVE already holds this card's branch — a non-terminal run row,
+  // or a linked-worktree lock naming a live pid. REFUSED, not held: resolving
+  // the holder is a judgment call (watch it, stop it, or verify its PR), not a
+  // queue position, and a hold would auto-fire a second lane onto the same
+  // branch the instant the holder terminalizes. Measured origin (2026-09-01):
+  // a launcher settle timeout mislabeled a run `failed` while its detached
+  // workflow kept building the branch; only the wrong-base guard's SHAPE check
+  // stopped the relaunch. This code refuses on LIVENESS.
+  | 'branch_live'
   | 'executor_unavailable'
   | 'backend_error'
 
@@ -536,6 +556,95 @@ export async function dispatchBoardBoundBuild(
       // squash merges make the original head un-ancestral while the work is landed.
       const message = `Refused: this card's work already merged as #${landed.pr} — branch ${branch} has a MERGED PR${landed.merged_at ? ` (merged ${landed.merged_at})` : ''}${landed.head_on_base === true ? ` and its head is contained in origin/${landed.base}` : ''}. Please verify the card instead of rebuilding: check what #${landed.pr} shipped; mark the Plan item done if complete, or put the unshipped half on a NEW Plan item with its own title. Nothing was dispatched.`
       return { ok: false, code: 'already_landed', message }
+    }
+  }
+
+  // (4b) BRANCH LIVENESS — never aim a second lane at a branch something live
+  // already holds. Measured 2026-09-01: a fire-turn settle timeout wrote a run
+  // off as `failed` while its detached workflow kept building this exact
+  // branch; the terminal wake then instructed a relaunch and only the
+  // wrong-base guard's SHAPE check stopped two lanes building one branch. So
+  // refuse on LIVENESS, two positive checks, cheapest first:
+  //   (a) the store — a NON-terminal run on this repo already carries this
+  //       branch (also catches the orchestrator's launched-but-unobserved
+  //       hold, which keeps the row non-terminal on purpose);
+  //   (b) the worktrees — a linked worktree has the branch checked out under
+  //       a lock naming a LIVE pid (signal-0 + recycled-pid starttime check —
+  //       the same probe the fire-evidence gate uses).
+  // POSITIVE EVIDENCE ONLY: no worktree, an unlocked or unparseable lock, a
+  // dead or recycled pid, a throwing probe, a terminal same-branch row — all
+  // proceed exactly as before. Worktree mtime is NOT consulted here: dispatch
+  // has no fire clock to compare against, and recency without a reference is
+  // just another arbitrary threshold. A refusal creates no RUN and must never
+  // advise deleting the branch — it is the live lane's workspace.
+  //
+  // IT RUNS *AFTER* `already_landed`, and the order is load-bearing. Both
+  // refuse and both dispatch nothing, so the only thing at stake is which
+  // sentence the operator reads — and "already merged as #N, verify the card"
+  // is strictly more actionable than "something is building this branch" for a
+  // card whose work has SHIPPED (the 2026-08-17 incidents this file's header
+  // names). Running the liveness probe second costs one `gh` call on the rarer
+  // path; running it first cost the clearer diagnosis on the common one.
+  {
+    const holdingRun = deps.store.listNonTerminalByRepo(repo_path).find((r) => r.branch === branch)
+    let message: string | null = null
+    let held_on_run_id: string | null = null
+    if (holdingRun !== undefined) {
+      held_on_run_id = holdingRun.id
+      message =
+        `Refused: branch ${branch} is already being built by live run ${holdingRun.id.slice(0, 8)} ` +
+        `(${holdingRun.slug}, phase ${holdingRun.phase}). Resolve that run first — watch it finish, or stop it ` +
+        `explicitly if it is truly dead — and never delete the branch under it. Nothing was dispatched.`
+    } else {
+      let holder: BranchHolderProbe | null = null
+      try {
+        holder = await (deps.branchHolderProbe ?? defaultBranchHolderProbe)(repo_path, branch)
+      } catch {
+        holder = null // a failed look is not a holder — positive evidence only
+      }
+      if (holder !== null && holder.pid_live) {
+        message =
+          `Refused: branch ${branch} is held by live worktree ${holder.worktree_basename}` +
+          (holder.pid !== null ? ` (lock pid ${holder.pid}, alive)` : '') +
+          ` — a lane appears to be building this branch right now even though no live run row says so ` +
+          `(a launcher timeout may have mislabeled its run as failed). Resolve the holder first: check ` +
+          '`git worktree list --porcelain` and that pid; never delete the branch under a live lock. ' +
+          `Re-dispatch only once nothing live holds the branch. Nothing was dispatched.`
+      }
+    }
+    if (message !== null) {
+      // QUEUE IT — a refusal is not a rejection. This condition ENDS the moment
+      // the live lane finishes, which is exactly the shape the hold queue was
+      // built for: without a row here the card is dropped on the floor and only
+      // a human re-dispatching it ever revives it, while the path-claim gate
+      // twenty lines below (the same "a live run owns this") auto-re-fires via
+      // `buildDispatchHoldSweep`. The sweep re-runs EVERY gate, so a still-live
+      // branch simply refreshes this row's reason and a freed one dispatches.
+      //
+      // `hold_kind: 'path'` and not a new `'branch'`: migration 0139 pins the
+      // column to CHECK (hold_kind IN ('blocker','path')), widening it needs a
+      // non-idempotent table rebuild the migrations contract forbids, and a
+      // held branch IS the same fact the 'path' kind already records — a live
+      // run owns a resource this dispatch needs. The reason string carries the
+      // detail; nothing reads the kind to decide behaviour.
+      await deps.holds?.upsert({
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        hold_kind: 'path',
+        hold_reason: message,
+        held_on_run_id,
+      })
+      // SAY SO. The refusal used to be silent in the logs as well as in the
+      // queue, so a card that stopped moving had no trace anywhere.
+      log.warn('dispatch_branch_live', {
+        project: deps.project_slug,
+        item: board_item_id,
+        branch,
+        held_on_run_id,
+      })
+      return { ok: false, code: 'branch_live', message }
     }
   }
 

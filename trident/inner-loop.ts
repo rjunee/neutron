@@ -57,6 +57,7 @@ import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/
 import { modelTierRegistry } from './model-tiers.ts'
 import { parsePhaseModelConfig } from './phase-models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
+import { FIRE_SETTLE_TIMEOUT_ERROR } from './fire-evidence.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { writeBriefParts, type BriefParts } from './brief-parts.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
@@ -903,7 +904,7 @@ export function buildSubstrateWorkflowFire(
       } catch {
         return {
           status: 'failed',
-          error: timedOut ? 'fire turn did not settle within the budget' : 'fire stream error',
+          error: timedOut ? FIRE_SETTLE_TIMEOUT_ERROR : 'fire stream error',
         }
       }
 
@@ -912,7 +913,7 @@ export function buildSubstrateWorkflowFire(
       return {
         status: 'failed',
         error: timedOut
-          ? 'fire turn did not settle within the budget'
+          ? FIRE_SETTLE_TIMEOUT_ERROR
           : 'fire turn closed without a completion event',
       }
     }
@@ -932,7 +933,7 @@ export function buildSubstrateWorkflowFire(
       timer = setTimer(() => {
         timedOut = true
         fireAndForget('inner-loop.cancel', handle.cancel())
-        resolve({ status: 'failed', error: 'fire turn did not settle within the budget' })
+        resolve({ status: 'failed', error: FIRE_SETTLE_TIMEOUT_ERROR })
       }, input.settle_timeout_ms)
     })
 

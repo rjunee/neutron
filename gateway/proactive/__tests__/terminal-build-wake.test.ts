@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { FIRE_PUBLISHED_REASON_MARKER, FIRE_SETTLE_TIMEOUT_ERROR, publishedFailureReason } from '@neutronai/trident/fire-evidence.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { makeTridentRun } from '@neutronai/trident/testing/make-trident-run.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../../wiring/build-live-agent-turn.ts'
@@ -77,5 +78,37 @@ describe('terminal build wake', () => {
     const prompt = buildTerminalBuildWakePrompt({ run: run(), board_item_id: 'item' })
     expect(prompt).toContain('PR #42'); expect(prompt).toContain('act immediately'); expect(prompt).toContain('concrete action now')
     expect(prompt).toContain('work_board_start'); expect(prompt).toContain('owns GitHub')
+  })
+  test('settle-timeout failure reason rewrites instruction 2 to resolve the branch holder first', () => {
+    const reason = `inner workflow fire failed: ${FIRE_SETTLE_TIMEOUT_ERROR}`
+    const prompt = buildTerminalBuildWakePrompt({ run: run({ phase: 'failed', failure_reason: reason }), board_item_id: 'item' })
+    expect(prompt).not.toContain('To retry or resume a failed build')
+    expect(prompt).toContain('Do NOT relaunch this build yet')
+    expect(prompt).toContain('git worktree list --porcelain')
+    expect(prompt).toContain('inner_checkpoint')
+    expect(prompt).toContain(reason)
+    expect(prompt).toContain('Your tools EXECUTE')
+    expect(prompt).toContain('owns GitHub operations')
+    expect(prompt).toContain('Hand work back to the owner')
+  })
+  test('published failure reason rewrites instruction 2 and points at a review round', () => {
+    const reason = publishedFailureReason(`outer-published:${'a'.repeat(40)}:0:3`)
+    const prompt = buildTerminalBuildWakePrompt({ run: run({ phase: 'failed', failure_reason: reason }), board_item_id: 'item' })
+    expect(prompt).not.toContain('To retry or resume a failed build')
+    expect(prompt).toContain('Do NOT relaunch this build yet')
+    expect(prompt).toContain('REVIEW round')
+    expect(reason).toContain(FIRE_PUBLISHED_REASON_MARKER)
+  })
+  test('every other failure reason keeps instruction 2 byte-identical', () => {
+    const ORIGINAL_INSTRUCTION_2 =
+      '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'
+    for (const over of [
+      { phase: 'failed' as const, failure_reason: 'no progress for 90 min — suspected agent hang' },
+      { phase: 'done' as const, failure_reason: null },
+    ]) {
+      const prompt = buildTerminalBuildWakePrompt({ run: run(over), board_item_id: 'item' })
+      expect(prompt.split('\n')).toContain(ORIGINAL_INSTRUCTION_2)
+      expect(prompt).not.toContain('Do NOT relaunch this build yet')
+    }
   })
 })

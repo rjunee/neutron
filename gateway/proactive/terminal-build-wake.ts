@@ -1,6 +1,7 @@
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
+import { FIRE_PUBLISHED_REASON_MARKER, FIRE_SETTLE_TIMEOUT_ERROR } from '@neutronai/trident/fire-evidence.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../wiring/build-live-agent-turn.ts'
@@ -34,12 +35,24 @@ export function buildTerminalBuildWakePrompt(args: { run: TridentRun; board_item
     `Task title: ${run.task}`,
   ]
   if (run.failure_reason !== null) facts.push('Failure reason (verbatim):', run.failure_reason)
+  // A settle-timeout or published-marker failure_reason does NOT mean the build
+  // is dead: the launcher turn timed out or was cancelled, but the workflow it
+  // fired may still be running detached (observed: a worktree appeared and wrote
+  // a correct resume plan five minutes AFTER the timeout wrote this row), or the
+  // run may have already built, pushed and gone green with review simply never
+  // run. Inviting `work_board_start` here dispatches a SECOND lane onto a branch
+  // the first still holds. Resolve the branch holder before ever re-dispatching.
+  const reason = run.failure_reason ?? ''
+  const fireShape = reason.includes(FIRE_SETTLE_TIMEOUT_ERROR) || reason.includes(FIRE_PUBLISHED_REASON_MARKER)
+  const instruction2 = fireShape
+    ? '2. Do NOT relaunch this build yet. The launcher turn timed out, but the workflow it fired may still be running — or the work may already be built and published. Resolve the branch holder first: check `git worktree list --porcelain` for a worktree holding this branch and whether its lock names a live pid, read the `inner_checkpoint` on the run row, and check the PR state. If the failure reason above says the work was already built and published, verify the PR and dispatch a REVIEW round — never a rebuild. Re-dispatch with `work_board_start` ONLY once nothing live holds the branch and no published work exists.'
+    : '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'
   return [
     '[TERMINAL BUILD WAKE]',
     'Investigate this terminal build and act immediately; do not merely acknowledge it or wait for the owner.',
     '', ...facts, '', 'In THIS turn:',
     '1. Your tools EXECUTE — investigate with Read/Grep/Bash (run record, branch, repo state) and read/update the bound board item with the `work_board_list` / `work_board_update` tools.',
-    '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.',
+    instruction2,
     '3. Never push to GitHub or mutate remotes yourself (no `git push`, no `gh` mutations) — the outer loop owns GitHub operations.',
     "4. Hand work back to the owner only when no tool can advance it — then report what you measured and the single decision you need, never a bare 'reply to retry'.",
   ].join('\n')
