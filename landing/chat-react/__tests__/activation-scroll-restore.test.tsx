@@ -32,6 +32,11 @@
  * it 2 (must-pass sibling): a surface the user had DELIBERATELY scrolled back in
  *      returns to that exact position, not to the bottom — asserted both as an
  *      equality and as an explicit "this is not the bottom path" bound.
+ * it 3 (must-fail control for the unread anchor): a switch-back with a captured
+ *      unread badge anchors the FIRST UNREAD message at the top of the viewport,
+ *      outranking an at-bottom capture. It also proves the trap live: the
+ *      controller has already zeroed the live count by the time the surface
+ *      activates, so only the render-phase capture still knows it.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
@@ -353,6 +358,122 @@ describe('switching back into a kept-alive conversation restores its scroll posi
       // …and explicitly NOT the bottom, so this case can never be satisfied by the
       // bottom path that it 1 pins.
       expect(viewport.scrollTop).toBeLessThan(900)
+    } finally {
+      await act(async () => {
+        root.unmount()
+      })
+      container.remove()
+    }
+  }, 60_000)
+
+  it('a captured unread badge anchors the first unread message at the top', async () => {
+    const { controller, sinksByTopic } = await freshWorld()
+    const { container, root, act } = await mountApp(controller)
+    try {
+      // Visit alpha so its surface mounts and stays kept-alive.
+      await act(async () => {
+        controller.start()
+        controller.setProject('alpha')
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+      const surface = alphaSurface(container)
+      expect(surface.hasAttribute('hidden')).toBe(false)
+      expect(surface.querySelectorAll('.car-row').length).toBe(100)
+      const viewport = viewportOf(surface)
+      stubGeometry(viewport) // scrollHeight 1000 / clientHeight 100
+
+      // Rect stubs for the anchor math (happy-dom has no layout): 100 rows, 10px
+      // each — consistent with the 1000px scrollHeight. Instance-level, so no
+      // prototype surgery and no restore needed. Rows are the SAME elements on
+      // switch-back (the surface is kept alive, its content is unchanged).
+      viewport.getBoundingClientRect = () =>
+        ({
+          top: 0,
+          bottom: 100,
+          left: 0,
+          right: 100,
+          width: 100,
+          height: 100,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        }) as DOMRect
+      const rows = [...surface.querySelectorAll('.car-row')] as HTMLElement[]
+      rows.forEach((r, i) => {
+        r.getBoundingClientRect = () =>
+          ({
+            top: i * 10 - viewport.scrollTop,
+            bottom: i * 10 - viewport.scrollTop + 10,
+            left: 0,
+            right: 100,
+            width: 100,
+            height: 10,
+            x: 0,
+            y: i * 10 - viewport.scrollTop,
+            toJSON: () => ({}),
+          }) as DOMRect
+      })
+
+      // The user was following the tail (at-bottom capture) — pins that unread
+      // OUTRANKS an at-bottom capture, while a deliberate scroll-back (it 2) still wins.
+      await act(async () => {
+        viewport.scrollTop = 900
+        viewport.dispatchEvent(new Event('scroll'))
+      })
+
+      // Away to beta…
+      await act(async () => {
+        controller.setProject('beta')
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+      viewport.scrollTop = 0 // models the browser's display:none box teardown (see header)
+
+      // …and while away the server fans a badge: alpha has 30 unread. Delivered
+      // through the ACTIVE (beta) session's sinks — the controller ignores frames
+      // from inactive sessions.
+      await act(async () => {
+        sinksByTopic.get(topicFor('beta'))!.onFrame({
+          type: 'projects_changed',
+          projects: [
+            { id: 'alpha', label: 'Alpha', unread: 30 },
+            { id: 'beta', label: 'Beta' },
+          ],
+        })
+        await tick()
+      })
+      expect(controller.getViewModel().projects.find((p) => p.id === 'alpha')?.unread).toBe(30)
+
+      // Back into alpha.
+      await act(async () => {
+        controller.setProject('alpha')
+        await tick()
+        await tick()
+      })
+      await act(async () => {
+        await tick()
+        await tick()
+      })
+
+      // THE TRAP, proven live: setProject zeroed the badge synchronously, so any
+      // restore that reads the live count sees 0 and falls to bottom. Only the
+      // render-phase capture still knows 30.
+      expect(controller.getViewModel().projects.find((p) => p.id === 'alpha')?.unread ?? 0).toBe(0)
+      expect(alphaSurface(container).hasAttribute('hidden')).toBe(false)
+      // 30th-from-last of 100 rows = index 70 ('alpha message 270' — the window is
+      // messages 200..299); anchoring its top to the viewport top puts scrollTop at
+      // exactly 700. The unfixed code lands at the bottom (scrollTop 1000 unclamped).
+      expect(rows[70]!.textContent ?? '').toContain('alpha message 270')
+      expect(viewport.scrollTop).toBe(700)
     } finally {
       await act(async () => {
         root.unmount()

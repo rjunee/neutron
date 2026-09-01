@@ -40,6 +40,29 @@ browser's box teardown — without that last line the control would have passed 
 is not a `.car-row`, and the only new prop with churn lands on the un-memoized `ChatSurface` inside
 an already-re-rendering surface.
 
+The owner also asked for "at least the last unread message", so the restore now has a middle
+precedence: deliberate position → unread → bottom. The only unread signal on the client is the
+per-project badge COUNT (`ChatProject.unread`) — there is no per-message read watermark — and
+`controller.setProject` zeroes that count SYNCHRONOUSLY before it publishes the switch frame
+("viewing a project marks it read"), so the render that activates a surface already reads 0. A
+restore that reads the live count therefore always falls to the bottom. `ChatApp` closes that by
+capturing the counts in a render-phase `unreadRef` map on the frames where a conversation is NOT
+the active one, skipping the active convId so the switch frame cannot overwrite the pre-clear
+value — the same semantics as the rail's own `activeId === p.id ? 0` forcing, and the same
+sanctioned render-phase ref write the frozen-vm cache already uses. The ref (identity-stable, so
+the surface memo is untouched) and the surface's own convId thread down to
+`ViewportActivationRestore`, which on the activation edge prefers a deliberate scroll-back, then a
+captured `n ≥ 1`, then the bottom. Resolving `n` waits: while the runtime has not settled on the
+live windowed length it applies the bottom and stays armed, and at the first settled commit it
+anchors the n-th-from-last non-typing `.car-row` at the viewport top by rect delta, then clears the
+target so a later arrival can never yank a reader. An `n` outside `1..rows.length` — a stale or
+oversized badge — falls back to the bottom, which remains the floor. The third case in
+`activation-scroll-restore.test.tsx` pins it end to end, including the trap itself: it fans a
+`projects_changed` badge through the active session's sinks while the surface is away, then asserts
+the live count reads 0 after the switch back while the viewport still lands exactly on the
+30th-from-last row. It was red at the bottom (1000 against an expected 700) before the ChatApp
+change and green after.
+
 
 ## 2026-08-17 — a stale rollout is not evidence, and a healthy reading must be able to release a seat (#418)
 

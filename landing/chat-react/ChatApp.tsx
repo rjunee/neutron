@@ -995,6 +995,16 @@ const AT_BOTTOM_EPSILON_PX = 4
  * mounted content is unchanged; otherwise the bottom. A position over CHANGED content
  * is not restored — bottom instead, never an arbitrary offset.
  *
+ * PRECEDENCE: deliberate position → unread → bottom. A captured unread count `n`
+ * anchors the n-th-from-last non-typing `.car-row` at the viewport top, so the first
+ * unread message is the first thing read; it outranks an at-bottom capture (the user
+ * was following the tail, and the tail is exactly what they have not seen) but never
+ * a deliberate scroll-back. THE TRAP: `controller.setProject` zeroes a project's
+ * badge SYNCHRONOUSLY before publishing the switch frame, so by the activating render
+ * the live count is already 0 — the count must come from a capture taken on PRIOR
+ * frames. `ChatApp` keeps that in `unreadRef`, writing every project except the
+ * currently-active convId; this component only reads it.
+ *
  * The hidden sentinel span exists only to reach `.car-viewport` via `.closest()`, the
  * same trick `LoadOlderMessages` uses with its `btnRef`. It is not a `.car-row`, so it
  * does not disturb the transcript-window row counts.
@@ -1002,10 +1012,16 @@ const AT_BOTTOM_EPSILON_PX = 4
 function ViewportActivationRestore({
   active,
   windowLength,
+  convId,
+  unreadRef,
 }: {
   active: boolean
   /** Length of the LIVE windowed list this surface's runtime is converging to. */
   windowLength: number
+  /** This surface's own conversation id — the key into `unreadRef`. */
+  convId: string
+  /** Unread counts captured on frames where the conversation was NOT active. */
+  unreadRef: { current: Map<string, number> }
 }): React.JSX.Element {
   const markRef = useRef<HTMLElement | null>(null)
   const posRef = useRef<{ scrollTop: number; atBottom: boolean; count: number } | null>(null)
@@ -1016,7 +1032,10 @@ function ViewportActivationRestore({
   renderedCountRef.current = renderedCount
   const prevActiveRef = useRef(false)
   const pendingRef = useRef<
-    { kind: 'bottom' } | { kind: 'position'; scrollTop: number; count: number } | null
+    | { kind: 'bottom' }
+    | { kind: 'position'; scrollTop: number; count: number }
+    | { kind: 'unread'; n: number }
+    | null
   >(null)
 
   // THE RESTORE — layout effect (pre-paint, no visible jump). React removes the
@@ -1031,10 +1050,13 @@ function ViewportActivationRestore({
     }
     if (!wasActive) {
       const pos = posRef.current
+      const unread = unreadRef.current.get(convId) ?? 0
       pendingRef.current =
         pos !== null && !pos.atBottom
           ? { kind: 'position', scrollTop: pos.scrollTop, count: pos.count }
-          : { kind: 'bottom' }
+          : unread >= 1
+            ? { kind: 'unread', n: unread }
+            : { kind: 'bottom' }
     }
     const p = pendingRef.current
     if (p === null) return
@@ -1048,6 +1070,33 @@ function ViewportActivationRestore({
       // alternative (yanking to bottom on the settle commit) discards the place the
       // reader deliberately held.
       viewport.scrollTop = renderedCount === p.count ? p.scrollTop : viewport.scrollHeight
+      pendingRef.current = null
+      return
+    }
+    if (p.kind === 'unread') {
+      // The unread rows are, by the badge's own meaning, absent from a transcript
+      // the controller cached while this surface was away — so hold the BOTTOM until
+      // the runtime settles on the live windowed list, then anchor the n-th-from-last
+      // row so the first unread is the first thing read. Anchoring at the settle
+      // commit is right in both worlds: a stale badge means current content IS the
+      // truth, and the at-cap kept-alive path converges on the first unread as the
+      // trailing window drops as much height off the front as it appends behind the
+      // fixed scrollTop. Cold mounts can lose this race to assistant-ui's initial
+      // auto-scroll and degrade to bottom — the card's stated floor. Resolution
+      // CLEARS the target: a lingering one could yank a reader on a later arrival.
+      if (renderedCount !== windowLength || renderedCount === 0) {
+        viewport.scrollTop = viewport.scrollHeight
+        return // stay armed for the settle commit
+      }
+      const rows = [...viewport.querySelectorAll('.car-row')].filter(
+        (r) => r.querySelector('.car-typing') === null, // the typing row is not a message
+      )
+      const anchor = p.n >= 1 && p.n <= rows.length ? rows[rows.length - p.n] : undefined
+      if (anchor instanceof HTMLElement) {
+        viewport.scrollTop += anchor.getBoundingClientRect().top - viewport.getBoundingClientRect().top
+      } else {
+        viewport.scrollTop = viewport.scrollHeight // n outside 1..rows.length → bottom
+      }
       pendingRef.current = null
       return
     }
@@ -2060,6 +2109,7 @@ function ChatSurface({
   uploadAffordance,
   active,
   windowLength,
+  unreadRef,
   olderHiddenCount,
   onLoadOlder,
   showPane,
@@ -2079,6 +2129,9 @@ function ChatSurface({
   /** `windowedMessages.length` — the rendered length this surface's runtime is
    *  converging to (see {@link ViewportActivationRestore}). */
   windowLength: number
+  /** Per-conversation unread counts captured before the controller cleared them
+   *  (see {@link ViewportActivationRestore}). Identity-stable. */
+  unreadRef: { current: Map<string, number> }
   /** How many of this conversation's messages are OUTSIDE the mounted transcript
    *  window (see {@link TRANSCRIPT_WINDOW_MESSAGES}); 0 hides the control. */
   olderHiddenCount: number
@@ -2288,7 +2341,12 @@ function ChatSurface({
         <div className="car-chatstage">
         <div className="car-chatmain">
         <ThreadPrimitive.Viewport className="car-viewport">
-          <ViewportActivationRestore active={active} windowLength={windowLength} />
+          <ViewportActivationRestore
+            active={active}
+            windowLength={windowLength}
+            convId={conversationIdOf(vm.projectId)}
+            unreadRef={unreadRef}
+          />
           <LoadOlderMessages hiddenCount={olderHiddenCount} onLoadOlder={onLoadOlder} />
           <ThreadPrimitive.Empty>
             {config.onboardingActive && vm.projectId === null ? (
@@ -2469,6 +2527,7 @@ const HYDRATION_GRACE_MS = 600
 function MountedConversationImpl({
   hostVm,
   active,
+  unreadRef,
   controller,
   config,
   draft,
@@ -2481,6 +2540,10 @@ function MountedConversationImpl({
 }: {
   hostVm: ChatViewModel
   active: boolean
+  /** Per-conversation unread counts captured BEFORE the controller cleared them
+   *  (see {@link ViewportActivationRestore}). Identity-stable, so it never busts
+   *  {@link MountedConversation}'s memo. */
+  unreadRef: { current: Map<string, number> }
   controller: NeutronChatController
   config: BootstrapConfig
   draft: AttachmentDraft
@@ -2623,6 +2686,7 @@ function MountedConversationImpl({
           uploadAffordance={uploadAffordance}
           active={active}
           windowLength={windowedMessages.length}
+          unreadRef={unreadRef}
           olderHiddenCount={olderHiddenCount}
           onLoadOlder={onLoadOlder}
           // W7 — the pane stays MOUNTED for the WHOLE life of this kept-alive
@@ -2725,6 +2789,20 @@ export function ChatApp({
   // scrollTop — so it is captured and restored explicitly on re-activation (see
   // ViewportActivationRestore).
   const convId = conversationIdOf(vm.projectId)
+
+  // UNREAD CAPTURE for ViewportActivationRestore. The controller ZEROES a
+  // project's badge synchronously inside setProject — BEFORE publishing the
+  // switch frame ("VIEWING a project marks it read") — so the render that
+  // activates a surface already reads 0. Capture every project's count on the
+  // frames where it is NOT the active conversation, and SKIP the active convId so
+  // the switch frame cannot overwrite the pre-clear value (the same semantics as
+  // the rail's `activeId === p.id ? 0` forcing). Render-phase ref write — the
+  // sanctioned pattern `cacheRef` below already uses (idempotent, StrictMode-safe).
+  const unreadRef = useRef<Map<string, number>>(new Map())
+  for (const p of vm.projects) {
+    const cid = conversationIdOf(p.id)
+    if (cid !== convId) unreadRef.current.set(cid, p.unread ?? 0)
+  }
 
   // REF-STABILIZED CALLBACKS. Every mounted surface takes these as props, and
   // `MountedConversation` is memoized — so a caller that passes an inline arrow (as
@@ -2840,6 +2918,7 @@ export function ChatApp({
             key={`${id}#${epochRef.current.get(id) ?? 0}`}
             hostVm={hostVm}
             active={active}
+            unreadRef={unreadRef}
             controller={controller}
             config={config}
             draft={draft}
