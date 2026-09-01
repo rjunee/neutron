@@ -1965,6 +1965,11 @@ function loadSeverityGate(): {
     report: unknown,
     scope?: string,
   ) => Array<{ severity: string; title: string; evidence: string; advisory?: unknown }>
+  withSuiteBlocker: (
+    s: unknown,
+    suite: unknown[],
+  ) => { verdict?: string; blockKind?: string; findings: unknown[] }
+  stripAdvisoryMarkers: (s: unknown) => { findings?: unknown[] } | null
 } {
   const grabConstLine = (name: string): string => {
     const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
@@ -1984,7 +1989,12 @@ function loadSeverityGate(): {
       // non-empty value so the real body runs.
       "const testStrategy = 'full'",
       grabFunction('fullSuiteFindings'),
-      'return { enforceSeverityGate, isNonBlockingFinding, classifyBlock, fullSuiteFindings }',
+      grabFunction('stripAdvisoryMarkers'),
+      grabFunction('normalizeVerdict'),
+      grabFunction('suiteFindingsBlock'),
+      grabFunction('withSuiteBlocker'),
+      'return { enforceSeverityGate, isNonBlockingFinding, classifyBlock, fullSuiteFindings,' +
+        ' stripAdvisoryMarkers, withSuiteBlocker }',
     ].join('\n'),
   )() as ReturnType<typeof loadSeverityGate>
 }
@@ -2126,5 +2136,160 @@ describe('inner-workflow.mjs — a finding declared non-blocking may not cost a 
       'APPROVE',
     )
     expect(enforceSeverityGate(null)).toBeNull()
+  })
+})
+
+// THE ROUND TAX IS PAID AT THE EMPTY-FINDINGS SEAM, not at the severity gate.
+//
+// MEASURED 2026-09-01 over code_trident_runs: 15 rows are REQUEST_CHANGES whose ONLY
+// stored finding is the pre-existing-red suite finding, 8 of them at a fix-round
+// checkpoint. Every one carries `fullSuiteFindings`' byte-identical title AND its literal
+// "THE BUILD'S OWN TRANSCRIPTION (untrusted -- verify it)" string, which proves the stored
+// finding is `withSuiteBlocker`'s PREPENDED COPY and not a model paraphrase -- i.e. the
+// panel returned REQUEST_CHANGES with findings: [].
+//
+// That route walks past both gates by construction: `enforceSeverityGate` returns early on
+// an empty list (deliberately -- a rejection with no stated reason is malformed, not
+// benign), `classifyBlock` returns 'code' unconditionally when no peer deferred, and
+// `withSuiteBlocker` then prepends the advisory finding WITHOUT forcing anything. The fix
+// loop sees REQUEST_CHANGES + 'code' and re-Forges against a findings list whose only
+// entry this file has already declared advisory.
+//
+// The fix re-derives `blockKind` over the MERGED list, at the seam where that list first
+// exists. It never manufactures an APPROVE.
+describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix round', () => {
+  const load = (): ReturnType<typeof loadSeverityGate> => loadSeverityGate()
+
+  const preexisting = (): Record<string, unknown> => {
+    const { fullSuiteFindings } = load()
+    const [f] = fullSuiteFindings({
+      testsPassed: false,
+      suiteOutcome: 'failed-preexisting',
+      suiteEvidence:
+        'ran at base: 3 fail | trident/x.test.ts, trident/y.test.ts fail identically without this diff',
+    })
+    if (f === undefined) throw new Error('fullSuiteFindings produced no finding')
+    return f as unknown as Record<string, unknown>
+  }
+
+  // MUST-PASS control for the extraction itself: the fixture has to be the REAL
+  // advisory finding, or every assertion below is testing a hand-written object.
+  test('the fixture is the shipped advisory finding, not a hand-rolled one', () => {
+    const f = preexisting()
+    expect(f.advisory).toBe(true)
+    expect(f.severity).toBe('major')
+    expect(String(f.title)).toContain('FULL SUITE RED FOR PRE-EXISTING REASONS')
+    expect(typeof load().withSuiteBlocker).toBe('function')
+    expect(typeof load().stripAdvisoryMarkers).toBe('function')
+  })
+
+  // THE DEFECT, exactly as measured.
+  test('a findings-free REQUEST_CHANGES + an advisory suite finding exits instead of re-forging', () => {
+    const { withSuiteBlocker } = load()
+    const out = withSuiteBlocker({ verdict: 'REQUEST_CHANGES', blockKind: 'code', findings: [] }, [
+      preexisting(),
+    ])
+    // The loop condition is `verdict === 'REQUEST_CHANGES' && blockKind !== 'infra-only'`.
+    expect(out.blockKind).toBe('infra-only')
+    // ...and the rejection is NOT laundered into an approval.
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    // The finding still rides along, so `infraTerminalCause` can name the stop.
+    expect(out.findings.length).toBe(1)
+  })
+
+  // MUST-FAIL control 1: the panel stated a reason of its own. That reason is the
+  // round's work and has already been judged by the two gates upstream; nothing at
+  // this seam may reclassify it.
+  test('a real panel finding still buys the round, even beside an advisory one', () => {
+    const { withSuiteBlocker } = load()
+    const out = withSuiteBlocker(
+      {
+        verdict: 'REQUEST_CHANGES',
+        blockKind: 'code',
+        findings: [{ severity: 'blocker', title: 'unsafe exec of untrusted input' }],
+      },
+      [preexisting()],
+    )
+    expect(out.blockKind).toBe('code')
+    expect(out.findings.length).toBe(2)
+  })
+
+  // MUST-FAIL control 2: an UNEARNED pre-existing claim is a `blocker` sibling with no
+  // marker. It must still force REQUEST_CHANGES + 'code' -- the hatch is earned by
+  // evidence, and this change may not widen it.
+  test('an unproven suite claim still forces a code round', () => {
+    const { withSuiteBlocker, fullSuiteFindings } = load()
+    const unproven = fullSuiteFindings({
+      testsPassed: false,
+      suiteOutcome: 'failed-preexisting',
+      suiteEvidence: '',
+    })
+    expect(unproven.every((f) => f.severity === 'blocker')).toBe(true)
+    expect(unproven.some((f) => f.advisory === true)).toBe(false)
+    const out = withSuiteBlocker({ verdict: 'APPROVE', findings: [] }, unproven)
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    expect(out.blockKind).toBe('code')
+  })
+
+  // MUST-FAIL control 3: an APPROVE is never touched, and an empty suite list leaves
+  // the synthesis byte-identical (the healthy-round path).
+  test('an approving round and a suite-free round are unchanged', () => {
+    const { withSuiteBlocker } = load()
+    expect(withSuiteBlocker({ verdict: 'APPROVE', findings: [] }, [preexisting()]).blockKind).toBeUndefined()
+    const healthy = { verdict: 'REQUEST_CHANGES', blockKind: 'code', findings: [] }
+    expect(withSuiteBlocker(healthy, [])).toBe(healthy)
+  })
+
+  // THE MODEL-BYPASS HOLE. `advisory: true` outranks every severity, and the advisory
+  // finding is quoted verbatim INTO the synthesis prompt -- so a model that copies the
+  // shape back would hand itself a merge-anything hatch. The marker is a workflow fact,
+  // so it is stripped from model JSON before either gate reads it.
+  test('a model-supplied advisory marker is stripped and the finding still blocks', () => {
+    const { stripAdvisoryMarkers, enforceSeverityGate, isNonBlockingFinding } = load()
+    const modelJson = {
+      verdict: 'REQUEST_CHANGES',
+      findings: [{ severity: 'blocker', title: 'sql injection in the migration path', advisory: true }],
+    }
+    // Unstripped, the marker would have walked it straight through the gate.
+    expect(isNonBlockingFinding(modelJson.findings[0])).toBe(true)
+    const stripped = stripAdvisoryMarkers(modelJson)
+    const f = (stripped?.findings ?? [])[0] as Record<string, unknown>
+    expect(Object.hasOwn(f, 'advisory')).toBe(false)
+    expect(f.severity).toBe('blocker')
+    expect(isNonBlockingFinding(f)).toBe(false)
+    expect(enforceSeverityGate(stripped)?.verdict).toBe('REQUEST_CHANGES')
+  })
+
+  // ...and stripping may not cost the model the judgement it IS allowed to make.
+  test('stripping leaves model-judged severity alone', () => {
+    const { stripAdvisoryMarkers, enforceSeverityGate } = load()
+    const stripped = stripAdvisoryMarkers({
+      verdict: 'REQUEST_CHANGES',
+      findings: [{ severity: 'nit', title: 'rename the variable', advisory: true }],
+    })
+    expect(enforceSeverityGate(stripped)?.verdict).toBe('APPROVE')
+  })
+
+  // A synthesis with no findings array (a dead seat) must survive the strip untouched --
+  // `synthesisOrInfraBlock` downstream is what handles it, and a rewrite here would hide it.
+  test('stripping is identity when there is nothing to strip', () => {
+    const { stripAdvisoryMarkers } = load()
+    const clean = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'blocker' }] }
+    expect(stripAdvisoryMarkers(clean)).toBe(clean)
+    const dead = { verdict: 'REQUEST_CHANGES' }
+    expect(stripAdvisoryMarkers(dead)).toBe(dead)
+    expect(stripAdvisoryMarkers(null)).toBeNull()
+  })
+
+  // THE SEAM IS WIRED. A gate no production path calls is a test that passes and a
+  // defect that ships (measured, repeatedly, on this repo).
+  test('the strip is applied to the synthesis seat output in the shipped source', () => {
+    // The strip happens at the BINDING of `synthesisRaw` (the source-order invariant
+    // test upstream pins `enforceSeverityGate(synthesisRaw)` as a literal), so the
+    // wiring to assert is that the name is bound THROUGH the strip, before the gate.
+    const bound = SRC.indexOf('const synthesisRaw = stripAdvisoryMarkers(')
+    const gated = SRC.indexOf('const severityGated = enforceSeverityGate(synthesisRaw)')
+    expect(bound).toBeGreaterThan(-1)
+    expect(gated).toBeGreaterThan(bound)
   })
 })

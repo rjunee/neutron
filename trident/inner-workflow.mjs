@@ -2522,6 +2522,39 @@ function isNonBlockingFinding(f) {
   return NON_BLOCKING_SEVERITIES.has(f.severity)
 }
 
+/**
+ * THE ADVISORY MARKER IS A WORKFLOW FACT, NOT A REVIEWER OPINION — so it is stripped
+ * from every model-supplied finding before either gate reads it.
+ *
+ * `isNonBlockingFinding` gives `advisory: true` more power than any severity: it is the
+ * ONE key that makes a `blocker` non-blocking. That is safe only while the key is set in
+ * THIS FILE, by code that already knows the answer (`fullSuiteFindings` sets it on the
+ * `failed-preexisting` entry and deliberately not on its `blocker` siblings). The
+ * synthesis seat returns model-authored JSON, and the suite finding — marker and all —
+ * is quoted INTO its prompt, so a model that copies the shape back would hand itself a
+ * merge-anything hatch. `VERDICT_SCHEMA` is not a defence: an unknown key that survives
+ * parsing is exactly the key we are worried about.
+ *
+ * Stripping, not rejecting: a model finding that also happens to be a nit is still
+ * carried by `NON_BLOCKING_SEVERITIES`, which is severity the model is SUPPOSED to
+ * judge. All this removes is the one field it has no standing to set. Fail-closed —
+ * the marker's absence can only make a finding block.
+ */
+function stripAdvisoryMarkers(synthesis) {
+  const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : null
+  if (!findings) return synthesis
+  const marked = (f) => f && typeof f === 'object' && Object.hasOwn(f, ADVISORY_FINDING_KEY)
+  if (!findings.some(marked)) return synthesis
+  return {
+    ...synthesis,
+    findings: findings.map((f) => {
+      if (!marked(f)) return f
+      const { [ADVISORY_FINDING_KEY]: _modelSupplied, ...rest } = f
+      return rest
+    }),
+  }
+}
+
 // DID THIS FIELD ACTUALLY ANSWER? Returns the status STRING, or '' for anything that
 // is not one — the single notion of "answered" shared by the lane retry and the
 // completeness gate.
@@ -4980,8 +5013,29 @@ function withSuiteBlocker(synthesis, suiteFindings) {
   if (!Array.isArray(suiteFindings) || suiteFindings.length === 0) return synthesis
   const panelFindings = Array.isArray(synthesis?.findings) ? synthesis.findings : []
   const findings = [...suiteFindings, ...panelFindings]
-  if (!suiteFindingsBlock(suiteFindings)) return { ...synthesis, findings }
-  return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings }
+  if (suiteFindingsBlock(suiteFindings)) {
+    return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings }
+  }
+  const merged = { ...synthesis, findings }
+  if (normalizeVerdict(merged.verdict) !== 'REQUEST_CHANGES') return merged
+  // The panel stated a reason of its own -> that reason is the round's work, and the
+  // two gates upstream have ALREADY judged it. Nothing here may second-guess them.
+  if (panelFindings.length > 0) return merged
+  // MEASURED 2026-09-01, 15 rows in code_trident_runs: a REQUEST_CHANGES whose findings
+  // list is EMPTY, merged with an advisory pre-existing-red suite finding, re-Forged a
+  // full round. The round had nothing to act on: the only text the fix prompt could show
+  // Forge was the advisory finding this file has already declared does not block, so the
+  // round could only re-derive "the red predates the branch" and pay five reviewers again.
+  //
+  // The verdict is NOT downgraded. This file's rule stands — a REQUEST_CHANGES carrying
+  // no findings is malformed, not benign, and a review we did not get is not an approval.
+  // What changes is only `blockKind`: 'infra-only' EXITS the fix loop instead of
+  // re-Forging, which is the classification the loop already documents for "the gate
+  // refuses to APPROVE but there is no code-side action". `infraTerminalCause` reads the
+  // merged list, so the stop is reported with the suite finding's own title rather than
+  // silently.
+  if (!findings.every((f) => isNonBlockingFinding(f))) return merged
+  return { ...merged, blockKind: 'infra-only' }
 }
 
 async function runReviewRound(diffFile, round, prForReview, paidReview = null, suiteFindings = []) {
@@ -5585,15 +5639,24 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
   // nothing is. An exhausted retry still yields no verdict, and `synthesisOrInfraBlock`
   // at the call site turns that into the infra block — a retry never turns into an
   // APPROVE, and never into a throw.
-  const synthesisRaw = (
-    await retryDeferredPeers({
-      verdicts: [await seatAttempt('argus:synthesis', runSynthesis)],
-      slots: [{ name: 'argus:synthesis', slot: 0, statusKey: 'verdict' }],
-      attempts: LANE_RETRY_ATTEMPTS,
-      log,
-      invoke: runSynthesis,
-    })
-  )[0]
+  //
+  // THE ADVISORY MARKER IS STRIPPED AT THIS BINDING, not at the severity gate below, so
+  // that no unstripped copy of the model's JSON exists for any later reader to pick up by
+  // mistake. See `stripAdvisoryMarkers` for why that one key is not the model's to set.
+  // (Deliberately NOT quoting the gate's call expression here: the source-order invariant
+  // test greps the source for it, and an earlier match in prose would anchor that guard on
+  // a comment instead of on the call.)
+  const synthesisRaw = stripAdvisoryMarkers(
+    (
+      await retryDeferredPeers({
+        verdicts: [await seatAttempt('argus:synthesis', runSynthesis)],
+        slots: [{ name: 'argus:synthesis', slot: 0, statusKey: 'verdict' }],
+        attempts: LANE_RETRY_ATTEMPTS,
+        log,
+        invoke: runSynthesis,
+      })
+    )[0],
+  )
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
   // A NIT MAY NOT COST A ROUND — applied FIRST, so both gates below can re-block

@@ -90,9 +90,14 @@ function extractConst(name: string): string {
 // predicate, and `retryDeferredPeers` closes over it. Restating it here would let the
 // retry and the completeness gate drift apart with this file still green — the very
 // divergence the const exists to close.
+// `isNonBlockingFinding` is the SINGLE predicate both gates now ask, so it comes along
+// for exactly the reason the severity set does: `classifyBlock` delegates to it, and a
+// local re-implementation would keep this file green through a change to the real one.
 const PRELUDE = [
   extractConst('LANE_FINDING_KIND'),
   extractConst('NON_BLOCKING_SEVERITIES'),
+  extractConst('ADVISORY_FINDING_KEY'),
+  extractFn('isNonBlockingFinding'),
   extractConst('usableStatus'),
   extractConst('CORE_SEAT_STATUS_KEY'),
 ].join('\n')

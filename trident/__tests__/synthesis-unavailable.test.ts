@@ -101,6 +101,8 @@ const real = new Function(
   'log',
   `
   ${grabConst('NON_BLOCKING_SEVERITIES')}
+  ${grabConst('ADVISORY_FINDING_KEY')}
+  ${grabFn('isNonBlockingFinding')}
   ${grabConst('LANE_FINDING_KIND')}
   ${grabConst('usableStatus')}
   ${grabFn('errText')}
