@@ -465,3 +465,43 @@ the launch; the union member that carries `hold` is the QUEUED refusal, so `'hol
 90-minute no-advance reaper, which runs BEFORE it, and the comment claiming the 2 h ceiling
 does too was wrong and is corrected. `STAGE_ALTERNATIVES` became a `Map`, so a prototype key
 is structurally unreachable instead of unreachable-by-caller.
+
+### Round 17 (2026-09-02) — Argus APPROVED; the round exists only to nominate the mutation the prover asked for
+
+The review stood. Run `b5c5b38e` reached verdict APPROVE at reviewed head `d97e4bce`
+(blockKind `none`, remainingTasks 0), and the run was refused afterwards by ONE gate and one
+gate only: the post-APPROVE mutation prover, with "mutation proof required but the build
+nominated no mutation to run" — the forge output's `mutationClaim` was null. An approved build
+that cannot name a mutation is a build whose tests nobody has watched fail, so the gate is
+right to refuse; the missing thing was the nomination, not the code.
+
+ZERO SOURCE CHANGES THIS ROUND, by design. The three doc paths in this commit are the whole
+diff: this file, `IMPLEMENTATION_PLAN.md`, and the byte-identical `.trident/plans` copy.
+`docs/AS_BUILT.md` stays untouched (one-writer rule). The 14 recorded Argus findings are all
+major/minor/nit on an approved round — notes, not work — and the salvage tag
+`trident-salvage/b5c5b38e-…` (= `d56dc1d7`, +302/−688) stays unadopted: it would delete the
+`trident/store.test.ts` "ARGUS r7 (BLOCKER)" regression block, and the tag preserves it anyway.
+
+THE NOMINATION, RE-PROVEN LOCALLY BEFORE IT WAS EMITTED. At this head the find-string
+`if (published !== null && Number(published[2]) === 0) {` occurs in `trident/fire-evidence.ts`
+EXACTLY ONCE (checked: `occurrences=1`) — an ambiguous find is refused by `validateClaim`, and
+the line moves whenever `classifyFireTimeoutRow` is edited, so uniqueness is re-checked at the
+head that emits the claim rather than trusted from the last round. Replacing it with
+`if (false) {` and running the two commands the prover will run gave, in this worktree:
+
+    mutated   guard    bun test trident/fire-evidence.test.ts   exit 1   — 22 pass / 7 fail
+    mutated   control  bun test trident/liveness.test.ts        exit 0   —  8 pass / 0 fail
+    restored  (git checkout -- trident/fire-evidence.ts)        git status --porcelain empty
+    restored  guard    bun test trident/fire-evidence.test.ts   exit 0   — 29 pass / 0 fail
+
+That is the whole shape of a proof: the guard reddens when the behaviour is removed, the
+control does not, so the guard is specific to the evidence gate this card built rather than to
+the module loading at all. The mutated file never reaches a commit — it is applied, observed,
+and reverted before any doc is written, and the empty porcelain above is the check that says so.
+
+The behaviour under the knife is requirement 1's cheapest evidence: the outer-published branch
+of `classifyFireTimeoutRow`, which reads the run's OWN `inner_checkpoint` and refuses to write
+`failed` over a row that says `outer-published:<sha>:0:<round>`. It needs no filesystem probe,
+it is the first check in the evidence list for exactly that reason, and it is the arm that
+would have saved runs `74dc3e77` and `8c88c96c` — both built, pushed and CI-green when the
+timeout called them failures.
