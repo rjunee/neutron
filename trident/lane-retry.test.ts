@@ -353,17 +353,26 @@ describe('the fix loop honours the classification', () => {
    * A resume off a recorded REQUEST_CHANGES used to assert `blockKind: 'code'` over the
    * recorded findings unconditionally — so a checkpoint written by an advisory-only round
    * (nits, or a red that predates the branch) bought the full fix round at resume that the
-   * round itself had already refused to buy. Same predicate as `classifyBlock`, so the two
-   * cannot drift.
+   * round itself had already refused to buy. The shortcut is now RESERVED for recorded
+   * code work, gated by the classifier's own predicate so the two cannot drift — and the
+   * non-code case may not fabricate the recorded 'advisory-only' result either: that
+   * replayed the terminal hold forever (`runReviewRound` returns a paid review untouched
+   * and the loop exits on 'advisory-only'), so a red that became green could never be
+   * observed. It re-reviews instead. This is a WIRING pin only; the behaviour is
+   * EXECUTED against the real workflow body in inner-workflow-resume.test.ts
+   * ("ONLY advisory findings → RE-REVIEW").
    */
-  test('a resume on non-actionable findings does not assert code work', () => {
+  test('a resume on non-actionable findings does not assert code work — and does not replay the hold', () => {
     const at = SRC.indexOf('const paidReview = {')
     expect(at).toBeGreaterThan(-1)
     const block = SRC.slice(at, SRC.indexOf('\n  }', at))
-    expect(block).toContain("blockKind: resumeHasCodeWork ? 'code' : 'advisory-only'")
-    // The predicate is the classifier's own, not a second opinion about severity.
+    // The paid shortcut asserts code work ONLY — never a fabricated advisory-only result.
+    expect(block).toContain("blockKind: 'code'")
+    expect(block).not.toContain('advisory-only')
+    // The gate is the classifier's own predicate, not a second opinion about severity.
     const derived = SRC.slice(SRC.indexOf('const resumeHasCodeWork ='), at)
     expect(derived).toContain('isNonBlockingFinding')
+    expect(derived).toContain("resumeMode === 'fix'")
   })
 
   test('the retry runs BEFORE the verdicts are read', () => {

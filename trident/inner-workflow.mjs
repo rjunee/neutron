@@ -6961,36 +6961,53 @@ ${task}${reflectionGuidance}`,
   }
 
   // First review + synthesis — UNLESS this is a resume whose recorded
-  // REQUEST_CHANGES verdict is about exactly the commit in front of us. Then the
-  // panel has already judged this code and said what is wrong with it; re-running
-  // it would buy the same four verdicts a second time, which is precisely the
-  // waste a mid-loop resume exists to stop. Seed the loop with the RECORDED
-  // findings instead and go straight to the fix round.
+  // REQUEST_CHANGES verdict is about exactly the commit in front of us AND
+  // carries code work. Then the panel has already judged this code and said what
+  // is wrong with it; re-running it would buy the same four verdicts a second
+  // time, which is precisely the waste a mid-loop resume exists to stop. Seed
+  // the loop with the RECORDED findings instead and go straight to the fix round.
   //
-  // This shortcut can only ever produce REQUEST_CHANGES, so it cannot ship
+  // The shortcut can only ever produce REQUEST_CHANGES, so it cannot ship
   // anything: the fix round that follows re-reviews its own new head before any
-  // APPROVE is possible.
+  // APPROVE is possible. A resume whose recorded findings are ALL non-blocking
+  // takes the real review path below instead — the only APPROVE it can produce
+  // is one a fresh, complete panel just gave to this exact head.
   let synthesis
   // THE FULL-SUITE GATE'S ROUND-1 FINDINGS: this process's own build report when it
   // built, and otherwise the claim the building process recorded on the checkpoint this
   // run resumed from. Exactly one of the two can be non-empty.
   const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport, buildSuiteScope)
-  if (resumeMode === 'fix') {
+  // THE PAID-REVIEW SHORTCUT IS FOR RECORDED CODE WORK ONLY. A checkpoint written by an
+  // advisory-only round carries findings this file has ALREADY declared non-blocking, and
+  // asserting 'code' over them re-Forged a full round on them at resume — undoing the
+  // exit the round itself had earned. Same predicate as `classifyBlock`, so the two
+  // cannot drift.
+  //
+  // AND THE NON-CODE CASE MAY NOT REPLAY THE HOLD (run 4f28c9e0 round 4 — the review the
+  // watchdog reaped). Fabricating the recorded 'advisory-only' result here was a
+  // LIVELOCK: `runReviewRound` returns a paid review untouched — no CI probe, no
+  // reviewer — and the fix loop exits on 'advisory-only', so a rerun on the same head
+  // replayed the terminal hold forever and could never observe a red that had become
+  // green. Those findings are stale MEASUREMENTS (a CI red that predates the branch),
+  // not review debt, so they are re-measured: fall through to the ordinary round-1
+  // review below — CI re-probed, panel re-run, checkpoint re-recorded. That costs one
+  // panel, exactly what a fresh run at this head would pay, and the advisory economy is
+  // intact: the loop still exits on 'advisory-only', so no Forge fix round runs unless
+  // the FRESH round states code work.
+  const resumeHasCodeWork = resumeMode === 'fix' && resumeFindingsList.some((f) => !isNonBlockingFinding(f))
+  if (resumeHasCodeWork) {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
-    // 'code' ONLY IF THERE IS CODE WORK IN THE RECORDED LIST. A checkpoint written by an
-    // advisory-only round carries findings this file has ALREADY declared non-blocking, and
-    // asserting 'code' over them re-Forged a full round on them at resume — undoing the
-    // exit the round itself had earned. Same predicate as `classifyBlock`, so the two
-    // cannot drift.
-    const resumeHasCodeWork = resumeFindingsList.some((f) => !isNonBlockingFinding(f))
     const paidReview = {
       verdict: 'REQUEST_CHANGES',
       findings: resumeFindingsList,
-      blockKind: resumeHasCodeWork ? 'code' : 'advisory-only',
+      blockKind: 'code',
     }
     synthesis = await runReviewRound(diffFile, round, pr, paidReview)
     finalVerdict = 'REQUEST_CHANGES'
   } else {
+    if (resumeMode === 'fix') {
+      log(`trident-v2 resume: recorded REQUEST_CHANGES at ${recordedResumeHead} (head unchanged) carries no code work — re-probing CI and re-reviewing instead of replaying the hold`)
+    }
     // THE GATE RIDES ON TOP OF THE PANEL'S VERDICT — see `withSuiteBlocker`. The panel
     // is still worth its cost (its findings are the next round's input); what it may not
     // do is APPROVE a commit whose required suite was never proven. Wrapped around the

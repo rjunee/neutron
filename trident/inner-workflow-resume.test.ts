@@ -43,6 +43,16 @@ const RECORDED_FINDINGS = [
   { severity: 'blocker', title: 'RECORDED — null deref in parseWidget', evidence: 'widget.ts:42' },
 ]
 
+/** The shape an advisory-only round records: workflow-stamped, all non-blocking. */
+const ADVISORY_ONLY_FINDINGS = [
+  {
+    severity: 'major',
+    advisory: true,
+    title: 'CI CHECK RED ON THIS PR AND AT THE BASE — pre-existing at the base',
+    evidence: 'shard 3/8 fails identically at the base commit; the excuse holds the merge, it does not force a round',
+  },
+]
+
 interface RunOut {
   labels: string[]
   prompts: Array<{ label: string; prompt: string }>
@@ -260,6 +270,56 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     // …and the APPROVE is pinned to the FIXED commit, never the resumed one.
     expect(out.result.reviewedHead).toBe(FIX_SHA(2))
     expect(out.result.reviewedHead).not.toBe(RECORDED)
+  })
+
+  /**
+   * THE ADVISORY-ONLY HOLD IS A MEASUREMENT, NOT REVIEW DEBT — SO A RESUME RE-MEASURES.
+   *
+   * Run 4f28c9e0's round-4 review (reaped by the watchdog; preserved in the relaunch
+   * dispatch) reproduced a livelock: a recorded REQUEST_CHANGES whose findings were all
+   * non-blocking was rebuilt at resume as a paid 'advisory-only' review, `runReviewRound`
+   * returned it untouched (no CI probe, no reviewer), and the fix loop exits on
+   * 'advisory-only' — so the terminal hold replayed forever and a red that had become
+   * green could never be observed. These two tests EXECUTE the boundary; both were red
+   * against the unfixed seam.
+   */
+  test("'argus-request-changes-round-2' + unchanged head + ONLY advisory findings → RE-REVIEW, and a now-green world reaches a verdict", async () => {
+    const out = await runResume({
+      checkpoint: 'argus-request-changes-round-2',
+      recordedHead: RECORDED,
+      findings: ADVISORY_ONLY_FINDINGS,
+      verdicts: ['APPROVE'],
+    })
+    // The build stays skipped (the head is unchanged) and the diff is regenerated…
+    expect(built(out.labels)).toBe(false)
+    expect(out.labels).toContain('resume-diff')
+    // …but the hold is NOT replayed: the panel actually runs, exactly once.
+    expect(out.labels.filter((l) => l === 'argus:claude')).toHaveLength(1)
+    // No Forge round is bought on the stale advisories — the economy 17c72201 bought.
+    expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
+    // The run reaches a verdict instead of replaying REQUEST_CHANGES forever…
+    expect(out.result.verdict).toBe('APPROVE')
+    expect(out.labels).toContain('checkpoint:argus-approved')
+    // …pinned to the commit the panel just re-read: the recorded, unchanged head.
+    expect(out.result.reviewedHead).toBe(RECORDED)
+  })
+
+  test('a re-probed advisory hold that is STILL rejected feeds the fix round the FRESH findings, never the stale advisories', async () => {
+    const out = await runResume({
+      checkpoint: 'argus-request-changes-round-2',
+      recordedHead: RECORDED,
+      findings: ADVISORY_ONLY_FINDINGS,
+      verdicts: ['REQUEST_CHANGES', 'APPROVE'],
+    })
+    expect(built(out.labels)).toBe(false)
+    // The fresh panel stated real code work, so the loop buys the round it names —
+    // round 3, because round 2 was inherited from the checkpoint.
+    expect(out.labels).toContain('forge:fix-round-3')
+    const fixPrompt = promptFor(out, 'forge:fix-round-3')
+    expect(fixPrompt).toContain('FRESH — still broken')
+    expect(fixPrompt).not.toContain('pre-existing at the base')
+    expect(out.result.verdict).toBe('APPROVE')
+    expect(out.result.reviewedHead).toBe(FIX_SHA(3))
   })
 
   test("'fix-round-7' + unchanged head → review it, and INHERIT the spent round budget", async () => {
