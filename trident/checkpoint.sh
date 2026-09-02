@@ -51,7 +51,7 @@
 #
 # BOTH `*_file` FIELDS ARE READ ONCE, in bash (`read_file_literal`), rather than
 # through `readfile()` in the SQL: `readfile()` is re-evaluated at every mention,
-# and the verdict CASE mentions the findings five times.
+# and the verdict CASE mentions the findings nine times.
 #
 # Every value above is wrapped in `frozen()` when it targets one of the two
 # LIVENESS columns — see the block above the field loop for what that means.
@@ -118,9 +118,10 @@ sql_quote() {
 # AS TEXT)` appearing more than once in a single statement (Argus r8 blocker).
 #
 # `readfile()` is a FUNCTION, not a value: SQLite re-evaluates it at every
-# occurrence, and the verdict CASE below mentions the findings expression five
-# times (once for the column, four more inside `json_valid`/the BOM `SUBSTR`/
-# `json_type`/`json_array_length`). A writer that replaced the file between two of those
+# occurrence, and the verdict CASE below mentions the findings expression nine
+# times (once for the column, eight more inside `json_valid`/the BOM `SUBSTR`/the NUL
+# `INSTR`/the three the UTF-8 gate and scan need/`json_type`/`json_array_length`). A writer that
+# replaced the file between two of those
 # evaluations therefore got a row whose `inner_verdict` was decided from DIFFERENT
 # bytes than the ones stored in `inner_checkpoint_findings` — reproduced by Argus
 # at iteration 132 of a 300-write alternating-file run, which persisted exactly the
@@ -184,6 +185,38 @@ read_file_literal() {
 # through an argument, so no write from THIS script can produce the shape; the clause
 # is parity for the rows that already exist, and it costs one more mention of a
 # materialised literal.
+# AND MALFORMED UTF-8 IS THE SHAPE THIS SCRIPT CAN ACTUALLY WRITE (Argus r3, blocker,
+# reproduced). Unlike a NUL, invalid UTF-8 travels through argv and through a findings
+# FILE perfectly well, and SQLite's JSON parser accepts any byte >= 0x20 inside a
+# string literal — so `[{"t":"<0x80>"}]` in the findings file was `json_valid` = 1, an
+# array, non-empty, and this CASE recorded `REQUEST_CHANGES` with it. Every reader of
+# that column then goes through bun:sqlite, whose driver returns the EMPTY STRING for a
+# value that is not well-formed UTF-8: `parseCheckpointFindings` is handed "" and
+# answers [], so the row reads back as precisely the REQUEST_CHANGES-with-no-findings
+# shape this script exists to make unwritable. The `NOT EXISTS` scan closes it by
+# asking the only question SQLite can answer about bytes — it splits text into
+# characters with its own UTF-8 reader, and re-encoding each character
+# (`CHAR(UNICODE(ch))`) reproduces the original bytes IF AND ONLY IF they were well
+# formed: an orphan continuation byte re-encodes to two bytes, and an overlong, a
+# surrogate, a truncated or an out-of-range sequence reads back as U+FFFD and
+# re-encodes to EF BF BD. U+FFFE and U+FFFF are the two false positives — well-formed
+# UTF-8 that SQLite's reader also folds to U+FFFD — so they are excluded by hand
+# rather than left to demote findings the parser reads perfectly well. Measured over
+# 32 byte shapes on BOTH engines this project runs (sqlite3 CLI 3.45.1 and bun:sqlite
+# 3.51.2) the clause agrees row for row with `new TextDecoder('utf-8', {fatal: true})`,
+# which is exactly the boundary bun's driver enforces; the same clause is in the
+# canonical counting SQL in `docs/AS_BUILT.md`, so the three copies still answer alike.
+# THE GLOB IN FRONT OF THE SCAN IS A COST GATE, NOT A SECOND OPINION, and this is the
+# write site where the cost lands. "Every character is TAB, LF, CR or printable ASCII"
+# is sufficient for well-formed UTF-8 on its own, so an all-ASCII findings payload —
+# which is every one this system has written, `JSON.stringify` escaping the rest — skips
+# the walk entirely. It matters because SQLite's SUBSTR on TEXT is O(offset), making the
+# walk quadratic: measured here, a 200 KB payload costs 30 s ungated and 3 ms gated, and
+# this script is handed findings files deliberately larger than one argv element. A
+# payload that really does carry non-ASCII still pays, bounded by its size (14 KB, the
+# live maximum, measures 123 ms). The gate can only skip a scan that had nothing to
+# find, so it changes no answer — `as-built-disposition-sql.test.ts` runs corpus rows on
+# both sides of it.
 # WHAT THIS PREDICATE DOES **NOT** ASK, stated so a future writer cannot open the
 # gap by accident (Argus r24, latent). `recordedTerminalVerdict`
 # (trident/orchestrator.ts) admits a REQUEST_CHANGES only when the checkpoint ALSO
@@ -202,8 +235,8 @@ read_file_literal() {
 #   $2 — SQL value when the findings are a real, non-empty rejection
 #   $3 — SQL value otherwise
 findings_case() {
-  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) AND INSTR(%s, CHAR(0)) = 0 THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
-    "$1" "$1" "$1" "$1" "$1" "$2" "$3" "$3"
+  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) AND INSTR(%s, CHAR(0)) = 0 AND (%s NOT GLOB ('*[^' || CHAR(9) || CHAR(10) || CHAR(13) || ' -~]*') OR NOT EXISTS (WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < LENGTH(%s)) SELECT 1 FROM (SELECT CAST(SUBSTR(%s, i, 1) AS BLOB) AS b FROM c) WHERE b <> CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB) AND b NOT IN (x'EFBFBE', x'EFBFBF'))) THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
+    "$1" "$1" "$1" "$1" "$1" "$1" "$1" "$1" "$2" "$3" "$3"
 }
 
 # A TERMINAL ROW'S LIVENESS COLUMNS ARE FROZEN — and ONLY those two.
@@ -282,13 +315,25 @@ phase_for_checkpoint() {
   esac
   local fix_re='^fix-round-[0-9]+$'
   local rc_re='^argus-request-changes-round-[0-9]+$'
+  # `[0-9]` IS COLLATED, NOT ASCII, under a UTF-8 locale — the same measurement
+  # `round_for_checkpoint` below carries (Argus r23), and it needs the same pin here.
+  # Under glibc `en_US.UTF-8` the class also matches U+0663 ARABIC-INDIC DIGIT THREE,
+  # so `fix-round-٣` MATCHED `$fix_re` and this mirror answered `argus` while
+  # `phaseForCheckpoint` answers null — two copies of one rule disagreeing about a
+  # row's phase under nothing but the ambient locale of the host that happened to run
+  # the write. `LC_ALL=C` for the duration of the two tests makes the class the ten
+  # ASCII digits both copies mean, so a non-ASCII digit falls through to "no phase",
+  # which is what the TypeScript copy says about it.
+  local saved_lc="${LC_ALL-}"
+  LC_ALL=C
+  local phase=''
   if [[ "$name" =~ $fix_re ]]; then
-    printf 'argus'
+    phase='argus'
   elif [[ "$name" =~ $rc_re ]]; then
-    printf 'forge-fix'
-  else
-    printf ''
+    phase='forge-fix'
   fi
+  if [ -n "$saved_lc" ]; then LC_ALL="$saved_lc"; else unset LC_ALL; fi
+  printf '%s' "$phase"
 }
 
 # THE CANONICAL CHECKPOINT -> ROUND PARSER, mirrored from
@@ -338,7 +383,9 @@ round_for_checkpoint() {
   # `fix-round-٣` MATCHED here and then `$(( 10#٣ ))` threw "invalid integer
   # constant" — under `set -euo pipefail` that aborts the whole invocation and the
   # ENTIRE checkpoint UPDATE is lost, i.e. exactly the blind row this script's
-  # docblock forbids. `LC_ALL=C` for the duration of the two tests makes the class
+  # docblock forbids. (`phase_for_checkpoint` above now carries the same pin for the
+  # same reason; there the missing one cost a mis-derived phase column rather than an
+  # aborted write.) `LC_ALL=C` for the duration of the two tests makes the class
   # the ten ASCII digits the arithmetic can actually read, so a non-ASCII digit
   # falls to the `else` and answers "not a round-bearing name", which is the same
   # answer `checkpointRound` and the canonical SQL give it.

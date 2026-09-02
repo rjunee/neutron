@@ -74,6 +74,31 @@ interface Row {
   verdict?: TridentVerdict | null
   checkpoint?: string | null
   findings?: string | null
+  /**
+   * Findings given as RAW BYTES (hex), for the shapes a JS string cannot hold — a
+   * malformed UTF-8 sequence is the r3 blocker and it has no `findings` spelling at
+   * all. The row is inserted as a SQL literal (see `corpusDb`) and the classifier
+   * side is fed `readerValue()`, i.e. what the driver actually hands production.
+   */
+  findingsHex?: string
+}
+
+/**
+ * WHAT bun:sqlite's DRIVER DELIVERS for a column holding these bytes — which is the
+ * value `parseCheckpointFindings` is handed in production, and the whole of the r3
+ * blocker: for bytes that are not well-formed UTF-8 the driver returns the EMPTY
+ * STRING, so the classifier sees no findings while SQLite's JSON functions, reading
+ * the same bytes, see a perfectly good one-element array. Round-tripped through the
+ * driver rather than asserted, so this file never states a second opinion about what
+ * the reader does.
+ */
+function readerValue(hex: string): string {
+  const db = new Database(':memory:')
+  db.run('CREATE TABLE v (x TEXT)')
+  db.run(`INSERT INTO v (x) VALUES (CAST(x'${hex}' AS TEXT))`)
+  const out = (db.query('SELECT x FROM v').get() as { x: string }).x
+  db.close()
+  return out
 }
 
 /**
@@ -117,6 +142,25 @@ const CORPUS: ReadonlyArray<readonly [string, Row]> = [
   // answers []. The `INSTR(inner_checkpoint_findings, CHAR(0)) = 0` clause in both
   // documented statements is the pin, and this row is what executes it.
   ['LEGACY rejection, real findings then a NUL', { verdict: 'REQUEST_CHANGES', findings: '[{"title":"real"}]\u0000garbage' }],
+  // MALFORMED UTF-8, the unguarded sibling of the two shapes above (Argus r3,
+  // blocker, reproduced). SQLite's JSON parser accepts any byte >= 0x20 inside a
+  // string literal, so these bytes are json_valid = 1, an array, one element long —
+  // a REAL rejection to the counting SQL — while bun:sqlite's driver returns the
+  // EMPTY STRING for the same column and `parseCheckpointFindings` therefore answers
+  // []. One row, two answers, in the direction that matters: the SQL crediting a
+  // reason to a rejection that states none. Three shapes, because they fail three
+  // different ways in SQLite's own UTF-8 reader (orphan continuation byte, truncated
+  // sequence, surrogate) and only the re-encoding test catches all three.
+  ['LEGACY rejection, findings holding an orphan continuation byte', { verdict: 'REQUEST_CHANGES', findingsHex: '5b7b227469746c65223a2280227d5d' }],
+  ['LEGACY rejection, findings holding a truncated 3-byte sequence', { verdict: 'REQUEST_CHANGES', findingsHex: '5b7b227469746c65223a22e280227d5d' }],
+  ['LEGACY rejection, findings holding a surrogate sequence', { verdict: 'REQUEST_CHANGES', findingsHex: '5b7b227469746c65223a22eda080227d5d' }],
+  // …AND THE POSITIVE CONTROLS THAT KEEP THE NEW CLAUSE FROM EATING REAL FINDINGS.
+  // Both are well-formed UTF-8 the driver reads perfectly, so both must stay REAL
+  // rejections. The second is the exception the clause spells out by hand: U+FFFF is
+  // valid UTF-8 that SQLite's own reader folds to U+FFFD, so a re-encoding test
+  // without the `NOT IN (x'EFBFBE', x'EFBFBF')` escape hatch would demote it.
+  ['rejected, findings holding a 4-byte emoji', { verdict: 'REQUEST_CHANGES', findingsHex: '5b7b227469746c65223a22f09f9880227d5d' }],
+  ['rejected, findings holding U+FFFF', { verdict: 'REQUEST_CHANGES', findingsHex: '5b7b227469746c65223a22efbfbf227d5d' }],
   // ── never reviewed, with a resumable build ────────────────────────────────
   ['forge-done', { checkpoint: 'forge-done' }],
   ['forge-done, legacy null verdict', { checkpoint: 'forge-done', verdict: null }],
@@ -189,7 +233,15 @@ function rowOf(over: Row) {
     phase: over.phase ?? 'failed',
     inner_verdict: over.verdict === undefined ? 'REVIEW_NOT_RUN' : over.verdict,
     inner_checkpoint: over.checkpoint ?? null,
-    inner_checkpoint_findings: over.findings === undefined ? null : over.findings,
+    // A raw-byte row is fed to the classifier AS THE DRIVER DELIVERS IT. Hard-coding
+    // '' for the malformed rows would assert bun's behaviour instead of executing it,
+    // and the positive controls below would then prove nothing about the real reader.
+    inner_checkpoint_findings:
+      over.findingsHex !== undefined
+        ? readerValue(over.findingsHex)
+        : over.findings === undefined
+          ? null
+          : over.findings,
   })
 }
 
@@ -222,7 +274,16 @@ function corpusDb(rows: ReadonlyArray<readonly [string, Row]> = CORPUS): Databas
   for (const [name, over] of rows) {
     const r = rowOf(over)
     const f = r.inner_checkpoint_findings
-    if (typeof f === 'string' && f.charCodeAt(0) === 0xfeff) {
+    // RAW BYTES, for the same reason the BOM row uses a literal and more sharply: a
+    // malformed UTF-8 findings value cannot be BOUND at all, because no JS string
+    // holds those bytes. The hex comes straight from the corpus entry.
+    if (typeof over.findingsHex === 'string') {
+      db.run(
+        `INSERT INTO code_trident_runs (id, phase, inner_verdict, inner_checkpoint, inner_checkpoint_findings)
+         VALUES (?, ?, ?, ?, CAST(x'${over.findingsHex}' AS TEXT))`,
+        [name, r.phase, r.inner_verdict, r.inner_checkpoint],
+      )
+    } else if (typeof f === 'string' && f.charCodeAt(0) === 0xfeff) {
       insertBom.run(name, r.phase, r.inner_verdict, r.inner_checkpoint, f.slice(1))
     } else {
       insert.run(name, r.phase, r.inner_verdict, r.inner_checkpoint, f)
@@ -255,6 +316,15 @@ describe("AS_BUILT's published counts are the classifier, executed", () => {
     // found, and it would make the pair double-count or drop the disputed rows.
     expect(real).toContain('INSTR(inner_checkpoint_findings, CHAR(0)) = 0')
     expect(legacy).toContain('INSTR(inner_checkpoint_findings, CHAR(0)) = 0')
+    // …and the malformed-UTF-8 scan on both, for the third time for the third
+    // reason (Argus r3). Unlike the BOM and NUL pins this one is NOT dormant — the
+    // execution below shows it moving rows — but its PRESENCE in both statements is
+    // still a textual property, because dropping it from one of the pair is what
+    // breaks "exact complement" rather than what breaks a count.
+    expect(real).toContain('CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB)')
+    expect(legacy).toContain('CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB)')
+    expect(real).toContain("x'EFBFBE', x'EFBFBF'")
+    expect(legacy).toContain("x'EFBFBE', x'EFBFBF'")
     expect(legacy).toContain('NOT CASE WHEN json_valid')
     expect(split).toContain('built-never-reviewed')
     expect(split).toContain('died-before-build')
@@ -276,7 +346,7 @@ describe("AS_BUILT's published counts are the classifier, executed", () => {
     // POSITIVE CONTROL: the corpus really does contain both shapes, so neither
     // count can pass by being zero — and the semantically-empty shapes sit on the
     // legacy side, not the real one.
-    expect(expectedReal).toBe(3)
+    expect(expectedReal).toBe(5)
     expect(rejections.length - expectedReal).toBeGreaterThan(2)
     expect(db.query(real!).get()).toEqual({ n: expectedReal })
     // The legacy findings-free rejections stay countable — the card forbids
@@ -353,6 +423,89 @@ describe("AS_BUILT's published counts are the classifier, executed", () => {
       )
     }
     db.close()
+  })
+
+  test('MALFORMED UTF-8 findings are EMPTY to the reader and to the documented count alike', () => {
+    // Argus r3 blocker, reproduced: `[{"title":"<0x80>"}]` is json_valid = 1, an array
+    // and one element long to SQLite, so the counting SQL scored it a REAL rejection —
+    // while bun:sqlite's driver, which every reader of this column goes through,
+    // returns '' for a value that is not well-formed UTF-8, so
+    // `parseCheckpointFindings` answered []. The row this card exists to make
+    // impossible — a rejection that states no reason — was being counted as one that
+    // does. The corpus could not reach the shape before: `findings` is a JS string and
+    // no JS string holds these bytes, which is why `findingsHex` exists.
+    const MALFORMED = [
+      'LEGACY rejection, findings holding an orphan continuation byte',
+      'LEGACY rejection, findings holding a truncated 3-byte sequence',
+      'LEGACY rejection, findings holding a surrogate sequence',
+    ]
+    const WELL_FORMED = [
+      'rejected, findings holding a 4-byte emoji',
+      'rejected, findings holding U+FFFF',
+    ]
+    const db = corpusDb()
+    const stored = db.query(
+      `SELECT hex(CAST(inner_checkpoint_findings AS BLOB)) AS bytes,
+              json_valid(inner_checkpoint_findings) AS jv,
+              json_array_length(inner_checkpoint_findings) AS jal
+         FROM code_trident_runs WHERE id = ?`,
+    )
+    for (const name of MALFORMED) {
+      const entry = CORPUS.find(([n]) => n === name)!
+      const r = stored.get(name) as { bytes: string; jv: number; jal: number }
+      // The bytes really are in the table AND SQLite really does read them as a
+      // non-empty array — otherwise there is nothing here for the clause to guard.
+      expect(r.bytes).toBe(entry[1]!.findingsHex!.toUpperCase())
+      expect([r.jv, r.jal]).toEqual([1, 1])
+      // …and the driver really does empty them, so the classifier reads the row as a
+      // rejection carrying no reason.
+      expect(readerValue(entry[1]!.findingsHex!)).toBe('')
+      expect(parseCheckpointFindings(rowOf(entry[1]!).inner_checkpoint_findings)).toEqual([])
+      expect(terminalRunDisposition(rowOf(entry[1]!))).toBe('reviewed-rejected')
+    }
+    db.close()
+
+    // EXECUTED AS A MUTANT rather than asserted textually: the documented statement is
+    // re-run with the re-encoding test neutralized — which is exactly the query as it
+    // stood before this round — and the malformed rows move to the REAL side.
+    const [real, legacy] = documentedStatements()
+    const PIN = 'b <> CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB)'
+    // Counted, not merely contained: the pin has to be in the EXECUTED SQL once, not
+    // in a `--` note about it.
+    expect(real!.split(PIN)).toHaveLength(2)
+    const unpinned = real!.replace(PIN, '1 = 0')
+    expect(unpinned).not.toBe(real)
+    for (const name of MALFORMED) {
+      const one = corpusDb([CORPUS.find(([n]) => n === name)!])
+      expect({ row: name, ...(one.query(real!).get() as { n: number }) }).toEqual({ row: name, n: 0 })
+      expect({ row: name, ...(one.query(legacy!).get() as { n: number }) }).toEqual({ row: name, n: 1 })
+      expect({ row: name, ...(one.query(unpinned).get() as { n: number }) }).toEqual({ row: name, n: 1 })
+      one.close()
+    }
+
+    // POSITIVE CONTROL: well-formed non-ASCII findings are not collateral — both rows
+    // stay REAL rejections under the documented statement.
+    for (const name of WELL_FORMED) {
+      const entry = CORPUS.find(([n]) => n === name)!
+      expect(parseCheckpointFindings(rowOf(entry[1]!).inner_checkpoint_findings)).toHaveLength(1)
+      const one = corpusDb([entry])
+      expect({ row: name, ...(one.query(real!).get() as { n: number }) }).toEqual({ row: name, n: 1 })
+      one.close()
+    }
+    // …and the hand-written noncharacter escape is load-bearing, not decoration:
+    // U+FFFF is well-formed UTF-8 that SQLite's OWN reader folds to U+FFFD, so without
+    // the exclusion the re-encoding test demotes findings the parser reads perfectly
+    // well. Removing it moves only that row; the emoji row is the control that says
+    // the mutation did not simply break the query.
+    const NONCHAR = "AND b NOT IN (x'EFBFBE', x'EFBFBF')"
+    expect(real!.split(NONCHAR)).toHaveLength(2)
+    const noEscape = real!.replace(NONCHAR, 'AND 1 = 1')
+    const ffff = corpusDb([CORPUS.find(([n]) => n === 'rejected, findings holding U+FFFF')!])
+    expect((ffff.query(noEscape).get() as { n: number }).n).toBe(0)
+    ffff.close()
+    const emoji = corpusDb([CORPUS.find(([n]) => n === 'rejected, findings holding a 4-byte emoji')!])
+    expect((emoji.query(noEscape).get() as { n: number }).n).toBe(1)
+    emoji.close()
   })
 
   test('the disposition split agrees with terminalRunDisposition, row for row', () => {

@@ -394,7 +394,10 @@ with cross-references noted inline.
     "empty-findings rejection guard"). Out-of-process: the LIVE inner workflow does not go through
     the store — it invokes `trident/checkpoint.sh`, which writes the verdict through a SQL CASE
     over the effective findings (`json_valid`/`json_type`/`json_array_length`, the SQL spelling of
-    `parseCheckpointFindings`) and records `REVIEW_NOT_RUN` instead when they are empty
+    `parseCheckpointFindings`, plus the three shapes SQLite's JSON functions read differently from
+    the reader every consumer of that column goes through — a leading BOM, an embedded NUL, and
+    bytes that are not well-formed UTF-8, for which bun:sqlite's driver hands the classifier the
+    empty string) and records `REVIEW_NOT_RUN` instead when they are empty
     (`trident/checkpoint.sh`, "THE VERDICT WRITE"; `trident/checkpoint-sh.test.ts`, "a REJECTION
     MUST STATE A REASON"). REFUSED, not failed: the rest of the write still lands, because losing
     the branch/checkpoint/result would trade one bad column for a blind row. `writeTerminalResult`

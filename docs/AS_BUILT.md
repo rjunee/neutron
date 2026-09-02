@@ -471,12 +471,52 @@ row-for-row agreement with the classifier.
 -- NUL, so it is what restores the row-for-row equivalence. Neither write site can
 -- produce the shape. The point is that the count answers the same thing the parser
 -- does whatever put the bytes there.
+-- AND MALFORMED UTF-8 IS NOT FINDINGS EITHER, the unguarded sibling of the two shapes
+-- above (Argus r3, blocker, reproduced). SQLite's JSON parser accepts any byte >= 0x20
+-- inside a string literal, so a stored `[{"t":"<0x80>"}]` answers json_valid = 1 and
+-- json_array_length = 1 and scored as a REAL rejection -- while the driver every reader
+-- of this column goes through (bun:sqlite) returns the EMPTY STRING for a value whose
+-- bytes are not well-formed UTF-8, so `parseCheckpointFindings` is handed "" and answers
+-- []. SQL said real rejection, and the classifier said no review happened.
+-- The NOT EXISTS below closes it with the one question SQLite can answer about bytes:
+-- it splits text into characters with its OWN UTF-8 reader, and re-encoding each of
+-- those characters -- CHAR(UNICODE(ch)) -- reproduces the original bytes IF AND ONLY IF
+-- they were well formed. An orphan continuation byte reads back as U+0080..U+00BF and
+-- re-encodes to TWO bytes, and an overlong, a surrogate, a truncated or an out-of-range
+-- sequence reads back as U+FFFD and re-encodes to EF BF BD. U+FFFE and U+FFFF are the
+-- only false positives -- well-formed UTF-8 that SQLite's reader ALSO folds to U+FFFD --
+-- so they are excluded by hand rather than left to drop findings the parser reads
+-- perfectly well. Measured over 32 byte shapes on BOTH engines this project runs
+-- (sqlite3 CLI 3.45.1 and bun:sqlite 3.51.2) the clause agrees row for row with
+-- `new TextDecoder('utf-8', { fatal: true })`, which is exactly the boundary bun's
+-- driver enforces. The corpus rows that execute it are inserted as SQL LITERALS,
+-- because a bound parameter cannot carry bytes a JS string cannot hold.
+-- THE GLOB IN FRONT OF THE SCAN IS A COST GATE, NOT A SECOND OPINION. Every character
+-- being TAB, LF, CR or printable ASCII is sufficient for well-formed UTF-8 all by
+-- itself, so the walk is skipped for a value that is entirely ASCII -- which is every
+-- findings payload this system has ever written, JSON.stringify escaping the rest.
+-- It matters because SQLite SUBSTR on TEXT is O(offset): the walk is quadratic, and
+-- measured on this box a 200 KB payload costs 30 s with the gate removed and 3 ms with
+-- it. Findings that DO carry non-ASCII still pay the walk, bounded by their size: the
+-- live corpus maxes near 14 KB, measured at 123 ms. An ASCII-only value cannot reach
+-- the scan and cannot need it, so the gate changes no answer -- the corpus proves that
+-- by running both sides of it.
 SELECT COUNT(*) AS n FROM code_trident_runs
  WHERE phase IN ('done','failed','stopped')
    AND inner_verdict = 'REQUEST_CHANGES'
    AND CASE WHEN json_valid(inner_checkpoint_findings)
                  AND SUBSTR(inner_checkpoint_findings, 1, 1) <> CHAR(65279)
                  AND INSTR(inner_checkpoint_findings, CHAR(0)) = 0
+                 AND (inner_checkpoint_findings NOT GLOB
+                        ('*[^' || CHAR(9) || CHAR(10) || CHAR(13) || ' -~]*')
+                      OR NOT EXISTS (
+                           WITH RECURSIVE c(i) AS (
+                             SELECT 1 UNION ALL
+                             SELECT i + 1 FROM c WHERE i < LENGTH(inner_checkpoint_findings))
+                           SELECT 1 FROM (SELECT CAST(SUBSTR(inner_checkpoint_findings, i, 1) AS BLOB) AS b
+                                            FROM c)
+                            WHERE b <> CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB)
+                              AND b NOT IN (x'EFBFBE', x'EFBFBF')))
               THEN json_type(inner_checkpoint_findings) = 'array'
                    AND json_array_length(inner_checkpoint_findings) > 0
               ELSE 0 END;
@@ -490,8 +530,8 @@ SELECT COUNT(*) AS n FROM code_trident_runs
 -- CASE records REVIEW_NOT_RUN. That is a claim about those two writers, NOT a database
 -- constraint: raw SQL against this table is still raw SQL, so read a RISE in this number
 -- as a new write path rather than as history moving.
--- The exact complement of the count above, over the same rows — BOM and NUL clauses
--- included, because "exact complement" is a property of these two statements, not a
+-- The exact complement of the count above, over the same rows — BOM, NUL and
+-- malformed-UTF-8 clauses included, because "exact complement" is a property of these two statements, not a
 -- hope: a hardening added to one of them and not the other would double-count or
 -- drop the rows it disagrees about.
 SELECT COUNT(*) AS n FROM code_trident_runs
@@ -500,6 +540,16 @@ SELECT COUNT(*) AS n FROM code_trident_runs
    AND NOT CASE WHEN json_valid(inner_checkpoint_findings)
                      AND SUBSTR(inner_checkpoint_findings, 1, 1) <> CHAR(65279)
                      AND INSTR(inner_checkpoint_findings, CHAR(0)) = 0
+                     AND (inner_checkpoint_findings NOT GLOB
+                            ('*[^' || CHAR(9) || CHAR(10) || CHAR(13) || ' -~]*')
+                          OR NOT EXISTS (
+                               WITH RECURSIVE c(i) AS (
+                                 SELECT 1 UNION ALL
+                                 SELECT i + 1 FROM c WHERE i < LENGTH(inner_checkpoint_findings))
+                               SELECT 1 FROM (SELECT CAST(SUBSTR(inner_checkpoint_findings, i, 1) AS BLOB) AS b
+                                                FROM c)
+                                WHERE b <> CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB)
+                                  AND b NOT IN (x'EFBFBE', x'EFBFBF')))
                   THEN json_type(inner_checkpoint_findings) = 'array'
                        AND json_array_length(inner_checkpoint_findings) > 0
                   ELSE 0 END;

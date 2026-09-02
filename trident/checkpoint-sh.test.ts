@@ -708,6 +708,55 @@ describe('checkpoint.sh — a REJECTION MUST STATE A REASON (the write-site prec
     }
   })
 
+  test('MALFORMED UTF-8 findings are REFUSED — the shape this script really can write', () => {
+    // Argus r3 blocker, reproduced. Unlike a NUL (which bash strips on ingest) and
+    // unlike a BOM (which every engine here already calls invalid JSON), invalid
+    // UTF-8 travels through a findings FILE perfectly well and SQLite's JSON parser
+    // accepts any byte >= 0x20 inside a string literal — so `[{"title":"<0x80>"}]`
+    // was json_valid, an array, non-empty, and this script recorded REQUEST_CHANGES
+    // with it. Every reader of that column then goes through bun:sqlite, whose
+    // driver returns '' for a value that is not well-formed UTF-8, so the row read
+    // back as precisely the findings-free rejection this script exists to make
+    // unwritable — written BY this script, not inherited from history.
+    const malformed: Array<[string, string]> = [
+      ['orphan-continuation-byte', '5b7b227469746c65223a2280227d5d'],
+      ['truncated-3-byte-sequence', '5b7b227469746c65223a22e280227d5d'],
+      ['surrogate-sequence', '5b7b227469746c65223a22eda080227d5d'],
+      ['overlong-sequence', '5b7b227469746c65223a22c080227d5d'],
+    ]
+    for (const [label, hex] of malformed) {
+      const f = join(dir, `malformed-${label}.json`)
+      writeFileSync(f, Buffer.from(hex, 'hex'))
+      // The bytes really are on disk — a helper that had re-encoded them through a
+      // JS string would leave this test asserting nothing.
+      expect(readFileSync(f).toString('hex')).toBe(hex)
+      const res = sh([dbPath, 'run-1', 'inner_findings_file', f, 'inner_verdict', 'REQUEST_CHANGES'])
+      expect({ label, code: res.code }).toEqual({ label, code: 0 })
+      expect({ label, verdict: row('run-1').inner_verdict }).toEqual({ label, verdict: 'REVIEW_NOT_RUN' })
+    }
+
+    // POSITIVE CONTROL, and it is the whole reason the clause is a re-encoding test
+    // and not "reject anything non-ASCII": well-formed non-ASCII findings are a real
+    // review saying real things, and they still record the rejection. U+FFFF is the
+    // sharp one — valid UTF-8 that SQLite's own reader folds to U+FFFD, hence the
+    // hand-written exception in `findings_case`.
+    const wellFormed: Array<[string, string]> = [
+      ['4-byte-emoji', '5b7b227469746c65223a22f09f9880227d5d'],
+      ['noncharacter-U-FFFF', '5b7b227469746c65223a22efbfbf227d5d'],
+      ['2-byte-accent', '5b7b227469746c65223a22c3a9227d5d'],
+    ]
+    for (const [label, hex] of wellFormed) {
+      const f = join(dir, `wellformed-${label}.json`)
+      writeFileSync(f, Buffer.from(hex, 'hex'))
+      const res = sh([dbPath, 'run-1', 'inner_findings_file', f, 'inner_verdict', 'REQUEST_CHANGES'])
+      expect({ label, code: res.code }).toEqual({ label, code: 0 })
+      expect({ label, verdict: row('run-1').inner_verdict }).toEqual({
+        label,
+        verdict: 'REQUEST_CHANGES',
+      })
+    }
+  })
+
   test('the BOM clause is PINNED in the bash copy too, not only in the documented statements', () => {
     // Argus r16 (mutation): deleting `AND SUBSTR(%s, 1, 1) <> CHAR(65279)` from
     // `findings_case` left 197 tests green, because on both engines this project
@@ -737,6 +786,14 @@ describe('checkpoint.sh — a REJECTION MUST STATE A REASON (the write-site prec
     // shape — this is parity over the rows that already exist.
     expect(findingsCase).toContain('INSTR')
     expect(findingsCase).toContain('CHAR(0)')
+    // AND THE MALFORMED-UTF-8 SCAN IS THE FOURTH COPY (Argus r3, blocker). This one
+    // is NOT dormant — the test above shows it moving a write from REQUEST_CHANGES to
+    // REVIEW_NOT_RUN — but its presence is pinned here beside its siblings so the
+    // three copies (this script, `parseCheckpointFindings`, the documented counting
+    // SQL) cannot drift apart one deletion at a time. The noncharacter escape is
+    // pinned too: without it the clause demotes findings the parser reads perfectly.
+    expect(findingsCase).toContain('CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB)')
+    expect(findingsCase).toContain("x'EFBFBE', x'EFBFBF'")
   })
 
   test("THIS invocation's findings win over the row's, so a rejection cannot ride on a stale non-empty column", () => {

@@ -10,6 +10,7 @@ import {
   COLS,
   TridentEmptyFindingsRejectionError,
   TridentIncompleteSeedError,
+  TridentUnseededPinError,
   TridentRunStore,
   TridentUnresumableSeedError,
   waveChildSlug,
@@ -615,6 +616,48 @@ describe('TridentRunStore', () => {
     expect(stored.inner_checkpoint).toBeNull()
     expect(stored.inner_checkpoint_head).toBeNull()
     expect(stored.base_sha).toBeNull()
+  })
+
+  // …AND THE ASYMMETRY IN THE OTHER DIRECTION IS CLOSED (Argus r3, minor, raised
+  // independently by two reviewers). The guard above is gated on a seed being
+  // PRESENT, so an unseeded caller reached the row body and persisted whatever it
+  // passed — `base_sha: 'NOT-A-SHA  '` and `inner_checkpoint_head: 'zzzz'` both
+  // landed. The `base_sha` half has teeth: `launch()` treats a run as a fresh build
+  // only when `inner_checkpoint === null && base_sha === null`, so an unchecked pin
+  // skips the origin fetch that would have set a real one and the publish-time
+  // "branch does not contain the pinned base tip" refusal then fires against a value
+  // nothing validated. No production caller does this today, which is exactly why
+  // the precondition belongs at the write site rather than in the caller.
+  test.each([
+    ['base_sha that is not a sha', { base_sha: 'NOT-A-SHA  ' }],
+    ['a 40-hex base_sha with no checkpoint to explain it', { base_sha: 'c'.repeat(40) }],
+    ['inner_checkpoint_head that is not a sha', { inner_checkpoint_head: 'zzzz' }],
+    ['a 40-hex head with no checkpoint to explain it', { inner_checkpoint_head: 'a'.repeat(40) }],
+    ['findings with no checkpoint to explain them', { inner_checkpoint_findings: '[{"t":1}]' }],
+    ['a whitespace-padded checkpoint that trims to nothing, plus pins', {
+      inner_checkpoint: ' \t\n ',
+      base_sha: 'c'.repeat(40),
+    }],
+  ])('create REFUSES an UNSEEDED row carrying %s', async (_label, pins) => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({ slug: 'unseeded', project_slug: 't1', repo_path: '/r', task: 't', ...pins }),
+    ).rejects.toThrow(TridentUnseededPinError)
+  })
+
+  test('the refusal writes NOTHING — a rejected unseeded pin leaves no row behind', async () => {
+    // A guard that threw after the INSERT would leave exactly the row it refused.
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'unseeded-none',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        base_sha: 'NOT-A-SHA  ',
+      }),
+    ).rejects.toThrow(TridentUnseededPinError)
+    expect(store.getBySlug('t1', 'unseeded-none')).toBeNull()
   })
 
   test('the refusal is on CREATE only — `update` still records any checkpoint the loop reaches', async () => {

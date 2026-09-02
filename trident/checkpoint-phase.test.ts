@@ -173,14 +173,17 @@ describe('phaseForCheckpoint — the canonical table', () => {
 
 describe('the Bash mirror in checkpoint.sh agrees with the TypeScript table', () => {
   /** Run the script's own `phase_for_checkpoint` by sourcing it out of the file. */
-  function bashPhaseFor(checkpoint: string): string {
+  function bashPhaseFor(checkpoint: string, locale?: string): string {
     const src = readFileSync(SCRIPT, 'utf8')
     const start = src.indexOf('phase_for_checkpoint() {')
     expect(start).toBeGreaterThan(-1) // the function must still be findable
     const end = src.indexOf('\n}\n', start)
     expect(end).toBeGreaterThan(start)
     const fn = src.slice(start, end + 3)
-    const p = Bun.spawnSync(['bash', '-c', `${fn}\nphase_for_checkpoint "$1"`, '_', checkpoint])
+    const p = Bun.spawnSync(
+      ['bash', '-c', `${fn}\nphase_for_checkpoint "$1"`, '_', checkpoint],
+      locale === undefined ? {} : { env: { ...process.env, LC_ALL: locale } },
+    )
     expect(p.exitCode).toBe(0)
     return p.stdout.toString()
   }
@@ -194,6 +197,36 @@ describe('the Bash mirror in checkpoint.sh agrees with the TypeScript table', ()
   for (const name of CHECKPOINT_NAMES) {
     test(`both copies agree for ${JSON.stringify(name)}`, () => {
       expect(bashPhaseFor(name)).toBe(phaseForCheckpoint(name) ?? '')
+    })
+  }
+
+  // AND THE TWO COPIES AGREE WHATEVER LOCALE THE HOST IS IN (Argus r3, minor,
+  // measured). `[0-9]` inside `[[ =~ ]]` is COLLATED under glibc, not ASCII, so in
+  // `en_US.UTF-8` it also matches U+0663 ARABIC-INDIC DIGIT THREE: the bash mirror
+  // answered `argus` for `fix-round-٣` while `phaseForCheckpoint`'s `/^fix-round-\d+$/`
+  // answers null — the SAME defect its sibling `round_for_checkpoint` was pinned for
+  // one round earlier, and the corpus above could not see it because it holds no
+  // non-ASCII digit. The cost here is a mis-derived `phase` column rather than an
+  // aborted write, which is why it was found second; the fix is the same `LC_ALL=C`
+  // around the two tests.
+  const ARABIC_INDIC_THREE = '٣'
+  for (const locale of ['en_US.UTF-8', 'C']) {
+    test(`a non-ASCII digit implies NO phase under ${locale}, in both copies`, () => {
+      for (const name of [
+        `fix-round-${ARABIC_INDIC_THREE}`,
+        `argus-request-changes-round-${ARABIC_INDIC_THREE}`,
+      ]) {
+        expect({ name, bash: bashPhaseFor(name, locale) }).toEqual({ name, bash: '' })
+        expect({ name, ts: phaseForCheckpoint(name) }).toEqual({ name, ts: null })
+      }
+    })
+
+    test(`an ASCII round still names its phase under ${locale} — the pin is not a ban`, () => {
+      // Positive control: a mirror that answered '' for everything would satisfy
+      // the assertion above without agreeing about anything.
+      expect(bashPhaseFor('fix-round-3', locale)).toBe('argus')
+      expect(bashPhaseFor('argus-request-changes-round-3', locale)).toBe('forge-fix')
+      expect(bashPhaseFor('forge-done', locale)).toBe('argus')
     })
   }
 })

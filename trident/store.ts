@@ -71,6 +71,28 @@ export class TridentIncompleteSeedError extends Error {
   }
 }
 
+/**
+ * The OTHER half of the seed precondition (Argus r3, minor, two independent repros).
+ * `TridentIncompleteSeedError` above fires only when a checkpoint WAS seeded, so an
+ * UNSEEDED caller walked past it and persisted whatever pins it passed —
+ * `base_sha: 'NOT-A-SHA  '`, `inner_checkpoint_head: 'zzzz'`. The `base_sha` half is
+ * the one with teeth: `launch()` treats a run as a fresh build only when
+ * `inner_checkpoint === null && base_sha === null`, so a non-null unseeded pin skips
+ * the origin fetch that would have set a real one, and the publish-time "branch does
+ * not contain the origin/<base> tip pinned at launch" refusal then fires against a
+ * value nothing ever validated. The three columns are ONE seed; none of them means
+ * anything without the checkpoint that names it.
+ */
+export class TridentUnseededPinError extends Error {
+  constructor(
+    column: 'inner_checkpoint_head' | 'base_sha' | 'inner_checkpoint_findings',
+    value: string | null,
+  ) {
+    super(`refusing to create a trident run with no inner_checkpoint but ${column}=${value === null ? 'NULL' : `'${value}'`}: those columns are the salvage-resume seed and are meaningless without the checkpoint that names it — an unseeded row carrying a base_sha is not a fresh launch to launch(), so it is never pinned and the publish-time "not cut from origin/<base>" refusal fires against an unchecked value`)
+    this.name = 'TridentUnseededPinError'
+  }
+}
+
 export class TridentEmptyFindingsRejectionError extends Error {
   constructor(id: string, source: 'update' | 'save' | 'saveIfActive') {
     super(`refusing to record inner_verdict='REQUEST_CHANGES' with no findings for trident run ${id} (via ${source}): an empty finding set is either an approval or an infrastructure failure, never a rejection — record REVIEW_NOT_RUN instead`)
@@ -504,6 +526,23 @@ export class TridentRunStore {
       if (!HEX40.test(seededBase)) {
         throw new TridentIncompleteSeedError(seededCheckpoint, 'base_sha', input.base_sha ?? null)
       }
+    } else {
+      // …AND THE SAME PRECONDITION READ THE OTHER WAY (Argus r3, minor). The block
+      // above is gated on a seed being present, so an unseeded caller passed all
+      // three columns through unchecked — see `TridentUnseededPinError` for why a
+      // non-null `base_sha` on such a row disarms `launch()`'s pin rather than
+      // merely being untidy. No production caller does it (board-dispatch seeds all
+      // three together or none), which is precisely why the check belongs at the
+      // write site: the card's rule is that no FUTURE path can bypass it either.
+      if (seededHead !== '') {
+        throw new TridentUnseededPinError('inner_checkpoint_head', input.inner_checkpoint_head ?? null)
+      }
+      if (seededBase !== '') {
+        throw new TridentUnseededPinError('base_sha', input.base_sha ?? null)
+      }
+      if (trimAsciiWs(input.inner_checkpoint_findings ?? '') !== '') {
+        throw new TridentUnseededPinError('inner_checkpoint_findings', input.inner_checkpoint_findings ?? null)
+      }
     }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()
@@ -549,7 +588,10 @@ export class TridentRunStore {
       // cut-from-origin refusal armed on a row `launch()` will not re-pin. On a
       // seeded row this is the NORMALISED pin the guard above accepted, not the
       // raw argument — see `inner_checkpoint` below for why the two must agree.
-      base_sha: seededCheckpoint !== '' ? seededBase : input.base_sha ?? null,
+      // The NORMALISED pin, or nothing: the guard above leaves no third case —
+      // an unseeded row that passed one is refused, so this no longer falls back to
+      // the raw argument (Argus r3).
+      base_sha: seededBase !== '' ? seededBase : null,
       base_behind: null,
       // NEVER seeded: `launch()` resolves the PR with
       // `run.pr ?? await detectExistingPr(run)`, and a carried-over number would
@@ -576,7 +618,7 @@ export class TridentRunStore {
       // a stored value that disagree is how the next divergence starts. An unseeded
       // row keeps the byte-identical fresh-dispatch shape: null.
       inner_checkpoint: seededCheckpoint !== '' ? seededCheckpoint : null,
-      inner_checkpoint_head: seededCheckpoint !== '' ? seededHead : input.inner_checkpoint_head ?? null,
+      inner_checkpoint_head: seededHead !== '' ? seededHead : null,
       inner_checkpoint_findings: input.inner_checkpoint_findings ?? null,
       // NEVER seeded: a verdict belongs to a review THIS run has not had yet.
       inner_verdict: null,

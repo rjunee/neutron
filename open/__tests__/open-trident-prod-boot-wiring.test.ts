@@ -523,6 +523,16 @@ describe('Open foundational-Trident prod-boot wiring', () => {
      * These literals name each half exactly once today, so nothing legitimate is
      * caught by it — including the hold sweep's site, which DOES carry conditional
      * spreads, none of which mention either half.
+     *
+     * RE-RAISED IN r3 AS STILL-OPEN, AND RE-RUN HERE RATHER THAN ARGUED: splicing
+     * `...{ hostRunner: undefined },` in after the wired property at the app's ▶
+     * site in the real `composer.ts` REDS this test (2 pass / 1 fail, on "EVERY
+     * dispatch site that gets the landed probe gets the host runner with it"), and
+     * reverting restores 3 pass / 0 fail. It is caught because the spread SPELLS
+     * `hostRunner`, so it becomes the last mention and is not the wired line — which
+     * is exactly what this rule was written for. Writing it on the SAME line as the
+     * wired property does not help either: `propLine` is anchored `^…$`, so a line
+     * carrying anything after the binding matches nothing.
      */
     const boundTo = (site: DepsSite, prop: string, value: string): boolean => {
       const named = new RegExp(`\\b${prop}\\b`)
