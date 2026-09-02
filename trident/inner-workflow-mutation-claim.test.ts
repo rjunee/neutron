@@ -18,9 +18,10 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { parseMutationClaim } from './mutation-prover.ts'
+import { classifyMutationTarget, parseMutationClaim } from './mutation-prover.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
+const PROVER_SRC = readFileSync(fileURLToPath(new URL('./mutation-prover.ts', import.meta.url)), 'utf8')
 
 interface Captured {
   label: string | undefined
@@ -134,6 +135,57 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
         expect(Object.keys(claim?.properties ?? {})).toContain(field)
       }
     }
+  })
+
+  test('the schema\'s DECLARED-test list is the classifier\'s, suffix for suffix', async () => {
+    // THE CONTRADICTION THIS PINS, measured. The schema told Forge never to
+    // nominate `a *_test.go/py/rs basename`; `TEST_BASENAME` in the prover
+    // deliberately dropped `rs` (cargo has no `_test.rs` convention, and
+    // keeping it let a build buy the no-production-file exemption by SUFFIX).
+    // So `classifyMutationTarget('src/pricing_test.rs') === 'production'` while
+    // the schema forbade naming it — and a Rust diff whose only code file is
+    // `src/pricing_test.rs` refuses with "no legal target" while telling Forge
+    // the one file it could have named is off limits. An unresolvable refusal
+    // loop, from two lists that drifted apart in two files.
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined })
+    const described = captured
+      .filter((c) => String(c.label).startsWith('forge:'))
+      .map(
+        (c) =>
+          (
+            c.schema as { properties?: { mutationClaim?: { properties?: { file?: { description?: string } } } } }
+          )?.properties?.mutationClaim?.properties?.file?.description ?? '',
+      )
+    // POSITIVE CONTROL on the extraction itself: the descriptions were really
+    // read, and every one of them really does enumerate the suffixes. Without
+    // this, a renamed field makes `described` a list of empty strings and every
+    // set comparison below passes on nothing.
+    expect(described.length).toBeGreaterThan(1)
+    for (const d of described) expect(d).toContain('_test.')
+
+    // The suffixes the SCHEMA names, in either spelling it has used
+    // (`*_test.go/py` and `*_test.go or *_test.py`).
+    const schemaSuffixes = new Set(
+      described.flatMap((d) => [...d.matchAll(/\*_test\.([a-z]+(?:\/[a-z]+)*)/g)].flatMap((m) => m[1]!.split('/'))),
+    )
+    // …and the suffixes the CLASSIFIER names, read out of its own regex literal
+    // rather than re-typed here, so the two lists can only agree by being the
+    // same list.
+    const pinned = PROVER_SRC.match(/const TEST_BASENAME = \/.*_test\\\.\(([a-z|]+)\)/)
+    expect(pinned).not.toBeNull()
+    const proverSuffixes = new Set((pinned![1] as string).split('|'))
+    expect([...proverSuffixes].sort()).toEqual(['go', 'py'])
+    expect([...schemaSuffixes].sort()).toEqual([...proverSuffixes].sort())
+
+    // AND THE BEHAVIOUR, not just the spelling: every suffix the schema tells
+    // Forge not to nominate really is refused by the gate, and no suffix it
+    // names is one the gate would have accepted.
+    for (const ext of schemaSuffixes) expect([ext, classifyMutationTarget(`src/pricing_test.${ext}`)]).toEqual([ext, 'test'])
+    // The suffix that started this: named by NEITHER side now, so a Rust module
+    // with a test-shaped name is an ordinary production file the build may
+    // nominate — which is the only outcome that leaves such a diff provable.
+    expect(classifyMutationTarget('src/pricing_test.rs')).toBe('production')
+    expect([...schemaSuffixes]).not.toContain('rs')
   })
 
   test('NO Forge schema has a field for a mutation RESULT — only for a nomination', async () => {

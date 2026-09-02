@@ -894,7 +894,7 @@ const FORGE_SCHEMA = {
         file: {
           type: 'string',
           description:
-            'repo-relative file whose PRODUCTION behaviour to break. Not a DECLARED test (a *.test.*/*.spec.* basename, a *_test.go/py/rs basename, or a direct child of __tests__/) and not documentation. A support LIBRARY under tests/ that declares no test cases IS a legal target — mutate it and let the separate test that asserts it go red.',
+            'repo-relative file whose PRODUCTION behaviour to break. Not a DECLARED test (a *.test.*/*.spec.* basename, a *_test.go or *_test.py basename, or a direct child of __tests__/) and not documentation. A support LIBRARY under tests/ that declares no test cases IS a legal target — mutate it and let the separate test that asserts it go red.',
         },
         find: { type: 'string', description: 'exact substring occurring EXACTLY ONCE, whose behaviour the PR relies on' },
         replace: { type: 'string', description: 'what replaces it — the break' },

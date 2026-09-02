@@ -1470,6 +1470,45 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
       expect(fine.observed).not.toBeNull()
     }
+
+    // AND THE EXPANSION IS BOUNDED IN THE ELEMENT IT READS. Every dotted prefix
+    // is expanded into a fresh string, so expanding ALL of them costs the sum of
+    // their lengths — quadratic in an argv element that arrives from an
+    // unbounded, agent-authored nomination and is read inside the single-flight
+    // tick. Measured on this box: 40 000 segments took 8486ms.
+    //
+    // The bound is paired with the REFUSAL, in one call, because a cap that
+    // fails open is the cheap way to make the timing pass: `src.limit` is the
+    // SECOND prefix of this selector, so an implementation that dropped the
+    // element on length would be fast AND would stop seeing the import. Both
+    // assertions must hold together.
+    const buried = ['src', 'limit', ...Array(40_000).fill('a')].join('.')
+    const deepFs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.py')]: SRC_BEFORE })
+    const { prover: bounded } = proverOver({}, deepFs)
+    const started = Date.now()
+    const scanned = await bounded.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file: 'src/limit.py',
+        guard: ['python3', '-m', 'unittest', buried],
+        control: ['python3', '-m', 'pytest', 'tests/other_test.py'],
+      },
+    })
+    // WALL-CLOCK-BOUND-OK: an unbounded prefix expansion has no non-timing
+    // signature — the capped and uncapped expansions return the SAME answer on
+    // this input (both contain `src/limit.py`, asserted directly below), so the
+    // only observable difference between them is how long the expansion takes,
+    // and there is no logical clock inside a string join to read instead.
+    // Measured on this box at 40 000 segments: capped 2ms, uncapped 8486ms
+    // (10k 546ms, 20k 2131ms — quadratic, 4x per doubling). The bound sits at
+    // 3s: ~1500x headroom over the passing path and a 2.8x margin under the
+    // failing one, matching the scheme-scan pin above.
+    expect(Date.now() - started).toBeLessThan(3_000)
+    // …and the cap is on prefix DEPTH, not on the element, so the real prefix
+    // buried in the absurd selector is still expanded and still refuses. This
+    // is the assertion that fails if the cap is turned into "drop the element".
+    expect([scanned.proved, scanned.reason.includes('IMPORTS')]).toEqual([false, true])
   })
 
   test('`node --test <path>` is a targeted guard — `--test` is the invocation, not an option', async () => {
@@ -1614,6 +1653,11 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     const file = 'tests/support/lib.ts'
     const cases: Array<[string[], string]> = [
       [['bun', 'test', '--coverage', 'tests/support/lib.test.ts'], 'operand of --coverage'],
+      // `--` IS NOT AN OPTION. It landed on the generic operand arm, which
+      // advised "attach the option's own value (--=…)" — a spelling no runner
+      // accepts, on the arm the canonical npm/yarn/pnpm idiom lands on. Same
+      // closed refusal, a remedy that exists.
+      [['npm', 'test', '--', 'tests/support/lib.test.ts'], 'sits after the `--` separator'],
       // cargo's whole story: `--test` takes a test TARGET name, so no guard
       // spelling selects for a collectible target under `tests/`. It fails
       // CLOSED and now SAYS so instead of implying an omission.
@@ -1640,6 +1684,37 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
         true,
       ])
     }
+
+    // …AND THE `--` ARM NO LONGER SPELLS THE IMPOSSIBLE REMEDY. Deleting the
+    // arm brings `--=…` back and reddens this, which the substring assertion
+    // above cannot do on its own.
+    const dashFs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: dashed } = proverOver({}, dashFs)
+    const dash = await dashed.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file,
+        guard: ['npm', 'test', '--', 'tests/support/lib.test.ts'],
+        control: ['bun', 'test', 'src/other.test.ts'],
+      },
+    })
+    expect(dash.reason).not.toContain('--=')
+    // POSITIVE CONTROL — the OTHER operand arm still offers it, so the
+    // assertion above is about the separator and not about a message this
+    // gate stopped writing at all.
+    const optFs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: opted } = proverOver({}, optFs)
+    const opt = await opted.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file,
+        guard: ['bun', 'test', '--coverage', 'tests/support/lib.test.ts'],
+        control: ['bun', 'test', 'src/other.test.ts'],
+      },
+    })
+    expect(opt.reason).toContain('--coverage=…')
 
     // AND NO ARM BORROWS A SENTENCE IT CANNOT SAY. A LONE search is dropped by
     // `pathArgs`, so it lands on this arm too — and the "so it reaches" tail

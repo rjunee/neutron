@@ -816,12 +816,33 @@ const DOTTED_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/
  * admitting either. It only ever REFUSES — a dotted module is never read as a
  * SELECTION (`pathArgs` drops it), so no guard becomes legal because of this.
  */
+/**
+ * HOW DEEP THE EXPANSION GOES, and why it has to stop somewhere.
+ *
+ * Every prefix is a fresh string, so expanding all of them costs the SUM of
+ * their lengths — quadratic in the element. The element is an agent-authored
+ * argv item of no bounded length: measured on this box, a 40 000-segment
+ * dotted element took 8.5s inside a single flight tick, past this file's own
+ * 3s wall-clock pin. That is an availability cost, never a bypass, but it is
+ * paid on input the gate does not control.
+ *
+ * The cap is on PREFIX DEPTH rather than on element length, and that choice is
+ * what keeps it from failing OPEN. Each expanded prefix is only ever compared
+ * against the ONE target path, so a prefix deeper than the target's own
+ * directory nesting can never equal it: with 24 levels every repo path this
+ * gate could be asked about is still expanded and still refuses, while the
+ * work is bounded at 24 prefixes. Dropping the element wholesale on length
+ * would instead let `src.limit.<40 000 junk segments>` stop naming
+ * `src/limit.py` at all.
+ */
+const MAX_MODULE_DEPTH = 24
+
 function modulePathsOf(arg: string): string[] {
   const raw = arg.startsWith('-') ? carriedValue(arg) : arg
   if (raw.length === 0 || !DOTTED_MODULE.test(raw)) return []
   const segments = raw.split('.')
   const out: string[] = []
-  for (let i = 1; i <= segments.length; i += 1) {
+  for (let i = 1; i <= Math.min(segments.length, MAX_MODULE_DEPTH); i += 1) {
     const stem = segments.slice(0, i).join('/')
     out.push(`${stem}.py`, `${stem}/__init__.py`)
   }
@@ -1069,6 +1090,24 @@ function whyNoSelection(argv: readonly string[]): string {
     if (arg.length === 0 || arg.startsWith('-')) continue
     const prev = i > start ? (argv[i - 1] as string) : ''
     if (prev.startsWith('-') && carriedValue(prev).length === 0) {
+      // `--` IS NOT AN OPTION, and the generic sentence handed the build a
+      // remedy no runner accepts: "attach the option's own value (--=…)". The
+      // canonical npm/yarn/pnpm idiom `npm test -- tests/x.test.ts` lands on
+      // exactly this arm, so the arm most builds meet was the one telling them
+      // to type a spelling that does not exist. The refusal itself is
+      // unchanged and still closed: everything after `--` is forwarded to
+      // whatever command the package script runs, and this gate does not read
+      // package.json, so it cannot know what the forwarded path selects and
+      // must assume the run discovers from the repo root. What changes is that
+      // the remedy is now one that exists.
+      if (prev === '--') {
+        return (
+          `${arg} sits after the \`--\` separator, so it is forwarded to whatever command ` +
+          `${argv[0] ?? 'the runner'} runs — this gate does not read package.json, so it cannot see what the ` +
+          'forwarded path selects and must assume the run discovers from the repo root and reaches the mutated ' +
+          'file — name the test file with the runner that actually runs it, with no separator in front of it'
+        )
+      }
       return (
         `${arg} is read as the operand of ${prev} rather than as a selection, ` +
         'so the runner discovers from the repo root and reaches the mutated file — ' +
