@@ -97,7 +97,7 @@ describe('TridentTickLoop.runOnce', () => {
   // (held_on_run_id null) waits on a bare pid, and a pid exiting emits no
   // terminal event. On a quiet instance the card queued forever. The tick now
   // drives the same sweep on its own cadence.
-  test('drain_dispatch_holds runs on EVERY tick, including a tick with no runs at all', async () => {
+  test('drain_dispatch_holds runs on a tick with no runs at all', async () => {
     const store = new TridentRunStore(db)
     let drained = 0
     const loop = new TridentTickLoop({
@@ -106,10 +106,41 @@ describe('TridentTickLoop.runOnce', () => {
       drain_dispatch_holds: async () => {
         drained += 1
       },
+      drain_dispatch_holds_min_interval_ms: 0,
     })
 
     await loop.runOnce()
     expect(drained).toBe(1)
+    await loop.runOnce()
+    expect(drained).toBe(2)
+  })
+
+  // ARGUS r5 (minor): the drain is not free — each queued hold re-runs the whole
+  // dispatch chokepoint (an uncached `gh pr list --head` plus a 15 s-bounded
+  // branch-holder probe, serialized) — and the tick is not a 90 s metronome: the
+  // change watcher wakes it every 2 s on churn. So the drain has a floor of its
+  // own, measured from the last drain that RAN.
+  test('the hold drain is floored: a second tick inside the interval does NOT drain, a later one does', async () => {
+    const store = new TridentRunStore(db)
+    let clock = 1_000_000
+    let drained = 0
+    const loop = new TridentTickLoop({
+      store,
+      deps: stubAdvanceDeps(() => fixedNow),
+      now: () => clock,
+      drain_dispatch_holds: async () => {
+        drained += 1
+      },
+      drain_dispatch_holds_min_interval_ms: 90_000,
+    })
+
+    await loop.runOnce()
+    expect(drained).toBe(1)
+    // A watcher-driven wake two seconds later: the sweep still runs, the drain does not.
+    clock += 2_000
+    await loop.runOnce()
+    expect(drained).toBe(1)
+    clock += 90_000
     await loop.runOnce()
     expect(drained).toBe(2)
   })

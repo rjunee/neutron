@@ -2,6 +2,52 @@
 
 Card: `buildSubstrateWorkflowFire` (trident/inner-loop.ts) resolves `{status:'failed', error:'fire turn did not settle within the budget'}` on launcher-settle timeout, and the orchestrator (`orchestrator.ts` `outcome.status !== 'fired'` branch) unconditionally terminalized the run — but "not settled" does NOT imply "not fired". Measured: 8 of 33 runs in 7 days; the wake then invites a second lane onto a branch a live lane holds (stopped only by wrong-base-guard luck), and twice the timeout wrote `failed` over a run whose own row said `outer-published:*` (built, pushed, CI green). Fix in four layers: (1) never write plain `failed` on settle-timeout without checking positive evidence the workflow started — the run's own `inner_checkpoint` first, filesystem probes second; (2) a distinct launched-but-launcher-unobserved outcome that holds the lane instead of terminalizing, expressed over EXISTING columns only (no new column, no new phase); (3) the terminal-build wake must not tell an agent to relaunch for this failure shape — resolve the branch holder first; (4) dispatch must refuse on branch LIVENESS (live worktree lock / non-terminal run on the branch), not only on branch shape.
 
+## Resume state (round 10, 2026-09-02 — ARGUS ROUND-5 FINDINGS ADDRESSED; T1–T7 unchanged in shape)
+
+Round 10 addressed Argus round 5. No new column, no new phase, no new module; every change sits
+inside a seam T1–T4 already own.
+
+- **Round 5's only BLOCKER was a REPORTING contradiction**, not code: the build reported
+  `testsPassed: true` alongside `suiteOutcome: 'not-run'`, and a self-contradictory report is
+  read as no proof. Verdict A's clean-checkout re-run of `eb977d7a` had already found the code
+  sound. This round re-runs the FULL suite and reports the outcome consistently; nothing was
+  changed on account of that finding.
+- **MAJOR — `probeBranchHolder` read only the FIRST same-branch worktree entry.**
+  `trident/fire-evidence-probes.ts` now filters ALL entries whose branch matches and prefers any
+  live holder, with the per-entry pid/starttime/mtime work split into `probeWorktreeEntry`. A
+  stale entry listed ahead of a live one had made the probe answer `pid_live: false` while a lane
+  was really building. Pinned by a new probes test (stale first, live second → `launched`, and the
+  LIVE basename is the one reported).
+- **MINOR — the per-tick hold drain was uncapped.** `TridentTickLoop` gained
+  `DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS` (90 s, overridable via
+  `drain_dispatch_holds_min_interval_ms` for tests), measured from the last drain that RAN. The
+  change watcher wakes the tick every 2 s on churn, and each queued hold costs an uncached
+  `gh pr list --head` plus a 15 s-bounded holder probe, serialized.
+- **MINOR — the `branch_live` refusal over-promised.** It claimed the card was QUEUED and returned
+  a `hold` shape even when NO hold store was supplied (nothing persisted), and it promised an
+  automatic re-dispatch that the sweep's linked-run drop cancels when the card already has a live
+  linked run. The closing sentence is now chosen from those two facts and the `hold` field is
+  present only when a store took the row. `livenessDeps` in `board-dispatch.test.ts` now wires a
+  REAL `DispatchHoldStore`, so the queued assertions are made against the production shape, and
+  the hold-less caller has its own test.
+- **MINOR — a vacuous narrowing in `dispatch-holds.test.ts`.** The tick-drain test asserted the
+  code AFTER using it to return early; a refusal-code regression would have passed. It now
+  hard-asserts `expect(first.code).toBe('branch_live')` first.
+- **NIT — the trimmed published checkpoint never landed.** `observed` is the CAS TOKEN and the
+  store compares it against the STORED column, so a trimmed token lost the swap in exactly the
+  whitespace case the trim exists for. `fire-evidence.ts` carries the RAW column in `observed`;
+  the orchestrator writes the trimmed `checkpoint` onto the row. New orchestrator test.
+- **NIT — the duplicate card spec** committed under the mis-derived slug
+  `.trident/plans/trident/resume-note-round-5-already-built-a.md` is deleted; the canonical plan
+  doc is this file.
+- **NIT — `phase` is written outside the CAS that guards `inner_checkpoint`.** Left as built and
+  STATED at the site: the window is bounded, it self-heals on the workflow's next checkpoint
+  write, and widening the CAS over a column the tick owns would make a lost swap drop the
+  lane-holding write entirely.
+- Accepted-risk finding (stale worktree lock naming a long-lived pooled pid can queue a card with
+  only a log line) is unchanged and remains documented at `dispatch-holds.ts`; the worktree reaper
+  loop is the mitigation.
+
 ## Resume state (round 9, 2026-09-02 — T7 landed: salvaged typecheck fix fast-forwarded onto published PR #498; plan COMPLETE)
 
 Round 9 landed the one thing left after round 8's push published #498 at `3f14fcd0`: the
@@ -151,6 +197,7 @@ Branch `trident/a-fire-turn-settle-timeout-writes-t` (LOCAL ONLY — not on orig
 - [x] **T4 — dispatch refuses on branch liveness (card req 4)** (committed `4483cd46`). `branch_live` gate in `trident/board-dispatch.ts` per decision 10 AS AMENDED IN ROUND 8 (it runs after `already_landed` and it QUEUES — the plan text now matches the code); `defaultBranchHolderProbe` exported from fire-evidence-probes; `work-board-surface.ts` union widened; full red-first refusal suite in `board-dispatch.test.ts`; `dispatch-holds.test.ts` path-hold intent preserved via differentiated task text.
 - [x] **T5 — the wake stops inviting a relaunch for this failure shape (card req 3)** (committed this commit). `gateway/proactive/terminal-build-wake.ts` `buildTerminalBuildWakePrompt`: when `run.failure_reason` contains `FIRE_SETTLE_TIMEOUT_ERROR` or `FIRE_PUBLISHED_REASON_MARKER` (imported from the pure `trident/fire-evidence.ts` leaf), instruction 2 is replaced with do-NOT-relaunch-yet guidance: resolve the branch holder first (`git worktree list --porcelain` lock + live pid, the run row's `inner_checkpoint`, the PR state); for the published marker, verify the PR and dispatch a REVIEW round, never a rebuild; re-dispatch via `work_board_start` only when nothing live holds the branch and no published work exists. Every other failure_reason (including null) renders a byte-identical prompt — pinned by asserting the exact original instruction-2 line verbatim. New tests recorded red first.
 - [x] **T6 — record it** (committed this commit)**.** Staged the `.trident/as-built/trident/a-fire-turn-settle-timeout-writes-t.md` entry (`docs/AS_BUILT.md` untouched, per the one-writer rule) covering the four layers + the measured evidence; truth-synced this plan and the `.trident/plans` card doc.
+- [x] **T8 — Argus round-5 findings** (this commit). Multi-entry branch-holder probe; drain floor on the tick's hold sweep; honest `branch_live` queue prose + conditional `hold` shape; hard-asserted refusal code in the drain test; trimmed checkpoint written at the write site while the CAS keeps the raw token; duplicate plan doc removed; as-built entry extended with a round-6 section.
 - [x] **T7 — land the salvaged typecheck fix (round 9).** Landed via `git merge --ff-only 726b92b25dc71dd67807d141314ee70c4557e3be` (local tag `trident-salvage/d567f33a-83f7-43d6-aa7a-db07a0bd2ee6`, parent `3f14fcd0`) on top of published `3f14fcd0`; no hand edits and no production diff. Verified: `bash scripts/ci/typecheck-all.sh` — `trident/tsconfig.json` PASS, the two TS2339 at `trident/board-dispatch.test.ts:546/565` gone (the matrix's remaining unrelated failures in `tsconfig.json` root — `whisper-install.test.ts`, `fire-and-forget.test.ts`, `zip-writer.ts` — are pre-existing and untouched by this diff); `bun test trident/board-dispatch.test.ts` — 36 pass, 0 fail. `git diff 3f14fcd0..HEAD --name-only` is exactly `trident/board-dispatch.test.ts` + the two `.trident/plans/*.md` docs + this file.
 
 ## Verification map (card's controls)

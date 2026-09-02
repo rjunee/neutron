@@ -385,7 +385,11 @@ describe('BRANCH LIVE IS TRANSIENT — the sweep keeps the hold queued', () => {
       }),
     )
     expect(first.ok).toBe(false)
-    if (first.ok || first.code !== 'branch_live') return
+    if (first.ok) return
+    // ASSERT the code BEFORE narrowing on it: a bare `if (code !== 'branch_live')
+    // return` lets a refusal-code regression skip the rest of this test and pass.
+    expect(first.code).toBe('branch_live')
+    if (first.code !== 'branch_live') return
     // NOTHING owns this hold — the holder is a pid, not a run.
     expect(holds.getByItem(SLUG, 'A')?.held_on_run_id ?? null).toBeNull()
     expect(runCount()).toBe(0)

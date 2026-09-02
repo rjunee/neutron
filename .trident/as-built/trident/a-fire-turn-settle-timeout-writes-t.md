@@ -165,3 +165,44 @@ precisely because the event stream carries nothing but the finished reply), and 
 `.part` files are written by the launcher BEFORE the fire, so their existence proves
 nothing about the workflow. Closing that last window needs an attributable launch
 receipt from the substrate, which is a separate change.
+
+### Round 6 (Argus round 5) — the probe stops trusting the first entry, and the queue stops over-promising
+
+Four repairs, all inside the seams above; no new module, no new column, no new phase.
+
+The branch-holder probe (`trident/fire-evidence-probes.ts`) now examines EVERY
+same-branch worktree entry rather than the first one it finds, preferring any live
+holder. `git worktree add --force --force` permits two linked trees on one branch, and
+a stale entry listed ahead of the live one made the probe answer `pid_live: false`
+while a lane was really building — a false negative in precisely the direction the
+probe exists to prevent. The per-entry work (lock pid, recycled-pid starttime check,
+mtime) is unchanged; it simply runs per candidate now.
+
+The `branch_live` refusal says only what is true. It promised "this card is QUEUED and
+dispatches automatically" in two cases where nothing would: a caller that wired no hold
+store persists nothing at all, and a card that already has a LIVE LINKED RUN has its
+hold deleted by the sweep on the very next pass (that run owns the card). The refusal
+now picks its closing sentence from those two facts, and the structured `hold` field is
+present only when a hold store actually took the row. The dispatch tests wire a real
+`DispatchHoldStore` so the queued assertions are made against the shape production
+actually uses, with the hold-less caller pinned separately.
+
+The per-tick hold drain has a floor (`DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS`, 90 s,
+overridable for tests). The tick is not a 90 s metronome — the change watcher wakes it
+every 2 s on churn — and each queued hold costs a full re-dispatch: an uncached
+`gh pr list --head` plus a 15 s-bounded branch-holder probe, serialized. The floor is
+measured from the last drain that ran, so a quiet instance still drains on its first
+tick and a busy one stops re-asking a question whose answer changes in minutes.
+
+The trimmed published checkpoint actually lands now. `observed` is the caller's
+compare-and-swap TOKEN and the store compares it against the STORED column, so putting
+the trimmed name there lost the CAS in exactly the whitespace case the trim exists for.
+`observed` carries the raw column; the orchestrator writes the trimmed `checkpoint`
+onto the row it saves.
+
+Stated rather than fixed: `phase` is derived from the observed checkpoint but written
+plainly, outside the CAS that guards `inner_checkpoint`. If the detached workflow lands
+a newer checkpoint inside the gap between the gatherer's re-read and the save, the row
+keeps the newer checkpoint beside a phase derived from the older one. It self-heals on
+the workflow's next checkpoint write, and widening the CAS over a column the TICK owns
+would make a lost swap drop the lane-holding write entirely — a worse trade.

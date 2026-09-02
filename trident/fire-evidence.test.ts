@@ -259,10 +259,13 @@ describe('publishedFailureReason', () => {
 })
 
 describe('round-2 findings — the carried columns and the length contract', () => {
-  // NIT (round 2): `checkpoint` was trimmed but `observed` carried the raw
-  // column, so the row the caller PERSISTS said one thing while the
-  // failure_reason quoted another.
-  test('published carries the TRIMMED checkpoint in observed, matching the quoted one', () => {
+  // NIT (round 2, REVISED round 5): `checkpoint` is trimmed and `observed` is
+  // NOT — because `observed` is the caller's compare-and-swap TOKEN, and the
+  // store compares it against the STORED column. Putting the trimmed value here
+  // lost the CAS in precisely the whitespace case the trim exists for, leaving
+  // the column untrimmed. The trimmed name reaches the row from `checkpoint`,
+  // which the orchestrator writes onto the run it saves.
+  test('published quotes the TRIMMED checkpoint but carries the RAW column as the CAS token', () => {
     const messy = `  outer-published:${SHA}:0:5:deviated \n`
     const evidence = classifyFireTimeoutRow(
       columns({ inner_checkpoint: messy, inner_verdict: 'REVIEW_NOT_RUN' }),
@@ -270,8 +273,9 @@ describe('round-2 findings — the carried columns and the length contract', () 
     )
     expect(evidence.kind).toBe('published')
     if (evidence.kind !== 'published') throw new Error('unreachable')
-    expect(evidence.observed?.inner_checkpoint).toBe(evidence.checkpoint)
-    expect(evidence.observed?.inner_checkpoint).toBe(`outer-published:${SHA}:0:5:deviated`)
+    expect(evidence.checkpoint).toBe(`outer-published:${SHA}:0:5:deviated`)
+    // Byte-equal to what is stored, or the CAS compares against a value no row holds.
+    expect(evidence.observed?.inner_checkpoint).toBe(messy)
     // Every OTHER workflow-owned column is still carried verbatim.
     expect(evidence.observed?.inner_verdict).toBe('REVIEW_NOT_RUN')
   })

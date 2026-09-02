@@ -596,6 +596,35 @@ export async function dispatchBoardBoundBuild(
   // path; running it first cost the clearer diagnosis on the common one.
   {
     const holdingRun = deps.store.listNonTerminalByRepo(repo_path).find((r) => r.branch === branch)
+    // WHAT WILL ACTUALLY RE-FIRE THIS CARD — say that, and nothing more. Two
+    // facts decide it, and the prose used to promise an automatic dispatch in
+    // cases where neither holds:
+    //  - A HOLD STORE. A caller that wired none persists nothing, so there is
+    //    no queue for the card to be in (every production composer passes one,
+    //    so this is the hypothetical arm — but a refusal must not claim a row
+    //    it did not write).
+    //  - THE SWEEP'S OWN DROP RULE. `buildDispatchHoldSweep` deletes a hold
+    //    whose card already has a LIVE linked run, because that run owns the
+    //    card. A refusal behind the card's own live run therefore queues
+    //    nothing that survives the next sweep, and telling the operator to
+    //    wait for a dispatch that will never come is worse than saying so.
+    const linkedRunId = item.linked_run_id ?? null
+    const linkedPhase = linkedRunId === null ? null : (deps.store.get(linkedRunId)?.phase ?? null)
+    const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
+    let tail: string
+    if (deps.holds === undefined) {
+      tail =
+        ' Nothing was dispatched, and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the ' +
+        'card yourself once the holder is gone.'
+    } else if (linkedLive) {
+      tail =
+        ` Nothing was dispatched now, and nothing stays queued — run ${(linkedRunId ?? '').slice(0, 8)} is already ` +
+        'bound to this card and owns it; the card moves when that run finishes.'
+    } else {
+      tail =
+        ' Nothing was dispatched now; this card is QUEUED and re-checked on every sweep, so it dispatches ' +
+        'automatically once nothing live holds the branch.'
+    }
     let message: string | null = null
     let held_on_run_id: string | null = null
     if (holdingRun !== undefined) {
@@ -603,8 +632,7 @@ export async function dispatchBoardBoundBuild(
       message =
         `Refused: branch ${branch} is already being built by live run ${holdingRun.id.slice(0, 8)} ` +
         `(${holdingRun.slug}, phase ${holdingRun.phase}). Resolve that run first — watch it finish, or stop it ` +
-        `explicitly if it is truly dead — and never delete the branch under it. Nothing was dispatched now; ` +
-        `this card is QUEUED and dispatches automatically once nothing live holds the branch.`
+        `explicitly if it is truly dead — and never delete the branch under it.` + tail
     } else {
       let holder: BranchHolderProbe | null = null
       try {
@@ -618,9 +646,8 @@ export async function dispatchBoardBoundBuild(
           (holder.pid !== null ? ` (lock pid ${holder.pid}, alive)` : '') +
           ` — a lane appears to be building this branch right now even though no live run row says so ` +
           `(a launcher timeout may have mislabeled its run as failed). Resolve the holder first: check ` +
-          '`git worktree list --porcelain` and that pid; never delete the branch under a live lock. ' +
-          `Nothing was dispatched now; this card is QUEUED and re-checked on every sweep, so it dispatches ` +
-          `automatically once nothing live holds the branch.`
+          '`git worktree list --porcelain` and that pid; never delete the branch under a live lock.' +
+          tail
       }
     }
     if (message !== null) {
@@ -661,12 +688,19 @@ export async function dispatchBoardBoundBuild(
         message,
         // SAY IT IS QUEUED IN THE SHAPE, NOT ONLY IN THE PROSE. `held` and the
         // path-claim refusal both carry this; a `branch_live` without it made a
-        // queued card look dropped to every structured consumer.
-        hold: {
-          kind: 'branch',
-          branch,
-          ...(held_on_run_id !== null ? { holding_run_id: held_on_run_id } : {}),
-        },
+        // queued card look dropped to every structured consumer. It is present
+        // ONLY when a hold store took the row: with no store nothing was
+        // persisted, and a `hold` shape then claims a queue entry that does not
+        // exist.
+        ...(deps.holds !== undefined
+          ? {
+              hold: {
+                kind: 'branch' as const,
+                branch,
+                ...(held_on_run_id !== null ? { holding_run_id: held_on_run_id } : {}),
+              },
+            }
+          : {}),
       }
     }
   }

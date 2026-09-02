@@ -45,6 +45,13 @@ import { changeSignatureEntries, type MergeMode, type TridentRun, type TridentRu
 import { LIVENESS_PROBE_INTERVAL_MS } from './liveness.ts'
 import { detectBaseBranch, type RunHostCommand } from './merge.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
+
+/**
+ * How rarely the per-tick dispatch-hold drain may actually run. 90 s — the tick's
+ * own baseline cadence, i.e. "once per settled sweep at most", NOT once per
+ * watcher-driven wake. See `drain_dispatch_holds_min_interval_ms`.
+ */
+export const DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS = 90_000
 import { createLogger } from '@neutronai/logger'
 
 const log = createLogger('trident-tick')
@@ -330,6 +337,20 @@ export interface TridentTickOptions {
    */
   drain_dispatch_holds?: () => Promise<void>
   /**
+   * FLOOR ON THE DRAIN'S CADENCE. Default
+   * {@link DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS}; `<= 0` (or non-finite) drains on
+   * every tick, which is what tests want and production does not.
+   *
+   * The drain is NOT cheap per queued hold: each one re-runs the whole dispatch
+   * chokepoint, which makes an uncached `gh pr list --head` call and a branch-holder
+   * probe bounded at 15 s, serialized. And the tick is NOT a 90 s metronome — the
+   * change watcher wakes it at `watch_interval_ms` (2 s) whenever rows churn, so
+   * a busy instance could run that fan-out many times a minute. The holds queue is
+   * waiting on a live lane finishing, an event measured in minutes; asking more
+   * often buys nothing and spends another lane's rate limit.
+   */
+  drain_dispatch_holds_min_interval_ms?: number
+  /**
    * Injectable clock (ms) for the transition fan's stall detection. Defaults to
    * `Date.now`. Tests pass a fixed clock to exercise the stall-crossing fan
    * deterministically.
@@ -359,6 +380,10 @@ export class TridentTickLoop {
   /** null when catch-up is not production-wired. */
   private readonly foldStagedAsBuilt: TridentAsBuiltFold | null
   private readonly drainDispatchHolds: (() => Promise<void>) | null
+  /** Floor between two hold drains; see the option's docblock for the cost. */
+  private readonly drainHoldsMinIntervalMs: number
+  /** When the last drain ran. `-Infinity` ⇒ the first tick always drains. */
+  private lastHoldDrainMs = Number.NEGATIVE_INFINITY
   /** Last observed change signature; null = nothing observed yet (first observation records, never wakes). */
   private lastChangeSig: string | null = null
   /**
@@ -444,6 +469,8 @@ export class TridentTickLoop {
           })
     this.foldStagedAsBuilt = options.fold_staged_as_built ?? null
     this.drainDispatchHolds = options.drain_dispatch_holds ?? null
+    this.drainHoldsMinIntervalMs =
+      options.drain_dispatch_holds_min_interval_ms ?? DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS
   }
 
   /** Start the loop. Idempotent — a second `start` is a no-op. */
@@ -903,7 +930,12 @@ export class TridentTickLoop {
       // The hold queue's per-cadence drain, failure-contained exactly like the
       // as-built catch-up: a sweep that throws must not cost the tick its
       // baseline settle.
-      if (this.drainDispatchHolds !== null) {
+      // RATE-LIMITED, not per-tick: the change watcher can wake this loop every
+      // 2 s, and each drained hold costs an uncached `gh` call plus a 15 s-bounded
+      // worktree probe. The floor is measured from the last drain that RAN.
+      const drainDueAt = this.lastHoldDrainMs + this.drainHoldsMinIntervalMs
+      if (this.drainDispatchHolds !== null && (!(this.drainHoldsMinIntervalMs > 0) || this.now() >= drainDueAt)) {
+        this.lastHoldDrainMs = this.now()
         try {
           await this.drainDispatchHolds()
         } catch (err) {

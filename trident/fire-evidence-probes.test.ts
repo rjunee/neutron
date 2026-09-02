@@ -281,6 +281,31 @@ describe('the branch holder — a live lock is launch evidence', () => {
     }
   })
 
+  test('a STALE same-branch entry listed FIRST does not mask the live holder behind it', async () => {
+    // `git worktree add --force --force` permits two linked trees on one branch.
+    // Reading only the first entry reported pid_live:false while a live lane
+    // held the branch — the false negative this probe exists to prevent.
+    const STALE = '/repo/.claude/worktrees/wf_stale-1'
+    const gather = buildFireEvidenceGatherer({
+      read_run: () => run(),
+      run_host: async () =>
+        okHost(
+          porcelain(
+            linkedBlock({ path: STALE, locked: 'claude agent wf_stale (pid 999 start 111)' }),
+            linkedBlock({ locked: LIVE_LOCK }),
+          ),
+        ),
+      fs: makeFs({ readFile: async () => procStat(4242, 987654) }),
+      probe_pid_alive: (pid) => (pid === 4242 ? 'alive' : 'dead'),
+    })
+    const evidence = await gather({ run: run(), fire_started_at_ms: FIRE_AT })
+    expect(evidence.kind).toBe('launched')
+    // The LIVE holder is the one reported, not the stale one listed ahead of it.
+    expect(evidence.detail).toContain(HOLDER_BASE)
+    expect(evidence.detail).toContain('4242')
+    expect(evidence.detail).not.toContain('wf_stale-1')
+  })
+
   test('MUST STAY FAILED — pid 1 in the lock reason is treated as absent', async () => {
     const asked: number[] = []
     const gather = buildFireEvidenceGatherer({

@@ -211,11 +211,13 @@ export function classifyFireTimeoutRow(
       kind: 'published',
       checkpoint: name,
       detail: 'run row already carries an outer-published checkpoint with no tasks remaining',
-      // THE TRIMMED NAME, not the raw column. `checkpoint` above (and the
-      // failure_reason rendered from it) quote the trimmed form, and `observed`
-      // is what the caller PERSISTS — so carrying the untrimmed value here would
-      // leave the row saying one thing and the reason quoting another.
-      ...(fresh !== null ? { observed: { ...pickWorkflowOwned(fresh), inner_checkpoint: name } } : {}),
+      // THE RAW COLUMN, VERBATIM — `observed` is the caller's COMPARE-AND-SWAP
+      // TOKEN, not the value to write. The store compares `inner_checkpoint IS ?`
+      // against what is STORED, so a trimmed token loses the CAS in exactly the
+      // whitespace case the trim exists for, and the column is then left
+      // untrimmed. `checkpoint` above carries the trimmed name; the caller writes
+      // THAT onto the row while CAS-ing on this.
+      ...(fresh !== null ? { observed: pickWorkflowOwned(fresh) } : {}),
     }
   }
   return {

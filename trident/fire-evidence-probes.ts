@@ -196,9 +196,37 @@ export async function probeBranchHolder(
 
   const entries = parseWorktreeList(res.stdout)
   const wantRef = `refs/heads/${branch}`
-  const entry = entries.slice(1).find((e) => e.branch === wantRef)
-  if (entry === undefined) return null
+  // EVERY matching entry, not just the first. `git worktree add --force --force`
+  // permits two linked trees on one branch, and a STALE entry can be listed
+  // ahead of the live one; examining only the first would report `pid_live:
+  // false` while a live lane holds the branch — a false negative in the exact
+  // direction this probe exists to prevent. So probe them all and prefer any
+  // live holder; with the common single match the behaviour is unchanged.
+  const candidates = entries.slice(1).filter((e) => e.branch === wantRef)
+  if (candidates.length === 0) return null
 
+  let first: BranchHolderProbe | null = null
+  for (const entry of candidates) {
+    const probe = await probeWorktreeEntry(deps, entry)
+    if (probe.pid_live) return probe
+    first ??= probe
+  }
+  return first
+}
+
+/**
+ * One candidate worktree, read as a holder: the pid its lock names (when it
+ * names one), whether that pid is really alive, and the tree's own mtime.
+ * Split out of `probeBranchHolder` so EVERY same-branch entry gets the same
+ * look — see the loop above.
+ */
+async function probeWorktreeEntry(
+  deps: {
+    fs: FireProbeFs
+    probe_pid_alive: (pid: number) => 'alive' | 'dead' | 'unknown'
+  },
+  entry: WorktreeListEntry,
+): Promise<BranchHolderProbe> {
   const match = entry.lock_reason === null ? null : entry.lock_reason.match(WORKTREE_LOCK_PID)
   let pid: number | null = null
   if (match?.[1] !== undefined) {
@@ -242,7 +270,6 @@ export async function probeBranchHolder(
 
   return { worktree_basename: basename(entry.path), lock_reason: entry.lock_reason, pid, pid_live, mtime_ms }
 }
-
 /**
  * The DISPATCH-SIDE entry to the branch-holder probe: `probeBranchHolder`
  * over this module's own production defaults (spawnCapture at the reused

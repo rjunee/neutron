@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from './store.ts'
+import { DispatchHoldStore } from './dispatch-holds.ts'
 import {
   detectReviewIntent,
   dispatchBoardBoundBuild,
@@ -461,10 +462,16 @@ describe('branch liveness refusal (branch_live)', () => {
     return wt
   }
 
+  // ARGUS r5 (minor): these deps used to omit `holds`, so the QUEUED prose and
+  // the `hold` shape were asserted against a caller that persists NOTHING —
+  // which is not how any production composer calls this (open/composer.ts passes
+  // a store at all four sites). Wire the real store here and pin the hold-less
+  // caller's DIFFERENT wording in its own test below.
   function livenessDeps(repoDir: string, over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
     return {
       store,
       board,
+      holds: new DispatchHoldStore(db),
       project_slug: 'proj-1',
       repo_path: tmp,
       resolveBuildRepo: async () => repoDir,
@@ -545,6 +552,66 @@ describe('branch liveness refusal (branch_live)', () => {
     expect('hold' in result).toBe(true)
     if (!('hold' in result)) return
     expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH })
+  })
+
+  // ARGUS r5 (minor): the arm returned the QUEUED sentence and the `hold` shape
+  // unconditionally, including for a caller that wired NO hold store — claiming
+  // a queue entry nothing wrote. Every production composer passes a store, so
+  // this arm is hypothetical; it must still not lie.
+  test('with NO hold store the refusal says nothing was queued and carries no hold shape', async () => {
+    const repoDir = makeCommittedRepo('repo-no-holds')
+    addLockedWorktree(repoDir, 'wt-no-holds', `claude agent test (pid ${process.pid})`)
+
+    // `exactOptionalPropertyTypes` forbids passing `holds: undefined`; the ABSENT
+    // key is exactly the caller shape under test.
+    const { holds: _holds, ...withoutHolds } = livenessDeps(repoDir)
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, withoutHolds)
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('NOTHING WAS QUEUED')
+    expect(result.message).toContain('re-dispatch the card yourself')
+    expect('hold' in result).toBe(false)
+  })
+
+  // ARGUS r5 (minor): the run-holder arm promised "dispatches automatically once
+  // nothing live holds the branch" — but `buildDispatchHoldSweep` DELETES a hold
+  // whose card already has a live linked run, so for the common shape (the
+  // holding run IS this card's own linked run) no automatic dispatch ever
+  // happens. The prose now matches the sweep.
+  test('when the card ALREADY has a live linked run, the refusal does not promise an automatic dispatch', async () => {
+    const repoDir = makeCommittedRepo('repo-linked-live')
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: live.id,
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('nothing stays queued')
+    expect(result.message).toContain(live.id.slice(0, 8))
+    expect(result.message).not.toContain('QUEUED and re-checked')
   })
 
   test('the branch_live hold names the holding RUN when there is one', async () => {

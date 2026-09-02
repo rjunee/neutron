@@ -3373,6 +3373,32 @@ describe('orchestrator — fire did not settle → failed', () => {
     expect(after.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
   })
 
+  // ARGUS r5 (nit): the trimmed checkpoint used to travel in `observed`, which is
+  // ALSO the CAS token — so `inner_checkpoint IS <trimmed>` never matched the
+  // stored untrimmed value and the column kept its whitespace. The trim now
+  // travels in `checkpoint` and is written onto the row, while the CAS still
+  // compares what is really stored.
+  test('the TRIMMED checkpoint actually lands over an untrimmed stored column', async () => {
+    const messy = `  ${PUBLISHED_CHECKPOINT} \n`
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      local_branch_tip: PUBLISHED_SHA,
+      gather_fire_evidence: async (input) => ({
+        kind: 'published',
+        checkpoint: PUBLISHED_CHECKPOINT,
+        detail: 'row already published',
+        // The CAS token is the RAW column, exactly as the classifier reports it.
+        observed: pickWorkflowOwned(store.get(input.run.id)!),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { inner_checkpoint: messy })
+
+    await h.loop.runOnce()
+
+    expect(store.get(run.id)?.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
+  })
+
   test('NO evidence keeps today\'s failure byte-identical', async () => {
     const h = buildHarness({
       plan: () => ({ fire: TIMEOUT_FIRE }),

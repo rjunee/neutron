@@ -3572,6 +3572,18 @@ export function buildTridentOrchestrator(
               // checkpoint: absent an observation there is no new checkpoint to
               // derive from, and a prior round's carried-forward checkpoint must
               // not drag the phase backwards.
+              //
+              // ONE RESIDUAL WINDOW, STATED PLAINLY (Argus r5): `phase` is not a
+              // workflow-owned column, so it is written PLAINLY while
+              // `inner_checkpoint` is CAS-guarded. If the detached workflow lands
+              // a NEWER checkpoint between the gatherer's re-read and this save,
+              // the CAS keeps that newer checkpoint and the phase beside it is
+              // derived from the older one. That is the same one-statement gap
+              // the CAS narrows but cannot close; it is bounded and self-heals on
+              // the workflow's next checkpoint write, which derives both columns
+              // together. Widening the CAS to cover `phase` would make the save
+              // all-or-nothing over a column the TICK owns — a worse trade: a
+              // lost swap would then drop the lane-holding write entirely.
               phase:
                 phaseForCheckpoint(evidence.observed?.inner_checkpoint ?? null) ?? pinnedRun.phase,
               subagent_run_id: id,
@@ -3603,7 +3615,16 @@ export function buildTridentOrchestrator(
           return {
             // Same rule as the held lane: terminalize over what the gatherer
             // actually READ, never over the pre-fire snapshot.
-            run: failedRun(seenRow, publishedFailureReason(evidence.checkpoint), false),
+            // THE TRIMMED CHECKPOINT IS WHAT LANDS, and it is written here rather
+            // than carried in `observed` — that field is the CAS TOKEN and must
+            // stay byte-equal to the stored column or the swap silently no-ops
+            // (`store.ts` compares `inner_checkpoint IS ?`). Writing it here is
+            // what makes the row and the failure_reason quote the same string.
+            run: failedRun(
+              { ...seenRow, inner_checkpoint: evidence.checkpoint },
+              publishedFailureReason(evidence.checkpoint),
+              false,
+            ),
             changed: true,
             waiting: false,
             note: `${run.phase} → failed (launcher timeout over already-published work — review not run)`,
