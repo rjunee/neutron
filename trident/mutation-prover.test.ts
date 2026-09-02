@@ -1461,6 +1461,39 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       expect(out.reason).toContain('forwards it to whatever command')
     }
 
+    // …AND `make` IS THE FOURTH WRAPPER, left off the first time and reproduced
+    // by a reviewer: `make test-all tests/support/lib.test.ts` against a
+    // `Makefile` whose `test-all` recipe is `bun test` came back `proved: true`
+    // while every OTHER spelling of the same repo was refused. Make does not
+    // forward the positional into the recipe — it reads it as a second GOAL, so
+    // the recipe's whole-suite command line runs and the named file, which
+    // exists on disk, is reported up to date. Different mechanism from npm's
+    // forwarding, identical forgery, and the refusal must SAY the mechanism the
+    // build wrote rather than blame a package.json it never had.
+    for (const guard of [
+      ['make', 'test-all', 'tests/support/lib.test.ts'],
+      ['make', 'test', 'tests/support/lib.test.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect(out.reason).toContain('second GOAL for make')
+      expect(out.reason).toContain(`${guard[1] as string} recipe`)
+      // The npm sentence would be a lie here — there is no package.json in this
+      // argv, and telling the next build to look in one sends it to the wrong
+      // file. This fails if the make arm is deleted and the npm arm inherits it.
+      expect(out.reason).not.toContain('package.json')
+    }
+
     // POSITIVE CONTROL — the over-refusal is spellable around, and it is scoped
     // to the forwarding programs: naming the same test file with the runner
     // that actually runs it is a targeted guard and stays legal. Without this

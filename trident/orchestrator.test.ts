@@ -753,6 +753,15 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // the assertion above would pass just as well if the note were empty.
     expect(truncateNote('a'.repeat(300)).startsWith('a'.repeat(240))).toBe(true)
     expect(truncateNote('short')).toBe('short')
+
+    // AND THE CUT IS AT EXACTLY 240. Everything above holds just as well at
+    // 241 — the surrogate case only swallows the pair whole, and `startsWith`
+    // is satisfied by any longer head — so the docblock's claim that a test
+    // pins the ceiling was not true of any assertion here. This one is: the
+    // ellipsis follows the 240th character and nothing else.
+    expect(truncateNote('a'.repeat(300))).toBe(
+      `${'a'.repeat(240)}… (300 chars; full reason in the mutation_proof_exempt log line)`,
+    )
   })
 
   test('the DURABLE copy of an exemption reason is capped too — generously, and only past a real diff', () => {

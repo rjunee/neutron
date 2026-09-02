@@ -618,6 +618,22 @@ function carriedValue(arg: string): string {
  * closed here and could not be: the config is part of the branch under proof.
  * The class pre-dates this rule for production files, and the same answer holds
  * for both — a proof is evidence for a reviewer, not a substitute for one.
+ *
+ * A WRAPPER'S BODY IS THE SAME RESIDUAL, and belongs on this list beside the
+ * configs because a reviewer reproduced it and did not find it written down: a
+ * `package.json` script or a `Makefile` recipe is a command line the BRANCH
+ * wrote, and the argv `npm run test:unit` says nothing about it. With
+ * `"test:unit": "bun test --preload=./src/limit.ts tests/unrelated.test.ts"`
+ * that guard loads the mutated PRODUCTION file into a process running an
+ * unrelated test, so a syntax-shaped mutation reddens it with nothing asserting
+ * the mutated behaviour — reproduced end to end on npm 10.9.8. This function
+ * cannot see it: for a production target it returns at the `aRunnerMayCollect`
+ * line below, and even for a collectible one the opacity is the point.
+ * `forwardsPositionalsToAScript` bounds the class — no wrapper POSITIONAL ever
+ * counts as a selection, for npm, pnpm, yarn or make — but the wrapper's own
+ * body stays outside argv, and closing it would mean parsing `package.json` and
+ * every `Makefile` dialect. The answer is the one above: a proof is evidence
+ * for a reviewer, not a substitute for one.
  */
 function guardRunsTheMutatedFile(guard: readonly string[], file: string): string | null {
   const target = normalizeArg(file)
@@ -1116,9 +1132,10 @@ function runnerPrefixLength(argv: readonly string[]): number {
 }
 
 /**
- * Whether this program FORWARDS its positionals to a command written in
- * `package.json` — npm, pnpm and yarn, the three package-script shapes on
- * `TEST_COMMAND_SHAPES`.
+ * Whether this program's positionals land in a command line the BRANCH WROTE
+ * rather than in a runner's own selector — npm, pnpm and yarn, whose script
+ * bodies live in `package.json`, and `make`, whose recipe bodies live in the
+ * `Makefile`. Those are every wrapper shape on `TEST_COMMAND_SHAPES`.
  *
  * THE BYPASS THIS CLOSES, reproduced end-to-end on npm 10.9.8. The `--` arm of
  * `whyNoSelection` already refuses `npm test -- tests/x.test.ts` for the right
@@ -1133,16 +1150,30 @@ function runnerPrefixLength(argv: readonly string[]): number {
  * that collects the mutated file and runs it as its own test. Red mutated,
  * green restored, "proved", with the branch having supplied both halves.
  *
- * The refusal is lexical and fails CLOSED: for these three programs no
- * positional counts as a selection, so a collectible target has no package-
- * script guard spelling. That is an OVER-refusal and it is spellable around —
- * name the test file with the runner that actually runs it (`bun test
- * tests/x.test.ts`), which is what the script would have run anyway. A
- * PRODUCTION target is untouched: `guardRunsTheMutatedFile` returns before any
- * of this unless a runner would COLLECT the mutated file wholesale.
+ * `make` IS THE FOURTH, and leaving it off left the hole open under a different
+ * spelling — reproduced by a reviewer against a `Makefile` whose recipe is
+ * `test-all:\n\tbun test`: the guard `make test-all tests/decoy.test.ts` came
+ * back `proved: true` while the SAME repo refused `make test-all`, `npm run
+ * test-all tests/decoy.test.ts` and `bun test`. Make does not forward the extra
+ * positional to the recipe at all — it reads it as a SECOND GOAL, so the
+ * `test-all` recipe runs its own whole-suite command line and then the named
+ * file, which exists on disk (`guardSelectsNothingOnDisk` requires it to), is
+ * reported up to date and exits 0. The argv reads targeted; the run is
+ * discovery. Different mechanism, identical forgery, and the same lexical
+ * answer: for make too, no positional counts as a selection.
+ *
+ * The refusal is lexical and fails CLOSED: for these four programs no
+ * positional counts as a selection, so a collectible target has no wrapper
+ * guard spelling. That is an OVER-refusal and it is spellable around — name the
+ * test file with the runner that actually runs it (`bun test
+ * tests/x.test.ts`), which is what the script or recipe would have run anyway.
+ * A PRODUCTION target is untouched: `guardRunsTheMutatedFile` returns before
+ * any of this unless a runner would COLLECT the mutated file wholesale — which
+ * is why the WRAPPER-OPACITY class is only bounded here, not closed; see the
+ * KNOWN RESIDUAL note on `guardRunsTheMutatedFile`.
  */
 function forwardsPositionalsToAScript(argv: readonly string[]): boolean {
-  return argv[0] === 'npm' || argv[0] === 'pnpm' || argv[0] === 'yarn'
+  return argv[0] === 'npm' || argv[0] === 'pnpm' || argv[0] === 'yarn' || argv[0] === 'make'
 }
 
 /** Whether a string is plainly a path at all: it has a directory separator or a
@@ -1327,6 +1358,19 @@ function whyNoSelection(argv: readonly string[]): string {
     // and npm forwards a bare positional identically. See
     // `forwardsPositionalsToAScript` for the reproduction.
     if (forwardsPositionalsToAScript(argv)) {
+      // MAKE IS NOT npm AND THE REMEDY MUST NOT LIE ABOUT IT. Make reads the
+      // extra positional as a SECOND GOAL rather than forwarding it into the
+      // recipe, and it is the `Makefile`, not `package.json`, that this gate
+      // cannot see. Same refusal, the mechanism the build actually wrote.
+      if (argv[0] === 'make') {
+        const goal = argv[1] ?? 'the target'
+        return (
+          `${arg} is a second GOAL for make, not a selection — make runs the ${goal} recipe's own command ` +
+          'line either way, and this gate does not read the Makefile, so it cannot see what that recipe runs ' +
+          'and must assume the run discovers from the repo root and reaches the mutated file — name the test ' +
+          'file with the runner that actually runs it'
+        )
+      }
       const script = argv[1] === 'run' ? (argv[2] ?? 'the script') : (argv[1] ?? 'the script')
       return (
         `${arg} is a positional argument to ${argv[0]}, which forwards it to whatever command the ` +

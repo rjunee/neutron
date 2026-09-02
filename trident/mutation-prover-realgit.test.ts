@@ -299,6 +299,62 @@ describe('the mutation-proof gate against real git', () => {
     // thing under test only ever buys a red that means "the box was busy".
   }, 120_000)
 
+  test('a make GOAL beside a real path runs a BRANCH-AUTHORED recipe, not a targeted guard, and is refused', async () => {
+    // THE BYPASS A REVIEWER REPRODUCED against the previous head: with a
+    // `Makefile` the branch itself wrote, whose `test-all` recipe is `bun test`,
+    // the guard `make test-all <a real test path>` came back `ok: true,
+    // proved: true` — while the SAME repo refused `make test-all`, `npm run
+    // test-all <path>` and `bun test`. Make does not hand the extra positional
+    // to the recipe; it reads it as a SECOND GOAL, so the recipe's whole-suite
+    // discovery runs (collecting and breaking on the mutated library) and the
+    // named file, which is on disk, is simply reported up to date. Red mutated,
+    // green restored, with the branch having supplied both halves.
+    //
+    // End to end against real git: the Makefile is committed, the claim is a
+    // legal support-library target, and the refusal must land BEFORE anything
+    // is executed or any worktree is created.
+    const lib = await seedSupportLib()
+    writeFileSync(join(lib, 'Makefile'), 'test-all:\n\tbun test\n')
+    await git(lib, 'add', '-A')
+    await git(lib, ...GIT_ID, 'commit', '-q', '-m', 'the branch-authored recipe')
+    const run = { id: 'run-make', slug: 'support-lib', repo_path: lib, branch: 'trident/support-lib-proof' }
+    const claim = {
+      file: 'tests/support/clamp.ts',
+      find: 'n > max ? max : n',
+      replace: 'n',
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+    const out = await runMutationProofGate({
+      run,
+      claim: { ...claim, guard: ['make', 'test-all', 'tests/support/clamp.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(out.reason).toContain('second GOAL for make')
+    expect(out.reason).toContain('test-all recipe')
+    expect(out.reason).toContain('tautology')
+    // Nothing ran, so nothing was left behind — and no `make` was spawned.
+    expect(existsSync(proofWorktreePath(lib, run))).toBe(false)
+
+    // POSITIVE CONTROL, and the one that stops this from passing on "make is
+    // banned outright": the spelling the refusal RECOMMENDS — the same test
+    // named with the runner that actually runs it — still proves red-then-green
+    // in this very repo, Makefile and all.
+    const fine = await runMutationProofGate({
+      run: { ...run, id: 'run-make-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/support/clamp.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([fine.ok, fine.exempt, fine.evidence?.proved ?? null]).toEqual([true, false, true])
+    const obs = fine.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
+
   test('the mutated file under an ABSOLUTE or ..-and-back name is still its own guard, and is refused', async () => {
     // THE BYPASS, against real git and the real path the proof worktree lands
     // at. The guard below runs `tests/support/clamp.ts` — the MUTATED file —
