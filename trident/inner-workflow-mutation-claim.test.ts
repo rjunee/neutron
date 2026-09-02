@@ -26,6 +26,7 @@ const PROVER_SRC = readFileSync(fileURLToPath(new URL('./mutation-prover.ts', im
 interface Captured {
   label: string | undefined
   schema: Record<string, unknown> | undefined
+  prompt: string
 }
 
 const BUILD_CLAIM = {
@@ -46,11 +47,11 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
   let synthCount = 0
 
   const agent = async (
-    _prompt: string,
+    prompt: string,
     o?: { label?: string; schema?: Record<string, unknown> },
   ): Promise<unknown> => {
     const label = o?.label
-    captured.push({ label, schema: o?.schema })
+    captured.push({ label, schema: o?.schema, prompt })
     const forgeResult = {
       prNumber: null,
       branch: 'trident/test-run',
@@ -117,6 +118,27 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
 }
 
 describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)', () => {
+  test('every BUILD prompt ASKS for the nomination — required-for-merge, legality, and when null is legal', async () => {
+    // MEASURED CAUSE of every null claim on this card: the schema had a
+    // mutationClaim field and no prompt ever told the build to fill it, so
+    // `null` was a schema-valid answer to a question nothing asked. The ask
+    // lives in the contract text, so it is the contract text that is pinned.
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined })
+    const prompts = captured
+      .filter((c) => c.label === 'forge:build' || String(c.label).startsWith('forge:fix-round-'))
+      .map((c) => c.prompt)
+    // POSITIVE CONTROL: the harness drives a build pass AND a fix pass, so an
+    // empty extraction must fail here rather than pass the loop vacuously.
+    expect(prompts.length).toBeGreaterThan(1)
+    for (const p of prompts) {
+      expect(p).toContain('MUTATION NOMINATION — REQUIRED, NOT A FORMALITY')
+      expect(p).toContain('CANNOT MERGE')
+      expect(p).toContain('null ONLY when NO legal target exists')
+      expect(p).toContain('mutationClaim (see MUTATION NOMINATION below)')
+      expect(p).toContain('a truthy claim from a fix round replaces the standing one')
+    }
+  })
+
   test('FORGE_SCHEMA requires a mutationClaim, with every field the prover needs', async () => {
     const { captured } = await runWorkflow({ fixRoundClaim: undefined })
     const forge = captured.filter((c) => String(c.label).startsWith('forge:'))
