@@ -549,3 +549,43 @@ The DEAD-holder arm remains reachable in production only when the occupancy prob
 `probeTreeOccupancy`'s unknown-veto fires first and answers "occupancy is UNKNOWN — treat it as
 live". That is the fail-safe direction and it is disclosed at the arm, so it is left alone
 deliberately; reversing the order would let an unreadable process table authorise a removal.
+
+### THE FOLD NOW SITS ABOVE THE FIRST REFUSAL, NOT ABOVE THE THIRD
+
+The same seam as the round above, one function earlier. `repoProse` was declared INSIDE the
+ancestry block, so the two refusals composed BEFORE it — the base fetch failing, and its tip not
+resolving — interpolated `repo_path` raw and passed git's stderr through `redactPushError` alone.
+That function redacts credentials and bounds the length; it folds neither a newline nor a delete
+command, and it was never meant to. Both messages are persisted, re-read, and routed by
+`delivery.ts` through the identical `trident infra: … the build was NOT started` classifier as the
+ancestry ones, so a legal repo path (`git init` and `git worktree add` both accept a newline in
+one; store.ts persists it verbatim) or a hostile fetch stderr could forge a line carrying
+`git branch -D -- victim` inside the class of message whose entire subject is that UNKNOWN
+authorises nothing. Reviewers reproduced it from both sources independently.
+
+`repoProse` and a shared `gitDetail` (redact first, then fold) are now declared above every path
+in the launcher that can refuse, and the ancestry arms use the same two bindings rather than their
+own copies — one fold on both sides of the seam, because two would drift, which is exactly how
+this arrived a round late. Both boundaries are now pinned by a test that makes the path AND the
+stderr hostile at once and asserts the composed reason is one line, carries no `branch -D`, shows
+`<command removed>`, still quotes the readable path and git's own words, and still reaches
+delivery as a launch that never happened.
+
+### ONE WORD CHARACTER DEFEATED THE DEFANG ANCHOR
+
+`defang` matched its verbs behind `\b`, which requires a NON-word character in front of them — so
+one word character was enough to make the whole rewrite miss. `foldEvidence('Xbranch -D victim')`
+returned it unchanged, and a lock reason spelled that way put the literal `branch -D` back into
+the live-holder arm whose pinned contract is that the string appears nowhere in it: the contract
+was falsifiable from outside the module, with the same local write access every other forgery here
+needs. The anchor is dropped rather than widened, because there is no benign spelling to protect —
+a verb is only rewritten when a DELETE OPTION is found in the bounded window after it, so prose
+that merely contains the letters (`rebranching a vantage tag`) renders unchanged, and over-folding
+quoted evidence is the safe direction. The cost of the trade is one substring in a position nobody
+can run; the alternative was a runnable-looking one in a message that promises none.
+
+The `invariant 122` citations now name their section. The numbered rules live INSIDE §12 of
+`docs/INVARIANTS.md`, whose headings run 1-13, so a reader looking for a top-level "122" concludes
+the citation dangles. It does not — "UNKNOWN never authorises an irreversible action" is at
+`docs/INVARIANTS.md:916`; the card's "121" is the off-by-one, and the citations say §12 so either
+number can be resolved.

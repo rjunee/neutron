@@ -5,6 +5,7 @@ import { join } from 'node:path'
 
 import {
   composeWrongBaseRefusal,
+  foldEvidence,
   probePidLiveness,
   probeTreeOccupancy,
   TOTAL_BUDGET_MS,
@@ -1516,6 +1517,59 @@ describe('composeWrongBaseRefusal: forged evidence cannot smuggle in a delete', 
       expect(msg).toContain(benign)
       expect(msg).not.toContain('<command removed>')
     }
+  })
+
+  test('ONE WORD CHARACTER in front of the verb no longer defeats the whole rule', async () => {
+    // The rule was anchored on `\b`, which needs a NON-word character before the verb — so a
+    // single word character in front of it made the entire rewrite miss, and the literal
+    // `branch -D` went back into the ALIVE arm whose pinned contract is that the string appears
+    // nowhere in it. Falsifiable from outside the module with nothing but a lock reason, which
+    // is the same access every other forgery here needs. Asserted at the helper AND through the
+    // real composer, because the contract that matters is the one on the composed message.
+    expect(foldEvidence('Xbranch -D victim')).not.toContain('branch -D')
+    expect(foldEvidence('Xbranch -D victim')).toContain('<command removed>')
+
+    const forgeries = [
+      'Xbranch -D feat-x',
+      '9branch --delete feat-x',
+      'agitpush origin :feat-x',
+      'zupdate-ref -d refs/heads/feat-x',
+      'atag --delete trident-salvage/run-77',
+    ]
+    for (const reason of forgeries) {
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): ${reason}`)
+      expect({
+        reason,
+        neutralised: msg.includes('<command removed>'),
+        leaks_delete:
+          msg.includes('branch -D') ||
+          msg.includes('branch --delete') ||
+          msg.includes('push origin :') ||
+          msg.includes('update-ref -d') ||
+          msg.includes('tag --delete'),
+      }).toEqual({ reason, neutralised: true, leaks_delete: false })
+      expect(msg).toContain('ALIVE')
+    }
+
+    // POSITIVE CONTROL 1: dropping the anchor rewrites nothing that carries no delete option, so
+    // prose that merely CONTAINS the letters is still quoted readably.
+    const prose = await withLockReason('claude agent wf_a (pid 4242 start 99) rebranching a vantage tag')
+    expect(prose).toContain('rebranching a vantage tag')
+    expect(prose).not.toContain('<command removed>')
+
+    // POSITIVE CONTROL 2: the guard's OWN safe arm still prints the delete. An implementation
+    // that answered this finding by neutralising the literal everywhere would pass every
+    // assertion above and leave the safe case with no remedy at all.
+    const safe = await composeWrongBaseRefusal(ARGS, {
+      run_host: fakeHost({
+        'worktree list --porcelain': ok(UNHELD_PORCELAIN),
+        [FETCH]: ok(),
+        [RESOLVE]: ok(`${TIP}\n`),
+      }).run_host,
+      probe_tree: CLEAR,
+    })
+    expect(safe).toContain('git -C /repo branch -D -- feat-x')
+    expect(safe).not.toContain('<command removed>')
   })
 })
 

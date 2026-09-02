@@ -10,7 +10,10 @@
  *
  * Two contract lines govern what replaces it:
  *   - a refusal names the layer that refused AND the evidence it rests on;
- *   - "UNKNOWN never authorises an irreversible action" (docs/INVARIANTS.md invariant 122).
+ *   - "UNKNOWN never authorises an irreversible action" (docs/INVARIANTS.md §12 invariant 122).
+ *     The card cites that rule as "invariant 121"; it is 122, and the numbers are inside §12, not
+ *     section headings — a reviewer looking for a top-level "122" finds sections 1-13 and reads
+ *     the citation as dangling. Cited with its section from here on so it can be found.
  *
  * The incident was an agent running the printed text VERBATIM, so every shell argument this
  * module prints is quoted (`sh`): a branch or path name is attacker-shaped data, and
@@ -390,6 +393,18 @@ function samePath(a: string, b: string): boolean {
  *      claim. What the arms' pinned contracts actually forbid is the guard appearing to
  *      instruct a REF DELETE, and arranging any of this needs local `git worktree lock --reason`
  *      write access — the same access every other forgery here needs.
+ *
+ *      AND THE VERB IS NO LONGER ANCHORED ON `\b` (Argus finding, reproduced through the real
+ *      composer). A word boundary needs a NON-word character before the verb, so one word
+ *      character in front of it defeated the whole rule: `foldEvidence('Xbranch -D victim')`
+ *      returned it UNCHANGED, and a lock reason spelling it that way put the literal
+ *      `branch -D` back inside the ALIVE arm whose pinned contract is that the string does not
+ *      contain it. The anchor is dropped rather than widened, because there is no benign
+ *      spelling to protect: the verbs are only rewritten when a DELETE OPTION is found in the
+ *      bounded window after them, so prose that merely contains the letters (`rebranch`,
+ *      `advantage`) is untouched, and over-folding evidence is the safe direction anyway. The
+ *      cost is one substring in an unrunnable position; the alternative is a runnable-looking
+ *      one in a message that promises none.
  */
 /** One option token that spells an irreversible ref delete: `--delete`, or a short cluster with d/D. */
 const DELETE_OPTION = /^(?:--delete|-[A-Za-z]*[Dd][A-Za-z]*)$/
@@ -416,12 +431,12 @@ function defang(s: string): string {
     // once, tokens cannot nest, and each option test is anchored at both ends. The window is the
     // LEADING OPTION RUN (`-`-prefixed tokens, unbounded, because six real options before the
     // delete is a spelling git accepts and a four-token window missed) plus four tokens after it.
-    .replace(/\b(branch|update-ref|tag)((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, verb: string, tail: string) =>
+    .replace(/(branch|update-ref|tag)((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, verb: string, tail: string) =>
       defangTokens(tail).some((t) => DELETE_OPTION.test(t)) ? `${verb} <command removed>` : whole)
-    .replace(/\b(worktree)(\s+)remove\b/g, '$1$2<command removed>')
+    .replace(/(worktree)(\s+)remove\b/g, '$1$2<command removed>')
     // `push` deletes three ways: by option (`-d`, `--delete`), by wiping the remote (`--mirror`),
     // and by REFSPEC with no option at all (`push origin :feat`, `push origin +:feat`).
-    .replace(/\bpush((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, tail: string) =>
+    .replace(/push((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, tail: string) =>
       defangTokens(tail).some((t) => PUSH_DELETE.test(t)) ? 'push <command removed>' : whole)
 }
 
@@ -711,7 +726,7 @@ function standDown(prefix: string, evidence: string, settle?: string, release: R
 /**
  * The by-hand settle for every treat-as-live arm: look at the tree, and read the lock back
  * from git. Both are READS. Neither unlocks, removes, signals or deletes anything — an
- * UNKNOWN holder authorises no irreversible act (docs/INVARIANTS.md invariant 122).
+ * UNKNOWN holder authorises no irreversible act (docs/INVARIANTS.md §12 invariant 122).
  *
  * AND IT SAYS WHAT ITS OWN FAILURE MEANS. Git does NOT mark a LOCKED entry prunable, so a
  * locked worktree whose DIRECTORY was deleted never reaches the prunable short-circuit above
@@ -1135,7 +1150,7 @@ export async function composeWrongBaseRefusal(
           // nothing) — and what this arm owes the reader instead is the read that CONVERTS the
           // unknown into an answer, plus what answer would make the tree releasable. Naming the
           // conclusion is not printing the command: an unresolved occupancy still authorises
-          // no irreversible act (docs/INVARIANTS.md invariant 122).
+          // no irreversible act (docs/INVARIANTS.md §12 invariant 122).
           return standDown(
             prefix,
             `The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that pid is gone, but /proc could not be read in full to confirm the tree is unoccupied (the usual cause is processes owned by another uid, whose cwd this guard may not read), so occupancy is UNKNOWN — treat it as live.`,

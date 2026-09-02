@@ -3243,6 +3243,22 @@ export function buildTridentOrchestrator(
     // one token, because folding a forgery codepoint to an ASCII space is what broke the
     // wrong-base classifier's anchor in `delivery.ts`.
     const baseProse = foldRefName(base)
+    // AND THE REPO PATH IS FOLDED FOR EVERY PRE-LAUNCH REFUSAL, not only the ancestry ones
+    // (Argus blocker, reproduced by two reviewers). This binding used to be declared INSIDE the
+    // ancestry block below, so the two refusals composed before it — the fetch failure and the
+    // tip-resolution failure — interpolated `launchRun.repo_path` RAW and passed git's stderr
+    // through `redactPushError` alone, which redacts credentials and truncates but folds neither
+    // a newline nor a delete command. Both messages are persisted, re-read, and routed by
+    // `delivery.ts`'s PRE_LAUNCH_PREFIX classifier exactly like the ancestry ones, so a legal
+    // path — `git init` and `git worktree add` both accept a newline, and store.ts persists it
+    // verbatim — or a hostile fetch stderr could forge a line carrying `git branch -D -- victim`
+    // inside the very message class this change exists to make evidence-honest. One binding,
+    // declared once, above every path that can refuse.
+    const repoProse = foldEvidence(launchRun.repo_path)
+    // Git's own words about a failure, credential-redacted FIRST and then folded — the same
+    // order the ancestry arms' `probeDetail` uses. `foldEvidence` also carries the 300-character
+    // bound the hand-rolled `.slice(-300)` used to carry, and MARKS its truncation.
+    const gitDetail = (text: string): string => foldEvidence(redactPushError(text).trim())
     if (freshBuild && launchRun.merge_mode === 'pr') {
       fetchedBase = true
       const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', baseRefspec]
@@ -3252,9 +3268,9 @@ export function buildTridentOrchestrator(
         fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
       }
       if (!fetched.ok) {
-        const detail = redactPushError(fetched.stderr).trim().slice(-300)
+        const detail = gitDetail(fetched.stderr)
         return {
-          run: failedRun(launchRun, `trident infra: could not fetch origin/${baseProse} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${baseProse} in ${repoProse} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
           changed: true,
           waiting: false,
           note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
@@ -3267,9 +3283,9 @@ export function buildTridentOrchestrator(
       )
       const oid = resolved.stdout.trim().toLowerCase()
       if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
-        const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
+        const detail = gitDetail(resolved.stderr || resolved.stdout)
         return {
-          run: failedRun(launchRun, `trident infra: fetched origin/${baseProse} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          run: failedRun(launchRun, `trident infra: fetched origin/${baseProse} but could not resolve its tip in ${repoProse}; the build was NOT started: ${detail}`, false),
           changed: true,
           waiting: false,
           note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
@@ -3317,7 +3333,7 @@ export function buildTridentOrchestrator(
         // publication probe already distinguishes the three (`ancestryUnknown` in
         // wrong-base-remedy.ts); the OUTER guard now does too. UNKNOWN refuses — fail-closed,
         // the build is not started — but it refuses as what it is, and names no destructive
-        // act (docs/INVARIANTS.md invariant 122).
+        // act (docs/INVARIANTS.md §12 invariant 122).
         const ancestry = (res: HostCommandResult): 'yes' | 'no' | 'unknown' =>
           res.ok ? 'yes' : res.exit_code === 1 && res.timed_out !== true ? 'no' : 'unknown'
         // EVERY FIELD THIS REFUSAL QUOTES IS FOLDED, on the same terms the remedy composer
@@ -3328,7 +3344,8 @@ export function buildTridentOrchestrator(
         // git's stderr is folded for the same reason and not a weaker one: `git -C <repo>` echoes
         // the path back on failure, so the raw path reaches this string by that route too.
         // `foldEvidence` also carries the bound the `.slice(-300)` used to carry, and MARKS its
-        // truncation.
+        // truncation. Both folds now live ABOVE the fetch (`repoProse`, `gitDetail`), because the
+        // two refusals composed before this block owed the identical contract and did not have it.
         //
         // AND THE BRANCH NAME IS FOLDED TOO (Argus blocker). An earlier draft exempted it on the
         // premise that "git's own ref rules have already excluded control characters" — true of
@@ -3340,7 +3357,6 @@ export function buildTridentOrchestrator(
         // exactly those codepoints and names them as forgery vectors, so exempting the branch
         // here made this seam contradict the threat model of the module it exists to guard.
         // Only the shas stay raw, and they are `^[0-9a-f]{40}$`-tested above.
-        const repoProse = foldEvidence(launchRun.repo_path)
         // NAME FIELDS ARE FOLDED AS NAMES (Argus blocker/finding). `foldEvidence` folds a
         // forgery codepoint to an ASCII SPACE, and the ASCII space is the one character git's
         // ref rules forbid — the character `delivery.ts` anchors its wrong-base classifier on.
@@ -3373,7 +3389,7 @@ export function buildTridentOrchestrator(
           res.timed_out === true
             ? 'the ancestry probe was killed by its watchdog'
             : `git merge-base --is-ancestor exited ${res.exit_code}: ${
-                foldEvidence(redactPushError(res.stderr || res.stdout).trim()) || 'no stderr'
+                gitDetail(res.stderr || res.stdout) || 'no stderr'
               }`
         const containedInBase = await opts.run_host(
           ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
