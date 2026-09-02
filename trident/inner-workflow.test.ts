@@ -1025,6 +1025,10 @@ function loadRealGate(): {
       // is how the classifier and the severity gate drift apart green.
       grabConst('ADVISORY_FINDING_KEY'),
       grab('isNonBlockingFinding'),
+      // ...and the COMPLETE code-work predicate `classifyBlock` now delegates to, which
+      // adds the lane-kind exclusion on top of it. Lifted, never restated: a local copy
+      // is how the classifier and the resume seam drifted apart green in the first place.
+      grab('isCodeWorkFinding'),
       // `usableStatus` is the ONE "did this field answer" predicate the lane retry and
       // `hasUsableVerdict` now share; `CORE_SEAT_STATUS_KEY` is the field it reads for a
       // core seat. Both are lifted rather than restated for the same reason as the two
@@ -1985,12 +1989,16 @@ function loadSeverityGate(): {
       grabConstLine('ADVISORY_FINDING_KEY'),
       grabConstLine('LANE_FINDING_KIND'),
       grabFunction('isNonBlockingFinding'),
+      grabFunction('isCodeWorkFinding'),
       grabFunction('enforceSeverityGate'),
       grabFunction('classifyBlock'),
       // `fullSuiteFindings` closes over the module-scope `testStrategy`; an empty
       // strategy means "no suite was asked for" and returns []. Bind it to a
       // non-empty value so the real body runs.
       "const testStrategy = 'full'",
+      // The gate stamps `kind` on its own findings so a resume can find them again
+      // inside a panel's recorded list; lifted from the source, never restated.
+      grabConstLine('SUITE_FINDING_KIND'),
       grabFunction('fullSuiteFindings'),
       grabFunction('stripAdvisoryMarkers'),
       grabFunction('normalizeVerdict'),

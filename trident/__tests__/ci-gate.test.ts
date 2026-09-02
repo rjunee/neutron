@@ -3149,6 +3149,7 @@ describe('a fully excused CI red still holds the merge', () => {
         constLine('ADVISORY_FINDING_KEY'),
         constLine('LANE_FINDING_KIND'),
         grab('isNonBlockingFinding'),
+        grab('isCodeWorkFinding'),
         grab('normalizeVerdict'),
         grab('classifyBlock'),
         SRC.slice(at, end),

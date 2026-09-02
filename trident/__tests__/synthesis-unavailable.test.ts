@@ -106,6 +106,7 @@ const real = new Function(
   ${grabConst('ADVISORY_FINDING_KEY')}
   ${grabFn('isNonBlockingFinding')}
   ${grabConst('LANE_FINDING_KIND')}
+  ${grabFn('isCodeWorkFinding')}
   ${grabConst('usableStatus')}
   ${grabFn('errText')}
   ${grabFn('seatAttempt')}

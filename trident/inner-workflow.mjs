@@ -2692,6 +2692,35 @@ function enforceSeverityGate(synthesis) {
 // finding, sending the fix loop off to re-Forge a network timeout.
 const LANE_FINDING_KIND = 'lane'
 
+/**
+ * IS THERE CODE WORK IN THIS FINDING? The COMPLETE predicate, in one place, because two
+ * sites asking "is this worth a Forge round?" with different answers is how a round gets
+ * bought that the round economy above already refused to buy.
+ *
+ * Two exclusions, and BOTH matter at BOTH call sites:
+ *  - a LANE finding (`kind`, the field the gate stamps) is a dead review seat, not a
+ *    defect in the diff — re-Forging it edits code to "fix" a network timeout;
+ *  - a finding this file has ALREADY declared non-blocking (`isNonBlockingFinding` — an
+ *    explicit 'minor'/'nit', or a workflow-stamped advisory).
+ *
+ * `classifyBlock` spelled both out inline while the resume seam
+ * (`resumeHasCodeWork`) spelled out only the second, and its comment claimed parity it
+ * did not have: a persisted `{severity:'blocker', kind:'lane'}` finding — exactly what
+ * the lane gate writes onto an `argus-request-changes-round-N` checkpoint, and exactly
+ * what the orchestrator's infra-only auto-retry replays — read as CODE work at resume and
+ * bought a Forge fix round over a seat that had died. Same function now, so the parity is
+ * a fact rather than a comment.
+ *
+ * FAIL-CLOSED, in the same direction as both gates it replaces: anything unrecognised
+ * (absent/misspelled severity, malformed or null finding) is code work and still
+ * re-Forges.
+ */
+function isCodeWorkFinding(f) {
+  if (f && f.kind === LANE_FINDING_KIND) return false
+  if (isNonBlockingFinding(f)) return false
+  return true
+}
+
 // IT STAMPS ON EVERY VERDICT, NOT ONLY ON AN APPROVE. This used to early-return the
 // synthesis UNTOUCHED whenever it was already REQUEST_CHANGES — "already blocked, so
 // there is nothing to do" — and that reasoning was wrong twice over, on the path the
@@ -2814,11 +2843,7 @@ function classifyBlock(synthesis, deferredPeers, noReviewRan = false, panelRejec
   // now does too, and reads the unreadable list as NO findings — which lands on the 'code'
   // arm at the bottom, the direction that re-Forges rather than exiting the loop.
   const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : []
-  const codeFindings = findings.filter((f) => {
-    if (f && f.kind === LANE_FINDING_KIND) return false
-    if (isNonBlockingFinding(f)) return false
-    return true
-  })
+  const codeFindings = findings.filter(isCodeWorkFinding)
   if (codeFindings.length > 0) return 'code'
   if (deferredPeers && deferredPeers.length > 0) return 'infra-only'
   // A COMPLETE PANEL DOES NOT MAKE AN ADVISORY INTO CODE WORK. This used to return 'code'
@@ -5189,6 +5214,14 @@ function reviewPreconditionDeferred(readiness) {
  * `testStrategy === ''` (a legacy launcher, or a test harness that passes no strategy)
  * is inert — byte-identical old behaviour.
  */
+// THE FULL-SUITE GATE STAMPS ITS FINDINGS TOO — same reason as `LANE_FINDING_KIND`: a
+// later reader has to be able to tell "this is the suite gate's own measurement" from
+// "this is something a reviewer said", and re-deriving that from the title template is two
+// sites agreeing on a message format, which is a contract nothing enforces. The one reader
+// is `resumeSuiteFindings`, which has to find this claim again inside a PANEL's recorded
+// finding list after `withSuiteBlocker` merged the two.
+const SUITE_FINDING_KIND = 'suite'
+
 function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
   if (testStrategy === '') return []
   if (
@@ -5199,6 +5232,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
     return [
       {
         severity: 'blocker',
+        kind: SUITE_FINDING_KIND,
         title: `CONTRADICTORY SUITE CLAIM — testsPassed=true cannot accompany suiteOutcome='${report.suiteOutcome}'`,
         evidence:
           "The TEST EXECUTION vocabulary says 'passed' is the only suite outcome that may accompany " +
@@ -5219,6 +5253,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
       return [
         {
           severity: 'blocker',
+          kind: SUITE_FINDING_KIND,
           title: 'FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE — the hatch fails closed',
           evidence:
             'The build claimed the red suite predates this branch but supplied no suiteEvidence ' +
@@ -5240,6 +5275,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
         // FULL SUITE NOT PROVEN — deliberately carry NO marker and keep blocking: the
         // hatch is earned by evidence, and an unearned or unproven claim is not this.
         advisory: true,
+        kind: SUITE_FINDING_KIND,
         title: 'FULL SUITE RED FOR PRE-EXISTING REASONS — the build says the failures are not its diff',
         evidence:
           'The build ran the FULL suite (stage 2), reported testsPassed=false, and reported ' +
@@ -5258,6 +5294,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
   return [
     {
       severity: 'blocker',
+      kind: SUITE_FINDING_KIND,
       title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
       evidence:
         `The build reported testsPassed=${JSON.stringify(report?.testsPassed ?? null)} and ` +
@@ -6356,10 +6393,31 @@ try {
   // suite. (`fix` mode is the argus-request-changes path, whose findings ARE a panel's
   // and are already the input to its fix round.)
   //
+  // …EXCEPT THAT A PANEL'S RECORDED LIST CAN CARRY THE GATE'S CLAIM TOO. `withSuiteBlocker`
+  // prepends the suite finding to the synthesis BEFORE the verdict is checkpointed, so an
+  // `argus-request-changes-round-N` row holds both. On the fix-mode fall-through (a
+  // recorded hold with no code work, re-reviewed rather than replayed) this list was
+  // dropped wholesale, and a PAID `failed-preexisting` advisory then vanished from the
+  // terminal row of a resume that went on to APPROVE — a report-completeness loss, since
+  // no build ran in this process to re-derive it.
+  //
+  // ONLY THE GATE'S OWN ENTRIES ARE CARRIED, by `kind`, and deliberately not every
+  // workflow advisory in the row: a stale CI advisory IS re-measured here (the fall-through
+  // re-probes CI), so carrying that one forward would assert a red this round may be about
+  // to observe has gone green. The suite claim is the one measurement this process cannot
+  // retake.
+  //
   // `testStrategy !== ''` is the SAME arming condition the gate itself uses, repeated
   // here so a row written by a launcher that never had a strategy cannot be read as a
   // gate record by a workflow that does.
-  const resumeSuiteFindings = resumeMode === 'review' && testStrategy !== '' ? resumeFindingsList : []
+  const resumeSuiteFindings =
+    testStrategy === ''
+      ? []
+      : resumeMode === 'review'
+        ? resumeFindingsList
+        : resumeMode === 'fix'
+          ? resumeFindingsList.filter((f) => f && f.kind === SUITE_FINDING_KIND)
+          : []
   if (resumeSuiteFindings.length > 0) {
     log(
       `trident-v2 full-suite gate: resumed at ${resumeCheckpoint} with a recorded suite finding — the panel runs, and ${suiteFindingsBlock(resumeSuiteFindings) ? 'this round cannot APPROVE' : 'the finding is advisory (pre-existing red)'}`,
@@ -6980,8 +7038,16 @@ ${task}${reflectionGuidance}`,
   // THE PAID-REVIEW SHORTCUT IS FOR RECORDED CODE WORK ONLY. A checkpoint written by an
   // advisory-only round carries findings this file has ALREADY declared non-blocking, and
   // asserting 'code' over them re-Forged a full round on them at resume — undoing the
-  // exit the round itself had earned. Same predicate as `classifyBlock`, so the two
-  // cannot drift.
+  // exit the round itself had earned. Literally the same function as `classifyBlock`
+  // asks, so the two cannot drift.
+  //
+  // A LANE BLOCKER IS NOT RECORDED CODE WORK EITHER, and the predicate has to be the
+  // WHOLE one to know that. This read `!isNonBlockingFinding(f)` — the severity half
+  // only — while the classifier ALSO drops `kind: LANE_FINDING_KIND` first, so a
+  // persisted `{severity:'blocker', kind:'lane'}` finding (what the lane gate writes onto
+  // `argus-request-changes-round-N`, and what the orchestrator's infra-only auto-retry
+  // replays) asserted 'code' at resume and bought a Forge round to "fix" a dead review
+  // seat. `isCodeWorkFinding` is that whole predicate, shared.
   //
   // AND THE NON-CODE CASE MAY NOT REPLAY THE HOLD (run 4f28c9e0 round 4 — the review the
   // watchdog reaped). Fabricating the recorded 'advisory-only' result here was a
@@ -6994,7 +7060,7 @@ ${task}${reflectionGuidance}`,
   // panel, exactly what a fresh run at this head would pay, and the advisory economy is
   // intact: the loop still exits on 'advisory-only', so no Forge fix round runs unless
   // the FRESH round states code work.
-  const resumeHasCodeWork = resumeMode === 'fix' && resumeFindingsList.some((f) => !isNonBlockingFinding(f))
+  const resumeHasCodeWork = resumeMode === 'fix' && resumeFindingsList.some(isCodeWorkFinding)
   if (resumeHasCodeWork) {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
     const paidReview = {

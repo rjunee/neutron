@@ -43,6 +43,22 @@ const RECORDED_FINDINGS = [
   { severity: 'blocker', title: 'RECORDED — null deref in parseWidget', evidence: 'widget.ts:42' },
 ]
 
+/**
+ * The shape an INFRA-ONLY round records: a lane blocker, identified by the `kind` field
+ * the cross-model gate stamps — NOT by its severity, which is 'blocker' precisely so a
+ * dead seat cannot be approved past. The classifier drops it before it reads severity at
+ * all; the resume seam must do the same, or a checkpoint that says "codex never answered"
+ * buys a Forge round to edit code over it.
+ */
+const LANE_ONLY_FINDINGS = [
+  {
+    severity: 'blocker',
+    kind: 'lane',
+    title: 'REVIEW SEAT DOWN: codex produced no verdict',
+    evidence: 'the codex seat returned nothing this round; the panel was incomplete',
+  },
+]
+
 /** The shape an advisory-only round records: workflow-stamped, all non-blocking. */
 const ADVISORY_ONLY_FINDINGS = [
   {
@@ -320,6 +336,68 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     expect(fixPrompt).not.toContain('pre-existing at the base')
     expect(out.result.verdict).toBe('APPROVE')
     expect(out.result.reviewedHead).toBe(FIX_SHA(3))
+  })
+
+  /**
+   * A RECORDED LANE BLOCKER IS NOT RECORDED CODE WORK — the other half of the same
+   * predicate. `classifyBlock` drops `kind: 'lane'` FIRST and only then asks about
+   * severity, and the resume seam asked only the severity half: a persisted
+   * `{severity:'blocker', kind:'lane'}` finding — what the lane gate writes onto
+   * `argus-request-changes-round-N`, and what the orchestrator's infra-only auto-retry
+   * replays — therefore asserted `blockKind: 'code'` at resume and sent Forge off to fix
+   * a dead review seat with code. Both sites now ask ONE function.
+   */
+  test("'argus-request-changes-round-1' + unchanged head + a recorded LANE blocker → RE-REVIEW, NO Forge round", async () => {
+    const out = await runResume({
+      checkpoint: 'argus-request-changes-round-1',
+      recordedHead: RECORDED,
+      findings: LANE_ONLY_FINDINGS,
+      verdicts: ['APPROVE'],
+    })
+    // No code was written to "fix" a seat that never answered…
+    expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
+    expect(built(out.labels)).toBe(false)
+    // …and the lane is RE-MEASURED instead of replayed: the panel runs, exactly once.
+    expect(out.labels.filter((l) => l === 'argus:claude')).toHaveLength(1)
+    // The seat answers this time, so the run reaches a verdict on the unchanged head.
+    expect(out.result.verdict).toBe('APPROVE')
+    expect(out.result.reviewedHead).toBe(RECORDED)
+    // And the stale lane text is nowhere in what this round dispatched.
+    expect(out.prompts.every((pr) => !pr.prompt.includes('REVIEW SEAT DOWN'))).toBe(true)
+  })
+
+  /**
+   * THE ADVISORY THE GATE PAID FOR SURVIVES THE FALL-THROUGH. `withSuiteBlocker` merges the
+   * full-suite gate's finding into the synthesis before the verdict is checkpointed, so an
+   * `argus-request-changes-round-N` row carries the panel's findings AND the suite claim.
+   * The fall-through dropped the whole row, and a resume that then APPROVED reported no
+   * suite advisory at all — a claim no build in THIS process can re-derive.
+   */
+  test('a recorded suite advisory rides through the re-review and reaches the panel and the verdict', async () => {
+    const out = await runResume({
+      checkpoint: 'argus-request-changes-round-2',
+      recordedHead: RECORDED,
+      testStrategy: 'bun run test',
+      findings: [
+        {
+          severity: 'major',
+          advisory: true,
+          kind: 'suite',
+          title: 'FULL SUITE RED FOR PRE-EXISTING REASONS — the build says the failures are not its diff',
+          evidence: 'the same 14 files fail identically at the merge base',
+        },
+      ],
+      verdicts: ['APPROVE'],
+    })
+    // Still no round bought — the advisory economy is untouched…
+    expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
+    expect(out.result.verdict).toBe('APPROVE')
+    // …the panel was TOLD about the unproven suite before it answered…
+    expect(promptFor(out, 'argus:claude')).toContain('FULL SUITE RED FOR PRE-EXISTING REASONS')
+    // …and it is written back onto the DURABLE record, so the next resume of this row
+    // still knows the suite was never proven. (An APPROVE terminal result carries no
+    // findings by design — the checkpoint is where the claim has to survive.)
+    expect(promptFor(out, 'checkpoint:argus-approved')).toContain('FULL SUITE RED FOR PRE-EXISTING REASONS')
   })
 
   test("'fix-round-7' + unchanged head → review it, and INHERIT the spent round budget", async () => {
