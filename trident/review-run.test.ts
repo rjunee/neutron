@@ -420,6 +420,73 @@ describe('orchestrator bound-review dispatch', () => {
     })
   })
 
+  test('a bound REQUEST_CHANGES with NO findings records REVIEW_NOT_RUN — the row must be WRITABLE', async () => {
+    // `verdict` comes from the panel's `inner_result` JSON while `findings` comes
+    // from its `inner_checkpoint_findings` COLUMN, so the two can disagree. The
+    // store REFUSES `REQUEST_CHANGES` beside no findings
+    // (`TridentEmptyFindingsRejectionError`), `tick.ts` swallows that throw as
+    // `advance_failed`, and the run then never reaches a terminal phase — the whole
+    // bound review re-runs on every tick, forever. Never APPROVE: that would merge
+    // unreviewed code.
+    const { step } = buildTridentOrchestrator({
+      fire_workflow: async () => ({ status: 'fired', error: null }),
+      db_path: '/tmp/not-used-bound-empty-findings.db',
+      run_host: async () => ok(),
+      execute_bound_review: async (run) => ({
+        status: 'success',
+        pr: run.bound_pr!,
+        reviewed_sha: HEAD,
+        verdict: 'REQUEST_CHANGES',
+        findings: [],
+        review_gate: { status: 'absent', detail: `review-gate absent on ${HEAD}` },
+      }),
+    })
+
+    const outcome = await step(makeTridentRun({
+      id: 'bound-empty-findings',
+      bound_pr: 515,
+      branch: 'trident/name-that-must-not-exist',
+      subagent_run_id: null,
+      subagent_status: null,
+    }))
+
+    expect(outcome.run).toMatchObject({
+      phase: 'done',
+      inner_verdict: 'REVIEW_NOT_RUN',
+      inner_checkpoint_findings: '[]',
+    })
+  })
+
+  test('POSITIVE CONTROL: a bound REQUEST_CHANGES carrying real findings still records REQUEST_CHANGES', async () => {
+    // Without this the test above would pass against a guard that demoted every
+    // rejection — including the honest ones, which is the failure mode the card
+    // explicitly forbids.
+    const { step } = buildTridentOrchestrator({
+      fire_workflow: async () => ({ status: 'fired', error: null }),
+      db_path: '/tmp/not-used-bound-real-findings.db',
+      run_host: async () => ok(),
+      execute_bound_review: async (run) => ({
+        status: 'success',
+        pr: run.bound_pr!,
+        reviewed_sha: HEAD,
+        verdict: 'REQUEST_CHANGES',
+        findings: [{ severity: 'blocker', title: 'a reviewer actually said this' }],
+        review_gate: { status: 'absent', detail: `review-gate absent on ${HEAD}` },
+      }),
+    })
+
+    const outcome = await step(makeTridentRun({
+      id: 'bound-real-findings',
+      bound_pr: 515,
+      branch: 'trident/name-that-must-not-exist',
+      subagent_run_id: null,
+      subagent_status: null,
+    }))
+
+    expect(outcome.run).toMatchObject({ phase: 'done', inner_verdict: 'REQUEST_CHANGES' })
+    expect(JSON.parse(String(outcome.run.inner_checkpoint_findings))).toHaveLength(1)
+  })
+
   test('head resolution failure is terminal and cannot fall through to the build path', async () => {
     let buildFires = 0
     const calls: string[][] = []

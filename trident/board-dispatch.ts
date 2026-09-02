@@ -23,6 +23,13 @@
  *      rebuild occurrences proved a reusable card branch must be checked for a
  *      merged PR before another run can claim it.
  *
+ * It also SALVAGES a build that already exists. When the card's latest terminal
+ * run is built-but-never-reviewed (`run-disposition.ts`) and the live branch tip
+ * still resolves to exactly the commit that run recorded, the new row is created
+ * already carrying that run's checkpoint evidence — so `launch()` takes its
+ * existing resume path and the commit goes to REVIEW instead of being rebuilt
+ * from scratch. Every other shape dispatches exactly as it did before.
+ *
  * Before creating the run it resolves THIS project's own git-initialized build
  * workspace (`<owner_home>/Projects/<project_slug>/code`, `ensureProjectBuildWorkspace`)
  * and writes that onto the run row's `repo_path` — so a brand-new project with
@@ -58,10 +65,12 @@ import {
   defaultRalphModeProbe,
   makeCredentialedHostRunner,
   makeLazyCredentialedHostRunner,
+  spawnCapture,
   type EnvCapableHostRunner,
   type PublisherCredentialSource,
 } from './git-mode.ts'
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
+import { builtButNeverReviewedSeed } from './run-disposition.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
 import type { DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
@@ -138,6 +147,82 @@ export function makeDispatchLandedProbe(run: EnvCapableHostRunner): DispatchLand
     } catch {
       return null
     }
+  }
+}
+
+/**
+ * Read a build branch's tip THE WAY THE LAUNCH WILL READ IT, because the seed is
+ * a prediction about what `launch()` + `classifyResume` will decide and a proof
+ * taken against a different ref proves nothing about that decision.
+ *
+ *   pr    → `git ls-remote --heads origin refs/heads/<branch>`, mirroring
+ *           `resolveResumeLiveHead` (orchestrator.ts), which reads the REMOTE in
+ *           pr mode. This is not a detail: Forge is told "do NOT push" in pr mode
+ *           (`forgePushStep`, inner-workflow.mjs), so a run that died at
+ *           `forge-done` in pr mode has its commit ONLY locally and origin has no
+ *           branch at all — `classifyResume` answers `head-branch-absent` and
+ *           REBUILDS. Proving the LOCAL ref there would seed a row that pays the
+ *           seed's whole cost (leftover-branch guard stripped, no base re-pin) for
+ *           none of its saving. An empty ls-remote is exactly that case and seeds
+ *           nothing; the pr-mode salvage that DOES pay is `outer-published:*`,
+ *           whose commit the outer loop already pushed.
+ *   local → the local ref, which is the same one `resolveResumeLiveHead` reads in
+ *           local mode. `--verify --quiet` makes an absent ref exit non-zero with
+ *           empty output rather than an error.
+ *
+ * Either way "no such branch" and "git could not answer" collapse into the same
+ * `''`, which is correct: both mean no evidence, so no resume seed.
+ *
+ * THE `pr`-MODE READ IS CREDENTIALED, like every other remote read this file makes
+ * (Argus r3). `ls-remote` against a PRIVATE origin over an uncredentialed process
+ * env exits non-zero, which collapses to `''` — a silent no-seed, i.e. the card's
+ * headline salvage quietly not happening on exactly the repos that most need it.
+ * It fails CLOSED so it was never wrong, only inert; the adjacent landed probe
+ * already takes `credentialedRunner` for the same class of read, so this takes the
+ * same runner. `spawnCapture` (the primitive `build-workspace.ts` uses) stays the
+ * default for callers that have no credential source.
+ *
+ * AND THE CREDENTIAL HAS TO BE WIRED, NOT MERELY ACCEPTED (Argus r16 blocker). An
+ * earlier revision of this note claimed "nothing needs new composition-root
+ * wiring", which was false: `credentialedRunner` was built ONLY from
+ * `secretsStore` + `owner_handle`, and no production caller passes those — all of
+ * them inject `resolveMergeMode` instead, because the composition root owns the
+ * token. So every real dispatch reached this function on bare `spawnCapture`, and
+ * against a private origin the salvage was inert: built, never reviewed, silently
+ * rebuilt. `BoardBoundBuildDeps.hostRunner` is the missing seam, and
+ * `open/composer.ts` hands the SAME `tridentHostRunner` the landed probe already
+ * uses to every production dispatch site.
+ */
+async function defaultReadBranchTip(
+  repo_path: string,
+  branch: string,
+  merge_mode: MergeMode,
+  run: EnvCapableHostRunner = spawnCapture,
+): Promise<string> {
+  const ref = `refs/heads/${branch}`
+  try {
+    if (merge_mode === 'pr') {
+      const res = await run(
+        ['git', '-C', repo_path, 'ls-remote', '--heads', 'origin', ref],
+        repo_path,
+      )
+      if (!res.ok) return ''
+      // `<oid>\t<ref>` on the first line; an OK ls-remote with no output is the
+      // remote saying the branch is not there.
+      const token = res.stdout.trim().split('\n')[0]?.trim().split(/\s+/)[0] ?? ''
+      return /^[0-9a-f]{40}$/i.test(token) ? token : ''
+    }
+    // `run`, not `spawnCapture`: the parameter defaults to `spawnCapture` already,
+    // and calling the primitive directly here dropped a caller-supplied
+    // instrumented runner on the local-mode path alone — a signature that
+    // over-promises on half its branches (Argus r4).
+    const res = await run(
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', ref],
+      repo_path,
+    )
+    return res.ok ? res.stdout.trim() : ''
+  } catch {
+    return ''
   }
 }
 
@@ -235,6 +320,37 @@ export interface BoardBoundBuildDeps {
   resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
   /** Outer-loop evidence that this card branch already has a merged PR. */
   landedProbe?: DispatchLandedProbe
+  /**
+   * Read the tip of a build branch THROUGH THE SAME REF THE LAUNCH WILL — the
+   * remote in `pr` mode, the local ref in `local` mode — or `''` when it is absent
+   * or unreadable. Only ever consulted to confirm that a prior run's
+   * built-but-unreviewed commit is still what that branch holds; `''` and any
+   * mismatch mean NO seed, so an unreadable ref costs a rebuild, never a wrong
+   * resume. Defaults to the production `spawnCapture` reader below, so no
+   * composition root has to wire it. Test seam.
+   */
+  readBranchTip?: (repo_path: string, branch: string, merge_mode: MergeMode) => Promise<string>
+  /**
+   * THE CREDENTIALED HOST RUNNER THIS DISPATCH'S REMOTE READS GO THROUGH — the
+   * composition root's own (`open/composer.ts` `tridentHostRunner`, the same one
+   * behind `landedProbe`), handed in because the token lives THERE, not here.
+   *
+   * The built-never-reviewed seed's branch-tip probe is why it exists: `git
+   * ls-remote origin` over a bare process env exits non-zero against a PRIVATE
+   * origin, which collapses to `''` — no seed, a silent rebuild of work that was
+   * already built (Argus r16 blocker). A caller that omits it keeps the
+   * uncredentialed `spawnCapture` default, so this cannot change behaviour on a
+   * public origin or in a test seam.
+   *
+   * IT IS NOT THE ONLY READ IT FEEDS (Argus r20/r21 — the docblock said "only the
+   * seed's branch-tip probe consults it today" and that stopped being true when
+   * the merged-PR fallback was widened). It also seeds `credentialedRunner`, from
+   * which a caller that supplies `hostRunner` and NO `landedProbe` is handed a
+   * manufactured merged-PR probe — the coupling adjudicated at that call site
+   * below. Every production site passes BOTH, pinned by the dispatch-site scan in
+   * `open/__tests__/open-trident-prod-boot-wiring.test.ts`.
+   */
+  hostRunner?: EnvCapableHostRunner
   /** Credential source for direct callers that do not inject a merge-mode resolver. */
   secretsStore?: Pick<SecretsStore, 'get'>
   owner_handle?: string
@@ -469,7 +585,10 @@ export async function dispatchBoardBoundBuild(
   let repo_path: string
   let merge_mode: MergeMode
   let ralph: boolean
-  let credentialedRunner: EnvCapableHostRunner | undefined
+  // The composition root's credentialed runner, when it wired one. The
+  // `secretsStore` + `owner_handle` branch below still overrides it for a direct
+  // caller that hands its own credential source instead.
+  let credentialedRunner: EnvCapableHostRunner | undefined = deps.hostRunner
   try {
     repo_path = await (deps.resolveBuildRepo ??
       ((home, slug) => ensureProjectBuildWorkspace(home, slug).then((r) => r.build_repo_path)))(
@@ -527,15 +646,130 @@ export async function dispatchBoardBoundBuild(
   // A gh outage or malformed response is no evidence and therefore degrades
   // open, matching detectMergedPr's rule that absence of evidence is not a merge.
   if (merge_mode === 'pr') {
+    // A CALLER THAT SUPPLIES `hostRunner` AND NOT `landedProbe` GETS A PROBE IT DID
+    // NOT ASK FOR (Argus r18, noted rather than changed). `credentialedRunner` is
+    // seeded from `deps.hostRunner`, so this pre-existing fallback now also fires
+    // for hostRunner-only callers and manufactures a merged-PR probe out of that
+    // runner. That is the intended reading — the two are the same credentialed
+    // remote read, and the boot-wiring test pins the pairing so every production
+    // site passes both — but it is a behaviour change for anyone who wires only
+    // the runner, and it is here rather than at the call site, so it is said here.
     const probe =
       deps.landedProbe ??
       (credentialedRunner !== undefined ? makeDispatchLandedProbe(credentialedRunner) : undefined)
-    const landed = probe === undefined ? null : await probe(repo_path, branch).catch(() => null)
+    // The INVOCATION is inside the try, not just the promise: a NON-async probe
+    // throws at the call site, before any promise exists for a `.catch` to attach to
+    // (Argus r7, applied here too — the seed probe below already had this shape and
+    // its docblock claimed parity this call did not yet have).
+    let landed: Awaited<ReturnType<NonNullable<typeof probe>>> | null = null
+    try {
+      landed = probe === undefined ? null : await probe(repo_path, branch)
+    } catch {
+      landed = null // no evidence — degrade open, exactly as a rejected promise does
+    }
     if (landed !== null) {
       // A MERGED PR is enough to refuse even when ancestry is false/unknown:
       // squash merges make the original head un-ancestral while the work is landed.
       const message = `Refused: this card's work already merged as #${landed.pr} — branch ${branch} has a MERGED PR${landed.merged_at ? ` (merged ${landed.merged_at})` : ''}${landed.head_on_base === true ? ` and its head is contained in origin/${landed.base}` : ''}. Please verify the card instead of rebuilding: check what #${landed.pr} shipped; mark the Plan item done if complete, or put the unshipped half on a NEW Plan item with its own title. Nothing was dispatched.`
       return { ok: false, code: 'already_landed', message }
+    }
+  }
+
+  // (4b) SALVAGE-RESUME SEED — a build that EXISTS is routed to review, never
+  // rebuilt.
+  //
+  // The measured waste this closes: 33 runs in 30 days reached `forge-done` (the
+  // build succeeded and committed) and then died without a review. Today the
+  // re-dispatch of that card creates a row with null checkpoints, so `launch()`
+  // treats it as a FRESH launch — which either rebuilds the identical work from
+  // scratch or, worse, gets refused outright by the leftover-branch guard because
+  // the previous run's own commits are sitting on the branch.
+  //
+  // So: when the card's latest TERMINAL run is built-but-never-reviewed and the
+  // live branch tip is still EXACTLY the commit that run recorded, carry its
+  // checkpoint evidence onto the new row. Nothing else changes — `launch()` reads
+  // `inner_checkpoint` and the existing `classifyResume` machinery routes
+  // `forge-done` / `fix-round-N` / `outer-published:*` to review mode — except a
+  // bare `forge-done` in RALPH mode, which that machinery rebuilds
+  // ('ralph-progress-unknown'), so the resolved `ralph` flag is an input to the
+  // seed decision rather than something read after the row exists.
+  //
+  // THE HEAD EQUALITY IS LOAD-BEARING, not a nicety. It is what makes ADOPTING the
+  // prior run's commit — its checkpoint, head, findings and base pin — safe: the
+  // branch provably still holds this lane's own recorded commit. Seeding does NOT
+  // remove the ownership check; since Argus r3 that check runs for every row that
+  // has not fired (`freshLaunch || seeded_resume`, orchestrator.ts), and a
+  // legitimate seed PASSES it because the tip provably descends from the carried
+  // base pin (`ownCrashLeftover`). A moved tip, an absent ref, an unreadable one,
+  // or any non-qualifying prior (approved, reviewed-and-rejected,
+  // died-before-build) all fall through to a byte-identical fresh dispatch with
+  // the guard intact. A thrown probe is treated as no evidence for the same reason
+  // the landed probe is.
+  //
+  // AND THE PROOF IS TAKEN AGAINST THE REF THE LAUNCH WILL CONSULT (see
+  // `defaultReadBranchTip`), not merely against a local ref — otherwise the seed
+  // predicts a resume the workflow was never going to perform. It is still a proof
+  // taken one tick BEFORE it is consumed, so `launch()` RE-VERIFIES it against the
+  // live head it reads anyway. That re-verification is deliberately NARROW: only a
+  // MOVED tip — a real 40-hex that is not the recorded one — drops the seed. An
+  // absent branch and an unreadable read are not evidence of another lane's work,
+  // so they leave the seed alone and are answered downstream by `classifyResume`'s
+  // own rebuild (orchestrator.ts, "SEEDED RESUME — REVALIDATED AT LAUNCH"). This
+  // check is the cheap filter; that one is the authority.
+  let seed: ReturnType<typeof builtButNeverReviewedSeed> = null
+  const prior = deps.store.latestTerminalBySlug(deps.project_slug, slug)
+  // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
+  // DIFFERENT cards whose titles agree on their first 35 slugged characters share
+  // a slug — and therefore share `trident/<slug>` as a branch. Without a seed the
+  // collision is caught downstream: the second card's dispatch is a fresh launch,
+  // and the leftover-branch guard refuses a branch carrying commits the lane does
+  // not own. A SEEDED row still RUNS that guard — but cannot be caught by it: the
+  // seed carries the prior run's base pin, the colliding tip genuinely descends
+  // from it, and `ownCrashLeftover` reads exactly that shape as "this lane's own
+  // leftover". So the collision has to be caught HERE, by the task text — the only
+  // column that distinguishes the two cards — or the second card silently adopts
+  // the first card's unreviewed commit and sends it to review under the wrong
+  // title. The head-equality probe cannot see it: on a collision the branch really
+  // does hold the prior run's commit, which is
+  // exactly the wrong-card case. The run row carries the FULL task text, so compare
+  // that — an exact match is the same card; anything else falls through to the
+  // byte-identical fresh dispatch with the guard intact. An edited title is a
+  // false negative and costs only the rebuild that happened before this existed.
+  //
+  // AND THE CARD MUST NAME THAT RUN — THIS FAILS CLOSED (Argus r1 blocker, codex
+  // veto). Task text is a PROXY for identity, and two distinct cards CAN carry
+  // byte-identical text — at which point the second one adopts the first one's
+  // unreviewed commit and sends it to review under the wrong title.
+  // `linked_run_id` is the real link: since #340 the terminal reconcile KEEPS it on
+  // failure, which is precisely the built-never-reviewed shape being seeded here,
+  // so a genuine re-dispatch of the same card still names the run it is about.
+  //
+  // An earlier revision let an ABSENT link fall back to the task text alone,
+  // tolerating that false positive to save a rebuild. That was the wrong side of the
+  // trade: a link-less card could still inherit another card's checkpoint, head,
+  // findings and base pin. So an absent link — null, undefined, or a whitespace-only
+  // string — is now a REFUSAL to seed, exactly like a link naming a different run.
+  // The cost is bounded and one-directional: that card takes the byte-identical
+  // fresh dispatch it took before this seed existed, with the leftover-branch guard
+  // intact. The saving is claimed only when the board itself says whose commit is
+  // being adopted.
+  const cardsPriorRun = typeof item.linked_run_id === 'string' ? item.linked_run_id.trim() : ''
+  if (prior !== null && prior.task === input.task && cardsPriorRun !== '' && cardsPriorRun === prior.id) {
+    const candidate = builtButNeverReviewedSeed(prior, { ralph })
+    if (candidate !== null) {
+      // The call itself sits inside the try: a NON-async probe throws at the
+      // call, before any promise exists for a .catch to attach to (Argus r7).
+      let tip = ''
+      try {
+        tip = await (
+          deps.readBranchTip ??
+          ((p: string, b: string, m: MergeMode) =>
+            defaultReadBranchTip(p, b, m, credentialedRunner ?? spawnCapture))
+        )(repo_path, branch, merge_mode)
+      } catch {
+        tip = '' // a thrown probe is NO evidence — fall through to a fresh dispatch
+      }
+      if (tip.trim().toLowerCase() === candidate.head) seed = candidate
     }
   }
 
@@ -578,6 +812,20 @@ export async function dispatchBoardBoundBuild(
       // query against live state rather than an inference.
       claimed_paths: paths,
       ...(input.bound_pr !== undefined && input.bound_pr !== null ? { bound_pr: input.bound_pr } : {}),
+      // The salvage-resume seed, or nothing at all. `bound_pr` is deliberately NOT
+      // seeded (it means review-only-never-publish) and no verdict is seeded — the
+      // resumed run is going to review, it has not been to one. `base_sha` IS
+      // seeded: a seeded checkpoint makes `launch()`'s `freshLaunch` false, so the
+      // row would otherwise never pin a base and the publish-time "not cut from
+      // origin/<base>" refusal could never fire on a salvaged run.
+      ...(seed !== null
+        ? {
+            inner_checkpoint: seed.checkpoint,
+            inner_checkpoint_head: seed.head,
+            inner_checkpoint_findings: seed.findings,
+            base_sha: seed.base_sha,
+          }
+        : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
       ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
       ...(deps.chat_id !== undefined ? { chat_id: deps.chat_id } : {}),

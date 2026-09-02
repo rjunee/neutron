@@ -61,6 +61,7 @@
  */
 
 import {
+  appendFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -2511,17 +2512,175 @@ export function buildTridentOrchestrator(
     // origin), which is the one case the base NAME is still the best available answer.
     const base = rebased.baseSha !== '' ? rebased.baseSha : await resolveBase(run)
     const changed = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', '--name-only', `${base}..${headToPublish}`],
+      // `--no-renames` HERE, not only on the group diffs below (Argus r17). This
+      // listing is what BUILDS the path universe the groups are restricted to, so
+      // with rename detection ON it names only a rename's DESTINATION — and the
+      // source path's deletion then appears in NEITHER group, silently dropping it
+      // from the artifact. The `--no-renames` added to the group diffs alone could
+      // not fix that: a path absent from this list is never handed to any group.
+      // `core.quotePath=false` for the same reason one line down: a C-quoted token
+      // fed back as a pathspec matches nothing and drops that file's hunks.
+      ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--name-only', '--no-renames', `${base}..${headToPublish}`],
       run.repo_path,
     )
     if (!changed.ok || changed.stdout.trim() === '') {
       throw new Error('outer publisher refused to dispatch reviewers for an empty diff')
     }
-    const diff = await opts.run_host(
-      ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${headToPublish}`],
-      run.repo_path,
-    )
-    if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
+    // AND THE FILES NO REVIEWER HAS SEEN COME FIRST.
+    //
+    // MEASURED (Argus r16, three reviewers): the artifact is 6,692 lines and the
+    // cross-model reviewer reads the first `ARGUS_DIFF_LINE_LIMIT` (3,000) of it,
+    // reporting `CODEX_REVIEW_DIFF_TRUNCATED`. In default git order — plain
+    // alphabetical — every write-site file of that round (`trident/checkpoint.sh`
+    // at line 3,417, `inner-workflow.mjs` at 4,427, `orchestrator.ts` at 5,132,
+    // `run-disposition.ts` at 5,851, `store.ts` at 6,360) fell past the window, so
+    // ~55% of the diff — including all of the round's NEW work — had no
+    // cross-model coverage at all. Alphabetical order is not neutral here: on a
+    // fix round it systematically buries the fix under the docs and tests of the
+    // rounds already reviewed.
+    //
+    // `reviewed_head` is the pin of what a reviewer HAS seen (migration 0124,
+    // enforced by the ancestry gate above), so `reviewed_head..head` is exactly
+    // the never-reviewed set. The artifact's CONTENT is unchanged — still the
+    // whole `base..head` diff, because a reviewer must be able to read the entire
+    // change — only its ORDER is: unseen files first, everything else after, one
+    // `git diff` per group concatenated in that order (git sorts within a single
+    // invocation whatever order the pathspecs arrive in, so the split is the only
+    // way to express this).
+    //
+    // AND THE PIN IS READ THE WAY `merge.ts` READS IT — AND WRITTEN AT THE SEAT
+    // THAT REACHES THIS LINE (Argus r17 + r18 blockers). Two separate holes, both
+    // of which made this reorder INERT in production while it passed in tests:
+    //
+    //   1. The `reviewed_head` COLUMN is settable only at `store.create` and no
+    //      production caller ever supplies a value — `update()` has no branch for
+    //      it — so keying the split on the column alone read '' on every real run.
+    //      Fixed by ALSO reading `reviewedHead` out of `inner_result`
+    //      (`reviewedHeadOid`, the OID the merge pins with `--match-head-commit`).
+    //   2. …but `inner-workflow.mjs`'s publish handoffs did not EMIT that field,
+    //      so the fallback read stayed '' too. The fix-round handoff now carries
+    //      it (inner-workflow.mjs, the `isPr` return under `fix-round-${round}`),
+    //      and `orchestrator.test.ts` pins the field against the shape the real
+    //      workflow emits rather than against a fabricated one.
+    //
+    // On a fix round the value is EXACTLY the head the reviewers judged: the
+    // resumed workflow sets it from the recorded resume head and never re-reads it
+    // before the publish handoff, while `publish_head` carries the new one. The
+    // round-1 `forge-done` handoff deliberately carries NO pin — no reviewer has
+    // seen anything yet, so every file is unseen, `seenPin` is '' and the fallback
+    // below renders the whole diff unordered, which is the correct artifact for a
+    // first review. The column still WINS when set: it is the more explicit pin.
+    //
+    // `--no-renames` on the split path is load-bearing, not taste: with rename
+    // detection ON, `--name-only` reports ONLY a rename's destination, so
+    // restricting a later group to the listed paths would silently DROP the
+    // source path's deletion from the artifact. Off, both sides are listed and
+    // both are rendered. Every degenerate case — no pin, an unreadable probe, all
+    // files unseen (a first round), none unseen, or more than 500 changed files —
+    // falls back to the single unordered command that shipped before, so the
+    // artifact still CONTAINS exactly what it does today.
+    //
+    // THE 500 IS A COUNT, AND ONLY A COUNT (Argus r24, nit). An earlier wording
+    // called it "a file list long enough to strain argv", which promised a fallback
+    // this code does not have: if a pathspec list ever DID overflow `execve`, the
+    // split `git diff` would come back not-ok and the publish would throw
+    // "outer publisher could not materialize the review diff" rather than degrade.
+    // It cannot happen here — the longest tracked path is 94 bytes, so 500 paths is
+    // ≈52 KB against a 2 MB ARG_MAX — and the count guard stands the reorder down
+    // long before that. The bound is a cheap ceiling on a review-diff reordering
+    // nobody wants for a 500-file change, not an argv calculation.
+    //
+    // NOT byte-identical between the two paths, though, and the earlier wording
+    // ("at worst exactly what it is today") overclaimed that (Argus r18). Only the
+    // split path passes `--no-renames`, so a renamed file renders as delete+add
+    // there and as a `rename` header on the fallback. That is the deliberate cost
+    // of not dropping a rename's source: the contract is that the whole change is
+    // present and reordered, never that the two renderings match byte for byte.
+    const changedLines = changed.stdout.split('\n').filter((l) => l.trim().length > 0)
+    const changedFiles = changedLines.map((l) => l.trim())
+    let groups: string[][] | null = null
+    const seenPin = (run.reviewed_head ?? reviewedHeadOid(run) ?? '').trim().toLowerCase()
+    // A C-QUOTED PATH IS NOT A PATHSPEC. `core.quotePath=false` above unquotes the
+    // common case (non-ASCII bytes), but git still quotes a path containing a
+    // quote, a backslash or a control character — and such a token fed back as a
+    // pathspec matches NOTHING, so `git diff` writes no hunks for it, exits 0, and
+    // the file vanishes from the artifact without tripping the fallback. Any
+    // leading `"` in the listing means at least one path cannot be expressed as a
+    // pathspec here, so the whole reorder stands down to the single command that
+    // renders every path correctly. (It also covers the pathological embedded
+    // newline: git quotes those too, so the split fragment still starts with `"`.)
+    const quoted = changedFiles.some((f) => f.startsWith('"'))
+    // AND A TRIMMED PATH IS NOT THE PATH EITHER (Argus r21, latent). git prints an
+    // unquoted path VERBATIM, so a tracked name with a leading or trailing space —
+    // legal on every filesystem this runs on, and printed bare because
+    // `core.quotePath` only quotes non-ASCII/control bytes — survives the listing
+    // intact and is then destroyed by the `trim()` above: `:(literal)<trimmed>`
+    // matches nothing, `git diff` writes no hunks, exits 0, and the file vanishes
+    // from the reviewer's artifact with no error anywhere. The trim itself stays
+    // (it is what makes the `\r` and blank-line cases safe); what changes is that a
+    // line the trim ALTERED means at least one path cannot be expressed as a
+    // pathspec here, so the reorder stands down to the single unrestricted command
+    // exactly as a C-quoted path does. Zero such paths are tracked today — this
+    // closes the shape before a reviewer reads a diff that is quietly incomplete.
+    const padded = changedLines.some((l) => l !== l.trim())
+    if (/^[0-9a-f]{40}$/.test(seenPin) && !quoted && !padded && changedFiles.length <= 500) {
+      const unseenRes = await opts.run_host(
+        ['git', '-C', run.repo_path, '-c', 'core.quotePath=false', 'diff', '--no-renames', '--name-only', `${seenPin}..${headToPublish}`],
+        run.repo_path,
+      )
+      if (unseenRes.ok) {
+        const unseen = new Set(
+          unseenRes.stdout
+            .split('\n')
+            .map((l) => l.trim())
+            .filter((l) => l.length > 0),
+        )
+        const first = changedFiles.filter((f) => unseen.has(f))
+        const rest = changedFiles.filter((f) => !unseen.has(f))
+        // Both non-empty or there is nothing to reorder.
+        if (first.length > 0 && rest.length > 0) groups = [first, rest]
+      }
+    }
+    if (groups === null) {
+      const diff = await opts.run_host(
+        ['git', '-C', run.repo_path, 'diff', `--output=${diffFile}`, `${base}..${headToPublish}`],
+        run.repo_path,
+      )
+      if (!diff.ok) throw new Error('outer publisher could not materialize the review diff')
+    } else {
+      writeFileSync(diffFile, '')
+      for (const [i, group] of groups.entries()) {
+        const part = `${diffFile}.part${i}`
+        // `:(literal)`, because a PATH IS NOT A PATTERN (Argus r20, nit, with a
+        // scratch-repo repro). A bare pathspec is glob-matched as well as
+        // literal-matched, so a changed path containing `[`, `*` or `?` — this repo
+        // tracks 13 of them, e.g. `app/app/projects/[id]/backups.tsx` — ALSO pulls
+        // in every sibling its brackets happen to match, and a file caught by both
+        // groups is rendered twice in the artifact. Nothing is dropped, but the
+        // reviewer reads the same hunks under two headings. Literal magic turns each
+        // token back into the exact path `--name-only` printed.
+        const partDiff = await opts.run_host(
+          [
+            'git', '-C', run.repo_path, 'diff', '--no-renames',
+            `--output=${part}`, `${base}..${headToPublish}`, '--', ...group.map((f) => `:(literal)${f}`),
+          ],
+          run.repo_path,
+        )
+        if (!partDiff.ok) throw new Error('outer publisher could not materialize the review diff')
+        // A group whose files produce no hunks contributes nothing, and that is not
+        // an error. MEASURED (Argus r22, scratch repo, git 2.43.0): `--output=` CREATES
+        // the file regardless — 0 bytes — so on this git the branch below always runs
+        // and appends nothing. The note that stood here said the file is not written,
+        // which would have made the `existsSync` load-bearing; it is a stand-down for a
+        // git that behaves the other way, and appending 0 bytes is the same artifact
+        // either way. It also has to be safe against a part left by an earlier run,
+        // which is why the file is removed after it is folded in.
+        if (existsSync(part)) {
+          appendFileSync(diffFile, readFileSync(part))
+          rmSync(part, { force: true })
+        }
+      }
+    }
     return { pr, head: headToPublish, push: alreadyPublished ? 'noop-already-at-head' : 'pushed' }
   }
 
@@ -3085,6 +3244,24 @@ export function buildTridentOrchestrator(
         // The evidence formatter has already recorded the serialization failure in the PR
         // comment. Keep the in-memory snapshot parseable too.
       }
+      // A REJECTION MUST STATE A REASON HERE TOO, and here it is not merely a
+      // consistency point — it is the difference between this run finishing and
+      // never finishing. `verdict` comes from the panel's `inner_result` JSON while
+      // `findings` comes from its `inner_checkpoint_findings` COLUMN
+      // (`review-run.ts`), two sources that can disagree; and `saveIfActive` THROWS
+      // on `REQUEST_CHANGES` beside no findings (`TridentEmptyFindingsRejectionError`).
+      // `tick.ts` swallows that throw as `advance_failed`, so the row never reaches a
+      // terminal phase and `executeBoundReview` runs the whole review AGAIN on the
+      // next tick, forever. Recording the true state instead is the same rule
+      // `checkpoint.sh` and the store apply — never APPROVE, which would merge
+      // unreviewed code. `recordedTerminalVerdict` is deliberately NOT reused: it
+      // additionally demands `hasArgusProvenance(checkpoint)`, and a bound review's
+      // `bound-review-complete:*` checkpoint has none, so it would demote a genuine
+      // rejection that DOES carry findings.
+      const recorded_verdict =
+        reviewed.verdict === 'REQUEST_CHANGES' && parseCheckpointFindings(findings).length === 0
+          ? 'REVIEW_NOT_RUN'
+          : reviewed.verdict
       const done: TridentRun = {
         ...run,
         phase: 'done',
@@ -3103,7 +3280,7 @@ export function buildTridentOrchestrator(
         inner_checkpoint: `bound-review-complete:${reviewed.reviewed_sha}:${reviewed.review_gate.status}`,
         inner_checkpoint_head: reviewed.reviewed_sha,
         inner_checkpoint_findings: findings,
-        inner_verdict: reviewed.verdict,
+        inner_verdict: recorded_verdict,
         last_advanced_at: now(),
       }
       return {
@@ -3119,14 +3296,14 @@ export function buildTridentOrchestrator(
     // reads.
     stamp('launch-start', `round=${run.round} ralph_round=${run.ralph_round}`)
     const base = await resolveBase(run)
-    const resume_checkpoint = run.inner_checkpoint
+    let resume_checkpoint = run.inner_checkpoint
     // MID-LOOP RESUME — the checkpoint travels WITH the commit it was recorded
     // against (and, for a REQUEST_CHANGES checkpoint, the findings recorded with
     // it). Threading the name alone is what forced every relaunch to rebuild: a
     // verdict is about a COMMIT, and without the OID the workflow cannot tell
     // whether the branch still holds the code that verdict was about.
-    const resume_checkpoint_head = run.inner_checkpoint_head
-    const resume_findings = run.inner_checkpoint_findings
+    let resume_checkpoint_head = run.inner_checkpoint_head
+    let resume_findings = run.inner_checkpoint_findings
     // MID-LOOP RESUME — READ the live branch head HERE, in the outer loop, because
     // THIS is the credentialed host boundary: `opts.run_host` already runs every other
     // git command for this run. The workflow's `head-probe-round-resume` agent seat
@@ -3141,7 +3318,7 @@ export function buildTridentOrchestrator(
     // Only read when the answer can change a decision: no checkpoint, no recorded OID
     // to compare against, or no branch → the workflow rebuilds regardless, and a fresh
     // launch must stay byte-identical (no extra git command, no extra arg).
-    const resume_live_head =
+    let resume_live_head =
       resume_checkpoint !== null &&
       /^[0-9a-f]{40}$/.test(recorded) &&
       typeof run.branch === 'string' &&
@@ -3166,6 +3343,79 @@ export function buildTridentOrchestrator(
             opts.sleep,
           )
         : undefined
+    // SEEDED RESUME — REVALIDATED AT LAUNCH, because the seed's proof was taken at
+    // DISPATCH and is consumed here, one process later.
+    //
+    // The dispatch chokepoint may create a row already carrying a prior terminal
+    // run's built-but-never-reviewed checkpoint (board-dispatch.ts), having proven
+    // the branch tip was exactly that commit. That proof is what makes seeding safe
+    // — a seeded row has a non-null `inner_checkpoint`, so `freshLaunch` below is
+    // false and the base RE-PIN is skipped (the seed carries the prior run's pin).
+    // The leftover-branch ancestry refusal is NOT skipped: it is armed for
+    // `freshLaunch || seeded_resume` (Argus r3), and a legitimate seed satisfies it
+    // through the containment / `ownCrashLeftover` exemptions. If the branch moved
+    // in between (another lane, a human, a slug collision the task-text check could
+    // not see), the premise is false and RESUMING on the strength of it would be
+    // adopting work this lane does not own.
+    //
+    // `workflow_run_id === null` is what identifies a SEEDED row rather than a
+    // genuine mid-run resume: it is written on the first fire (below) and stays
+    // null until then, so a row holding a checkpoint it has never fired for can
+    // only have been handed one. A genuine resume is deliberately untouched — its
+    // branch legitimately advances past the last checkpoint with its OWN commits.
+    //
+    // FALSIFIED means the branch DEMONSTRABLY holds a different commit — a real
+    // 40-hex that is not the recorded one. An unreadable head (`''`) or a branch
+    // the remote says is gone (`'absent'`) is NOT evidence of another lane's work,
+    // and both are already answered downstream: the bounded fast-exit below, and
+    // `classifyResume`'s own rebuild. Narrow on purpose, because the only thing
+    // this check is entitled to undo is the guard-stripping the seed bought.
+    //
+    // AND IT MUST STAY NARROW, which is not a preference: `beginCrashRecovery` and
+    // `beginInfraRetry` (store.ts) NULL `workflow_run_id` on a row that earned its
+    // checkpoint by firing, so `workflow_run_id === null` ALONE is ALSO true for a
+    // recovered run whose branch legitimately advanced past its last checkpoint with
+    // its OWN commits. Treating that row as a seed would throw away exactly the built
+    // work this card exists to stop throwing away, the first time a launcher died or
+    // an origin read blipped — the falsification below would null its checkpoint AND
+    // its base pin, and the (now-armed) leftover-branch guard would then fail the run
+    // terminally over the commits it just made. So the discriminator ALSO requires a
+    // row that has never spent a recovery budget unit: `crash_recoveries` and
+    // `infra_retries` are the durable counters those two store methods are the only
+    // writers of, they are initialised to 0 at create, and a SEEDED row is brand new
+    // (`createIfClaimsAvailable`, board-dispatch.ts) so both are 0 on it by
+    // construction. A recovered row therefore reads as the genuine mid-run resume it
+    // is: seed untouched, guard not armed by this branch.
+    //
+    // Falsified → drop the ENTIRE seed (checkpoint, head, findings, base pin) and
+    // continue as the byte-identical fresh dispatch this card would have had before
+    // the seed existed: base re-pinned, leftover-branch guard armed, no resume arg
+    // threaded to the workflow. Not a failure — there is nothing wrong with the
+    // card, only with the shortcut.
+    const never_recovered = (run.crash_recoveries ?? 0) === 0 && (run.infra_retries ?? 0) === 0
+    const seeded_resume =
+      run.inner_checkpoint !== null && run.workflow_run_id === null && never_recovered
+    const seed_falsified =
+      seeded_resume &&
+      typeof resume_live_head === 'string' &&
+      /^[0-9a-f]{40}$/.test(resume_live_head) &&
+      resume_live_head !== recorded
+    if (seed_falsified) {
+      resume_checkpoint = null
+      resume_checkpoint_head = null
+      resume_findings = null
+      resume_live_head = undefined
+    }
+    const seedCheckedRun: TridentRun = seed_falsified
+      ? {
+          ...run,
+          inner_checkpoint: null,
+          inner_checkpoint_head: null,
+          inner_checkpoint_findings: null,
+          base_sha: null,
+        }
+      : run
+
     // PART 2b, OUTER FAST-EXIT — the launcher itself just failed 3 code reads of the
     // head. Firing the workflow now would spend a fire only to have `classifyResume`
     // return the bounded stop ({ mode: 'stop', reason: 'head-unreadable' }) for every
@@ -3184,6 +3434,16 @@ export function buildTridentOrchestrator(
     // reason 'no-checkpoint' — there is nothing recorded to preserve) are answered
     // before the head check; the head-INDEPENDENT names rebuild on every head. See
     // `resumeHeadDecides`.
+    //
+    // KNOWN, AND DELIBERATELY NOT SPECIAL-CASED (Argus r3, minor): a salvage-SEEDED
+    // brand-new dispatch whose head read fails at launch takes this exit and ends
+    // `failed` without ever building — a run that has nothing of its own to preserve.
+    // The tempting fix (drop the seed and build fresh) cannot be written safely with
+    // the discriminator available here, because `beginCrashRecovery` /
+    // `beginInfraRetry` null `workflow_run_id`, so the same test also matches a
+    // recovered run whose committed work this exit exists to protect. It is loud and
+    // self-healing — a re-dispatch re-seeds from the same prior row — so it costs one
+    // re-dispatch, and the alternative risks the rebuild this card exists to stop.
     const resume_checkpoint_name = (resume_checkpoint ?? '').trim()
     // THE PR LINK IS RESOLVED BEFORE THE EXIT, NOT AFTER IT (Argus r5). This used to sit
     // below, so the one path that ends a run WITHOUT ever firing recorded a terminal row
@@ -3191,7 +3451,10 @@ export function buildTridentOrchestrator(
     // opening the PR the recorded work is on. The exit is rare and already terminal; one
     // `gh pr view` to make the record point at the work is worth more than the call saved.
     const existingPr = run.pr ?? (await detectExistingPr(run))
-    const launchRun: TridentRun = existingPr !== null && run.pr === null ? { ...run, pr: existingPr } : run
+    const launchRun: TridentRun =
+      existingPr !== null && run.pr === null
+        ? { ...seedCheckedRun, pr: existingPr }
+        : seedCheckedRun
     if (resume_live_head === '' && resumeHeadDecides(resume_checkpoint_name, run.ralph)) {
       const cause = `could not read the head of ${run.branch}; the recorded work is at ${recorded}; re-run when the read succeeds`
       return {
@@ -3267,8 +3530,28 @@ export function buildTridentOrchestrator(
     }
     const pinnedRun = freshBuild ? { ...launchRun, base_sha, base_behind } : launchRun
 
+    // THE LOCAL-BRANCH OWNERSHIP CHECK RUNS FOR EVERY ROW THAT HAS NOT FIRED, not
+    // only for `freshLaunch` ones (Argus r3 blocker). It used to be gated on
+    // `inner_checkpoint === null`, so a salvage-SEEDED row skipped it — and the seed
+    // is a proof about the ref `resolveResumeLiveHead` reads, which in `pr` mode is
+    // the REMOTE. An absent-or-unreadable remote (and, in pr mode, even a matching
+    // one) says nothing about the LOCAL branch, and the local branch is what Forge
+    // is told to re-enter. So the one guard that can tell "this lane's commits" from
+    // "another lane's" was being dropped on the strength of evidence that does not
+    // speak to it: pre-seed the same card refused loudly, post-seed it silently
+    // built on whatever was sitting there.
+    //
+    // Running it for a seeded row costs one `rev-parse` plus one `merge-base` and
+    // refuses NOTHING that was previously fine: the check already exempts a tip
+    // contained in the base, and `ownCrashLeftover` exempts a tip descended from
+    // this row's OWN `base_sha` pin AND containing this row's OWN recorded
+    // checkpoint head — which is precisely the shape a legitimate salvage seed has
+    // (the pin and the head both travel with the seed), and which a sibling lane
+    // cutting the same branch name from the same base does NOT. `seeded_resume` is
+    // the "never fired, never recovered" test, and a row with no pin at all still
+    // skips the whole block, so no legacy row can be refused for lacking one.
     if (
-      freshLaunch &&
+      (freshLaunch || seeded_resume) &&
       base_sha !== null &&
       typeof launchRun.branch === 'string' &&
       launchRun.branch.length > 0
@@ -3293,6 +3576,34 @@ export function buildTridentOrchestrator(
             launchRun.repo_path,
           )
           ownCrashLeftover = descendsFromPriorBase.ok
+          // DESCENT FROM THE BASE PIN IS NOT OWNERSHIP (Argus r4 blocker). A SIBLING
+          // lane that cut the same branch name from the same base also descends from
+          // this row's pin, so the pin alone cannot tell "my leftover commits" from
+          // "somebody else's". When this row records a checkpoint HEAD — which every
+          // salvage seed does, `board-dispatch.ts` only seeds a candidate whose head
+          // it just matched against the branch tip — that head is a commit THIS row
+          // owns, so requiring it to be an ancestor-or-equal of the local tip is the
+          // ownership proof the pin is not: a sibling's tip cannot contain it.
+          //
+          // Only when the recorded head is not a readable object HERE does the pin go
+          // back to being the whole answer: `merge-base --is-ancestor` cannot
+          // distinguish "not an ancestor" from "unknown object", and refusing a run on
+          // an object we could not even read would discard built work on evidence we
+          // do not have. No recorded head at all (the crash-leftover-before-any-
+          // checkpoint shape) is unchanged for the same reason.
+          if (ownCrashLeftover && /^[0-9a-f]{40}$/.test(recorded)) {
+            const recordedPresent = await opts.run_host(
+              ['git', '-C', launchRun.repo_path, 'cat-file', '-e', `${recorded}^{commit}`],
+              launchRun.repo_path,
+            )
+            if (recordedPresent.ok) {
+              const containsRecorded = await opts.run_host(
+                ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', recorded, branchTip],
+                launchRun.repo_path,
+              )
+              ownCrashLeftover = containsRecorded.ok
+            }
+          }
         }
         if (!containedInBase.ok && !ownCrashLeftover) {
           const ahead = await opts.run_host(
@@ -3586,6 +3897,29 @@ export function buildTridentOrchestrator(
   async function applyResult(run: TridentRun, result: InnerResult): Promise<AdvanceOutcome> {
     fired.delete(run.id)
     redispatched.delete(run.id)
+
+    // FOLD THE WORKFLOW-REPORTED ROUND INTO THE ROW, before ANY terminal shape
+    // below spreads `run` — wave-child failures, the merged-PR done, the infra
+    // budget-exhaustion `failedRun`, the provenance rejects, exhausted, and every
+    // merge outcome all build their row from this object. `run.round` is the row's
+    // COPY, stamped at launch; when the live bumps predate the bash seam's
+    // derivation it never moved (215 of 224 measured runs sat at round 1 while
+    // their checkpoints named fix-round-2..7), so the reported round is the only
+    // honest number available at harvest. Guard identical to
+    // `innerTerminalFailureReason`, which already prefers the reported round for
+    // the same reason; monotonic, so a lower report never walks the row back.
+    //
+    // `isSafeInteger`, NOT `isFinite`: this value is written to
+    // `code_trident_runs.round`, an INTEGER column on a STRICT table, and
+    // `saveIfActive` binds it into `round = MAX(round, ?, ?)`. bun:sqlite refuses a
+    // REAL there ("cannot store REAL value in INTEGER column"), so folding a
+    // fractional report would throw at HARVEST — the one moment whose whole job is
+    // to record what happened. `parseInnerResult` already narrows to the same
+    // domain; this is the second lock on the door, because the fold is what puts
+    // the number on the row.
+    if (Number.isSafeInteger(result.round) && result.round > 0 && result.round > run.round) {
+      run = { ...run, round: result.round }
+    }
 
     // A wave child owns exactly one pinned build. Its `built` result is the join
     // barrier's input, not an approval or publish handoff: finish the child in

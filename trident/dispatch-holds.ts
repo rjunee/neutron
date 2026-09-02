@@ -266,6 +266,16 @@ export function buildDispatchHoldSweep(deps: {
    */
   makeDispatchDeps: (hold: DispatchHold) => BoardBoundBuildDeps & {
     preflight: NonNullable<BoardBoundBuildDeps['preflight']>
+    /**
+     * AND THE CREDENTIAL, for exactly the same reason and by the same mechanism
+     * (Argus r17). This sweep re-fires a card whose build is the built-but-never-
+     * reviewed shape the seed exists to adopt, so it is the entry that most needs
+     * `hostRunner`: without it the seed's `ls-remote` runs uncredentialed, a
+     * private origin refuses it, and the finished commit is rebuilt unattended.
+     * Required in the TYPE so the compiler — not a grep for the word — is what
+     * keeps the composer's `makeDispatchDeps` honest.
+     */
+    hostRunner: NonNullable<BoardBoundBuildDeps['hostRunner']>
   }
 }): (run: TridentRun) => Promise<void> {
   return async (_run: TridentRun): Promise<void> => {

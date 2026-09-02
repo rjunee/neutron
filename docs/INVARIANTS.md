@@ -381,6 +381,183 @@ with cross-references noted inline.
     through the production `listRecentForScope` with the anonymous scope asserted empty as the
     control).
 
+
+118. Trident terminal-verdict HONESTY + built-work SALVAGE (added 2026-08-31; the 30-day
+    measurement: 97 of 160 recorded REQUEST_CHANGES rows carried no findings, 33 already at
+    `forge-done` — built work recorded as rejected, then rebuilt from scratch).
+    (a) `REQUEST_CHANGES` requires non-empty recorded findings AT BOTH WRITE SITES, because a
+    precondition only one of two writers honours is not a precondition. In-process:
+    `update`/`save`/`saveIfActive` throw `TridentEmptyFindingsRejectionError` when the effective
+    post-write state would be `REQUEST_CHANGES` with NULL/`[]`/unparseable findings
+    (`trident/store.ts`, the throw sites in `update`/`save`/`saveIfActive`; RED-on-revert pins in
+    `trident/store.test.ts`
+    "empty-findings rejection guard"). Out-of-process: the LIVE inner workflow does not go through
+    the store — it invokes `trident/checkpoint.sh`, which writes the verdict through a SQL CASE
+    over the effective findings (`json_valid`/`json_type`/`json_array_length`, the SQL spelling of
+    `parseCheckpointFindings`, plus the three shapes SQLite's JSON functions read differently from
+    the reader every consumer of that column goes through — a leading BOM, an embedded NUL, and
+    bytes that are not well-formed UTF-8, for which bun:sqlite's driver hands the classifier the
+    empty string) and records `REVIEW_NOT_RUN` instead when they are empty
+    (`trident/checkpoint.sh`, "THE VERDICT WRITE"; `trident/checkpoint-sh.test.ts`, "a REJECTION
+    MUST STATE A REASON"). REFUSED, not failed: the rest of the write still lands, because losing
+    the branch/checkpoint/result would trade one bad column for a blind row. `writeTerminalResult`
+    therefore carries the rejection's findings into the SAME invocation as the verdict
+    (`trident/inner-workflow.mjs`). Never "fixed" by defaulting to APPROVE — that would merge
+    unreviewed code. THE PRECONDITION IS ON THE ROW, NOT ON THE INVOCATION: a findings-only write
+    that empties the set DEMOTES a stored `REQUEST_CHANGES` to `REVIEW_NOT_RUN` (an `APPROVE` or
+    null-verdict row is untouched), or the forbidden shape is reachable in two legal steps — and
+    the findings file is read ONCE, in bash, and emitted as a single SQL literal, because
+    `readfile()` is re-evaluated at every one of the CASE's five mentions and a file swapped
+    mid-statement decided the verdict from bytes other than the ones stored
+    (`trident/checkpoint.sh` `read_file_literal`/`findings_case`; both pinned RED-on-revert in
+    `trident/checkpoint-sh.test.ts`). THAT STATEMENT REACHES `sqlite3` ON STDIN, never as an argv
+    element: the materialised bytes appear in it sixteen times, Linux caps ONE argument at 128 KiB
+    whatever `ARG_MAX` says, and a 33 KB findings file therefore killed the whole terminal write
+    with `Argument list too long` — losing verdict, findings and branch together on exactly the
+    reviews that found the most to say. AND A SETTLED REJECTION IS NOT ERASED: on a TERMINAL row a
+    findings-only write that would empty REAL recorded findings is refused on BOTH columns at once
+    (the verdict and the findings), because `artifactCheckpointCommand` opens every phase
+    checkpoint with `printf '%s' '[]' > <tmp>` and a cancelled build's workflow keeps checkpointing
+    (rjunee/neutron#177), so the demotion that is right for a live row would otherwise let an
+    orphan rewrite a reviewer's decision to `REVIEW_NOT_RUN` and delete their words with it —
+    manufacturing the built-never-reviewed row this invariant exists to prevent. A LIVE row still
+    demotes; adding real findings to a terminal row is still allowed; only erasure is refused. The
+    guard arms on the row's CLAIM (`inner_verdict = 'REQUEST_CHANGES'`, so the legacy findings-free
+    population is protected too) OR on stored findings that really parse (so a terminal
+    `REVIEW_NOT_RUN`/`APPROVE` row keeps the evidence `recordedTerminalVerdict` promises is
+    "still PRESERVED" and `builtButNeverReviewedSeed` carries forward), and it covers the
+    verdict-carrying invocation as well as the findings-only one: `inner_verdict REQUEST_CHANGES`
+    beside `[]` is the same emptying write with a verdict stapled on, and it asks for the ONE
+    verdict this script refuses to write findings-free, so it can never be a caller deciding
+    something new. A bare `APPROVE` still lands — it brings a verdict a reviewer
+    reached — but the CLEARING write does NOT: it brings no review at all, and a NULLed verdict
+    beside preserved findings is the one atomic write's two guarded columns disagreeing about
+    whether a review happened, so it is frozen on the same terms (Argus r21; `docs/AS_BUILT.md`,
+    "AND THE CLEARING WRITE IS AN ERASURE TOO"). The BOUND-REVIEW executor obeys the same rule for the same
+    reason (`trident/orchestrator.ts`, `recorded_verdict`): its verdict comes from the panel's
+    `inner_result` JSON while its findings come from the panel's column, so the two can disagree,
+    and the store's throw would otherwise keep the run non-terminal and re-run the whole review on
+    every tick (`trident/review-run.test.ts`, "the row must be WRITABLE" + its positive control).
+    (b) `REVIEW_NOT_RUN` is the ONE no-reviewer terminal verdict
+    (`migrations/0138_code_trident_runs_review_not_run.sql`), written at source by
+    `writeTerminalResult` (`trident/inner-workflow.mjs`) and at every orchestrator fabrication
+    site through `recordedTerminalVerdict` (`trident/orchestrator.ts`, `recordedTerminalVerdict`; REQUEST_CHANGES survives
+    only with Argus provenance + non-empty findings). A run terminating at `forge-done` with no
+    review records REVIEW_NOT_RUN, never REQUEST_CHANGES
+    (`trident/inner-workflow-built-head.test.ts`, "a built-head stop reports ok:false", with the
+    positive control "a genuine rejection still records REQUEST_CHANGES with its findings").
+    (c) The three-way taxonomy — died-before-build / built-never-reviewed / reviewed-rejected — is
+    derivable from EXISTING COLUMNS ALONE via `terminalRunDisposition`
+    (`trident/run-disposition.ts`, `terminalRunDisposition`; table pinned in
+    `trident/run-disposition.test.ts`). No new
+    column; historical rows are never rewritten (they are the measurement evidence). A
+    REQUEST_CHANGES row classifies `reviewed-rejected` whether or not it carries findings, so a
+    legacy fabricated row can never seed a resume; `died-before-build` means "no build this
+    dispatch may resume" (`ralph-task-built` sits there WITH a commit, because the workflow
+    rebuilds that shape by design). The classifier is mode-blind so an offline count of the
+    historical table never turns on a flag, and the offline SQL published in `docs/AS_BUILT.md` is
+    executed against it rather than asserted (`trident/as-built-disposition-sql.test.ts`).
+    (d) A built-but-never-reviewed terminal SEEDS the next dispatch of the same card
+    (`builtButNeverReviewedSeed`, `trident/run-disposition.ts`; chokepoint
+    `trident/board-dispatch.ts`, the `cardsPriorRun` block, via `latestTerminalBySlug`,
+    `trident/store.ts`) under
+    SIX preconditions, each of which replaces a guard the seed itself removes: the prior row was
+    not STOPPED (`stopped` has two writers, `/code stop` and the board X-cancel/delete via
+    `trident/terminate.ts`, so it is always an explicit operator discard — never a crash, reap or
+    budget death; the DISPOSITION still reads `built-never-reviewed`, because the offline count is
+    about what happened, only the SEED refuses), the prior row's
+    FULL TASK TEXT is this card's (the slug truncates at 35 chars, so two cards can collide on it
+    and share a branch), THE CARD'S OWN `linked_run_id` NAMES THAT RUN — task text is a proxy and
+    two distinct cards can carry identical text, so identity is taken from the board's own link
+    and an absent/null/whitespace-only one FAILS CLOSED to a fresh dispatch
+    (`trident/board-dispatch.ts` `cardsPriorRun !== '' && cardsPriorRun === prior.id`, pinned by
+    `trident/board-dispatch.test.ts` "a card carrying NO LINK AT ALL does not seed"), the prior
+    row carries a 40-hex `base_sha`, the branch tip resolves to
+    EXACTLY the recorded head THROUGH THE REF THE LAUNCH WILL READ (`ls-remote --heads origin` in
+    pr mode, mirroring `resolveResumeLiveHead`; the local ref in local mode — a local-ref proof in
+    pr mode predicts a resume that cannot happen, since Forge does not push in pr mode and
+    `classifyResume` answers `head-branch-absent`), AND THAT REMOTE READ IS CREDENTIALED — a
+    bare-env `ls-remote` against a private origin exits non-zero and collapses to `''`, which is a
+    silent no-seed, so the composition root hands its own `tridentHostRunner` to EVERY production
+    dispatch site as `BoardBoundBuildDeps.hostRunner` (paired with `landedProbe`, the other
+    credentialed remote read, and pinned that way in
+    `open/__tests__/open-trident-prod-boot-wiring.test.ts`; the fail-closed direction means an
+    unwired site is invisible except as work rebuilt), and the checkpoint is one
+    `resumeOnUnchangedHead` really reviews — a bare `forge-done` in RALPH mode is not (it rebuilds,
+    'ralph-progress-unknown'). The base pin is REQUIRED, not carried-if-present: a seeded row is
+    not a fresh launch and `launch()` never re-pins it, so a null-base seed would leave the
+    publish-time cut-from-origin refusal permanently inert for it and every re-seed off it. The
+    seed does NOT carry `pr`, which would short-circuit `detectExistingPr` onto a possibly-closed
+    PR (`trident/board-dispatch.test.ts`, "dispatch seeds a resume from a built-but-never-
+    reviewed prior run"). Any non-qualifying shape dispatches byte-identically to a fresh launch,
+    guard intact. AND THE PROOF IS RE-VERIFIED WHERE IT IS CONSUMED: the dispatch proof is taken a
+    process earlier, so `launch()` drops the entire seed — checkpoint, head, findings, base pin —
+    when the live head it reads anyway is a 40-hex OTHER than the recorded one, restoring the
+    fresh-launch base pin and leftover-branch refusal (`trident/orchestrator.ts`, "SEEDED RESUME —
+    REVALIDATED AT LAUNCH"; `trident/orchestrator.test.ts`, "a SEEDED row whose branch MOVED since
+    dispatch"). A row that has already FIRED (`workflow_run_id !== null`) is never treated as
+    seeded — its branch legitimately advances past its own last checkpoint — and NEITHER IS A
+    RECOVERED ONE: `beginCrashRecovery`/`beginInfraRetry` NULL `workflow_run_id` on a row that
+    earned its checkpoint by firing, so the discriminator also requires `crash_recoveries` and
+    `infra_retries` to be 0 (both are 0 by construction on a freshly seeded row). Without that,
+    a crash-recovered run whose live head had legitimately moved past its checkpoint — the
+    everyday shape, since `trident/checkpoint.sh` records `fix-round-N` BEFORE that round's commits —
+    lost its checkpoint AND its base pin to the falsification branch and was then failed
+    terminally by the ownership guard over its own commits (`trident/orchestrator.test.ts`, "a
+    CRASH-RECOVERED run is not a seed" and "an INFRA-RETRIED run is not a seed either", both
+    built through the real store methods). AND THE SEED NO LONGER
+    STRIPS THE LOCAL-BRANCH OWNERSHIP CHECK: that refusal runs for every row that has NOT fired
+    (`freshLaunch || seeded_resume`), because the seed's proof is about the ref
+    `resolveResumeLiveHead` reads — the REMOTE in pr mode — while the refusal is about the LOCAL
+    branch Forge re-enters, and an absent/unreadable/even matching remote says nothing about it
+    (`trident/orchestrator.test.ts`, "a SEEDED row runs the local-branch ownership check" and "a
+    seed the REMOTE proves is still no proof about the LOCAL branch"). It refuses nothing that was
+    previously fine: a tip contained in the pinned base, or descended from this row's own
+    `base_sha` AND containing this row's own recorded checkpoint head (`ownCrashLeftover`), is
+    exempt — the shape a legitimate salvage seed has. DESCENT FROM THE PIN ALONE IS NOT
+    OWNERSHIP: a sibling lane that cut the same branch name from the same base descends from it
+    too, so the recorded head — a commit this row demonstrably owns, which a sibling's tip cannot
+    contain — is the comparison that separates them (`trident/orchestrator.test.ts`, "a SIBLING
+    lane cut from the same base is refused" and its positive control "a seeded resume whose
+    branch CONTAINS its recorded head proceeds"). The comparison is made only when the recorded
+    commit is READABLE here (`cat-file -e`), because `merge-base --is-ancestor` cannot tell "not
+    an ancestor" from "unknown object" and refusing on an unreadable object would discard built
+    work on evidence the guard does not have. The seed-DROP half stays narrow (40-hex mismatch only): widening the drop
+    to "not a confirmed match" would discard exactly the built work this invariant exists to
+    preserve the first time an origin read blipped. The pr-mode tip
+    probe is CREDENTIALED, like the landed probe beside it — uncredentialed it exits non-zero
+    against a private origin and the salvage silently never happens
+    (`trident/board-dispatch.test.ts`, "THE PR-MODE TIP PROBE IS CREDENTIALED").
+    (e) `round` is DERIVED from round-carrying checkpoint names at BOTH write seams — TS
+    (`checkpointRound`, applied in `TridentRunStore.update` and at `TridentRunStore.create`,
+    `trident/store.ts`) and bash (`round_for_checkpoint`, folded into the same atomic UPDATE,
+    `trident/checkpoint.sh`) — as `MAX(round, N)`, monotonic, pinned by the cross-language
+    equivalence suite (`trident/checkpoint-round.test.ts`) and the derivation suite
+    (`trident/checkpoint-sh.test.ts`, "checkpoint.sh derives the round from the checkpoint name"). Both copies clamp the round to at most nine digits and
+    both TRIM before matching, which is what makes the equivalence total rather than true only over
+    the names a writer emits today: bash's `$(( 10#N ))` wraps NEGATIVE past 2^63 and would
+    interpolate a minus sign into the UPDATE, and an untrimmed bash copy answered '' for
+    ` fix-round-3 ` where the TS copy answered 3. A round that reaches the row is also always an
+    INTEGER — `code_trident_runs.round` is INTEGER on a STRICT table, so both the parse
+    (`trident/inner-loop.ts` `parseInnerResult`) and the harvest fold
+    (`trident/orchestrator.ts` `applyResult`) narrow with `Number.isSafeInteger`, never `isFinite`.
+    A checkpoint name and its round can never disagree — SCOPED to the round DOMAIN both parsers
+    share (at most nine digits). Outside it the clamp DECLINES rather than lies: a name carrying a
+    ten-digit round parses to no round at all in either copy, so the row keeps the round it already
+    had instead of adopting a wrong one — the safe direction, and unreachable in production because
+    rounds are bounded by `max_rounds`. ONE DOMAIN, THREE COPIES: `terminalRunDisposition`'s
+    `OUTER_PUBLISHED` shape test (`trident/run-disposition.ts`) and the offline SQL in
+    `docs/AS_BUILT.md` (`LENGTH(tail) - INSTR(tail, ':') <= 9`) carry the SAME nine-digit round
+    bound as the two parsers, so a name outside it is "not one of these shapes" in every copy
+    rather than salvageable in one and unreadable in the next. The launcher's resume parse
+    (`trident/orchestrator.ts`, the `outer-published:` capture feeding `recorded`) stays wider on
+    purpose and is not a fourth definition of the domain: it reads the OID out of group 1 to
+    compare heads and never consults the round at all.
+    Readers follow the RECORDED verdict in both directions — a never-reviewed row is never narrated
+    as a rejection AND an APPROVED one never is either (`trident/delivery.ts`, `interpretFailure`).
+    Protects: **P10** (Trident checkpoint hardening; cross-ref #20, #112) and the
+    trustworthy-rejection-count query recorded in `docs/AS_BUILT.md` (2026-08-31 entry).
+
 ## 4. Duplication / consolidation seams (`critic-duplication.md`)
 
 27. Sender-registry semantics DIFFER by design: chat-bridge's send must **propagate** throws
@@ -924,7 +1101,7 @@ and is not reused here.
      acquires the authority of an observation. The canonical failure is `last_advanced_at` read
      as liveness: it moves only at checkpoint boundaries and is "stale by construction during a
      long Forge step, so a reaper keyed on it asks 'has a phase ended recently', not 'is anything
-     alive'" (`trident/store.ts:562-567`; the same reasoning at `trident/liveness.ts:24`). The
+     alive'" (`trident/store.ts`, the `last_advanced_at` docblock; the same reasoning at `trident/liveness.ts`). The
      stored/derived split, per entity: a run stores phase, checkpoint, verdict, built commit,
      published ref and findings and DERIVES is-hung / is-stale / is-mergeable; a credential stores
      the last probe result and when, and DERIVES is-connected; a PR stores its head sha and the
@@ -935,16 +1112,21 @@ and is not reused here.
      — never by convention at call sites. A guard at a caller is one more guard among many; a
      guard at the waist is the contract. The enforced instance: `inner_verdict='REQUEST_CHANGES'`
      with an empty findings list is a write the store REJECTS
-     (`TridentEmptyFindingsRejectionError`, `trident/store.ts:58`, thrown at `:1026`, `:1172`,
-     `:1248`). The write site is chosen precisely because it is unavoidable, and the store says so
-     about its own residual gap at `trident/store.ts:1019-1021`: the guard "makes findings-free
-     rejection structurally unwritable by in-process writers; `checkpoint.sh` remains
-     out-of-process SQL and bypasses it by construction". That residue is why #125 exists.
-     Protects: `trident/store.test.ts:918` ("empty-findings rejection guard — an empty finding set
+     (`TridentEmptyFindingsRejectionError`, declared in `trident/store.ts` and thrown from all
+     three of its writers — `update`, `save` and `saveIfActive`). The write site is chosen
+     precisely because it is unavoidable — for IN-PROCESS writers. The out-of-process writer is
+     not covered by that throw and does not have to be: `trident/checkpoint.sh` carries its OWN
+     copy of the rule, an atomic SQL CASE in the same UPDATE that records `REVIEW_NOT_RUN`
+     instead of rejecting (#118), and the store's comment at the `update` guard says exactly
+     that. It used to say `checkpoint.sh` "bypasses it by construction"; that stopped being true
+     when the second copy was written, and this entry quoted the stale sentence for one release.
+     The residue #125 exists for is the DUPLICATION, not a hole: two writers, two copies of one
+     rule, and nothing but review keeping them in step.
+     Protects: `trident/store.test.ts` ("empty-findings rejection guard — an empty finding set
      is never a rejection").
 125. An enforcement point must be UNWIREABLE-OFF. Only two qualify, and each covers the other's
      blind spot exactly: (a) the TYPE at the construction site — always on, a missing field is a
-     compile error, blind to out-of-process writers such as `trident/checkpoint.sh:300`, which
+     compile error, blind to out-of-process writers such as `trident/checkpoint.sh`, which
      issues raw `sqlite3 ... UPDATE code_trident_runs` no TypeScript type will ever see; and
      (b) the SCHEMA at the file — always on for every writer including that shell script, blind to
      whether a value was observed rather than typed. A separately-wired runtime gate is NOT an
@@ -969,7 +1151,8 @@ and is not reused here.
      `runtime/subagent/registry.ts:18` defines `finished` as a process-status value. Activity is
      not output: a non-zero cost, a fresh timestamp and a process that replied are proxies for
      aliveness, which is exactly the mistake `last_advanced_at` encodes (#123).
-     Protects: `trident/store.test.ts:918` for the run half; the dispatch half is
+     Protects: `trident/store.test.ts` ("empty-findings rejection guard") for the run half;
+     the dispatch half is
      **unprotected — covered by review only.**
 127. A DERIVED JUDGEMENT PINS THE IDENTITY OF ITS INPUTS. "Is this PR green" is computed only
      from checks bound to the CURRENT head sha, never from a check list that does not say which
@@ -985,14 +1168,15 @@ and is not reused here.
      honest sibling row that is written instead, and it does not ship until a test enumerates the
      terminal states it constrains and shows each is reachable by a writer that exists. A refusal
      with no writable alternative converts a lie into a deadlock, and this repository has already
-     paid that bill: `trident/store.ts:1225-1245` records a run that "retried forever without
+     paid that bill: `trident/store.ts`, the `update()` empty-findings rejection guard, records a run that "retried forever without
      leaving `forge-init`" and states the rule in the source — "A guard that reads a column its
      own writer cannot populate is unsatisfiable by construction." The same obligation applies to
      every check that reports a verdict, and the conforming precedent outside the store is the
      leak gate, which exits **3** with `LEAK GATE: INCOMPLETE` rather than `SILENT ✅` when its
      rule could not run, because "I could not check" must not look like "I checked and it was
      clean" (`CONTRIBUTING.md`, "Git hooks").
-     Protects: `trident/store.test.ts:918` (the one guard that shipped with its honest sibling);
+     Protects: `trident/store.test.ts` ("empty-findings rejection guard" — the one guard that
+     shipped with its honest sibling);
      the general obligation is **unprotected — covered by review only**, and no totality test
      exists yet.
 
@@ -1012,7 +1196,7 @@ that was never recorded, so these are the same contract seen from the write side
      Protects: **unprotected — covered by review only.**
 130. NO ACTION MAY SILENTLY DO NOTHING: a call whose precondition is unmet is structurally
      incapable of returning success. The reference implementation already exists in this tree, in
-     shell, because its author could not get it from a type — `trident/checkpoint.sh:300-303` runs
+     shell, because its author could not get it from a type — `trident/checkpoint.sh` runs
      the UPDATE, reads `changes()`, and on zero prints
      `checkpoint.sh: run '<id>' not found — checkpoint NOT applied` and exits **3**, a distinct
      code for a distinct outcome. That is the whole contract in four lines; the job is to make it

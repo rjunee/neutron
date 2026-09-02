@@ -61,7 +61,10 @@ function stubBoard(cards: StubCard[]): StubBoard {
 function deps(
   board: StubBoard,
   extra: Partial<BoardBoundBuildDeps> = {},
-): BoardBoundBuildDeps & { preflight: NonNullable<BoardBoundBuildDeps['preflight']> } {
+): BoardBoundBuildDeps & {
+  preflight: NonNullable<BoardBoundBuildDeps['preflight']>
+  hostRunner: NonNullable<BoardBoundBuildDeps['hostRunner']>
+} {
   return {
     store,
     board,
@@ -75,6 +78,11 @@ function deps(
     // it in the type: the sweep re-dispatches UNATTENDED, so it may not be the
     // one entry that skips the liveness gate.
     preflight: async () => ({ ok: true }),
+    // And the credential, required by the same type for the same reason: the
+    // sweep's seed probe reads a remote tip, and uncredentialed it reads empty
+    // and rebuilds a finished commit. No repo exists in this harness, so the
+    // stub just answers "no such branch" the way an empty ls-remote would.
+    hostRunner: async () => ({ ok: true, exit_code: 0, stdout: '', stderr: '' }),
     ...extra,
   }
 }

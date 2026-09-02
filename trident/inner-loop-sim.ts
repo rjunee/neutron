@@ -20,6 +20,7 @@
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import type { FireOutcome, InnerLoopInput, TridentWorkflowFirer } from './inner-loop.ts'
+import { recordedTerminalVerdict } from './orchestrator.ts'
 import type { TridentRunStore } from './store.ts'
 
 /** The fields a simulated inner workflow writes into `inner_result` (the typed
@@ -121,17 +122,29 @@ export async function writeSimulatedResult(
   // The verdict lands raw, modeling the FIXED out-of-process checkpoint.sh writer
   // (post-T3 discriminator); it stays raw because production's writer is never the
   // guarded store API.
+  //
+  // WHAT it writes is IMPORTED, not re-stated (Argus r1, nit). This is a third
+  // write site expressing the one predicate the card is about, and a hand-copied
+  // `verdict && blockKind && findings.length` was already drifting from the real
+  // one — it never checked Argus provenance, so a simulated rejection stamped at
+  // `forge-done` recorded REQUEST_CHANGES here while production recorded
+  // REVIEW_NOT_RUN. Orchestrator tests assert against the rows this writes, so a
+  // sim that is kinder than production makes them assert a state production cannot
+  // reach. The findings come from the SIM RESULT rather than the row because that
+  // is what this seam models: the workflow's own terminal payload.
   await db.run(
     'UPDATE code_trident_runs SET inner_verdict = ? WHERE id = ?',
     [
+      // APPROVE stays here, exactly as at the production call site
+      // (`orchestrator.ts`): the discriminator answers only the REJECTION question
+      // — REQUEST_CHANGES or REVIEW_NOT_RUN — and is reached only on the terminal
+      // FAILED path, because an approval is not a rejection to discriminate.
       sim.verdict === 'APPROVE'
         ? 'APPROVE'
-        : sim.verdict === 'REQUEST_CHANGES' &&
-            sim.blockKind === 'code' &&
-            Array.isArray(sim.findings) &&
-            sim.findings.length > 0
-          ? 'REQUEST_CHANGES'
-          : 'REVIEW_NOT_RUN',
+        : recordedTerminalVerdict(
+            { verdict: sim.verdict ?? null, block_kind: sim.blockKind ?? null, checkpoint },
+            sim.findings === undefined ? null : JSON.stringify(sim.findings),
+          ),
       runId,
     ],
   )

@@ -6315,6 +6315,47 @@ deleted, no dual path):
   when the Argus phase's OWN recorded `inner_checkpoint = 'argus-approved'` (written
   by the synthesis-phase Bash step) backs it — a self-asserted `APPROVE` in the
   result line with no recorded provenance is REJECTED to `failed`, never merged.
+- **A NON-DECISION IS NEVER RECORDED AS A REJECTION (2026-08-31):** measured over 30 days,
+  97 of 160 recorded `REQUEST_CHANGES` rows carried NO findings — a default stamped by paths
+  that never reviewed — and 33 of those had already reached `forge-done`, so built work was
+  discarded and rebuilt. Now: `REQUEST_CHANGES` requires non-empty recorded findings at the
+  STORE write site (`update`/`save`/`saveIfActive` throw `TridentEmptyFindingsRejectionError`
+  otherwise), and `REVIEW_NOT_RUN` (migration `0138`) is the terminal verdict for a run no
+  reviewer ever judged — written at source by the workflow's `writeTerminalResult` and by every
+  orchestrator terminal site through `recordedTerminalVerdict` (an outer-loop `REQUEST_CHANGES`
+  survives only with Argus provenance + non-empty findings). The shared pure classifier
+  `trident/run-disposition.ts` (`terminalRunDisposition`) derives the three-way taxonomy from
+  existing columns alone — died-before-build / built-never-reviewed / reviewed-rejected — and a
+  built-but-never-reviewed terminal SEEDS the next dispatch of the same card
+  (`builtButNeverReviewedSeed` at the `trident/board-dispatch.ts` chokepoint, gated on the prior
+  row's FULL TASK TEXT matching — the slug truncates at 35 chars and two cards can collide on it —
+  on the live branch tip resolving to EXACTLY the recorded head, and on the checkpoint being one
+  the workflow really reviews, which a bare `forge-done` in RALPH mode is not), so a successful
+  build whose lane died pre-review is routed to REVIEW on re-dispatch instead of being rebuilt.
+  SCOPE, because the Ralph exclusion is not a corner case here: a governed repo (a git root with
+  `SPEC.md` — THIS one) runs Ralph, and there a bare `forge-done` still rebuilds, because a Ralph
+  iteration's build says nothing about how many tasks remain (`classifyResume` →
+  `ralph-progress-unknown`). What the seed recovers in a governed repo is the
+  `outer-published:<oid>:<remaining>:<round>` and `fix-round-N` window — the shapes that DO carry
+  a reviewable commit and a recorded remaining-task count — AND ONLY WHERE THE COMMIT IS ON A REF
+  THE RESUME CAN READ (Argus, major): the tip proof runs against `origin` in `pr` mode and the
+  local ref in `local` mode, and Forge is told not to push in `pr` mode, so a pr-mode
+  `fix-round-N` or `forge-done` commit is local-only, the origin probe answers `absent`, and the
+  seed correctly declines. In `pr` mode only `outer-published:*` — the commit the outer loop
+  already pushed — actually salvages; in `local` mode every salvageable checkpoint does. That
+  boundary is why the 33 measured `forge-done` rows (all 33 `pr` mode, 0 `local`) are NOT covered
+  by the seed, stated at length in `docs/AS_BUILT.md`. What the verdict honesty fixes
+  everywhere, Ralph included, is the RECORDING: a run of the shape those 33 rows have — terminal
+  at `forge-done`, no review, no findings — is now recorded `REVIEW_NOT_RUN` rather than
+  inflating the rejection count. FROM NOW ON, not retroactively: the 33 measured rows still say
+  what they said. Readers follow the
+  RECORDED verdict in both directions (`trident/delivery.ts` `interpretFailure`; both Work Board
+  clients render REVIEW_NOT_RUN as "Review never ran — the work was not rejected."). `round` is
+  derived from round-carrying checkpoint names at BOTH write seams (`checkpointRound` in the TS
+  store; `round_for_checkpoint` in `trident/checkpoint.sh`, cross-language equivalence pinned),
+  monotonic `MAX(round, N)`, so the fix-loop round a row reports is the round its own checkpoint
+  names. Historical rows are never rewritten — they are the evidence base. See
+  `docs/INVARIANTS.md` #118 and the `docs/AS_BUILT.md` 2026-08-31 entry.
 - **A MERGE IS TERMINAL (ISSUES #563):** the run lifecycle ENDS where the change
   ships. The inner loop probes the PR's merge state the instant a Forge round
   returns — ahead of the review panel, the Ralph re-fire, the round-1 empty-build

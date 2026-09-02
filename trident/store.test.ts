@@ -9,7 +9,10 @@ import {
   changeSignatureEntries,
   COLS,
   TridentEmptyFindingsRejectionError,
+  TridentIncompleteSeedError,
+  TridentUnseededPinError,
   TridentRunStore,
+  TridentUnresumableSeedError,
   waveChildSlug,
 } from './store.ts'
 
@@ -316,6 +319,34 @@ describe('TridentRunStore', () => {
     expect(got?.inner_checkpoint_findings).toBe('[{"severity":"blocker"}]')
   })
 
+  test('save() with NON-NULL findings WRITES them — patch-wins, the same rule update() has', async () => {
+    // The other direction of the same COALESCE, pinned because it is the one that
+    // can lose data (Argus r20, minor): a snapshot carrying findings overwrites
+    // whatever the row holds, so a STALE non-null copy would beat fresher findings
+    // written out of band by checkpoint.sh. That is deliberate and it matches
+    // `update()`'s patch-wins semantics — the caller brought a value, so the value
+    // lands — and it is inert today because no production path calls `save()`
+    // (`tick.ts` uses `saveIfActive`). Pinning it means a future round that DOES
+    // wire `save()` into the loop has to decide this on purpose rather than
+    // discover it.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'save-nonnull', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, {
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: '[{"severity":"blocker","title":"the row already says this"}]',
+    })
+
+    const snapshot = {
+      ...store.get(run.id)!,
+      inner_checkpoint_findings: '[{"severity":"major","title":"and the snapshot says this"}]',
+    }
+    await store.save(snapshot)
+
+    expect(store.get(run.id)?.inner_checkpoint_findings).toBe(
+      '[{"severity":"major","title":"and the snapshot says this"}]',
+    )
+  })
+
   test('#317 create persists a non-telegram originating channel_kind', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({
@@ -381,6 +412,262 @@ describe('TridentRunStore', () => {
     await expect(
       store.create({ slug: 'dup', project_slug: 't1', repo_path: '/r', task: 'b' }),
     ).rejects.toThrow()
+  })
+
+  /**
+   * SALVAGE-RESUME SEED (the built-but-never-reviewed card). `getBySlug` is
+   * uniqueness-scoped to LIVE rows, so the dispatch chokepoint had no way to ask
+   * "what happened the last time this card ran". These pins are what let it ask,
+   * and what let the answer be carried onto the fresh row.
+   */
+  test('latestTerminalBySlug returns the NEWEST terminal row, ignoring the live one', async () => {
+    let tick = 0
+    const store = new TridentRunStore(
+      db,
+      () => new Date(Date.UTC(2026, 7, 30, 0, 0, tick++)).toISOString(),
+    )
+    const first = await store.create({ slug: 'card-a', project_slug: 't1', repo_path: '/r', task: 'a' })
+    await store.update(first.id, { phase: 'failed', inner_checkpoint: 'inner-error' })
+    const second = await store.create({ slug: 'card-a', project_slug: 't1', repo_path: '/r', task: 'a' })
+    await store.update(second.id, { phase: 'stopped', inner_checkpoint: 'forge-done' })
+    // A LIVE row for the same card must never be mistaken for the prior attempt.
+    const live = await store.create({ slug: 'card-a', project_slug: 't1', repo_path: '/r', task: 'a' })
+
+    const latest = store.latestTerminalBySlug('t1', 'card-a')
+    expect(latest?.id).toBe(second.id)
+    expect(latest?.inner_checkpoint).toBe('forge-done')
+    expect(latest?.id).not.toBe(live.id)
+    // Project-scoped, exactly like getBySlug.
+    expect(store.latestTerminalBySlug('t2', 'card-a')).toBeNull()
+  })
+
+  test('latestTerminalBySlug is null when the card has only ever had live rows', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({ slug: 'card-b', project_slug: 't1', repo_path: '/r', task: 'b' })
+    expect(store.latestTerminalBySlug('t1', 'card-b')).toBeNull()
+    expect(store.latestTerminalBySlug('t1', 'never-existed')).toBeNull()
+  })
+
+  test('create round-trips the salvage-resume seed, and defaults all four to NULL', async () => {
+    const store = new TridentRunStore(db)
+    const HEAD = 'a'.repeat(40)
+    const BASE = 'c'.repeat(40)
+    const seeded = await store.create({
+      slug: 'seeded',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 't',
+      inner_checkpoint: 'forge-done',
+      inner_checkpoint_head: HEAD,
+      inner_checkpoint_findings: '[{"title":"suite"}]',
+      base_sha: BASE,
+    })
+    const stored = store.get(seeded.id)!
+    expect(stored.inner_checkpoint).toBe('forge-done')
+    expect(stored.inner_checkpoint_head).toBe(HEAD)
+    expect(stored.inner_checkpoint_findings).toBe('[{"title":"suite"}]')
+    // PERSISTED, not just returned: `base_sha` used to backfill through the column
+    // default and was excluded from the INSERT, so a seeded pin was silently lost —
+    // and with it the publish-time "not cut from origin/<base>" refusal, which is
+    // gated on `base_sha !== null` and can never re-pin a non-fresh launch.
+    expect(stored.base_sha).toBe(BASE)
+    // A seeded row is NOT a reviewed row: no verdict travels with the evidence.
+    expect(stored.inner_verdict).toBeNull()
+    // …and no PR: `launch()` resolves it with `run.pr ?? detectExistingPr(run)`, so
+    // a seeded number would short-circuit that probe onto a maybe-closed PR.
+    expect(stored.pr).toBeNull()
+
+    const plain = await store.create({ slug: 'plain', project_slug: 't1', repo_path: '/r', task: 't' })
+    const plainStored = store.get(plain.id)!
+    expect(plainStored.inner_checkpoint).toBeNull()
+    expect(plainStored.inner_checkpoint_head).toBeNull()
+    expect(plainStored.inner_checkpoint_findings).toBeNull()
+    expect(plainStored.base_sha).toBeNull()
+    expect(plainStored.pr).toBeNull()
+  })
+
+  // THE SEED DOMAIN IS A WRITE-SITE PRECONDITION, NOT A CALLER'S HABIT (Argus r23,
+  // major). `create` persisted whatever `inner_checkpoint` it was handed while the
+  // only thing that decided which names are safe lived in `builtButNeverReviewedSeed`
+  // — the "check only in the caller" shape this card explicitly forbids. A row born
+  // at `argus-approved` resumes as an already-approved run and writes a terminal
+  // APPROVE having reviewed nothing, so the column's domain is enforced where the
+  // column is written.
+  test.each([
+    'argus-approved',
+    'argus-request-changes',
+    'argus-request-changes-round-7',
+    'pr-merged',
+    'inner-error',
+    'ralph-task-built',
+    'awaiting-trailer',
+    'who-knows',
+    // Out of the round domain both round parsers accept, so no reader would call it
+    // resumable either.
+    'fix-round-1000000000',
+    'fix-round-x',
+    `outer-published:${'z'.repeat(40)}:1:2`,
+  ])('create REFUSES a row seeded at %p', async (checkpoint) => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'refused',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: 'a'.repeat(40),
+        base_sha: 'c'.repeat(40),
+      }),
+    ).rejects.toThrow(TridentUnresumableSeedError)
+    // AND THE ROW IS NOT THERE. A refusal that still inserted would be worse than
+    // no check at all — the resume would run off a row nobody thinks exists.
+    expect(store.latestTerminalBySlug('t1', 'refused')).toBeNull()
+    expect(store.getBySlug('t1', 'refused')).toBeNull()
+    expect(store.listNonTerminal().filter((r) => r.slug === 'refused')).toHaveLength(0)
+  })
+
+  // POSITIVE CONTROL: the three names a real salvage emits still create, and the
+  // fresh (unseeded) shape is untouched. Without this, a `create` that threw for
+  // every seed would satisfy the refusals above.
+  test.each(['forge-done', 'fix-round-3', `outer-published:${'a'.repeat(40)}:2:6:deviated`, ' forge-done '])(
+    'create ACCEPTS a row seeded at %p',
+    async (checkpoint) => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({
+        slug: 'accepted',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: 'a'.repeat(40),
+        base_sha: 'c'.repeat(40),
+      })
+      // THE STORED VALUE IS THE ONE THAT WAS GUARDED (Argus r24, minor). It used to
+      // be the RAW argument, so `' forge-done '` passed a guard reading the trimmed
+      // name and then reached `classifyResume`, which compares exact names — a row
+      // admitted as resumable and then rebuilt as unrecognised. The column now holds
+      // what the check decided on.
+      expect(store.get(run.id)?.inner_checkpoint).toBe(checkpoint.trim())
+    },
+  )
+
+  // A SEEDED NAME IS ONLY HALF A SEED (Argus r24, major). The name guard above
+  // answered "this checkpoint means a commit exists and nothing judged it", then let
+  // the two columns saying WHICH commit through unchecked. Both gaps are permanent
+  // once written: `launch()` re-pins a base only on a FRESH build, so a seeded row
+  // born with a null `base_sha` can never acquire one and the publish-time
+  // cut-from-origin refusal (gated on `base_sha !== null`) is disarmed for it
+  // forever; and a seed with no 40-hex head cannot be revalidated against the live
+  // tip, which is what arms the leftover-branch ownership check.
+  test.each([
+    ['base_sha', { inner_checkpoint_head: 'a'.repeat(40), base_sha: null }],
+    ['base_sha omitted', { inner_checkpoint_head: 'a'.repeat(40) }],
+    ['base_sha short', { inner_checkpoint_head: 'a'.repeat(40), base_sha: 'c'.repeat(39) }],
+    ['base_sha not hex', { inner_checkpoint_head: 'a'.repeat(40), base_sha: 'z'.repeat(40) }],
+    ['head null', { inner_checkpoint_head: null, base_sha: 'c'.repeat(40) }],
+    ['head omitted', { base_sha: 'c'.repeat(40) }],
+    ['head short', { inner_checkpoint_head: 'a'.repeat(39), base_sha: 'c'.repeat(40) }],
+    ['head not hex', { inner_checkpoint_head: 'q'.repeat(40), base_sha: 'c'.repeat(40) }],
+  ])('create REFUSES a forge-done seed with %s', async (_label, pins) => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'halfseed',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        inner_checkpoint: 'forge-done',
+        ...pins,
+      }),
+    ).rejects.toThrow(TridentIncompleteSeedError)
+    // Refused means ABSENT, not inserted-then-complained-about.
+    expect(store.getBySlug('t1', 'halfseed')).toBeNull()
+    expect(store.listNonTerminal().filter((r) => r.slug === 'halfseed')).toHaveLength(0)
+  })
+
+  // POSITIVE CONTROLS for the pin guard, so a `create` that threw on every seed
+  // could not satisfy the refusals above: a complete seed still lands, an UNSEEDED
+  // row is still allowed to carry no pins at all, and the pins are stored in the
+  // normalised form the guard read.
+  test('a complete seed still lands, and its pins are stored as the guard read them', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'complete',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 't',
+      inner_checkpoint: 'fix-round-2',
+      inner_checkpoint_head: ` ${'A'.repeat(40)} `,
+      base_sha: `${'B'.repeat(40)}\n`,
+    })
+    const stored = store.get(run.id)!
+    expect(stored.inner_checkpoint).toBe('fix-round-2')
+    expect(stored.inner_checkpoint_head).toBe('a'.repeat(40))
+    expect(stored.base_sha).toBe('b'.repeat(40))
+  })
+
+  test('an UNSEEDED row is untouched by the pin guard', async () => {
+    // The fresh-dispatch shape carries no checkpoint and no pins, and `launch()`
+    // pins the base itself. Demanding a pin here would refuse every real dispatch.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'fresh', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stored = store.get(run.id)!
+    expect(stored.inner_checkpoint).toBeNull()
+    expect(stored.inner_checkpoint_head).toBeNull()
+    expect(stored.base_sha).toBeNull()
+  })
+
+  // …AND THE ASYMMETRY IN THE OTHER DIRECTION IS CLOSED (Argus r3, minor, raised
+  // independently by two reviewers). The guard above is gated on a seed being
+  // PRESENT, so an unseeded caller reached the row body and persisted whatever it
+  // passed — `base_sha: 'NOT-A-SHA  '` and `inner_checkpoint_head: 'zzzz'` both
+  // landed. The `base_sha` half has teeth: `launch()` treats a run as a fresh build
+  // only when `inner_checkpoint === null && base_sha === null`, so an unchecked pin
+  // skips the origin fetch that would have set a real one and the publish-time
+  // "branch does not contain the pinned base tip" refusal then fires against a value
+  // nothing validated. No production caller does this today, which is exactly why
+  // the precondition belongs at the write site rather than in the caller.
+  test.each([
+    ['base_sha that is not a sha', { base_sha: 'NOT-A-SHA  ' }],
+    ['a 40-hex base_sha with no checkpoint to explain it', { base_sha: 'c'.repeat(40) }],
+    ['inner_checkpoint_head that is not a sha', { inner_checkpoint_head: 'zzzz' }],
+    ['a 40-hex head with no checkpoint to explain it', { inner_checkpoint_head: 'a'.repeat(40) }],
+    ['findings with no checkpoint to explain them', { inner_checkpoint_findings: '[{"t":1}]' }],
+    ['a whitespace-padded checkpoint that trims to nothing, plus pins', {
+      inner_checkpoint: ' \t\n ',
+      base_sha: 'c'.repeat(40),
+    }],
+  ])('create REFUSES an UNSEEDED row carrying %s', async (_label, pins) => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({ slug: 'unseeded', project_slug: 't1', repo_path: '/r', task: 't', ...pins }),
+    ).rejects.toThrow(TridentUnseededPinError)
+  })
+
+  test('the refusal writes NOTHING — a rejected unseeded pin leaves no row behind', async () => {
+    // A guard that threw after the INSERT would leave exactly the row it refused.
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'unseeded-none',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        base_sha: 'NOT-A-SHA  ',
+      }),
+    ).rejects.toThrow(TridentUnseededPinError)
+    expect(store.getBySlug('t1', 'unseeded-none')).toBeNull()
+  })
+
+  test('the refusal is on CREATE only — `update` still records any checkpoint the loop reaches', async () => {
+    // The live state machine writes `building`, `reviewing`, `inner-error`,
+    // `argus-approved` … through `update`, and those are the row saying where it
+    // IS, not a seed promising a resume. Narrowing them would blind the loop.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'live', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+    expect(store.get(run.id)?.inner_checkpoint).toBe('argus-approved')
   })
 
   test('update applies a partial patch + re-stamps last_advanced_at', async () => {
@@ -945,6 +1232,39 @@ describe('empty-findings rejection guard — an empty finding set is never a rej
     ).rejects.toThrow(TridentEmptyFindingsRejectionError)
   })
 
+  test('update() refuses REQUEST_CHANGES whose findings nest DEEPER THAN SQLITE ACCEPTS', async () => {
+    // json_valid enforces JSON_MAX_DEPTH (1000), so checkpoint.sh's CASE records
+    // REVIEW_NOT_RUN for this and the counting SQL scores it legacy. JSON.parse
+    // reads it as a 1-element array, so without the parser's explicit bound this
+    // write site alone called it a real rejection (Argus r7, reproduced).
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-deep', project_slug: 't1', repo_path: '/r', task: 't' })
+
+    await expect(
+      store.update(run.id, {
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: '['.repeat(1001) + '0' + ']'.repeat(1001),
+      }),
+    ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+
+    expect(store.get(run.id)?.inner_verdict).toBeNull()
+  })
+
+  test('POSITIVE CONTROL: findings nested exactly 1000 deep are ACCEPTED and stored verbatim', async () => {
+    // The boundary is >1000, not >=1000 — both dialects call this one real, so
+    // the refusal above is a bound and not a blanket rejection of deep content.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-update-deep-ok', project_slug: 't1', repo_path: '/r', task: 't' })
+    const findings = '['.repeat(1000) + '0' + ']'.repeat(1000)
+
+    await store.update(run.id, { inner_verdict: 'REQUEST_CHANGES', inner_checkpoint_findings: findings })
+
+    expect(store.get(run.id)).toMatchObject({
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: findings,
+    })
+  })
+
   test('update() accepts REQUEST_CHANGES with non-empty findings in the same patch', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'guard-update-paired', project_slug: 't1', repo_path: '/r', task: 't' })
@@ -1008,6 +1328,98 @@ describe('empty-findings rejection guard — an empty finding set is never a rej
     expect(store.get(run.id)?.phase).toBe('forge-init')
   })
 
+  test("FALSIFICATION 3 — an incoming '[]' cannot ERASE the stored findings and land beside REQUEST_CHANGES", async () => {
+    // THE HOLE THE FALLBACK OPENED (Argus r1 blocker). Both guards fell back to the
+    // STORED row whenever the incoming findings decoded empty — but `'[]'` is not the
+    // same as "brought nothing": it is non-null, so the COALESCE in the very same
+    // UPDATE OVERWRITES the column with it. A snapshot carrying `'[]'` therefore
+    // cleared the guard on evidence it was about to delete, and persisted exactly the
+    // `REQUEST_CHANGES` + `[]` row this card exists to make unwritable. NULL is the
+    // only incoming value COALESCE leaves the stored evidence alone for, so NULL is
+    // the only one allowed to be judged against it.
+    const store = new TridentRunStore(db)
+    const REAL = '[{"severity":"blocker","title":"a reviewer actually said this"}]'
+
+    for (const writer of ['save', 'saveIfActive'] as const) {
+      const run = await store.create({
+        slug: `guard-empty-over-stored-${writer.toLowerCase()}`,
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+      })
+      await store.update(run.id, {
+        inner_checkpoint: 'argus-request-changes',
+        inner_checkpoint_findings: REAL,
+      })
+
+      // The checkpoint write above derives a phase; capture it so "nothing moved"
+      // is measured against the row as it stood, not against a guessed constant.
+      const phaseBefore = store.get(run.id)!.phase
+      expect(phaseBefore).not.toBe('failed') // the write below would be a real move
+
+      const snapshot = {
+        ...store.get(run.id)!,
+        phase: 'failed' as const,
+        inner_verdict: 'REQUEST_CHANGES' as const,
+        inner_checkpoint_findings: '[]',
+      }
+      await expect(
+        writer === 'save' ? store.save(snapshot) : store.saveIfActive(snapshot),
+      ).rejects.toThrow(TridentEmptyFindingsRejectionError)
+
+      // Nothing moved: not the phase, and above all not the evidence.
+      expect({ [writer]: store.get(run.id)?.phase }).toEqual({ [writer]: phaseBefore })
+      expect({ [writer]: store.get(run.id)?.inner_checkpoint_findings }).toEqual({ [writer]: REAL })
+
+      // The legacy shape is not merely absent — it is unwritable. Counted with the
+      // canonical SQL from docs/AS_BUILT.md so this asserts the number the card
+      // promises to make trustworthy, not a JS re-reading of it.
+      const legacy = db.raw().query(
+        `SELECT COUNT(*) AS n FROM code_trident_runs
+          WHERE id = ? AND inner_verdict = 'REQUEST_CHANGES'
+            AND NOT CASE WHEN json_valid(inner_checkpoint_findings)
+                           THEN json_type(inner_checkpoint_findings) = 'array'
+                                AND json_array_length(inner_checkpoint_findings) > 0
+                           ELSE 0 END`,
+      ).get(run.id) as { n: number }
+      expect({ [writer]: legacy.n }).toEqual({ [writer]: 0 })
+    }
+  })
+
+  test("POSITIVE CONTROL for FALSIFICATION 3 — a snapshot that brings NULL findings is still judged against the stored ones, and commits", async () => {
+    // The other half of patch-wins: a save that legitimately leaves the column alone
+    // (NULL, which COALESCE preserves) must still be able to commit a genuine
+    // rejection on the evidence already on record. Without this, tightening the guard
+    // would read as correct while having broken every real terminal RC write.
+    const store = new TridentRunStore(db)
+    const REAL = '[{"severity":"blocker","title":"a reviewer actually said this"}]'
+    const run = await store.create({
+      slug: 'guard-null-over-stored',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 't',
+    })
+    await store.update(run.id, {
+      inner_checkpoint: 'argus-request-changes',
+      inner_checkpoint_findings: REAL,
+    })
+
+    expect(
+      await store.saveIfActive({
+        ...store.get(run.id)!,
+        phase: 'failed',
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: null,
+      }),
+    ).toBe(true)
+
+    expect(store.get(run.id)).toMatchObject({
+      phase: 'failed',
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: REAL,
+    })
+  })
+
   test('saveIfActive() commits a genuine RC terminal snapshot when the row carries findings', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'guard-save-active-genuine', project_slug: 't1', repo_path: '/r', task: 't' })
@@ -1022,6 +1434,31 @@ describe('empty-findings rejection guard — an empty finding set is never a rej
       inner_verdict: 'REQUEST_CHANGES',
     })).toBe(true)
     expect(store.get(run.id)).toMatchObject({ phase: 'failed', inner_verdict: 'REQUEST_CHANGES' })
+  })
+
+  test('save() commits a genuine RC snapshot that BRINGS its findings, and persists them (Argus r1)', async () => {
+    // The satisfiability control for save()'s guard. It used to read the STORED
+    // column while this writer never populated it, so a caller holding the findings
+    // in hand could not satisfy it by any means — a real rejection would throw on
+    // every tick (swallowed as `advance_failed`) and the run would retry forever.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'guard-save-carries-findings', project_slug: 't1', repo_path: '/r', task: 't' })
+    expect(store.get(run.id)?.inner_checkpoint_findings).toBeNull() // the row has nothing
+
+    await store.save({
+      ...store.get(run.id)!,
+      phase: 'failed',
+      inner_verdict: 'REQUEST_CHANGES',
+      inner_checkpoint_findings: '[{"severity":"blocker","title":"a reviewer actually said this"}]',
+    })
+
+    expect(store.get(run.id)).toMatchObject({
+      phase: 'failed',
+      inner_verdict: 'REQUEST_CHANGES',
+      // The verdict and its evidence landed in the SAME statement — a rejection
+      // recorded beside an empty column is the row this whole card forbids.
+      inner_checkpoint_findings: '[{"severity":"blocker","title":"a reviewer actually said this"}]',
+    })
   })
 
   test('the guard ignores APPROVE and REVIEW_NOT_RUN', async () => {

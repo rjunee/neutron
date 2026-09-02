@@ -472,19 +472,56 @@ describe('interpretFailure — an early stop must not be told as a review outcom
 
   test('a REAL review exhaustion is still told as a review outcome', () => {
     // The positive control. Without it, a branch that caught everything would look correct.
+    // The row shape is the honest one: a terminal REQUEST_CHANGES carrying the findings
+    // the write site now insists on, which is what marks this as a review outcome.
     const out = interpretFailure(
-      run({ failure_reason: 'inner loop exhausted 10 round(s) without Argus APPROVE' }),
+      run({
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
+        failure_reason: 'inner loop exhausted 10 round(s) without Argus APPROVE',
+      }),
     )
     expect(out.klass).toBe('review-unresolved')
     expect(out.summary).toContain('blocking findings')
   })
 
+  test('an APPROVED row whose reason says "exhausted" is NOT told as a rejection', () => {
+    // THE OTHER DIRECTION, and the one the first version of this branch still got
+    // wrong. A merge failure KEEPS `inner_verdict = 'APPROVE'` — the review really
+    // did approve — and its reason can carry the word 'exhausted' (retries
+    // exhausted). The prose match then claimed the reviewer "still had blocking
+    // findings" about a run a reviewer had APPROVED, which is the same class of lie
+    // this card exists to remove, pointing the other way.
+    const out = interpretFailure(
+      run({
+        phase: 'failed',
+        inner_verdict: 'APPROVE',
+        failure_reason: 'merge failed: push retries exhausted after 3 attempts',
+      }),
+    )
+    expect(out.klass).not.toBe('review-unresolved')
+    expect(out.summary).not.toContain('blocking findings')
+    // It lands on what actually happened to it.
+    expect(out.klass).toBe('merge-mechanics')
+  })
+
   test('neither summary ever pastes the raw reason at the owner', () => {
-    for (const reason of [
-      "inner workflow ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE",
-      'inner loop exhausted 10 round(s) without Argus APPROVE',
-    ]) {
-      const out = interpretFailure(run({ failure_reason: reason }))
+    // Each reason with the row shape it really occurs in: the early stop recorded no
+    // verdict, the exhaustion recorded a rejection carrying findings. Both classes
+    // author their own sentence, so neither pastes the reason back at the owner.
+    const shapes: Partial<TridentRun>[] = [
+      {
+        failure_reason:
+          "inner workflow ended at round 1 of 10 at checkpoint 'inner-error' without Argus APPROVE",
+      },
+      {
+        inner_verdict: 'REQUEST_CHANGES',
+        inner_checkpoint_findings: JSON.stringify([{ severity: 'blocker', note: 'x' }]),
+        failure_reason: 'inner loop exhausted 10 round(s) without Argus APPROVE',
+      },
+    ]
+    for (const over of shapes) {
+      const out = interpretFailure(run(over))
       expect(out.summary).not.toContain('Argus')
       expect(out.summary).not.toContain('checkpoint')
     }

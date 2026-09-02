@@ -122,7 +122,7 @@ export interface RunProgress {
   /** `<repo web url>/pull/<pr>` — null when there is no PR or the repo could not
    *  be resolved, in which case the `#NNN` tag renders as plain text. */
   pr_url: string | null
-  verdict: 'APPROVE' | 'REQUEST_CHANGES' | null
+  verdict: 'APPROVE' | 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' | null
   failure_reason: string | null
   /** Added after the base progress shape; optional for rolling-deploy frames. */
   brief_alert?: string | null
@@ -437,7 +437,13 @@ function parseRunProgress(raw: unknown): RunProgress | null {
     // Absent/malformed → null: an older gateway's frame stays valid and the tag
     // simply renders as plain text.
     pr_url: typeof r['pr_url'] === 'string' ? (r['pr_url'] as string) : null,
-    verdict: verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' ? verdict : null,
+    // `REVIEW_NOT_RUN` is a RECORDED terminal verdict, not an absent one — collapsing
+    // it to null here threw away the only thing a reasonless failed card can say.
+    // Every other unknown string still degrades to null.
+    verdict:
+      verdict === 'APPROVE' || verdict === 'REQUEST_CHANGES' || verdict === 'REVIEW_NOT_RUN'
+        ? verdict
+        : null,
     failure_reason: typeof r['failure_reason'] === 'string' ? (r['failure_reason'] as string) : null,
     brief_alert: typeof r['brief_alert'] === 'string' ? (r['brief_alert'] as string) : null,
   }

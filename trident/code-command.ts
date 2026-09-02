@@ -24,6 +24,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+import type { EnvCapableHostRunner } from './git-mode.ts'
 import { buildTridentTerminator } from './terminate.ts'
 import { buildBoardReconcileObserver, type TridentBoardReconciler } from './board-reconcile.ts'
 import { composeTerminalHook } from './terminal-observer.ts'
@@ -152,6 +153,14 @@ export interface TridentCodeContext {
   /** Outer-loop merged-PR guard shared by all production dispatch surfaces. */
   landedProbe?: DispatchLandedProbe
   /**
+   * The composition root's CREDENTIALED host runner, forwarded to the dispatch
+   * chokepoint (`BoardBoundBuildDeps.hostRunner`). Same object as the one behind
+   * `landedProbe`; without it the built-never-reviewed seed's `ls-remote` probe
+   * runs uncredentialed and answers `''` on a private origin — no seed, and the
+   * finished commit is rebuilt from scratch (Argus r16).
+   */
+  hostRunner?: EnvCapableHostRunner
+  /**
    * Resolve whether this build is governed (Ralph one-task-per-context
    * loop). Defaults to `detectRalphMode` (see board-dispatch.ts) — a
    * `SPEC.md` at the git root governs; an explicit resolver still wins.
@@ -233,6 +242,7 @@ async function executeDispatch(
     ...(ctx.resolveBuildRepo !== undefined ? { resolveBuildRepo: ctx.resolveBuildRepo } : {}),
     resolveMergeMode: ctx.resolveMergeMode,
     ...(ctx.landedProbe !== undefined ? { landedProbe: ctx.landedProbe } : {}),
+    ...(ctx.hostRunner !== undefined ? { hostRunner: ctx.hostRunner } : {}),
     ...(ctx.resolveRalph !== undefined ? { resolveRalph: ctx.resolveRalph } : {}),
     ...(ctx.chat_id !== undefined ? { chat_id: ctx.chat_id } : {}),
     ...(ctx.thread_id !== undefined ? { thread_id: ctx.thread_id } : {}),

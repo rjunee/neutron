@@ -2228,6 +2228,12 @@ export function buildOpenGraphComposer(
           repo_path: owner_home,
           resolveMergeMode: resolveTridentMergeMode,
           landedProbe: tridentLandedProbe,
+          // THE SAME CREDENTIALED RUNNER, forwarded to the dispatch chokepoint.
+          // Without it the built-never-reviewed seed's `git ls-remote origin`
+          // probe runs on a bare process env, exits non-zero against a private
+          // origin and answers `''` — no seed, and a commit that was already
+          // built is rebuilt from scratch (Argus r16).
+          hostRunner: tridentHostRunner,
           preflight: tridentCodexBuildPreflight,
           holds: tridentDispatchHolds,
         }
@@ -4384,6 +4390,9 @@ export function buildOpenGraphComposer(
                 thread_id: null,
                 resolveMergeMode: resolveTridentMergeMode,
                 landedProbe: tridentLandedProbe,
+                // The credentialed runner the seed's branch-tip probe needs
+                // (Argus r16) — see the `/code` site above.
+                hostRunner: tridentHostRunner,
                 // The ▶ button is the owner's primary dispatch path and was the
                 // one this gate originally missed.
                 preflight: tridentCodexBuildPreflight,
@@ -5965,6 +5974,7 @@ export function buildOpenGraphComposer(
         repo_path: owner_home,
         resolveMergeMode: resolveTridentMergeMode,
         landedProbe: tridentLandedProbe,
+        hostRunner: tridentHostRunner,
         preflight: tridentCodexBuildPreflight,
         // Replay the ORIGINATING turn's chat/limits context, so a build that
         // finally starts an hour later still answers into the conversation that
@@ -6956,6 +6966,9 @@ export function buildOpenGraphComposer(
               channel_kind: 'app_socket' as const,
               merge_mode_probe: tridentMergeModeProbe,
               landed_probe: tridentLandedProbe,
+              // The credentialed runner the seed's branch-tip probe needs
+              // (Argus r16) — see the `/code` site above.
+              host_runner: tridentHostRunner,
               // M1 ▶ (agent-native) — `work_board_start` resolves a card's saved
               // spec (its plans/ doc, else its title) via the same service the
               // HTTP ▶ route uses, so both build from the one on-disk spec.

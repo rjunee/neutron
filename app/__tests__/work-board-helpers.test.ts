@@ -178,6 +178,37 @@ describe('briefAlertText', () => {
       brief_alert: 'earlier recovered alert',
     }))).toBeNull();
   });
+
+  it('a failed run that recorded REVIEW_NOT_RUN says so instead of showing a blank', () => {
+    // The card's measured cost, at the reading end: built work recorded as rejected.
+    // A row that recorded no review and no reason can still say the one true thing.
+    expect(runNotice(progress({
+      phase_label: 'failed',
+      step_label: 'failed',
+      failure_reason: null,
+      verdict: 'REVIEW_NOT_RUN',
+    }))).toEqual({
+      text: 'Review never ran — the work was not rejected.',
+      tone: 'failure',
+    });
+    // A LEGACY frame (null verdict) claims nothing — the blank stays a blank.
+    expect(runNotice(progress({
+      phase_label: 'failed',
+      step_label: 'failed',
+      failure_reason: null,
+      verdict: null,
+    }))).toBeNull();
+    // A recorded reason still wins: it says more than the verdict does.
+    expect(runNotice(progress({
+      phase_label: 'failed',
+      step_label: 'failed',
+      failure_reason: 'merge failed: the branch could not be landed',
+      verdict: 'REVIEW_NOT_RUN',
+    }))).toEqual({
+      text: 'merge failed: the branch could not be landed',
+      tone: 'failure',
+    });
+  });
 });
 
 describe('dotState', () => {
