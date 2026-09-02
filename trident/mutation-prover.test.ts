@@ -636,14 +636,22 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     // leading token boundary and was retried from every offset of a long run of
     // scheme-characters that never reaches a `:/` — quadratic, and CodeQL
     // js/polynomial-redos (HIGH) on argv that arrives from an unbounded,
-    // agent-authored nomination. Measured unanchored on this box: 80k
-    // characters took ~7s and each doubling cost 4x, so 200k is tens of
-    // seconds; anchored it is sub-millisecond. This assertion fails if the
-    // boundary is taken back off the second alternative.
+    // agent-authored nomination. This assertion fails if the boundary is taken
+    // back off the second alternative.
     const started = Date.now()
     const { prover: long } = proverOver()
-    const scanned = await long.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', 'a'.repeat(200_000)] } })
-    expect(Date.now() - started).toBeLessThan(5_000)
+    const scanned = await long.prove({ run: RUN, claim: { ...CLAIM, guard: ['bun', 'test', 'a'.repeat(80_000)] } })
+    // WALL-CLOCK-BOUND-OK: catastrophic backtracking has no non-timing
+    // signature — the anchored and unanchored regexes return the SAME answer
+    // (no match) on this input, so the only observable difference between the
+    // fixed pattern and the CodeQL-flagged one is how long the scan takes, and
+    // there is no logical clock inside V8's regex engine to read instead.
+    // Measured on this box at 80k characters: anchored 1ms, unanchored 8083ms
+    // (10k 149ms, 20k 514ms, 40k 2083ms — quadratic, 4x per doubling). The
+    // bound sits at 3s: ~3000x headroom over the passing path and a 2.7x margin
+    // under the failing one, and a red pin costs CI ~8s rather than the ~64s a
+    // 200k input would.
+    expect(Date.now() - started).toBeLessThan(3_000)
     // …and a run of letters is no scheme, so it was not refused as one — the
     // measurement above is of the scan, not of an early exit.
     expect(scanned.reason).not.toContain('repo-relative')
@@ -1633,6 +1641,32 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       ])
     }
 
+    // AND NO ARM BORROWS A SENTENCE IT CANNOT SAY. A LONE search is dropped by
+    // `pathArgs`, so it lands on this arm too — and the "so it reaches" tail
+    // used to be glued on at the CALL SITE as "so the runner discovers from the
+    // repo root", which told the next build that `bun test app/*.test.ts`
+    // discovers from the repo root when it discovers from `app`. Same refusal,
+    // an accurate reason. Gluing the tail back on reddens the second assertion.
+    const searchFs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: searched } = proverOver({}, searchFs)
+    const lone = await searched.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'app/*.test.ts'], control: ['bun', 'test', 'src/other.test.ts'] },
+    })
+    expect(lone.proved).toBe(false)
+    expect(lone.reason).toContain('names a search, which reaches every collectible file under its root')
+    expect(lone.reason).not.toContain('discovers from the repo root')
+
+    // POSITIVE CONTROL — the DISCOVERY arms still say it, so the assertion above
+    // cannot be passing because the sentence was deleted from the module.
+    const bareFs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: bare } = proverOver({}, bareFs)
+    const nothing = await bare.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test'], control: ['bun', 'test', 'src/other.test.ts'] },
+    })
+    expect(nothing.reason).toContain('it names no path at all, so the runner discovers from the repo root')
+
     // The actionable half: the refusal carries the spelling that IS accepted…
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
     const { prover } = proverOver({}, fs)
@@ -1835,6 +1869,15 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
     ['tests/test_probe.py', 'production'],
     ['src/ab-test.ts', 'production'],
     ['src/thing_test.ts', 'production'],
+    // AND RUST, WHOSE `_test.rs` SUFFIX NAMES NO CARGO CONVENTION. Cargo
+    // collects `tests/*.rs` under any name and `#[cfg(test)]` modules in
+    // `src/`; a `_test.rs` arm therefore covered no target `tests/foo.rs` did
+    // not already miss, while declaring an ordinary Rust module a test and
+    // selling its diff the no-production-file exemption on a suffix the build
+    // wrote. Both classify `production` now, which is the strictly narrower
+    // answer.
+    ['src/pricing_test.rs', 'production'],
+    ['tests/integration_test.rs', 'production'],
     // THE HYBRID EXTENSIONS NO RUNNER COLLECTS. `[cm]?[jt]sx?` reads as eight
     // extensions and admits twelve; the four extra (`.cjsx`, `.mjsx`, `.ctsx`,
     // `.mtsx`) are spellings bun ignores — a lone `payments.test.cjsx` gives
@@ -1879,7 +1922,6 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
       'a/b.test.jsx',
       'src/foo_test.go',
       'src/foo_test.py',
-      'src/foo_test.rs',
     ]) {
       expect([p, isDeclaredTestFile(p)]).toEqual([p, true])
     }
@@ -1892,6 +1934,13 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
     for (const p of [
       'src/ab-test.ts',
       'src/thing_test.ts',
+      // RUST IS NOT A `_test.rs` LANGUAGE. Cargo's test targets are `tests/*.rs`
+      // under any name plus `#[cfg(test)]` modules in `src/`, so `_test.rs`
+      // declared nothing cargo collects while handing an ordinary Rust module —
+      // production logic with a suffix the BUILD chose — the no-production-file
+      // exemption. Putting `rs` back into TEST_BASENAME reddens these two.
+      'src/pricing_test.rs',
+      'tests/integration_test.rs',
       'tests/support/helper_spec.ts',
       'tests/test_probe.py',
       'tests/support/scrub-instance-env.ts',
@@ -1909,12 +1958,13 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
   })
 })
 
-describe('diffHasNoLegalMutationTarget — the exemption predicate, including its unreachable arms', () => {
+describe('diffHasNoLegalMutationTarget — the exemption predicate, both its arms', () => {
   test('null and EMPTY are not exempt — a diff we know nothing about fails closed', () => {
-    // `changedFilesOnBranch` collapses empty into null today, so the gate cannot
-    // reach `[]`. Pinned HERE precisely because of that: `[].every(…)` is
-    // vacuously true, so dropping the emptiness guard would exempt a diff the
-    // gate could not read a single file of.
+    // BOTH ARMS ARE LIVE. `changedFilesOnBranch` returns `[]` for a branch whose
+    // diff git read perfectly and found empty, and `null` only when git itself
+    // failed. `[].every(…)` is vacuously true, so dropping the emptiness guard
+    // would exempt exactly the diff that changed nothing provable — and `null`
+    // must fail closed for the opposite reason, that nothing was read at all.
     expect(diffHasNoLegalMutationTarget(null)).toBe(false)
     expect(diffHasNoLegalMutationTarget([])).toBe(false)
   })
@@ -1930,6 +1980,10 @@ describe('diffHasNoLegalMutationTarget — the exemption predicate, including it
     // classifier to cover every collectible name would widen this — which is why
     // that breadth lives on the guard side instead.
     expect(diffHasNoLegalMutationTarget(['testfoo.py', 'src/test-foo.js', 'docs/x.md'])).toBe(false)
+    // …and so is a Rust module whose `_test.rs` suffix names no cargo
+    // convention. Putting `rs` back into TEST_BASENAME turns this line green
+    // for `true`, which is the exemption being bought with a suffix.
+    expect(diffHasNoLegalMutationTarget(['src/pricing_test.rs', 'docs/x.md'])).toBe(false)
   })
 })
 

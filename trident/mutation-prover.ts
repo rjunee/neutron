@@ -143,8 +143,22 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
  * to ban — and the tautology itself is now stated directly, as the guard-argv
  * check in `validateClaim`, which the path rule was only ever standing in for.
  *
- * WHAT THIS COVERS — the card's spec EXACTLY and nothing wider: `*.test.*` /
- * `*.spec.*` for the JS/TS runners, `*_test.go|py|rs` for go, pytest and cargo.
+ * WHAT THIS COVERS: `*.test.*` / `*.spec.*` for the JS/TS runners, and
+ * `*_test.go` / `*_test.py` for go and pytest — names those two runners really
+ * do collect.
+ *
+ * `_test.rs` IS NOT ONE OF THEM, and dropping it is the one place this narrows
+ * the card's literal list. Cargo has no `_test.rs` convention at all: its test
+ * targets are `tests/*.rs` under ANY name, plus `#[cfg(test)]` modules inside
+ * `src/`. So the arm declared `src/pricing_test.rs` — an ordinary Rust module
+ * carrying production logic — a TEST, and through `classifyMutationTarget` sold
+ * its diff the no-production-file exemption for a suffix the build chose. It
+ * covered no cargo test target that `tests/foo.rs` did not already miss, so
+ * removing it makes every `.rs` path classify the same way and strictly
+ * NARROWS the exemption. No tautology opens: a real cargo test target lives
+ * under `tests/`, so `aRunnerMayCollect` still calls it collectible for its
+ * parent and a `cargo test` guard is still refused — the dead end already
+ * written down in `whyNoSelection`.
  *
  * WHAT IT DELIBERATELY DOES NOT COVER: every LOOSER name a runner still picks
  * up — `ab-test.ts`, `thing_test.ts`, `helper_spec.ts`, `test_probe.py`,
@@ -171,7 +185,7 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
  * `.mjs`, `.mts`) and the bare form takes an optional one (`.js`, `.jsx`,
  * `.ts`, `.tsx`).
  */
-const TEST_BASENAME = /\.(test|spec)\.(?:[cm][jt]s|[jt]sx?)$|_test\.(go|py|rs)$/
+const TEST_BASENAME = /\.(test|spec)\.(?:[cm][jt]s|[jt]sx?)$|_test\.(go|py)$/
 
 /** What DECLARES a file a test: its basename, or being a DIRECT child of a
  *  `__tests__/` directory. A support library under `tests/` (or nested below
@@ -615,7 +629,12 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
   if (!aRunnerMayCollect(target)) return null
   const selectors = pathArgs(guard)
   if (selectors.length === 0) {
-    return `collects (${whyNoSelection(guard)}, so the runner discovers from the repo root and reaches)`
+    // The "so it reaches" half belongs to each ARM, not to this call site: it
+    // used to be glued on here as "so the runner discovers from the repo root",
+    // which is a sentence only the discovery arms can honestly say. A LONE
+    // search (`bun test app/*.test.ts`) lands here too, and told the next build
+    // its argv discovered from the repo root when it discovers from `app`.
+    return `collects (${whyNoSelection(guard)})`
   }
   // A SEARCH THAT SHARES ITS ARGV WITH A SELECTOR WAS INVISIBLE TO EVERY ARM.
   // `go test ./cmd/ ./...` is a whole-module run, and `./...` reaches
@@ -631,9 +650,16 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
   // So a search is READ HERE, as what it is: a root plus "everything
   // collectible under it". `./...` and `*.test.ts` are rooted at `.`;
   // `tests/...` and `tests/**/*_test.go` at `tests`. A search rooted somewhere
-  // ELSE still selects nothing of the mutated file and is left alone, which is
-  // what keeps `bun test app/*.test.ts` a legal guard for a library under
-  // `tests/`.
+  // ELSE selects nothing of the mutated file and is left alone by THIS arm —
+  // `bun test app/other.test.ts app/*.test.ts` stays a legal guard for a
+  // library under `tests/`.
+  //
+  // WHAT THIS ARM DOES NOT REACH, said plainly because the earlier wording
+  // claimed otherwise: a search STANDING ALONE never gets here. `pathArgs`
+  // drops searches, so `bun test app/*.test.ts` has no selectors and the
+  // no-selection arm above has already refused it. That is an OVER-refusal and
+  // it fails closed; the answer is to name the test file beside the glob, which
+  // is the mixed form this arm reads.
   const search = searchesReaching(guard, target)
   if (search !== null) return search
   // WHAT THE RUN REACHES IS EVERY OPERAND, NOT ONLY EVERY SELECTOR, and reading
@@ -1012,6 +1038,12 @@ function pathArgs(argv: readonly string[]): string[] {
  * down. Every arm below mirrors exactly one `pathArgs` filter, in the same
  * order, and names the element it dropped.
  *
+ * EACH ARM ALSO OWNS ITS OWN "and so it reaches the mutated file", rather than
+ * the caller gluing one sentence onto all of them. The glued one said "so the
+ * runner discovers from the repo root", which the SEARCH arm cannot honestly
+ * say: `bun test app/*.test.ts` discovers from `app`. Same refusal, an accurate
+ * reason.
+ *
  * `cargo test --test integration` lands on the first arm too, and that is the
  * whole of cargo's story: `--test`'s operand is a test TARGET name rather than
  * a path, so for a cargo repo a collectible target under `tests/` has no guard
@@ -1038,23 +1070,33 @@ function whyNoSelection(argv: readonly string[]): string {
     const prev = i > start ? (argv[i - 1] as string) : ''
     if (prev.startsWith('-') && carriedValue(prev).length === 0) {
       return (
-        `${arg} is read as the operand of ${prev} rather than as a selection — ` +
+        `${arg} is read as the operand of ${prev} rather than as a selection, ` +
+        'so the runner discovers from the repo root and reaches the mutated file — ' +
         `put the path BEFORE the options, or attach the option's own value (${prev}=…)`
       )
     }
-    // Normalised first, mirroring `pathArgs` element for element.
+    // Normalised first, mirroring `pathArgs` element for element. This is the
+    // ONE arm that must not borrow the repo-root sentence: a search selects its
+    // own root, and saying "discovers from the repo root" about
+    // `bun test app/*.test.ts` is simply false.
     if (namesASearch(normalizeArg(arg))) {
-      return `${arg} names a search, which reaches every collectible file under its root`
+      return `${arg} names a search, which reaches every collectible file under its root, including the mutated file`
     }
     if (!looksLikeAPath(arg)) {
-      return `${arg} has neither a directory separator nor an extension, so a runner reads it as a substring filter`
+      return (
+        `${arg} has neither a directory separator nor an extension, so a runner reads it as a substring filter ` +
+        'and discovers from the repo root, reaching the mutated file'
+      )
     }
     const base = normalizeArg(arg).split('/').pop() as string
     if (/\.[A-Za-z0-9]+$/.test(base) && !namesATestFile(base)) {
-      return `${base} is not a name an allowlisted runner would RUN, so it selects no test`
+      return (
+        `${base} is not a name an allowlisted runner would RUN, so it selects no test ` +
+        'and the runner discovers from the repo root, reaching the mutated file'
+      )
     }
   }
-  return 'it names no path at all'
+  return 'it names no path at all, so the runner discovers from the repo root and reaches the mutated file'
 }
 
 /**
@@ -1134,12 +1176,22 @@ function argvEscapesTheWorktree(arg: string): boolean {
  * scheme-characters that never reaches a `:/` — quadratic, and CodeQL's
  * `js/polynomial-redos` (HIGH) on argv this gate reads from an untrusted
  * nomination. Inside the boundary only ONE start position can begin the scan.
- * Semantics are preserved for every spelling that can load anything: a scheme
- * is meaningful only where a token starts, and a run of scheme-characters
- * starts either at the element's head or straight after a character the
- * boundary class already admits — `--import=data:…` after the `=`, the embedded
- * `file:///…` after `(` or `"`, and `x.file://…` consumed from the boundary
- * through the letter-prefixed run.
+ *
+ * THE ANCHORING IS NOT REGEX-LEVEL IDENTICAL, and claiming it was overstated
+ * the case. It refuses strictly LESS: an any-scheme run preceded by a character
+ * the boundary class excludes — `-rfile:///abs/x`, where `-` is itself a
+ * scheme character — matched the free-floating alternative and no longer
+ * matches here. A fuzz over 275,607 strings found ~101 such divergences and not
+ * one of them is a hole, because every one is still refused downstream: by the
+ * attached-short-option re-read in `argvEscapesTheWorktree` (which asks
+ * `-rfile:///abs/x` again as `file:///abs/x`, matching at `^`) or by the
+ * embedded-absolute arm below, which catches the `/abs` the URL carries. What
+ * IS preserved is every spelling that can load anything: a scheme is meaningful
+ * only where a token starts, and a run of scheme-characters starts either at
+ * the element's head or straight after a character the boundary class already
+ * admits — `--import=data:…` after the `=`, the embedded `file:///…` after `(`
+ * or `"`, and `x.file://…` consumed from the boundary through the
+ * letter-prefixed run.
  */
 const LOADABLE_SCHEME = /(^|[^A-Za-z0-9+.-])(?:(?:file|data|node|blob|https?|ftp):|[A-Za-z][A-Za-z0-9+.-]*:\/)/i
 
