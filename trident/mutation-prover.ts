@@ -1115,6 +1115,36 @@ function runnerPrefixLength(argv: readonly string[]): number {
   }
 }
 
+/**
+ * Whether this program FORWARDS its positionals to a command written in
+ * `package.json` — npm, pnpm and yarn, the three package-script shapes on
+ * `TEST_COMMAND_SHAPES`.
+ *
+ * THE BYPASS THIS CLOSES, reproduced end-to-end on npm 10.9.8. The `--` arm of
+ * `whyNoSelection` already refuses `npm test -- tests/x.test.ts` for the right
+ * reason — everything after `--` is handed to whatever command the script runs,
+ * this gate does not read `package.json`, so it cannot know what the forwarded
+ * path selects and must assume the run discovers from the repo root. But npm
+ * forwards a positional written WITHOUT the separator identically: `npm run
+ * test-all tests/x.test.ts` executes the script's own command line with the
+ * path appended. A branch may author that script, and a script ending in a
+ * shell comment (`"test-all": "bun test #"`) SWALLOWS the appended path — so
+ * the argv reads as a targeted guard while the run is whole-suite discovery
+ * that collects the mutated file and runs it as its own test. Red mutated,
+ * green restored, "proved", with the branch having supplied both halves.
+ *
+ * The refusal is lexical and fails CLOSED: for these three programs no
+ * positional counts as a selection, so a collectible target has no package-
+ * script guard spelling. That is an OVER-refusal and it is spellable around —
+ * name the test file with the runner that actually runs it (`bun test
+ * tests/x.test.ts`), which is what the script would have run anyway. A
+ * PRODUCTION target is untouched: `guardRunsTheMutatedFile` returns before any
+ * of this unless a runner would COLLECT the mutated file wholesale.
+ */
+function forwardsPositionalsToAScript(argv: readonly string[]): boolean {
+  return argv[0] === 'npm' || argv[0] === 'pnpm' || argv[0] === 'yarn'
+}
+
 /** Whether a string is plainly a path at all: it has a directory separator or a
  *  file extension. The FIRST of the two filters an element must pass to count
  *  as a SELECTION — it is what keeps `bun test --timeout 1000` from presenting
@@ -1205,6 +1235,11 @@ function pathArgs(argv: readonly string[]): string[] {
     const prev = i > start ? (argv[i - 1] as string) : ''
     if (prev.startsWith('-') && carriedValue(prev).length === 0) continue
     if (arg.length === 0) continue
+    // A PACKAGE SCRIPT'S POSITIONAL IS FORWARDED, NOT SELECTED — see
+    // `forwardsPositionalsToAScript`. The same reasoning the `--` arm already
+    // applied, applied to the spelling that carries no separator in front of
+    // it, because npm forwards both alike.
+    if (forwardsPositionalsToAScript(argv)) continue
     // NORMALISE BEFORE ASKING WHETHER IT IS A SEARCH — the same order
     // `guardPathCandidates` uses, and asking the RAW element was the
     // inconsistency between them. `./src/limit.mjs?proof` is one file's
@@ -1286,6 +1321,19 @@ function whyNoSelection(argv: readonly string[]): string {
         `${arg} is read as the operand of ${prev} rather than as a selection, ` +
         'so the runner discovers from the repo root and reaches the mutated file — ' +
         `put the path BEFORE the options, or attach the option's own value (${prev}=…)`
+      )
+    }
+    // THE SAME FORWARDING, WITHOUT THE SEPARATOR — the arm above reads `--`,
+    // and npm forwards a bare positional identically. See
+    // `forwardsPositionalsToAScript` for the reproduction.
+    if (forwardsPositionalsToAScript(argv)) {
+      const script = argv[1] === 'run' ? (argv[2] ?? 'the script') : (argv[1] ?? 'the script')
+      return (
+        `${arg} is a positional argument to ${argv[0]}, which forwards it to whatever command the ` +
+        `${script} script runs — this gate does not read package.json, so it cannot see what the forwarded ` +
+        'path selects (a script ending in a shell comment discards it) and must assume the run discovers ' +
+        'from the repo root and reaches the mutated file — name the test file with the runner that actually ' +
+        'runs it'
       )
     }
     // Normalised first, mirroring `pathArgs` element for element. This is the

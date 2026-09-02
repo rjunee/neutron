@@ -1438,13 +1438,39 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
     }
 
-    // POSITIVE CONTROL — the same script name FOLLOWED by a real path argument
-    // is a targeted run and stays legal.
+    // …AND THE SAME SCRIPT NAME FOLLOWED BY A REAL PATH IS NOT A TARGETED RUN
+    // EITHER. This shape was pinned as LEGAL and it forges a proof: npm
+    // forwards the positional to the script's own command line WITHOUT `--`
+    // (reproduced on npm 10.9.8), and a branch-authored script ending in a
+    // shell comment — `"test-all": "bun test #"` — swallows it, leaving
+    // whole-suite discovery that collects the mutated library and runs it as
+    // its own guard. The `--` arm already refused the separated spelling for
+    // exactly this reason; this is the same forwarding without the separator.
+    for (const guard of [
+      ['npm', 'run', 'test-all', 'tests/support/lib.test.ts'],
+      ['pnpm', 'test', 'tests/support/lib.test.ts'],
+      ['yarn', 'run', 'test-ci', 'tests/support/lib.test.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard, control: ['bun', 'test', 'src/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology')]).toEqual([guard.join(' '), false, true])
+      expect(out.reason).toContain('forwards it to whatever command')
+    }
+
+    // POSITIVE CONTROL — the over-refusal is spellable around, and it is scoped
+    // to the forwarding programs: naming the same test file with the runner
+    // that actually runs it is a targeted guard and stays legal. Without this
+    // the assertions above would also pass if the gate had simply stopped
+    // accepting any guard for a collectible target.
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
     const { prover: ok } = proverOver({}, fs)
     const fine = await ok.prove({
       run: RUN,
-      claim: { ...CLAIM, file, guard: ['npm', 'run', 'test-all', 'tests/support/lib.test.ts'] },
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/support/lib.test.ts'] },
     })
     expect(fine.reason).not.toContain('tautology')
     expect(fine.observed).not.toBeNull()
@@ -2080,6 +2106,14 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       // …and the same shape with NO scheme on it at all: an absolute path
       // opening a token mid-element is that same absolute path.
       '--outfile=report;/pw/leak.ts',
+      // …AND A `data:` URL CARRYING NEITHER. `data` was the SOLE refuser of
+      // this element — its own alternative in `LOADABLE_SCHEME` — and nothing
+      // pinned it: no `file:` for the any-scheme alternative to catch, and the
+      // one `/` in `text/javascript` follows a path character so the
+      // embedded-absolute arm never fires. Delete `data` from the pattern and
+      // node preloads whatever this source says, inside the worktree, with no
+      // arm having looked.
+      '--import=data:text/javascript,console.log(1)',
     ]) {
       const { prover, host } = proverOver()
       const out = await prover.prove({
