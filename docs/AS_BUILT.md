@@ -347,6 +347,26 @@ wiring gate was fixed for. The comment ranges now come from TypeScript's own par
 file and are blanked in place, and the commented-out mutant is executed in-test against the real
 `trident/code-command.ts` beside a positive control that the unmutated file still reads as bound.
 
+AND A LINE IS NOT A CALL SITE (Argus r1 VETO, codex's executed mutant). Both rules above still
+asked their question of LINES: any executable line anywhere in the caller file spelling
+`hostRunner: <value>` counted as the wire. So the wire could be moved off the dispatch entirely —
+delete `/code`'s forwarding spread and park `void { hostRunner: ctx.hostRunner }` one line above
+`const deps` — and the guard stayed green while `dispatchBoardBoundBuild` received deps with no
+credential and `tsc --noEmit` said nothing, the field being optional. A decoy is unbeatable by any
+rule that reads text near a call rather than the call's own argument, so the question is now asked
+of the DEPS OBJECT THE CHOKEPOINT RECEIVES: for every `dispatchBoardBoundBuild(` call in the file,
+its second argument is resolved off TypeScript's parse tree — an inline literal, a `const` whose
+initializer is a literal, or a value whose declared type (or whose factory's declared RETURN type,
+which is how `dispatch-holds.ts` spells it) REQUIRES `hostRunner` with no `?`, where the compiler
+and not this scan is the guarantee — and that object, at any depth including the conditional
+spreads, must bind the property to something other than `undefined`. EVERY call in the file must
+bind it, and a file with no dispatch call binds nothing, so an empty extraction fails rather than
+reading as a pass. Reading the parse tree also answers the comment question by construction: a
+commented-out forwarding line is not in the tree at all, so the strip above is gone rather than
+repaired. Three mutants run in-test against the real `trident/code-command.ts` — delete the spread,
+comment it out, and the decoy — with the retired line-wise rule spelled beside the decoy and
+asserted to read it as WIRED, which is the measurement of what was broken.
+
 AND A CITATION BY LINE NUMBER IS UNGUARDABLE (Argus r29, major). `docs/INVARIANTS.md` #118 — the
 invariant this card writes — carried nine `path:LINE` anchors and every one had drifted
 (`store.ts:677` pointed at a `// COLS order` comment rather than at `latestTerminalBySlug`). They

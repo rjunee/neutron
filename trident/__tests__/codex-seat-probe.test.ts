@@ -1070,43 +1070,125 @@ describe('dispatch preflight (P4)', () => {
      * docblock mention are neither.
      */
     /**
-     * AND A COMMENT IS WHATEVER THE COMPILER SAYS IT IS (Argus r9). The strip
-     * this rule used to run was a line-PREFIX rule — it dropped a line only when
-     * the line itself STARTED with `*`, `//` or a block opener. So a forwarding
-     * line sitting between a lone block opener and a lone block closer is gone
-     * from the build and still read here as a binding, which is the same
-     * "delete nothing, comment it out" mutant the wiring gate in
-     * `open/__tests__/open-trident-prod-boot-wiring.test.ts` was fixed for.
-     * The comment ranges now come from TypeScript's OWN parse of the file and
-     * are blanked in place, so a comment is whatever the compiler says it is and
-     * every position stays where it was. The mutant is executed below.
+     * AND A LINE IS NOT A CALL SITE (Argus r1 VETO, codex's executed mutant).
+     * The rule this replaces asked whether ANY executable line ANYWHERE in the
+     * caller file spelled `hostRunner: <value>`. So a decoy binding that no
+     * dispatch ever receives — `void { hostRunner: ctx.hostRunner }` parked one
+     * line above `const deps`, with the real forwarding spread deleted — read as
+     * a wire, typechecked (the field is optional), and left `/code` dispatching
+     * uncredentialed behind a green guard. The question is therefore asked of
+     * the DEPS OBJECT the chokepoint actually receives: for every
+     * `dispatchBoardBoundBuild(` call in the file, take its second argument,
+     * resolve it (an inline literal; a `const` whose initializer is a literal;
+     * a value produced by a factory or annotated with a type that REQUIRES the
+     * credential, where the compiler — not this scan — is the guarantee), and
+     * ask whether THAT binds `hostRunner`. A file with no dispatch call binds
+     * nothing: an empty extraction fails rather than reading as a pass.
+     *
+     * Asking the parse tree also answers Argus r9's comment question for free —
+     * a commented-out forwarding line is not in the tree at all, so a comment is
+     * whatever the compiler says it is, by construction rather than by a strip.
+     * Both mutants are executed below.
      */
-    const executable = (text: string): string => {
-      const parsed = ts.createSourceFile(
+    const parseCaller = (text: string): ts.SourceFile =>
+      ts.createSourceFile(
         'caller.scan.ts',
         text,
         ts.ScriptTarget.Latest,
         /* setParentNodes */ true,
         ts.ScriptKind.TS,
       )
-      const chars = text.split('')
-      const blank = (range: ts.CommentRange): void => {
-        for (let i = range.pos; i < range.end; i++) if (chars[i] !== '\n') chars[i] = ' '
-      }
-      const visit = (node: ts.Node): void => {
-        // Every comment is leading or trailing trivia of exactly one token, and
-        // the EOF token carries the ones at the end of the file.
-        for (const range of ts.getLeadingCommentRanges(text, node.getFullStart()) ?? []) blank(range)
-        for (const range of ts.getTrailingCommentRanges(text, node.getEnd()) ?? []) blank(range)
-        for (const child of node.getChildren(parsed)) visit(child)
-      }
-      visit(parsed)
-      return chars.join('')
+    const walk = (node: ts.Node, visit: (n: ts.Node) => void): void => {
+      visit(node)
+      node.forEachChild((child) => walk(child, visit))
     }
-    const bindsCredential = (text: string): boolean =>
-      executable(text)
-        .split('\n')
-        .some((l) => /\bhostRunner:\s*[A-Za-z_$]/.test(l))
+    const named = (name: ts.PropertyName | ts.BindingName, want: string): boolean =>
+      (ts.isIdentifier(name) || ts.isStringLiteralLike(name)) && name.text === want
+    // `hostRunner` given a VALUE somewhere inside this object literal — directly,
+    // or through the `...(x !== undefined ? { hostRunner: x } : {})` spread every
+    // optional-forwarding caller uses.
+    const objectBinds = (obj: ts.ObjectLiteralExpression): boolean => {
+      let bound = false
+      walk(obj, (n) => {
+        if (ts.isShorthandPropertyAssignment(n) && named(n.name, 'hostRunner')) bound = true
+        if (
+          ts.isPropertyAssignment(n) &&
+          named(n.name, 'hostRunner') &&
+          !(ts.isIdentifier(n.initializer) && n.initializer.text === 'undefined')
+        )
+          bound = true
+      })
+      return bound
+    }
+    // A type that DEMANDS the credential: a `hostRunner` member with no `?`.
+    // `hostRunner?: EnvCapableHostRunner` is a declaration, not a demand.
+    const typeDemands = (type: ts.TypeNode | undefined): boolean => {
+      if (type === undefined) return false
+      let demanded = false
+      walk(type, (n) => {
+        if (ts.isPropertySignature(n) && named(n.name, 'hostRunner') && n.questionToken === undefined)
+          demanded = true
+      })
+      return demanded
+    }
+    // …one call removed: `deps.makeDispatchDeps(hold)` in `dispatch-holds.ts`
+    // builds the deps elsewhere, so the demand has to live in the factory's
+    // declared RETURN type — which is exactly where that file puts it.
+    const factoryDemands = (src: ts.SourceFile, call: ts.CallExpression): boolean => {
+      const callee = call.expression
+      const name = ts.isPropertyAccessExpression(callee)
+        ? callee.name.text
+        : ts.isIdentifier(callee)
+          ? callee.text
+          : null
+      if (name === null) return false
+      let demanded = false
+      walk(src, (n) => {
+        if (ts.isMethodSignature(n) && named(n.name, name) && typeDemands(n.type)) demanded = true
+        if (
+          ts.isPropertySignature(n) &&
+          named(n.name, name) &&
+          n.type !== undefined &&
+          ts.isFunctionTypeNode(n.type) &&
+          typeDemands(n.type.type)
+        )
+          demanded = true
+      })
+      return demanded
+    }
+    const depsArgBinds = (src: ts.SourceFile, arg: ts.Expression): boolean => {
+      if (ts.isObjectLiteralExpression(arg)) return objectBinds(arg)
+      if (!ts.isIdentifier(arg)) return false
+      let bound = false
+      walk(src, (n) => {
+        if (!ts.isVariableDeclaration(n) || !named(n.name, arg.text)) return
+        const init = n.initializer
+        if (init !== undefined && ts.isObjectLiteralExpression(init) && objectBinds(init)) bound = true
+        if (typeDemands(n.type)) bound = true
+        if (init !== undefined && ts.isCallExpression(init) && factoryDemands(src, init)) bound = true
+      })
+      return bound
+    }
+    const bindsCredential = (text: string): boolean => {
+      const src = parseCaller(text)
+      let calls = 0
+      let bound = 0
+      walk(src, (n) => {
+        if (!ts.isCallExpression(n)) return
+        const callee = n.expression
+        const name = ts.isIdentifier(callee)
+          ? callee.text
+          : ts.isPropertyAccessExpression(callee)
+            ? callee.name.text
+            : null
+        if (name !== 'dispatchBoardBoundBuild') return
+        calls += 1
+        const deps = n.arguments[1]
+        if (deps !== undefined && depsArgBinds(src, deps)) bound += 1
+      })
+      // EVERY dispatch in the file, not the luckiest one.
+      return calls > 0 && bound === calls
+    }
 
     for (const file of callers) {
       const src = `${file}: ${readFileSync(join(REPO, file), 'utf8')}`
@@ -1126,10 +1208,10 @@ describe('dispatch preflight (P4)', () => {
       // `trident/code-command.ts` — the word is still spelled by the optional
       // field's own declaration (`hostRunner?: EnvCapableHostRunner`) and by the
       // docblock above it, and an OPTIONAL field means the compiler does not
-      // notice either. So the rule reads BINDINGS, not mentions: on a line that
-      // is not a comment, `hostRunner:` followed by a value. A declaration writes
-      // `hostRunner?:` and a docblock line starts with `*`, so neither can stand
-      // in for a wire.
+      // notice either. So the rule reads BINDINGS, not mentions — and (Argus r1)
+      // the binding it reads is the one ON THE DEPS OBJECT THE DISPATCH CALL
+      // RECEIVES. A declaration (`hostRunner?:`), a docblock, and a decoy literal
+      // no dispatch is ever handed are none of them a wire.
       expect(bindsCredential(readFileSync(join(REPO, file), 'utf8'))).toBe(true)
     }
     // THE MUTANT, EXECUTED: delete `/code`'s forwarding spread and nothing else.
@@ -1161,10 +1243,39 @@ describe('dispatch preflight (P4)', () => {
     expect(commentedOut).toContain(codeCommandSrc.split('\n')[forwardingAt]!)
     expect(commentedOut.split('\n').length).toBe(codeCommandSrc.split('\n').length + 2)
     expect(bindsCredential(commentedOut)).toBe(false)
-    // Positive control for the strip: it must not blank executable code — the
-    // unmutated file still reads as bound, and a `//` inside a string survives.
+    // …AND THE DECOY, EXECUTED (Argus r1 VETO, codex's mutant). Delete the
+    // forwarding spread and park the same words on an executable statement that
+    // no dispatch ever receives. It typechecks (the field is optional) and it
+    // leaves `/code` reaching the chokepoint uncredentialed — and the retired
+    // line-wise rule, spelled below, reads it as WIRED, which is what made it a
+    // false green. The call-site-bound rule reads the deps object instead.
+    const decoy = codeCommandSrc
+      .split('\n')
+      .flatMap((l) =>
+        /\.\.\.\(ctx\.hostRunner !== undefined/.test(l)
+          ? []
+          : /^\s*const deps = \{/.test(l)
+            ? ['  void { hostRunner: ctx.hostRunner }', l]
+            : [l],
+      )
+      .join('\n')
+    expect(decoy).not.toContain('...(ctx.hostRunner !== undefined')
+    expect(decoy).toContain('void { hostRunner: ctx.hostRunner }')
+    expect(decoy.split('\n').length).toBe(codeCommandSrc.split('\n').length)
+    const lineWiseBinds = (text: string): boolean =>
+      text.split('\n').some((l) => /\bhostRunner:\s*[A-Za-z_$]/.test(l) && !l.trimStart().startsWith('*'))
+    expect(lineWiseBinds(decoy)).toBe(true) // the retired rule: a false green
+    expect(bindsCredential(decoy)).toBe(false) // this one: red, as it must be
+    // Positive controls. The unmutated file still reads as bound; an inline
+    // literal handed straight to the chokepoint binds; a decoy beside a dispatch
+    // that does not carry it does not; and a file with NO dispatch call binds
+    // nothing at all, so an empty extraction fails instead of passing.
     expect(bindsCredential(codeCommandSrc)).toBe(true)
-    expect(executable("const u = 'https://example'")).toContain('https://example')
+    expect(bindsCredential('await dispatchBoardBoundBuild(input, { hostRunner: runner })')).toBe(true)
+    expect(
+      bindsCredential('void { hostRunner: runner }\nawait dispatchBoardBoundBuild(input, { store })'),
+    ).toBe(false)
+    expect(bindsCredential('const deps = { hostRunner: runner }')).toBe(false)
     // …and the ▶ closure specifically: the same shared object, by name, inside
     // the `boardStartBuild` dispatch call.
     //

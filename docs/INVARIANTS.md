@@ -407,11 +407,11 @@ with cross-references noted inline.
     that empties the set DEMOTES a stored `REQUEST_CHANGES` to `REVIEW_NOT_RUN` (an `APPROVE` or
     null-verdict row is untouched), or the forbidden shape is reachable in two legal steps — and
     the findings file is read ONCE, in bash, and emitted as a single SQL literal, because
-    `readfile()` is re-evaluated at every one of the CASE's four mentions and a file swapped
+    `readfile()` is re-evaluated at every one of the CASE's five mentions and a file swapped
     mid-statement decided the verdict from bytes other than the ones stored
     (`trident/checkpoint.sh` `read_file_literal`/`findings_case`; both pinned RED-on-revert in
     `trident/checkpoint-sh.test.ts`). THAT STATEMENT REACHES `sqlite3` ON STDIN, never as an argv
-    element: the materialised bytes appear in it four times, Linux caps ONE argument at 128 KiB
+    element: the materialised bytes appear in it sixteen times, Linux caps ONE argument at 128 KiB
     whatever `ARG_MAX` says, and a 33 KB findings file therefore killed the whole terminal write
     with `Argument list too long` — losing verdict, findings and branch together on exactly the
     reviews that found the most to say. AND A SETTLED REJECTION IS NOT ERASED: on a TERMINAL row a
