@@ -745,11 +745,33 @@ lane's work, with a delete beside it. This checkout really can arrive shallow: `
 in the same file documents the shape arriving in production and runs only on the REPLAY path, never
 before this guard. Exit 1 is now downgraded to UNKNOWN unless the checkout is PROVEN complete, by
 the same `rev-parse --is-shallow-repository` probe `healShallowCheckout` uses. Exit 0 stays
-definitive: truncation can hide an ancestry link, never invent one. The probe is lazy and memoised,
-so the ordinary shape — a branch already contained in the base — never pays for it. An unreadable
+definitive: truncation can hide an ancestry link, never invent one. The probe is lazy, so the
+ordinary shape — a branch already contained in the base — never pays for it. An unreadable
 depth is itself UNKNOWN, which is fail-closed and authorises nothing, and the two answers are told
 apart in the message rather than sharing one sentence: the shallow arm names the boundary and the
 `fetch --unshallow` read that settles it, the unreadable arm says the depth could not be read.
+
+The exit-1 read and the depth read are separate `git` invocations, so the pair must be made to
+describe ONE history. A "no" therefore rests on an exit 1 observed after completeness was proven:
+the ancestry probe is re-run, and only a second exit 1 answers "no" — a re-run that exits 0 (the
+unshallow landed the missing parents between the reads) answers "yes", any other exit is UNKNOWN,
+and the detail line quotes the read the verdict rests on. That re-read was originally justified by
+"deepening is one-way — nothing re-truncates a checkout in place", which is FALSE: `git fetch
+--depth=1` truncates a complete checkout, reproduced on git 2.43, where
+`--is-shallow-repository` flips false → true and a genuine ancestor starts exiting 1 again. Under
+the old memoised probe, one depth read taken while the checkout was complete authorised every later
+exit 1, including reads taken after such a truncation, and the pair published as proven divergence
+on a correctly based branch. So the depth probe is no longer memoised, and the confirming read is
+BRACKETED: depth is read once before it and once after it, and "no" requires the checkout to have
+measured complete on both sides of the read the verdict rests on. A truncation landing across that
+read makes the closing probe answer "yes" (or fail) and the verdict degrades to UNKNOWN. This is a
+narrowing, not a lock — a truncate AND a re-deepen both completing inside the bracket would still
+be missed — but the shape observed in this repo, a single depth-limited fetch that LEAVES the
+checkout shallow, is caught. Both directions are pinned by tests through the real launcher: the
+shallow → complete transition (stale exit 1, then a finding read, and the build fires) and the
+complete → shallow one (exit 1 at both reads, a checkout that truncated in between → UNKNOWN, no
+`branch -D`), with exit 1 at both reads of a checkout complete on both sides as the positive
+control that the wrong-base refusal still fires.
 
 The launch base fetch and the composer's own publication fetch both carry
 `--no-recurse-submodules`. Without it, `git fetch` recurses whenever `fetch.recurseSubmodules` says

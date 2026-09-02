@@ -5437,6 +5437,120 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(reason).toContain('branch -D -- trident/add-thing')
   })
 
+  // THE REVERSE TRANSITION, which the three cases above could not reach. The re-read they pin
+  // was justified by "deepening is one-way — nothing re-truncates a checkout in place", and the
+  // depth probe was MEMOISED on that premise: one "complete" answer licensed every later exit 1
+  // in the same guard pass. The premise is false. `git fetch --depth=1` truncates a COMPLETE
+  // checkout in place (git 2.43: `--is-shallow-repository` flips false → true and `merge-base
+  // --is-ancestor` starts exiting 1 on a genuine ancestor), so a truncation landing across the
+  // confirming read paired a STALE "complete" with an exit 1 that means nothing — the false
+  // wrong-base refusal and its safe-delete chain, on a correctly based branch. The depth probe
+  // is no longer memoised and the confirming read is BRACKETED: complete before it AND after it,
+  // or the verdict is UNKNOWN.
+  /** Like `toctouResponder`, but the depth answer is the case's to control per read. */
+  const toctouResponderDepth =
+    (ancestor: () => HostCommandResult, depth: () => HostCommandResult) =>
+    (cmd: string[]): HostCommandResult => {
+      const joined = cmd.join(' ')
+      if (joined.includes('rev-parse --is-shallow-repository')) return depth()
+      if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(TOCTOU_BASE)
+      if (joined.includes(`merge-base --is-ancestor ${TOCTOU_TIP} ${TOCTOU_BASE}`)) return ancestor()
+      if (joined.includes(`rev-list --count ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
+      if (joined.includes('worktree list --porcelain')) {
+        return ok(
+          ['worktree /repo', `HEAD ${TOCTOU_BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0',
+        )
+      }
+      if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) return ok(TOCTOU_TIP)
+      return ok()
+    }
+
+  test('a checkout TRUNCATED between the two reads cannot become a proven divergence either', async () => {
+    const order: string[] = []
+    let depths = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponderDepth(
+        () => {
+          order.push('ancestry')
+          // Exit 1 at BOTH reads — indistinguishable, at the probe, from a real divergence.
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        },
+        () => {
+          depths += 1
+          order.push('depth')
+          // Read 1: the checkout really is complete. Read 2: a `fetch --depth=1` landed in
+          // between and truncated it, so the exit 1 the verdict would rest on means nothing.
+          return depths === 1 ? ok('false') : ok('true')
+        },
+      ),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+
+    // The bracket: depth is read once BEFORE the confirming ancestry read and once AFTER it, so
+    // the second depth answer cannot be inherited from before the read it licenses.
+    expect(order).toEqual(['ancestry', 'depth', 'ancestry', 'depth'])
+    // Still REFUSED — fail-closed, nothing fired. Only the CLAIM changes.
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(reason).toContain('UNKNOWN')
+    // The detail quotes the depth actually measured around that read, not the stale one.
+    expect(reason).toContain('SHALLOW')
+    expect(reason).toContain('--unshallow')
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('it was not cut from')
+    expect(reason).not.toContain('branch -D')
+  })
+
+  test('POSITIVE CONTROL: complete on BOTH sides of the confirming read is still the wrong-base refusal', async () => {
+    // The bracket must not be satisfiable by an implementation that stopped answering "no".
+    let depths = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponderDepth(
+        () => ({ ok: false, stdout: '', stderr: '', exit_code: 1 }),
+        () => {
+          depths += 1
+          return ok('false')
+        },
+      ),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(depths).toBe(2)
+    expect(reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(reason).toContain('branch -D -- trident/add-thing')
+  })
+
+  test('a CLOSING depth read that cannot answer is UNKNOWN, not a "no" borrowed from the opening one', async () => {
+    let depths = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponderDepth(
+        () => ({ ok: false, stdout: '', stderr: '', exit_code: 1 }),
+        () => {
+          depths += 1
+          return depths === 1 ? ok('false') : { ok: false, stdout: '', stderr: 'fatal: not a repository', exit_code: 128 }
+        },
+      ),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reason).toContain('UNKNOWN')
+    expect(reason).toContain('the depth of this checkout could not be read')
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('branch -D')
+  })
+
   test('a re-read that ERRORS is UNKNOWN, not a "no" borrowed from the first read', async () => {
     let reads = 0
     const h = buildHarness({

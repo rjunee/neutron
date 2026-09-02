@@ -987,7 +987,18 @@ export async function composeWrongBaseRefusal(
     // this module never created — the module would be manufacturing the false evidence it
     // exists to prevent. `git tag` also refuses an existing tag without `-f`, so the
     // create-only property survives the shorter form.
-    const salvageTag = `trident-salvage/${args.run_id.trim() !== '' ? args.run_id.trim() : tipProse}`
+    //
+    // AND THE RUN ID IS FOLDED AS A NAME, like every other field this module interpolates
+    // (Argus finding). It reached the printed command raw, on the premise that the single
+    // caller passes a store-generated uuid — the same "the caller is disciplined" premise the
+    // tip and count folds above exist to stop relying on. A run id spelling `branch -D` would
+    // place that literal, `sh()`-quoted, inside the unpublished arm whose pinned contract is
+    // that the string appears nowhere in it. A uuid passes through byte-identical.
+    // The emptiness test runs on the RAW trim, before the fold, because `foldRefName` maps
+    // whitespace to `?`: folding first would turn an all-blank run id into the tag `?` instead
+    // of falling back to the tip, which is the one thing this expression already got right.
+    const rawRunId = args.run_id.trim()
+    const salvageTag = `trident-salvage/${rawRunId !== '' ? foldRefName(rawRunId) : tipProse}`
     const salvage = (): string => `git -C ${sh(repo)} tag ${sh(salvageTag)} ${sh(tipProse)}`
     // TOTAL evidence budget (Argus finding 10): priced at each spawn, so whatever one command
     // consumed is gone for the next.

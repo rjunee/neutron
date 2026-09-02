@@ -3370,18 +3370,28 @@ export function buildTridentOrchestrator(
         // `healShallowCheckout` uses; an unreadable depth is itself UNKNOWN, which is
         // fail-closed and authorises nothing.
         //
-        // Probed LAZILY and memoised: a contained branch (the overwhelmingly common shape)
-        // never needs the answer, and one guard pass asks at most once.
-        let shallow: 'yes' | 'no' | 'unknown' | null = null
+        // Probed LAZILY: a contained branch (the overwhelmingly common shape) never needs the
+        // answer, and never pays for it.
+        //
+        // AND NOT MEMOISED (Argus blocker). An earlier draft cached the first answer for the
+        // whole guard pass, on the premise that deepening is one-way. It is not: `git fetch
+        // --depth=1` re-truncates a COMPLETE checkout in place, reproduced on git 2.43, where
+        // `rev-parse --is-shallow-repository` flips false → true and `merge-base --is-ancestor`
+        // starts exiting 1 on a genuine ancestor. Under the cache, a depth read taken while the
+        // checkout was complete authorised BOTH later exit-1 reads — including reads taken after
+        // a truncation — and the pair was published as proven divergence: the false wrong-base
+        // refusal and its safe-delete chain on a correctly based branch, the exact outcome this
+        // change exists to remove. `lastDepth` therefore records only the MOST RECENT answer, for
+        // the detail line to quote, and every caller re-reads.
+        let lastDepth: 'yes' | 'no' | 'unknown' | null = null
         const checkoutIsShallow = async (): Promise<'yes' | 'no' | 'unknown'> => {
-          if (shallow !== null) return shallow
           const probe = await opts.run_host(
             ['git', '-C', launchRun.repo_path, 'rev-parse', '--is-shallow-repository'],
             launchRun.repo_path,
           )
           const answer = probe.stdout.trim()
-          shallow = !probe.ok ? 'unknown' : answer === 'true' ? 'yes' : answer === 'false' ? 'no' : 'unknown'
-          return shallow
+          lastDepth = !probe.ok ? 'unknown' : answer === 'true' ? 'yes' : answer === 'false' ? 'no' : 'unknown'
+          return lastDepth
         }
         // AND THE TWO READS MUST DESCRIBE ONE HISTORY (Argus blocker). The exit-1 read and the
         // depth read are separate `git` invocations, so a checkout unshallowed BETWEEN them
@@ -3396,11 +3406,22 @@ export function buildTridentOrchestrator(
         // So "no" now rests on an exit 1 observed AFTER completeness was proven: the probe is
         // RE-RUN once the depth answers complete, and only a second exit 1 answers "no". A re-run
         // that exits 0 — the unshallow landed the missing parents between the reads — answers
-        // "yes", and any other exit is UNKNOWN. Deepening is one-way (nothing re-truncates a
-        // checkout in place), so the second read is taken in a history at least as complete as
-        // the one the depth probe measured. The probe is spawned HERE rather than by the caller
-        // so the re-run is the identical argv, and the RESULT that the detail line quotes is the
-        // one the verdict actually rests on.
+        // "yes", and any other exit is UNKNOWN. The probe is spawned HERE rather than by the
+        // caller so the re-run is the identical argv, and the RESULT that the detail line quotes
+        // is the one the verdict actually rests on.
+        //
+        // AND THE RACE RUNS BOTH WAYS (Argus blocker). The re-read alone was justified by
+        // "deepening is one-way — nothing re-truncates a checkout in place", which is false:
+        // `git fetch --depth=1` truncates a complete checkout, and after it a TRUE ancestor exits
+        // 1 again. One depth read taken BEFORE the confirming read therefore could not speak for
+        // the history the confirming read saw. So the confirming read is BRACKETED: depth is read
+        // once before it and once AFTER it, both non-cached, and "no" requires the checkout to
+        // have measured complete on both sides of the read the verdict rests on. A truncation
+        // landing anywhere across that read makes the closing probe answer "yes" (or fail), and
+        // the verdict degrades to UNKNOWN, which authorises nothing. What remains is not a lock —
+        // a truncate AND a re-deepen both completing inside the bracket would still be missed —
+        // but that is a two-step adversarial sequence, where the shape actually observed in this
+        // repo (a single depth-limited fetch, which LEAVES the checkout shallow) is caught.
         const ancestry = async (
           argv: string[],
         ): Promise<{ verdict: 'yes' | 'no' | 'unknown'; res: HostCommandResult }> => {
@@ -3411,6 +3432,9 @@ export function buildTridentOrchestrator(
           const confirm = await opts.run_host(argv, launchRun.repo_path)
           if (confirm.ok) return { verdict: 'yes', res: confirm }
           if (confirm.exit_code !== 1 || confirm.timed_out === true) return { verdict: 'unknown', res: confirm }
+          // The closing half of the bracket: the depth that licenses reading THIS exit 1 as
+          // divergence is read after it, not inherited from before it.
+          if ((await checkoutIsShallow()) !== 'no') return { verdict: 'unknown', res: confirm }
           return { verdict: 'no', res: confirm }
         }
         // EVERY FIELD THIS REFUSAL QUOTES IS FOLDED, on the same terms the remedy composer
@@ -3488,8 +3512,8 @@ export function buildTridentOrchestrator(
         // step (`git fetch --unshallow`) follows only from being told so.
         const probeDetail = (res: HostCommandResult): string => {
           if (res.timed_out === true) return 'the ancestry probe was killed by its watchdog'
-          if (res.exit_code === 1 && shallow !== 'no') {
-            return shallow === 'yes'
+          if (res.exit_code === 1 && lastDepth !== 'no') {
+            return lastDepth === 'yes'
               ? 'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and git rev-parse --is-shallow-repository says this checkout is SHALLOW, where the parent commits are absent and exit 1 is also what a TRUE ancestor produces (git fetch --unshallow origin makes the probe answerable)'
               : 'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and the depth of this checkout could not be read (git rev-parse --is-shallow-repository neither answered true nor false), so exit 1 cannot be read as divergence'
           }
