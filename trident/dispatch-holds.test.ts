@@ -79,6 +79,21 @@ function deps(
   }
 }
 
+/** A branch holder that is unambiguously alive — the refusal's own trigger. */
+const liveHolder = async (): Promise<{
+  worktree_basename: string
+  lock_reason: string
+  pid: number
+  pid_live: boolean
+  mtime_ms: number
+}> => ({
+  worktree_basename: 'wf_live',
+  lock_reason: 'claude agent wf_live (pid 4242 start 99)',
+  pid: 4242,
+  pid_live: true,
+  mtime_ms: 0,
+})
+
 beforeEach(() => {
   tmp = mkdtempSync(join(tmpdir(), 'neutron-dispatch-holds-'))
   db = ProjectDb.open(join(tmp, 'project.db'))
@@ -314,20 +329,6 @@ describe('BRANCH LIVE IS TRANSIENT — the sweep keeps the hold queued', () => {
     const board = stubBoard([
       { id: 'A', title: 'the only card, whose branch a live worktree already holds', design_doc_ref: null, status: 'upcoming' },
     ])
-    const liveHolder = async (): Promise<{
-      worktree_basename: string
-      lock_reason: string
-      pid: number
-      pid_live: boolean
-      mtime_ms: number
-    }> => ({
-      worktree_basename: 'wf_live',
-      lock_reason: 'claude agent wf_live (pid 4242 start 99)',
-      pid: 4242,
-      pid_live: true,
-      mtime_ms: 0,
-    })
-
     const first = await dispatchBoardBoundBuild(
       { task: 'edit trident/foo.ts', board_item_id: 'A' },
       deps(board, { branchHolderProbe: liveHolder }),
@@ -361,6 +362,53 @@ describe('BRANCH LIVE IS TRANSIENT — the sweep keeps the hold queued', () => {
     await sweep({ id: 'unrelated' } as never)
     expect(runCount()).toBe(1)
     expect(holds.getByItem(SLUG, 'A')).toBeNull()
+  })
+
+  // ARGUS r3 (minor): a `bound_pr` dispatch is a REVIEW of a published head — it
+  // never builds. The hold carried no `bound_pr`, so the sweep re-fired it as a
+  // full BUILD, which opens a second PR for work that is already published; and
+  // the terminal-build wake now steers operators to exactly this dispatch.
+  test('a held REVIEW round comes back as a review — the hold replays bound_pr', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'the card whose published head needs another review round', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const first = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'A', bound_pr: 498 },
+      deps(board, { branchHolderProbe: liveHolder }),
+    )
+    expect(first.ok).toBe(false)
+    expect(holds.getByItem(SLUG, 'A')?.payload?.bound_pr).toBe(498)
+
+    await buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })()
+    expect(runCount()).toBe(1)
+    const fired = store.get(board.attached[0]!.run_id)
+    expect(fired?.bound_pr).toBe(498)
+  })
+
+  // MUST-PASS SIBLING: an ordinary BUILD hold still fires as a build, with no
+  // bound_pr invented for it.
+  test('an ordinary held build still fires with no bound_pr', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'the ordinary card whose branch a live worktree holds', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const first = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'A' },
+      deps(board, { branchHolderProbe: liveHolder }),
+    )
+    expect(first.ok).toBe(false)
+    expect(holds.getByItem(SLUG, 'A')?.payload?.bound_pr).toBeUndefined()
+
+    await buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })()
+    expect(runCount()).toBe(1)
+    expect(store.get(board.attached[0]!.run_id)?.bound_pr).toBeNull()
   })
 
   // ARGUS r4 (major): the WORKTREE-ONLY holder (held_on_run_id null) has no run
@@ -539,6 +587,48 @@ describe('STUCK CLAIM CANNOT WEDGE THE QUEUE', () => {
     await buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })({ id: 'terminal' } as never)
     expect(runCount()).toBe(1)
     expect(holds.list()).toEqual([])
+  })
+
+  // ARGUS r3 (BLOCKER, state-based half): the refusal behind a card's own live
+  // run promises "nothing stays queued". Pinned END TO END here, over the real
+  // store and the real sweep rather than a call counter: a hold that already
+  // existed is GONE after the refusal, so terminalizing that run — as `stopped`,
+  // i.e. someone stopped this card on purpose — re-fires nothing.
+  test('the branch_live refusal behind the card’s own live run leaves NOTHING for the sweep to re-fire', async () => {
+    const live = await store.create({ slug: 'live', project_slug: SLUG, repo_path: REPO, task: 'build', claimed_paths: [] })
+    const board = stubBoard([
+      { id: 'B', title: 'the card whose own build is already running against it', design_doc_ref: null, status: 'in_progress', linked_run_id: live.id },
+    ])
+    // Seeded EARLIER, while the card was free — the shape the skip alone missed.
+    await holds.upsert({
+      project_slug: SLUG,
+      board_item_id: 'B',
+      task: 'edit trident/foo.ts',
+      hold_kind: 'blocker',
+      hold_reason: 'queued before this card had a run of its own',
+      held_on_blocker_id: 'A',
+    })
+
+    const refusal = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'B' },
+      deps(board, { branchHolderProbe: liveHolder }),
+    )
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('branch_live')
+    expect(refusal.message).toContain('nothing stays queued')
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+
+    // The run is STOPPED on purpose, and the sweep — which drops a hold only
+    // while the linked run is live AT SWEEP TIME — finds no row to act on.
+    await store.terminalTransition(live.id, { phase: 'stopped' })
+    await buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })(store.get(live.id)!)
+    expect(runCount()).toBe(1)
+    expect(board.attached).toEqual([])
   })
 
   test('a terminal run that still carries its claims blocks nothing', async () => {

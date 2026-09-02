@@ -47,6 +47,18 @@ export interface DispatchHoldPayload {
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * THE PR A HELD **REVIEW** ROUND WAS BOUND TO (Argus r3, minor). A `bound_pr`
+   * dispatch reviews a published head and never builds; a held one that lost the
+   * number came back through the sweep as a FULL BUILD, which opens a second PR
+   * for work that is already published — and the terminal-build wake now steers
+   * operators to exactly this dispatch, so the shape is no longer rare.
+   *
+   * It rides in the PAYLOAD, not a column: the payload is a JSON blob, so this
+   * needs no migration, and `payload` is already the "replay the dispatch as it
+   * was fired" bag the queue was built around.
+   */
+  bound_pr?: number | null
 }
 
 export interface DispatchHold {
@@ -305,7 +317,15 @@ export function buildDispatchHoldSweep(deps: {
           }
         }
         const result = await dispatchBoardBoundBuild(
-          { task: hold.task, board_item_id: hold.board_item_id },
+          {
+            task: hold.task,
+            board_item_id: hold.board_item_id,
+            // REPLAY THE ROUND THAT WAS HELD, NOT A DIFFERENT ONE. Without this
+            // a queued REVIEW round (`bound_pr` set) re-fired as a build.
+            ...(hold.payload?.bound_pr !== undefined && hold.payload.bound_pr !== null
+              ? { bound_pr: hold.payload.bound_pr }
+              : {}),
+          },
           dispatchDeps,
         )
         if (result.ok) {

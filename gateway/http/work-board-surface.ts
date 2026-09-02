@@ -99,7 +99,10 @@ export type WorkBoardStartResult =
         | 'underspecified'
         | 'already_landed'
         // Something live already holds the card's branch (a non-terminal run, or a
-        // live worktree lock). Falls through to the 409 arm like already_landed.
+        // live worktree lock). It answers 409 like already_landed — via the
+        // catch-all `backend_error ? 500 : 409` below, not a case of its own;
+        // "falls through to the 409 arm" is how the codes that are not
+        // `underspecified` or `backend_error` all reach it.
         | 'branch_live'
         // NOT A FAILURE — the build is QUEUED. The card declares an unfinished
         // blocker, or a live run already claims a file it would touch, so it was

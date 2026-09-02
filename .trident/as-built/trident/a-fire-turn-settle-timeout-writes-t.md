@@ -218,3 +218,58 @@ a newer checkpoint inside the gap between the gatherer's re-read and the save, t
 keeps the newer checkpoint beside a phase derived from the older one. It self-heals on
 the workflow's next checkpoint write, and widening the CAS over a column the TICK owns
 would make a lost swap drop the lane-holding write entirely — a worse trade.
+
+### Round 7 (Argus round 3 of this branch) — the refusal now deletes what it refuses to write
+
+"Nothing stays queued" was enforced only against THIS refusal's own upsert. A hold row
+seeded EARLIER survived it: the blocker gate upserts unconditionally, and any `path`
+row written while the card had no live linked run stays behind once one appears. Either
+survivor outlives the linked run, because the sweep drops a hold only while that run is
+live AT SWEEP TIME — so the moment it went `stopped`/`failed` the row fell through to a
+fresh dispatch and restarted a card that had been stopped on purpose. The exact hazard
+this branch claims to close, arriving one row early. The `branch_live` arm now DELETES
+the item's hold (idempotent, keyed on the hold table's own `(project, card)` pair)
+whenever it declines to write one, so the sentence is true of the store and not just of
+the call. The card is not dropped by that: its live linked run owns it, and that run's
+own terminal event is what moves it next. Pinned at the transition boundary in
+`board-dispatch.test.ts` (a pre-seeded hold is gone after the refusal) and end to end
+over the real store and the real sweep in `dispatch-holds.test.ts` (refuse, stop the
+run, sweep, no second run).
+
+A HELD REVIEW ROUND COMES BACK AS A REVIEW. `bound_pr` is what makes a dispatch a
+review of a published head rather than a build; the hold never carried it, so the sweep
+re-fired a queued review as a full BUILD — opening a second PR for work already
+published, and the new wake prompt steers operators to exactly that dispatch. It now
+rides in the hold's `payload` (a JSON blob: no migration, and the payload is already
+the "replay the dispatch as it was fired" bag), and the sweep passes it back. An
+ordinary build hold still fires with `bound_pr` null.
+
+Declined, deliberately, and recorded because it was asked for: the review wanted the
+`published` arm to require a branch-holder look that actually RAN, so a failed
+`git worktree list` would no longer let a row carrying the previous round's
+`outer-published:…` checkpoint terminalize. It must not. A probe that cannot run is
+SILENCE, and silence does not outrank a checkpoint the outer loop wrote after pushing;
+downgrading that row to `failed` re-creates the SECOND SHAPE this card exists to delete
+— a finished, pushed build announced as a failure, whose wake then invites a rebuild —
+and the composed wiring test pins exactly that over a repo_path that does not exist.
+What the distinction IS worth is the operator's sentence: `probeBranchHolderOutcome`
+reports whether the look happened, and the `none` detail now says "the worktree probe
+could not run" instead of claiming "no linked worktree holds the branch" about a
+question nobody asked. No verdict branches on it; the dispatch-side entry is unchanged.
+
+`WORKTREE_LOCK_PID` is anchored on a word boundary: unanchored, `stupid 45` parsed as
+pid 45, and a pid the kernel happens to know reads as a LIVE holder — evidence made of
+a word. Only start-of-string or a space/`(` may precede `pid`, the two shapes the
+substrate writes.
+
+The recycled-pid dispatch test is guarded on a readable `/proc`. The starttime
+refinement it proves is Linux-only by construction (`/proc/<pid>/stat` field 22); where
+that file cannot be read the probe keeps its signal-0 answer, the lock reads as live,
+and the assertion inverts on the platform rather than on the code. Skipped there,
+unchanged here.
+
+Corrected in the docs, not the code: `drain_holds_min_interval_ms: Infinity` DISABLES
+the drain (it is `> 0`, so the gate takes the due-time branch, and
+`-Infinity + Infinity` is `NaN`, which every comparison rejects) — the docblock had
+claimed it drains every tick, which only `NaN` and `<= 0` do. And `branch_live` reaches
+409 through the catch-all `backend_error ? 500 : 409`, not an arm of its own.

@@ -465,9 +465,68 @@ describe('MUST STAY FAILED — a look that could not happen contributes NOTHING 
       })
       const evidence = await gather({ run: run(), fire_started_at_ms: FIRE_AT })
       expect(evidence.kind).toBe('none')
-      expect(evidence.detail).toContain('no linked worktree holds the branch')
+      // AND IT SAYS WHICH SILENCE IT IS. "no holder" and "could not ask" used to
+      // render the same sentence; only the second is a look that never happened.
+      expect(evidence.detail).toContain('the worktree probe could not run')
     })
   }
+
+  // ARGUS r3 (minor), DECLINED IN PART AND PINNED: the review asked that the
+  // `published` arm require a look that RAN. It must not. A probe that could not
+  // run is silence, and silence does not outrank a checkpoint the outer loop
+  // wrote AFTER pushing — downgrading that row to `failed` is precisely the
+  // SECOND SHAPE this card exists to delete (a finished, pushed build announced
+  // as a failure, whose wake then invites a rebuild). The distinction is spent
+  // on the SENTENCE instead, above.
+  for (const [label, run_host] of hosts) {
+    test(`a PUBLISHED row still terminalizes when the probe could not run (${label})`, async () => {
+      const published = `outer-published:${SHA}:0:3`
+      const gather = buildFireEvidenceGatherer({
+        read_run: () => run({ inner_checkpoint: published }),
+        run_host,
+        fs: makeFs(),
+        probe_pid_alive: () => 'alive',
+      })
+      const evidence = await gather({
+        run: run({ inner_checkpoint: published }),
+        fire_started_at_ms: FIRE_AT,
+      })
+      expect(evidence.kind).toBe('published')
+    })
+  }
+})
+
+describe('MUST STAY FAILED — a pid the lock reason never named', () => {
+  // ARGUS r3 (minor): `/pid (\d+)/` matched the tail of ANY word, so the lock
+  // reason `stupid 45` parsed as pid 45 — and a pid the kernel happens to know
+  // then reads as a LIVE holder, sparing a run on evidence made of a word.
+  test('`stupid 45` is not a pid, even with every pid alive', async () => {
+    const gather = buildFireEvidenceGatherer({
+      read_run: () => run(),
+      run_host: async () => okHost(porcelain(linkedBlock({ locked: 'stupid 45' }))),
+      fs: makeFs(),
+      probe_pid_alive: () => 'alive',
+    })
+    const evidence = await gather({ run: run(), fire_started_at_ms: FIRE_AT })
+    expect(evidence.kind).toBe('none')
+    expect(evidence.detail).toContain('no live lock pid')
+  })
+
+  test('the shapes the substrate really writes still parse — leading, and after `(`', async () => {
+    for (const locked of [`pid ${process.pid} start 1`, `claude agent wf_x (pid ${process.pid} start 1)`]) {
+      const gather = buildFireEvidenceGatherer({
+        read_run: () => run(),
+        run_host: async () => okHost(porcelain(linkedBlock({ locked }))),
+        fs: makeFs(),
+        probe_pid_alive: () => 'alive',
+      })
+      const evidence = await gather({ run: run(), fire_started_at_ms: FIRE_AT })
+      // The pid parsed and read alive; the starttime check is what decides it,
+      // and `readFile` returns '' here — unparsable, so the signal-0 answer stands.
+      expect(evidence.kind).toBe('launched')
+      expect(evidence.detail).toContain(String(process.pid))
+    }
+  })
 })
 
 describe('what is NOT a holder', () => {

@@ -69,8 +69,14 @@ export interface WorktreeListEntry {
  * The lock-reason shape the substrate writes, observed verbatim on this host:
  * `claude agent wf_9d6cb66c-408-2 (pid 2088872 start 122952867)`. The `start`
  * group is optional because not every writer records it.
+ *
+ * `pid` IS ANCHORED ON A WORD BOUNDARY (Argus r3, minor): unanchored, the reason
+ * `stupid 45` parsed as pid 45 and synthesized a holder out of a word. Only a
+ * start-of-string or a space/`(` may precede it — the two shapes the substrate
+ * actually writes — because a manufactured pid here reads as a LIVE holder, and
+ * that is the one direction this module must never invent.
  */
-export const WORKTREE_LOCK_PID = /pid (\d+)(?: start (\d+))?/
+export const WORKTREE_LOCK_PID = /(?:^|[\s(])pid (\d+)(?: start (\d+))?/
 
 /**
  * Strip git's C-quoting when a porcelain value is wrapped in double quotes (git
@@ -184,15 +190,38 @@ export async function probeBranchHolder(
   repo_path: string,
   branch: string,
 ): Promise<BranchHolderProbe | null> {
+  return (await probeBranchHolderOutcome(deps, repo_path, branch)).holder
+}
+
+/**
+ * The same look, with the ONE fact `probeBranchHolder` deliberately hides: did
+ * the look happen at all (Argus r3, minor).
+ *
+ * For the VERDICT the distinction is worthless — an unreadable `git worktree
+ * list` is not a holder, and this module reports evidence or silence — so no
+ * arm branches on it. It exists for the SENTENCE: "no linked worktree holds the
+ * branch" and "the probe could not run" are the same null and were the same
+ * words, and only the second means the question was never asked. An operator
+ * reading a terminal detail should be able to tell those apart.
+ */
+export async function probeBranchHolderOutcome(
+  deps: {
+    run_host: (cmd: string[], cwd?: string) => Promise<HostCommandResult>
+    fs: FireProbeFs
+    probe_pid_alive: (pid: number) => 'alive' | 'dead' | 'unknown'
+  },
+  repo_path: string,
+  branch: string,
+): Promise<{ looked: boolean; holder: BranchHolderProbe | null }> {
   let res: HostCommandResult
   try {
     res = await deps.run_host(['git', '-C', repo_path, 'worktree', 'list', '--porcelain'], repo_path)
   } catch {
-    return null
+    return { looked: false, holder: null }
   }
   // A FAILED LOOK IS NOT A HOLDER. There is no `unknown` to escalate into here:
   // this whole module reports evidence or silence.
-  if (!res.ok || res.timed_out === true) return null
+  if (!res.ok || res.timed_out === true) return { looked: false, holder: null }
 
   const entries = parseWorktreeList(res.stdout)
   const wantRef = `refs/heads/${branch}`
@@ -203,7 +232,7 @@ export async function probeBranchHolder(
   // direction this probe exists to prevent. So probe them all and prefer any
   // live holder; with the common single match the behaviour is unchanged.
   const candidates = entries.slice(1).filter((e) => e.branch === wantRef)
-  if (candidates.length === 0) return null
+  if (candidates.length === 0) return { looked: true, holder: null }
 
   // WITH NO LIVE HOLDER, THE FRESHEST ONE WINS — not the first one listed. The
   // caller's OTHER liveness signal is the tree's own mtime against the fire
@@ -217,12 +246,12 @@ export async function probeBranchHolder(
   let best: BranchHolderProbe | null = null
   for (const entry of candidates) {
     const probe = await probeWorktreeEntry(deps, entry)
-    if (probe.pid_live) return probe
+    if (probe.pid_live) return { looked: true, holder: probe }
     if (best === null || (probe.mtime_ms !== null && (best.mtime_ms === null || probe.mtime_ms > best.mtime_ms))) {
       best = probe
     }
   }
-  return best
+  return { looked: true, holder: best }
 }
 
 /**
@@ -388,7 +417,8 @@ export function buildFireEvidenceGatherer(opts: BuildFireEvidenceGathererOptions
     // abandon the live lane the round just started — inside the settle window the
     // row cannot yet have moved, because the earliest workflow-owned write is at
     // `forge-done`, minutes later. So ASK THE WORKTREES FIRST: a live holder wins.
-    const holder = await probeBranchHolder({ run_host, fs, probe_pid_alive }, input.run.repo_path, branch)
+    const probe = await probeBranchHolderOutcome({ run_host, fs, probe_pid_alive }, input.run.repo_path, branch)
+    const holder = probe.holder
 
     // CLOSE THE PROBE WINDOW. The `git worktree list` above may have taken the
     // whole 15 s bound, and `observed` is not a report — the caller SPREADS it
@@ -402,9 +432,29 @@ export function buildFireEvidenceGatherer(opts: BuildFireEvidenceGathererOptions
     const observed = settled.kind === 'published' ? settled.observed : undefined
 
     if (holder === null) {
+      // A LOOK THAT COULD NOT HAPPEN SAYS SO — and changes nothing else (Argus
+      // r3, minor, DECLINED IN PART and written down here). `null` collapses "no
+      // holder" and "could not ask"; the review asked that the `published` arm
+      // require a look that RAN before terminalizing. It deliberately does not.
+      // The published checkpoint is this card's OWN cheapest-and-strongest
+      // evidence — a row that says `outer-published:<sha>:0:<round>` was written
+      // by the outer loop after it pushed — and downgrading it to `failed`
+      // because `git worktree list` could not run re-creates the SECOND SHAPE
+      // this card exists to delete: a finished, pushed build recorded as a
+      // failure, whose wake then invites a rebuild. A probe that cannot run is
+      // not counter-evidence; it is silence, and silence does not outrank a
+      // written checkpoint. (`build-core-modules-trident-fire-evidence-wiring`
+      // pins exactly this over a repo_path that does not exist.) What the
+      // distinction IS worth is the operator's sentence, so the `none` detail
+      // now names which silence it was.
       return settled.kind === 'published'
         ? settled
-        : { kind: 'none', detail: 'row unchanged; no linked worktree holds the branch' }
+        : {
+            kind: 'none',
+            detail: probe.looked
+              ? 'row unchanged; no linked worktree holds the branch'
+              : 'row unchanged; the worktree probe could not run, so no holder question was answered',
+          }
     }
 
     const fresh_worktree =

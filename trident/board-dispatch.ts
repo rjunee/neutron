@@ -458,6 +458,11 @@ export async function dispatchBoardBoundBuild(
     ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
     ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+    // AND THE ROUND'S OWN KIND (Argus r3, minor). `bound_pr` is what makes this
+    // dispatch a REVIEW of a published head rather than a build; a hold that
+    // dropped it came back through the sweep as a full build, opening a second
+    // PR for work that is already published.
+    ...(bound_pr !== undefined && bound_pr !== null ? { bound_pr } : {}),
   }
 
   // (4) DECLARED BLOCKERS — do not fan out onto an unmet dependency.
@@ -688,6 +693,23 @@ export async function dispatchBoardBoundBuild(
           hold_reason: message,
           held_on_run_id,
         })
+      } else if (deps.holds !== undefined) {
+        // AND NOT WRITING IS NOT ENOUGH — DELETE WHAT IS ALREADY THERE (Argus
+        // r3 BLOCKER). Skipping the upsert only kept THIS refusal from queuing
+        // the card; a hold row seeded EARLIER still survives it. The blocker
+        // gate twenty lines up upserts unconditionally, and a `path`/`branch`
+        // row written while the card had no live linked run stays behind once
+        // one appears. Either survivor outlives the linked run: the sweep drops
+        // a hold only while that run is live AT SWEEP TIME, so the moment it
+        // goes `stopped`/`failed` the row falls through to a fresh dispatch and
+        // restarts a card that was stopped on purpose — the exact hazard the
+        // `queued` rule exists to close, arriving one row early.
+        //
+        // The delete is idempotent (no row is not an error) and scoped to this
+        // (project, card) pair, which is the hold table's own key. The card is
+        // not dropped by it: its live linked run owns it, and that run's own
+        // terminal event is what moves the card next.
+        await deps.holds.deleteByItem(deps.project_slug, board_item_id)
       }
       // SAY SO. The refusal used to be silent in the logs as well as in the
       // queue, so a card that stopped moving had no trace anywhere.

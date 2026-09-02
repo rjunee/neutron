@@ -339,8 +339,14 @@ export interface TridentTickOptions {
   drain_dispatch_holds?: () => Promise<void>
   /**
    * FLOOR ON THE DRAIN'S CADENCE. Default
-   * {@link DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS}; `<= 0` (or non-finite) drains on
-   * every tick, which is what tests want and production does not.
+   * {@link DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS}; `<= 0` (and `NaN`, which fails
+   * every comparison) drains on every tick, which is what tests want and
+   * production does not. `Infinity` is NOT in that set (Argus r3, nit): it is
+   * `> 0`, so the gate takes the due-time branch, and `lastHoldDrainMs`
+   * (`-Infinity` until the first drain) `+ Infinity` is `NaN`, which every
+   * comparison rejects — so `Infinity` DISABLES the drain outright rather than
+   * running it on every tick. That is a sane reading of "never re-ask", and it
+   * is written down here because the code does not say it out loud.
    *
    * The drain is NOT cheap per queued hold: each one re-runs the whole dispatch
    * chokepoint, which makes an uncached `gh pr list --head` call and a branch-holder

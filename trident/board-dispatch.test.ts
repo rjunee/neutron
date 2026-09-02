@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
@@ -624,6 +624,60 @@ describe('branch liveness refusal (branch_live)', () => {
     expect('hold' in result).toBe(false)
   })
 
+  // ARGUS r3 (BLOCKER): skipping the upsert only stopped THIS refusal writing a
+  // row — a hold seeded EARLIER (the blocker gate upserts unconditionally, and
+  // any `path`/branch row written before the card had a live linked run) sailed
+  // straight through it. The sweep drops such a row only while the linked run is
+  // live AT SWEEP TIME, so the moment that run went `stopped` the survivor
+  // re-fired a card someone had stopped on purpose — exactly the hazard the
+  // `queued` rule claims to close, arriving one row early. The refusal now
+  // DELETES what it refuses to write.
+  test('a hold seeded BEFORE the card went live does not survive the refusal either', async () => {
+    const repoDir = makeCommittedRepo('repo-linked-live-seeded')
+    const holds = new DispatchHoldStore(db)
+    await holds.upsert({
+      project_slug: 'proj-1',
+      board_item_id: 'ready',
+      task: TASK,
+      hold_kind: 'blocker',
+      hold_reason: 'queued while the card had no live run of its own',
+      held_on_blocker_id: 'some-other-card',
+    })
+    expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: live.id,
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('nothing stays queued')
+    // The sentence is now true of the STORE, not just of this call.
+    expect(holds.getByItem('proj-1', 'ready')).toBeNull()
+    expect('hold' in result).toBe(false)
+  })
+
   test('the branch_live hold names the holding RUN when there is one', async () => {
     const repoDir = makeCommittedRepo('repo-queued-row')
     const live = await store.create({
@@ -670,7 +724,12 @@ describe('branch liveness refusal (branch_live)', () => {
     expect(result.message).toContain('4242')
   })
 
-  test('a recycled-pid lock (live pid, starttime mismatch) does NOT refuse — and neither does the fresh mtime', async () => {
+  // ARGUS r3 (nit): the recycled-pid REFINEMENT needs a readable `/proc`. Where
+  // there is none (macOS, a hardened container) `pid_live` keeps the signal-0
+  // answer, the lock reads as live, and this assertion inverts — a test failing
+  // on the platform, not on the code. Guarded rather than deleted: on Linux it
+  // is the real end-to-end proof that a recycled pid does not refuse a dispatch.
+  test.skipIf(!existsSync('/proc/self/stat'))('a recycled-pid lock (live pid, starttime mismatch) does NOT refuse — and neither does the fresh mtime', async () => {
     const repoDir = makeCommittedRepo('repo-recycled')
     // pid alive but the RECORDED starttime cannot match the real one, so the
     // holder is gone. The worktree was cut milliseconds ago, so this also pins

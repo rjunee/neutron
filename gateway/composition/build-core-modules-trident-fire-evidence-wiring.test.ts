@@ -124,6 +124,12 @@ async function seedFreshRun(id: string, repo_path: string, branch: string): Prom
 // hold, frees the holder, and asserts the row is gone and the run created; "the
 // sweep drains with NO run argument at all" pins the tick-cadence trigger), and
 // its cadence and failure-containment in `trident/tick.test.ts`.
+//
+// INCLUDING THE TRANSITION BOUNDARY (Argus r3). The state case that motivated
+// this seam — a hold seeded BEFORE the card's own run went live, refused with
+// "nothing stays queued", then that run STOPPED — is pinned over the real store
+// and the real sweep by "the branch_live refusal behind the card's own live run
+// leaves NOTHING for the sweep to re-fire" in the same file.
 describe('trident hold-drain composition wiring — the composed tick drains the dispatch-hold queue', () => {
   test('drain_dispatch_holds is called by the composed loop on an ordinary tick', async () => {
     let drained = 0
