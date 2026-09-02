@@ -746,6 +746,68 @@ describe('branch liveness refusal (branch_live)', () => {
     expect('hold' in result).toBe(false)
   })
 
+  // ARGUS r10 (BLOCKER): the intersection the two throw tests above miss — a
+  // FAILING `deleteByItem`, i.e. the card has a live linked run (so the refusal
+  // takes the delete arm) AND the store throws. The seeded row SURVIVES, and it
+  // is exactly the survivor `buildDispatchHoldSweep` re-fires once the linked
+  // run terminalizes; the generic clause nonetheless said "this card will NOT
+  // re-dispatch on its own; re-dispatch it yourself", which is false in the
+  // dangerous direction — it invites a SECOND lane onto a card that may re-fire
+  // itself. The clause must describe the failure that actually happened.
+  test('a THROWING deleteByItem says the STALE hold survived and may re-fire — never "re-dispatch it yourself"', async () => {
+    const repoDir = makeCommittedRepo('repo-delete-throws')
+    const holds = new DispatchHoldStore(db)
+    await holds.upsert({
+      project_slug: 'proj-1',
+      board_item_id: 'ready',
+      task: TASK,
+      hold_kind: 'blocker',
+      hold_reason: 'queued while the card had no live run of its own',
+      held_on_blocker_id: 'some-other-card',
+    })
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: live.id,
+      }),
+    }
+    holds.deleteByItem = async () => {
+      throw new Error('database is locked')
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    // The refusal itself survives, typed, as in the upsert case.
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('database is locked')
+    // The row really is still there — this is the fact the prose must carry.
+    expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+    expect(result.message).toContain('could not be REMOVED')
+    expect(result.message).toContain('may still exist')
+    // …and the two sentences that would produce a double dispatch are absent.
+    expect(result.message).not.toContain('nothing could be QUEUED')
+    expect(result.message).not.toContain('re-dispatch it yourself once the reason above clears')
+    // No `hold` shape: this call queued nothing of its own.
+    expect('hold' in result).toBe(false)
+  })
+
   // ARGUS r8 (BLOCKER): `TridentRunStore.get` is keyed on the run id ALONE, so a
   // stale or mis-copied `linked_run_id` naming ANOTHER project's live run was
   // read here as this card's driver — and unlike the two other consumers of that

@@ -52,7 +52,10 @@ let savedEnv: Record<string, string | undefined> = {}
 let tmpDir: string
 let db: ProjectDb
 let drain: (() => Promise<void>) | undefined
-let cleanups: Array<() => void> = []
+// The contract's own type (`gateway/composition/input/misc-input.ts`) permits an
+// ASYNC cleanup, so narrowing this to `() => void` here made the teardown drop
+// the promise on the floor and race `db.close()` / `rmSync` (Argus r10).
+let cleanups: Array<() => void | Promise<void>> = []
 
 /** Answers immediately and starts no `claude` process; the graph composes the same. */
 function mockSubstrate(): Substrate {
@@ -101,10 +104,12 @@ beforeAll(async () => {
   drain = composition.trident?.drain_dispatch_holds
 }, 120_000)
 
-afterAll(() => {
+afterAll(async () => {
   for (const cleanup of cleanups) {
     try {
-      cleanup()
+      // AWAITED, because a cleanup may be async — closing the database and
+      // removing the temp dir under a still-running cleanup leaks handles.
+      await cleanup()
     } catch {
       /* best-effort */
     }

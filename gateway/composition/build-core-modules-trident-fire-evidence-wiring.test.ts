@@ -125,6 +125,15 @@ async function seedFreshRun(id: string, repo_path: string, branch: string): Prom
 // sweep drains with NO run argument at all" pins the tick-cadence trigger), and
 // its cadence and failure-containment in `trident/tick.test.ts`.
 //
+// SO THE END-TO-END PATH IS PINNED IN TWO HALVES, ON PURPOSE (Argus r10, which
+// read this test's `expect(drained).toBe(1)` as leaving tick -> real sweep
+// unpinned). This half proves the composed tick CALLS whatever drain it was
+// handed; `open/__tests__/open-dispatch-hold-drain-wiring.test.ts` takes the
+// drain the PRODUCTION composer built — not one a test wrote — and proves that
+// calling it moves real hold state (a seeded row for a card that is on no board
+// is gone afterwards). Joining them in one test would mean building the sweep
+// here, which is exactly the self-proof the paragraph above declines.
+//
 // INCLUDING THE TRANSITION BOUNDARY (Argus r3). The state case that motivated
 // this seam — a hold seeded BEFORE the card's own run went live, refused with
 // "nothing stays queued", then that run STOPPED — is pinned over the real store

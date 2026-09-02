@@ -412,6 +412,14 @@ interface QueueOutcome {
   queued: boolean
   /** The hold store's failure message, or null when the write went through. */
   error: string | null
+  /**
+   * WHICH write failed — the two failures have OPPOSITE consequences, so the
+   * refusal prose may not describe them with one sentence (Argus r10 BLOCKER).
+   * A failed `upsert` queued nothing, so the card really will not move on its
+   * own; a failed `delete` left a row that an EARLIER dispatch seeded, and the
+   * sweep re-fires that survivor once the card's linked run terminalizes.
+   */
+  attempted: 'upsert' | 'delete'
 }
 
 /**
@@ -578,7 +586,8 @@ export async function dispatchBoardBoundBuild(
   // caller acts on — with the QUEUE CLAIM retracted in both the prose and the
   // shape, which is the one thing a failed write actually invalidates.
   const queueHold = async (entry: DispatchHoldInput, decision: QueueDecision): Promise<QueueOutcome> => {
-    if (deps.holds === undefined) return { queued: false, error: null }
+    const attempted = decision.queued ? 'upsert' : 'delete'
+    if (deps.holds === undefined) return { queued: false, error: null, attempted }
     try {
       // NOT WRITING IS NOT ENOUGH — DELETE WHAT IS ALREADY THERE (Argus r3
       // BLOCKER, generalised in r4). Skipping the upsert only keeps THIS refusal
@@ -589,19 +598,34 @@ export async function dispatchBoardBoundBuild(
       if (decision.queued) await deps.holds.upsert(entry)
       else await deps.holds.deleteByItem(deps.project_slug, board_item_id)
     } catch (err) {
-      return { queued: false, error: err instanceof Error ? err.message : String(err) }
+      return { queued: false, error: err instanceof Error ? err.message : String(err), attempted }
     }
-    return { queued: decision.queued, error: null }
+    return { queued: decision.queued, error: null, attempted }
   }
-  // The sentence appended to a refusal whose queue write failed. It retracts the
-  // "…it will dispatch automatically…" promise the message already made and
-  // hands the operator the only action left, because nothing will re-fire this
-  // card on its own now.
-  const queueFailureClause = (outcome: QueueOutcome): string =>
-    outcome.error === null
-      ? ''
-      : ` NOTE: nothing could be QUEUED — the hold store failed (${outcome.error}) — so this card will NOT ` +
-        're-dispatch on its own; re-dispatch it yourself once the reason above clears.'
+  // The sentence appended to a refusal whose queue write failed. WHICH write
+  // failed decides what it says (Argus r10 BLOCKER) — the two failures are not
+  // the same fact and the safe action differs:
+  //  - `upsert` threw: nothing was queued, so the card really will NOT move on
+  //    its own and the operator must re-dispatch it.
+  //  - `delete` threw: the row this arm exists to REMOVE is still there. That
+  //    survivor is exactly the one `buildDispatchHoldSweep` re-fires once the
+  //    card's linked run terminalizes, so telling the operator to re-dispatch
+  //    would invite a SECOND lane onto the card. Say the stale hold is still
+  //    queued and may re-fire, and ask for it to be cleared instead.
+  const queueFailureClause = (outcome: QueueOutcome): string => {
+    if (outcome.error === null) return ''
+    if (outcome.attempted === 'delete') {
+      return (
+        ` NOTE: a STALE hold for this card could not be REMOVED — the hold store failed (${outcome.error}) — so an ` +
+        'earlier queue entry may still exist and could re-dispatch this card on its own once the run that owns it ' +
+        'finishes; clear that hold before dispatching the card yourself, or two lanes will build it.'
+      )
+    }
+    return (
+      ` NOTE: nothing could be QUEUED — the hold store failed (${outcome.error}) — so this card will NOT ` +
+      're-dispatch on its own; re-dispatch it yourself once the reason above clears.'
+    )
+  }
 
   // (4) DECLARED BLOCKERS — do not fan out onto an unmet dependency.
   //

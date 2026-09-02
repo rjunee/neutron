@@ -636,3 +636,57 @@ one-function containment fix on an otherwise approved diff.
 by `throw err` — measured at this head, guard `bun test trident/board-dispatch.test.ts` 40 pass /
 2 fail mutated against 40 pass / 0 fail clean, control `bun test trident/liveness.test.ts` 8 pass
 / 0 fail mutated. The find-string occurs exactly once.
+
+### Round 20 (2026-09-02) — Argus r10: a FAILED delete may not be reported as "nothing was queued"
+
+**The blocker.** `queueHold` has two arms — upsert the hold, or DELETE whatever an earlier
+dispatch already queued — and both were reported with ONE sentence: "nothing could be QUEUED …
+so this card will NOT re-dispatch on its own; re-dispatch it yourself". For the delete arm that
+sentence is false in the dangerous direction. The row the arm exists to remove is still there,
+and it is exactly the survivor `buildDispatchHoldSweep` re-fires once the card's linked run
+terminalizes — so the card MAY move on its own, while the operator has just been told to move it
+by hand. Two lanes on one card, which is the harm this whole branch exists to prevent.
+
+**The fix.** `QueueOutcome` now carries `attempted: 'upsert' | 'delete'`, set before either write,
+and `queueFailureClause` branches on it. The delete-failure clause says the STALE hold could not
+be removed, that it may still exist and may re-dispatch the card on its own, and asks for it to be
+CLEARED — not for a manual re-dispatch. The upsert clause is unchanged. No arm claims a `hold`
+shape it did not write.
+
+**The missing intersection test, added.** The two existing throw tests both make `upsert` throw;
+neither reaches the delete arm, because that arm only runs when the card has a live linked run.
+The new test seeds a hold, gives the card a live linked run (so the refusal takes the delete arm),
+makes `deleteByItem` throw, and asserts: the refusal is still the typed `branch_live`, the seeded
+row is STILL PRESENT, the prose says "could not be REMOVED" / "may still exist", and the two
+sentences that would produce a double dispatch are ABSENT.
+
+**Also closed this round, all single-reviewer non-blocking findings.**
+
+- The composed drain wiring test asserted only `expect(drained).toBe(1)`. The path is pinned in
+  two halves on purpose, and the comment now says so: this half proves the composed tick CALLS the
+  drain it was handed, and `open/__tests__/open-dispatch-hold-drain-wiring.test.ts` proves the
+  drain the PRODUCTION composer built moves real hold state. Joining them would mean building the
+  sweep inside the composition test, which proves nothing about production.
+- That Open-side test narrowed the composition's cleanups to `() => void` and invoked them
+  un-awaited before `db.close()` and `rmSync`. The contract type permits `Promise<void>`; the
+  array is widened to match and the teardown awaits each cleanup.
+- The `observed` carry-forward on the live-holder-over-published arm was mutation-insensitive.
+  The "a live branch holder OUTRANKS an outer-published checkpoint" test now asserts
+  `evidence.observed?.inner_checkpoint` is the published marker — verified to fail when the
+  carry-forward is dropped.
+- `saveIfActive`'s NULL-safe `inner_checkpoint IS ?` half was pinned by nothing. A new store test
+  saves a FIRST checkpoint over a NULL both the row and the caller saw; under `=` the CAS reads as
+  lost and the write is dropped — verified red against that mutation.
+
+**Not done, deliberately, and unchanged from round 19.** The one-shot gather at the timeout
+instant (the row is classified once, at t+0, while the card's own measurements put first evidence
+63-86 s later) still stands as a follow-up. Both reviewers who raised it recommended that, it is
+not a regression against base, and closing it means holding the row open across ticks and
+re-asking while the negative control `6948da2d` must still terminalize — a change to the step
+state machine, not a wrap.
+
+**The mutation nomination CHANGES this round**, to the behaviour this round is about:
+`trident/board-dispatch.ts`, `if (outcome.attempted === 'delete') {` replaced by `if (false) {`,
+which routes a failed DELETE back through the upsert sentence. Guard
+`bun test trident/board-dispatch.test.ts`, control `bun test trident/liveness.test.ts`. The
+find-string occurs exactly once.

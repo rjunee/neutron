@@ -163,6 +163,17 @@ describe('the row is read FIRST, and row evidence needs no filesystem at all', (
     expect(evidence.detail).toContain('outranks the published checkpoint')
     // Still no path, still no raw lock reason.
     expect(evidence.detail).not.toContain(HOLDER)
+    // ARGUS r10 (nit): the `observed` CARRY-FORWARD on this arm was
+    // mutation-insensitive — dropping it kept every test green while the
+    // orchestrator went on deriving `phase` from `evidence.observed
+    // ?.inner_checkpoint` and writing that `phase` plainly beside the CAS'd
+    // checkpoint. Without the carry-forward the two disagree, which is the
+    // incoherent row the orchestrator's own comment exists to prevent. The live
+    // holder outranks the published checkpoint for the OUTCOME; it does not
+    // erase what the row said.
+    if (evidence.kind === 'launched') {
+      expect(evidence.observed?.inner_checkpoint).toBe(published)
+    }
   })
 
   test('a published row whose branch holder shows NO life stays published', async () => {

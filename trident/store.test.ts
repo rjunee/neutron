@@ -297,6 +297,35 @@ describe('TridentRunStore', () => {
     expect(store.get(run.id)?.inner_checkpoint).toBe('forge-done')
   })
 
+  // ARGUS r10 (minor): the CAS is written with the NULL-SAFE `IS` compare, and
+  // the NULL half of it was pinned by nothing — swapping `IS` for `=` on
+  // `inner_checkpoint` left the whole suite green. It must not: a run that has
+  // not checkpointed yet holds NULL in both the row and the caller's `seen`
+  // value, and `NULL = NULL` is NULL, so under `=` the CAS reads as LOST and the
+  // very first checkpoint of every run is silently dropped. That is the settle
+  // path's own shape — the fire gate saves with the columns it read, and on a
+  // round-1 run it read NULL.
+  test('saveIfActive() CAS is NULL-safe — a first checkpoint lands over a NULL both sides saw', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-null-safe', project_slug: 't1', repo_path: '/r', task: 't' })
+    const seen = store.get(run.id)!
+    // Nothing has ever written these columns: both the row and what the caller
+    // read are NULL.
+    expect(seen.inner_checkpoint).toBeNull()
+    expect(seen.inner_verdict).toBeNull()
+
+    expect(
+      await store.saveIfActive(
+        { ...seen, inner_checkpoint: 'forge-done', inner_verdict: 'REVIEW_NOT_RUN' },
+        { workflow_columns_seen: { inner_checkpoint: seen.inner_checkpoint, inner_verdict: seen.inner_verdict } },
+      ),
+    ).toBe(true)
+
+    const after = store.get(run.id)!
+    expect(after.inner_checkpoint).toBe('forge-done')
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
+  })
+
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })
