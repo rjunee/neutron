@@ -2802,7 +2802,7 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // failure matches `enforceSeverityGate`: only the two LISTED severities are skipped,
 // so an unknown/absent/misspelled severity still counts as code and still re-Forges,
 // and a malformed (null) finding does too.
-function classifyBlock(synthesis, deferredPeers) {
+function classifyBlock(synthesis, deferredPeers, noReviewRan = false) {
   // A NON-ARRAY `findings` IS MALFORMED, NOT EMPTY — and it must not crash the round.
   // `(synthesis && synthesis.findings) || []` accepted any truthy value and then called
   // `.filter` on it, so a synthesis carrying `findings: 'oops'` threw a TypeError out of
@@ -2836,7 +2836,14 @@ function classifyBlock(synthesis, deferredPeers) {
   // file has already declared non-blocking. Recording that as "review never ran" cost a
   // resumed run a full re-Forge on findings nobody was ever going to act on — the exact
   // waste the advisory economy exists to stop, reintroduced one seam downstream.
-  return findings.length === 0 ? 'code' : 'advisory-only'
+  //
+  // AND 'advisory-only' ASSERTS A PANEL. It says the panel ran, judged the code and had
+  // nothing actionable — so it may not be emitted when NO seat judged anything. With every
+  // seat deliberately set to NONE the caller's own `reviewRecord` says 'NO REVIEW RAN' in
+  // words, and the blockKind said the opposite; 'infra-only' is the honest kind there, and
+  // it exits the loop the same way, so only what the run REPORTS changes.
+  if (findings.length === 0) return 'code'
+  return noReviewRan ? 'infra-only' : 'advisory-only'
 }
 
 /**
@@ -4480,7 +4487,8 @@ function ciBlockerFindings(ci, preexisting = null) {
         'this change. Surface it, do not block on it.' +
         (f.link !== null ? `\n${f.link}` : '') +
         '\nIf this check\'s failure at the base looks like a DIFFERENT failure from the one here, ' +
-        'or the diff touches the code it exercises, treat it as a BLOCKER in your own words.',
+        'or the diff touches the code it exercises, raise it as a BLOCKER. The merge is held on ' +
+        'a red PR either way — this text is not the thing deciding that.',
     }
   })
 }
@@ -5299,19 +5307,26 @@ function withSuiteBlocker(synthesis, suiteFindings) {
   //
   // The verdict is NOT downgraded. This file's rule stands — a REQUEST_CHANGES carrying
   // no findings is malformed, not benign, and a review we did not get is not an approval.
-  // What changes is only `blockKind`: 'advisory-only' EXITS the fix loop instead of
-  // re-Forging, and it says WHICH exit this is — the panel ran and had nothing actionable,
-  // as against 'infra-only', which asserts no seat ever judged the code.
+  // What changes is only `blockKind`: it EXITS the fix loop instead of re-Forging.
+  //
+  // AND THE EXIT IS 'infra-only', NOT 'advisory-only'. The two differ in what they SAY, and
+  // this arm is reached ONLY when the panel stated no reason of its own (`panelFindings` is
+  // empty — the arm above returns the moment it is not). 'advisory-only' asserts the panel
+  // judged the code and everything it returned was non-blocking; on a rejection carrying no
+  // stated reason that is false, and this file's standing rule is that such a rejection is
+  // malformed, not benign. The only finding left is one THIS FILE prepended, so no seat
+  // spoke about the diff — which is exactly what 'infra-only' means, and it is what the
+  // terminal writer must record (REVIEW_NOT_RUN), not a review nobody gave.
   //
   // AND THE STOP REPORTS NO CAUSE, deliberately. `infraTerminalCause` excludes every
-  // finding this file has already declared non-blocking, so an advisory-only stop
-  // measures '' — which is what keeps `classifyInnerFailure` (trident/orchestrator.ts)
-  // from reading it as "infrastructure" and auto-retrying the whole run back into the
-  // same round. The findings are not lost: they ride out on the terminal result's
+  // finding this file has already declared non-blocking, so this stop measures '' — and
+  // `classifyInnerFailure` (trident/orchestrator.ts) requires a NON-EMPTY cause beside
+  // 'infra-only' before it will call a run 'infrastructure', so this one classifies
+  // 'genuine' and is not auto-retried back into the same round. The findings are not lost: they ride out on the terminal result's
   // `findings` and reach the operator there. Only the one-line CAUSE is empty, and it
   // is empty on purpose.
   if (!findings.every((f) => isNonBlockingFinding(f))) return merged
-  return { ...merged, blockKind: 'advisory-only' }
+  return { ...merged, blockKind: 'infra-only' }
 }
 
 async function runReviewRound(diffFile, round, prForReview, paidReview = null, suiteFindings = []) {
@@ -6003,10 +6018,6 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
             verdict: 'REQUEST_CHANGES',
             findings: [...ciFindings, ...(severityGated?.findings ?? [])],
           }
-        // `severityGated` is null when the synthesis seat died. Spreading a null yields a
-        // verdict-less object: fail-closed (synthesisOrInfraBlock replaces it), but it
-        // dropped the CI advisories the old code carried. `?? {}` keeps them.
-        //
         // THE EXCUSE BUYS A ROUND, NEVER A MERGE. The verdict is held at REQUEST_CHANGES
         // even when EVERY red is excused, because the two questions are different and this
         // arm used to answer both with one match on a check NAME: "is there code work here?"
@@ -6018,11 +6029,22 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
         // branch protection as the only backstop). Nothing here is inferred from the
         // advisory text and nothing is delegated to the synthesis seat: the hold is
         // unconditional on a red PR, and it costs no extra round.
-        : {
-            ...(severityGated ?? {}),
-            verdict: 'REQUEST_CHANGES',
-            findings: [...ciFindings, ...(severityGated?.findings ?? [])],
-          }
+        //
+        // AND ONLY OVER A SEAT THAT SPOKE. `severityGated` is null when the synthesis seat
+        // died, and setting the verdict over that null FABRICATED a panel judgment no panel
+        // made: `synthesisOrInfraBlock` returns anything carrying a usable verdict UNTOUCHED,
+        // so a dead seat plus a fully-excused red walked past SYNTHESIS_UNAVAILABLE and
+        // landed as an ordinary 'advisory-only' rejection — no lane finding, no infra retry,
+        // and nothing anywhere naming the seat that died. The dead-seat arm is therefore
+        // VERDICT-LESS, which is the fail-closed shape this file already relies on; the CI
+        // advisories are not lost with it, they are carried onto the infra block there.
+        : severityGated
+          ? {
+              ...severityGated,
+              verdict: 'REQUEST_CHANGES',
+              findings: [...ciFindings, ...(severityGated.findings ?? [])],
+            }
+          : { findings: [...ciFindings] }
       : severityGated
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can
@@ -6036,10 +6058,11 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   // when the only blocker is a lane that could not run — there is nothing in the
   // code to fix, and a re-Forge then costs a fresh round of four reviewers plus a
   // diff of noise. See classifyBlock.
-  const reviewRecord = offSeats.length === 4
+  const noReviewRan = offSeats.length === 4
+  const reviewRecord = noReviewRan
     ? 'NO REVIEW RAN — all four review seats were deliberately set to NONE; merge relied on build and CI gates alone.'
     : `Review panel: ${4 - offSeats.length} seat(s) ran; off: ${offSeats.length === 0 ? 'none' : offSeats.join(', ')}.`
-  return { ...gated, blockKind: classifyBlock(gated, peers), reviewRecord }
+  return { ...gated, blockKind: classifyBlock(gated, peers, noReviewRan), reviewRecord }
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────

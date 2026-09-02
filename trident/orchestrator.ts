@@ -2029,8 +2029,9 @@ export function innerTerminalFailureReason(
   // they keep the generic sentence (see the test that pins each of them).
   //
   // `null` IS NOT ONLY "THE CATCH PATH" — and an earlier revision of this comment said it
-  // was (Argus r4). `parseInnerResult` decodes `block_kind` FAIL-CLOSED: the four strings the
-  // workflow writes decode, and ANY other value — garbled, truncated, from a future writer —
+  // was (Argus r4). `parseInnerResult` decodes `block_kind` FAIL-CLOSED: the five strings the
+  // workflow writes decode ('none', 'code', 'infra-only', 'advisory-only', 'round-lost' —
+  // see trident/inner-loop.ts), and ANY other value — garbled, truncated, from a future writer —
   // becomes `null` too. Which is precisely why this branch is safe to widen to it: the
   // sentence `null` selects states the failure and quotes the measured cause, and claims
   // NOTHING about the review panel. Only 'infra-only' licenses "review never ran", and only

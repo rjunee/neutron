@@ -978,7 +978,7 @@ function loadRealGate(): {
   crossModelPeerStatus: (slot: number | null, verdicts: unknown[], statusKey: string) => string
   missingCoreReviewers: (verdicts: unknown[], seats: unknown[]) => Peer[]
   coreSeats: Array<{ slot: number; name: string; letter: string; panelLabel: string }>
-  classifyBlock: (s: unknown, peers: unknown[]) => string
+  classifyBlock: (s: unknown, peers: unknown[], noReviewRan?: boolean) => string
   corePanelLine: (letter: string, label: string, verdict: unknown) => string
   codexPanelLine: (status: string, review: unknown) => string
 } {
@@ -1963,7 +1963,7 @@ describe('#568 — the head-probe seat is wrapped, and this test EXISTS because 
 function loadSeverityGate(): {
   enforceSeverityGate: (s: unknown) => { verdict: string; findings: unknown[] } | null
   isNonBlockingFinding: (f: unknown) => boolean
-  classifyBlock: (s: unknown, peers: unknown[]) => string
+  classifyBlock: (s: unknown, peers: unknown[], noReviewRan?: boolean) => string
   fullSuiteFindings: (
     report: unknown,
     scope?: string,
@@ -2194,10 +2194,12 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
     const out = withSuiteBlocker({ verdict: 'REQUEST_CHANGES', blockKind: 'code', findings: [] }, [
       preexisting(),
     ])
-    // The loop condition excludes BOTH exits; this one is 'advisory-only', because the
-    // panel ran and had nothing actionable — 'infra-only' would assert no seat ever judged
-    // the code, which the outer loop reads as REVIEW_NOT_RUN.
-    expect(out.blockKind).toBe('advisory-only')
+    // The loop condition excludes BOTH exits. This one is 'infra-only': the panel stated
+    // NO reason of its own (the arm below returns the moment it does), so the only finding
+    // left is the one this file prepended, and no seat spoke about the diff. Calling that
+    // 'advisory-only' would assert a panel judgment that was never given — and the outer
+    // loop is right to read this as REVIEW_NOT_RUN.
+    expect(out.blockKind).toBe('infra-only')
     // ...and the rejection is NOT laundered into an approval.
     expect(out.verdict).toBe('REQUEST_CHANGES')
     // The finding still rides along, so `infraTerminalCause` can name the stop.
@@ -2219,6 +2221,18 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
     )
     expect(out.blockKind).toBe('code')
     expect(out.findings.length).toBe(2)
+  })
+
+  // 'advisory-only' ASSERTS A PANEL — so it may not be emitted when no seat judged
+  // anything. With all four seats deliberately NONE the caller's own `reviewRecord` reads
+  // 'NO REVIEW RAN'; the blockKind in the same object may not say the opposite.
+  test('with every seat off, an all-advisory rejection is infra-only, not advisory-only', () => {
+    const { classifyBlock } = load()
+    const rejected = { verdict: 'REQUEST_CHANGES', findings: [preexisting()] }
+    // The healthy panel: it ran, and everything it said is non-blocking.
+    expect(classifyBlock(rejected, [])).toBe('advisory-only')
+    // ...and the same findings with NO panel behind them are an infra stop, not a review.
+    expect(classifyBlock(rejected, [], true)).toBe('infra-only')
   })
 
   // MUST-FAIL control 2: an UNEARNED pre-existing claim is a `blocker` sibling with no

@@ -3083,6 +3083,29 @@ describe('REVIEW_NOT_RUN — terminal without the reviewer speaking', () => {
     expect(final.inner_checkpoint_findings).toBe(findings)
   })
 
+  // ...AND THE SIMULATOR WRITES THE SAME ROW THE WORKFLOW WOULD. The test above seeds the
+  // verdict column by hand (deliberately — it models the OLD out-of-process writer the
+  // harvest must correct), so it cannot catch the simulated writer drifting away from
+  // production's. `inner-loop-sim.ts` widened its blockKind TYPE for 'advisory-only' and
+  // left its `inner_verdict` discriminator matching 'code' alone, which recorded
+  // REVIEW_NOT_RUN where production records REQUEST_CHANGES. This runs it.
+  test('the SIMULATED writer records an advisory-only stop the way production does', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES' as const,
+          branch: 'feat-x',
+          checkpoint: 'argus-request-changes',
+          blockKind: 'advisory-only' as const,
+          findings: [{ severity: 'major', advisory: true, title: 'CI RED FOR PRE-EXISTING REASONS: shard 3/8' }],
+        },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+  })
+
   // ...and the provenance requirement is NOT relaxed by the new kind. An advisory-only
   // claim with no Argus checkpoint behind it is still a claim nobody made.
   test('advisory-only without Argus provenance is still REVIEW_NOT_RUN', async () => {

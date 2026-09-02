@@ -302,9 +302,10 @@ describe('the gate is WIRED, not merely written', () => {
     const block = code.slice(at, code.indexOf('const peers =', at))
     expect(block.includes("verdict: 'REQUEST_CHANGES'")).toBe(true)
     expect(block.includes('ciFindingsBlock(ciFindings)')).toBe(true)
-    // The findings are attached on BOTH sides of that condition — an unforced red that
-    // dropped its findings would tell no one anything.
-    expect(block.split('...ciFindings').length - 1).toBe(2)
+    // The findings are attached on EVERY arm a red can take — an unforced red that
+    // dropped its findings would tell no one anything, and the dead-seat arm carries them
+    // for `synthesisOrInfraBlock` to keep. Three arms, three attachments.
+    expect(block.split('...ciFindings').length - 1).toBe(3)
   })
 
   test('the base is measured before any red is excused, and only when the PR is red', () => {
@@ -332,7 +333,7 @@ describe('the gate is WIRED, not merely written', () => {
   test('classifyBlock reads the peers INCLUDING the CI one', () => {
     // Otherwise a CI deferral would not classify as infra-only and the loop would
     // re-Forge against a pending check.
-    expect(code.includes('classifyBlock(gated, peers)')).toBe(true)
+    expect(code.includes('classifyBlock(gated, peers')).toBe(true)
   })
 
   test('LOCAL mode never spends an agent on a PR that does not exist', () => {
@@ -2708,7 +2709,7 @@ describe('the pre-existing CI hatch — earned by measuring the base, by name', 
     expect(ciFindingsBlock(f)).toBe(false)
     // It is SURFACED, not suppressed — the reviewers still read it, and are told when to
     // overrule it.
-    expect(String(f[0]?.evidence)).toContain('treat it as a BLOCKER')
+    expect(String(f[0]?.evidence)).toContain('raise it as a BLOCKER')
   })
 
   test('ONE new red among pre-existing ones still forces the round', () => {
@@ -2895,23 +2896,41 @@ describe('the pre-existing CI hatch — earned by measuring the base, by name', 
     expect(builtAt).toBeLessThan(promptAt)
     expect(SRC.indexOf('const ciFindings =')).toBeLessThan(builtAt)
     // The prompt carries the finding's own evidence, not a summary of it — the
-    // "treat it as a BLOCKER" sentence is the whole point of showing it.
+    // "raise it as a BLOCKER" sentence is the whole point of showing it.
     const block = SRC.slice(builtAt, SRC.indexOf('\n\n', builtAt))
     expect(block).toContain('finding?.evidence')
     expect(block).toContain('NAME ONLY')
   })
 
-  // The old code spread a possibly-null `severityGated`, which is fail-closed for the
-  // VERDICT (synthesisOrInfraBlock replaces a verdict-less object) but silently dropped
-  // the CI advisories from the report.
-  test('a dead synthesis seat does not take the CI findings down with it', () => {
-    const code = SRC.split('\n')
-      .filter((line) => !line.trim().startsWith('//'))
-      .join('\n')
-    const at = code.indexOf('const withCi =')
-    const block = code.slice(at, code.indexOf('const peers =', at))
-    expect(block).toContain('...(severityGated ?? {})')
-    expect(block).not.toContain('{ ...severityGated,')
+  // The old code spread a possibly-null `severityGated`, which silently dropped the CI
+  // advisories from the report; the code after THAT spread `?? {}` and then set a verdict
+  // over it, which is worse — a verdict-carrying object is one `synthesisOrInfraBlock`
+  // hands straight back, so the dead seat stopped being reported at all. Both are stated
+  // here as behaviour, on the arm as it is actually written (see the executed tests in
+  // 'a fully excused CI red still holds the merge').
+  test('a dead synthesis seat keeps its CI findings and gains no verdict', () => {
+    const { ciBlockerFindings } = loadReal()
+    const findings = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['shard 3/8']),
+    )
+    const at = SRC.indexOf('const withCi =')
+    const out = (
+      new Function(
+        'ci',
+        'ciFindings',
+        'ciFindingsBlock',
+        'severityGated',
+        `${SRC.slice(at, SRC.indexOf('const peers =', at))}\n  return withCi`,
+      ) as (
+        ci: unknown,
+        f: unknown[],
+        block: (f: unknown[]) => boolean,
+        s: unknown,
+      ) => Record<string, unknown>
+    )({ status: 'red' }, findings, loadReal().ciFindingsBlock, null)
+    expect((out.findings as unknown[]).length).toBe(1)
+    expect(Object.hasOwn(out, 'verdict')).toBe(false)
   })
 })
 
@@ -2985,25 +3004,99 @@ describe('ciSection anchors to whole marker lines, not to the first mention', ()
  * (no — no fix round is bought) and "may this merge over a red PR?" (no).
  */
 describe('a fully excused CI red still holds the merge', () => {
-  const arm = () => {
-    const code = SRC.split('\n')
-      .filter((line) => !line.trim().startsWith('//'))
-      .join('\n')
-    const at = code.indexOf('const withCi =')
+  // THE ARM IS SLICED OUT OF THE SOURCE AND RUN, not grepped. Round 3 of this branch
+  // condemned exactly the grep technique this block used to use ("the guard greps the
+  // source and never executed the substitution, which is why it stayed green"), and it
+  // then re-earned that verdict here: a `.toContain("verdict: 'REQUEST_CHANGES'")` is
+  // equally true of an arm that sets the verdict over a DEAD synthesis seat, which
+  // fabricates a panel judgment no panel made. Only running it can tell those apart.
+  //
+  // Every free identifier in the arm is a parameter, so a rename in production fails
+  // this file loudly rather than leaving it asserting about history.
+  const runArm = (
+    ci: { status: string },
+    ciFindings: unknown[],
+    severityGated: Record<string, unknown> | null,
+  ): Record<string, unknown> => {
+    const { ciFindingsBlock } = loadReal()
+    const at = SRC.indexOf('const withCi =')
     expect(at).toBeGreaterThan(-1)
-    const block = code.slice(at, code.indexOf('const peers =', at))
-    // The FORCING arm is the `?` branch; the arm under test is the `:` alternative.
-    return block.slice(block.indexOf(': {'))
+    const end = SRC.indexOf('const peers =', at)
+    expect(end).toBeGreaterThan(at)
+    const run = new Function(
+      'ci',
+      'ciFindings',
+      'ciFindingsBlock',
+      'severityGated',
+      `${SRC.slice(at, end)}\n  return withCi`,
+    ) as (
+      ci: unknown,
+      f: unknown[],
+      block: (f: unknown[]) => boolean,
+      s: unknown,
+    ) => Record<string, unknown>
+    return run(ci, ciFindings, ciFindingsBlock, severityGated)
   }
 
-  test('the non-forcing arm sets REQUEST_CHANGES, so no APPROVE reaches the merge', () => {
-    expect(arm()).toContain("verdict: 'REQUEST_CHANGES'")
+  const excused = () => {
+    const { ciBlockerFindings } = loadReal()
+    return ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['shard 3/8']),
+    )
+  }
+
+  test('a panel APPROVE over a fully excused red comes out REQUEST_CHANGES', () => {
+    const out = runArm({ status: 'red' }, excused(), { verdict: 'APPROVE', findings: [] })
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    // ...and the advisory rides along, so the report still says WHICH check is red.
+    expect((out.findings as { title: string }[]).map((f) => f.title)).toEqual([
+      'CI RED FOR PRE-EXISTING REASONS: shard 3/8',
+    ])
   })
 
   test('the hold does not depend on the synthesis seat reading the advisory', () => {
-    // Nothing in this arm may condition the verdict on the advisory text or on the seat.
-    expect(arm()).not.toContain('ciFindingsBlock')
-    expect(arm()).not.toContain('severityGated?.verdict')
+    // The seat's own verdict, its findings and the advisory text are all varied; the hold
+    // is unconditional on a red PR, so none of them can move it.
+    for (const seat of [
+      { verdict: 'APPROVE', findings: [] },
+      { verdict: 'APPROVE', findings: [{ severity: 'nit', title: 'rename it' }] },
+      { verdict: 'REQUEST_CHANGES', findings: [] },
+    ]) {
+      expect(runArm({ status: 'red' }, excused(), seat).verdict).toBe('REQUEST_CHANGES')
+    }
+  })
+
+  // THE OTHER HALF OF THE SAME LINE, and the one a grep cannot see. `severityGated` is
+  // null when the synthesis seat died; setting the verdict over that null hands
+  // `synthesisOrInfraBlock` a usable verdict, and it returns such an object UNTOUCHED —
+  // so a dead seat plus a fully-excused red walked past SYNTHESIS_UNAVAILABLE and landed
+  // as an ordinary rejection: no lane finding, no infra retry, no seat named.
+  test('a DEAD synthesis seat is never given a verdict — the arm stays fail-closed', () => {
+    const out = runArm({ status: 'red' }, excused(), null)
+    expect(Object.hasOwn(out, 'verdict')).toBe(false)
+    // ...and the advisories it was carrying are still there for the infra block to keep.
+    expect((out.findings as unknown[]).length).toBe(1)
+  })
+
+  // A red this branch DID cause is code work, dead seat or not — the fail-closed shape
+  // above may not swallow the case the gate exists for.
+  test('an unexcused red still forces the verdict, dead seat or live', () => {
+    const { ciBlockerFindings } = loadReal()
+    const findings = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['lint']),
+    )
+    expect(runArm({ status: 'red' }, findings, null).verdict).toBe('REQUEST_CHANGES')
+    expect(runArm({ status: 'red' }, findings, { verdict: 'APPROVE', findings: [] }).verdict).toBe(
+      'REQUEST_CHANGES',
+    )
+  })
+
+  // A GREEN PR IS UNTOUCHED: the seat's verdict is handed back as-is, same object.
+  test('a green PR hands the panel verdict back unchanged', () => {
+    const seat = { verdict: 'APPROVE', findings: [] }
+    expect(runArm({ status: 'green' }, [], seat)).toBe(seat)
   })
 
   test('an excused red is still not code work, so it buys no fix round', () => {
@@ -3048,5 +3141,20 @@ describe('the CI findings are redacted and bounded before they reach the prompt'
     // The seat may still ADD a blocker; what it may not be asked to do is be the only
     // thing standing between an excused red and a merge.
     expect(promptBlock()).not.toContain('return REQUEST_CHANGES')
+  })
+
+  // ...AND THE DELEGATION DOES NOT COME BACK IN THROUGH THE FINDINGS. The template const
+  // is only half the composed prompt: every advisory finding's own `evidence` is
+  // interpolated into it too, and that text was still ending "treat it as a BLOCKER in
+  // your own words" long after the const stopped saying anything of the kind. Asserted on
+  // the produced finding, not on the source, so no wording change can hide it.
+  test('the advisory finding text does not hand the decision to the seat either', () => {
+    const { ciBlockerFindings } = loadReal()
+    const [f] = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['shard 3/8']),
+    )
+    expect(f?.advisory).toBe(true)
+    expect(String(f?.evidence)).not.toContain('in your own words')
   })
 })

@@ -35,6 +35,8 @@ interface Finding {
   kind?: string
   title?: string
   evidence?: string
+  /** The pre-existing-red marker `isNonBlockingFinding` reads. */
+  advisory?: boolean
 }
 interface Synthesis {
   verdict?: unknown
@@ -115,10 +117,11 @@ const real = new Function(
   ${grabFn('classifyBlock')}
   ${grabFn('synthesisOrInfraBlock')}
   ${grabFn('reviewRoundOrInfraBlock')}
+  ${grabFn('ciFindingsBlock')}
   return {
     LANE_FINDING_KIND, SYNTHESIS_UNAVAILABLE, normalizeVerdict, enforceSeverityGate,
     enforceCrossModelGate, classifyBlock, synthesisOrInfraBlock, seatAttempt,
-    synthesisUnavailable, reviewRoundOrInfraBlock, errText,
+    synthesisUnavailable, reviewRoundOrInfraBlock, errText, ciFindingsBlock,
   }
 `,
 )((line: string) => logged.push(line)) as {
@@ -133,7 +136,41 @@ const real = new Function(
   synthesisUnavailable: (seat: string, reason: string) => Readonly<Synthesis>
   reviewRoundOrInfraBlock: (run: () => unknown) => Promise<Synthesis>
   errText: (err: unknown) => string
+  ciFindingsBlock: (findings: Finding[]) => boolean
 }
+
+/**
+ * THE REAL `withCi` ARM, SLICED OUT OF THE SOURCE AND EVALUATED — never hand-copied.
+ *
+ * The previous version of this harness re-typed the arm by hand, and then went stale: the
+ * copy never grew the `verdict` line production had added, so every assertion below passed
+ * against a shape production could no longer produce, and the fabricated-verdict blocker it
+ * exists to catch sailed through green. A hand copy of the code under test is not a test.
+ *
+ * Every free identifier in the arm is a parameter, so the slice can only compile if the
+ * source still reads exactly those four things — a rename in production fails this file
+ * loudly instead of quietly leaving it testing history.
+ */
+function grabWithCiArm(): string {
+  const at = SRC.indexOf('const withCi =')
+  if (at === -1) throw new Error('const withCi is missing from inner-workflow.mjs')
+  const end = SRC.indexOf('const peers =', at)
+  if (end === -1) throw new Error('could not find the end of the withCi arm')
+  return SRC.slice(at, end)
+}
+
+const withCiArm = new Function(
+  'ci',
+  'ciFindings',
+  'ciFindingsBlock',
+  'severityGated',
+  `${grabWithCiArm()}\n  return withCi`,
+) as (
+  ci: { status: string },
+  ciFindings: Finding[],
+  ciFindingsBlock: (f: Finding[]) => boolean,
+  severityGated: Synthesis | null,
+) => Synthesis
 
 /**
  * The TAIL of `reviewAndSynthesize` — its gate chain and its single `return`, run
@@ -146,26 +183,41 @@ function reviewAndSynthesizeTail(
   { ciRed = false, ciAdvisory = false, peers = [] as Peer[] } = {},
 ): Synthesis {
   const severityGated = real.enforceSeverityGate(synthesisRaw)
-  // The NON-FORCING arm, copied from the source it stands in for: every red is already
-  // failing at the base, so the findings ride along without setting the verdict.
-  const advisoryFindings = [
-    { severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck', evidence: 'red at base too' },
-  ]
-  const withCi = ciRed
-    ? {
-        verdict: 'REQUEST_CHANGES',
-        findings: [{ severity: 'blocker', title: 'CI FAILING: typecheck', evidence: 'red' }, ...(severityGated?.findings ?? [])],
-      }
+  // The CI inputs are fixtures; the ARM ITSELF is the source's, evaluated. `ciAdvisory` is
+  // a red every check of which is already failing at the base (`advisory: true`, which
+  // `ciFindingsBlock` reads as "no code work here"); `ciRed` is a red this branch caused.
+  const ciFindings: Finding[] = ciRed
+    ? [{ severity: 'blocker', title: 'CI FAILING: typecheck', evidence: 'red' }]
     : ciAdvisory
-      ? { ...(severityGated ?? {}), findings: [...advisoryFindings, ...(severityGated?.findings ?? [])] }
-      : severityGated
+      ? [{ severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck', evidence: 'red at base too' }]
+      : []
+  const withCi = withCiArm(
+    { status: ciRed || ciAdvisory ? 'red' : 'green' },
+    ciFindings,
+    real.ciFindingsBlock,
+    severityGated,
+  )
   const gated = real.enforceCrossModelGate(withCi, peers)
   return { ...gated, blockKind: real.classifyBlock(gated, peers) }
 }
 
-/** What the loop at the call site would do with a given synthesis. */
+/**
+ * What the loop at the call site would do with a given synthesis — BOTH exits, as the
+ * real `while` has them (inner-workflow.mjs: 'infra-only' and 'advisory-only' each end
+ * the fix loop). Excluding only one of them made this helper claim a re-Forge the loop
+ * would never perform.
+ */
 const wouldReForge = (s: Synthesis): boolean =>
-  real.normalizeVerdict(s.verdict) === 'REQUEST_CHANGES' && s.blockKind !== 'infra-only'
+  real.normalizeVerdict(s.verdict) === 'REQUEST_CHANGES' &&
+  s.blockKind !== 'infra-only' &&
+  s.blockKind !== 'advisory-only'
+
+/** The loop's own condition, so the helper above cannot drift from it. */
+test('the fix loop really does exit on both kinds', () => {
+  const loop = SRC.slice(SRC.indexOf('  while (\n    finalVerdict ==='))
+  expect(loop).toContain("synthesis.blockKind !== 'infra-only'")
+  expect(loop).toContain("synthesis.blockKind !== 'advisory-only'")
+})
 
 const laneBlocker: Peer = { name: 'kimi', title: 'kimi deferred', evidence: 'timeout' }
 
@@ -195,7 +247,7 @@ describe('the premise: what a dead synthesis agent ACTUALLY produces', () => {
     // `reviewRecord` to the same return, which is why the old exact-string assertion
     // broke while everything it actually protected stayed true. The single-`return`
     // check below is what guarantees there is no other exit handing back a bare null.
-    expect(SRC).toContain('return { ...gated, blockKind: classifyBlock(gated, peers)')
+    expect(SRC).toContain('return { ...gated, blockKind: classifyBlock(gated, peers')
     // One `return`, so there is no other exit that could hand back a bare null.
     const body = grabFn('reviewAndSynthesize')
     expect(body.split('\n').filter((l) => /^ {2}return /.test(l))).toHaveLength(1)
