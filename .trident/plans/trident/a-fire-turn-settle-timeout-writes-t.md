@@ -2,6 +2,42 @@
 
 Card: `buildSubstrateWorkflowFire` (trident/inner-loop.ts) resolves `{status:'failed', error:'fire turn did not settle within the budget'}` on launcher-settle timeout, and the orchestrator (`orchestrator.ts` `outcome.status !== 'fired'` branch) unconditionally terminalized the run — but "not settled" does NOT imply "not fired". Measured: 8 of 33 runs in 7 days; the wake then invites a second lane onto a branch a live lane holds (stopped only by wrong-base-guard luck), and twice the timeout wrote `failed` over a run whose own row said `outer-published:*` (built, pushed, CI green). Fix in four layers: (1) never write plain `failed` on settle-timeout without checking positive evidence the workflow started — the run's own `inner_checkpoint` first, filesystem probes second; (2) a distinct launched-but-launcher-unobserved outcome that holds the lane instead of terminalizing, expressed over EXISTING columns only (no new column, no new phase); (3) the terminal-build wake must not tell an agent to relaunch for this failure shape — resolve the branch holder first; (4) dispatch must refuse on branch LIVENESS (live worktree lock / non-terminal run on the branch), not only on branch shape.
 
+## Resume state (round 16, 2026-09-02 — ARGUS r7 BLOCKER CLOSED AT THE WRITE, NOT AT THE GATE)
+
+The r7 review of `43c648d9` confirmed ONE blocker and one major worth building; everything else
+it raised was a comment or a documented judgement. What changed:
+
+- **BLOCKER — the branch-liveness TOCTOU no longer escapes as `backend_error`/HTTP 500.** Gate
+  (4b) reads the live rows synchronously and then AWAITS the worktree probe, so a competitor that
+  bound the branch inside that window walked on to the INSERT and met the live-only unique index
+  (migration 0138) as `UNIQUE constraint failed: code_trident_runs.project_slug, …` — surfaced as
+  `backend_error`, mapped to 500, **queueing nothing**, so the card was dropped rather than parked
+  behind the lane that beat it. `TridentRunStore.createIfClaimsAvailable` now re-takes the same
+  liveness fact INSIDE the insert's transaction and reports it as `conflict: 'branch'` (the path
+  conflict keeps its own kind), and `dispatchBoardBoundBuild` renders it through the SAME
+  `refuseBranchLive` helper both call sites now share — same sentence, same hold, same log line.
+  A residual cross-process constraint error (two gateway processes, one DB file) maps to the same
+  refusal instead of a 500. Red-first: with the store guard disabled the new dispatch control goes
+  red; the must-pass sibling (nobody racing) still admits and binds the card.
+- **MAJOR — the production drain wire is proved by CALLING it, not by grepping for it.**
+  `open/__tests__/open-dispatch-hold-drain-wiring.test.ts` was `readFileSync` + `SRC.includes(…)`
+  with exact occurrence counts: commenting the wire out satisfied every assertion (string matching
+  does not parse comments) and a benign refactor broke it. It now composes the REAL Open graph
+  input (credentialed fixture, mock substrate, ~0.7 s) and calls the callback the product supplies
+  against the product's own stores — a queued hold whose card no longer exists is dropped by the
+  real sweep. Verified red by commenting out the wire.
+- **The null-probe arm of the TOCTOU suite is covered at last.** Every earlier TOCTOU test answered
+  the holder probe with a live worktree, so the gate refused before the write and the write-time
+  race never ran; the new cases answer `null`.
+- Written down, not built (each with its argument in the code): no `bound_pr` exemption on the
+  liveness gate (a review round's fix rounds do build, and the refusal queues WITH its `bound_pr`);
+  the accumulating per-sweep cost of never-deleted `branch_live` holds (why the stale-age ERROR
+  line is the release valve); the held lane's fire-settle segment is a BUDGET, not a measurement;
+  the union member carrying `hold` is the QUEUED refusal, and `'hold' in result` — never the code —
+  is the check; the orphan wait is bounded by the 90-minute no-advance reaper, which runs BEFORE
+  it (the 2 h ceiling does not, and the comment claiming so is corrected). `STAGE_ALTERNATIVES` is
+  a `Map`, so prototype keys are structurally unreachable.
+
 ## Resume state (round 14, 2026-09-02 — BUILD COMPLETE AND GREEN; this round is VERIFICATION-ONLY so a valid review can finally run)
 
 Measured this round from the repo of record:

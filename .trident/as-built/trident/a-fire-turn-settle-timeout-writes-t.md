@@ -402,3 +402,66 @@ token: the asymmetry is deliberate and now documented at the line — a false po
 yields the CAUTIOUS instruction (resolve the branch holder first), which is safe advice for
 any terminal build, where a false positive on the published marker suppressed a relaunch
 that should have happened.
+
+### Round 16 (Argus round 7) — the branch race is decided by the INSERT, and the drain wire is proved by calling it
+
+Round 15 moved the queue/no-queue decision to the write. The r7 review found the half that
+was still decided too early: the branch itself.
+
+THE GATE CANNOT WIN THIS RACE ALONE. `dispatchBoardBoundBuild`'s liveness gate reads the
+live rows synchronously and then AWAITS the worktree holder probe. A competing dispatch
+that binds the branch inside that await is invisible to the gate, so the dispatch walked on
+to `createIfClaimsAvailable` — which re-checked only `claimed_paths` — and met the live-only
+unique index (migration 0138) as `UNIQUE constraint failed: code_trident_runs.project_slug,
+code_trident_runs.slug`. The bare handler at the bottom of the block turned that into
+`backend_error`, `work-board-surface.ts` turned that into HTTP 500, and — the part that
+actually costs a card — `backend_error` queues NO hold, so the card was DROPPED rather than
+parked behind the lane that beat it. The gate's own comment already named this race shape;
+round 15 fixed only its queue-decision half.
+
+So the fact is re-taken where it can no longer be raced: inside the insert's transaction.
+`createIfClaimsAvailable` now asks, in one statement beside the claim scan, whether a live
+row already carries this branch in this repo OR this project already has this slug live
+(the two halves of the collision: the gate's question and the index's), and returns
+`{ ok: false, conflict: 'branch', holding_run }`. The path conflict keeps its own
+`conflict: 'path'` kind and its `path`, so the two refusals cannot be confused. Both
+dispatch call sites — the gate and the admission — now render through ONE
+`refuseBranchLive` helper: the same tail deciding what will re-fire the card, the same
+`queueHold` arms, the same `dispatch_branch_live` log line, the same `hold` shape. A refusal
+composed twice is a refusal that drifts.
+
+A residual cross-process collision (two gateway processes, one DB file, both reads passing)
+maps the raw constraint error to the same refusal rather than a 500. It is a second
+mechanism for the same fact, and it is there because the cost of missing it is a dropped
+card, not a slow one.
+
+RED FIRST, AND ON THE ARM NOBODY HAD TESTED. Every existing TOCTOU test answered the holder
+probe with a LIVE worktree, so the gate always refused before the write and the write-time
+race never ran. The new cases answer `null`: a competitor creates a live run on the branch
+inside the probe, and the dispatch must return `branch_live` naming that run, carrying a
+`hold`, with a row in the queue, no second run inserted, and no card bound — then the sweep
+dispatches it once the winner goes terminal. Disabling the store's branch check turns that
+test red. The must-pass sibling (nobody racing) still admits and binds the card, so "never
+insert" cannot pass.
+
+THE DRAIN WIRE IS NOW PROVED BY CALLING IT. `open/__tests__/open-dispatch-hold-drain-wiring.test.ts`
+was `readFileSync` plus `SRC.includes('drain_dispatch_holds: () => tridentHoldSweep()')` and
+exact occurrence counts — string matching does not parse comments, so commenting the wire
+out satisfied every assertion, and the counts broke on any benign refactor. It now composes
+the REAL Open graph input (credentialed fixture, mock substrate, ~0.7 s — no full graph
+boot) and calls the callback the product supplies, against the product's own stores: a
+queued hold whose board item no longer exists is dropped by the real sweep. Commenting the
+wire out turns it red. The behavioural test at the `buildCoreModules` boundary still covers
+the cadence; this one covers the hand-over the cadence test injects around.
+
+WRITTEN DOWN, NOT BUILT, each argued at the line it concerns: the liveness gate takes no
+`bound_pr` exemption (a review round's own fix rounds build, on this branch, under whatever
+still holds it — and the refusal queues WITH its `bound_pr`, so the sweep replays the review
+the moment the holder is gone); a never-deleted `branch_live` hold lengthens every later
+sweep, which is why the stale-age ERROR line is the release valve rather than a delete; a
+held lane's fire-settle segment is the settle BUDGET by construction, not a measurement of
+the launch; the union member that carries `hold` is the QUEUED refusal, so `'hold' in result`
+— never the code, which both members admit — is the check; the orphan wait is bounded by the
+90-minute no-advance reaper, which runs BEFORE it, and the comment claiming the 2 h ceiling
+does too was wrong and is corrected. `STAGE_ALTERNATIVES` became a `Map`, so a prototype key
+is structurally unreachable instead of unreachable-by-caller.

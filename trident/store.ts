@@ -535,20 +535,70 @@ export class TridentRunStore {
    *
    * An EMPTY claim set skips the scan entirely and always admits: the gate
    * cannot hold on paths it never measured.
+   *
+   * IT ALSO RE-TAKES THE BRANCH-LIVENESS CHECK, and that is not redundant with
+   * the dispatch gate that already ran. `dispatchBoardBoundBuild` reads the live
+   * rows synchronously and then AWAITS a worktree probe before it gets here, so
+   * a competing dispatch that binds this branch DURING that await passes the
+   * gate and lands on the INSERT — where the live-only unique index
+   * (`(project_slug, slug)` WHERE phase NOT IN terminal, migration 0138) throws
+   * `UNIQUE constraint failed`, which the caller could only report as
+   * `backend_error` (HTTP 500), queueing nothing. Same fact, same transaction as
+   * the write, so the race has nowhere left to run: the caller gets the
+   * `branch_live` refusal it would have got a microsecond earlier, and the card
+   * is QUEUED instead of dropped on the floor.
+   *
+   * BOTH HALVES OF THE COLLISION ARE ASKED FOR: a live row on this repo already
+   * carrying the branch (what the dispatch gate checks), and a live row this
+   * project already has under this slug (what the index enforces — reachable
+   * when the same card is dispatched against a different `repo_path`).
    */
   async createIfClaimsAvailable(
     input: CreateTridentRunInput,
-  ): Promise<{ ok: true; run: TridentRun } | { ok: false; holding_run: TridentRun; path: string }> {
+  ): Promise<
+    | { ok: true; run: TridentRun }
+    | { ok: false; conflict: 'path'; holding_run: TridentRun; path: string }
+    | { ok: false; conflict: 'branch'; holding_run: TridentRun }
+  > {
     return this.db.transaction(async () => {
       const wanted = new Set(input.claimed_paths ?? [])
       if (wanted.size > 0) {
         for (const live of this.listNonTerminalByRepo(input.repo_path)) {
           const path = live.claimed_paths.find((candidate) => wanted.has(candidate))
-          if (path !== undefined) return { ok: false as const, holding_run: live, path }
+          if (path !== undefined) {
+            return { ok: false as const, conflict: 'path' as const, holding_run: live, path }
+          }
         }
+      }
+      const branchHolder = this.liveBranchOrSlugHolder(input)
+      if (branchHolder !== null) {
+        return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
       }
       return { ok: true as const, run: await this.create(input) }
     })
+  }
+
+  /**
+   * The live run that would collide with this insert on its BRANCH or on its
+   * SLUG, or null. Read inside {@link createIfClaimsAvailable}'s transaction —
+   * see the note there for why the dispatch gate's earlier look is not enough.
+   *
+   * A null branch claims nothing: a run with no branch cannot hold one, and the
+   * empty string bound in its place is never a real ref name.
+   */
+  private liveBranchOrSlugHolder(input: CreateTridentRunInput): TridentRun | null {
+    const row = this.db
+      .prepare<TridentRunDbRow, [string, string, string, string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND ( (repo_path = ? AND branch IS NOT NULL AND branch = ?)
+               OR (project_slug = ? AND slug = ?) )
+          ORDER BY started_at ASC
+          LIMIT 1`,
+      )
+      .get(input.repo_path, input.branch ?? '', input.project_slug, input.slug)
+    return row === null ? null : rowToRun(row)
   }
 
   get(id: string): TridentRun | null {

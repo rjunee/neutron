@@ -20,6 +20,7 @@ import {
   DispatchHoldStore,
   buildDispatchHoldSweep,
 } from './dispatch-holds.ts'
+import { slugifyTask } from './slugify-task.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
@@ -998,6 +999,121 @@ describe('DISPATCH TOCTOU — a card bound DURING the async gates is not queued 
     })({ id: 'unrelated' } as never)
     expect(runCount()).toBe(1)
     expect(holds.getByItem(SLUG, 'B')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARGUS r7 (BLOCKER) — THE RACE THE GATE CANNOT WIN ON ITS OWN.
+//
+// Gate (4b) reads the live rows synchronously and then AWAITS the worktree
+// probe. A competitor that binds the branch inside that await is invisible to
+// it, so the dispatch walked on to the INSERT and met the live-only unique
+// index (migration 0138) as `UNIQUE constraint failed: code_trident_runs.
+// project_slug, code_trident_runs.slug` — returned as `backend_error`, mapped
+// to HTTP 500 by `work-board-surface.ts`, and queueing NOTHING, so the card was
+// DROPPED rather than parked behind the lane that beat it.
+//
+// The probe answers NULL in every test below, which is the arm the earlier
+// TOCTOU tests could not reach: they always returned a live worktree holder, so
+// the gate refused before the write and the write-time race never ran.
+// ---------------------------------------------------------------------------
+describe('DISPATCH TOCTOU AT THE WRITE — a branch bound during the probe refuses, and never 500s', () => {
+  const TASK = 'edit trident/foo.ts'
+  const BRANCH = `trident/${slugifyTask(TASK)}`
+
+  /** The competing lane, created INSIDE the gate's only await. */
+  async function winTheRace(): Promise<TridentRun> {
+    return await store.create({
+      slug: slugifyTask(TASK),
+      project_slug: SLUG,
+      repo_path: REPO,
+      task: TASK,
+      branch: BRANCH,
+      // Claims NOTHING, so the path gate cannot refuse first — the branch is
+      // the only contended thing here.
+      claimed_paths: [],
+    })
+  }
+
+  test('the refusal is branch_live with a QUEUED hold, not backend_error', async () => {
+    const board = stubBoard([
+      { id: 'B', title: 'the card whose branch a competitor bound mid-probe', design_doc_ref: null, status: 'upcoming' },
+    ])
+    let competitor!: TridentRun
+    const refusal = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'B' },
+      deps(board, {
+        branchHolderProbe: async () => {
+          competitor = await winTheRace()
+          return null // NO worktree holder — the gate sees nothing and proceeds
+        },
+      }),
+    )
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('branch_live')
+    // The raw constraint never reaches an operator…
+    expect(refusal.message).not.toContain('UNIQUE constraint')
+    expect(refusal.message).toContain(competitor.id.slice(0, 8))
+    expect(refusal.message).toContain(BRANCH)
+    // …the card is QUEUED in the shape and in the table…
+    expect('hold' in refusal).toBe(true)
+    if (!('hold' in refusal)) return
+    expect(refusal.hold).toEqual({ kind: 'branch', branch: BRANCH, holding_run_id: competitor.id })
+    expect(holds.getByItem(SLUG, 'B')).not.toBeNull()
+    // …no second lane was admitted, and no card was bound to one.
+    expect(runCount()).toBe(1)
+    expect(board.attached).toEqual([])
+
+    // AND THE QUEUE IS THE RECOVERY: once the winner goes terminal the sweep
+    // dispatches the card that lost the race.
+    await store.terminalTransition(competitor.id, { phase: 'done' })
+    await buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })(store.get(competitor.id)!)
+    expect(runCount()).toBe(2)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+  })
+
+  test('the same race with the CARD also bound queues nothing, exactly like the gate', async () => {
+    const board = stubBoard([
+      { id: 'B', title: 'the card the competitor took outright, branch and all', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const refusal = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'B' },
+      deps(board, {
+        branchHolderProbe: async () => {
+          const competitor = await winTheRace()
+          board.cards.get('B')!.linked_run_id = competitor.id
+          board.cards.get('B')!.status = 'in_progress'
+          return null
+        },
+      }),
+    )
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('branch_live')
+    expect(refusal.message).toContain('nothing stays queued')
+    expect('hold' in refusal).toBe(false)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+    expect(runCount()).toBe(1)
+  })
+
+  // THE MUST-PASS SIBLING — a free branch at the write still admits. Without
+  // it the fix could be "never insert", which passes both tests above.
+  test('with nobody racing, the same dispatch admits and binds the card', async () => {
+    const board = stubBoard([
+      { id: 'B', title: 'the card nobody raced for at all, dispatched against a free branch', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'B' },
+      deps(board, { branchHolderProbe: async () => null }),
+    )
+    expect(result.ok).toBe(true)
+    expect(runCount()).toBe(1)
+    expect(board.attached.length).toBe(1)
   })
 })
 

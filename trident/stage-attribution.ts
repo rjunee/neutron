@@ -56,16 +56,30 @@ export const HEARTBEAT_STAGES: ReadonlySet<string> = REPEATING_STAGES
  * rescue — 8 of 33 in the measured week. The instant the launcher stops being
  * observed is still the honest boundary between "dispatching" and "the workflow
  * is running", which is what those two segments measure.
+ *
+ * READ THE HELD LANE'S FIRE-SETTLE DURATION AS A BUDGET, NOT A MEASUREMENT
+ * (Argus r6, nit). The substitute stamp is written when the fire promise
+ * resolves — which on this path is the settle timeout itself — so the segment it
+ * closes is always ~`settle_timeout_ms` (~180 s) wide by construction. That is
+ * the right boundary (nothing observed the launcher after it) but it is a
+ * CEILING on how long the launch really took, and averaging it in with settled
+ * lanes would report the budget back as if it were a measurement.
  */
-export const STAGE_ALTERNATIVES: Readonly<Record<string, readonly string[]>> = {
-  'fire-settled': ['fire-unobserved-launch'],
-}
+// A MAP, NOT AN OBJECT LITERAL (Argus r6, nit). Indexed as a plain object,
+// `STAGE_ALTERNATIVES['constructor']` returns a function and the `for…of` below
+// throws — unreachable today, because every `stage` this file looks up comes
+// from the constant `STAGE_SEGMENTS` table or a literal, but that is a fact
+// about today's callers rather than about this table. A Map has no prototype
+// keys, so the safety is structural.
+export const STAGE_ALTERNATIVES: ReadonlyMap<string, readonly string[]> = new Map([
+  ['fire-settled', ['fire-unobserved-launch']],
+])
 
 /** The stage's own stamp, or the first substitute present. See STAGE_ALTERNATIVES. */
 function lookupStage(first: ReadonlyMap<string, StageEvent>, stage: string): StageEvent | undefined {
   const own = first.get(stage)
   if (own !== undefined) return own
-  for (const alternative of STAGE_ALTERNATIVES[stage] ?? []) {
+  for (const alternative of STAGE_ALTERNATIVES.get(stage) ?? []) {
     const event = first.get(alternative)
     if (event !== undefined) return event
   }

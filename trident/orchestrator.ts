@@ -540,9 +540,15 @@ export interface BuildTridentOrchestratorOptions {
    *
    * POSITIVE EVIDENCE ONLY, and only ever to WAIT: null (nothing holds it, or the
    * look failed), a non-live holder, a throw, and an omitted seam all redispatch
-   * exactly as before. Waiting is bounded by the same 90-min no-advance reaper and
-   * 2 h ceiling that bound every other in-flight lane, both of which are evaluated
-   * BEFORE this point in `step()`.
+   * exactly as before.
+   *
+   * WAITING IS BOUNDED, and by ONE of the two bounds — the 90-minute no-advance
+   * reaper, which runs BEFORE this point in `step()` and which a waiting lane
+   * cannot outrun: waiting returns `changed: false`, so `last_advanced_at` never
+   * moves. (Argus r6, nit: this note used to claim the 2 h in-flight ceiling was
+   * also evaluated first. It is not — that check sits AFTER the orphan block —
+   * and citing a bound that has not run yet is exactly how a "bounded" comment
+   * stops being checkable.)
    */
   probe_branch_holder?: (repo_path: string, branch: string) => Promise<BranchHolderProbe | null>
   /**

@@ -1639,3 +1639,128 @@ describe('update() derives the phase from the checkpoint', () => {
     expect([got?.phase, got?.round]).toEqual(['argus', 4])
   })
 })
+
+// ---------------------------------------------------------------------------
+// ARGUS r7 (BLOCKER) — the branch half of the admission transaction.
+//
+// `dispatchBoardBoundBuild`'s liveness gate reads the live rows SYNCHRONOUSLY
+// and then awaits a worktree probe before it reaches this insert, so a
+// competitor that binds the branch inside that window was invisible to it. The
+// insert then met the live-only unique index (migration 0138) as a raw
+// `UNIQUE constraint failed`, which the caller could only report as
+// `backend_error` (HTTP 500) with NOTHING queued. The admission transaction
+// re-takes the same liveness fact, so the race resolves as a refusal.
+// ---------------------------------------------------------------------------
+describe('createIfClaimsAvailable — the branch/slug conflict is a refusal, not a thrown constraint', () => {
+  test('a live run already carrying the branch in this repo refuses with conflict "branch"', async () => {
+    const store = new TridentRunStore(db)
+    const holder = await store.create({
+      slug: 'the-lane-that-won-the-race',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the competitor',
+      branch: 'trident/contested',
+    })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the loser',
+      branch: 'trident/contested',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    expect(admission.ok).toBe(false)
+    if (admission.ok) return
+    expect(admission.conflict).toBe('branch')
+    expect(admission.holding_run.id).toBe(holder.id)
+    // …and nothing was inserted behind the refusal.
+    expect(
+      db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()?.n,
+    ).toBe(1)
+  })
+
+  test('the SLUG half — a live run under this project+slug in another repo refuses too', async () => {
+    const store = new TridentRunStore(db)
+    // Different repo_path, so the branch scan cannot see it; this is exactly
+    // what the live-only unique index enforces, and the throw it used to be.
+    await store.create({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/elsewhere',
+      task: 'the competitor',
+      branch: 'trident/contested',
+    })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the loser',
+      branch: 'trident/contested',
+      claimed_paths: [],
+    })
+    expect(admission.ok).toBe(false)
+    if (admission.ok) return
+    expect(admission.conflict).toBe('branch')
+  })
+
+  // THE MUST-PASS SIBLINGS — the gate is LIVENESS, not branch shape.
+  test('a TERMINAL holder of the same branch and slug admits exactly as before', async () => {
+    const store = new TridentRunStore(db)
+    const holder = await store.create({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the finished lane',
+      branch: 'trident/contested',
+    })
+    await store.terminalTransition(holder.id, { phase: 'done' })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the next round',
+      branch: 'trident/contested',
+      claimed_paths: [],
+    })
+    expect(admission.ok).toBe(true)
+  })
+
+  test('a live run with NO branch holds none — a branchless dispatch still admits', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({ slug: 'branchless-holder', project_slug: 't1', repo_path: '/r', task: 'no branch' })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'branchless-newcomer',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'also no branch',
+      claimed_paths: [],
+    })
+    expect(admission.ok).toBe(true)
+  })
+
+  test('the PATH conflict still reports its own kind and path', async () => {
+    const store = new TridentRunStore(db)
+    const claimer = await store.create({
+      slug: 'claimer',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'edit trident/foo.ts',
+      branch: 'trident/claimer',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'newcomer',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'edit trident/foo.ts as well',
+      branch: 'trident/newcomer',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    expect(admission.ok).toBe(false)
+    if (admission.ok) return
+    expect(admission.conflict).toBe('path')
+    if (admission.conflict !== 'path') return
+    expect(admission.path).toBe('trident/foo.ts')
+    expect(admission.holding_run.id).toBe(claimer.id)
+  })
+})

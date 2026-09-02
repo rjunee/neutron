@@ -355,6 +355,16 @@ export interface TridentTickOptions {
    * a busy instance could run that fan-out many times a minute. The holds queue is
    * waiting on a live lane finishing, an event measured in minutes; asking more
    * often buys nothing and spends another lane's rate limit.
+   *
+   * AND THE PER-SWEEP COST ACCUMULATES (Argus r6, minor). A `branch_live` hold is
+   * never deleted — dropping it would silently lose a queued card — so a queue
+   * that grows lengthens EVERY subsequent sweep by another gh call plus another
+   * 15 s-bounded probe, serialized. That is the deliberate trade (a slow sweep
+   * over a dropped card), and it is why a hold that stops looking transient is
+   * escalated to an ERROR line naming its age
+   * ({@link BRANCH_LIVE_HOLD_STALE_MS} in `dispatch-holds.ts`): the operator cue
+   * to clear a lock nothing will ever release is also the cue that stops the
+   * queue from growing without bound.
    */
   drain_dispatch_holds_min_interval_ms?: number
   /**
