@@ -2550,13 +2550,27 @@ function isNonBlockingFinding(f) {
 function stripAdvisoryMarkers(synthesis) {
   const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : null
   if (!findings) return synthesis
-  const marked = (f) => f && typeof f === 'object' && Object.hasOwn(f, ADVISORY_FINDING_KEY)
+  // BOTH WORKFLOW MARKERS, not just the one this function is named for. `advisory` buys a
+  // single finding past `enforceSeverityGate`; `kind: LANE_FINDING_KIND` buys the whole
+  // ROUND past the fix loop, because `classifyBlock` reads a lane-kinded finding as "there
+  // is nothing here for Forge to change" and 'infra-only' EXITS the loop. The lane kind is
+  // stamped in THIS file by the gates that measured a seat dying, exactly as the advisory
+  // marker is — so a model that returns `kind: 'lane'` on a code blocker is laundering it
+  // into an infra stop. Stripped for the same reason and in the same place, before either
+  // gate reads it and before this file attaches its own lane findings downstream.
+  const marked = (f) =>
+    f &&
+    typeof f === 'object' &&
+    (Object.hasOwn(f, ADVISORY_FINDING_KEY) || f.kind === LANE_FINDING_KIND)
   if (!findings.some(marked)) return synthesis
   return {
     ...synthesis,
     findings: findings.map((f) => {
       if (!marked(f)) return f
       const { [ADVISORY_FINDING_KEY]: _modelSupplied, ...rest } = f
+      // Only the lane VALUE is the model's to lose. A `kind` of its own invention says
+      // nothing to any gate here, so it rides along untouched.
+      if (rest.kind === LANE_FINDING_KIND) delete rest.kind
       return rest
     }),
   }
@@ -2786,7 +2800,13 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // so an unknown/absent/misspelled severity still counts as code and still re-Forges,
 // and a malformed (null) finding does too.
 function classifyBlock(synthesis, deferredPeers) {
-  const findings = (synthesis && synthesis.findings) || []
+  // A NON-ARRAY `findings` IS MALFORMED, NOT EMPTY — and it must not crash the round.
+  // `(synthesis && synthesis.findings) || []` accepted any truthy value and then called
+  // `.filter` on it, so a synthesis carrying `findings: 'oops'` threw a TypeError out of
+  // `runReviewRound`. Every sibling gate in this file asks `Array.isArray` first; this one
+  // now does too, and reads the unreadable list as NO findings — which lands on the 'code'
+  // arm at the bottom, the direction that re-Forges rather than exiting the loop.
+  const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : []
   const codeFindings = findings.filter((f) => {
     if (f && f.kind === LANE_FINDING_KIND) return false
     if (isNonBlockingFinding(f)) return false
@@ -4473,6 +4493,12 @@ function ciFindingsBlock(ciFindings) {
  * every failing check on the PR stays a blocker. Only a base we could read, and read as
  * red, may excuse anything — and it excuses a check BY NAME, so a branch that reds a
  * check the base does not still pays its round.
+ *
+ * A MIXED BASE (some rows red, others still running) is `red`, and that is deliberate
+ * rather than a hole in the rule above: the excuse is granted per NAME, from `failing`
+ * only, so a base row that never settled contributes no name and excuses nothing. What
+ * "pending excuses nothing" means here is exactly that — the check whose base state we
+ * do not know yet is not in this set, and its PR-side red stays a blocker.
  */
 function ciPreexistingNames(base) {
   if (!base || base.status !== 'red' || !Array.isArray(base.failing)) return new Set()
@@ -4895,11 +4921,14 @@ async function probeCiBase(round) {
   // ENCODED AND QUOTED, exactly as `probeRequiredChecks` does below. `baseBranch` is a
   // workflow argument and `git check-ref-format --branch 'main$(id)'` accepts that name,
   // so a bare interpolation would put a legal branch name inside a bash command as code.
-  // PER SEGMENT, because a ref is a PATH: whole-string `encodeURIComponent` turns
-  // `release/1.x` into `release%2F1.x`, which the commits endpoint does not resolve, and
-  // the hatch then dies silently on every repository that does not build off a
-  // single-segment branch. Encoding each segment keeps the separator and still leaves no
-  // shell metacharacter in the string. The 40-hex `pinnedBase` path is unaffected.
+  // THE SHELL SAFETY IS `shSingleQuote`, not the encoding — the whole API argument is
+  // single-quoted below, and that is what makes a metacharacter in `ref` inert. The
+  // encoding is about URL CORRECTNESS, and it is PER SEGMENT because a ref is a PATH:
+  // whole-string `encodeURIComponent` turns `release/1.x` into `release%2F1.x`, which the
+  // commits endpoint does not resolve, and the hatch then dies silently on every
+  // repository that does not build off a single-segment branch. Encoding each segment
+  // keeps the separator and leaves the ref resolvable. The 40-hex `pinnedBase` path is
+  // unaffected by either.
   const encodedRef = encodeRefPath(ref)
   const runsApi = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs?per_page=100`)} --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
   // BOTH KINDS OF CI, because the PR side reads both. `gh pr checks` reports check runs
@@ -5225,9 +5254,15 @@ function withSuiteBlocker(synthesis, suiteFindings) {
   // no findings is malformed, not benign, and a review we did not get is not an approval.
   // What changes is only `blockKind`: 'infra-only' EXITS the fix loop instead of
   // re-Forging, which is the classification the loop already documents for "the gate
-  // refuses to APPROVE but there is no code-side action". `infraTerminalCause` reads the
-  // merged list, so the stop is reported with the suite finding's own title rather than
-  // silently.
+  // refuses to APPROVE but there is no code-side action".
+  //
+  // AND THE STOP REPORTS NO CAUSE, deliberately. `infraTerminalCause` excludes every
+  // finding this file has already declared non-blocking, so an advisory-only stop
+  // measures '' — which is what keeps `classifyInnerFailure` (trident/orchestrator.ts)
+  // from reading it as "infrastructure" and auto-retrying the whole run back into the
+  // same round. The findings are not lost: they ride out on the terminal result's
+  // `findings` and reach the operator there. Only the one-line CAUSE is empty, and it
+  // is empty on purpose.
   if (!findings.every((f) => isNonBlockingFinding(f))) return merged
   return { ...merged, blockKind: 'infra-only' }
 }

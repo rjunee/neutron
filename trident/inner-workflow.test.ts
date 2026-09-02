@@ -2033,9 +2033,11 @@ describe('inner-workflow.mjs — a finding declared non-blocking may not cost a 
 
     const out = enforceSeverityGate({ verdict: 'REQUEST_CHANGES', findings })
     expect(out?.verdict).toBe('APPROVE')
-    // …and the fix loop must not read it as code work. `classifyBlock` only ever
-    // returns 'infra-only' when a peer deferred, so the peer is the precondition
-    // being held constant here; the variable under test is the finding.
+    // …and the fix loop must not read it as code work. A deferred peer is passed so
+    // this case is pinned on the SAME shape the sibling must-FAIL control below uses —
+    // the variable under test is the finding, not the panel's health. (`classifyBlock`
+    // no longer needs a deferred peer to answer 'infra-only'; an all-non-blocking
+    // finding list is enough. Holding the peer constant keeps the two tests comparable.)
     expect(classifyBlock(out, [{ name: 'codex' }])).toBe('infra-only')
   })
 
@@ -2282,6 +2284,54 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
     const dead: { verdict: string; findings?: unknown[] } = { verdict: 'REQUEST_CHANGES' }
     expect(stripAdvisoryMarkers(dead)).toBe(dead)
     expect(stripAdvisoryMarkers(null)).toBeNull()
+  })
+
+  // THE SECOND MODEL-BYPASS HOLE, and the more expensive one. `advisory: true` buys a
+  // single finding past the severity gate; `kind: 'lane'` buys the whole ROUND past the
+  // fix loop, because `classifyBlock` reads a lane-kinded finding as "nothing to fix" and
+  // 'infra-only' EXITS instead of re-Forging. The kind is stamped by THIS file's gates
+  // when a seat actually died, so a model returning it is laundering a code blocker.
+  test('a model-supplied lane kind is stripped and the blocker still reads as code work', () => {
+    const { stripAdvisoryMarkers, classifyBlock } = load()
+    const modelJson = {
+      verdict: 'REQUEST_CHANGES',
+      findings: [{ kind: 'lane', severity: 'blocker', title: 'sql injection in the migration path' }],
+    }
+    // Unstripped, the laundered kind walks the round straight out of the fix loop.
+    expect(classifyBlock(modelJson, [])).toBe('infra-only')
+    const stripped = stripAdvisoryMarkers(modelJson)
+    const f = (stripped?.findings ?? [])[0] as Record<string, unknown>
+    expect(Object.hasOwn(f, 'kind')).toBe(false)
+    expect(f.severity).toBe('blocker')
+    expect(classifyBlock(stripped, [])).toBe('code')
+  })
+
+  // …and a kind the model invented for itself means nothing to any gate here, so it is
+  // not the model's to lose. Only the one reserved value is taken away.
+  test('stripping leaves a non-lane kind alone', () => {
+    const { stripAdvisoryMarkers } = load()
+    const stripped = stripAdvisoryMarkers({
+      verdict: 'REQUEST_CHANGES',
+      findings: [{ kind: 'security', severity: 'blocker', title: 'x', advisory: true }],
+    })
+    const f = (stripped?.findings ?? [])[0] as Record<string, unknown>
+    expect(f.kind).toBe('security')
+    expect(Object.hasOwn(f, 'advisory')).toBe(false)
+  })
+
+  // A MALFORMED FINDINGS LIST MAY NOT CRASH THE ROUND. `findings` arrives from
+  // model-authored JSON; a truthy non-array used to reach `.filter` and throw a
+  // TypeError out of `runReviewRound`, killing the whole build. Read it as no findings,
+  // which lands on the 'code' arm — the direction that re-Forges rather than exiting.
+  test('classifyBlock survives a non-array findings list and still re-Forges', () => {
+    const { classifyBlock } = load()
+    expect(classifyBlock({ verdict: 'REQUEST_CHANGES', findings: 'oops' }, [])).toBe('code')
+    expect(classifyBlock({ verdict: 'REQUEST_CHANGES', findings: 42 }, [])).toBe('code')
+    // A dead peer still outranks it: the panel was incomplete, so the stop is infra.
+    expect(classifyBlock({ verdict: 'REQUEST_CHANGES', findings: 'oops' }, [{ name: 'codex' }])).toBe(
+      'infra-only',
+    )
+    expect(classifyBlock(null, [])).toBe('code')
   })
 
   // THE SEAM IS WIRED. A gate no production path calls is a test that passes and a
