@@ -402,6 +402,19 @@ interface QueueDecision {
 }
 
 /**
+ * What the hold write ACTUALLY did — see `queueHold` inside
+ * {@link dispatchBoardBoundBuild}. `queued` is the {@link QueueDecision}'s
+ * intent confirmed by a write that returned; a non-null `error` means the store
+ * threw and NOTHING is queued, so no refusal may claim a `hold` shape.
+ */
+interface QueueOutcome {
+  /** A hold row exists for this card because this call wrote one. */
+  queued: boolean
+  /** The hold store's failure message, or null when the write went through. */
+  error: string | null
+}
+
+/**
  * Create a board-bound trident run, enforcing the required-item + ask-gate
  * chokepoint rules. Pure of any chat/tool framing — the two callers wrap the
  * typed result in their own response shape.
@@ -550,17 +563,45 @@ export async function dispatchBoardBoundBuild(
           'owns it; the card moves when that run finishes, not when this clears.'
     return { queued: deps.holds !== undefined && !linkedLive, linkedLive, linkedRunId, notQueuedClause }
   }
-  const queueHold = async (entry: DispatchHoldInput, decision: QueueDecision): Promise<void> => {
-    if (deps.holds === undefined) return
-    // NOT WRITING IS NOT ENOUGH — DELETE WHAT IS ALREADY THERE (Argus r3
-    // BLOCKER, generalised in r4). Skipping the upsert only keeps THIS refusal
-    // from queuing the card; a row seeded by an EARLIER dispatch, before the
-    // card had a live run, still survives it and re-fires once that run
-    // terminalizes. The delete is idempotent and scoped to this (project, card)
-    // pair, which is the hold table's own key.
-    if (decision.queued) await deps.holds.upsert(entry)
-    else await deps.holds.deleteByItem(deps.project_slug, board_item_id)
+  // A FAILED HOLD WRITE IS REPORTED, NEVER THROWN (Argus r9 BLOCKER). Both arms
+  // are DB writes and both can fail — a locked SQLite file, a closed handle, a
+  // full disk. Two of the three refusal gates that call this run OUTSIDE every
+  // try/catch in this function (the blocker gate, and the branch-liveness gate
+  // whose probe `try` closes before the write), so a throw there escaped
+  // `dispatchBoardBoundBuild` as a REJECTED PROMISE and turned a typed,
+  // recoverable refusal into an unhandled failure at the surface — both callers
+  // (`trident/code-command.ts`, `open/composer.ts`) await this function with no
+  // local try, and only the sweep (`trident/dispatch-holds.ts`) contains its
+  // own per-hold throws. So the throw is contained HERE, once, for every gate,
+  // and REPORTED instead: the caller still gets its typed refusal — the card
+  // really is blocked, the branch really is held, and that fact is what the
+  // caller acts on — with the QUEUE CLAIM retracted in both the prose and the
+  // shape, which is the one thing a failed write actually invalidates.
+  const queueHold = async (entry: DispatchHoldInput, decision: QueueDecision): Promise<QueueOutcome> => {
+    if (deps.holds === undefined) return { queued: false, error: null }
+    try {
+      // NOT WRITING IS NOT ENOUGH — DELETE WHAT IS ALREADY THERE (Argus r3
+      // BLOCKER, generalised in r4). Skipping the upsert only keeps THIS refusal
+      // from queuing the card; a row seeded by an EARLIER dispatch, before the
+      // card had a live run, still survives it and re-fires once that run
+      // terminalizes. The delete is idempotent and scoped to this (project, card)
+      // pair, which is the hold table's own key.
+      if (decision.queued) await deps.holds.upsert(entry)
+      else await deps.holds.deleteByItem(deps.project_slug, board_item_id)
+    } catch (err) {
+      return { queued: false, error: err instanceof Error ? err.message : String(err) }
+    }
+    return { queued: decision.queued, error: null }
   }
+  // The sentence appended to a refusal whose queue write failed. It retracts the
+  // "…it will dispatch automatically…" promise the message already made and
+  // hands the operator the only action left, because nothing will re-fire this
+  // card on its own now.
+  const queueFailureClause = (outcome: QueueOutcome): string =>
+    outcome.error === null
+      ? ''
+      : ` NOTE: nothing could be QUEUED — the hold store failed (${outcome.error}) — so this card will NOT ` +
+        're-dispatch on its own; re-dispatch it yourself once the reason above clears.'
 
   // (4) DECLARED BLOCKERS — do not fan out onto an unmet dependency.
   //
@@ -580,7 +621,7 @@ export async function dispatchBoardBoundBuild(
     if (status === 'failed') {
       message += ' That blocker has FAILED; it must be retried before this card can start.'
     }
-    await queueHold(
+    const outcome = await queueHold(
       {
         project_slug: deps.project_slug,
         board_item_id,
@@ -595,10 +636,10 @@ export async function dispatchBoardBoundBuild(
     return {
       ok: false,
       code: 'held',
-      message,
+      message: message + queueFailureClause(outcome),
       // The `hold` shape is a claim that a queue entry EXISTS; only make it when
-      // one was really written.
-      ...(decision.queued ? { hold: { kind: 'blocker' as const, blocker_id } } : {}),
+      // one was really written — which now includes "the write did not throw".
+      ...(outcome.queued ? { hold: { kind: 'blocker' as const, blocker_id } } : {}),
     }
   }
 
@@ -718,7 +759,7 @@ export async function dispatchBoardBoundBuild(
     // DELETES instead, because writing a row anyway — or leaving one an
     // earlier dispatch wrote — is what let a stopped/failed card auto-restart
     // once that run terminalized. See the note at `queueDecision`.
-    await queueHold(
+    const outcome = await queueHold(
       {
         project_slug: deps.project_slug,
         board_item_id,
@@ -737,18 +778,20 @@ export async function dispatchBoardBoundBuild(
       item: board_item_id,
       branch,
       held_on_run_id,
+      ...(outcome.error !== null ? { hold_write_failed: outcome.error } : {}),
     })
     return {
       ok: false,
       code: 'branch_live',
-      message,
+      message: message + queueFailureClause(outcome),
       // SAY IT IS QUEUED IN THE SHAPE, NOT ONLY IN THE PROSE. `held` and the
       // path-claim refusal both carry this; a `branch_live` without it made a
       // queued card look dropped to every structured consumer. It is present
       // ONLY when a hold row was really written: with no store — or behind the
-      // card's own live run — nothing was persisted, and a `hold` shape then
-      // claims a queue entry that does not exist.
-      ...(decision.queued
+      // card's own live run, or after a THROWING write (Argus r9) — nothing was
+      // persisted, and a `hold` shape then claims a queue entry that does not
+      // exist.
+      ...(outcome.queued
         ? {
             hold: {
               kind: 'branch' as const,
@@ -935,7 +978,7 @@ export async function dispatchBoardBoundBuild(
         (decision.queued
           ? 'this build will start automatically when that run goes terminal.'
           : decision.notQueuedClause)
-      await queueHold(
+      const outcome = await queueHold(
         {
           project_slug: deps.project_slug,
           board_item_id,
@@ -951,8 +994,8 @@ export async function dispatchBoardBoundBuild(
       return {
         ok: false,
         code: 'held',
-        message,
-        ...(decision.queued
+        message: message + queueFailureClause(outcome),
+        ...(outcome.queued
           ? {
               hold: {
                 kind: 'path' as const,
@@ -982,12 +1025,14 @@ export async function dispatchBoardBoundBuild(
     // refusal and the same hold rather than a 500 that queues nothing. Any
     // other failure is still a genuine `backend_error`.
     if (/UNIQUE constraint failed:\s*code_trident_runs\.(project_slug|slug)/i.test(detail)) {
-      // CONTAINED, because this one is OUTSIDE the try (Argus r8 nit). The
-      // sibling call at the admission site runs inside it, so a throwing
-      // `holds.upsert`/`deleteByItem` there degrades to `backend_error`; here it
-      // would escape `dispatchBoardBoundBuild` as a rejected promise and turn a
-      // recoverable refusal into an unhandled failure at the surface. Same
-      // degradation, spelled out.
+      // BELT AND BRACES, kept from Argus r8. The hold write itself no longer
+      // throws — `queueHold` contains it for EVERY gate now (Argus r9 BLOCKER,
+      // which is what made the two unwrapped gates above safe) and reports the
+      // failure in the refusal instead. This catch remains only for the rest of
+      // `refuseBranchLive`: its `queueDecision` re-read of the board and the
+      // store, and the log line. Both run in a catch block already handling a
+      // failed write, so a second failure here degrades to `backend_error`
+      // rather than escaping as a rejected promise.
       try {
         return await refuseBranchLive(
           `Refused: branch ${branch} is already being built by a live run that won the race for this card while ` +

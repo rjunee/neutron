@@ -575,6 +575,74 @@ describe('branch liveness refusal (branch_live)', () => {
     expect('hold' in result).toBe(false)
   })
 
+  // ARGUS r9 (BLOCKER): the branch-liveness gate's hold write sits AFTER the
+  // holder probe's try/catch closes and BEFORE the admission try opens, so a
+  // throwing `holds.upsert` escaped `dispatchBoardBoundBuild` as a rejected
+  // promise — and both callers (`trident/code-command.ts`, `open/composer.ts`)
+  // await it with no local try. A recoverable refusal became an unhandled
+  // failure at the surface. It must stay a TYPED refusal, with the queue claim
+  // retracted in both the prose and the shape.
+  test('a THROWING hold store still returns the typed branch_live refusal — never a rejected promise', async () => {
+    const repoDir = makeCommittedRepo('repo-hold-throws')
+    addLockedWorktree(repoDir, 'wt-hold-throws', `claude agent test (pid ${process.pid})`)
+    const holds = new DispatchHoldStore(db)
+    holds.upsert = async () => {
+      throw new Error('database is locked')
+    }
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir, { holds }))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    // The refusal itself survives — the branch really IS held, and that is what
+    // the caller acts on.
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain(BRANCH)
+    // …and the queue promise it just made is retracted, naming the cause.
+    expect(result.message).toContain('nothing could be QUEUED')
+    expect(result.message).toContain('database is locked')
+    expect(result.message).toContain('re-dispatch it yourself')
+    // No `hold` shape may claim a row that failed to write.
+    expect('hold' in result).toBe(false)
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+  })
+
+  // ARGUS r9 (BLOCKER), the sibling gate: the blocker gate's `queueHold` is
+  // likewise outside every try. Same containment, same retraction.
+  test('a THROWING hold store still returns the typed held refusal from the blocker gate', async () => {
+    const repoDir = makeCommittedRepo('repo-blocker-throws')
+    const blockerBoard: TridentBoardBinder = {
+      get: (_slug, id) =>
+        id === 'dep-card'
+          ? { id: 'dep-card', title: 'the dependency', design_doc_ref: null, status: 'in_progress' }
+          : {
+              id: 'ready',
+              title: 'wire the CSV export button to the new endpoint with tests',
+              design_doc_ref: null,
+              blockers: ['dep-card'],
+            },
+      attachRun: async () => {},
+    }
+    const holds = new DispatchHoldStore(db)
+    holds.upsert = async () => {
+      throw new Error('database is locked')
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: blockerBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('held')
+    expect(result.message).toContain('dep-card')
+    expect(result.message).toContain('nothing could be QUEUED')
+    expect(result.message).toContain('database is locked')
+    expect('hold' in result).toBe(false)
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+  })
+
   // ARGUS r5 (minor): the run-holder arm promised "dispatches automatically once
   // nothing live holds the branch" — but `buildDispatchHoldSweep` DELETES a hold
   // whose card already has a live linked run, so for the common shape (the

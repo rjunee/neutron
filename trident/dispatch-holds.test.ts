@@ -679,6 +679,48 @@ describe('STUCK CLAIM CANNOT WEDGE THE QUEUE', () => {
     expect(holds.list()).toEqual([])
   })
 
+  // ARGUS r9 (minor): the sweep read `store.get(linked_run_id)` with no project
+  // comparison — and `TridentRunStore.get` is keyed on the run id ALONE. A stale
+  // or mis-copied id naming ANOTHER project's live run therefore read as this
+  // card's driver, and this path's consequence is destructive: the hold is
+  // DELETED, while that foreign run terminalizes on a different board and never
+  // re-dispatches this card. The card is then gone with nothing left to revive
+  // it. Same scoping the r8 fix applied to `board-dispatch.ts`'s queueDecision.
+  test('a linked_run_id pointing at ANOTHER project’s live run does not drop the hold — the card still dispatches', async () => {
+    const foreign = await store.create({
+      slug: 'foreign',
+      project_slug: 'some-other-project',
+      repo_path: '/build/other/code',
+      task: 'build something else entirely',
+      claimed_paths: [],
+    })
+    const board = stubBoard([
+      {
+        id: 'B',
+        title: 'a card whose linked_run_id names a run this project does not own',
+        design_doc_ref: null,
+        status: 'upcoming',
+        linked_run_id: foreign.id,
+      },
+    ])
+    await holds.upsert({
+      project_slug: SLUG,
+      board_item_id: 'B',
+      task: 'Edit trident/other.ts',
+      hold_kind: 'path',
+      hold_reason: 'queued behind a claim that has since cleared',
+    })
+
+    await buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })({ id: 'terminal' } as never)
+
+    // The foreign run drives nothing here, so the queued card really dispatched
+    // (2 rows = the foreign one + this card's) and the hold cleared BY dispatch,
+    // not by the drop. With the unscoped read this was 1 run and a deleted hold.
+    expect(runCount()).toBe(2)
+    expect(board.attached.map((a) => a.id)).toEqual(['B'])
+    expect(holds.list()).toEqual([])
+  })
+
   // ARGUS r3 (BLOCKER, state-based half): the refusal behind a card's own live
   // run promises "nothing stays queued". Pinned END TO END here, over the real
   // store and the real sweep rather than a call counter: a hold that already

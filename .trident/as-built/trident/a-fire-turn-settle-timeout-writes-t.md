@@ -62,8 +62,10 @@ changes nothing, and with no evidence the `failed` path stays byte-identical:
   possibly-live one. Orphan recovery now consults the same branch-holder probe
   (orchestrator option `probe_branch_holder`, wired to `defaultBranchHolderProbe`)
   and WAITS instead of redispatching while a live lock holds the run's branch. The
-  90-min no-advance reaper and the 2 h ceiling, both evaluated earlier in `step()`,
-  still bound that wait.
+  90-min no-advance reaper, evaluated earlier in `step()`, still bounds that wait —
+  and it alone does. An earlier draft of this line also claimed a 2 h ceiling; that
+  was wrong (see the round-16 note below) and is struck here rather than left to
+  contradict its own correction.
 - The held row is written from what the gatherer READ, not from the pre-fire
   snapshot. `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly, so
   saving the pinned row back would erase the detached workflow's own progress — the
@@ -583,3 +585,54 @@ green respectively. The r8 findings about the worktree-lock reason with no ` sta
 `branch_live` holds paying full dispatch cost every drain are left as written down: both are
 deliberate trades already argued in-file, and both would be closed by changing a bound rather
 than a defect.
+
+### Round 19 (2026-09-02) — the confirmed r9 blocker: a fallible hold write may not become a rejected promise
+
+**The blocker.** `refuseBranchLive`'s hold write sat outside every `try` at the branch-liveness
+gate (the probe's own `try` closes before it, and the admission `try` opens after it), and so did
+the blocker gate's `queueHold`. Both arms of `queueHold` are DB writes — `holds.upsert` and
+`holds.deleteByItem` — so a locked SQLite file turned a typed, recoverable refusal into a
+REJECTED PROMISE out of `dispatchBoardBoundBuild`, which both callers (`trident/code-command.ts`,
+`open/composer.ts`) await with no local `try`. Only the sweep contained its own per-hold throws.
+
+**The fix is one containment, not three.** `queueHold` now catches and RETURNS a `QueueOutcome`
+(`queued`, `error`) instead of throwing, so every gate that writes a hold is covered by
+construction rather than by remembering to wrap the next one. What degrades is only the part the
+failed write actually invalidates: the refusal keeps its typed code — the card really is blocked,
+the branch really is held, and that fact is what the caller acts on — while the queue claim is
+retracted in BOTH the prose (a NOTE naming the store's own error and telling the operator to
+re-dispatch by hand, because nothing will re-fire the card now) and the shape (no `hold` field,
+which is a claim a row exists). Choosing that over `backend_error` is deliberate: a 500 loses the
+reason the dispatch was refused, and the reason is the actionable half. The r8 wrapper in the
+outer catch stays as belt and braces for the rest of `refuseBranchLive` — its `queueDecision`
+re-read and its log line — with its comment corrected to say so.
+
+Pinned by two tests over the REAL `DispatchHoldStore` with a throwing `upsert`, one per unwrapped
+gate: the call resolves to `branch_live` / `held`, names `database is locked`, says nothing could
+be QUEUED, and carries no `hold`. Without the containment both tests fail by rejection.
+
+**Also closed (r9 minor).** `buildDispatchHoldSweep` read `store.get(item.linked_run_id)` with no
+project comparison — the same unscoped lookup the r8 fix closed in `queueDecision`, but with the
+DESTRUCTIVE consequence: a foreign project's live run read as this card's driver deletes the hold,
+and that run terminalizes on another board and never re-dispatches this card, so the card is gone
+with nothing left to revive it. Scoped to the hold's own project; the test seeds exactly that
+shape and asserts the card DISPATCHES (2 runs, card attached) rather than being silently dropped,
+and it fails against the unscoped read.
+
+**Doc.** The orphan-wait bound is stated once, correctly: the 90-minute no-advance reaper, and it
+alone. The earlier line claiming the 2 h ceiling also bounds it contradicted its own correction
+lower in this file and is struck.
+
+**Not done, deliberately.** The r9 major about the settle-timeout gather being a single
+synchronous pass at the timeout instant — while the card's own measurements put first evidence
+63-277 s later — is left for a follow-up round, as BOTH reviewers who raised it recommended.
+Closing it means holding the row open across ticks and re-asking, and the negative control
+(`6948da2d`, a fire that never launched) must still terminalize; that is a change to the
+orchestrator's step state machine, not a wrap, and it does not belong in the same round as a
+one-function containment fix on an otherwise approved diff.
+
+**The mutation nomination CHANGES this round**, to the behaviour this round is about:
+`trident/board-dispatch.ts`, the `queueHold` catch's `return { queued: false, error: … }` replaced
+by `throw err` — measured at this head, guard `bun test trident/board-dispatch.test.ts` 40 pass /
+2 fail mutated against 40 pass / 0 fail clean, control `bun test trident/liveness.test.ts` 8 pass
+/ 0 fail mutated. The find-string occurs exactly once.

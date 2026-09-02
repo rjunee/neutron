@@ -331,7 +331,18 @@ export function buildDispatchHoldSweep(deps: {
         const dispatchDeps = deps.makeDispatchDeps(hold)
         if (item.linked_run_id !== null && item.linked_run_id !== undefined) {
           const linked = dispatchDeps.store.get(item.linked_run_id)
-          if (linked !== null && !['done', 'failed', 'stopped'].includes(linked.phase)) {
+          // SCOPE THE LOOKUP TO THIS HOLD'S PROJECT (Argus r9, minor — the same
+          // hazard the r8 fix closed at `board-dispatch.ts`'s `queueDecision`).
+          // `TridentRunStore.get` is keyed on the run id ALONE, so a stale or
+          // mis-copied `linked_run_id` naming ANOTHER project's live run reads
+          // here as this card's driver — and the consequence on this path is
+          // DESTRUCTIVE: the hold is deleted, and that foreign run's terminal
+          // event fires on a different project's board and never re-dispatches
+          // this card, so the card is dropped with nothing left to revive it. A
+          // run that is not this project's drives nothing here, so the hold
+          // stands and the sweep re-dispatches as usual.
+          const phase = linked !== null && linked.project_slug === hold.project_slug ? linked.phase : null
+          if (phase !== null && !['done', 'failed', 'stopped'].includes(phase)) {
             // A successful dispatch through any entry point owns the card now.
             // Drop a stale hold rather than attaching a second concurrent run.
             await deps.holds.deleteByItem(hold.project_slug, hold.board_item_id)
