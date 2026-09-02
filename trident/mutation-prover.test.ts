@@ -1412,6 +1412,25 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       // …and node's second spelling of that same option, which the anchored
       // regex would otherwise leave open as a free rename of the first.
       ['src/limit.mjs', ['node', '--test', '--env-file-if-exists=./tests/.env', 'tests/other.test.mjs']],
+      // …node's own config spellings, which carry an `--import` through the
+      // runtime's options exactly as the dotenv does: first the one that NAMES
+      // the file, attached and separated,
+      ['src/limit.mjs', ['node', '--test', '--experimental-config-file=./tests/node.config.json', 'tests/o.test.mjs']],
+      ['src/limit.mjs', ['node', '--test', '--experimental-config-file', './tests/node.config.json', 'tests/o.test.mjs']],
+      // …then the VALUELESS one, which reads `node.config.json` from the cwd and
+      // so hands a value-shaped rule nothing to look at. Written LAST it carries
+      // nothing and is followed by nothing: only the name-only arm can see it,
+      // and deleting that arm reddens this row alone.
+      ['src/limit.mjs', ['node', '--test', 'tests/other.test.mjs', '--experimental-default-config-file']],
+      // …the same option written where a value-shaped rule would have refused
+      // for the WRONG reason — reading the test path that follows it as the
+      // config — which is a refusal that disappears the moment the argv is
+      // re-ordered,
+      ['src/limit.mjs', ['node', '--test', '--experimental-default-config-file', 'tests/other.test.mjs']],
+      // …and bun's and jest's SHORT `--config`, attached and separated: the
+      // whole forgery above in two characters less.
+      ['src/limit.ts', ['bun', 'test', '-c./tests/bunfig.toml', 'tests/other.test.ts']],
+      ['src/limit.ts', ['bun', 'test', '-c', './tests/bunfig.toml', 'tests/other.test.ts']],
       // …asked of a COLLECTIBLE target too, because the config preloads a
       // support library under `tests/` into the guard process exactly as it
       // preloads `src/`.
@@ -1440,6 +1459,13 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     // coverage-reporting guard in the repo.
     for (const [file, guard] of [
       ['src/limit.ts', ['bun', 'test', '--coverage-reporter=lcov', 'tests/other.test.ts']],
+      // …AND ON THE SHORT LETTER, which is refused for what it CARRIES and not
+      // on sight. `go test -cover ./cmd/` splits to `-c` + `over`, which is no
+      // path, and a trailing `-c` carries nothing at all — the name-only arm is
+      // long-only precisely so go's valueless compile flag keeps a legal guard.
+      // Widen either and both rows go red.
+      ['tests/support/lib.ts', ['go', 'test', '-cover', './cmd/']],
+      ['tests/support/lib.ts', ['go', 'test', './cmd/', '-c']],
     ] as const) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
       const { prover: ok } = proverOver({}, fs)
@@ -1758,7 +1784,12 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     for (const guard of [
       ['bun', 'test', '--timeout', '1000'],
       ['bun', 'test', '--timeout=1000'],
-      ['bun', 'test', '--reporter', 'junit'],
+      // NOT `--reporter junit`, though that is the shape this row was written
+      // with: a reporter is now refused on its SPELLING by `loadHookCarrying`,
+      // which fires before this arm, so the row would have passed for a reason
+      // that has nothing to do with the operand it claims to be about.
+      // `--bail 3` carries a non-path operand and no shape rule touches it.
+      ['bun', 'test', '--bail', '3'],
     ]) {
       const file = 'src/thing_test.ts'
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
@@ -1933,8 +1964,14 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     // contains it — `src/thing_test.ts` included. Each kept the no-path arm
     // from firing while the runner discovered the mutated file and ran it.
     for (const [file, guard] of [
-      ['tests/support/lib.ts', ['bun', 'test', '--reporter=junit', '--reporter-outfile=report.xml']],
-      ['tests/support/lib.ts', ['bun', 'test', '--reporter', 'junit.xml']],
+      // SPELLED WITH THE OUTFILE ALONE, not with `--reporter=junit` beside it:
+      // a reporter is refused on its spelling by `loadHookCarrying` now, which
+      // fires before this arm and would have made both rows pass without ever
+      // asking the question they are here to ask. `--reporter-outfile` names a
+      // file the runner WRITES and is deliberately legal, so the only thing
+      // that can refuse these is the no-selection arm this row pins.
+      ['tests/support/lib.ts', ['bun', 'test', '--reporter-outfile=report.xml']],
+      ['tests/support/lib.ts', ['bun', 'test', '--reporter-outfile', 'junit.xml']],
       ['src/thing_test.ts', ['bun', 'test', 'thing']],
       ['src/thing_test.ts', ['make', 'test', 'FOO=bar.out']],
     ] as const) {

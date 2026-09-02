@@ -580,7 +580,12 @@ function worktreeCaptureFailureSuffix(detail: string): string {
  *  mutation gate's no-production-file exemption names EVERY changed file, so a
  *  large test-only refactor hands this a multi-kilobyte string. Truncated HERE
  *  and never at the source: the full list still reaches
- *  `log.info('mutation_proof_exempt')`, and the note says where to find it. */
+ *  `log.info('mutation_proof_exempt')`, and the note says where to find it.
+ *
+ *  THE CEILING IS ON THE PREFIX KEPT, NOT ON THE RESULT. The pointer suffix is
+ *  appended PAST it, so a truncated note runs to roughly 310 characters — which
+ *  is what `orchestrator.test.ts` pins, and saying "capped at 240" here read as
+ *  a promise the code does not make. */
 const TICK_NOTE_CEILING = 240
 
 /** EXPORTED for the test that pins the cut: the boundary case is one character
@@ -607,6 +612,10 @@ export function truncateNote(reason: string): string {
  * `code_trident_stage_events.meta`, once per exempt merge. Generous enough that
  * no real diff is cut (a 4 000-character reason is ~120 paths) and small enough
  * that a pathological one cannot put an unbounded blob on the row.
+ *
+ * ON THE PREFIX KEPT, NOT ON THE RESULT, exactly as `TICK_NOTE_CEILING` is: the
+ * pointer suffix is appended past the cut, so a truncated reason lands near
+ * 4 070 characters. Bounded either way; the number is just not the total.
  */
 const STAGE_REASON_CEILING = 4_000
 

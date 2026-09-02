@@ -659,7 +659,13 @@ function carriedValue(arg: string): string {
  * so is `--config=./tests/bunfig.toml`, which names the config instead of the
  * hook and reached `proved: true` through the real gate on bun 1.3.13; so is
  * `--env-file=./tests/.env`, whose `NODE_OPTIONS` sets the hook a third way.
- * See `loadHookCarrying`, which refuses each shape whatever file it names.
+ * EVERY SPELLING MEANS EVERY SPELLING, and three of them were still open a
+ * round ago: node's `--experimental-config-file=<file>`, node's valueless
+ * `--experimental-default-config-file` (which reads `node.config.json` from the
+ * cwd and so carries no value for a value-shaped rule to catch), and the short
+ * `-c` that bun and jest accept for `--config`. See `loadHookCarrying`, which
+ * refuses each shape whatever file it names — and, for a long name, whether or
+ * not it names one at all.
  *
  * A WRAPPER'S BODY WAS THE SAME RESIDUAL AND IS NO LONGER ONE. A `package.json`
  * script or a `Makefile` recipe is a command line the BRANCH wrote, and the
@@ -1130,10 +1136,21 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * that names a third file.
  *
  * THE SHORT SPELLING IS AMBIGUOUS AND IS READ NARROWLY. `-r` is node's and
- * bun's `--require`, but go's own `-run` and `-race` also begin `-r` and carry
- * an attached value by the same rule — so the short form counts only when what
- * it carries LOOKS LIKE A PATH (`-r./tests/setup.ts` does; `-run`'s `un` does
+ * bun's `--require`, and `-c` is bun's and jest's `--config`, but go's own
+ * `-run` and `-race` also begin `-r` and carry an attached value by the same
+ * rule — so an ATTACHED short value counts only when it LOOKS LIKE A PATH
+ * (`-r./tests/setup.ts` and `-c./tests/bunfig.toml` do; `-run`'s `un` does
  * not). A long name is unambiguous and needs no such test.
+ *
+ * `-c` WAS DEFERRED HERE ON THE GROUND THAT `go test -c` SPELLS IT TOO, and
+ * that deferral does not survive being read. `go test -c` is a compile-only
+ * FLAG taking no value at all, so it can never wear the attached form the arm
+ * above admits, and the separated form (`go test -c ./pkg`) is the only
+ * collision left. That one is OVER-REFUSED on purpose, the way every ambiguity
+ * here is: it fails CLOSED, and it is spellable around by dropping `-c`, since
+ * the prover reads exit codes and never a compiled binary. Leaving it open cost
+ * more, because `bun test -c ./tests/bunfig.toml other.test.ts` is the
+ * `--config` forgery below written in two characters less.
  *
  * A REPORTER IS A LOAD HOOK TOO, and it is the same forged proof one option
  * further along. Node v22's `--test-reporter` takes a MODULE SPECIFIER and
@@ -1166,21 +1183,35 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * the guard file asserting nothing about the mutated behaviour. `--env-file` is
  * the same instruction through a second file: a committed `.env` carrying
  * `NODE_OPTIONS=--import=<hook>` sets the hook the argv never shows, and node
- * spells the identical option `--env-file-if-exists` as well. Every one of them
- * names a file the runner READS AND OBEYS, which is not
+ * spells the identical option `--env-file-if-exists` as well. NODE SPELLS THE
+ * CONFIG ITSELF TWICE MORE: `--experimental-config-file=<file>` names a
+ * branch-authored `node.config.json`, and `--experimental-default-config-file`
+ * reads `node.config.json` from the cwd — both carry an `--import` through the
+ * runtime's own options exactly as the dotenv does. Every one of them names a
+ * file the runner READS AND OBEYS, which is not
  * `--test-reporter-destination`'s file it merely WRITES.
+ *
+ * A LONG NAME IS REFUSED ON THE NAME, VALUE OR NONE, and that is not belt and
+ * braces — it is the only arm that can see node's DEFAULT config spelling.
+ * `--experimental-default-config-file` takes no value at all: an arm that fires
+ * on a carried value or on a following operand looks straight past it, and
+ * `node --test --experimental-default-config-file tests/other.test.mjs` would
+ * be refused only by accident (for the test path that follows it) while the
+ * same option written last in the argv escaped entirely. Refusing the NAME
+ * costs nothing honest: every other option here is malformed without its value.
  *
  * KNOWN RESIDUAL of the same shape, left open on purpose: pytest's `-p
  * my_plugin` executes a branch-authored plugin module, and mocha's short `-R`
  * carries a reporter the same way its long spelling does. Their letters collide
  * with `go test -p 4`'s parallelism flag and with other runners' short options,
- * the short-letter narrowing above stays untouched, and the python side already
- * carries the larger `conftest.py` residual named above, which no argv rule can
- * close. The SHORT config spellings stay open for the same reason: `-c` is
- * `go test -c`'s compile-only flag as well as bun's and jest's `--config`,
- * and the short-letter narrowing above is not widened to guess between them.
+ * the short-letter narrowing above is not widened to guess between them, and
+ * the python side already carries the larger `conftest.py` residual named
+ * above, which no argv rule can close.
  */
-const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|env-file|env-file-if-exists)$/
+// KEPT ON ONE LINE ON PURPOSE: `inner-workflow-mutation-claim.test.ts` reads
+// these names straight out of this source to check the Forge schema names them
+// too, and its extraction matches this declaration as written.
+const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|experimental-config-file|experimental-default-config-file|env-file|env-file-if-exists)$/
 
 function loadHookCarrying(guard: readonly string[]): string | null {
   const start = runnerPrefixLength(guard)
@@ -1190,7 +1221,7 @@ function loadHookCarrying(guard: readonly string[]): string | null {
     const eq = arg.indexOf('=')
     const attachedShort = eq === -1 && SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg)
     const name = eq !== -1 ? arg.slice(0, eq) : attachedShort ? arg.slice(0, 2) : arg
-    const short = name === '-r'
+    const short = name === '-r' || name === '-c'
     if (!short && !LOAD_HOOK_OPTION.test(name)) continue
     const attached = carriedValue(arg)
     if (attached.length > 0) {
@@ -1202,6 +1233,11 @@ function loadHookCarrying(guard: readonly string[]): string | null {
     // that element is itself an option.
     const next = guard[i + 1]
     if (next !== undefined && next.length > 0 && !next.startsWith('-')) return `${arg} ${next}`
+    // …AND A LONG NAME CARRYING NOTHING IS STILL THE HOOK — see the docblock:
+    // node's `--experimental-default-config-file` never carries anything, so
+    // this is the arm that sees it. Short letters stay out: `go test -c` really
+    // is a valueless flag of another runner.
+    if (!short) return `${arg} (which reads a file this argv does not name)`
   }
   return null
 }
@@ -2391,6 +2427,17 @@ function checkObservation(value: unknown, field: string): string | null {
  * MATCHED ON EVERY PATH SEGMENT, not on a repo-root prefix. `skills/x/S.md` and
  * `onboarding/interview/skills/_envelope.md` are the same kind of file, and a
  * root-anchored prefix let the second one through as documentation.
+ *
+ * `.trident` IS DELIBERATELY NOT ON THIS LIST, and the reason is the defect this
+ * whole gate change exists to fix. A plan under `.trident/plans/` is read by an
+ * AGENT and never by the harness, and a plan-doc-only commit is a real shape in
+ * this repo (`159ceee7` is one) — so listing it here would classify that commit
+ * as production, require a proof of it, and leave no legal target to nominate:
+ * exactly the no-reachable-outcome bug fixed above, re-created for plan docs.
+ * The escape it leaves open is narrow and named: a diff of {plan doc + declared
+ * tests} takes the no-production-file exemption. Nothing that ships reads those
+ * files, and a reviewer reads the plan anyway. Reopen it here only together
+ * with an outcome for the plan-only diff.
  */
 const PROSE_DIR_DENYLIST = ['skills', 'prompts', '.claude', 'agent-dispatch', '.github']
 

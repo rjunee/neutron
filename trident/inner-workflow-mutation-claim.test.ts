@@ -273,7 +273,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
 
     // CONTAINMENT, pinned by name: the agreement loop above compares two lists and
     // goes green again if an entry is deleted from BOTH sides, so a two-sided
-    // deletion would reopen a closed escape silently. These eleven must be there.
+    // deletion would reopen a closed escape silently. These thirteen must be there.
     for (const name of [
       'preload',
       'require',
@@ -284,10 +284,22 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       'reporter',
       'reporters',
       'config',
+      'experimental-config-file',
+      'experimental-default-config-file',
       'env-file',
       'env-file-if-exists',
     ])
       expect([name, hookNames.includes(name)]).toEqual([name, true])
+
+    // THE SPELLINGS THE NAME-LOOPS ABOVE CANNOT SEE, pinned literally. The
+    // wrapper loop reads EXECUTABLE names out of the prover, so a description
+    // saying only `npm run …` passes it while the prover refuses the bare `npm
+    // test` alias too — an unannounced refusal is how this whole family started.
+    // The short `-c`/`-r` spellings are invisible to the hook loop for the same
+    // reason: they are not `--<name>` and only this line requires them.
+    for (const d of described)
+      for (const spelling of ['npm test', '-c…', '-r…'])
+        expect([spelling, d.includes(spelling)]).toEqual([spelling, true])
 
     // …and both refusals really exist on the prover side, in the words its
     // reasons use, so this test fails if either shape is quietly re-allowed.
