@@ -193,8 +193,12 @@ function rowOf(over: Row) {
   })
 }
 
-/** A table with exactly the four columns the documented SQL reads. */
-function corpusDb(): Database {
+/**
+ * A table with exactly the four columns the documented SQL reads. The row set is a
+ * parameter so the per-row equivalence test below can put ONE corpus row in front
+ * of a COUNT statement — see there for why a total is not enough.
+ */
+function corpusDb(rows: ReadonlyArray<readonly [string, Row]> = CORPUS): Database {
   const db = new Database(':memory:')
   db.run(
     `CREATE TABLE code_trident_runs (
@@ -215,7 +219,7 @@ function corpusDb(): Database {
   const insertBom = db.prepare(
     'INSERT INTO code_trident_runs (id, phase, inner_verdict, inner_checkpoint, inner_checkpoint_findings) VALUES (?, ?, ?, ?, CHAR(65279) || ?)',
   )
-  for (const [name, over] of CORPUS) {
+  for (const [name, over] of rows) {
     const r = rowOf(over)
     const f = r.inner_checkpoint_findings
     if (typeof f === 'string' && f.charCodeAt(0) === 0xfeff) {
@@ -279,6 +283,40 @@ describe("AS_BUILT's published counts are the classifier, executed", () => {
     // rewriting them — and they are exactly the ones the first count drops.
     expect(db.query(legacy!).get()).toEqual({ n: rejections.length - expectedReal })
     db.close()
+  })
+
+  test('the real/legacy split agrees with the classifier ROW BY ROW, not just in total', () => {
+    // Argus r24 (minor, test strength): the totals above are counts, so a
+    // COMPENSATING swap passes them — one row misclassified from real to legacy and
+    // another from legacy to real leaves both totals exactly where they were, and
+    // the split test's row-for-row keying covers only the never-reviewed CASE, not
+    // these two statements. The disposition test earned its keying; these two had
+    // not. Both are `SELECT COUNT(*)`, and rewriting the doc's SQL to project ids
+    // would test a statement the doc does not publish — so the statements are run
+    // VERBATIM against a table holding exactly ONE corpus row, where a count IS the
+    // per-row answer and no other row can cancel it.
+    const [real, legacy] = documentedStatements()
+    let reals = 0
+    let legacies = 0
+    for (const entry of CORPUS) {
+      const [name, over] = entry
+      const row = rowOf(over)
+      const rejected = terminalRunDisposition(row) === 'reviewed-rejected'
+      const hasFindings = parseCheckpointFindings(row.inner_checkpoint_findings).length > 0
+      const wantReal = rejected && hasFindings ? 1 : 0
+      const wantLegacy = rejected && !hasFindings ? 1 : 0
+      const db = corpusDb([entry])
+      expect({ row: name, ...(db.query(real!).get() as { n: number }) }).toEqual({ row: name, n: wantReal })
+      expect({ row: name, ...(db.query(legacy!).get() as { n: number }) }).toEqual({ row: name, n: wantLegacy })
+      db.close()
+      reals += wantReal
+      legacies += wantLegacy
+    }
+    // POSITIVE CONTROLS: both sides are non-empty and no row lands on both, so this
+    // loop cannot pass by having asserted `n: 0` twice for every row.
+    expect(reals).toBeGreaterThan(0)
+    expect(legacies).toBeGreaterThan(0)
+    expect(reals + legacies).toBeLessThanOrEqual(CORPUS.length)
   })
 
   test('a BOM-prefixed findings array is EMPTY to the parser and to the documented count alike', () => {

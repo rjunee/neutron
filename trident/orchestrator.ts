@@ -2576,9 +2576,19 @@ export function buildTridentOrchestrator(
     // restricting a later group to the listed paths would silently DROP the
     // source path's deletion from the artifact. Off, both sides are listed and
     // both are rendered. Every degenerate case — no pin, an unreadable probe, all
-    // files unseen (a first round), none unseen, or a file list long enough to
-    // strain argv — falls back to the single unordered command that shipped
-    // before, so the artifact still CONTAINS exactly what it does today.
+    // files unseen (a first round), none unseen, or more than 500 changed files —
+    // falls back to the single unordered command that shipped before, so the
+    // artifact still CONTAINS exactly what it does today.
+    //
+    // THE 500 IS A COUNT, AND ONLY A COUNT (Argus r24, nit). An earlier wording
+    // called it "a file list long enough to strain argv", which promised a fallback
+    // this code does not have: if a pathspec list ever DID overflow `execve`, the
+    // split `git diff` would come back not-ok and the publish would throw
+    // "outer publisher could not materialize the review diff" rather than degrade.
+    // It cannot happen here — the longest tracked path is 94 bytes, so 500 paths is
+    // ≈52 KB against a 2 MB ARG_MAX — and the count guard stands the reorder down
+    // long before that. The bound is a cheap ceiling on a review-diff reordering
+    // nobody wants for a 500-file change, not an argv calculation.
     //
     // NOT byte-identical between the two paths, though, and the earlier wording
     // ("at worst exactly what it is today") overclaimed that (Argus r18). Only the

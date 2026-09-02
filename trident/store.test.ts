@@ -9,6 +9,7 @@ import {
   changeSignatureEntries,
   COLS,
   TridentEmptyFindingsRejectionError,
+  TridentIncompleteSeedError,
   TridentRunStore,
   TridentUnresumableSeedError,
   waveChildSlug,
@@ -541,11 +542,80 @@ describe('TridentRunStore', () => {
         inner_checkpoint_head: 'a'.repeat(40),
         base_sha: 'c'.repeat(40),
       })
-      // Stored VERBATIM — the guard reads the trimmed value the classifier reads,
-      // and rewrites nothing.
-      expect(store.get(run.id)?.inner_checkpoint).toBe(checkpoint)
+      // THE STORED VALUE IS THE ONE THAT WAS GUARDED (Argus r24, minor). It used to
+      // be the RAW argument, so `' forge-done '` passed a guard reading the trimmed
+      // name and then reached `classifyResume`, which compares exact names — a row
+      // admitted as resumable and then rebuilt as unrecognised. The column now holds
+      // what the check decided on.
+      expect(store.get(run.id)?.inner_checkpoint).toBe(checkpoint.trim())
     },
   )
+
+  // A SEEDED NAME IS ONLY HALF A SEED (Argus r24, major). The name guard above
+  // answered "this checkpoint means a commit exists and nothing judged it", then let
+  // the two columns saying WHICH commit through unchecked. Both gaps are permanent
+  // once written: `launch()` re-pins a base only on a FRESH build, so a seeded row
+  // born with a null `base_sha` can never acquire one and the publish-time
+  // cut-from-origin refusal (gated on `base_sha !== null`) is disarmed for it
+  // forever; and a seed with no 40-hex head cannot be revalidated against the live
+  // tip, which is what arms the leftover-branch ownership check.
+  test.each([
+    ['base_sha', { inner_checkpoint_head: 'a'.repeat(40), base_sha: null }],
+    ['base_sha omitted', { inner_checkpoint_head: 'a'.repeat(40) }],
+    ['base_sha short', { inner_checkpoint_head: 'a'.repeat(40), base_sha: 'c'.repeat(39) }],
+    ['base_sha not hex', { inner_checkpoint_head: 'a'.repeat(40), base_sha: 'z'.repeat(40) }],
+    ['head null', { inner_checkpoint_head: null, base_sha: 'c'.repeat(40) }],
+    ['head omitted', { base_sha: 'c'.repeat(40) }],
+    ['head short', { inner_checkpoint_head: 'a'.repeat(39), base_sha: 'c'.repeat(40) }],
+    ['head not hex', { inner_checkpoint_head: 'q'.repeat(40), base_sha: 'c'.repeat(40) }],
+  ])('create REFUSES a forge-done seed with %s', async (_label, pins) => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'halfseed',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        inner_checkpoint: 'forge-done',
+        ...pins,
+      }),
+    ).rejects.toThrow(TridentIncompleteSeedError)
+    // Refused means ABSENT, not inserted-then-complained-about.
+    expect(store.getBySlug('t1', 'halfseed')).toBeNull()
+    expect(store.listNonTerminal().filter((r) => r.slug === 'halfseed')).toHaveLength(0)
+  })
+
+  // POSITIVE CONTROLS for the pin guard, so a `create` that threw on every seed
+  // could not satisfy the refusals above: a complete seed still lands, an UNSEEDED
+  // row is still allowed to carry no pins at all, and the pins are stored in the
+  // normalised form the guard read.
+  test('a complete seed still lands, and its pins are stored as the guard read them', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({
+      slug: 'complete',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 't',
+      inner_checkpoint: 'fix-round-2',
+      inner_checkpoint_head: ` ${'A'.repeat(40)} `,
+      base_sha: `${'B'.repeat(40)}\n`,
+    })
+    const stored = store.get(run.id)!
+    expect(stored.inner_checkpoint).toBe('fix-round-2')
+    expect(stored.inner_checkpoint_head).toBe('a'.repeat(40))
+    expect(stored.base_sha).toBe('b'.repeat(40))
+  })
+
+  test('an UNSEEDED row is untouched by the pin guard', async () => {
+    // The fresh-dispatch shape carries no checkpoint and no pins, and `launch()`
+    // pins the base itself. Demanding a pin here would refuse every real dispatch.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'fresh', project_slug: 't1', repo_path: '/r', task: 't' })
+    const stored = store.get(run.id)!
+    expect(stored.inner_checkpoint).toBeNull()
+    expect(stored.inner_checkpoint_head).toBeNull()
+    expect(stored.base_sha).toBeNull()
+  })
 
   test('the refusal is on CREATE only — `update` still records any checkpoint the loop reaches', async () => {
     // The live state machine writes `building`, `reviewing`, `inner-error`,

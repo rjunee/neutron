@@ -5928,14 +5928,21 @@ describe('orchestrator — the resume live head is read in code, never relayed b
 `)
           : ok(),
     })
+    // BUILT THE WAY PRODUCTION BUILDS IT (Argus r24): this row EARNED its checkpoint
+    // by firing, so the checkpoint and head arrive through `update` — the column the
+    // running loop writes — not through `create`'s seed, which now demands the base
+    // pin a seeded row can never acquire later. Writing it as a pinless seed was
+    // exactly the shape the new guard refuses, and the row it stood for is not one.
     const run = await createRun({
       slug: 'genuine-resume',
       merge_mode: 'pr' as MergeMode,
       branch: 'trident/add-thing',
+    })
+    await store.update(run.id, {
       inner_checkpoint: 'forge-done',
       inner_checkpoint_head: HEAD,
+      workflow_run_id: 'launcher-session-1',
     })
-    await store.update(run.id, { workflow_run_id: 'launcher-session-1' })
 
     await launchOnce(h)
 

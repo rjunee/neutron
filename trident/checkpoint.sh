@@ -92,13 +92,26 @@ if [ "$#" -eq 0 ]; then
   exit 2
 fi
 
-# Escape a value for inclusion inside a single-quoted SQL string literal
-# (' → ''). Uses a variable for the quote char — macOS bash 3.2 treats quote
-# characters embedded in a ${var//pat/rep} replacement as LITERAL text.
+# Escape a value for inclusion inside a single-quoted SQL string literal (' → '').
+#
+# LINEAR, NOT QUADRATIC (Argus r24, minor). This was `${s//$q/$q$q}`, and bash's
+# pattern substitution rebuilds the result buffer per match: measured on the build
+# box at 1.12 s for a 50 KB dense-apostrophe payload, 18.5 s at 200 KB and 62.7 s
+# at 400 KB (0.08 s when quote-free). That is on the write that RECORDS THE VERDICT
+# — the findings literal comes through here via `read_file_literal` — and nothing
+# upstream bounds the size of a findings array. The live corpus tops out around
+# 14 KB, so this was never a live stall; it was one bad review away from being one.
+#
+# THE SENTINEL IS WHAT MAKES A SUBPROCESS SAFE HERE. `sed` is a LINE tool: a BSD
+# sed appends a trailing newline to input that lacks one, which would corrupt the
+# byte-verbatim round trip `read_file_literal` is pinned on. Appending `X` inside
+# the pipeline puts any such newline AFTER the sentinel, where `$( … )`'s own
+# trailing-newline stripping removes it, and `${out%X}` then removes the sentinel —
+# so the output is the input's bytes plus the doubled quotes, on any sed.
 sql_quote() {
-  local s="$1"
-  local q="'"
-  printf '%s' "${s//$q/$q$q}"
+  local out
+  out="$( { printf '%s' "$1"; printf 'X'; } | sed "s/'/''/g" )"
+  printf '%s' "${out%X}"
 }
 
 # READ A FILE ONCE, AS A SQL LITERAL — the replacement for `CAST(readfile(<path>)
@@ -171,6 +184,20 @@ read_file_literal() {
 # through an argument, so no write from THIS script can produce the shape; the clause
 # is parity for the rows that already exist, and it costs one more mention of a
 # materialised literal.
+# WHAT THIS PREDICATE DOES **NOT** ASK, stated so a future writer cannot open the
+# gap by accident (Argus r24, latent). `recordedTerminalVerdict`
+# (trident/orchestrator.ts) admits a REQUEST_CHANGES only when the checkpoint ALSO
+# carries Argus provenance (`hasArgusProvenance`); this script asks only whether the
+# findings are a real, non-empty array. So a `REQUEST_CHANGES` written HERE at, say,
+# `forge-done` with findings attached lands, and reads back as `reviewed-rejected` to
+# the classifier, while the TS write site would have refused it. It is unreachable
+# today — every writer of a terminal verdict goes through `writeTerminalResult`
+# (inner-workflow.mjs), which requires a code-level block WITH findings, and the
+# suite gate rides a panel that always stamps an `argus-*` checkpoint first. The
+# provenance test is deliberately NOT copied down here: it belongs to the merge
+# decision, which this script does not make, and a fourth copy of it in bash is a
+# fourth thing to drift. What must not happen is a NEW non-panel writer calling this
+# script with a verdict; if one is ever added, the provenance check comes with it.
 #   $1 — the findings SQL expression (a literal, per read_file_literal above)
 #   $2 — SQL value when the findings are a real, non-empty rejection
 #   $3 — SQL value otherwise

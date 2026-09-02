@@ -64,6 +64,13 @@ export class TridentUnresumableSeedError extends Error {
   }
 }
 
+export class TridentIncompleteSeedError extends Error {
+  constructor(checkpoint: string, column: 'inner_checkpoint_head' | 'base_sha', value: string | null) {
+    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}' with ${column}=${value === null ? 'NULL' : `'${value}'`}: a seeded row needs a 40-hex ${column}, because launch() re-pins neither — a seed missing its head cannot be revalidated against the live tip, and a seed missing its base pin permanently disarms the publish-time "not cut from origin/<base>" refusal`)
+    this.name = 'TridentIncompleteSeedError'
+  }
+}
+
 export class TridentEmptyFindingsRejectionError extends Error {
   constructor(id: string, source: 'update' | 'save' | 'saveIfActive') {
     super(`refusing to record inner_verdict='REQUEST_CHANGES' with no findings for trident run ${id} (via ${source}): an empty finding set is either an approval or an infrastructure failure, never a rejection — record REVIEW_NOT_RUN instead`)
@@ -281,7 +288,9 @@ export interface CreateTridentRunInput {
    */
   inner_checkpoint?: string | null
   /** Salvage-resume seed — see `inner_checkpoint`. The recorded commit the seeded
-   *  checkpoint was stamped against; the resume comparison is meaningless without it. */
+   *  checkpoint was stamped against; the resume comparison is meaningless without it,
+   *  so `create` REFUSES a seeded row whose head is not 40 hex characters
+   *  (`TridentIncompleteSeedError`) and stores the trimmed, lower-cased value. */
   inner_checkpoint_head?: string | null
   /** Salvage-resume seed — see `inner_checkpoint`. Carried verbatim, because the
    *  workflow reads these back on resume exactly as the prior round recorded them. */
@@ -296,6 +305,10 @@ export interface CreateTridentRunInput {
    * does not contain the origin/<base> tip pinned at launch" is gated on
    * `base_sha !== null`, so it could never fire for a salvaged run or any re-seed
    * chained off one. Seeding the prior run's pin keeps that gate live.
+   *
+   * "Required" is ENFORCED, not merely documented (Argus r24): `create` throws
+   * `TridentIncompleteSeedError` when a seeded row's pin is not 40 hex characters,
+   * and stores the trimmed, lower-cased value it checked.
    */
   base_sha?: string | null
 }
@@ -405,6 +418,14 @@ const INSERT_PLACEHOLDERS = INSERT_COLS
 const TERMINAL_PHASE_SQL = "('done', 'failed', 'stopped')"
 
 /**
+ * A full git object id, the ONLY shape a seeded head or base pin may take. The
+ * same literal as `builtButNeverReviewedSeed`'s (trident/run-disposition.ts) and
+ * the launcher's revalidation, deliberately: a seed the producer would refuse
+ * must not become writable by arriving at `create` from somewhere else.
+ */
+const HEX40 = /^[0-9a-f]{40}$/
+
+/**
  * Split a {@link TridentRunStore.changeSignature} into `run id → last_advanced_at`.
  *
  * The watcher only ever needs string equality on the whole signature; this is for
@@ -459,6 +480,31 @@ export class TridentRunStore {
     if (seededCheckpoint !== '' && !reviewCapableCheckpoint(seededCheckpoint)) {
       throw new TridentUnresumableSeedError(seededCheckpoint)
     }
+    // AND THE NAME IS ONLY HALF THE SEED (Argus r24, major). The guard above asked
+    // whether the checkpoint MEANS "a commit exists and nothing has judged it yet"
+    // and then let the two columns that say WHICH commit through unchecked, so a
+    // row seeded `forge-done` with a null `base_sha` — or with no 40-hex head —
+    // was a valid row. Both shapes are permanently unfixable once written:
+    // `launch()` pins a base only on a FRESH build (`inner_checkpoint === null &&
+    // base_sha === null`), which a seeded checkpoint makes false, so the row can
+    // never acquire a pin and the publish-time "branch does not contain the
+    // origin/<base> tip pinned at launch" refusal — gated on `base_sha !== null` —
+    // is disarmed for it and for every re-seed chained off it; and the launch-time
+    // revalidation compares the seeded head against the live tip, so a seed with no
+    // head strips the leftover-branch ownership guard off a row that still needs
+    // it. `builtButNeverReviewedSeed` already refuses both (run-disposition.ts), on
+    // the same 40-hex test and the same ASCII trim — this is that predicate at the
+    // write site, which is where this card says a precondition belongs.
+    const seededHead = trimAsciiWs(input.inner_checkpoint_head ?? '').toLowerCase()
+    const seededBase = trimAsciiWs(input.base_sha ?? '').toLowerCase()
+    if (seededCheckpoint !== '') {
+      if (!HEX40.test(seededHead)) {
+        throw new TridentIncompleteSeedError(seededCheckpoint, 'inner_checkpoint_head', input.inner_checkpoint_head ?? null)
+      }
+      if (!HEX40.test(seededBase)) {
+        throw new TridentIncompleteSeedError(seededCheckpoint, 'base_sha', input.base_sha ?? null)
+      }
+    }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()
     const run: TridentRun = {
@@ -500,8 +546,10 @@ export class TridentRunStore {
       // of this card built work that was never reviewed and the branch tip still
       // holds exactly that commit — in which case the prior run's base pin
       // describes this row's head too, and is what keeps the publish-time
-      // cut-from-origin refusal armed on a row `launch()` will not re-pin.
-      base_sha: input.base_sha ?? null,
+      // cut-from-origin refusal armed on a row `launch()` will not re-pin. On a
+      // seeded row this is the NORMALISED pin the guard above accepted, not the
+      // raw argument — see `inner_checkpoint` below for why the two must agree.
+      base_sha: seededCheckpoint !== '' ? seededBase : input.base_sha ?? null,
       base_behind: null,
       // NEVER seeded: `launch()` resolves the PR with
       // `run.pr ?? await detectExistingPr(run)`, and a carried-over number would
@@ -519,8 +567,16 @@ export class TridentRunStore {
       failure_reason: null,
       brief_alert: null,
       workflow_run_id: null,
-      inner_checkpoint: input.inner_checkpoint ?? null,
-      inner_checkpoint_head: input.inner_checkpoint_head ?? null,
+      // THE STORED VALUE IS THE ONE THAT WAS GUARDED (Argus r24, minor). The guard
+      // above decides on the TRIMMED name and the normalised pins; persisting the
+      // raw arguments instead let a padded `' forge-done '` pass the check and then
+      // reach `classifyResume`, which compares exact names — accepted as
+      // resumable, then rebuilt as unrecognised. Inert today (the only writer,
+      // `builtButNeverReviewedSeed`, already trims and lowercases), but a guard and
+      // a stored value that disagree is how the next divergence starts. An unseeded
+      // row keeps the byte-identical fresh-dispatch shape: null.
+      inner_checkpoint: seededCheckpoint !== '' ? seededCheckpoint : null,
+      inner_checkpoint_head: seededCheckpoint !== '' ? seededHead : input.inner_checkpoint_head ?? null,
       inner_checkpoint_findings: input.inner_checkpoint_findings ?? null,
       // NEVER seeded: a verdict belongs to a review THIS run has not had yet.
       inner_verdict: null,
