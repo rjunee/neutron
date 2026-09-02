@@ -896,6 +896,13 @@ export function classifyInnerFailure(
  * (re-)judged (the inner workflow's own terminology), while an empty finding set
  * is either approval or infrastructure failure — never a rejection.
  *
+ * `advisory-only` IS A REVIEW AND IS RECORDED AS ONE. It is the workflow's statement that
+ * a healthy panel judged the code and every finding it returned was one the workflow has
+ * already declared non-blocking — so the fix loop exits without buying a round. That is the
+ * opposite of `infra-only`, and reading it as REVIEW_NOT_RUN was untrue in the one direction
+ * that costs real work: a resume off that row re-Forged a whole round on findings the run
+ * had already settled as non-actionable.
+ *
  * AND THE REVIEWER MUST ACTUALLY HAVE RUN. Findings alone do not prove that: the
  * suite gate in `inner-workflow.mjs` writes a `blocker` of its own ("FULL SUITE
  * NOT PROVEN …") on a build that never reached a reviewer, and that build carries
@@ -915,7 +922,7 @@ export function recordedTerminalVerdict(
 ): 'REQUEST_CHANGES' | 'REVIEW_NOT_RUN' {
   if (
     result.verdict === 'REQUEST_CHANGES' &&
-    result.block_kind === 'code' &&
+    (result.block_kind === 'code' || result.block_kind === 'advisory-only') &&
     hasArgusProvenance(result.checkpoint) &&
     parseCheckpointFindings(rowFindings).length > 0
   ) {
@@ -1936,7 +1943,8 @@ export function resumeHeadDecides(checkpoint: string, ralph: boolean): boolean {
  *     also self-asserts `verdict: 'REQUEST_CHANGES'`, which is why the verdict field cannot
  *     be trusted here and the checkpoint can.
  *   • `block_kind: 'infra-only'` is the workflow's own statement that NO REVIEW SEAT ever
- *     judged the code — the stop says nothing about the diff.
+ *     judged the code — the stop says nothing about the diff. `advisory-only` is NOT that
+ *     and must never be added here: it says a seat DID judge the code.
  *
  * An `inner-error` result that DOES carry findings keeps the current behavior: real review
  * findings exist behind it, so the generic "ended without APPROVE" sentence is still true.

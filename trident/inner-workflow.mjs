@@ -2390,7 +2390,10 @@ async function writeTerminalResult(result) {
     result.verdict === 'APPROVE'
       ? 'APPROVE'
       : result.verdict === 'REQUEST_CHANGES' &&
-          result.blockKind === 'code' &&
+          // 'advisory-only' IS A REVIEW. The panel ran, judged the code and produced
+          // findings; that they are all non-blocking makes the round cheap, not absent.
+          // Recording it as REVIEW_NOT_RUN said no seat ever looked at the diff.
+          (result.blockKind === 'code' || result.blockKind === 'advisory-only') &&
           Array.isArray(result.findings) &&
           result.findings.length > 0
         ? 'REQUEST_CHANGES'
@@ -2822,10 +2825,18 @@ function classifyBlock(synthesis, deferredPeers) {
   // Forge to change, exactly the waste `withSuiteBlocker` measured 15 times.
   //
   // THE EMPTY LIST STILL RE-FORGES. A rejection carrying no stated reason is malformed,
-  // not benign — this file's standing rule — and 'infra-only' would EXIT the loop on it,
-  // which is the unsafe direction. Only findings this file has ALREADY declared
-  // non-blocking buy the exit.
-  return findings.length === 0 ? 'code' : 'infra-only'
+  // not benign — this file's standing rule — and an exit would be the unsafe direction on
+  // it. Only findings this file has ALREADY declared non-blocking buy the exit.
+  //
+  // AND THE EXIT IS 'advisory-only', NOT 'infra-only'. Both stop the fix loop, which is the
+  // whole point; they differ in what they SAY, and the outer loop reads the difference.
+  // 'infra-only' means NO REVIEW SEAT EVER JUDGED THE CODE (trident/orchestrator.ts —
+  // `isInfraDeath`, `recordedTerminalVerdict`, `infra-block.ts`), and on this arm that is
+  // simply false: the panel was healthy, it answered, and every answer it gave was one this
+  // file has already declared non-blocking. Recording that as "review never ran" cost a
+  // resumed run a full re-Forge on findings nobody was ever going to act on — the exact
+  // waste the advisory economy exists to stop, reintroduced one seam downstream.
+  return findings.length === 0 ? 'code' : 'advisory-only'
 }
 
 /**
@@ -4871,11 +4882,47 @@ function encodeRefPath(ref) {
 function ciSection(probe, name) {
   const raw = probe && typeof probe.raw === 'string' ? probe.raw : ''
   const marker = `___SECTION=${name}`
-  const at = raw.indexOf(marker)
+  // WHOLE-LINE, AND THE LAST ONE — the discipline `probeSections` already uses, for the
+  // same reason. The probe writes each boundary with its own `echo`, so a real marker owns
+  // a whole line. An ECHOED transcript does not: a seat that quotes the command it ran puts
+  // the marker text mid-line and BEFORE the real output, and the first-match cut then handed
+  // `classifyCi` a slice with no JSON at all. That reads 'unknown', which excuses nothing
+  // (fail-shut) — but it also makes the entire pre-existing hatch inert on every round, with
+  // no signal anywhere that it never engaged. A check name poisoned with the marker text
+  // lands the same way. Anchoring to a line the PROBE ITSELF wrote takes both back.
+  const startsLine = (at) => at === 0 || raw[at - 1] === '\n'
+  const endsLine = (at, len) => {
+    const after = raw[at + len]
+    return after === undefined || after === '\n' || after === '\r'
+  }
+  let at = -1
+  let from = raw.length
+  while (from > 0) {
+    const found = raw.lastIndexOf(marker, from - 1)
+    if (found < 0) break
+    if (startsLine(found) && endsLine(found, marker.length)) {
+      at = found
+      break
+    }
+    from = found
+  }
   if (at < 0) return { raw: '', exit_code: 0 }
-  const from = at + marker.length
-  const next = raw.indexOf('___SECTION=', from)
-  return { raw: raw.slice(from, next < 0 ? raw.length : next), exit_code: 0 }
+  const body = at + marker.length
+  // The CLOSING boundary is any later marker line, whatever its key — we do not know the
+  // next section's name. It must still start a line, so an echo inside the payload cannot
+  // truncate the section either.
+  let next = -1
+  let scan = body
+  while (scan <= raw.length) {
+    const found = raw.indexOf('___SECTION=', scan)
+    if (found < 0) break
+    if (startsLine(found)) {
+      next = found
+      break
+    }
+    scan = found + 1
+  }
+  return { raw: raw.slice(body, next < 0 ? raw.length : next), exit_code: 0 }
 }
 
 /**
@@ -5252,9 +5299,9 @@ function withSuiteBlocker(synthesis, suiteFindings) {
   //
   // The verdict is NOT downgraded. This file's rule stands — a REQUEST_CHANGES carrying
   // no findings is malformed, not benign, and a review we did not get is not an approval.
-  // What changes is only `blockKind`: 'infra-only' EXITS the fix loop instead of
-  // re-Forging, which is the classification the loop already documents for "the gate
-  // refuses to APPROVE but there is no code-side action".
+  // What changes is only `blockKind`: 'advisory-only' EXITS the fix loop instead of
+  // re-Forging, and it says WHICH exit this is — the panel ran and had nothing actionable,
+  // as against 'infra-only', which asserts no seat ever judged the code.
   //
   // AND THE STOP REPORTS NO CAUSE, deliberately. `infraTerminalCause` excludes every
   // finding this file has already declared non-blocking, so an advisory-only stop
@@ -5264,7 +5311,7 @@ function withSuiteBlocker(synthesis, suiteFindings) {
   // `findings` and reach the operator there. Only the one-line CAUSE is empty, and it
   // is empty on purpose.
   if (!findings.every((f) => isNonBlockingFinding(f))) return merged
-  return { ...merged, blockKind: 'infra-only' }
+  return { ...merged, blockKind: 'advisory-only' }
 }
 
 async function runReviewRound(diffFile, round, prForReview, paidReview = null, suiteFindings = []) {
@@ -5818,11 +5865,21 @@ TASK: ${task}`
       `trident-v2 CI gate: round=${round} failing=${ci.failing.length} base=${ciBase?.status ?? 'unmeasured'} — ${ciFindingsBlock(ciFindings) ? 'at least one red is NEW to this branch, forcing REQUEST_CHANGES' : 'every red is already failing at the base; surfaced without forcing'}`,
     )
   }
+  // REDACTED AND BOUNDED, like every other probe-derived text that reaches a prompt.
+  // A check's NAME comes from `.github/workflows/*.yml`, which Forge writes — so this is
+  // build-authored text landing in the seat that sets the verdict, and it goes through the
+  // same `redactProbeText` the sibling probe text does.
+  //
+  // AND IT NO LONGER ASKS THE MODEL TO BE THE GUARD. The old closing sentence told the seat
+  // to "return REQUEST_CHANGES in your own words" if the excuse looked wrong — a decision
+  // this gate's whole contract says is derived in code, never read by a model. It is derived
+  // in code now: an excused red no longer APPROVES (see `withCi`), so the model's answer can
+  // only ADD a blocker, never remove the hold.
   const ciFindingsPrompt = ciFindings.length === 0
     ? ''
     : `\nCI GATE FINDINGS (generated by the workflow from GitHub's OWN check results — the PR's checks, and the same checks measured at the base commit this branch was cut from):\n${ciFindings
-      .map((finding) => `[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`)
-      .join('\n')}\nWeigh these like any reviewer's finding: a check excused as pre-existing is matched by NAME ONLY, so if this diff touches what it exercises, say so and return REQUEST_CHANGES.`
+      .map((finding) => redactProbeText(`[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`).slice(0, 2000))
+      .join('\n')}\nWeigh these like any reviewer's finding. A check excused as pre-existing is matched by NAME ONLY: the excuse buys this branch no FIX ROUND, and it does NOT clear the red — the merge is held either way — so if this diff touches what an excused check exercises, say so.`
 
   // PANEL COMPLETENESS IS DERIVED IN CODE. Every seat's status comes from whether it
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
@@ -5949,7 +6006,23 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
         // `severityGated` is null when the synthesis seat died. Spreading a null yields a
         // verdict-less object: fail-closed (synthesisOrInfraBlock replaces it), but it
         // dropped the CI advisories the old code carried. `?? {}` keeps them.
-        : { ...(severityGated ?? {}), findings: [...ciFindings, ...(severityGated?.findings ?? [])] }
+        //
+        // THE EXCUSE BUYS A ROUND, NEVER A MERGE. The verdict is held at REQUEST_CHANGES
+        // even when EVERY red is excused, because the two questions are different and this
+        // arm used to answer both with one match on a check NAME: "is there code work here?"
+        // (no — the red predates the branch, so `ciFindingsBlock` is false and `classifyBlock`
+        // reads the advisories as 'advisory-only', which EXITS the fix loop without
+        // re-Forging) and "may this merge over a red PR?" (no — a failure this branch DID
+        // cause, landing inside a check that was ALREADY red for another reason, is invisible
+        // to a name match, and the old arm passed that APPROVE straight to `gh pr merge` with
+        // branch protection as the only backstop). Nothing here is inferred from the
+        // advisory text and nothing is delegated to the synthesis seat: the hold is
+        // unconditional on a red PR, and it costs no extra round.
+        : {
+            ...(severityGated ?? {}),
+            verdict: 'REQUEST_CHANGES',
+            findings: [...ciFindings, ...(severityGated?.findings ?? [])],
+          }
       : severityGated
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can
@@ -6846,7 +6919,17 @@ ${task}${reflectionGuidance}`,
   const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport, buildSuiteScope)
   if (resumeMode === 'fix') {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
-    const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }
+    // 'code' ONLY IF THERE IS CODE WORK IN THE RECORDED LIST. A checkpoint written by an
+    // advisory-only round carries findings this file has ALREADY declared non-blocking, and
+    // asserting 'code' over them re-Forged a full round on them at resume — undoing the
+    // exit the round itself had earned. Same predicate as `classifyBlock`, so the two
+    // cannot drift.
+    const resumeHasCodeWork = resumeFindingsList.some((f) => !isNonBlockingFinding(f))
+    const paidReview = {
+      verdict: 'REQUEST_CHANGES',
+      findings: resumeFindingsList,
+      blockKind: resumeHasCodeWork ? 'code' : 'advisory-only',
+    }
     synthesis = await runReviewRound(diffFile, round, pr, paidReview)
     finalVerdict = 'REQUEST_CHANGES'
   } else {
@@ -6881,10 +6964,17 @@ ${task}${reflectionGuidance}`,
   // no code finding to act on, so another round would edit code to "fix" a
   // timeout and then pay for four more reviews to say the same thing. Stop and
   // report honestly; the operator fixes the lane and re-runs.
+  // AN ADVISORY-ONLY BLOCK EXITS FOR THE SAME REASON AND SAYS SOMETHING DIFFERENT.
+  // There is no code finding to act on there either — the panel ran, and everything it
+  // returned is a finding this file has already declared non-blocking — so another round
+  // could only re-derive that and pay five seats to say it again. The two kinds are kept
+  // apart because the OUTER loop reads them differently: 'infra-only' asserts no seat ever
+  // judged the code, which on this arm would be false.
   while (
     finalVerdict === 'REQUEST_CHANGES' &&
     round < maxRounds &&
-    synthesis.blockKind !== 'infra-only'
+    synthesis.blockKind !== 'infra-only' &&
+    synthesis.blockKind !== 'advisory-only'
   ) {
     round++
     log(`trident-v2 fix loop: round=${round}/${maxRounds} — re-Forge against findings`)
@@ -7098,6 +7188,9 @@ ${task}${reflectionGuidance}`,
     // nothing about the diff. Reporting that as an ordinary REQUEST_CHANGES is what
     // made 2026-08-08's summaries misleading: three runs read as code rejections
     // when at least two were lane failures.
+    // 'advisory-only' means the OPPOSITE of 'infra-only' about the panel: it ran, it
+    // answered, and nothing it said is actionable — so the loop exits without a fix round
+    // and the outer loop still records a real REQUEST_CHANGES.
     // A round whose work never reached the branch is its OWN kind of block, and
     // it must not read as a code rejection: the code was not re-judged at all.
     // A round that COMMITTED but produced no diff is 'round-lost' too: in both

@@ -1787,6 +1787,9 @@ describe('inner-workflow.mjs — exec-model terminal-result harvest signal', () 
     const fn = SRC.slice(SRC.indexOf('async function writeTerminalResult('), SRC.indexOf('function normalizeVerdict'))
     expect(fn).toContain("'REVIEW_NOT_RUN'")
     expect(fn).toContain("result.blockKind === 'code'")
+    // ...and 'advisory-only' counts as a reviewer that spoke, because it IS one: a healthy
+    // panel judged the code and everything it said was already declared non-blocking.
+    expect(fn).toContain("result.blockKind === 'advisory-only'")
     expect(fn).toContain('result.findings.length > 0')
     expect(fn).not.toContain("result.verdict === 'APPROVE' ? 'APPROVE' : 'REQUEST_CHANGES'")
     expect(SRC).toMatch(/const stopResult = \{[\s\S]*?verdict: null/)
@@ -2191,8 +2194,10 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
     const out = withSuiteBlocker({ verdict: 'REQUEST_CHANGES', blockKind: 'code', findings: [] }, [
       preexisting(),
     ])
-    // The loop condition is `verdict === 'REQUEST_CHANGES' && blockKind !== 'infra-only'`.
-    expect(out.blockKind).toBe('infra-only')
+    // The loop condition excludes BOTH exits; this one is 'advisory-only', because the
+    // panel ran and had nothing actionable — 'infra-only' would assert no seat ever judged
+    // the code, which the outer loop reads as REVIEW_NOT_RUN.
+    expect(out.blockKind).toBe('advisory-only')
     // ...and the rejection is NOT laundered into an approval.
     expect(out.verdict).toBe('REQUEST_CHANGES')
     // The finding still rides along, so `infraTerminalCause` can name the stop.
@@ -2298,7 +2303,7 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
       findings: [{ kind: 'lane', severity: 'blocker', title: 'sql injection in the migration path' }],
     }
     // Unstripped, the laundered kind walks the round straight out of the fix loop.
-    expect(classifyBlock(modelJson, [])).toBe('infra-only')
+    expect(classifyBlock(modelJson, [])).toBe('advisory-only')
     const stripped = stripAdvisoryMarkers(modelJson)
     const f = (stripped?.findings ?? [])[0] as Record<string, unknown>
     expect(Object.hasOwn(f, 'kind')).toBe(false)

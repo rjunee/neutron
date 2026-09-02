@@ -338,10 +338,32 @@ describe('the fix loop honours the classification', () => {
     // isolation. It asserts the wiring only — the behaviour of the classifier
     // itself is covered above.
     expect(SRC).toContain("synthesis.blockKind !== 'infra-only'")
+    // ...and the advisory-only exit, which stops the loop for the same reason while
+    // saying something DIFFERENT about the panel: it ran, and it had nothing actionable.
+    expect(SRC).toContain("synthesis.blockKind !== 'advisory-only'")
     // And the terminal result must SURFACE it, or an operator reads a lane failure
     // as a code rejection — which is exactly what made the 2026-08-08 run
     // summaries misleading.
     expect(SRC).toContain('blockKind:')
+  })
+
+  /**
+   * THE RESUME SEAM IS THE OTHER HALF OF THE SAME ECONOMY.
+   *
+   * A resume off a recorded REQUEST_CHANGES used to assert `blockKind: 'code'` over the
+   * recorded findings unconditionally — so a checkpoint written by an advisory-only round
+   * (nits, or a red that predates the branch) bought the full fix round at resume that the
+   * round itself had already refused to buy. Same predicate as `classifyBlock`, so the two
+   * cannot drift.
+   */
+  test('a resume on non-actionable findings does not assert code work', () => {
+    const at = SRC.indexOf('const paidReview = {')
+    expect(at).toBeGreaterThan(-1)
+    const block = SRC.slice(at, SRC.indexOf('\n  }', at))
+    expect(block).toContain("blockKind: resumeHasCodeWork ? 'code' : 'advisory-only'")
+    // The predicate is the classifier's own, not a second opinion about severity.
+    const derived = SRC.slice(SRC.indexOf('const resumeHasCodeWork ='), at)
+    expect(derived).toContain('isNonBlockingFinding')
   })
 
   test('the retry runs BEFORE the verdicts are read', () => {

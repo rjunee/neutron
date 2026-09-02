@@ -288,10 +288,12 @@ describe('the injected finding is a LANE finding, not a code finding', () => {
   // a rejection whose only findings are nits, or a red that predates the branch, bought a
   // whole fix round with nothing for Forge to change.
   test('with a HEALTHY panel, findings this file calls non-blocking still buy no round', () => {
+    // 'advisory-only', not 'infra-only': both exit the fix loop, but only one of them is
+    // true about the panel. A healthy panel DID judge this code.
     const advisory = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', advisory: true, title: 'pre-existing red' }] }
-    expect(real.classifyBlock(advisory, [])).toBe('infra-only')
+    expect(real.classifyBlock(advisory, [])).toBe('advisory-only')
     const nits = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'nit', title: 'spacing' }, { severity: 'minor', title: 'name' }] }
-    expect(real.classifyBlock(nits, [])).toBe('infra-only')
+    expect(real.classifyBlock(nits, [])).toBe('advisory-only')
   })
 
   test('...but one real finding among them is still code work', () => {

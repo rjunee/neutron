@@ -2914,3 +2914,139 @@ describe('the pre-existing CI hatch — earned by measuring the base, by name', 
     expect(block).not.toContain('{ ...severityGated,')
   })
 })
+
+
+/**
+ * THE SECTION READER'S BOUNDARIES COME FROM LINES THE PROBE WROTE.
+ *
+ * `ciSection` used to take the FIRST occurrence of `___SECTION=<name>` anywhere in the
+ * reply, including inside a line that merely CONTAINS it. The sibling reader
+ * (`probeSections`) has required a whole-line, last-occurrence match since the day a
+ * ruleset context called `___SECTION=BRANCH` moved a boundary past the real payload.
+ *
+ * The failure direction is shut either way — a section cut at an echo holds no JSON, and
+ * `classifyCi` reads that as 'unknown', which excuses nothing. What it does instead is
+ * make the entire pre-existing hatch INERT, silently, on every round of every repository
+ * whose probe seat echoes the command it ran. A gate nobody can tell has stopped working
+ * is the expensive kind.
+ */
+describe('ciSection anchors to whole marker lines, not to the first mention', () => {
+  const echoed = (runs: string, statuses: string) =>
+    // The seat transcribes the command FIRST (both markers, mid-line), then the output.
+    '+ cd /repo && echo "___SECTION=RUNS"; gh api ... ; echo "___SECTION=STATUSES"; gh api ...\n' +
+    `___SECTION=RUNS\n${runs}\n___SECTION=STATUSES\n${statuses}\n___EXIT=0`
+
+  test('an echoed command transcript does not cut the sections short', () => {
+    const { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames } = loadBaseProbe()
+    const reply = {
+      raw: echoed('[{"name":"shard 3/8","state":"failure"}]', '[{"name":"buildkite/build","state":"failure"}]'),
+      exit_code: 0,
+    }
+    // BEFORE: both sections were cut at the echo line and came back empty -> 'unknown'.
+    const merged = mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES')))
+    expect(merged.status).toBe('red')
+    expect([...ciPreexistingNames(merged)].sort()).toEqual(['buildkite/build', 'shard 3/8'])
+  })
+
+  test('a check NAME carrying the marker text is payload, not a boundary', () => {
+    const { classifyCi, ciSection } = loadBaseProbe()
+    const reply = {
+      raw: '___SECTION=RUNS\n[{"name":"x___SECTION=STATUSES","state":"failure"}]\n___SECTION=STATUSES\n[]\n___EXIT=0',
+      exit_code: 0,
+    }
+    const runs = classifyCi(ciSection(reply, 'RUNS'))
+    expect(runs.status).toBe('red')
+    expect(runs.failing.map((f) => f.name)).toEqual(['x___SECTION=STATUSES'])
+    // ...and the REAL statuses boundary is still the one that closes the section.
+    expect(classifyCi(ciSection(reply, 'STATUSES')).status).toBe('none')
+  })
+
+  test('a missing section is still empty, and an empty section is still unknown', () => {
+    const { classifyCi, ciSection } = loadBaseProbe()
+    const reply = { raw: '___SECTION=RUNS\n[]\n___EXIT=0', exit_code: 0 }
+    expect(ciSection(reply, 'STATUSES').raw).toBe('')
+    expect(classifyCi(ciSection(reply, 'STATUSES')).status).toBe('unknown')
+    expect(classifyCi(ciSection(null, 'RUNS')).status).toBe('unknown')
+  })
+})
+
+/**
+ * THE EXCUSE BUYS A ROUND, NEVER A MERGE.
+ *
+ * `ciBlockerFindings` matches an excusable red by check NAME, and a name is a coarse key:
+ * `.github/workflows/ci.yml` names its jobs `shard N/8`, so a test THIS branch broke,
+ * landing in a shard that was already red for another reason, produces the same name and
+ * the same downgrade. The non-forcing arm then carried the panel's APPROVE through to
+ * `gh pr merge`, with branch protection as the only thing left in the way — and branch
+ * protection is repository CONFIGURATION, which is exactly what this gate exists to stop
+ * relying on.
+ *
+ * The two questions are answered separately now, both in code: "is there code work here?"
+ * (no — no fix round is bought) and "may this merge over a red PR?" (no).
+ */
+describe('a fully excused CI red still holds the merge', () => {
+  const arm = () => {
+    const code = SRC.split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+    const at = code.indexOf('const withCi =')
+    expect(at).toBeGreaterThan(-1)
+    const block = code.slice(at, code.indexOf('const peers =', at))
+    // The FORCING arm is the `?` branch; the arm under test is the `:` alternative.
+    return block.slice(block.indexOf(': {'))
+  }
+
+  test('the non-forcing arm sets REQUEST_CHANGES, so no APPROVE reaches the merge', () => {
+    expect(arm()).toContain("verdict: 'REQUEST_CHANGES'")
+  })
+
+  test('the hold does not depend on the synthesis seat reading the advisory', () => {
+    // Nothing in this arm may condition the verdict on the advisory text or on the seat.
+    expect(arm()).not.toContain('ciFindingsBlock')
+    expect(arm()).not.toContain('severityGated?.verdict')
+  })
+
+  test('an excused red is still not code work, so it buys no fix round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const ci = { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] }
+    const findings = ciBlockerFindings(ci, new Set(['shard 3/8']))
+    expect(ciFindingsBlock(findings)).toBe(false)
+    expect(findings.length).toBe(1)
+    expect(findings[0]?.severity).toBe('major')
+    expect(findings[0]?.advisory).toBe(true)
+  })
+
+  test('a red the base does NOT carry still forces the round, unchanged', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const ci = { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] }
+    expect(ciFindingsBlock(ciBlockerFindings(ci, new Set(['lint'])))).toBe(true)
+  })
+})
+
+/**
+ * BUILD-AUTHORED TEXT REACHES THE SEAT THAT SETS THE VERDICT, SO IT IS REDACTED.
+ *
+ * A CI check's name comes from `.github/workflows/*.yml` — a file Forge writes. Once the
+ * CI findings began riding in the synthesis prompt, that became a path from build-authored
+ * text into the prompt of the seat that decides the verdict. Every sibling probe text in
+ * this file goes through `redactProbeText` and a length cap before it reaches a prompt;
+ * this one now does too.
+ */
+describe('the CI findings are redacted and bounded before they reach the prompt', () => {
+  const promptBlock = () => {
+    const at = SRC.indexOf('const ciFindingsPrompt =')
+    expect(at).toBeGreaterThan(-1)
+    return SRC.slice(at, SRC.indexOf('\n\n', at))
+  }
+
+  test('the prompt interpolation goes through redactProbeText and a cap', () => {
+    expect(promptBlock()).toContain('redactProbeText(')
+    expect(promptBlock()).toMatch(/\.slice\(0, \d+\)/)
+  })
+
+  test('the prompt no longer delegates the excuse decision to the model', () => {
+    // The seat may still ADD a blocker; what it may not be asked to do is be the only
+    // thing standing between an excused red and a merge.
+    expect(promptBlock()).not.toContain('return REQUEST_CHANGES')
+  })
+})
