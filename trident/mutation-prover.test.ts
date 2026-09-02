@@ -733,9 +733,15 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       [join(wt, 'tests/alias.test.ts')]: join(wt, file),
       [join(wt, 'tests/alias-dir')]: join(wt, 'tests/support'),
     }
+    // THE CARRIED SPELLING IS `--grep=` AND NOT `--preload=` on purpose: a load
+    // hook is now refused LEXICALLY, for its opacity, before any realpath is
+    // taken (see `loadHookCarrying`), which would prove nothing about
+    // resolution. `guardPathCandidates` reads an option's value whatever the
+    // option is called, so `--grep=` exercises the same seam and only the
+    // resolved answer can refuse it.
     for (const [arg, why] of [
       ['tests/alias.test.ts', 'resolves to the same file'],
-      ['--preload=tests/alias.test.ts', 'resolves to the same file'],
+      ['--grep=tests/alias.test.ts', 'resolves to the same file'],
       ['tests/alias-dir', 'resolves to a directory holding it'],
       // …AND A QUERY SUFFIX DOES NOT HIDE THE LINK. Asked of the RAW element, a
       // `?` reads as a GLOB, so this seam SKIPPED the one element it most
@@ -801,7 +807,11 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       if (absent.has(path)) throw new Error(`ENOENT ${path}`)
       return path
     }
-    for (const arg of ['--preload=./tests/support/clamp.js', '-r./tests/support/clamp.js', 'tests/support/clamp.js']) {
+    // The two carried spellings are `--grep=`/`-g` rather than `--preload=`/`-r`
+    // for the reason above: a load hook is refused for its OPACITY first, and
+    // this test is about the REWRITE. An option's value is read by name-agnostic
+    // code, so the seam under test is identical.
+    for (const arg of ['--grep=./tests/support/clamp.js', '-g./tests/support/clamp.js', 'tests/support/clamp.js']) {
       const fs = memFs({ [join(wt, file)]: SRC_BEFORE })
       fs.realpath = disk
       const { prover, host } = proverOver({}, fs)
@@ -837,7 +847,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       claim: {
         ...CLAIM,
         file,
-        guard: ['bun', 'test', '--preload=./tests/support/unrelated.js', 'tests/separate.test.ts'],
+        guard: ['bun', 'test', '--grep=./tests/support/unrelated.js', 'tests/separate.test.ts'],
         control: ['bun', 'test', 'tests/other-control.test.ts'],
       },
     })
@@ -1227,14 +1237,94 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
 
     // POSITIVE CONTROL — an option carrying a DIFFERENT file is untouched, so
-    // the rule above cannot be refusing every `=` it sees.
+    // the rule above cannot be refusing every `=` it sees. It is `--grep=` and
+    // NOT `--preload=`: a hook naming a third file is refused for its opacity
+    // now (the test below this one is that boundary), so pinning it as legal
+    // here is what let an indirect preload forge a proof.
     const { prover: ok } = proverOver()
     const fine = await ok.prove({
       run: RUN,
-      claim: { ...CLAIM, guard: ['bun', 'test', '--preload=./tests/setup.ts', 'src/other.test.ts'] },
+      claim: { ...CLAIM, guard: ['bun', 'test', '--grep=./tests/setup.ts', 'src/other.test.ts'] },
     })
     expect(fine.reason).not.toContain('tautology')
     expect(fine.observed).not.toBeNull()
+  })
+
+  test('a LOAD HOOK naming a THIRD file is opaque — its body may import the mutated one', async () => {
+    // THE BYPASS THIS CLOSES, reproduced end to end against the real prover.
+    // The branch commits `tests/setup.ts` whose whole body is `import
+    // '../src/limit.ts'` and nominates guard `bun test
+    // --preload=./tests/setup.ts tests/other.test.ts`, where `tests/other.test.ts`
+    // asserts only `1 + 1`. Every arm above compares the hook's VALUE against
+    // the target and sees a different file — so the gate returned `ok: true,
+    // exempt: false, proved: true` (guard_mutated 1, control_mutated 0,
+    // guard_restored 0) for a syntax-shaped mutation nothing asserted: the guard
+    // reddens because bun loads the mutated module into its process, and the
+    // control stays green because only the guard carries the hook.
+    //
+    // The hook's file is branch-authored and this gate reads argv, never file
+    // bodies — the same opacity a WRAPPER has, and it is refused the same way:
+    // on the shape, whatever file it names.
+    for (const [file, guard] of [
+      ['src/limit.ts', ['bun', 'test', '--preload=./tests/setup.ts', 'tests/other.test.ts']],
+      // …the space-separated spelling of the identical instruction,
+      ['src/limit.ts', ['bun', 'test', '--preload', './tests/setup.ts', 'tests/other.test.ts']],
+      // …the attached short one,
+      ['src/limit.ts', ['bun', 'test', '-r./tests/setup.ts', 'tests/other.test.ts']],
+      // …node's two, one of which sits in front of `--test`,
+      ['src/limit.mjs', ['node', '--test', '--import=./tests/setup.mjs', 'tests/other.test.mjs']],
+      ['src/limit.mjs', ['node', '--loader=./tests/hook.mjs', '--test', 'tests/other.test.mjs']],
+      // …and a COLLECTIBLE target, because a preload loads a support library
+      // under `tests/` into the guard process exactly as it loads `src/`.
+      ['tests/support/lib.ts', ['bun', 'test', '--preload=./tests/setup.ts', 'tests/other.test.ts']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      // Refused on the spelling: nothing written, nothing run.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      // …and the refusal SAYS what is wrong with the shape, so the next build
+      // spells the runner out instead of trying another hook.
+      expect([guard.join(' '), out.reason.includes('whose body the branch wrote')]).toEqual([guard.join(' '), true])
+      expect([guard.join(' '), fs.writes.length]).toEqual([guard.join(' '), 0])
+    }
+
+    // POSITIVE CONTROLS, because every assertion above would pass just as well
+    // against "refuse any guard carrying an option with a path in it".
+    //  (1) an option that CARRIES a third file without loading it — the shape
+    //      the rule must not swallow, or the `=` arm's own control has no
+    //      spelling left;
+    //  (2) go's `-run`, which the attached-short reading turns into `-r` +
+    //      `un`: the letter is only a hook when what it carries looks like a
+    //      path, and deleting that condition refuses every Go guard there is;
+    //  (3) `-race` for the same reason, with no operand of its own;
+    //  (4) a plain runner invocation, untouched.
+    for (const [file, guard] of [
+      ['src/limit.ts', ['bun', 'test', '--grep=./tests/setup.ts', 'tests/other.test.ts']],
+      ['src/limit.go', ['go', 'test', '-run', 'TestClamp', './cmd']],
+      ['src/limit.go', ['go', 'test', '-race', './cmd']],
+      ['src/limit.ts', ['bun', 'test', 'tests/other.test.ts']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      // POSITIVE CONTROL ON THE EXTRACTION: the guard really ran, so the line
+      // above is reading a real outcome and not an early refusal for some other
+      // reason that happens to word itself differently.
+      expect([guard.join(' '), fine.observed !== null]).toEqual([guard.join(' '), true])
+    }
   })
 
   test("an OPTION'S VALUE NEED NOT WRITE THE EXTENSION — `--preload=./src/limit` loads `src/limit.ts`", async () => {
@@ -1269,7 +1359,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     //  (1) a bare specifier for a DIFFERENT module,
     //  (2) a DIRECTORY that does not hold the mutated file,
     //  (3) an option whose value is not a path at all.
-    for (const arg of ['--preload=./tests/setup', '--preload=./tests', '--reporter-outfile=report.xml']) {
+    for (const arg of ['--grep=./tests/setup', '--grep=./tests', '--reporter-outfile=report.xml']) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
       const { prover: ok } = proverOver({}, fs)
       const fine = await ok.prove({
@@ -1346,7 +1436,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     //      every guard they can spell.
     for (const guard of [
       ['bun', 'test', '--timeout', '30000', 'src/other.test.ts'],
-      ['bun', 'test', '--preload', './tests', 'src/other.test.ts'],
+      ['bun', 'test', '--grep', './tests', 'src/other.test.ts'],
       ['node', '--test', 'src/other.test.js'],
     ]) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
@@ -1465,7 +1555,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       claim: {
         ...CLAIM,
         file: 'tests/support/clamp.ts',
-        guard: ['bun', 'test', '--preload=./tests/support/unrelated.js', 'tests/separate.test.ts'],
+        guard: ['bun', 'test', '--grep=./tests/support/unrelated.js', 'tests/separate.test.ts'],
       },
     })
     expect(fine.reason).not.toContain('tautology')
@@ -1774,7 +1864,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     const { prover: ok } = proverOver({}, fs)
     const fine = await ok.prove({
       run: RUN,
-      claim: { ...CLAIM, file, guard: ['bun', 'test', '-r./tests/setup.ts', 'tests/support/lib.test.ts'] },
+      claim: { ...CLAIM, file, guard: ['bun', 'test', '-g./tests/setup.ts', 'tests/support/lib.test.ts'] },
     })
     expect(fine.reason).not.toContain('tautology')
     expect(fine.reason).not.toContain('repo-relative')
@@ -2025,7 +2115,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     // read as "any guard carrying punctuation is refused", which would close
     // the class this branch exists to open.
     for (const [file, guard] of [
-      ['src/limit.mjs', ['node', '--test', '--import=./tests/setup.mjs?once', 'tests/limit.test.mjs']],
+      ['src/limit.mjs', ['node', '--test', '--test-name-pattern=./tests/setup.mjs?once', 'tests/limit.test.mjs']],
       ['src/limit.py', ['python3', '-m', 'pytest', 'tests/limit_test.py::test_probe']],
       ['src/limit.ts', ['bun', 'test', 'tests/limit.test.ts', '--test-name-pattern=fast:path']],
     ] as const) {

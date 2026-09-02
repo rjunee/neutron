@@ -640,6 +640,12 @@ function carriedValue(arg: string): string {
  * The class pre-dates this rule for production files, and the same answer holds
  * for both — a proof is evidence for a reviewer, not a substitute for one.
  *
+ * ITS ARGV-VISIBLE HALF IS NOT A RESIDUAL AND IS REFUSED. A hook written INTO
+ * the guard — `--preload=./tests/setup.ts` whose body imports the target — is
+ * the same load with the branch's fingerprints on the argv, and it forged a
+ * proof end to end; see `loadHookCarrying`, which refuses the shape whatever
+ * file it names.
+ *
  * A WRAPPER'S BODY WAS THE SAME RESIDUAL AND IS NO LONGER ONE. A `package.json`
  * script or a `Makefile` recipe is a command line the BRANCH wrote, and the
  * argv `npm run test:unit` says nothing about it; with `"test:unit": "bun test
@@ -665,6 +671,14 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
   // collectible gate below — see `carriedValueReaching`.
   const carriedReach = carriedValueReaching(guard, target)
   if (carriedReach !== null) return carriedReach
+  // AND A HOOK THAT NAMES A THIRD FILE IS OPAQUE, whatever that file imports —
+  // see `loadHookCarrying`. Asked AFTER the arms above so a hook naming the
+  // mutated file itself keeps its more specific refusal, and BEFORE the
+  // collectible gate because a preload is a load and not a discovery.
+  const hook = loadHookCarrying(guard)
+  if (hook !== null) {
+    return `loads ${hook}, whose body the branch wrote and this argv does not show, and so may import`
+  }
   if (!aRunnerMayCollect(target)) {
     // A WRAPPER IS OPAQUE, AND OPACITY IS NOT INNOCENCE. Everything above reads
     // argv; a wrapper's argv says `npm run test:unit` and its real command line
@@ -1069,6 +1083,70 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
     if (dir.length > 0 && target.startsWith(`${dir}/`)) {
       return `loads it via ${spelling}, which names the directory holding it`
     }
+  }
+  return null
+}
+
+/**
+ * The LOAD HOOK this guard carries, in the caller's words, or null if it
+ * carries none.
+ *
+ * A HOOK NAMING A THIRD FILE IS THE WRAPPER'S OPACITY IN ANOTHER SPELLING, and
+ * it forged a `proved: true` end to end. `carriedValueReaching` above refuses a
+ * hook whose value IS the mutated file, in every spelling a loader completes;
+ * nothing could see `--preload=./tests/setup.ts` whose BODY is `import
+ * '../src/limit.ts'`. That setup file is branch-authored and this gate reads
+ * argv, not file bodies — so the guard loads the mutated PRODUCTION module into
+ * a process running an unrelated test, a syntax-shaped mutation reddens it with
+ * nothing having asserted the mutated behaviour, and the control stays green
+ * because only the guard carries the hook. Reproduced against the real prover:
+ * `ok: true, exempt: false, proved: true`, guard_mutated 1 / control_mutated 0 /
+ * guard_restored 0, with the guard file asserting only `1 + 1`.
+ *
+ * So the SHAPE is refused, exactly as a wrapper's is: an option that tells a
+ * runtime to EXECUTE a file before the suite opens is opaque whatever file it
+ * names. It fails CLOSED, it over-refuses a repo whose suite genuinely needs a
+ * hook, and it is spellable around — name the runner and the separate test,
+ * which is what the hook would have run anyway.
+ *
+ * ASKED OF EVERY TARGET, not only a production one, because the load is the
+ * same load: a support library under `tests/` is preloaded into the guard's
+ * process exactly as `src/limit.ts` is, and no other arm here looks at a hook
+ * that names a third file.
+ *
+ * THE SHORT SPELLING IS AMBIGUOUS AND IS READ NARROWLY. `-r` is node's and
+ * bun's `--require`, but go's own `-run` and `-race` also begin `-r` and carry
+ * an attached value by the same rule — so the short form counts only when what
+ * it carries LOOKS LIKE A PATH (`-r./tests/setup.ts` does; `-run`'s `un` does
+ * not). A long name is unambiguous and needs no such test.
+ *
+ * KNOWN RESIDUAL of the same shape, left open on purpose: pytest's `-p
+ * my_plugin` executes a branch-authored plugin module. Its letter collides with
+ * `go test -p 4`'s parallelism flag, and the python side already carries the
+ * larger `conftest.py` residual named above, which no argv rule can close.
+ */
+const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader)$/
+
+function loadHookCarrying(guard: readonly string[]): string | null {
+  const start = runnerPrefixLength(guard)
+  for (let i = start; i < guard.length; i += 1) {
+    const arg = guard[i] as string
+    if (!arg.startsWith('-')) continue
+    const eq = arg.indexOf('=')
+    const attachedShort = eq === -1 && SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg)
+    const name = eq !== -1 ? arg.slice(0, eq) : attachedShort ? arg.slice(0, 2) : arg
+    const short = name === '-r'
+    if (!short && !LOAD_HOOK_OPTION.test(name)) continue
+    const attached = carriedValue(arg)
+    if (attached.length > 0) {
+      if (short && !looksLikeAPath(attached)) continue
+      return arg
+    }
+    // …AND THE SPACE IS A SEPARATOR HERE TOO (`--preload ./tests/setup.ts`),
+    // read the way `carriedValueReaching` reads it: the next element, unless
+    // that element is itself an option.
+    const next = guard[i + 1]
+    if (next !== undefined && next.length > 0 && !next.startsWith('-')) return `${arg} ${next}`
   }
   return null
 }

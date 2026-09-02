@@ -229,6 +229,54 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     }
   })
 
+  test("the schema's GUARD description names both OPAQUE shapes the gate refuses", async () => {
+    // THE CONTRADICTION THIS PINS. The gate refuses two guard shapes for EVERY
+    // target because the command they really run lives in a file the branch
+    // wrote and the argv does not show it: a WRAPPER (`npm run …`, `make …`,
+    // whose script body may itself preload the mutated file) and a LOAD HOOK
+    // (`--preload=…` and its family, whose file may import it). The schema said
+    // neither — it mentioned `npm run test-all` only as an example of
+    // whole-suite DISCOVERY — so a build following it literally on a wrapper
+    // repo earned a refusal after the entire review had already run, with
+    // nothing anywhere telling it what to write instead. Same class of drift as
+    // the declared-test list above: two lists in two files that must agree.
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined })
+    const described = captured
+      .filter((c) => String(c.label).startsWith('forge:'))
+      .map(
+        (c) =>
+          (
+            c.schema as { properties?: { mutationClaim?: { properties?: { guard?: { description?: string } } } } }
+          )?.properties?.mutationClaim?.properties?.guard?.description ?? '',
+      )
+    // POSITIVE CONTROL on the extraction: the GUARD descriptions were really
+    // read. Without it a renamed field makes every assertion below pass on ''.
+    expect(described.length).toBeGreaterThan(1)
+    for (const d of described) expect(d).toContain('MUST go RED')
+
+    // THE WRAPPERS, read out of the prover's own predicate rather than re-typed,
+    // so adding a fifth wrapper there reddens this line until the schema says it.
+    const wrappers = PROVER_SRC.match(/function forwardsPositionalsToAScript[^}]*}/)
+    expect(wrappers).not.toBeNull()
+    const names = [...(wrappers![0] as string).matchAll(/argv\[0\] === '([a-z]+)'/g)].map((m) => m[1] as string)
+    expect(names.length).toBeGreaterThan(1)
+    for (const d of described) for (const name of names) expect([name, d.includes(name)]).toEqual([name, true])
+
+    // AND THE LOAD HOOKS, read out of the prover's regex the same way, so the
+    // schema cannot name three of them and leave the fourth to be discovered by
+    // a build that gets refused for writing it.
+    const hooks = PROVER_SRC.match(/const LOAD_HOOK_OPTION = \/\^--\(\?:([a-z|-]+)\)\$\//)
+    expect(hooks).not.toBeNull()
+    const hookNames = (hooks![1] as string).split('|')
+    expect(hookNames.length).toBeGreaterThan(1)
+    for (const d of described) for (const h of hookNames) expect([h, d.includes(`--${h}`)]).toEqual([h, true])
+
+    // …and both refusals really exist on the prover side, in the words its
+    // reasons use, so this test fails if either shape is quietly re-allowed.
+    expect(PROVER_SRC).toContain('whose script body the branch wrote')
+    expect(PROVER_SRC).toContain('whose body the branch wrote')
+  })
+
   test('NO Forge schema has a field for a mutation RESULT — only for a nomination', async () => {
     // The structural invariant: an agent that could report "mutation verified" is
     // an agent that can fabricate it. There must be nowhere on the wire to say it.
