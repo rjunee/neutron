@@ -5360,6 +5360,106 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(reason3).toContain('branch -D -- trident/add-thing')
   })
 
+  // THE TOCTOU BLOCKER, in three cases. The exit-1 read and the depth read are two separate
+  // `git` invocations, and the guard used to pair them: exit 1 first, depth afterwards. A
+  // checkout unshallowed BETWEEN them therefore pairs the STALE exit 1 — the one a TRUE ancestor
+  // produces past a shallow boundary — with a now-complete depth answer, and the pair reads as
+  // proven divergence: the false wrong-base refusal and its safe-delete chain, on a correctly
+  // based branch. That race is not hypothetical here, because the refusal's own detail line
+  // tells the operator to run `git fetch --unshallow origin` — exactly the event that closes the
+  // window. So the "no" is re-established AFTER completeness is proven, and these cases pin the
+  // TRANSITION the shallow triple above (all static states) could not reach. Split into three
+  // tests because the first case FIRES: a live run keeps its `(project_slug, slug)`, and a
+  // second `runOnce` in the same test would re-process it.
+  const TOCTOU_BASE = 'b'.repeat(40)
+  const TOCTOU_TIP = 'c'.repeat(40)
+  /** Every read but `merge-base --is-ancestor`, which each case answers for itself. */
+  const toctouResponder =
+    (ancestor: () => HostCommandResult) =>
+    (cmd: string[]): HostCommandResult => {
+      const joined = cmd.join(' ')
+      // The depth read lands AFTER the unshallow: this checkout really is complete when asked.
+      if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+      if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(TOCTOU_BASE)
+      if (joined.includes(`merge-base --is-ancestor ${TOCTOU_TIP} ${TOCTOU_BASE}`)) return ancestor()
+      if (joined.includes(`rev-list --count ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
+      if (joined.includes('worktree list --porcelain')) {
+        return ok(
+          ['worktree /repo', `HEAD ${TOCTOU_BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0',
+        )
+      }
+      if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) return ok(TOCTOU_TIP)
+      return ok()
+    }
+
+  test('an unshallow landing between the two reads cannot become a proven divergence', async () => {
+    let reads = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponder(() => {
+        reads += 1
+        // Read 1: taken while the parent commits were still missing — exit 1 on a TRUE ancestor.
+        // Read 2: taken after they arrived, and it finds the link.
+        return reads === 1 ? { ok: false, stdout: '', stderr: '', exit_code: 1 } : ok()
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    // The proven-complete read is the one the verdict rests on, so the branch is CONTAINED: the
+    // build fires and no refusal is composed at all.
+    expect(reads).toBe(2)
+    expect(h.inputs).toHaveLength(1)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('branch -D')
+  })
+
+  test('POSITIVE CONTROL: exit 1 at BOTH reads of a complete checkout is still the wrong-base refusal', async () => {
+    // Without this, "re-read before answering no" could be satisfied by an implementation that
+    // stopped answering "no" at all and never refused a real wrong-base branch again.
+    let reads = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponder(() => {
+        reads += 1
+        return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reads).toBe(2)
+    expect(reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(reason).toContain('branch -D -- trident/add-thing')
+  })
+
+  test('a re-read that ERRORS is UNKNOWN, not a "no" borrowed from the first read', async () => {
+    let reads = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponder(() => {
+        reads += 1
+        return reads === 1
+          ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
+          : { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reason).toContain('UNKNOWN')
+    // The detail quotes the read the verdict actually rests on — the second one.
+    expect(reason).toContain('exited 128')
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('branch -D')
+  })
+
   test('exit 0 stays definitive, so a shallow checkout costs a contained branch nothing', async () => {
     // Truncation can only HIDE ancestry, never invent it: `--is-ancestor` exiting 0 found the
     // link, and that is positive proof at any depth. So the depth probe is lazy — the common
@@ -5867,6 +5967,20 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     // overcounting, which is the same defect as the undercount this sentence was written to fix.
     expect(reason).toContain('if origin had moved that ref')
     expect(reason).toContain("that ref's reflog")
+    // ...WHILE THE CONFIGURED BOOKKEEPING IS NOT CONDITIONAL (Argus finding). It used to ride
+    // inside that same "if origin had moved that ref" list, which asserted in the NO-OP case a
+    // boundary the config falsifies: reproduced on git 2.43 with `fetch.writeCommitGraph=true`
+    // and a tracking ref already at origin's tip, the ref did not move (reflog stayed at one
+    // line) and the commit-graph files appeared anyway. It belongs on FETCH_HEAD's side, where
+    // `delivery.ts` already puts it — so it is named BEFORE the conditional opens.
+    expect(reason).toContain('bookkeeping')
+    expect(reason.indexOf('bookkeeping')).toBeLessThan(reason.indexOf('if origin had moved that ref'))
+    // AND THE CAVEAT NAMES CONFIGURED CODE, NOT HOOKS ALONE (Argus blocker). An `ext::` remote
+    // helper is spawned BY the fetch and was reproduced writing into the working tree during the
+    // exact fetch form this path runs, so a hook-only caveat left the same hole one config key
+    // along. Shared verbatim with `delivery.ts` through `CONFIGURED_CODE_CAVEAT`.
+    expect(reason).toContain('code this repo configures git to run is code of its own')
+    expect(reason).toContain('ext:: remote helper or a credential helper is spawned by the fetch itself')
 
     // POSITIVE CONTROL, and the OVERcounting half: a run that already carries a base pin makes
     // no fetch on this path, so naming one would report a write that never happened. An
@@ -5889,6 +6003,10 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(pinned.hostCalls.some((c) => c.join(' ').includes('fetch'))).toBe(false)
     expect(reason2).toContain('no branch, worktree, commit or file in the tree was changed or deleted')
     expect(reason2).not.toContain('FETCH_HEAD')
+    // The no-fetch arm measures git's writes too, and carries the same caveat: a hook or helper
+    // this repo configures is not bounded by a sentence about what the launcher did.
+    expect(reason2).toContain('deleted by git itself')
+    expect(reason2).toContain('code this repo configures git to run is code of its own')
   })
 
   test('a checkpointed resume does not fetch or pin a base', async () => {

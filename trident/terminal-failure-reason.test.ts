@@ -1213,8 +1213,8 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
       // may write anywhere, so the sentence every arm OPENS with says what was measured.
       expect(`${name}: ${out.input_needed}`).toContain('deleted by git itself on this path')
       expect(`${name}: ${out.input_needed}`).not.toContain('was changed or deleted.')
-      expect(`${name}: ${out.input_needed}`).toContain('All of that measures what GIT writes')
-      expect(`${name}: ${out.input_needed}`).toContain('reference-transaction hook runs inside the very ref update')
+      expect(`${name}: ${out.input_needed}`).toContain('All of that measures what GIT itself writes')
+      expect(`${name}: ${out.input_needed}`).toContain('reference-transaction hook fires inside the very ref update')
       // The advice this class exists to forbid — a launch that never happened is not retried
       // by replying, and the branch is not this run's to take until it is free.
       expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
@@ -1444,7 +1444,11 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
     // ...and the fetching arm's enumeration no longer closes itself with a claim a config can
     // falsify: `fetch.writeCommitGraph` writes under `.git`, outside the four items named.
     expect(safe.out.input_needed).not.toContain('objects it downloads, and nothing else')
-    expect(safe.out.input_needed).toContain('and nothing outside .git')
+    // ...and the boundary is stated as GIT's writes, not the fetch's (Argus blocker): an `ext::`
+    // remote helper is spawned BY the fetch and was reproduced writing into the working tree
+    // during this exact fetch form, so "the fetch itself" was the wrong subject for the absolute.
+    expect(safe.out.input_needed).toContain("git's own writes on that fetch go nowhere outside .git")
+    expect(safe.out.input_needed).not.toContain('written by the fetch itself')
   })
 
   test('the write sentences say whose writes they measure, and no arm ends in an absolute a hook falsifies', async () => {
@@ -1488,7 +1492,13 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
       const { out } = await deliver(deps)
       // Attributed, and the caveat that makes the attribution true is present exactly once.
       expect(`${name}: ${out.input_needed}`).toContain('deleted by git itself on this path')
-      expect(`${name}: ${out.input_needed}`).toContain("A hook this repo configures on git's own operations is code of its own")
+      expect(`${name}: ${out.input_needed}`).toContain('code this repo configures git to run is code of its own')
+      // AND THE CLASS IS WIDER THAN HOOKS (Argus blocker). An `ext::` remote helper is spawned BY
+      // the fetch — reproduced on git 2.43 writing a file into the working tree during the exact
+      // fetch form this guard runs — so a caveat naming only hooks left the same hole open one
+      // config key along. Both members are named, and so is the tree.
+      expect(`${name}: ${out.input_needed}`).toContain('ext:: remote helper or a credential helper is spawned by the fetch itself')
+      expect(`${name}: ${out.input_needed}`).toContain('may write anywhere, the working tree included')
       expect(`${name}: ${out.input_needed}`.split('reference-transaction').length - 1).toBe(1)
       // The two absolutes that survived the earlier scoping are gone from every arm.
       expect(`${name}: ${out.input_needed}`).not.toContain('nothing else can have been written either way')

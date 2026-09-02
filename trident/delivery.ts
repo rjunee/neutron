@@ -43,6 +43,7 @@ import {
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_STASH_PARKED_MARKER,
 } from './orchestrator.ts'
+import { CONFIGURED_CODE_CAVEAT } from './wrong-base-remedy.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -198,14 +199,19 @@ const NO_DESTRUCTIVE_WRITE =
 
 /**
  * THE ONE THING NONE OF THE WRITE SENTENCES CAN BOUND, said once and covering all of them. Every
- * sentence above and below enumerates GIT's own writes; a repo may configure hooks that git runs
- * inside those operations, and such a hook is arbitrary local code. Naming it here — after the
- * enumeration, before the next step — is what makes the enumeration's scope true, and it is the
- * honest form of the absolute it replaces: this message says what was measured, not what cannot
- * be promised.
+ * sentence above and below enumerates GIT's own writes; a repo may configure git to run arbitrary
+ * local code inside those operations. Naming it here — after the enumeration, before the next
+ * step — is what makes the enumeration's scope true, and it is the honest form of the absolute it
+ * replaces: this message says what was measured, not what cannot be promised.
+ *
+ * AND THE CLASS IS "CONFIGURED CODE", NOT "HOOKS" (Argus blocker). This caveat named hooks alone,
+ * which left the identical hole open through the remote and credential configuration: an `ext::`
+ * remote helper is spawned BY the fetch, and a reviewer reproduced one writing into the WORKING
+ * TREE during the exact fetch form these guards run. The wording, and that reproduction, now live
+ * once in `CONFIGURED_CODE_CAVEAT` (`wrong-base-remedy.ts`), shared with the launch guard's own
+ * `noWrites` so the two cannot drift apart again.
  */
-const HOOK_CAVEAT =
-  "All of that measures what GIT writes. A hook this repo configures on git's own operations is code of its own — a reference-transaction hook runs inside the very ref update a fetch above makes, and can write anywhere — so nothing in this message bounds what such a hook did."
+const HOOK_CAVEAT = `All of that measures what GIT itself writes: ${CONFIGURED_CODE_CAVEAT}.`
 
 /**
  * THE GUARD IS NOT THE ONLY THING THAT RAN ON THIS PATH (Argus blocker). The per-arm sentences
@@ -248,7 +254,7 @@ const HOOK_CAVEAT =
  * arm's absolute in exactly the same way (Argus blocker).
  */
 const LAUNCH_PATH_FETCH =
-  "That accounts for the guard itself. Separately, IF this refusal came from a fresh PR launch, the launcher refreshed origin's base ref before this guard ran; that write belongs to the launcher, is counted exactly where it happens, and moves only origin's base pointer and git's own bookkeeping under this repo's .git — the fetch itself writes nothing in the tree, and recurses into no submodule. A launch that does not fetch — a local-merge build, or a re-entry whose base was already pinned — made no such write at all."
+  "That accounts for the guard itself. Separately, IF this refusal came from a fresh PR launch, the launcher refreshed origin's base ref before this guard ran; that write belongs to the launcher, is counted exactly where it happens, and moves only origin's base pointer and git's own bookkeeping under this repo's .git — git's own writes on that fetch touch nothing in the tree, and it recurses into no submodule. A launch that does not fetch — a local-merge build, or a re-entry whose base was already pinned — made no such write at all."
 
 /**
  * THE COMPOSER'S ARM OPENINGS, named once because two things now read them: the write
@@ -354,7 +360,7 @@ function wrongBaseWrites(evidence: string): string {
     // one arm along. FETCH_HEAD is the one write that IS unconditional (this fetch does not
     // pass `--no-write-fetch-head`), so the conditional is spelled per item rather than over
     // the whole list.
-    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog) if origin has moved it, rewrites FETCH_HEAD, and writes any objects it downloads, plus whatever bookkeeping that fetch's own configuration adds under .git (fetch.writeCommitGraph writes a commit-graph, for one) — a fetch that finds the tracking ref already at origin's tip updates no ref and appends nothing to that reflog, and nothing outside .git is written by the fetch itself."
+    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog) if origin has moved it, rewrites FETCH_HEAD, and writes any objects it downloads, plus whatever bookkeeping that fetch's own configuration adds under .git (fetch.writeCommitGraph writes a commit-graph, for one) — a fetch that finds the tracking ref already at origin's tip updates no ref and appends nothing to that reflog, and git's own writes on that fetch go nowhere outside .git."
   }
   // THE THROW ARM CAN FIRE ON EITHER SIDE OF THE FETCH (Argus finding). The composer's outer
   // catch wraps its WHOLE body — enumeration, fetch, and the composition after it — so a throw

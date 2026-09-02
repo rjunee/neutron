@@ -592,6 +592,27 @@ function defang(s: string): string {
  */
 const EVIDENCE_PROSE_MAX = 300
 /**
+ * THE ONE THING NO WRITE SENTENCE IN THIS SYSTEM CAN BOUND, said once and shared by every one of
+ * them (Argus blocker). The launch guard's `noWrites` and `delivery.ts`'s per-arm write sentences
+ * all enumerate GIT's own writes; a repo can configure git to run arbitrary local code INSIDE
+ * those very operations, and that code is bounded by nothing here.
+ *
+ * HOOKS WERE THE FIRST INSTANCE, AND NOT THE ONLY ONE. Naming hooks alone left the same class
+ * open through the remote and credential configuration: `remote.<name>.url = ext::sh -c …` makes
+ * git SPAWN that command as the transport, before any ref moves. Reproduced on git 2.43 in a
+ * scratch repo with `protocol.ext.allow=always`: the exact fetch form these guards run
+ * (`git fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main`)
+ * created a file in the WORKING TREE and then exited 128 — a tree write, by the fetch, that a
+ * hook-only caveat did not cover. `credential.helper` is the same shape. So the caveat names the
+ * class — code this repo configures git to run — rather than one member of it.
+ *
+ * Written as a CLAUSE, no leading capital and no trailing period, because both call sites splice
+ * it into a longer sentence and punctuate it themselves.
+ */
+export const CONFIGURED_CODE_CAVEAT =
+  "code this repo configures git to run is code of its own — a reference-transaction hook fires inside the very ref update a fetch makes, and an ext:: remote helper or a credential helper is spawned by the fetch itself before any ref moves — and such code may write anywhere, the working tree included, so nothing measured here bounds what it did"
+
+/**
  * The same INPUT cap `scrub` applies before its own passes (Argus nit). Every current caller's
  * input is already bounded — a path by PATH_MAX, git stderr by the orchestrator's own slice —
  * so this changes no output that exists today; the asymmetry was the thing worth removing,
@@ -931,7 +952,28 @@ export async function composeWrongBaseRefusal(
   // and can carry the same codepoints for the same reason.
   const branchProse = foldRefName(branch)
   const baseProse = foldRefName(base)
-  const prefix = `branch ${branchProse} already carries ${ahead_count} commit(s) not on origin/${baseProse} — it was not cut from origin/${baseProse}; refusing to build on another lane's work. `
+  // AND THE TWO NON-NAME FIELDS ARE FOLDED HERE TOO (Argus finding, two reviewers, one repro
+  // each). `ahead_count` and `branch_tip` were interpolated RAW, safe only because the single
+  // call site happens to gate them (`/^\d+$/` and `/^[0-9a-f]{40}$/` in `orchestrator.ts`) —
+  // a precondition no type, docblock or test pinned, so a second caller, or a rewrite of the
+  // first, silently re-opens it. Reproduced through the real composer: a newline-bearing
+  // `ahead_count` forges a line carrying the banned `branch -D` literal inside the ALIVE arm
+  // and flips `delivery.ts`'s classifier from `branch-held` to `merge-mechanics`; a
+  // newline-bearing `branch_tip` does the same through the three arms that quote it as prose.
+  // The composer's own contract is that NOTHING it interpolates can forge a line, so the fold
+  // belongs here rather than in the caller's discipline. A well-formed value passes through
+  // byte-identical, which is why the shape is a test-and-passthrough rather than a rewrite:
+  // `branch_tip` is a token, so it folds as a NAME (never to a space), and a count that is not
+  // a count becomes `?` — the same stand-in the caller already emits for an unreadable count.
+  //
+  // AND THE FOLDED TIP IS THE ONE THE PRINTED COMMANDS USE TOO, not only the prose. `sh()` makes
+  // a forged tip UNRUNNABLE, but it does not make it unreadable: `sh()` renders an embedded
+  // newline as `$'…\n…'`, which spelled the banned `branch -D` literal out in plain sight inside
+  // the salvage tag's own argument. A tip that is not a sha resolves to no commit anyway, so
+  // degrading it costs a real remedy nothing, and every well-formed tip is unchanged.
+  const aheadProse = /^\d+$/.test(ahead_count) ? ahead_count : '?'
+  const tipProse = /^[0-9a-f]{40}$/i.test(branch_tip) ? branch_tip : foldRefName(branch_tip)
+  const prefix = `branch ${branchProse} already carries ${aheadProse} commit(s) not on origin/${baseProse} — it was not cut from origin/${baseProse}; refusing to build on another lane's work. `
   try {
     // PER-RUN, not per-branch (orchestrator.ts:2608 is the same namespace). A stable
     // `trident-salvage/<branch>` tag would MOVE on the next salvage of the same branch and
@@ -945,8 +987,8 @@ export async function composeWrongBaseRefusal(
     // this module never created — the module would be manufacturing the false evidence it
     // exists to prevent. `git tag` also refuses an existing tag without `-f`, so the
     // create-only property survives the shorter form.
-    const salvageTag = `trident-salvage/${args.run_id.trim() !== '' ? args.run_id.trim() : branch_tip}`
-    const salvage = (): string => `git -C ${sh(repo)} tag ${sh(salvageTag)} ${sh(branch_tip)}`
+    const salvageTag = `trident-salvage/${args.run_id.trim() !== '' ? args.run_id.trim() : tipProse}`
+    const salvage = (): string => `git -C ${sh(repo)} tag ${sh(salvageTag)} ${sh(tipProse)}`
     // TOTAL evidence budget (Argus finding 10): priced at each spawn, so whatever one command
     // consumed is gone for the next.
     //
@@ -1438,12 +1480,12 @@ export async function composeWrongBaseRefusal(
       // Equality is not the only way origin can carry the local work: when origin/<branch> is
       // a DESCENDANT of the local tip the shas differ yet every local commit is published, and
       // "these commits exist nowhere else" would be a false statement of evidence.
-      const identical = originSha === branch_tip.toLowerCase()
+      const identical = originSha === tipProse.toLowerCase()
       let contained = identical
       let ancestryUnknown: string | null = null
       if (!identical) {
         const ancestry = await run(
-          ['git', '-C', repo, 'merge-base', '--is-ancestor', branch_tip, `refs/remotes/origin/${branch}`],
+          ['git', '-C', repo, 'merge-base', '--is-ancestor', tipProse, `refs/remotes/origin/${branch}`],
           undefined,
           LOCAL_TIMEOUT_MS,
         )
@@ -1459,12 +1501,12 @@ export async function composeWrongBaseRefusal(
         }
       }
       if (ancestryUnknown !== null) {
-        return `${prefix}The wrong-base launch guard found no worktree holding the branch and origin/${branchProse} at ${originSha}, but whether it contains the local tip ${branch_tip} could NOT be established (${ancestryUnknown}) — publication is UNKNOWN, and UNKNOWN does not authorise deletion. Salvage the branch first — ${salvage()}, create-only so it cannot overwrite an earlier receipt (or publish it with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)} if this lane has push rights) — then re-resolve it by hand.`
+        return `${prefix}The wrong-base launch guard found no worktree holding the branch and origin/${branchProse} at ${originSha}, but whether it contains the local tip ${tipProse} could NOT be established (${ancestryUnknown}) — publication is UNKNOWN, and UNKNOWN does not authorise deletion. Salvage the branch first — ${salvage()}, create-only so it cannot overwrite an earlier receipt (or publish it with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)} if this lane has push rights) — then re-resolve it by hand.`
       }
       if (contained) {
         const relation = identical
-          ? `is at the identical commit (local ${branch_tip}, origin ${originSha})`
-          : `is ahead of the local tip and already contains it (local ${branch_tip}, origin ${originSha})`
+          ? `is at the identical commit (local ${tipProse}, origin ${originSha})`
+          : `is ahead of the local tip and already contains it (local ${tipProse}, origin ${originSha})`
         // EVERY PREMISE IS RE-ESTABLISHED BY THE COMMAND ITSELF. This message is composed at
         // refusal time and read minutes to hours later, and BOTH facts it rests on can rot in
         // between: the local ref can move (an unpublished commit pushed onto it), and origin
@@ -1511,13 +1553,13 @@ export async function composeWrongBaseRefusal(
         // own does: this line runs in the reader's repo, and a recursed fetch writes inside a
         // submodule's git dir. A remedy this message vouches for should touch exactly the ref
         // the argument beside it names.
-        const verify = `git -C ${sh(repo)} fetch --no-tags --no-recurse-submodules origin ${sh(refspec)} && test "$(git -C ${sh(repo)} rev-parse --verify ${sh(`refs/heads/${branch}`)})" = ${sh(branch_tip)} && git -C ${sh(repo)} merge-base --is-ancestor ${sh(branch_tip)} ${sh(`refs/remotes/origin/${branch}`)} && ${salvage()} && git -C ${sh(repo)} branch -D -- ${sh(branch)}`
+        const verify = `git -C ${sh(repo)} fetch --no-tags --no-recurse-submodules origin ${sh(refspec)} && test "$(git -C ${sh(repo)} rev-parse --verify ${sh(`refs/heads/${branch}`)})" = ${sh(tipProse)} && git -C ${sh(repo)} merge-base --is-ancestor ${sh(tipProse)} ${sh(`refs/remotes/origin/${branch}`)} && ${salvage()} && git -C ${sh(repo)} branch -D -- ${sh(branch)}`
         return `${prefix}The wrong-base launch guard found no worktree holding the branch, and origin/${branchProse} ${relation} — every commit on the local branch is already on origin, so dropping the local ref loses nothing. Delete it ONLY through the chain that re-establishes both of those facts at the moment it runs: ${verify}. The fetch re-reads origin, so a force-push that dropped these commits before you run this stops the delete; the test re-compares the local ref against the evidenced tip, so a branch that moved stops it too; the ancestry check re-proves origin contained that tip as of that fetch; the tag takes a local snapshot of the evidenced commit IMMEDIATELY before the delete, and being create-only it stops the chain rather than overwriting an earlier receipt; and branch -D is the delete git RE-CHECKS holders for — it refuses ("used by worktree at ...") if a lane has taken the branch since, and that refusal is a stand-down signal, never something to route around with a low-level ref delete. What the chain does NOT close, and you should know before running it: it is compare-THEN-delete, so a commit landing on the ref in the gap between the test and the delete would be deleted with it, and the ancestry link reads a TRACKING ref that is only as fresh as this chain's own fetch, so a force-push landing after that fetch is not seen at all. Nothing in git closes either gap for a branch delete; what bounds them is that each gap is one command wide, that branch -D still refuses a branch a lane has checked out, and that the snapshot tag is taken inside the window — so if origin has since dropped these commits they are still reachable here by that tag rather than by nothing. Then re-dispatch.`
       }
     }
     const evidence = absent
       ? `origin has no ${branchProse} at all`
-      : `origin/${branchProse} is at ${originSha} and does not contain the local tip ${branch_tip}`
+      : `origin/${branchProse} is at ${originSha} and does not contain the local tip ${tipProse}`
     return `${prefix}The wrong-base launch guard found no worktree holding the branch, and ${evidence} — these commits are unpublished. Salvage first: snapshot them the way the stranded-run salvage does — ${salvage()}, create-only so it cannot overwrite an earlier receipt — or, if this lane has push rights, publish them with git -C ${sh(repo)} push origin ${sh(`refs/heads/${branch}`)}; never delete unpublished work.`
   } catch (err) {
     return unknownHolder(

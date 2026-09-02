@@ -79,7 +79,7 @@ import { hasArgusProvenance } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
-import { composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
+import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import {
   runMutationProofGate,
   type MutationGateInput,
@@ -3371,7 +3371,7 @@ export function buildTridentOrchestrator(
         // fail-closed and authorises nothing.
         //
         // Probed LAZILY and memoised: a contained branch (the overwhelmingly common shape)
-        // never needs the answer, and the depth cannot change under a single guard pass.
+        // never needs the answer, and one guard pass asks at most once.
         let shallow: 'yes' | 'no' | 'unknown' | null = null
         const checkoutIsShallow = async (): Promise<'yes' | 'no' | 'unknown'> => {
           if (shallow !== null) return shallow
@@ -3383,10 +3383,35 @@ export function buildTridentOrchestrator(
           shallow = !probe.ok ? 'unknown' : answer === 'true' ? 'yes' : answer === 'false' ? 'no' : 'unknown'
           return shallow
         }
-        const ancestry = async (res: HostCommandResult): Promise<'yes' | 'no' | 'unknown'> => {
-          if (res.ok) return 'yes'
-          if (res.exit_code !== 1 || res.timed_out === true) return 'unknown'
-          return (await checkoutIsShallow()) === 'no' ? 'no' : 'unknown'
+        // AND THE TWO READS MUST DESCRIBE ONE HISTORY (Argus blocker). The exit-1 read and the
+        // depth read are separate `git` invocations, so a checkout unshallowed BETWEEN them
+        // pairs a STALE exit 1 — the one a TRUE ancestor produces past a shallow boundary — with
+        // a now-complete depth answer, and the pair reads as proven divergence: the false
+        // wrong-base refusal and its safe-delete chain, on a correctly based branch, which is the
+        // exact outcome this change exists to remove. The race is not hypothetical here: the
+        // refusal's own `probeDetail` tells the operator to run `git fetch --unshallow origin`,
+        // which is precisely the event that closes the window, and an earlier comment asserting
+        // "the depth cannot change under a single guard pass" enforced nothing.
+        //
+        // So "no" now rests on an exit 1 observed AFTER completeness was proven: the probe is
+        // RE-RUN once the depth answers complete, and only a second exit 1 answers "no". A re-run
+        // that exits 0 — the unshallow landed the missing parents between the reads — answers
+        // "yes", and any other exit is UNKNOWN. Deepening is one-way (nothing re-truncates a
+        // checkout in place), so the second read is taken in a history at least as complete as
+        // the one the depth probe measured. The probe is spawned HERE rather than by the caller
+        // so the re-run is the identical argv, and the RESULT that the detail line quotes is the
+        // one the verdict actually rests on.
+        const ancestry = async (
+          argv: string[],
+        ): Promise<{ verdict: 'yes' | 'no' | 'unknown'; res: HostCommandResult }> => {
+          const res = await opts.run_host(argv, launchRun.repo_path)
+          if (res.ok) return { verdict: 'yes', res }
+          if (res.exit_code !== 1 || res.timed_out === true) return { verdict: 'unknown', res }
+          if ((await checkoutIsShallow()) !== 'no') return { verdict: 'unknown', res }
+          const confirm = await opts.run_host(argv, launchRun.repo_path)
+          if (confirm.ok) return { verdict: 'yes', res: confirm }
+          if (confirm.exit_code !== 1 || confirm.timed_out === true) return { verdict: 'unknown', res: confirm }
+          return { verdict: 'no', res: confirm }
         }
         // EVERY FIELD THIS REFUSAL QUOTES IS FOLDED, on the same terms the remedy composer
         // already folds its own (Argus blocker). `repo_path` is persisted verbatim by store.ts
@@ -3440,6 +3465,14 @@ export function buildTridentOrchestrator(
         // IS established is the class: everything that fetch can touch lives under `.git`, and
         // "file" in the clause below means a file in the TREE, which is the reassurance owed.
         //
+        // AND THAT BOOKKEEPING IS UNCONDITIONAL (Argus finding). It used to ride inside the
+        // "if origin had moved that ref" list, which asserted in the NO-OP case a boundary the
+        // config falsifies: reproduced on git 2.43 with `fetch.writeCommitGraph=true` and a
+        // tracking ref already at origin's tip — the ref did not move (reflog stayed at one
+        // line) and the commit-graph files went 0 → 2 anyway. `delivery.ts` already phrases the
+        // same enumeration correctly, so the split below matches it: FETCH_HEAD and the
+        // configured bookkeeping are unconditional, the ref, its reflog and the objects are not.
+        //
         // AND THE REF UPDATE IS CONDITIONAL (Argus finding, same one `delivery.ts` carries for
         // the composer's own fetch). A fetch whose tracking ref already sits at origin's tip
         // makes no ref transaction: repeating the identical fetch against an unchanged remote
@@ -3447,8 +3480,8 @@ export function buildTridentOrchestrator(
         // asserted, in the no-op case, writes that did not happen — overcounting, which this
         // sentence exists to avoid in both directions. FETCH_HEAD is the unconditional one.
         const noWrites = fetchedBase
-          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags --no-recurse-submodules origin ${foldRefName(baseRefspec)} made under this repo's own .git — FETCH_HEAD, plus — if origin had moved that ref — refs/remotes/origin/${baseProse}, that ref's reflog and the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top; a hook configured on this repo is code of its own, and outside what this sentence measures`
-          : 'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted by git itself, and the only writes on this path are the ones the earlier git fetch --no-tags --no-recurse-submodules origin ${foldRefName(baseRefspec)} made under this repo's own .git — FETCH_HEAD and whatever bookkeeping that fetch's own configuration adds on top, plus — if origin had moved that ref — refs/remotes/origin/${baseProse}, that ref's reflog and the objects it downloaded; ${CONFIGURED_CODE_CAVEAT}`
+          : `the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted by git itself; ${CONFIGURED_CODE_CAVEAT}`
         // The DETAIL names the shallow case as the shallow case. An exit-1 UNKNOWN reported as
         // "exited 1: no stderr" reads as a probe that malfunctioned; what actually happened is
         // that git answered honestly about a history it cannot see past, and the operator's next
@@ -3464,16 +3497,21 @@ export function buildTridentOrchestrator(
             gitDetail(res.stderr || res.stdout) || 'no stderr'
           }`
         }
-        const containedInBase = await opts.run_host(
-          ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
+        const containedInBase = await ancestry([
+          'git',
+          '-C',
           launchRun.repo_path,
-        )
-        const contained = await ancestry(containedInBase)
+          'merge-base',
+          '--is-ancestor',
+          branchTip,
+          base_sha,
+        ])
+        const contained = containedInBase.verdict
         if (contained === 'unknown') {
           return {
             run: failedRun(
               pinnedRun,
-              `trident infra: could not establish whether branch ${branchProse} at ${branchTip} is contained in origin/${baseProse} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+              `trident infra: could not establish whether branch ${branchProse} at ${branchTip} is contained in origin/${baseProse} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase.res)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
               false,
             ),
             changed: true,
@@ -3483,11 +3521,16 @@ export function buildTridentOrchestrator(
         }
         let ownCrashLeftover = false
         if (contained === 'no' && priorBaseSha !== null) {
-          const descendsFromPriorBase = await opts.run_host(
-            ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
+          const descendsFromPriorBase = await ancestry([
+            'git',
+            '-C',
             launchRun.repo_path,
-          )
-          const descends = await ancestry(descendsFromPriorBase)
+            'merge-base',
+            '--is-ancestor',
+            priorBaseSha,
+            branchTip,
+          ])
+          const descends = descendsFromPriorBase.verdict
           // Same three exits, same rule. A failed probe here would otherwise read as "this is
           // NOT this run's own crash leftover", which routes a run's own restart debris into a
           // refusal that blames another lane for it.
@@ -3495,7 +3538,7 @@ export function buildTridentOrchestrator(
             return {
               run: failedRun(
                 pinnedRun,
-                `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${baseProse} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase)}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+                `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${baseProse} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase.res)}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
                 false,
               ),
               changed: true,
