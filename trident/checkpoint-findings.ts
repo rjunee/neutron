@@ -12,6 +12,8 @@
  * SQL must agree at this boundary; the corpus in
  * `as-built-disposition-sql.test.ts` executes the agreement.
  */
+import { trimAsciiWs } from './ascii-trim.ts'
+
 const SQLITE_JSON_MAX_DEPTH = 1000
 
 /** Container nesting depth exceeds SQLite's bound? Linear scan; brackets inside
@@ -55,7 +57,13 @@ function exceedsSqliteJsonDepth(raw: string): boolean {
  * give ONE answer at the nesting boundary — see `SQLITE_JSON_MAX_DEPTH` above.
  */
 export function parseCheckpointFindings(raw: string | null | undefined): unknown[] {
-  if (typeof raw !== 'string' || raw.trim().length === 0) return []
+  // THE SIX-CHARACTER TRIM, like the rest of this family (Argus r29, nit).
+  // `String.prototype.trim` also strips NBSP, the Unicode space separators and the
+  // BOM, which neither `checkpoint.sh` nor the canonical counting SQL can express;
+  // no divergence is measurable today (all three answer "no findings" on those
+  // inputs by other routes), and naming the same six characters here is what keeps
+  // it that way — see `trident/ascii-trim.ts`.
+  if (typeof raw !== 'string' || trimAsciiWs(raw).length === 0) return []
   // A LEADING BYTE-ORDER MARK IS NOT FINDINGS, stated explicitly rather than left to
   // `JSON.parse` to throw on (Argus r1, minor). RE-MEASURED IN r15, because the note
   // that stood here claimed the two SQLite builds DISAGREE about `'\uFEFF[1]'` and

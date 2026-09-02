@@ -1060,6 +1060,20 @@ describe('dispatch preflight (P4)', () => {
       'trident/dispatch-holds.ts',
       'trident/work-board-build-tool.ts',
     ])
+    /**
+     * `hostRunner` BOUND TO A VALUE, on a line that is not a comment: either the
+     * property is forwarded (`hostRunner: ctx.hostRunner`, `hostRunner:
+     * tridentHostRunner`) or it is REQUIRED in the deps type the caller must
+     * satisfy (`hostRunner: NonNullable<…>` in `dispatch-holds.ts`, where the
+     * compiler — not this grep — is the guarantee). A `?:` declaration and a
+     * docblock mention are neither.
+     */
+    const bindsCredential = (text: string): boolean =>
+      text
+        .split('\n')
+        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
+        .some((l) => /\bhostRunner:\s*[A-Za-z_$]/.test(l))
+
     for (const file of callers) {
       const src = `${file}: ${readFileSync(join(REPO, file), 'utf8')}`
       expect(src).toContain('preflight')
@@ -1072,8 +1086,29 @@ describe('dispatch preflight (P4)', () => {
       // the BEHAVIOUR is proven against a private origin, per tool entry, in
       // `work-board-build-tool.test.ts`, and `dispatch-holds.ts` additionally
       // demands it in the TYPE so the compiler backs this word up.
-      expect(src).toContain('hostRunner')
+      //
+      // AND THE WORD IS NOT THE WIRE (Argus r29, mutant executed below). A bare
+      // `toContain('hostRunner')` survived DELETING the forwarding expression at
+      // `trident/code-command.ts` — the word is still spelled by the optional
+      // field's own declaration (`hostRunner?: EnvCapableHostRunner`) and by the
+      // docblock above it, and an OPTIONAL field means the compiler does not
+      // notice either. So the rule reads BINDINGS, not mentions: on a line that
+      // is not a comment, `hostRunner:` followed by a value. A declaration writes
+      // `hostRunner?:` and a docblock line starts with `*`, so neither can stand
+      // in for a wire.
+      expect(bindsCredential(readFileSync(join(REPO, file), 'utf8'))).toBe(true)
     }
+    // THE MUTANT, EXECUTED: delete `/code`'s forwarding spread and nothing else.
+    // The word survives, the file still typechecks (the field is optional) — and
+    // the rule above goes red, which is the only thing that makes it a guard.
+    const codeCommandSrc = readFileSync(join(REPO, 'trident', 'code-command.ts'), 'utf8')
+    const unwired = codeCommandSrc
+      .split('\n')
+      .filter((l) => !/\.\.\.\(ctx\.hostRunner !== undefined/.test(l))
+      .join('\n')
+    expect(unwired.split('\n').length).toBe(codeCommandSrc.split('\n').length - 1)
+    expect(unwired).toContain('hostRunner')
+    expect(bindsCredential(unwired)).toBe(false)
     // …and the ▶ closure specifically: the same shared object, by name, inside
     // the `boardStartBuild` dispatch call.
     //

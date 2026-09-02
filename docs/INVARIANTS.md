@@ -429,7 +429,11 @@ with cross-references noted inline.
     verdict-carrying invocation as well as the findings-only one: `inner_verdict REQUEST_CHANGES`
     beside `[]` is the same emptying write with a verdict stapled on, and it asks for the ONE
     verdict this script refuses to write findings-free, so it can never be a caller deciding
-    something new. `APPROVE` and a clearing write still land. The BOUND-REVIEW executor obeys the same rule for the same
+    something new. A bare `APPROVE` still lands — it brings a verdict a reviewer
+    reached — but the CLEARING write does NOT: it brings no review at all, and a NULLed verdict
+    beside preserved findings is the one atomic write's two guarded columns disagreeing about
+    whether a review happened, so it is frozen on the same terms (Argus r21; `docs/AS_BUILT.md`,
+    "AND THE CLEARING WRITE IS AN ERASURE TOO"). The BOUND-REVIEW executor obeys the same rule for the same
     reason (`trident/orchestrator.ts`, `recorded_verdict`): its verdict comes from the panel's
     `inner_result` JSON while its findings come from the panel's column, so the two can disagree,
     and the store's throw would otherwise keep the run non-terminal and re-run the whole review on
@@ -437,13 +441,15 @@ with cross-references noted inline.
     (b) `REVIEW_NOT_RUN` is the ONE no-reviewer terminal verdict
     (`migrations/0138_code_trident_runs_review_not_run.sql`), written at source by
     `writeTerminalResult` (`trident/inner-workflow.mjs`) and at every orchestrator fabrication
-    site through `recordedTerminalVerdict` (`trident/orchestrator.ts:912`; REQUEST_CHANGES survives
+    site through `recordedTerminalVerdict` (`trident/orchestrator.ts`, `recordedTerminalVerdict`; REQUEST_CHANGES survives
     only with Argus provenance + non-empty findings). A run terminating at `forge-done` with no
     review records REVIEW_NOT_RUN, never REQUEST_CHANGES
-    (`trident/inner-workflow-built-head.test.ts:435`).
+    (`trident/inner-workflow-built-head.test.ts`, "a built-head stop reports ok:false", with the
+    positive control "a genuine rejection still records REQUEST_CHANGES with its findings").
     (c) The three-way taxonomy — died-before-build / built-never-reviewed / reviewed-rejected — is
     derivable from EXISTING COLUMNS ALONE via `terminalRunDisposition`
-    (`trident/run-disposition.ts:155`; table pinned in `trident/run-disposition.test.ts`). No new
+    (`trident/run-disposition.ts`, `terminalRunDisposition`; table pinned in
+    `trident/run-disposition.test.ts`). No new
     column; historical rows are never rewritten (they are the measurement evidence). A
     REQUEST_CHANGES row classifies `reviewed-rejected` whether or not it carries findings, so a
     legacy fabricated row can never seed a resume; `died-before-build` means "no build this
@@ -452,9 +458,9 @@ with cross-references noted inline.
     historical table never turns on a flag, and the offline SQL published in `docs/AS_BUILT.md` is
     executed against it rather than asserted (`trident/as-built-disposition-sql.test.ts`).
     (d) A built-but-never-reviewed terminal SEEDS the next dispatch of the same card
-    (`builtButNeverReviewedSeed`, `trident/run-disposition.ts:210`; chokepoint
+    (`builtButNeverReviewedSeed`, `trident/run-disposition.ts`; chokepoint
     `trident/board-dispatch.ts`, the `cardsPriorRun` block, via `latestTerminalBySlug`,
-    `trident/store.ts:677`) under
+    `trident/store.ts`) under
     SIX preconditions, each of which replaces a guard the seed itself removes: the prior row was
     not STOPPED (`stopped` has two writers, `/code stop` and the board X-cancel/delete via
     `trident/terminate.ts`, so it is always an explicit operator discard — never a crash, reap or
@@ -482,7 +488,7 @@ with cross-references noted inline.
     not a fresh launch and `launch()` never re-pins it, so a null-base seed would leave the
     publish-time cut-from-origin refusal permanently inert for it and every re-seed off it. The
     seed does NOT carry `pr`, which would short-circuit `detectExistingPr` onto a possibly-closed
-    PR (`trident/board-dispatch.test.ts:478` "dispatch seeds a resume from a built-but-never-
+    PR (`trident/board-dispatch.test.ts`, "dispatch seeds a resume from a built-but-never-
     reviewed prior run"). Any non-qualifying shape dispatches byte-identically to a fresh launch,
     guard intact. AND THE PROOF IS RE-VERIFIED WHERE IT IS CONSUMED: the dispatch proof is taken a
     process earlier, so `launch()` drops the entire seed — checkpoint, head, findings, base pin —
@@ -495,7 +501,7 @@ with cross-references noted inline.
     earned its checkpoint by firing, so the discriminator also requires `crash_recoveries` and
     `infra_retries` to be 0 (both are 0 by construction on a freshly seeded row). Without that,
     a crash-recovered run whose live head had legitimately moved past its checkpoint — the
-    everyday shape, since `checkpoint.sh` records `fix-round-N` BEFORE that round's commits —
+    everyday shape, since `trident/checkpoint.sh` records `fix-round-N` BEFORE that round's commits —
     lost its checkpoint AND its base pin to the falsification branch and was then failed
     terminally by the ownership guard over its own commits (`trident/orchestrator.test.ts`, "a
     CRASH-RECOVERED run is not a seed" and "an INFRA-RETRIED run is not a seed either", both
@@ -523,11 +529,11 @@ with cross-references noted inline.
     against a private origin and the salvage silently never happens
     (`trident/board-dispatch.test.ts`, "THE PR-MODE TIP PROBE IS CREDENTIALED").
     (e) `round` is DERIVED from round-carrying checkpoint names at BOTH write seams — TS
-    (`checkpointRound`, applied in `trident/store.ts:1047` and at create `trident/store.ts:461`) and
-    bash (`round_for_checkpoint`, `trident/checkpoint.sh:183`, folded into the same atomic UPDATE at
-    `trident/checkpoint.sh:337`) — as `MAX(round, N)`, monotonic, pinned by the cross-language
-    equivalence suite (`trident/checkpoint-round.test.ts:58`) and the derivation suite
-    (`trident/checkpoint-sh.test.ts:508`). Both copies clamp the round to at most nine digits and
+    (`checkpointRound`, applied in `TridentRunStore.update` and at `TridentRunStore.create`,
+    `trident/store.ts`) and bash (`round_for_checkpoint`, folded into the same atomic UPDATE,
+    `trident/checkpoint.sh`) — as `MAX(round, N)`, monotonic, pinned by the cross-language
+    equivalence suite (`trident/checkpoint-round.test.ts`) and the derivation suite
+    (`trident/checkpoint-sh.test.ts`, "checkpoint.sh derives the round from the checkpoint name"). Both copies clamp the round to at most nine digits and
     both TRIM before matching, which is what makes the equivalence total rather than true only over
     the names a writer emits today: bash's `$(( 10#N ))` wraps NEGATIVE past 2^63 and would
     interpolate a minus sign into the UPDATE, and an untrimmed bash copy answered '' for
@@ -548,7 +554,7 @@ with cross-references noted inline.
     purpose and is not a fourth definition of the domain: it reads the OID out of group 1 to
     compare heads and never consults the round at all.
     Readers follow the RECORDED verdict in both directions — a never-reviewed row is never narrated
-    as a rejection AND an APPROVED one never is either (`trident/delivery.ts:217,358-362`).
+    as a rejection AND an APPROVED one never is either (`trident/delivery.ts`, `interpretFailure`).
     Protects: **P10** (Trident checkpoint hardening; cross-ref #20, #112) and the
     trustworthy-rejection-count query recorded in `docs/AS_BUILT.md` (2026-08-31 entry).
 
@@ -1095,7 +1101,7 @@ and is not reused here.
      acquires the authority of an observation. The canonical failure is `last_advanced_at` read
      as liveness: it moves only at checkpoint boundaries and is "stale by construction during a
      long Forge step, so a reaper keyed on it asks 'has a phase ended recently', not 'is anything
-     alive'" (`trident/store.ts:618-623`; the same reasoning at `trident/liveness.ts:24`). The
+     alive'" (`trident/store.ts`, the `last_advanced_at` docblock; the same reasoning at `trident/liveness.ts`). The
      stored/derived split, per entity: a run stores phase, checkpoint, verdict, built commit,
      published ref and findings and DERIVES is-hung / is-stale / is-mergeable; a credential stores
      the last probe result and when, and DERIVES is-connected; a PR stores its head sha and the
@@ -1162,7 +1168,7 @@ and is not reused here.
      honest sibling row that is written instead, and it does not ship until a test enumerates the
      terminal states it constrains and shows each is reachable by a writer that exists. A refusal
      with no writable alternative converts a lie into a deadlock, and this repository has already
-     paid that bill: `trident/store.ts:1320-1331` records a run that "retried forever without
+     paid that bill: `trident/store.ts`, the `update()` empty-findings rejection guard, records a run that "retried forever without
      leaving `forge-init`" and states the rule in the source — "A guard that reads a column its
      own writer cannot populate is unsatisfiable by construction." The same obligation applies to
      every check that reports a verdict, and the conforming precedent outside the store is the

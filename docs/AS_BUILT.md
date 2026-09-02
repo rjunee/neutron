@@ -137,8 +137,9 @@ every shape — does this write BRING findings? — and freezing costs nothing r
 production path emits a verdict beside a findings file: `writeTerminalResult` attaches one only
 on its `REQUEST_CHANGES` branch, and `artifactCheckpointCommand` never sends a verdict. A LIVE
 row still demotes; ADDING real findings to a terminal row is still allowed — only erasure is
-refused; a real `APPROVE` (which carries no findings file, the only shape production emits) and
-a clearing write still land. The BOUND-REVIEW executor (`trident/orchestrator.ts`) obeys the rule for
+refused; a real `APPROVE` (which carries no findings file, the only shape production emits) still
+lands. The CLEARING write does NOT — it brings no review at all, and it is frozen on the same
+terms (see "AND THE CLEARING WRITE IS AN ERASURE TOO" below). The BOUND-REVIEW executor (`trident/orchestrator.ts`) obeys the rule for
 a sharper reason than symmetry: its verdict comes from the panel's `inner_result` JSON while its
 findings come from the panel's `inner_checkpoint_findings` COLUMN (`trident/review-run.ts`), the
 two can disagree, and `saveIfActive`'s throw is swallowed by `tick.ts` as `advance_failed` — so
@@ -267,6 +268,34 @@ a legitimate site: each half is named exactly once at all four, including the ho
 does carry conditional spreads and mentions neither half in them. Both override forms are applied
 to the real source and asserted RED, beside an assertion that the counting AND the per-literal
 scans are blind to them.
+
+AND A `return` IS ONLY A HAND-OFF IF IT IS THE RIGHT FUNCTION'S (Argus r29 blocker, re-executed
+by synthesis). The hand-off gate above closed the wrapper hole from the outside — a literal wrapped
+in `Object.assign(…, { hostRunner: undefined })` is not what the chokepoint receives — but it
+accepted ANY `return` statement as a hand-off, so the same wrapper worked from the inside: put the
+wired literal in an inner function and hand back `Object.assign(inner(), { hostRunner: undefined })`
+and the literal is still "returned", every count stays equal, every site stays paired, bound and
+legible, tsc stays silent because the field is optional — and `/code` builds with an undefined
+credential. A `return` only reaches the chokepoint when the FUNCTION it belongs to is itself the
+value handed over, so the gate now asks whose return it is: the enclosing function must be the
+`resolve_context` property value. The inner-function mutant is applied to the REAL `open/composer.ts`
+in-test, and it reds the file under the old rule.
+
+AND THE WORD IS NOT THE WIRE (Argus r29, major, mutant executed). The caller enumeration in
+`trident/__tests__/codex-seat-probe.test.ts` asserted `toContain('hostRunner')` per caller file,
+which survives DELETING `/code`'s forwarding spread: the word is still spelled by the optional
+field's own declaration and by the docblock above it, and an optional field means the compiler does
+not close the gap either. The rule now reads BINDINGS — `hostRunner:` followed by a value, on a line
+that is not a comment — and executes that exact deletion in-test, asserting the guard goes red.
+
+AND A CITATION BY LINE NUMBER IS UNGUARDABLE (Argus r29, major). `docs/INVARIANTS.md` #118 — the
+invariant this card writes — carried nine `path:LINE` anchors and every one had drifted
+(`store.ts:677` pointed at a `// COLS order` comment rather than at `latestTerminalBySlug`). They
+are replaced by citations by NAME, the way #124/#125/#126/#130 already do it, and
+`trident/invariants-citations.test.ts` keeps it that way: every file #118 names must exist, no line
+anchor may return, and a positive control proves both rules catch what they are for. The same round
+resolved the contradiction this file and #118 shared — both said "a clearing write still lands"
+while both also record it frozen, below.
 
 AND THE CLEARING WRITE IS AN ERASURE TOO (Argus r21). `checkpoint.sh` froze the findings column
 and the `REQUEST_CHANGES`/`REVIEW_NOT_RUN`/any-other-verdict writes against a settled terminal

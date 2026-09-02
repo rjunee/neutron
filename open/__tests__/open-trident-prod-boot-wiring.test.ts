@@ -569,8 +569,9 @@ describe('Open foundational-Trident prod-boot wiring', () => {
      * or a merge helper of one's own tomorrow). So, as with legibility, the rule
      * runs the other way round and FAILS CLOSED: the site's literal must sit in
      * one of the hand-off positions this file actually uses, read off
-     * TypeScript's OWN parse tree — a `return`, a property value, an arrow's
-     * concise body, or a direct argument of `dispatchBoardBoundBuild` itself.
+     * TypeScript's OWN parse tree — a `return` OF THE FUNCTION THAT IS ITSELF
+     * HANDED OVER (`resolve_context`, not any nested helper), a property value,
+     * an arrow's concise body, or a direct argument of `dispatchBoardBoundBuild`.
      * Anything else is reported UNWIRED, because "something else receives this
      * literal first" is not "the chokepoint receives this literal".
      */
@@ -599,13 +600,41 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       return covering[covering.length - 1] ?? null
     }
 
+    /** The function whose `return` this node is — the nearest function-like ancestor. */
+    const enclosingFunction = (node: ts.Node): ts.Node | null => {
+      for (let p: ts.Node | undefined = node.parent; p !== undefined; p = p.parent) {
+        if (ts.isFunctionLike(p)) return p
+      }
+      return null
+    }
+
     /** True when the literal at `idx` is what its consumer receives, unmodified. */
     const handedOverDirectly = (file: ts.SourceFile, idx: number): boolean => {
       const lit = innermostObjectAt(file, idx)
       if (lit === null) return false
       const parent = lit.parent
-      // `/code`'s `resolve_context`: `return { … }`.
-      if (ts.isReturnStatement(parent)) return true
+      // `/code`'s `resolve_context`: `return { … }` — AND ONLY THE RETURN OF
+      // `resolve_context` ITSELF (Argus r29 blocker, re-executed by synthesis).
+      // Accepting ANY return statement re-opened the wrapper hole this whole rule
+      // exists to close, from the inside: put the wired literal in an inner
+      // function and hand the outer function's caller the wrapper —
+      // `return Object.assign((() => { return { … } })(), { hostRunner: undefined })`
+      // — and the literal is in a `return` position, every count is equal, every
+      // site is paired and bound, and the filter receives an object whose
+      // `hostRunner` is undefined. A `return` only reaches the chokepoint when the
+      // FUNCTION it belongs to is itself the value handed over, so the rule asks
+      // that question instead of trusting the keyword.
+      if (ts.isReturnStatement(parent)) {
+        const fn = enclosingFunction(parent)
+        if (fn === null) return false
+        const owner = fn.parent
+        return (
+          ts.isPropertyAssignment(owner) &&
+          owner.initializer === fn &&
+          ts.isIdentifier(owner.name) &&
+          owner.name.text === 'resolve_context'
+        )
+      }
       // The agent-native entry: `trident_build_dispatch: { … }`.
       if (ts.isPropertyAssignment(parent)) return parent.initializer === lit
       // The hold sweep: `makeDispatchDeps: (hold) => ({ … })`.
@@ -949,6 +978,33 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(dispatchDepsSites(aliasWrappedMutant).length).toBe(4)
     expect(
       dispatchDepsSites(aliasWrappedMutant).filter((site) => !siteIsWired(site)).length,
+    ).toBe(1)
+
+    // r29 — THE SAME WRAPPER, HIDDEN BEHIND A `return` (Argus r29 blocker,
+    // re-executed by synthesis: the docblock above promised this shape was
+    // reported UNWIRED and it was not). The victim is `/code`'s `resolve_context`
+    // — the ONE site whose hand-off position is a return statement — and the
+    // mutant moves its literal into an inner function, so the literal is still
+    // returned, by a function nobody hands over, while what `resolve_context`
+    // returns is the wrapper. Nothing inside the literal changes.
+    const codeRange = enclosingObjectRange(src, offsetOfLine(anchorAt[0]!))
+    expect(codeRange).not.toBeNull()
+    const [codeOpen, codeClose] = codeRange!
+    const innerReturnMutant = `${src.slice(0, codeOpen)}Object.assign((() => { return ${src.slice(
+      codeOpen,
+      codeClose + 1,
+    )} })(), { hostRunner: undefined })${src.slice(codeClose + 1)}`
+    // The wired literal survives byte for byte, and every count-and-pair rule is
+    // as blind to it as it was to the outer wrapper…
+    expect(innerReturnMutant).toContain(src.slice(codeOpen, codeClose + 1))
+    expect(count('hostRunner', 'tridentHostRunner', innerReturnMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(camelPairs(innerReturnMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(innerReturnMutant).length).toBe(4)
+    // …but the hand-off gate now asks WHOSE return it is, so the site is unwired.
+    expect(
+      dispatchDepsSites(innerReturnMutant).filter((site) => !siteIsWired(site)).length,
     ).toBe(1)
 
     // r4 — the simplest mutant of all, and the one every rule above missed: DELETE
