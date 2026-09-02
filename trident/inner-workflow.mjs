@@ -737,6 +737,13 @@ function routeModel(label, tag) {
             ? ROLE_MODEL['build-trailer-probe']
             : label.startsWith('ci-probe-round-')
               ? ROLE_MODEL['ci-probe']
+              // The BASE probe is the same shape as the PR probe — one `gh api` read,
+              // transcribed verbatim — so it rides the same seat. Spelled out rather
+              // than folded into a looser prefix because `ci-probe-round-` is NOT a
+              // prefix of `ci-base-probe-round-`, and the silent fallback (Opus, high)
+              // is exactly the incident `head-probe-round-N` already cost once.
+              : label.startsWith('ci-base-probe-round-')
+                ? ROLE_MODEL['ci-probe']
               : label.startsWith('merge-probe-round-')
                 ? ROLE_MODEL['merge-probe']
           // A retry lane is the SAME lane. Routing it separately (or letting it fall
@@ -3460,6 +3467,10 @@ const CI_FAILED_STATES = new Set([
 ])
 /** States meaning the check has not finished yet. */
 const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
+// THE NAME A ROW WITHOUT ONE GETS. It is a placeholder, not an identity: two rows
+// carrying it are not the same check, so `ciPreexistingNames` refuses to match on it.
+// Named once, because a literal in both places is how the two quietly drift apart.
+const CI_UNNAMED_CHECK = 'unnamed check'
 
 // HOW LONG THE GATE WAITS FOR A REQUIRED CHECK — A MEASURED BUDGET, NOT A GUESS.
 //
@@ -4358,7 +4369,7 @@ function classifyCi(probe) {
   const failing = []
   let pending = 0
   for (const row of rows) {
-    const name = row && typeof row.name === 'string' ? row.name : 'unnamed check'
+    const name = row && typeof row.name === 'string' ? row.name : CI_UNNAMED_CHECK
     const state = row && typeof row.state === 'string' ? row.state.toUpperCase() : ''
     if (CI_FAILED_STATES.has(state)) {
       const link = row && typeof row.link === 'string' && row.link.length > 0 ? row.link : null
@@ -4437,7 +4448,15 @@ function ciFindingsBlock(ciFindings) {
  */
 function ciPreexistingNames(base) {
   if (!base || base.status !== 'red' || !Array.isArray(base.failing)) return new Set()
-  return new Set(base.failing.map((f) => f.name).filter((n) => typeof n === 'string' && n !== ''))
+  // THE SENTINEL IS NOT A NAME. `classifyCi` writes 'unnamed check' for a row whose
+  // name it could not read, on BOTH sides — so keeping it here would let one malformed
+  // row at the base excuse a different malformed row on the PR. A red we cannot name is
+  // a red we cannot match, and an unmatched red stays a blocker.
+  return new Set(
+    base.failing
+      .map((f) => f.name)
+      .filter((n) => typeof n === 'string' && n !== '' && n !== CI_UNNAMED_CHECK),
+  )
 }
 
 /**
@@ -4796,7 +4815,11 @@ ${cmd}`,
 async function probeCiBase(round) {
   if (!isPr) return { status: 'none', failing: [] }
   const ref = pinnedBase !== null ? pinnedBase : baseBranch
-  const api = `api repos/{owner}/{repo}/commits/${ref}/check-runs?per_page=100 --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
+  // ENCODED AND QUOTED, exactly as `probeRequiredChecks` does below. `baseBranch` is a
+  // workflow argument and `git check-ref-format --branch 'main$(id)'` accepts that name,
+  // so a bare interpolation would put a legal branch name inside a bash command as code.
+  const encodedRef = encodeURIComponent(ref)
+  const api = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs?per_page=100`)} --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
   const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(api)} 2>&1; echo "___EXIT=$?"`
   const res = await seatAttempt(`ci-base-probe-round-${round}`, () =>
     agent(
@@ -5649,6 +5672,34 @@ TASK: ${task}`
   const ci = await probeCi(prForCi, round)
   log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
 
+  // A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER. The base is measured (one probe
+  // seat, spent only when the PR is red) and a failing check that is ALSO failing there
+  // becomes an advisory finding instead of a blocker — the same hatch the full-suite gate
+  // has, earned the same way. `ciFindingsBlock` is what decides whether the verdict is
+  // forced, so a check red only on the BRANCH still forces it, and so does a base we
+  // could not read.
+  //
+  // MEASURED HERE, ABOVE THE SYNTHESIS PROMPT, so the advisory is READABLE BY THE SEAT IT
+  // ADDRESSES. The excuse matches by check NAME, and a name is a coarse key: a check
+  // called `ci` can be red at the base for a lint failure and red here for a test this
+  // diff added. Its evidence tells the reader to call that a blocker in their own words —
+  // which was addressed to nobody while these findings were built after every prompt. The
+  // core reviewers still cannot see it (they are dispatched before CI is even probed, on
+  // purpose), but the synthesis seat can, and the synthesis seat is the one that sets the
+  // verdict — so a REQUEST_CHANGES it returns survives the non-forcing path below.
+  const ciBase = ci.status === 'red' ? await probeCiBase(round) : null
+  const ciFindings = ci.status === 'red' ? ciBlockerFindings({ ...ci, baseRef: ciBase?.baseRef }, ciPreexistingNames(ciBase)) : []
+  if (ci.status === 'red') {
+    log(
+      `trident-v2 CI gate: round=${round} failing=${ci.failing.length} base=${ciBase?.status ?? 'unmeasured'} — ${ciFindingsBlock(ciFindings) ? 'at least one red is NEW to this branch, forcing REQUEST_CHANGES' : 'every red is already failing at the base; surfaced without forcing'}`,
+    )
+  }
+  const ciFindingsPrompt = ciFindings.length === 0
+    ? ''
+    : `\nCI GATE FINDINGS (generated by the workflow from GitHub's OWN check results — the PR's checks, and the same checks measured at the base commit this branch was cut from):\n${ciFindings
+      .map((finding) => `[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`)
+      .join('\n')}\nWeigh these like any reviewer's finding: a check excused as pre-existing is matched by NAME ONLY, so if this diff touches what it exercises, say so and return REQUEST_CHANGES.`
+
   // PANEL COMPLETENESS IS DERIVED IN CODE. Every seat's status comes from whether it
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
   // default applied to a missing verdict, which is how a crashed reviewer used to read
@@ -5711,7 +5762,7 @@ Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying AS
 ${corePanelLines}
 ${offPanelLines}
 ${codexPanel}
-${kimiPanelLine}${suiteFindingsPrompt}`,
+${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
       withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
     )
   // THE SYNTHESIS SEAT IS RETRIED LIKE ANY OTHER, through the SAME bounded retry —
@@ -5764,19 +5815,6 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
   // "CI FAILING" finding, and merged a red build. That is precisely the bug this gate
   // exists to prevent, and it is asserted below rather than left to reading.
   //
-  // A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER. The base is measured (one probe
-  // seat, spent only when the PR is red) and a failing check that is ALSO failing there
-  // becomes an advisory finding instead of a blocker — the same hatch the full-suite gate
-  // has, earned the same way. `ciFindingsBlock` is what decides whether the verdict is
-  // forced, so a check red only on the BRANCH still forces it, and so does a base we
-  // could not read.
-  const ciBase = ci.status === 'red' ? await probeCiBase(round) : null
-  const ciFindings = ci.status === 'red' ? ciBlockerFindings({ ...ci, baseRef: ciBase?.baseRef }, ciPreexistingNames(ciBase)) : []
-  if (ci.status === 'red') {
-    log(
-      `trident-v2 CI gate: round=${round} failing=${ci.failing.length} base=${ciBase?.status ?? 'unmeasured'} — ${ciFindingsBlock(ciFindings) ? 'at least one red is NEW to this branch, forcing REQUEST_CHANGES' : 'every red is already failing at the base; surfaced without forcing'}`,
-    )
-  }
   const withCi =
     ci.status === 'red'
       ? ciFindingsBlock(ciFindings)
@@ -5784,7 +5822,10 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
             verdict: 'REQUEST_CHANGES',
             findings: [...ciFindings, ...(severityGated?.findings ?? [])],
           }
-        : { ...severityGated, findings: [...ciFindings, ...(severityGated?.findings ?? [])] }
+        // `severityGated` is null when the synthesis seat died. Spreading a null yields a
+        // verdict-less object: fail-closed (synthesisOrInfraBlock replaces it), but it
+        // dropped the CI advisories the old code carried. `?? {}` keeps them.
+        : { ...(severityGated ?? {}), findings: [...ciFindings, ...(severityGated?.findings ?? [])] }
       : severityGated
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can

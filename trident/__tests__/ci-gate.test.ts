@@ -2718,4 +2718,66 @@ describe('the pre-existing CI hatch — earned by measuring the base, by name', 
     expect(classifyCi(probe([{ name: 'slow', state: 'queued' }])).status).toBe('pending')
     expect(SRC).toContain('(.conclusion // .status)')
   })
+
+  // A NAMELESS ROW IS NOT A NAME. `classifyCi` writes the same placeholder for any row
+  // whose name it could not read, on the PR side AND at the base — so matching on it would
+  // let one malformed base row excuse a different malformed PR row, which is the excuse
+  // hole with the fewest moving parts of all.
+  test('the unnamed-check placeholder can never excuse anything', () => {
+    const { classifyCi, ciBlockerFindings, ciFindingsBlock, ciPreexistingNames } = loadReal()
+    const base = classifyCi(probe([{ state: 'failure' }, { name: 'ci', state: 'failure' }]))
+    expect(base.failing.map((f) => f.name)).toEqual(['unnamed check', 'ci'])
+    // The named red is still excusable; the nameless one is not in the set at all.
+    expect([...ciPreexistingNames(base)]).toEqual(['ci'])
+    const pr = classifyCi(probe([{ state: 'failure' }]))
+    const f = ciBlockerFindings(pr, ciPreexistingNames(base))
+    expect(f[0]?.severity).toBe('blocker')
+    expect(ciFindingsBlock(f)).toBe(true)
+  })
+
+  // The ref reaches a BASH command. `baseBranch` is a workflow argument and
+  // `git check-ref-format --branch 'main$(id)'` accepts that name, so a bare
+  // interpolation is command substitution waiting for a legal branch. The sibling
+  // `probeRequiredChecks` already encodes AND quotes; this is the same file's own bar.
+  test('the base probe encodes and quotes the ref it interpolates into the URL', () => {
+    const at = SRC.indexOf('async function probeCiBase(')
+    expect(at).toBeGreaterThan(-1)
+    const body = SRC.slice(at, SRC.indexOf('\n}', at))
+    expect(body).toContain('encodeURIComponent(ref)')
+    expect(body).toContain('shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs')
+    // ...and the bare form is GONE, not merely accompanied by the safe one.
+    expect(body).not.toContain('repos/{owner}/{repo}/commits/${ref}')
+  })
+
+  // THE HATCH'S SAFETY NET HAS TO BE READABLE BY SOMEONE. The advisory tells its reader to
+  // call a same-named-but-different failure a blocker in their own words — which was
+  // addressed to nobody while these findings were built after every prompt. The synthesis
+  // seat is the one that sets the verdict, so it is the seat that must see them.
+  test('the CI findings are built BEFORE the synthesis prompt, and are IN it', () => {
+    const promptAt = SRC.indexOf('${kimiPanelLine}${suiteFindingsPrompt}')
+    expect(promptAt).toBeGreaterThan(-1)
+    expect(SRC.slice(promptAt, SRC.indexOf('`,', promptAt))).toContain('${ciFindingsPrompt}')
+    const builtAt = SRC.indexOf('const ciFindingsPrompt =')
+    expect(builtAt).toBeGreaterThan(-1)
+    expect(builtAt).toBeLessThan(promptAt)
+    expect(SRC.indexOf('const ciFindings =')).toBeLessThan(builtAt)
+    // The prompt carries the finding's own evidence, not a summary of it — the
+    // "treat it as a BLOCKER" sentence is the whole point of showing it.
+    const block = SRC.slice(builtAt, SRC.indexOf('\n\n', builtAt))
+    expect(block).toContain('finding?.evidence')
+    expect(block).toContain('NAME ONLY')
+  })
+
+  // The old code spread a possibly-null `severityGated`, which is fail-closed for the
+  // VERDICT (synthesisOrInfraBlock replaces a verdict-less object) but silently dropped
+  // the CI advisories from the report.
+  test('a dead synthesis seat does not take the CI findings down with it', () => {
+    const code = SRC.split('\n')
+      .filter((line) => !line.trim().startsWith('//'))
+      .join('\n')
+    const at = code.indexOf('const withCi =')
+    const block = code.slice(at, code.indexOf('const peers =', at))
+    expect(block).toContain('...(severityGated ?? {})')
+    expect(block).not.toContain('{ ...severityGated,')
+  })
 })

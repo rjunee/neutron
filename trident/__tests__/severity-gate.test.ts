@@ -67,7 +67,6 @@ function severitySetDecl(): string {
   return SRC.slice(at + 1, SRC.indexOf('\n', at + 1))
 }
 
-/** The whole comment block above the severity set — the thing #184's false claim hid in. */
 /**
  * The DECLARATION line of the advisory-marker key, anchored at column 0 for exactly the
  * reason `severitySetDecl` is: the docblock above it names the const, so an unanchored
@@ -79,6 +78,7 @@ function advisoryKeyDecl(): string {
   return SRC.slice(at + 1, SRC.indexOf('\n', at + 1))
 }
 
+/** The whole comment block above the severity set — the thing #184's false claim hid in. */
 function gateDocblock(): string {
   const at = SRC.indexOf('// A NIT MAY NOT COST A ROUND.')
   if (at === -1) throw new Error('the severity-gate docblock header is missing')
