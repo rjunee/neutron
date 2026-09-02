@@ -129,7 +129,11 @@ const TEST_COMMAND_SHAPES: ReadonlyArray<{
   ok: (argv: readonly string[]) => boolean
 }> = [
   { program: 'bun', shape: 'bun test …', ok: (a) => a[1] === 'test' },
-  { program: 'node', shape: 'node --test … (never --run)', ok: (a) => a.includes('--test') && !a.some(isNodeRunOption) },
+  {
+    program: 'node',
+    shape: 'node --test … (--test FIRST, never --run)',
+    ok: (a) => a[1] === '--test' && !a.some(isNodeRunOption),
+  },
   { program: 'npm', shape: 'npm test … / npm run test… ', ok: isPackageScriptTest },
   { program: 'pnpm', shape: 'pnpm test … / pnpm run test…', ok: isPackageScriptTest },
   { program: 'yarn', shape: 'yarn test … / yarn run test…', ok: isPackageScriptTest },
@@ -165,6 +169,22 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
  * only the space-separated one would leave the same wrapper one character away.
  * Costs nothing honest — the script's body is a runner invocation the
  * nomination can simply write out.
+ *
+ * AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
+ * OPTION, which is why the node shape now requires `--test` to be `argv[1]`.
+ * Node only enters test-runner mode when `--test` is one of ITS OWN options,
+ * i.e. before the entry script; written after one it is an ordinary argument
+ * node hands straight to the script (verified on v22: the script prints
+ * `argv=["--test"]`). So `node tests/wrap.mjs --test tests/other.test.mjs` ran
+ * a BRANCH-AUTHORED entry script — one line of `import '../src/limit.mjs'`
+ * away from reddening under any syntax break — while `includes('--test')`
+ * called it a test invocation. The leading spelling is the only one that means
+ * anything, and `runnerPrefixLength` already assumed exactly that
+ * (`argv[1] === '--test' ? 2 : 1`); the shape check now agrees with it instead
+ * of admitting shapes that prefix could not read. Fails CLOSED and costs
+ * nothing honest: `node --test --experimental-strip-types tests/x.ts` says the
+ * same thing with the options after the mode, which is where node documents
+ * them.
  */
 function isNodeRunOption(arg: string): boolean {
   return arg === '--run' || arg.startsWith('--run=')
@@ -672,7 +692,11 @@ function carriedValue(arg: string): string {
  * with nothing in the argv saying so. A `bunfig.toml` committed at the repo
  * ROOT is read by every `bun test` in the tree, and its `[test] preload` key
  * loads whatever it names; jest's `setupFiles` and pytest's `conftest.py` are
- * the same file under other names. This function reads argv, so a branch that
+ * the same file under other names; and a committed `tests/tsconfig.json` needs
+ * no flag AT ALL — bun walks up from the test file and applies its
+ * `compilerOptions.paths`, so the aliasing `--tsconfig-override` is refused for
+ * below is available to a branch that simply commits the file where the guard
+ * already is. This function reads argv, so a branch that
  * commits such a config makes any guard load the mutated file, and the guard's
  * argv is byte-for-byte an honest one. It is not closed here and could not be:
  * the config is part of the branch under proof. The class pre-dates this rule
@@ -1232,6 +1256,26 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * file the runner READS AND OBEYS, which is not
  * `--test-reporter-destination`'s file it merely WRITES.
  *
+ * A RESOLUTION MAP IS THE FOURTH SPELLING OF THE SAME FILE, and it does not
+ * load anything itself — it decides WHICH FILE a specifier means. `bun test
+ * --tsconfig-override=./tests/cfg/tsconfig.json` applies a branch-authored
+ * `compilerOptions.paths`, so `{"mylib": ["../../src/limit.ts"]}` turns a bare
+ * `import 'mylib'` inside an otherwise unrelated test into an import OF THE
+ * MUTATED FILE. Reproduced on bun 1.3.13: without the flag the guard cannot
+ * even resolve the specifier ("Cannot find package mylib"); with it the guard
+ * exits 0 healthy, exits 1 once `src/limit.ts` is broken, and exits 0 again on
+ * restore — a full red-then-green with nothing having asserted the mutated
+ * behaviour. The argv NAMES the config, exactly as `--config` does, so it is
+ * refused in the same place and for the same reason: the branch wrote the file
+ * and this argv does not show its contents.
+ *
+ * ONLY THE OPTION THAT TAKES A PATH IS LISTED. `--project` and `--tsconfig` are
+ * not added on suspicion: vitest's `--project <name>` selects a workspace
+ * project by NAME, and a long name here is refused on the name alone, so
+ * listing it would refuse an honest guard for a spelling no repro has forged a
+ * proof with. The rule stays "an option the runner READS AND OBEYS AS A FILE",
+ * and it is widened when a spelling is measured, not when it sounds plausible.
+ *
  * A LONG NAME IS REFUSED ON THE NAME, VALUE OR NONE, and that is not belt and
  * braces — it is the only arm that can see node's DEFAULT config spelling.
  * `--experimental-default-config-file` takes no value at all: an arm that fires
@@ -1252,7 +1296,7 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
 // KEPT ON ONE LINE ON PURPOSE: `inner-workflow-mutation-claim.test.ts` reads
 // these names straight out of this source to check the Forge schema names them
 // too, and its extraction matches this declaration as written.
-const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|experimental-config-file|experimental-default-config-file|env-file|env-file-if-exists)$/
+const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|experimental-config-file|experimental-default-config-file|env-file|env-file-if-exists|tsconfig-override)$/
 
 /**
  * GO SPELLS THE SAME HOOK WITH ONE DASH, and the `^--` anchor above cannot see

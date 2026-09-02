@@ -1271,9 +1271,11 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       ['src/limit.ts', ['bun', 'test', '--preload', './tests/setup.ts', 'tests/other.test.ts']],
       // …the attached short one,
       ['src/limit.ts', ['bun', 'test', '-r./tests/setup.ts', 'tests/other.test.ts']],
-      // …node's two, one of which sits in front of `--test`,
+      // …node's two, both AFTER the mode word: `--test` has to lead (see the
+      // `node <script> --test` test below), so a hook written in front of it is
+      // refused one step earlier, at the shape, and this arm never sees it.
       ['src/limit.mjs', ['node', '--test', '--import=./tests/setup.mjs', 'tests/other.test.mjs']],
-      ['src/limit.mjs', ['node', '--loader=./tests/hook.mjs', '--test', 'tests/other.test.mjs']],
+      ['src/limit.mjs', ['node', '--test', '--loader=./tests/hook.mjs', 'tests/other.test.mjs']],
       // …and a COLLECTIBLE target, because a preload loads a support library
       // under `tests/` into the guard process exactly as it loads `src/`.
       ['tests/support/lib.ts', ['bun', 'test', '--preload=./tests/setup.ts', 'tests/other.test.ts']],
@@ -1431,10 +1433,21 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       // whole forgery above in two characters less.
       ['src/limit.ts', ['bun', 'test', '-c./tests/bunfig.toml', 'tests/other.test.ts']],
       ['src/limit.ts', ['bun', 'test', '-c', './tests/bunfig.toml', 'tests/other.test.ts']],
+      // …and bun's RESOLUTION MAP, which names a config that does not load the
+      // mutated file so much as REDEFINE what an import means. With
+      // `compilerOptions.paths` of `{"mylib": ["../../src/limit.ts"]}` a bare
+      // `import 'mylib'` inside an unrelated test IS the mutated file:
+      // reproduced on bun 1.3.13, where without the flag the guard cannot even
+      // resolve the specifier, and with it the guard exits 0 healthy, 1 broken
+      // and 0 again on restore. Attached and separated, since the two spellings
+      // are one character apart.
+      ['src/limit.ts', ['bun', 'test', '--tsconfig-override=./tests/cfg/tsconfig.json', 'tests/other.test.ts']],
+      ['src/limit.ts', ['bun', 'test', '--tsconfig-override', './tests/cfg/tsconfig.json', 'tests/other.test.ts']],
       // …asked of a COLLECTIBLE target too, because the config preloads a
       // support library under `tests/` into the guard process exactly as it
       // preloads `src/`.
       ['tests/support/lib.ts', ['bun', 'test', '--config=./tests/bunfig.toml', 'tests/other.test.ts']],
+      ['tests/support/lib.ts', ['bun', 'test', '--tsconfig-override=./tests/cfg/tsconfig.json', 'tests/other.test.ts']],
     ] as const) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
       const { prover, host } = proverOver({}, fs)
@@ -1466,6 +1479,13 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       // Widen either and both rows go red.
       ['tests/support/lib.ts', ['go', 'test', '-cover', './cmd/']],
       ['tests/support/lib.ts', ['go', 'test', './cmd/', '-c']],
+      // …AND ON THE NARROWNESS OF THE RESOLUTION ENTRY: only the option that
+      // really takes a tsconfig PATH is listed. vitest's `--project <name>`
+      // selects a workspace project by NAME, and a long hook name is refused on
+      // the name alone — so adding it on suspicion would refuse this honest
+      // guard outright. Widen the list past what a repro has forged and this
+      // row goes red.
+      ['src/limit.ts', ['bun', 'test', '--project', 'unit', 'tests/other.test.ts']],
     ] as const) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
       const { prover: ok } = proverOver({}, fs)
@@ -1525,6 +1545,63 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     const fine = await ok.prove({
       run: RUN,
       claim: { ...CLAIM, file: 'src/limit.ts', guard: ['node', '--test', 'tests/other.test.mjs'] },
+    })
+    expect(fine.reason).not.toContain('must be a test invocation')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('`node <script> --test <unrelated>` runs the SCRIPT — only a LEADING `--test` is a test invocation', async () => {
+    // THE BYPASS THIS CLOSES, the wrapper family with no option to name it.
+    // Node enters test-runner mode only when `--test` is one of ITS OWN
+    // options, i.e. before the entry script; written AFTER one it is an
+    // ordinary argument node hands straight to the script (verified on v22.23:
+    // the script prints `argv=["--test"]`). The shape check asked only whether
+    // `--test` appeared ANYWHERE, so `node tests/wrap.mjs --test
+    // tests/other.test.mjs` passed it while running a BRANCH-AUTHORED entry
+    // script — one line of `import '../src/limit.mjs'` away from reddening
+    // under any syntax break with nothing asserting the mutated behaviour, and
+    // driven to `proved: true` through the real prover. `runnerPrefixLength`
+    // already assumed the leading spelling (`argv[1] === '--test' ? 2 : 1`);
+    // the shape now agrees with it.
+    for (const guard of [
+      ['node', 'tests/wrap.mjs', '--test', 'tests/other.test.mjs'],
+      // …the same wrapper with the script named as a relative path, which is how
+      // a branch would actually write it,
+      ['node', './tests/wrap.mjs', '--test', 'tests/other.test.mjs'],
+      // …and with NOTHING after the option, so no later arm could refuse it for
+      // the path it names: the shape is the only thing standing here.
+      ['node', 'tests/wrap.mjs', '--test'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.mjs')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file: 'src/limit.mjs', guard } })
+      // Refused before anything was written or run.
+      expect([guard.join(' '), out.proved, host.calls.length, fs.writes.length]).toEqual([guard.join(' '), false, 0, 0])
+      expect([guard.join(' '), out.reason.includes('must be a test invocation')]).toEqual([guard.join(' '), true])
+      // …and the refusal says WHERE `--test` has to go, so the next nomination
+      // is not left guessing at the one shape that works.
+      expect([guard.join(' '), out.reason.includes('--test FIRST')]).toEqual([guard.join(' '), true])
+    }
+
+    // The CONTROL is held to the same shape — it is executed too.
+    const { prover: ctl } = proverOver({}, memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.mjs')]: SRC_BEFORE }))
+    const control = await ctl.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: 'src/limit.mjs', control: ['node', 'tests/wrap.mjs', '--test'] },
+    })
+    expect(control.reason).toContain('claim.control must be a test invocation')
+
+    // POSITIVE CONTROL: the canonical spelling still runs, options and all, so
+    // this is not "no node guard is legal" — without it every assertion above
+    // passes on a shape check that refuses node outright.
+    const { prover: ok } = proverOver({}, memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.mjs')]: SRC_BEFORE }))
+    const fine = await ok.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file: 'src/limit.mjs',
+        guard: ['node', '--test', '--test-concurrency=1', 'tests/other.test.mjs'],
+      },
     })
     expect(fine.reason).not.toContain('must be a test invocation')
     expect(fine.observed).not.toBeNull()

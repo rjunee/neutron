@@ -273,7 +273,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
 
     // CONTAINMENT, pinned by name: the agreement loop above compares two lists and
     // goes green again if an entry is deleted from BOTH sides, so a two-sided
-    // deletion would reopen a closed escape silently. These thirteen must be there.
+    // deletion would reopen a closed escape silently. These fourteen must be there.
     for (const name of [
       'preload',
       'require',
@@ -288,6 +288,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       'experimental-default-config-file',
       'env-file',
       'env-file-if-exists',
+      'tsconfig-override',
     ])
       expect([name, hookNames.includes(name)]).toEqual([name, true])
 
@@ -322,6 +323,20 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // re-admitting it.
     for (const d of described) expect(['node --run', d.includes('node --run')]).toEqual(['node --run', true])
     expect(PROVER_SRC).toContain('never --run')
+
+    // …AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
+    // OPTION, invisible to every loop above for the same reason. Node forwards a
+    // `--test` written after an entry script straight to that BRANCH-AUTHORED
+    // script, so the shape requires the LEADING spelling — and a build told only
+    // "not --run" would write the other one and be refused after the whole review
+    // had run. The schema must say where `--test` goes, and the prover must
+    // really require it.
+    for (const d of described)
+      expect(['--test first', d.includes('`--test` must be the FIRST argument after `node`')]).toEqual([
+        '--test first',
+        true,
+      ])
+    expect(PROVER_SRC).toContain("ok: (a) => a[1] === '--test' && !a.some(isNodeRunOption)")
 
     // …and both refusals really exist on the prover side, in the words its
     // reasons use, so this test fails if either shape is quietly re-allowed.
