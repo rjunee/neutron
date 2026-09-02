@@ -65,6 +65,15 @@
  * the guard really moved" un-fakeable; it does not make "the nominated
  * mutation was the interesting one" un-fakeable. That residual is a review
  * question, and Argus still owns it.
+ *
+ * NOR IS THE MOVEMENT ITSELF SELF-EXPLAINING. The guard is argv, and a branch
+ * may commit a file the runner obeys without the argv naming it — a root
+ * `bunfig.toml` `[test] preload`, jest `setupFiles`, `conftest.py`. Then a
+ * perfectly honest-looking guard loads the mutated file and moves red-then-
+ * green with nothing having asserted the mutated behaviour. Every spelling
+ * that puts such a load ON the argv is refused (see `LOAD_HOOK_OPTION`); the
+ * committed-config half cannot be read out of argv at all and stays a review
+ * question with the residual above.
  */
 
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
@@ -633,18 +642,24 @@ function carriedValue(arg: string): string {
  * `argumentOperands` plus carried values.
  *
  * KNOWN RESIDUAL, argv-invisible: a runner's CONFIG can load the mutated file
- * with nothing in the argv saying so — `bunfig.toml`'s `[test].preload`, jest's
- * `setupFiles`, pytest's `conftest.py`. This function reads argv, so a branch
- * that commits such a config makes any guard load the mutated file. It is not
- * closed here and could not be: the config is part of the branch under proof.
- * The class pre-dates this rule for production files, and the same answer holds
- * for both — a proof is evidence for a reviewer, not a substitute for one.
+ * with nothing in the argv saying so. A `bunfig.toml` committed at the repo
+ * ROOT is read by every `bun test` in the tree, and its `[test] preload` key
+ * loads whatever it names; jest's `setupFiles` and pytest's `conftest.py` are
+ * the same file under other names. This function reads argv, so a branch that
+ * commits such a config makes any guard load the mutated file, and the guard's
+ * argv is byte-for-byte an honest one. It is not closed here and could not be:
+ * the config is part of the branch under proof. The class pre-dates this rule
+ * for production files, and the same answer holds for both — a proof is
+ * evidence for a reviewer, not a substitute for one.
  *
- * ITS ARGV-VISIBLE HALF IS NOT A RESIDUAL AND IS REFUSED. A hook written INTO
- * the guard — `--preload=./tests/setup.ts` whose body imports the target — is
- * the same load with the branch's fingerprints on the argv, and it forged a
- * proof end to end; see `loadHookCarrying`, which refuses the shape whatever
- * file it names.
+ * ITS ARGV-VISIBLE HALF IS NOT A RESIDUAL AND IS REFUSED — in every spelling
+ * that PUTS the config on the command line. A hook written INTO the guard
+ * (`--preload=./tests/setup.ts` whose body imports the target) is the same load
+ * with the branch's fingerprints on the argv, and it forged a proof end to end;
+ * so is `--config=./tests/bunfig.toml`, which names the config instead of the
+ * hook and reached `proved: true` through the real gate on bun 1.3.13; so is
+ * `--env-file=./tests/.env`, whose `NODE_OPTIONS` sets the hook a third way.
+ * See `loadHookCarrying`, which refuses each shape whatever file it names.
  *
  * A WRAPPER'S BODY WAS THE SAME RESIDUAL AND IS NO LONGER ONE. A `package.json`
  * script or a `Makefile` recipe is a command line the BRANCH wrote, and the
@@ -1142,15 +1157,30 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * they name a file the runner WRITES, not one it loads, and the regex is
  * anchored so it cannot match the longer option.
  *
+ * A CONFIG FILE AND AN ENV FILE ARE THE SAME OPACITY ONE STEP FURTHER OUT, and
+ * both are refused here. `bun test --config=./tests/bunfig.toml` hands the
+ * runner a file the BRANCH wrote whose `[test] preload` key is the very hook
+ * the names above refuse when it is spelled into the argv — the argv says
+ * `--config`, the process loads whatever that file names, and the forged proof
+ * is the one already reproduced: `ok: true, proved: true` on bun 1.3.13 with
+ * the guard file asserting nothing about the mutated behaviour. `--env-file` is
+ * the same instruction through a second file: a committed `.env` carrying
+ * `NODE_OPTIONS=--import=<hook>` sets the hook the argv never shows, and node
+ * spells the identical option `--env-file-if-exists` as well. Every one of them
+ * names a file the runner READS AND OBEYS, which is not
+ * `--test-reporter-destination`'s file it merely WRITES.
+ *
  * KNOWN RESIDUAL of the same shape, left open on purpose: pytest's `-p
  * my_plugin` executes a branch-authored plugin module, and mocha's short `-R`
  * carries a reporter the same way its long spelling does. Their letters collide
  * with `go test -p 4`'s parallelism flag and with other runners' short options,
  * the short-letter narrowing above stays untouched, and the python side already
  * carries the larger `conftest.py` residual named above, which no argv rule can
- * close.
+ * close. The SHORT config spellings stay open for the same reason: `-c` is
+ * `go test -c`'s compile-only flag as well as bun's and jest's `--config`,
+ * and the short-letter narrowing above is not widened to guess between them.
  */
-const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters)$/
+const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|env-file|env-file-if-exists)$/
 
 function loadHookCarrying(guard: readonly string[]): string | null {
   const start = runnerPrefixLength(guard)

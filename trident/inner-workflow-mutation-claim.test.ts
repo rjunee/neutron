@@ -273,8 +273,20 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
 
     // CONTAINMENT, pinned by name: the agreement loop above compares two lists and
     // goes green again if an entry is deleted from BOTH sides, so a two-sided
-    // deletion would reopen a closed escape silently. These eight must be there.
-    for (const name of ['preload', 'require', 'import', 'loader', 'experimental-loader', 'test-reporter', 'reporter', 'reporters'])
+    // deletion would reopen a closed escape silently. These eleven must be there.
+    for (const name of [
+      'preload',
+      'require',
+      'import',
+      'loader',
+      'experimental-loader',
+      'test-reporter',
+      'reporter',
+      'reporters',
+      'config',
+      'env-file',
+      'env-file-if-exists',
+    ])
       expect([name, hookNames.includes(name)]).toEqual([name, true])
 
     // …and both refusals really exist on the prover side, in the words its

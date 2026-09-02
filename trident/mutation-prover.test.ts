@@ -1392,6 +1392,68 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
   })
 
+  test('a CONFIG and an ENV FILE are LOAD HOOKS too — the runner obeys the file they name', async () => {
+    // THE BYPASS THIS CLOSES, the same family one step further out. The argv
+    // does not have to carry the hook; it only has to carry the file that
+    // DECLARES it. `bun test --config=./tests/bunfig.toml` reads a
+    // branch-authored config whose `[test] preload` key is exactly the load
+    // `--preload=` is refused for — reproduced through the real gate on bun
+    // 1.3.13 as `ok: true, proved: true` with the guard file asserting nothing
+    // about the mutated behaviour. `--env-file=./tests/.env` is the third
+    // spelling: a committed dotenv carrying `NODE_OPTIONS=--import=<hook>` sets
+    // the hook the argv never shows, and node spells the same option
+    // `--env-file-if-exists` as well.
+    for (const [file, guard] of [
+      ['src/limit.ts', ['bun', 'test', '--config=./tests/bunfig.toml', 'tests/other.test.ts']],
+      // …the space-separated spelling of the identical instruction,
+      ['src/limit.ts', ['bun', 'test', '--config', './tests/bunfig.toml', 'tests/other.test.ts']],
+      // …the dotenv route into `NODE_OPTIONS`,
+      ['src/limit.mjs', ['node', '--test', '--env-file=./tests/.env', 'tests/other.test.mjs']],
+      // …and node's second spelling of that same option, which the anchored
+      // regex would otherwise leave open as a free rename of the first.
+      ['src/limit.mjs', ['node', '--test', '--env-file-if-exists=./tests/.env', 'tests/other.test.mjs']],
+      // …asked of a COLLECTIBLE target too, because the config preloads a
+      // support library under `tests/` into the guard process exactly as it
+      // preloads `src/`.
+      ['tests/support/lib.ts', ['bun', 'test', '--config=./tests/bunfig.toml', 'tests/other.test.ts']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      // Refused on the spelling: nothing written, nothing run.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect([guard.join(' '), out.reason.includes('whose body the branch wrote')]).toEqual([guard.join(' '), true])
+      expect([guard.join(' '), fs.writes.length]).toEqual([guard.join(' '), 0])
+    }
+
+    // POSITIVE CONTROL on the ANCHOR: the regex matches WHOLE option names, so a
+    // longer option that merely contains one of them stays legal and its guard
+    // really runs. Drop the `$` and this row goes red along with every honest
+    // coverage-reporting guard in the repo.
+    for (const [file, guard] of [
+      ['src/limit.ts', ['bun', 'test', '--coverage-reporter=lcov', 'tests/other.test.ts']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      // POSITIVE CONTROL ON THE EXTRACTION: the guard really ran, so the line
+      // above reads a real outcome and not an early refusal worded differently.
+      expect([guard.join(' '), fine.observed !== null]).toEqual([guard.join(' '), true])
+    }
+  })
+
   test("an OPTION'S VALUE NEED NOT WRITE THE EXTENSION — `--preload=./src/limit` loads `src/limit.ts`", async () => {
     // THE BYPASS, reproduced end to end on bun 1.3.x. A loader completes a bare
     // specifier from its extension list and falls back to a directory's
@@ -1592,6 +1654,15 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     // used to claim the opposite ("a guard that names a `.js` file which really
     // exists ... is untouched"). If the seam ever grows an existence check, this
     // is the assertion that has to change with it — deliberately, not silently.
+    //
+    // THE OPTION CARRYING THE VALUE IS DELIBERATELY NOT A LOAD HOOK. Written
+    // with `--preload=` this assertion was VACUOUS: `loadHookCarrying` refuses
+    // that shape on its spelling alone, so every line below held whether or not
+    // the loader-rewrite candidate existed at all. `--grep=` carries a value the
+    // same way and is refused by no shape rule, so the refusal can only come
+    // from the resolved seam this test claims to pin — delete the `loaderRewrites`
+    // push in `guardPathCandidates` and this test goes red, which is the whole
+    // point of writing it down.
     const wt = proofWorktreePath('/repo', RUN)
     const fs = memFs({
       [join(wt, 'tests/support/clamp.ts')]: SRC_BEFORE,
@@ -1603,7 +1674,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       claim: {
         ...CLAIM,
         file: 'tests/support/clamp.ts',
-        guard: ['bun', 'test', '--preload=./tests/support/clamp.js', 'tests/separate.test.ts'],
+        guard: ['bun', 'test', '--grep=./tests/support/clamp.js', 'tests/separate.test.ts'],
       },
     })
     // The refusal comes from the RESOLVED seam, which runs inside the proof
