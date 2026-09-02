@@ -28,6 +28,7 @@ import { asOwnerHandle } from '@neutronai/persistence/index.ts'
  */
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import ts from 'typescript'
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -356,27 +357,64 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // and KEPT the property between them, so every count and every site scan below
     // read the site as wired while the runtime object carried no `hostRunner` at
     // all — and `BoardBoundBuildDeps.hostRunner` is OPTIONAL, so tsc says nothing
-    // either. The strip now carries block state across lines, and the mutant is
+    // either. The strip carries block state across lines, and the mutant is
     // applied to the real source at the bottom of this test and must come out RED.
-    /** `text` with its comments removed — what is commented out is not wiring. */
+    //
+    // AND A BLOCK COMMENT MAY OPEN ANYWHERE ON A LINE (Argus r5 blocker, with an
+    // executed repro). The strip that answered r4 was still LINE-oriented: a line
+    // entered block state only when its TRIMMED text STARTED with `/*`. So
+    // appending ` /*` to the property line ABOVE the pair — `resolveMergeMode:
+    // resolveTridentMergeMode, /*` — kept that line, kept `landedProbe:` and
+    // `hostRunner:` after it, and then DISCARDED the closing `*/` line through the
+    // `startsWith('*')` branch: every count equal, every site paired and bound,
+    // and production carrying NEITHER half at runtime, with tsc silent because
+    // both fields are optional. No line-prefix rule can close that, because a
+    // comment's boundaries are token positions and not line positions. So the
+    // strip is now the COMPILER'S OWN PARSE — which also stops it mistaking the
+    // `//` inside a string (`https://…`, and the `Projects/*/STATUS.md` globs
+    // written inside comments, both of which `composer.ts` has) for a delimiter.
+    // The boundary mutant is applied to the real source at the bottom of this test
+    // and must come out RED.
+    /**
+     * `text` with every comment blanked to spaces — what is commented out is not
+     * wiring.
+     *
+     * Blanked rather than deleted so that every position in the result is the
+     * position the file really has, which is what the line-anchored scans below
+     * read. The comment ranges come from TypeScript's own parse of the file, so a
+     * comment is whatever the COMPILER says a comment is — no line-prefix rule,
+     * and template literals, nested substitutions and regex literals are the
+     * parser's problem rather than this test's. (A hand-driven `ts.createScanner`
+     * is NOT enough here: a raw scan loop does not re-scan a template's `}` as a
+     * template middle, so everything after the first `${…}` is read as code and
+     * the `/*` inside a later comment opens a block that eats a third of the file.)
+     */
     const executable = (text: string): string => {
-      const kept: string[] = []
-      let inBlock = false
-      for (const line of text.split('\n')) {
-        const t = line.trimStart()
-        if (inBlock) {
-          if (t.includes('*/')) inBlock = false
-          continue
-        }
-        if (t.startsWith('//') || t.startsWith('*')) continue
-        if (t.startsWith('/*')) {
-          if (!t.includes('*/')) inBlock = true
-          continue
-        }
-        kept.push(line)
+      const parsed = ts.createSourceFile(
+        'composer.scan.ts',
+        text,
+        ts.ScriptTarget.Latest,
+        /* setParentNodes */ true,
+        ts.ScriptKind.TS,
+      )
+      const chars = text.split('')
+      const blank = (range: ts.CommentRange): void => {
+        for (let i = range.pos; i < range.end; i++) if (chars[i] !== '\n') chars[i] = ' '
       }
-      return kept.join('\n')
+      const visit = (node: ts.Node): void => {
+        // Every comment in the file is leading or trailing trivia of exactly one
+        // token, and the EOF token carries the ones at the end.
+        for (const range of ts.getLeadingCommentRanges(text, node.getFullStart()) ?? []) blank(range)
+        for (const range of ts.getTrailingCommentRanges(text, node.getEnd()) ?? []) blank(range)
+        for (const child of node.getChildren(parsed)) visit(child)
+      }
+      visit(parsed)
+      return chars.join('')
     }
+    // The two cases the line-prefix rule got wrong, one in each direction: a block
+    // that OPENS mid-line is stripped, and a `//` inside a string is NOT.
+    expect(executable('const a = { x: 1, /*\n  y: 2,\n*/\n}')).not.toMatch(/y: 2/)
+    expect(executable("const u = 'https://example'")).toContain('https://example')
     const raw = readFileSync(join(HERE, '..', 'composer.ts'), 'utf8')
     const src = executable(raw)
     const propLine = (prop: string, value: string): RegExp =>
@@ -815,6 +853,44 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // the site count untouched.
     expect(dispatchDepsSites(commentedMutant).length).toBe(4)
     expect(dispatchDepsSites(commentedMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // r5 — the same "delete nothing, comment it out", one character further in:
+    // the block does not OPEN on its own line. Hanging ` /*` off the END of the
+    // property line above the pair and closing it after the runner comments BOTH
+    // halves out at runtime, and the line-prefix strip that answered r4 kept both
+    // property lines and ate the `*/`. Applied to the REAL source.
+    const beforeProbe = rawAnchors[1]! - 1
+    // The mutant only proves something if the line it hangs the `/*` off is
+    // executable code today — a `//` line would swallow it and prove nothing.
+    expect(rawLines[beforeProbe]!.trimStart().startsWith('//')).toBe(false)
+    expect(rawLines[beforeProbe]!.trimEnd().endsWith(',')).toBe(true)
+    const inlineOpenRaw = rawLines
+      .flatMap((l, i) => (i === beforeProbe ? [`${l} /*`] : i === rawRunner ? [l, '*/'] : [l]))
+      .join('\n')
+    // Again: the mutant DELETES NOTHING. Both property lines are still spelled,
+    // character for character, in the mutated source.
+    expect(
+      inlineOpenRaw.split('\n').filter((l) => propLine('hostRunner', 'tridentHostRunner').test(l))
+        .length,
+    ).toBe(rawLines.filter((l) => propLine('hostRunner', 'tridentHostRunner').test(l)).length)
+    expect(
+      inlineOpenRaw
+        .split('\n')
+        .filter((l) => propLine('landedProbe', 'tridentLandedProbe').test(l)).length,
+    ).toBe(rawLines.filter((l) => propLine('landedProbe', 'tridentLandedProbe').test(l)).length)
+    const inlineOpenMutant = executable(inlineOpenRaw)
+    // …and the scanner-backed strip takes BOTH halves out of the executable text,
+    // exactly as the runtime object does.
+    expect(count('hostRunner', 'tridentHostRunner', inlineOpenMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner') - 1,
+    )
+    expect(count('landedProbe', 'tridentLandedProbe', inlineOpenMutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe') - 1,
+    )
+    // The site is still a site — it keeps `store:` and `repo_path:` — and it is
+    // now unwired, with the other three untouched.
+    expect(dispatchDepsSites(inlineOpenMutant).length).toBe(4)
+    expect(dispatchDepsSites(inlineOpenMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
   })
 
   test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {

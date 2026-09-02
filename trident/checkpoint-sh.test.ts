@@ -35,7 +35,15 @@
 
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
 import { Database } from 'bun:sqlite'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -827,6 +835,105 @@ describe('checkpoint.sh — a REJECTION MUST STATE A REASON (the write-site prec
     // alone is NOT it (glibc passes U+110000 through); the target is pinned so a
     // future edit cannot quietly widen what counts as well-formed.
     expect(src).toContain('iconv -f UTF-8 -t UTF-32LE')
+  })
+
+  test('the ceiling fails closed in BOTH directions, EXECUTED — not asserted from the source text', () => {
+    // Argus r5 (minor, and the theme behind the confirmed blocker beside it): the
+    // ceiling was pinned by `toContain` on the script's own source, so a mutant
+    // that SWAPPED the two above-the-ceiling answers — the fail-OPEN direction —
+    // stayed green. These two cases run a real over-ceiling value through the real
+    // script, one per question, and each has a below-the-ceiling control so the
+    // pass cannot come from the value being rejected for some other reason.
+    const db = new Database(dbPath)
+    const findingsOf = (chars: number): string =>
+      `[{"severity":"blocker","title":"${'é'.repeat(chars)}"}]`
+    // QUESTION 1 — "may this write record a REJECTION", asked of the OLD row's
+    // stored column because the invocation brings no findings file of its own.
+    // Above the ceiling the answer is 0: the rejection is demoted to the
+    // no-review state rather than recorded on evidence the script could not read.
+    const over = findingsOf(20_000)
+    expect(over.length).toBeGreaterThan(16_384)
+    db.query('UPDATE code_trident_runs SET inner_checkpoint_findings = ? WHERE id = ?').run(
+      over,
+      'run-1',
+    )
+    expect(sh([dbPath, 'run-1', 'inner_verdict', 'REQUEST_CHANGES']).code).toBe(0)
+    expect(row('run-1').inner_verdict).toBe('REVIEW_NOT_RUN')
+    // …and the SAME payload under the ceiling records the rejection, so the
+    // demotion above is the ceiling and nothing else.
+    const under = findingsOf(8_000)
+    expect(under.length).toBeLessThan(16_384)
+    db.query(
+      'UPDATE code_trident_runs SET inner_checkpoint_findings = ?, inner_verdict = NULL WHERE id = ?',
+    ).run(under, 'run-1')
+    expect(sh([dbPath, 'run-1', 'inner_verdict', 'REQUEST_CHANGES']).code).toBe(0)
+    expect(row('run-1').inner_verdict).toBe('REQUEST_CHANGES')
+
+    // QUESTION 2 — "must I refuse to ERASE this row's findings", asked of the same
+    // column on a TERMINAL row. Above the ceiling the answer is 1: an orphan `[]`
+    // write cannot blank findings the script could not read. The verdict is left
+    // NULL deliberately, so `settled_rejection` has to reach the scan rather than
+    // being satisfied by the `inner_verdict = 'REQUEST_CHANGES'` half of its OR.
+    const orphan = join(dir, 'orphan-empty.json')
+    writeFileSync(orphan, '[]')
+    db.query(
+      `UPDATE code_trident_runs
+          SET phase = 'failed', inner_verdict = NULL, inner_checkpoint_findings = ?
+        WHERE id = ?`,
+    ).run(over, 'run-other')
+    expect(sh([dbPath, 'run-other', 'inner_findings_file', orphan]).code).toBe(0)
+    expect(row('run-other').inner_checkpoint_findings).toBe(over)
+    // Control, in the other direction: the same orphan write lands on a row that is
+    // NOT a settled rejection, so "refused" is a decision about this row and not
+    // this script declining every empty write.
+    db.query(
+      `UPDATE code_trident_runs
+          SET phase = 'forge-init', inner_verdict = NULL, inner_checkpoint_findings = ?
+        WHERE id = ?`,
+    ).run(over, 'run-other')
+    expect(sh([dbPath, 'run-other', 'inner_findings_file', orphan]).code).toBe(0)
+    expect(row('run-other').inner_checkpoint_findings).toBe('[]')
+    db.close()
+  })
+
+  test('a real rejection does not depend on this host shipping `iconv`', () => {
+    // Argus r5 (major): with no `iconv` the literal fell back to the ceilinged SQL
+    // scan, whose above-the-ceiling answer on a literal is 0 — so on such a host a
+    // GENUINE review whose findings ran past 16,384 non-ASCII characters was
+    // recorded REVIEW_NOT_RUN, discarding a real rejection and leaving the row
+    // salvage-seed eligible. The same question is now answered by `od` + `awk`,
+    // which are POSIX, in the same single linear pass.
+    const binDir = join(dir, 'no-iconv-bin')
+    mkdirSync(binDir)
+    // Everything the script actually shells out to, MINUS `iconv`. `sqlite3` is
+    // here too, so a PATH that lost it would fail loudly rather than pass quietly.
+    for (const tool of ['bash', 'sqlite3', 'sed', 'date', 'cat', 'tail', 'od', 'awk']) {
+      const found = Bun.spawnSync(['bash', '-lc', `command -v ${tool}`]).stdout.toString().trim()
+      expect({ tool, found: found.length > 0 }).toEqual({ tool, found: true })
+      symlinkSync(found, join(binDir, tool))
+    }
+    expect(existsSync(join(binDir, 'iconv'))).toBe(false)
+    const big = `[{"severity":"blocker","title":"${'é'.repeat(20_000)}"}]`
+    const f = join(dir, 'no-iconv-findings.json')
+    writeFileSync(f, big)
+    const run = (args: string[]): number =>
+      Bun.spawnSync(['bash', SCRIPT, ...args], { env: { PATH: binDir } }).exitCode
+    expect(run([dbPath, 'run-1', 'inner_findings_file', f, 'inner_verdict', 'REQUEST_CHANGES'])).toBe(0)
+    expect(row('run-1').inner_verdict).toBe('REQUEST_CHANGES')
+    expect(String(row('run-1').inner_checkpoint_findings)).toBe(big)
+    // POSITIVE CONTROL: the iconv-less validator is still a validator. The same
+    // payload with one orphan continuation byte in it is refused on the same host.
+    const bad = join(dir, 'no-iconv-malformed.json')
+    writeFileSync(
+      bad,
+      Buffer.concat([
+        Buffer.from(`[{"severity":"blocker","title":"${'é'.repeat(20_000)}`, 'utf8'),
+        Buffer.from([0x80]),
+        Buffer.from('"}]', 'utf8'),
+      ]),
+    )
+    expect(run([dbPath, 'run-1', 'inner_findings_file', bad, 'inner_verdict', 'REQUEST_CHANGES'])).toBe(0)
+    expect(row('run-1').inner_verdict).toBe('REVIEW_NOT_RUN')
   })
 
   test('the BOM clause is PINNED in the bash copy too, not only in the documented statements', () => {

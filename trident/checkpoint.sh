@@ -226,12 +226,24 @@ literal_of() {
 # 32 byte shapes on BOTH engines this project runs (sqlite3 CLI 3.45.1 and bun:sqlite
 # 3.51.2) the clause agrees row for row with `new TextDecoder('utf-8', {fatal: true})`,
 # which is exactly the boundary bun's driver enforces; the same clause is in the
-# canonical counting SQL in `docs/AS_BUILT.md`, so the three copies still answer alike.
+# canonical counting SQL in `docs/AS_BUILT.md`, so the three copies answer alike ON
+# THE VALUES THEY ALL WALK. That parity is SCOPED, and the scope is this script's
+# alone (Argus r5): the other two copies — the documented counting statements and
+# `parseCheckpointFindings` — are unbounded readers of rows that already exist,
+# while THIS copy is the write path and carries a cost ceiling (`utf8_scan_max`
+# below) over the one operand it cannot decide in bash. Above that ceiling this copy
+# stops walking and answers fail-closed per question, so it can answer "not
+# well-formed" where the other two, given the time, would answer "well-formed". The
+# divergence is stated where the ceiling is set, and its live residue is the
+# named follow-up recorded in `docs/AS_BUILT.md`.
 # THE GLOB IN FRONT OF THE SCAN IS A COST GATE, NOT A SECOND OPINION, and this is the
 # write site where the cost lands. "Every character is TAB, LF, CR or printable ASCII"
-# is sufficient for well-formed UTF-8 on its own, so an all-ASCII findings payload —
-# which is every one this system has written, `JSON.stringify` escaping the rest — skips
-# the walk entirely. It matters because SQLite's SUBSTR on TEXT is O(offset), making the
+# is sufficient for well-formed UTF-8 on its own, so an all-ASCII findings payload skips
+# the walk entirely — which is FEWER payloads than this comment once claimed ("every one
+# this system has written, `JSON.stringify` escaping the rest"): `JSON.stringify` emits
+# raw non-ASCII bytes and LLM findings carry em dashes, so real rejections miss the gate
+# routinely, which is why the sizes below matter and why the ceiling under them exists.
+# It matters because SQLite's SUBSTR on TEXT is O(offset), making the
 # walk quadratic: measured here, a 200 KB payload costs 30 s ungated and 3 ms gated, and
 # this script is handed findings files deliberately larger than one argv element. A
 # payload that really does carry non-ASCII still pays, bounded by its size (14 KB, the
@@ -309,9 +321,54 @@ utf8_wellformed() {
 # by hand. (`-t UTF-8` alone is NOT that boundary: glibc passes U+110000 through.)
 # It reads the bytes bash already captured, on stdin, so it cannot see a different
 # file than the one being stored, and it never appears in argv.
+#
+# AND `iconv` IS NOT A PRECONDITION FOR RECORDING A REAL REJECTION (Argus r5). A
+# host without it fell back to the ceilinged SQL scan, so on that host a genuine
+# review whose findings ran past 16,384 characters — one long non-ASCII payload —
+# was recorded `REVIEW_NOT_RUN`: fail-closed, but it discards a real rejection and
+# leaves the row salvage-seed eligible, which is the waste this card is about. The
+# fallback below asks the SAME question over the SAME bytes in the same single
+# linear pass, using only `od` and `awk` (both POSIX), so the answer no longer
+# depends on which converters the host ships. The state machine IS RFC 3629, which
+# is what `-t UTF-32LE` enforces: C2..DF/E0..EF/F0..F4 lead bytes with the
+# overlong (E0 A0, F0 90), surrogate (ED 80..9F) and out-of-range (F4 80..8F)
+# bounds written out, every continuation 80..BF, and no exclusion for
+# U+FFFE/U+FFFF. Decimal literals, because hex constants are not portable awk.
 utf8_verdict() {
-  command -v iconv >/dev/null 2>&1 || return 0
-  if printf '%s' "$1" | iconv -f UTF-8 -t UTF-32LE >/dev/null 2>&1; then
+  if command -v iconv >/dev/null 2>&1; then
+    if printf '%s' "$1" | iconv -f UTF-8 -t UTF-32LE >/dev/null 2>&1; then
+      printf '1'
+    else
+      printf '0'
+    fi
+    return 0
+  fi
+  command -v od >/dev/null 2>&1 || return 0
+  command -v awk >/dev/null 2>&1 || return 0
+  if printf '%s' "$1" | od -An -v -tu1 | awk '
+    {
+      for (i = 1; i <= NF; i++) {
+        b = $i + 0
+        if (n == 0) {
+          if (b < 128) continue
+          else if (b >= 194 && b <= 223) { n = 1; lo = 128; hi = 191 }
+          else if (b == 224) { n = 2; lo = 160; hi = 191 }
+          else if (b >= 225 && b <= 236) { n = 2; lo = 128; hi = 191 }
+          else if (b == 237) { n = 2; lo = 128; hi = 159 }
+          else if (b >= 238 && b <= 239) { n = 2; lo = 128; hi = 191 }
+          else if (b == 240) { n = 3; lo = 144; hi = 191 }
+          else if (b >= 241 && b <= 243) { n = 3; lo = 128; hi = 191 }
+          else if (b == 244) { n = 3; lo = 128; hi = 143 }
+          else { bad = 1; exit }
+        } else {
+          if (b < lo || b > hi) { bad = 1; exit }
+          lo = 128; hi = 191
+          n--
+        }
+      }
+    }
+    END { if (bad || n != 0) exit 1; exit 0 }
+  '; then
     printf '1'
   else
     printf '0'

@@ -493,14 +493,36 @@ row-for-row agreement with the classifier.
 -- because a bound parameter cannot carry bytes a JS string cannot hold.
 -- THE GLOB IN FRONT OF THE SCAN IS A COST GATE, NOT A SECOND OPINION. Every character
 -- being TAB, LF, CR or printable ASCII is sufficient for well-formed UTF-8 all by
--- itself, so the walk is skipped for a value that is entirely ASCII -- which is every
--- findings payload this system has ever written, JSON.stringify escaping the rest.
--- It matters because SQLite SUBSTR on TEXT is O(offset): the walk is quadratic, and
--- measured on this box a 200 KB payload costs 30 s with the gate removed and 3 ms with
--- it. Findings that DO carry non-ASCII still pay the walk, bounded by their size: the
--- live corpus maxes near 14 KB, measured at 123 ms. An ASCII-only value cannot reach
--- the scan and cannot need it, so the gate changes no answer -- the corpus proves that
--- by running both sides of it.
+-- itself, so the walk is skipped for a value that is entirely ASCII.
+-- THE GATE MISSES OFTEN, and the sentence that used to stand here -- "which is every
+-- findings payload this system has ever written, JSON.stringify escaping the rest" --
+-- was simply FALSE (Argus r4, restated r5): JSON.stringify emits raw non-ASCII bytes,
+-- and LLM-authored findings carry em dashes and curly quotes as a matter of course, so
+-- a large share of real rejections pay the walk. It matters because SQLite SUBSTR on
+-- TEXT is O(offset): the walk is quadratic, and measured on this box a 200 KB payload
+-- costs 30 s with the gate removed and 3 ms with it, and a non-ASCII payload costs 0.73 s
+-- at 16 K characters, 3.0 s at 32 K and 12.4 s at 64 K. The live corpus maxes near
+-- 14 KB, measured at 123 ms.
+-- THESE TWO STATEMENTS ARE DELIBERATELY UNBOUNDED, and that is the ONE place they part
+-- company with checkpoint.sh's third copy of the predicate. They are ANALYSIS queries
+-- over rows that already exist -- they answer a count, at a keyboard, and paying the
+-- walk is the right trade for an answer that is always the parser's. checkpoint.sh runs
+-- the same predicate on the WRITE path, where the cost lands on the run being recorded,
+-- so it decides the literal an invocation brings in one linear pass in bash and keeps a
+-- 16,384-character ceiling (`utf8_scan_max`) over the one operand bash cannot see: the
+-- OLD row's stored column. Above that ceiling checkpoint.sh does not walk at all and
+-- answers fail-closed per question. So "the three copies answer alike" holds for every
+-- value all three walk, and NOT above the ceiling, where checkpoint.sh can answer "not
+-- well-formed" about a value these statements would call well formed.
+-- NAMED FOLLOW-UP, not closed here (Argus r5): the live residue of that divergence is a
+-- bare `inner_verdict REQUEST_CHANGES` write whose evidence is the row's own stored
+-- findings and whose findings run past the ceiling -- it is recorded REVIEW_NOT_RUN,
+-- which discards a genuine rejection and leaves the row eligible for the
+-- built-never-reviewed seed. It cannot merge anything and no production caller writes
+-- that shape today (writeTerminalResult always attaches the findings file it just
+-- wrote), so it is a follow-up rather than a defect of this change. Closing it means a
+-- linear well-formedness test SQLite can run over a BLOB, or reading the stored column
+-- into bash under a guard that the UPDATE still sees the same bytes.
 SELECT COUNT(*) AS n FROM code_trident_runs
  WHERE phase IN ('done','failed','stopped')
    AND inner_verdict = 'REQUEST_CHANGES'

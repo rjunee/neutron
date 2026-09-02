@@ -1226,8 +1226,13 @@ export class TridentRunStore {
             ? patch.inner_checkpoint_findings
             : row.inner_checkpoint_findings
           // T1's production discriminator cannot reach this state. The guard makes
-          // findings-free rejection structurally unwritable by in-process writers;
-          // checkpoint.sh remains out-of-process SQL and bypasses it by construction.
+          // findings-free rejection structurally unwritable by in-process writers.
+          // checkpoint.sh is out-of-process SQL and never runs THIS check — it
+          // carries its own copy of the same rule instead (Argus r5: this comment
+          // used to say it "bypasses it by construction", which stopped being true
+          // when that copy was written). Its copy is an atomic SQL CASE inside the
+          // same UPDATE, and it REFUSES rather than throws: the findings-free
+          // rejection is recorded REVIEW_NOT_RUN and the rest of the write lands.
           if (
             effectiveVerdict === 'REQUEST_CHANGES' &&
             parseCheckpointFindings(effectiveFindings).length === 0
