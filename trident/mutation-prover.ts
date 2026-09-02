@@ -70,8 +70,13 @@
  * may commit a file the runner obeys without the argv naming it — a root
  * `bunfig.toml` `[test] preload`, jest `setupFiles`, `conftest.py`. Then a
  * perfectly honest-looking guard loads the mutated file and moves red-then-
- * green with nothing having asserted the mutated behaviour. Every spelling
- * that puts such a load ON the argv is refused (see `LOAD_HOOK_OPTION`); the
+ * green with nothing having asserted the mutated behaviour. A spelling that
+ * puts such a load ON the argv is refused — the two-dash options of
+ * `LOAD_HOOK_OPTION`, go's one-dash `GO_TOOLCHAIN_HOOK_OPTION`, and every
+ * WRAPPER whose body is a file (`npm`/`pnpm`/`yarn`/`make` at
+ * `forwardsPositionalsToAScript`, and `node --run`, refused at its shape) —
+ * bar the short-letter residuals NAMED at `LOAD_HOOK_OPTION` (pytest's `-p`,
+ * mocha's `-R`), whose letters collide with other runners' flags. The
  * committed-config half cannot be read out of argv at all and stays a review
  * question with the residual above.
  */
@@ -124,7 +129,7 @@ const TEST_COMMAND_SHAPES: ReadonlyArray<{
   ok: (argv: readonly string[]) => boolean
 }> = [
   { program: 'bun', shape: 'bun test …', ok: (a) => a[1] === 'test' },
-  { program: 'node', shape: 'node --test …', ok: (a) => a.includes('--test') },
+  { program: 'node', shape: 'node --test … (never --run)', ok: (a) => a.includes('--test') && !a.some(isNodeRunOption) },
   { program: 'npm', shape: 'npm test … / npm run test… ', ok: isPackageScriptTest },
   { program: 'pnpm', shape: 'pnpm test … / pnpm run test…', ok: isPackageScriptTest },
   { program: 'yarn', shape: 'yarn test … / yarn run test…', ok: isPackageScriptTest },
@@ -141,6 +146,28 @@ const TEST_COMMAND_SHAPES: ReadonlyArray<{
 function isPackageScriptTest(argv: readonly string[]): boolean {
   if (argv[1] === 'test') return true
   return argv[1] === 'run' && typeof argv[2] === 'string' && argv[2].startsWith('test')
+}
+
+/**
+ * `node --run <script>` IS A WRAPPER WEARING NODE'S NAME, and it wore the test
+ * shape too. Node executes the named `package.json` script — a command line the
+ * BRANCH wrote — and hands the remaining argv to it, so `node --run test-all
+ * --test tests/other.test.mjs` satisfied `includes('--test')` while node itself
+ * never entered test-runner mode at all. With `"test-all": "bun test
+ * --preload=./src/limit.ts tests/other.test.ts"` in the branch's own
+ * `package.json` that guard loads the mutated PRODUCTION file into a process
+ * running an unrelated test: byte for byte the forgery `npm run` is already
+ * refused for (see `forwardsPositionalsToAScript`), reopened under node's own
+ * binary. Refused at the SHAPE, which is where "a recognised program in a shape
+ * that is not its test subcommand" belongs — `--run` and `--test` are two modes
+ * of one binary and only the second is a test runner. BOTH SPELLINGS COUNT:
+ * node parses `--run=name` as it parses every other string option, and refusing
+ * only the space-separated one would leave the same wrapper one character away.
+ * Costs nothing honest — the script's body is a runner invocation the
+ * nomination can simply write out.
+ */
+function isNodeRunOption(arg: string): boolean {
+  return arg === '--run' || arg.startsWith('--run=')
 }
 
 /**
@@ -680,6 +707,15 @@ function carriedValue(arg: string): string {
  * the production half is refused at the `aRunnerMayCollect` gate below. Unlike
  * a config, this one costs nothing honest — the wrapper's body is a runner
  * invocation the nomination can simply write out.
+ *
+ * A WRAPPER ANSWERS TO MORE THAN FOUR NAMES, and two spellings outlived the
+ * paragraph above. `node --run test-all --test tests/other.test.mjs` runs a
+ * `package.json` script and never enters node's test mode at all, so it is
+ * refused one step earlier, at the SHAPE (`isNodeRunOption`) — the four-program
+ * predicate here reads `argv[0]` and node is a test runner under its other
+ * spelling. And go carries a branch-authored body on one dash: `-exec`,
+ * `-toolexec`, `-overlay` (`GO_TOOLCHAIN_HOOK_OPTION`), refused with the load
+ * hooks because that is what they are.
  */
 function guardRunsTheMutatedFile(guard: readonly string[], file: string): string | null {
   const target = normalizeArg(file)
@@ -1097,12 +1133,17 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
     // The loader-REWRITE spelling (`clamp.js` for `clamp.ts`) is deliberately
     // NOT asked here: `guardPathCandidates` already carries it, and its refusal
     // names the file the rewrite lands on, which this arm cannot say as well.
-    if (value === target || extensionCompletions(value).includes(target)) return `loads it as ${spelling}`
+    // THE FRAGMENT COMPOSES WITH ITS CALLER'S SENTENCE, which supplies "the
+    // mutated file <path> as its own test" straight after it. "loads it as
+    // <spelling>" read back as "…loads it as -rsrc the mutated file src/limit.ts
+    // as its own test"; the object belongs to the caller, so this arm must not
+    // supply a second one.
+    if (value === target || extensionCompletions(value).includes(target)) return `loads via ${spelling}`
     // A DIRECTORY'S `index` IS THE DIRECTORY, for this question: `--preload=./src/index`
     // executes the entry point every module under `src` is reached through.
     const dir = value.endsWith('/index') ? value.slice(0, -'/index'.length) : value
     if (dir.length > 0 && target.startsWith(`${dir}/`)) {
-      return `loads it via ${spelling}, which names the directory holding it`
+      return `loads, via ${spelling} naming the directory holding it,`
     }
   }
   return null
@@ -1213,17 +1254,47 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
 // too, and its extraction matches this declaration as written.
 const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|experimental-config-file|experimental-default-config-file|env-file|env-file-if-exists)$/
 
+/**
+ * GO SPELLS THE SAME HOOK WITH ONE DASH, and the `^--` anchor above cannot see
+ * it. `go test -exec <prog>` runs the compiled test binary THROUGH a program the
+ * branch wrote; `-toolexec <prog>` runs that program for every compile and link
+ * step; and `-overlay <file>` hands the toolchain a JSON map that REPLACES the
+ * contents of any source file, the mutated one included. Each is a body this
+ * argv does not show, and each forges the same proof: a wrapper script that
+ * imports (or an overlay that rewrites) `src/limit.go` reddens an unrelated
+ * guard under a syntax break and greens it on restore, with nothing having
+ * asserted the mutated behaviour.
+ *
+ * KEPT AS A SECOND REGEX rather than widened into the first: `-e`, `-o` and
+ * their neighbours are other runners' short options, and `SHORT_OPTION_WITH_ATTACHED_VALUE`
+ * reads `-exec` as `-e` carrying `xec`. These three are matched WHOLE, before
+ * that short-option reading, so nothing else changes meaning. Over-refusal is
+ * the cost — a cross-compiling `go test -exec` is honest and is refused with
+ * everything else — and it fails CLOSED and is spellable around by running the
+ * test the way the guard means to.
+ */
+// KEPT ON ONE LINE ON PURPOSE, for the same reason as the regex above: the
+// Forge-schema guard test reads these names straight out of this source.
+const GO_TOOLCHAIN_HOOK_OPTION = /^-(?:exec|toolexec|overlay)$/
+
 function loadHookCarrying(guard: readonly string[]): string | null {
   const start = runnerPrefixLength(guard)
   for (let i = start; i < guard.length; i += 1) {
     const arg = guard[i] as string
     if (!arg.startsWith('-')) continue
     const eq = arg.indexOf('=')
-    const attachedShort = eq === -1 && SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg)
+    // GO'S ONE-DASH LONG NAMES ARE READ WHOLE, and asked FIRST: `-exec` matches
+    // `SHORT_OPTION_WITH_ATTACHED_VALUE`, so read as a short option it becomes
+    // `-e` carrying `xec` and falls straight through the `continue` below —
+    // which is exactly how `go test -exec ./tests/wrap.sh ./pkg` stayed legal.
+    const goHook = GO_TOOLCHAIN_HOOK_OPTION.test(eq !== -1 ? arg.slice(0, eq) : arg)
+    const attachedShort = !goHook && eq === -1 && SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg)
     const name = eq !== -1 ? arg.slice(0, eq) : attachedShort ? arg.slice(0, 2) : arg
     const short = name === '-r' || name === '-c'
-    if (!short && !LOAD_HOOK_OPTION.test(name)) continue
-    const attached = carriedValue(arg)
+    if (!goHook && !short && !LOAD_HOOK_OPTION.test(name)) continue
+    // …and for the same reason its value is only ever the `=` half or the next
+    // element: `carriedValue('-exec')` would answer `xec`.
+    const attached = goHook && eq === -1 ? '' : carriedValue(arg)
     if (attached.length > 0) {
       if (short && !looksLikeAPath(attached)) continue
       return arg
@@ -1237,7 +1308,7 @@ function loadHookCarrying(guard: readonly string[]): string | null {
     // node's `--experimental-default-config-file` never carries anything, so
     // this is the arm that sees it. Short letters stay out: `go test -c` really
     // is a valueless flag of another runner.
-    if (!short) return `${arg} (which reads a file this argv does not name)`
+    if (goHook || !short) return `${arg} (which reads a file this argv does not name)`
   }
   return null
 }

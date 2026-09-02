@@ -301,6 +301,28 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       for (const spelling of ['npm test', '-c…', '-r…'])
         expect([spelling, d.includes(spelling)]).toEqual([spelling, true])
 
+    // GO'S ONE-DASH HOOKS, read out of the prover's SECOND regex the same way.
+    // The `--`-anchored loop above is blind to them by construction, so without
+    // this loop the schema could name every long option and still send a build
+    // to write `go test -exec ./wrap.sh ./pkg` and be refused for it.
+    const goHooks = PROVER_SRC.match(/const GO_TOOLCHAIN_HOOK_OPTION = \/\^-\(\?:([a-z|]+)\)\$\//)
+    expect(goHooks).not.toBeNull()
+    const goNames = (goHooks![1] as string).split('|')
+    expect(goNames.length).toBeGreaterThan(1)
+    for (const d of described) for (const g of goNames) expect([g, d.includes(`-${g}`)]).toEqual([g, true])
+    // CONTAINMENT for those three, by name, for the same two-sided-deletion
+    // reason the thirteen above are pinned.
+    for (const name of ['exec', 'toolexec', 'overlay'])
+      expect([name, goNames.includes(name)]).toEqual([name, true])
+
+    // `node --run` IS A WRAPPER AND NO LOOP ABOVE CAN SEE IT: it is refused at
+    // the node SHAPE rather than by the wrapper predicate (whose `argv[0]` is
+    // `node` under the legal spelling too), so only a literal pin requires the
+    // schema to say so — and only a literal pin keeps the prover from quietly
+    // re-admitting it.
+    for (const d of described) expect(['node --run', d.includes('node --run')]).toEqual(['node --run', true])
+    expect(PROVER_SRC).toContain('never --run')
+
     // …and both refusals really exist on the prover side, in the words its
     // reasons use, so this test fails if either shape is quietly re-allowed.
     expect(PROVER_SRC).toContain('whose script body the branch wrote')

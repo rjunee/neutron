@@ -1480,6 +1480,141 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
   })
 
+  test("`node --run` is a WRAPPER wearing node's name — a `--test` further along does not make it a runner", async () => {
+    // THE BYPASS THIS CLOSES, the wrapper family under a sixth spelling. Node
+    // v22's `--run <script>` executes a `package.json` script — a command line
+    // the BRANCH wrote — and node never enters test-runner mode at all, but the
+    // shape check asked only whether `--test` appeared ANYWHERE in the argv, and
+    // a trailing `--test` node forwards to the script satisfied it. With
+    // `"test-all": "bun test --preload=./src/limit.ts tests/other.test.ts"` in
+    // the branch's own `package.json`, that guard loads the mutated PRODUCTION
+    // file into a process running an unrelated test: byte for byte the forgery
+    // `npm run` is already refused for. Refused at the SHAPE, so no later arm
+    // ever sees it.
+    for (const guard of [
+      ['node', '--run', 'test-all', '--test', 'tests/other.test.mjs'],
+      // …the `=` spelling of the same option, one character away from the above,
+      ['node', '--run=test-all', '--test', 'tests/other.test.mjs'],
+      // …and with the `--test` written FIRST, which is the shape that reads
+      // most like an honest node test invocation.
+      ['node', '--test', '--run', 'test-all'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file: 'src/limit.ts', guard } })
+      // Refused before anything was written or run, and the refusal says what a
+      // node guard must look like instead.
+      expect([guard.join(' '), out.proved, host.calls.length, fs.writes.length]).toEqual([guard.join(' '), false, 0, 0])
+      expect([guard.join(' '), out.reason.includes('must be a test invocation')]).toEqual([guard.join(' '), true])
+      expect([guard.join(' '), out.reason.includes('never --run')]).toEqual([guard.join(' '), true])
+    }
+
+    // The CONTROL is held to the same shape — it is executed too, and a control
+    // that runs a branch-written script is green for reasons the diff does not own.
+    const { prover: ctl } = proverOver({}, memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE }))
+    const control = await ctl.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: 'src/limit.ts', control: ['node', '--run', 'test-all', '--test'] },
+    })
+    expect(control.reason).toContain('claim.control must be a test invocation')
+
+    // POSITIVE CONTROL: the legal spelling is untouched, so this is not "no node
+    // guard is legal" — without it every assertion above passes on a shape check
+    // that refuses node outright.
+    const { prover: ok } = proverOver({}, memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE }))
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: 'src/limit.ts', guard: ['node', '--test', 'tests/other.test.mjs'] },
+    })
+    expect(fine.reason).not.toContain('must be a test invocation')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('GO CARRIES A BRANCH-WRITTEN BODY ON ONE DASH — `-exec`, `-toolexec` and `-overlay` are load hooks', async () => {
+    // THE BYPASS THIS CLOSES, the load-hook family in the spelling the `^--`
+    // anchor cannot see. `go test -exec ./tests/wrap.sh ./pkg` runs the compiled
+    // test binary THROUGH a program the branch wrote; `-toolexec` runs one for
+    // every compile and link step; and `-overlay` hands the toolchain a JSON map
+    // that REPLACES a source file's contents — the mutated file's included. Each
+    // reddens an unrelated guard under a syntax break and greens it on restore
+    // with nothing having asserted the mutated behaviour, and each walked
+    // straight through: `SHORT_OPTION_WITH_ATTACHED_VALUE` reads `-exec` as `-e`
+    // carrying `xec`, which matches no hook name and is skipped.
+    for (const guard of [
+      ['go', 'test', '-exec', './tests/wrap.sh', './pkg'],
+      ['go', 'test', '-exec=./tests/wrap.sh', './pkg'],
+      ['go', 'test', '-toolexec', './tests/tool.sh', './pkg'],
+      ['go', 'test', '-toolexec=./tests/tool.sh', './pkg'],
+      ['go', 'test', '-overlay', './tests/overlay.json', './pkg'],
+      ['go', 'test', '-overlay=./tests/overlay.json', './pkg'],
+      // …and NAMING NOTHING is still the hook, exactly as a valueless long
+      // option is above: the file it reads is one this argv does not show.
+      ['go', 'test', './pkg', '-overlay'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.go')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file: 'src/limit.go', guard } })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect([guard.join(' '), out.reason.includes('whose body the branch wrote')]).toEqual([guard.join(' '), true])
+      expect([guard.join(' '), fs.writes.length]).toEqual([guard.join(' '), 0])
+    }
+
+    // POSITIVE CONTROLS, because every assertion above would pass just as well
+    // against "refuse every one-dash option go accepts":
+    //  (1) an ordinary go flag whose value is not a body at all,
+    //  (2) a flag whose NAME merely starts with one of the three,
+    //  (3) the plain targeted invocation the refusal recommends.
+    for (const guard of [
+      ['go', 'test', '-count=1', './pkg/other'],
+      ['go', 'test', '-execute-nothing=1', './pkg/other'],
+      ['go', 'test', './pkg/other'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.go')]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file: 'src/limit.go', guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      // POSITIVE CONTROL ON THE EXTRACTION: the guard really ran.
+      expect([guard.join(' '), fine.observed !== null]).toEqual([guard.join(' '), true])
+    }
+  })
+
+  test('the CARRIED-VALUE arm answers in its own words, and the refusal is ONE sentence', async () => {
+    // TWO THINGS AT ONCE, both of which a reviewer's mutant battery found open.
+    // (1) THE ARM IS LOAD-BEARING. Neutralising `carriedValueReaching` — or
+    // `extensionCompletions` inside it — left the whole suite green, because the
+    // hook arm below re-refuses the SAME spellings with a vaguer reason and the
+    // resolved-path seam catches the rest at proof time. Redundancy nobody has
+    // pinned is redundancy that gets deleted, so the two reasons are told apart
+    // here by name.
+    // (2) THE REASON COMPOSES. Its caller appends "the mutated file <path> as
+    // its own test", so a fragment carrying its own object read back as "loads
+    // it via -rsrc, which names the directory holding it the mutated file
+    // src/limit.ts as its own test" — the same wording-class bug already fixed
+    // on the wrapper arm.
+    for (const [arg, sentence] of [
+      ['--preload=./src/limit', 'loads via --preload=./src/limit the mutated file src/limit.ts as its own test'],
+      ['-rsrc', 'loads, via -rsrc naming the directory holding it, the mutated file src/limit.ts as its own test'],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', arg, 'tests/other.test.ts'] },
+      })
+      expect([arg, out.proved, host.calls.length]).toEqual([arg, false, 0])
+      // The whole sentence, not a substring of it: this is what the next build reads.
+      expect([arg, out.reason.includes(sentence)]).toEqual([arg, true])
+      // …and it is NOT the hook arm's wording, which is what the neutralised
+      // versions of both helpers fell back to.
+      expect([arg, out.reason.includes('whose body the branch wrote')]).toEqual([arg, false])
+    }
+  })
+
   test("an OPTION'S VALUE NEED NOT WRITE THE EXTENSION — `--preload=./src/limit` loads `src/limit.ts`", async () => {
     // THE BYPASS, reproduced end to end on bun 1.3.x. A loader completes a bare
     // specifier from its extension list and falls back to a directory's
