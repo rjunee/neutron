@@ -829,8 +829,10 @@ Each carries an acceptance criterion; all in `neutron-open`.
       receives the findings is the one forbidden to act on what they mean;
       (iii) `plan:fable` is invoked ONCE, OUTSIDE the fix loop (`inner-workflow.mjs` ~2073 vs the `while` at
       ~2175), so the only agent permitted to re-plan never hears a single reviewer finding.
-      The escape hatch already exists in exactly one flavour — the loop breaks on
-      `synthesis.blockKind !== 'infra-only'` — proving the category is understood; it simply has no siblings.
+      The escape hatch already exists in two flavours — the loop runs only while
+      `synthesis.blockKind` is neither `'infra-only'` (no seat judged the code) nor `'advisory-only'` (a healthy
+      panel judged it and said only things this file has already declared non-blocking) — proving the category
+      is understood; it simply has no siblings that say the PLAN is wrong.
       EVIDENCE (all nine review results of `36b95167`): three findings — the tautological "row/rail lockstep"
       test, the out-of-spec `inline_active` proxy, and the untouched research/dispatch path — recur in ALL
       NINE rounds, and the finding totals never converge (9, 8, 13, 9, 8, 12, 9, 10, 11). Note the planner

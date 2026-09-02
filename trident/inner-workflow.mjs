@@ -2802,7 +2802,11 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // failure matches `enforceSeverityGate`: only the two LISTED severities are skipped,
 // so an unknown/absent/misspelled severity still counts as code and still re-Forges,
 // and a malformed (null) finding does too.
-function classifyBlock(synthesis, deferredPeers, noReviewRan = false) {
+// AND THE LIST IT READS IS NOT ALWAYS THE PANEL'S. `panelRejectedWithoutReason` is the
+// caller's answer to the one question this classifier cannot ask of the merged object:
+// did the SEAT state a reason, or did this file attach every finding on it? See the
+// arm at the bottom.
+function classifyBlock(synthesis, deferredPeers, noReviewRan = false, panelRejectedWithoutReason = false) {
   // A NON-ARRAY `findings` IS MALFORMED, NOT EMPTY — and it must not crash the round.
   // `(synthesis && synthesis.findings) || []` accepted any truthy value and then called
   // `.filter` on it, so a synthesis carrying `findings: 'oops'` threw a TypeError out of
@@ -2843,6 +2847,27 @@ function classifyBlock(synthesis, deferredPeers, noReviewRan = false) {
   // words, and the blockKind said the opposite; 'infra-only' is the honest kind there, and
   // it exits the loop the same way, so only what the run REPORTS changes.
   if (findings.length === 0) return 'code'
+  // AND A LIST THIS FILE FILLED IN IS STILL AN EMPTY ONE, as far as the rule above is
+  // concerned. The arm directly above reads the MERGED object, and by the time it does,
+  // `reviewAndSynthesize`'s CI seam may have prepended its own advisories to a panel
+  // reply whose findings were `[]` — so a REQUEST_CHANGES the seat gave no reason for
+  // stopped being "empty", skipped the malformed arm, and came out 'advisory-only':
+  // a kind that ASSERTS the panel produced findings, which `writeTerminalResult` then
+  // records as a durable REQUEST_CHANGES reserved "for a reviewer that judged the CODE
+  // and produced at least one finding". Nobody had. The workflow's own advisories were
+  // laundered into the seat's reasons.
+  //
+  // The caller measures it, because only the caller still holds the seat's own reply
+  // (`severityGated`) beside the merged one. This is the exact mirror of the arm
+  // `withSuiteBlocker` already runs at the other injection seam, down to the kind it
+  // chooses: 'infra-only', not 'advisory-only', because 'advisory-only' says the panel
+  // judged the code and returned only non-blocking findings, and on a rejection carrying
+  // no stated reason that is false. The loop exits either way — what changes is only what
+  // the run REPORTS, and it reports REVIEW_NOT_RUN rather than a review nobody gave.
+  //
+  // Fail-closed, like every other gate here: nothing about this downgrades the verdict.
+  // A malformed rejection is still a rejection, and a red PR still holds the merge.
+  if (panelRejectedWithoutReason) return 'infra-only'
   return noReviewRan ? 'infra-only' : 'advisory-only'
 }
 
@@ -6062,7 +6087,17 @@ ${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
   const reviewRecord = noReviewRan
     ? 'NO REVIEW RAN — all four review seats were deliberately set to NONE; merge relied on build and CI gates alone.'
     : `Review panel: ${4 - offSeats.length} seat(s) ran; off: ${offSeats.length === 0 ? 'none' : offSeats.join(', ')}.`
-  return { ...gated, blockKind: classifyBlock(gated, peers, noReviewRan), reviewRecord }
+  // DID THE SEAT STATE A REASON OF ITS OWN? Measured HERE because this is the last place
+  // the panel's own reply (`severityGated`) is still separable from the findings the CI
+  // seam above prepended to it — `gated` has them merged, and a classifier reading only
+  // the merged list cannot tell a reviewer's finding from one this file wrote. A
+  // rejection the seat gave no reason for is malformed whatever the workflow later
+  // attached to it; `classifyBlock` refuses to call that a panel judgment. Non-array
+  // findings count as none, exactly as `withSuiteBlocker` counts them at the other seam.
+  const panelFindings = Array.isArray(severityGated?.findings) ? severityGated.findings : []
+  const panelRejectedWithoutReason =
+    normalizeVerdict(severityGated?.verdict) === 'REQUEST_CHANGES' && panelFindings.length === 0
+  return { ...gated, blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason), reviewRecord }
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────

@@ -3114,6 +3114,86 @@ describe('a fully excused CI red still holds the merge', () => {
     const ci = { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] }
     expect(ciFindingsBlock(ciBlockerFindings(ci, new Set(['lint'])))).toBe(true)
   })
+
+  // ...AND THE ADVISORIES IT ATTACHES MAY NOT BECOME THE PANEL'S REASONS. The arm above
+  // prepends this file's own findings to whatever the seat returned. When the seat
+  // returned REQUEST_CHANGES with NO findings — the shape this file calls malformed, not
+  // benign — the merged list was no longer empty, so `classifyBlock` skipped its
+  // reasonless-rejection arm and stamped 'advisory-only': a kind that ASSERTS the panel
+  // judged the code and produced findings, and one `writeTerminalResult` records as a
+  // durable REQUEST_CHANGES. Nobody had judged anything. Run, not grepped: the classifier
+  // and the caller's own tail are both sliced out of the source.
+  const classifyTail = (
+    severityGated: Record<string, unknown> | null,
+    gated: Record<string, unknown>,
+    peers: unknown[] = [],
+    noReviewRan = false,
+  ): Record<string, unknown> => {
+    const constLine = (name: string): string => {
+      const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
+      if (line === undefined) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
+      return line
+    }
+    const at = SRC.indexOf('  const panelFindings = Array.isArray(severityGated')
+    expect(at).toBeGreaterThan(-1)
+    const end = SRC.indexOf('\n}', at)
+    expect(end).toBeGreaterThan(at)
+    const run = new Function(
+      'severityGated',
+      'gated',
+      'peers',
+      'noReviewRan',
+      'reviewRecord',
+      [
+        constLine('NON_BLOCKING_SEVERITIES'),
+        constLine('ADVISORY_FINDING_KEY'),
+        constLine('LANE_FINDING_KIND'),
+        grab('isNonBlockingFinding'),
+        grab('normalizeVerdict'),
+        grab('classifyBlock'),
+        SRC.slice(at, end),
+      ].join('\n'),
+    ) as (
+      s: unknown,
+      g: unknown,
+      p: unknown[],
+      n: boolean,
+      r: string,
+    ) => Record<string, unknown>
+    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.')
+  }
+
+  const seatSaid = (severityGated: Record<string, unknown> | null): Record<string, unknown> =>
+    classifyTail(severityGated, runArm({ status: 'red' }, excused(), severityGated))
+
+  test('a reasonless panel REQUEST_CHANGES is not laundered into a reviewed verdict', () => {
+    const out = seatSaid({ verdict: 'REQUEST_CHANGES', findings: [] })
+    // The advisory is still carried, and the merge is still held...
+    expect((out.findings as unknown[]).length).toBe(1)
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    // ...but no seat stated a reason, so this is not a review, and the loop still exits.
+    expect(out.blockKind).toBe('infra-only')
+  })
+
+  test('a panel that DID speak still gets the cheap exit, not a fix round', () => {
+    // APPROVE over an excused red: the panel judged and had nothing actionable.
+    expect(seatSaid({ verdict: 'APPROVE', findings: [] }).blockKind).toBe('advisory-only')
+    // A nit is a stated reason — a cheap one, which is exactly what 'advisory-only' is for.
+    expect(
+      seatSaid({ verdict: 'REQUEST_CHANGES', findings: [{ severity: 'nit', title: 'rename it' }] })
+        .blockKind,
+    ).toBe('advisory-only')
+  })
+
+  test('an unexcused red is still code work whatever the seat said', () => {
+    const { ciBlockerFindings } = loadReal()
+    const findings = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['lint']),
+    )
+    const seat = { verdict: 'REQUEST_CHANGES', findings: [] }
+    expect(classifyTail(seat, runArm({ status: 'red' }, findings, seat)).blockKind).toBe('code')
+  })
 })
 
 /**

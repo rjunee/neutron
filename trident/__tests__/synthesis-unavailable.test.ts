@@ -130,7 +130,7 @@ const real = new Function(
   normalizeVerdict: (v: unknown) => string
   enforceSeverityGate: (s: unknown) => Synthesis | null
   enforceCrossModelGate: (s: unknown, peers: Peer[]) => Synthesis
-  classifyBlock: (s: unknown, peers: Peer[]) => string
+  classifyBlock: (s: unknown, peers: Peer[], noReviewRan?: boolean, panelRejectedWithoutReason?: boolean) => string
   synthesisOrInfraBlock: (s: unknown) => Synthesis
   seatAttempt: (seat: string, run: () => unknown) => Promise<unknown>
   synthesisUnavailable: (seat: string, reason: string) => Readonly<Synthesis>
@@ -198,7 +198,15 @@ function reviewAndSynthesizeTail(
     severityGated,
   )
   const gated = real.enforceCrossModelGate(withCi, peers)
-  return { ...gated, blockKind: real.classifyBlock(gated, peers) }
+  // The caller's own last measurement, mirrored here because this helper rebuilds the
+  // tail by hand: `gated` has the CI advisories merged in, so only `severityGated` can
+  // still say whether the SEAT stated a reason. A dead seat states none — which is why
+  // this reads `true` on every call below, and why an advisory over a dead seat is not
+  // 'advisory-only'. The source assertion above pins production to the same tail.
+  const panelFindings = Array.isArray(severityGated?.findings) ? severityGated.findings : []
+  const panelRejectedWithoutReason =
+    real.normalizeVerdict(severityGated?.verdict) === 'REQUEST_CHANGES' && panelFindings.length === 0
+  return { ...gated, blockKind: real.classifyBlock(gated, peers, false, panelRejectedWithoutReason) }
 }
 
 /**
