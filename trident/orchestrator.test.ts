@@ -143,7 +143,16 @@ function buildHarness(opts: {
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
-    if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    // THE DEPTH PROBE IS STUBBABLE, and defaults to a COMPLETE checkout. The launch ancestry
+    // guard reads it to decide whether `merge-base --is-ancestor` exit 1 is a proven "no" or a
+    // shallow boundary lying — so a scenario must be able to say "this clone is shallow". The
+    // default stays 'false' because every pre-existing scenario means a complete history, and
+    // an empty-but-ok answer from a catch-all responder is not an override, on the same terms
+    // the gate's own probes use below.
+    if (joined.includes('rev-parse --is-shallow-repository')) {
+      const depth = opts.hostResponder?.(cmd)
+      return depth !== undefined && (!depth.ok || depth.stdout.trim() !== '') ? depth : ok('false')
+    }
     // `^{commit}` EXCLUDED ON PURPOSE. Two different probes both open with
     // `rev-parse --verify --quiet refs/heads/…`: the launch path's local-tip
     // check (`orchestrator.ts:3090`, no suffix) and #542's ref resolution
@@ -5220,7 +5229,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     // reproduced on git 2.43): with a narrowed configured refspec, `fetch --no-tags origin main`
     // exits 0, moves FETCH_HEAD, and leaves refs/remotes/origin/main exactly where it was — the
     // ref this very test then rev-parses for `base_sha` and pins the build to.
-    const BASE_REFSPEC = 'fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main'
+    const BASE_REFSPEC = 'fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main'
     expect(calls.some((c) => c.includes(BASE_REFSPEC))).toBe(true)
     expect(calls.findIndex((c) => c.includes(BASE_REFSPEC)))
       .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
@@ -5268,7 +5277,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(final.failure_reason).toContain('branch -D -- trident/add-thing')
     // The printed remedy re-establishes BOTH perishable premises at the moment it runs — the
     // local ref is still the evidenced sha, and origin still carries it — before it deletes.
-    expect(final.failure_reason).toContain('fetch --no-tags origin +refs/heads/trident/add-thing')
+    expect(final.failure_reason).toContain('fetch --no-tags --no-recurse-submodules origin +refs/heads/trident/add-thing')
     expect(final.failure_reason).toContain(`merge-base --is-ancestor ${TIP} refs/remotes/origin/trident/add-thing`)
     // The delete git RE-CHECKS, never a low-level ref delete: this reason is read minutes to
     // hours after it is composed, and `update-ref -d` would blow past the
@@ -5276,6 +5285,135 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     // branch in between.
     expect(final.failure_reason).not.toContain('update-ref -d')
     expect(final.failure_reason).toContain(TIP)
+  })
+
+  test('a SHALLOW checkout cannot turn a true ancestor into a proven divergence', async () => {
+    // THE BLOCKER. `merge-base --is-ancestor B C` exits 1 past a shallow boundary for a B that
+    // IS an ancestor of C — the parent commits simply are not in the object store (reproduced on
+    // git 2.43 with a depth-1 clone and a true parent). This checkout may arrive shallow:
+    // `healShallowCheckout` documents that shape in production and runs only on the REPLAY path,
+    // never before this guard. Reading exit 1 as divergence therefore printed "already carries N
+    // commit(s) not on origin/main — it was not cut from origin/main", a positive claim about
+    // another lane's work that nothing established, in the one message class this change exists
+    // to make evidence-honest. Shallow => UNKNOWN, and UNKNOWN authorises nothing.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const scenario = (depth: HostCommandResult) =>
+      buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        local_branch_tip: TIP,
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --is-shallow-repository')) return depth
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+          }
+          if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+          if (joined.includes('worktree list --porcelain')) {
+            return ok(['worktree /repo', `HEAD ${BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0')
+          }
+          if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) return ok(TIP)
+          return ok()
+        },
+      })
+
+    const shallow = scenario(ok('true'))
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(shallow)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    // Still REFUSED — fail-closed, nothing fired. Only the CLAIM changes.
+    expect(shallow.inputs).toHaveLength(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(reason).toContain('UNKNOWN')
+    expect(reason).toContain('SHALLOW')
+    // The claim the shallow boundary did not license is gone...
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('it was not cut from')
+    // ...and so is every destructive instruction (docs/INVARIANTS.md §12 invariant 122).
+    expect(reason).not.toContain('branch -D')
+    // The reader is told the read that settles it, rather than being left with "exited 1".
+    expect(reason).toContain('--unshallow')
+
+    // AN UNREADABLE DEPTH IS UNKNOWN TOO — fail-closed in the same direction, and it says so
+    // rather than borrowing the shallow wording it did not measure.
+    const blind = scenario({ ok: false, stdout: '', stderr: 'fatal: not a repository', exit_code: 128 })
+    const run2 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(blind)
+    const reason2 = store.get(run2.id)?.failure_reason ?? ''
+    expect(blind.inputs).toHaveLength(0)
+    expect(reason2).toContain('UNKNOWN')
+    expect(reason2).toContain('the depth of this checkout could not be read')
+    expect(reason2).not.toContain('already carries')
+    expect(reason2).not.toContain('branch -D')
+
+    // POSITIVE CONTROL: the identical exit 1 in a checkout PROVEN complete is still the
+    // wrong-base refusal, remedy and all. Without this, "shallow => UNKNOWN" could be satisfied
+    // by an implementation that stopped answering "no" at all and never refused a real
+    // wrong-base branch again.
+    const complete = scenario(ok('false'))
+    const run3 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(complete)
+    const reason3 = store.get(run3.id)?.failure_reason ?? ''
+    expect(complete.inputs).toHaveLength(0)
+    expect(reason3).toContain('already carries 3 commit(s) not on origin/')
+    expect(reason3).toContain('branch -D -- trident/add-thing')
+  })
+
+  test('exit 0 stays definitive, so a shallow checkout costs a contained branch nothing', async () => {
+    // Truncation can only HIDE ancestry, never invent it: `--is-ancestor` exiting 0 found the
+    // link, and that is positive proof at any depth. So the depth probe is lazy — the common
+    // shape (a branch already contained in the base) never pays for it, and never stalls on it.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --is-shallow-repository')) return ok('true')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) return ok()
+        return ok()
+      },
+    })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.join(' ').includes('rev-parse --is-shallow-repository'))).toBe(false)
+  })
+
+  test("the launch base fetch stays inside this repo's own .git — no submodule recursion", async () => {
+    // The refusal composed on this path, and `delivery.ts`'s LAUNCH_PATH_FETCH beside it, both
+    // tell the reader the launcher's writes live under this repo's `.git`. A fetch recurses into
+    // submodules whenever `fetch.recurseSubmodules` says so (its default is `on-demand`, and a
+    // repo may set `true`), and a recursed fetch writes inside the SUBMODULE's git dir — git's
+    // OWN write, which no hook caveat covers, and which falsifies the boundary the message
+    // asserts. One flag; this pins that it is passed, and that the sentence quotes the argv that
+    // actually ran.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const fetched = h.hostCalls.find((c) => c.includes('fetch'))
+    expect(fetched).toBeDefined()
+    expect(fetched).toContain('--no-recurse-submodules')
+    expect(fetched?.indexOf('--no-recurse-submodules')).toBeLessThan(fetched?.indexOf('origin') ?? -1)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(reason).toContain('--no-recurse-submodules')
+    expect(reason).toContain("under this repo's own .git")
   })
 
   test('an ancestor-only local branch leftover proceeds', async () => {
@@ -5686,7 +5824,7 @@ describe('orchestrator — the resume live head is read in code, never relayed b
 
   test('the UNKNOWN refusal counts the fetch it already made instead of claiming it wrote nothing', async () => {
     // The refusal asserted "no branch, worktree, commit or file was changed or deleted" — true
-    // as far as it goes — immediately after this same path ran `git fetch --no-tags origin main`,
+    // as far as it goes — immediately after this same path ran the base fetch,
     // which force-updates the tracking ref, appends that ref's reflog, rewrites FETCH_HEAD and
     // writes whatever objects it downloaded. `delivery.ts` names that exact set for the
     // composer's own fetch and calls undercounting your own writes the overclaiming this refusal
@@ -5714,10 +5852,12 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     // The sentence quotes the argv that actually ran, refspec included — a refusal that named
     // a shorthand fetch while the code ran a different one is the same defect in miniature.
     expect(
-      fresh.hostCalls.some((c) => c.join(' ').includes('fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main')),
+      fresh.hostCalls.some((c) =>
+        c.join(' ').includes('fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main'),
+      ),
     ).toBe(true)
     expect(reason).toContain('no branch, worktree, commit or file in the tree was changed or deleted')
-    expect(reason).toContain('fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main')
+    expect(reason).toContain('fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main')
     expect(reason).toContain('refs/remotes/origin/main')
     expect(reason).toContain('FETCH_HEAD')
     // ...AND THE REF UPDATE IS NAMED AS THE CONDITIONAL IT IS (Argus finding). A fetch whose

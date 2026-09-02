@@ -3261,7 +3261,27 @@ export function buildTridentOrchestrator(
     const gitDetail = (text: string): string => foldEvidence(redactPushError(text).trim())
     if (freshBuild && launchRun.merge_mode === 'pr') {
       fetchedBase = true
-      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', baseRefspec]
+      // `--no-recurse-submodules` IS PART OF THE WRITE BOUNDARY THIS PATH ASSERTS (Argus
+      // blocker). `git fetch` recurses into submodules whenever `fetch.recurseSubmodules` says
+      // so — the config default is `on-demand`, and a repo may set `true` outright — and a
+      // recursed fetch writes inside the SUBMODULE's git dir, e.g. `<repo>/sub/.git/refs/
+      // remotes/origin/main`. Reproduced on a populated old-form submodule with
+      // `fetch.recurseSubmodules=true`: this exact command moved that ref. That is git's OWN
+      // write, so the hook caveat does not cover it, and it falsifies the sentence this refusal
+      // and `delivery.ts`'s LAUNCH_PATH_FETCH both print — that the only writes are origin's
+      // base pointer and git's bookkeeping under `.git` (singular, this repo's). The flag is
+      // free here: nothing on the launch path reads a submodule, only `refs/heads/<base>` is
+      // wanted, and the explicit refspec above already says so.
+      const fetchCmd = [
+        'git',
+        '-C',
+        launchRun.repo_path,
+        'fetch',
+        '--no-tags',
+        '--no-recurse-submodules',
+        'origin',
+        baseRefspec,
+      ]
       let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
       if (!fetched.ok) {
         await (opts.sleep ?? realSleep)(1000)
@@ -3334,8 +3354,40 @@ export function buildTridentOrchestrator(
         // wrong-base-remedy.ts); the OUTER guard now does too. UNKNOWN refuses — fail-closed,
         // the build is not started — but it refuses as what it is, and names no destructive
         // act (docs/INVARIANTS.md §12 invariant 122).
-        const ancestry = (res: HostCommandResult): 'yes' | 'no' | 'unknown' =>
-          res.ok ? 'yes' : res.exit_code === 1 && res.timed_out !== true ? 'no' : 'unknown'
+        //
+        // AND EXIT 1 IS ONLY A "NO" IN A COMPLETE HISTORY (Argus blocker). Past a shallow
+        // boundary the parent commits do not exist locally, so `merge-base --is-ancestor B C`
+        // exits 1 for a B that IS an ancestor of C — reproduced on git 2.43 with a depth-1
+        // clone and a true parent. This checkout MAY be shallow: `healShallowCheckout` above
+        // documents that shape arriving in production ("install.sh used to clone at depth 1,
+        // and hand-made clones still can") and it runs only on the REPLAY path, never before
+        // this guard. So a shallow repo turned a true ancestor into the refusal "already
+        // carries N commit(s) not on origin/<base> — it was not cut from origin/<base>": a
+        // false positive, in the exact message class this change exists to make evidence-honest.
+        // Exit 0 stays definitive — finding the ancestry is positive proof, and truncation can
+        // only hide ancestry, never invent it. Exit 1 is downgraded to UNKNOWN unless the
+        // checkout is PROVEN complete, by the same `rev-parse --is-shallow-repository` probe
+        // `healShallowCheckout` uses; an unreadable depth is itself UNKNOWN, which is
+        // fail-closed and authorises nothing.
+        //
+        // Probed LAZILY and memoised: a contained branch (the overwhelmingly common shape)
+        // never needs the answer, and the depth cannot change under a single guard pass.
+        let shallow: 'yes' | 'no' | 'unknown' | null = null
+        const checkoutIsShallow = async (): Promise<'yes' | 'no' | 'unknown'> => {
+          if (shallow !== null) return shallow
+          const probe = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'rev-parse', '--is-shallow-repository'],
+            launchRun.repo_path,
+          )
+          const answer = probe.stdout.trim()
+          shallow = !probe.ok ? 'unknown' : answer === 'true' ? 'yes' : answer === 'false' ? 'no' : 'unknown'
+          return shallow
+        }
+        const ancestry = async (res: HostCommandResult): Promise<'yes' | 'no' | 'unknown'> => {
+          if (res.ok) return 'yes'
+          if (res.exit_code !== 1 || res.timed_out === true) return 'unknown'
+          return (await checkoutIsShallow()) === 'no' ? 'no' : 'unknown'
+        }
         // EVERY FIELD THIS REFUSAL QUOTES IS FOLDED, on the same terms the remedy composer
         // already folds its own (Argus blocker). `repo_path` is persisted verbatim by store.ts
         // and both `git init` and `git worktree add` accept a newline in a path, so a legal path
@@ -3368,7 +3420,12 @@ export function buildTridentOrchestrator(
         // `opts.base_branch` and git accepts U+2028 and U+202E in a branch name exactly as it
         // does for `launchRun.branch`, so the same forged line was available through the base.
         const branchProse = foldRefName(launchRun.branch)
-        // WHAT THIS PATH WROTE, COUNTED EXACTLY. `git fetch --no-tags origin <base>` above is not
+        // AND THE BOUNDARY IS "THIS REPO'S OWN .git", which is only true because the fetch above
+        // passes `--no-recurse-submodules` (Argus blocker): without it a repo configuring
+        // `fetch.recurseSubmodules` makes that same command write inside a SUBMODULE's git dir,
+        // which is neither this `.git` nor a hook's doing.
+        //
+        // WHAT THIS PATH WROTE, COUNTED EXACTLY. The base fetch above is not
         // write-free: it force-updates that tracking ref, appends the ref's reflog, rewrites
         // FETCH_HEAD and writes whatever objects it downloaded (delivery.ts names the same set
         // for the composer's own fetch). None of them is a branch, a worktree, a commit or a file
@@ -3390,19 +3447,28 @@ export function buildTridentOrchestrator(
         // asserted, in the no-op case, writes that did not happen — overcounting, which this
         // sentence exists to avoid in both directions. FETCH_HEAD is the unconditional one.
         const noWrites = fetchedBase
-          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${foldRefName(baseRefspec)} made under .git — FETCH_HEAD, plus — if origin had moved that ref — refs/remotes/origin/${baseProse}, that ref's reflog and the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top; a hook configured on this repo is code of its own, and outside what this sentence measures`
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags --no-recurse-submodules origin ${foldRefName(baseRefspec)} made under this repo's own .git — FETCH_HEAD, plus — if origin had moved that ref — refs/remotes/origin/${baseProse}, that ref's reflog and the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top; a hook configured on this repo is code of its own, and outside what this sentence measures`
           : 'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
-        const probeDetail = (res: HostCommandResult): string =>
-          res.timed_out === true
-            ? 'the ancestry probe was killed by its watchdog'
-            : `git merge-base --is-ancestor exited ${res.exit_code}: ${
-                gitDetail(res.stderr || res.stdout) || 'no stderr'
-              }`
+        // The DETAIL names the shallow case as the shallow case. An exit-1 UNKNOWN reported as
+        // "exited 1: no stderr" reads as a probe that malfunctioned; what actually happened is
+        // that git answered honestly about a history it cannot see past, and the operator's next
+        // step (`git fetch --unshallow`) follows only from being told so.
+        const probeDetail = (res: HostCommandResult): string => {
+          if (res.timed_out === true) return 'the ancestry probe was killed by its watchdog'
+          if (res.exit_code === 1 && shallow !== 'no') {
+            return shallow === 'yes'
+              ? 'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and git rev-parse --is-shallow-repository says this checkout is SHALLOW, where the parent commits are absent and exit 1 is also what a TRUE ancestor produces (git fetch --unshallow origin makes the probe answerable)'
+              : 'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and the depth of this checkout could not be read (git rev-parse --is-shallow-repository neither answered true nor false), so exit 1 cannot be read as divergence'
+          }
+          return `git merge-base --is-ancestor exited ${res.exit_code}: ${
+            gitDetail(res.stderr || res.stdout) || 'no stderr'
+          }`
+        }
         const containedInBase = await opts.run_host(
           ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
           launchRun.repo_path,
         )
-        const contained = ancestry(containedInBase)
+        const contained = await ancestry(containedInBase)
         if (contained === 'unknown') {
           return {
             run: failedRun(
@@ -3421,7 +3487,7 @@ export function buildTridentOrchestrator(
             ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
             launchRun.repo_path,
           )
-          const descends = ancestry(descendsFromPriorBase)
+          const descends = await ancestry(descendsFromPriorBase)
           // Same three exits, same rule. A failed probe here would otherwise read as "this is
           // NOT this run's own crash leftover", which routes a run's own restart debris into a
           // refusal that blames another lane for it.

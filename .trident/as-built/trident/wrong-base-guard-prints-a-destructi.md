@@ -733,3 +733,50 @@ above the oversized-but-plausible shape the raw rendering exists to keep readabl
 how many digits it dropped, the way `scrub` marks its own truncation, because a number a reader
 can see was cut beats one silently reshaped. The parse and the "probed as" comparison still run on
 the raw digits, so the arm still names the pid it actually measured.
+
+### A SHALLOW CHECKOUT NO LONGER PROVES DIVERGENCE, AND THE BASE FETCH STAYS IN ONE .git
+
+`merge-base --is-ancestor` exit 1 was read as a definitive "no" on the launch path, with no depth
+check anywhere before it. Past a shallow boundary the parent commits are simply absent, so git
+exits 1 for a commit that IS an ancestor — reproduced on git 2.43 with a depth-1 clone and a true
+parent — and the refusal then printed "already carries N commit(s) not on origin/<base> — it was
+not cut from origin/<base>", the exact false positive this card exists to remove, about another
+lane's work, with a delete beside it. This checkout really can arrive shallow: `healShallowCheckout`
+in the same file documents the shape arriving in production and runs only on the REPLAY path, never
+before this guard. Exit 1 is now downgraded to UNKNOWN unless the checkout is PROVEN complete, by
+the same `rev-parse --is-shallow-repository` probe `healShallowCheckout` uses. Exit 0 stays
+definitive: truncation can hide an ancestry link, never invent one. The probe is lazy and memoised,
+so the ordinary shape — a branch already contained in the base — never pays for it. An unreadable
+depth is itself UNKNOWN, which is fail-closed and authorises nothing, and the two answers are told
+apart in the message rather than sharing one sentence: the shallow arm names the boundary and the
+`fetch --unshallow` read that settles it, the unreadable arm says the depth could not be read.
+
+The launch base fetch and the composer's own publication fetch both carry
+`--no-recurse-submodules`. Without it, `git fetch` recurses whenever `fetch.recurseSubmodules` says
+so — the config default is `on-demand`, and a repo may set `true` outright — and a recursed fetch
+writes inside the SUBMODULE's git dir, demonstrated on a populated old-form submodule as a move of
+`<repo>/sub/.git/refs/remotes/origin/main`. That is git's OWN write, so the hook caveat above does
+not cover it, and it falsified the boundary two messages assert: the launch refusal's `noWrites`
+and `delivery.ts`'s `LAUNCH_PATH_FETCH`, both of which say the writes live under `.git`. Neither
+path reads a submodule and both name their one refspec explicitly, so the flag costs nothing and
+makes the enumerated boundary a measurement again. The fetch the safe arm PRINTS for the reader to
+run carries it too, for the same reason: that line runs in someone else's repo.
+
+`LAUNCH_PATH_FETCH` is conditional in its own words. It is concatenated unconditionally while only
+`wrongBaseWrites` is arm-aware, so it also rides on the local-merge and already-pinned launches,
+where the launcher's `freshBuild && merge_mode === 'pr'` gate means no fetch ran at all. The old
+wording was generic rather than false, but a reader on those paths read it as a fetch that
+happened. It now says WHEN it applies and names the case that made no such write. Conditioning the
+concatenation instead would require this module to know which launch path ran, which is exactly
+what its own docblock says it cannot.
+
+The `sh()`-quoting disclosure names every arm that prints a command, not the two treat-as-live
+helpers it used to list. Reviewers reproduced the banned literal inside the DEAD arm's release
+procedure (through `sh(wt)`) and inside the unpublished-salvage chain (through `sh(repo)` and the
+run id in the tag name) — arms the prose did not mention, which made a disclosure read as an
+enumeration. Every occurrence is still a POSIX-quoted ARGUMENT rather than a runnable delete, and
+the ALIVE arm's contract — no printed command at all, so no quoted argument to carry it — is
+unchanged. Both halves are now pinned: five holder arms and the salvage arm with hostile fields,
+asserting the quoted form is present and that removing exactly those quoted arguments leaves no
+`branch -D` behind. The parity-splitting helper the earlier pin used cannot do this job, because
+these arms' own prose contains apostrophes.

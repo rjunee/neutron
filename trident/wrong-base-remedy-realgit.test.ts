@@ -238,7 +238,7 @@ describe('wrong-base remedy against real git', () => {
       { run_host: spawnCapture },
     )
     const printed =
-      `git -C ${work} fetch --no-tags origin +refs/heads/feat-x:refs/remotes/origin/feat-x && ` +
+      `git -C ${work} fetch --no-tags --no-recurse-submodules origin +refs/heads/feat-x:refs/remotes/origin/feat-x && ` +
       `test "$(git -C ${work} rev-parse --verify refs/heads/feat-x)" = ${evidencedTip} && ` +
       `git -C ${work} merge-base --is-ancestor ${evidencedTip} refs/remotes/origin/feat-x && ` +
       `git -C ${work} tag ${SALVAGE_TAG} ${evidencedTip} && ` +
@@ -284,7 +284,7 @@ describe('wrong-base remedy against real git', () => {
       { run_host: spawnCapture },
     )
     const printed =
-      `git -C ${work} fetch --no-tags origin +refs/heads/feat-x:refs/remotes/origin/feat-x && ` +
+      `git -C ${work} fetch --no-tags --no-recurse-submodules origin +refs/heads/feat-x:refs/remotes/origin/feat-x && ` +
       `test "$(git -C ${work} rev-parse --verify refs/heads/feat-x)" = ${evidencedTip} && ` +
       `git -C ${work} merge-base --is-ancestor ${evidencedTip} refs/remotes/origin/feat-x && ` +
       `git -C ${work} tag ${SALVAGE_TAG} ${evidencedTip} && ` +

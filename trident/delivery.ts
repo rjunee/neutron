@@ -220,6 +220,22 @@ const HOOK_CAVEAT =
  * happened is the overcounting the per-arm conditional above exists to prevent. The launch path
  * counts its own writes at its own site, exactly (`noWrites` in `orchestrator.ts`).
  *
+ * AND THE SENTENCE IS CONDITIONAL IN ITS OWN WORDS, because it is appended UNCONDITIONALLY
+ * (Argus finding, raised as a blocker and weakened on verification). Only `wrongBaseWrites` is
+ * arm-conditional; this clause rides along on the local-merge and already-pinned paths too,
+ * where `orchestrator.ts`'s `freshBuild && merge_mode === 'pr'` gate means NO launcher fetch
+ * ran. The old phrasing — "a fresh PR launch refreshes origin's base ref before this guard
+ * runs" — was generic rather than false, but a reader on those paths reads it as a fetch that
+ * happened. So it now says WHEN it applies and names the other case, which costs a clause and
+ * removes the last reading in which this message reports a write nobody made. Conditioning the
+ * concatenation instead would require this module to know which launch path ran, which is
+ * exactly what the paragraph above says it cannot.
+ *
+ * THE ".git" IN IT IS THIS REPO'S OWN, and that is a property of the launcher's command, not of
+ * fetch in general: `git fetch` recurses into submodules under `fetch.recurseSubmodules` and
+ * then writes inside a submodule's git dir. `orchestrator.ts` passes `--no-recurse-submodules`
+ * so this sentence is true; the two move together (Argus blocker).
+ *
  * AND THE CLAIM IS SCOPED TO WHAT THE FETCH ITSELF DOES (Argus minor). "never the tree" and
  * "nothing outside .git" were absolutes about a fetch, and a fetch runs LOCAL CODE if this repo
  * configures it to: a `reference-transaction` hook fires inside the very ref update this
@@ -232,7 +248,7 @@ const HOOK_CAVEAT =
  * arm's absolute in exactly the same way (Argus blocker).
  */
 const LAUNCH_PATH_FETCH =
-  "That accounts for the guard itself. Separately, a fresh PR launch refreshes origin's base ref before this guard runs; that write belongs to the launcher, is counted where it happens, and moves only origin's base pointer and git's own bookkeeping under .git — the fetch itself writes nothing in the tree."
+  "That accounts for the guard itself. Separately, IF this refusal came from a fresh PR launch, the launcher refreshed origin's base ref before this guard ran; that write belongs to the launcher, is counted exactly where it happens, and moves only origin's base pointer and git's own bookkeeping under this repo's .git — the fetch itself writes nothing in the tree, and recurses into no submodule. A launch that does not fetch — a local-merge build, or a re-entry whose base was already pinned — made no such write at all."
 
 /**
  * THE COMPOSER'S ARM OPENINGS, named once because two things now read them: the write

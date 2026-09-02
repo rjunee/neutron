@@ -50,7 +50,7 @@ const RUN = 'run-77'
 const SALVAGE = `tag trident-salvage/${RUN}`
 const RECEIPT_TOKEN = 'refs/tags/trident-salvage'
 const ARGS = { repo: '/repo', branch: 'feat-x', base: 'main', branch_tip: TIP, ahead_count: '3', run_id: RUN }
-const FETCH = 'fetch --no-tags origin +refs/heads/feat-x:refs/remotes/origin/feat-x'
+const FETCH = 'fetch --no-tags --no-recurse-submodules origin +refs/heads/feat-x:refs/remotes/origin/feat-x'
 const RESOLVE = 'rev-parse --verify --quiet refs/remotes/origin/feat-x'
 const IS_ANCESTOR = 'merge-base --is-ancestor'
 /** No process may be assumed to be standing in a fixture path; say so explicitly. */
@@ -574,7 +574,7 @@ describe('composeWrongBaseRefusal', () => {
     // nowhere. The create-only salvage tag makes that loss recoverable rather than the race
     // impossible, and it sits IMMEDIATELY before the delete so nothing can intervene between.
     expect(msg).toContain(
-      `git -C /repo fetch --no-tags origin +refs/heads/feat-x:refs/remotes/origin/feat-x && ` +
+      `git -C /repo fetch --no-tags --no-recurse-submodules origin +refs/heads/feat-x:refs/remotes/origin/feat-x && ` +
         `test "$(git -C /repo rev-parse --verify refs/heads/feat-x)" = ${TIP} && ` +
         `git -C /repo merge-base --is-ancestor ${TIP} refs/remotes/origin/feat-x && ` +
         `git -C /repo ${SALVAGE} ${TIP} && ` +
@@ -670,7 +670,7 @@ describe('composeWrongBaseRefusal', () => {
     const branch = '--mirror'
     const host = fakeHost({
       'worktree list --porcelain': ok(UNHELD_PORCELAIN),
-      'fetch --no-tags origin': ok(),
+      'fetch --no-tags --no-recurse-submodules origin': ok(),
       'rev-parse --verify --quiet': ok(`${ORIGIN_DIVERGED}\n`),
       [IS_ANCESTOR]: fail(),
     })
@@ -1219,7 +1219,7 @@ describe('composeWrongBaseRefusal', () => {
 
     const safeHost = fakeHost({
       'worktree list --porcelain': ok(UNHELD_PORCELAIN),
-      'fetch --no-tags origin': ok(),
+      'fetch --no-tags --no-recurse-submodules origin': ok(),
       'rev-parse --verify --quiet': ok(`${TIP}\n`),
     })
     const safe = await composeWrongBaseRefusal(
@@ -1789,6 +1789,29 @@ describe('composeWrongBaseRefusal: an operation git omits the branch attribute f
 })
 
 describe('composeWrongBaseRefusal: claims the code actually supports', () => {
+  test("the publication fetch stays inside this repo's .git — no submodule recursion", async () => {
+    // `delivery.ts` tells the reader the only write this guard can make lives "under .git", and
+    // `git fetch` recurses into submodules whenever `fetch.recurseSubmodules` says so (its
+    // default is `on-demand`, and a repo may set `true` outright) — a recursed fetch then
+    // writes inside the SUBMODULE's git dir. That is git's OWN write, so the hook caveat does
+    // not cover it, and it falsifies the boundary the refusal states. One flag closes it; this
+    // pins that the flag is actually passed, on the guard's own fetch and on the fetch the safe
+    // arm PRINTS for the reader to run (Argus blocker, raised against the launcher's twin).
+    const host = fakeHost({
+      'worktree list --porcelain': ok(UNHELD_PORCELAIN),
+      [FETCH]: ok(),
+      [RESOLVE]: ok(`${TIP}\n`),
+    })
+    const msg = await composeWrongBaseRefusal(ARGS, { run_host: host.run_host, probe_tree: CLEAR })
+    const fetched = host.calls.find((c) => c.includes('fetch'))
+    expect(fetched).toBeDefined()
+    expect(fetched).toContain('--no-recurse-submodules')
+    // ...and the flag sits on the fetch, before the remote, where git reads it.
+    expect(fetched?.indexOf('--no-recurse-submodules')).toBeLessThan(fetched?.indexOf('origin') ?? -1)
+    // The printed chain runs in the READER's repo and owes the same scoping.
+    expect(msg).toContain('fetch --no-tags --no-recurse-submodules origin')
+  })
+
   test('the safe-delete chain does not claim a guarantee `&&` cannot give it', async () => {
     // THE BLOCKER. The printed text asserted "Each link fails closed" and that "the test is
     // compare-and-delete, so a branch that MOVED since keeps its unpublished commit". The
@@ -1841,7 +1864,7 @@ describe('composeWrongBaseRefusal: claims the code actually supports', () => {
     const branch = '-foo-branch'
     const host = fakeHost({
       'worktree list --porcelain': ok(UNHELD_PORCELAIN),
-      'fetch --no-tags origin': ok(),
+      'fetch --no-tags --no-recurse-submodules origin': ok(),
       'rev-parse --verify --quiet': ok(`${TIP}\n`),
     })
     const msg = await composeWrongBaseRefusal(
@@ -1956,7 +1979,7 @@ describe('composeWrongBaseRefusal: claims the code actually supports', () => {
     ): Promise<HostCommandResult> => {
       const joined = cmd.join(' ')
       if (joined.includes('worktree list --porcelain')) return ok(UNHELD_PORCELAIN)
-      if (joined.includes('fetch --no-tags origin')) {
+      if (joined.includes('fetch --no-tags --no-recurse-submodules origin')) {
         envs.push(env)
         return fail("fatal: couldn't find remote ref refs/heads/feat-x")
       }
@@ -2364,7 +2387,7 @@ describe('composeWrongBaseRefusal: the branch NAME is evidence too', () => {
       {
         run_host: fakeHost({
           'worktree list --porcelain': ok(UNHELD_PORCELAIN),
-          'fetch --no-tags origin': fail("fatal: couldn't find remote ref refs/heads/feat-x", 128),
+          'fetch --no-tags --no-recurse-submodules origin': fail("fatal: couldn't find remote ref refs/heads/feat-x", 128),
         }).run_host,
         probe_tree: CLEAR,
       },
@@ -2462,5 +2485,81 @@ describe('composeWrongBaseRefusal: a worktree PATH carrying the banned literal',
       probe_tree: CLEAR,
     })
     expect(outsideQuotes(safe)).toContain('branch -D')
+  })
+
+  /**
+   * Everything the message says OUTSIDE the sh()-quoted arguments named here. `outsideQuotes`
+   * above cannot do this job for these arms: it splits on parity, and these messages contain
+   * apostrophes in their own prose ("another lane's work"), which flips the parity and drops a
+   * genuinely quoted argument into the "outside" half. Naming the expected quoted forms and
+   * removing exactly those is the precise version — and it fails if the quoting is ever dropped,
+   * because then the literal is not inside the form being removed.
+   */
+  const outsideTheseArguments = (s: string, args: string[]): string =>
+    args.reduce((acc, a) => acc.split(`'${a}'`).join(' <quoted arg> '), s)
+
+  test('the SAME quoting holds in every arm that prints a command, not only the treat-as-live pair', async () => {
+    // THE DISCLOSURE USED TO NAME TWO HELPERS AND THE TEST ABOVE PINNED ONE ARM (Argus finding,
+    // reproduced independently by two reviewers). The literal also reaches the DEAD arm's
+    // release procedure through `sh(wt)`/`sh(repo)`, and the unpublished arm's salvage through
+    // `sh(repo)` and the run id inside the tag name — arms neither the prose nor the pin
+    // mentioned. Every one of them is a POSIX-quoted ARGUMENT rather than a runnable delete,
+    // which is the property worth pinning: an implementation that stopped quoting one of these
+    // would turn a disclosed inertness into a live forgery with nothing to notice.
+    const HOSTILE_WT = '/repo/.claude/worktrees/wf_x; git branch -D -- victim'
+    const holderListing = ok(
+      zPorcelain(MAIN_FIELDS, [
+        `worktree ${HOSTILE_WT}`,
+        'HEAD ' + TIP,
+        'branch refs/heads/feat-x',
+        'locked claude agent wf_x (pid 4242 start 99)',
+      ]),
+    )
+    // Every holder arm that prints a settle or a release: zombie, dead-with-occupied-tree,
+    // dead-with-unreadable-/proc (the arm that always fires off euid 0), dead-and-clear (the
+    // full unlock/remove procedure) and liveness-unknown.
+    const holderArms: [string, PidLiveness, () => TreeOccupancy][] = [
+      ['zombie', 'zombie', CLEAR],
+      ['dead, tree occupied', 'dead', () => ({ kind: 'occupied', pid: 999 })],
+      ['dead, occupancy unreadable', 'dead', () => ({ kind: 'unknown', unreadable: 1 })],
+      ['dead, tree clear', 'dead', CLEAR],
+      ['liveness unknown', 'unknown', CLEAR],
+    ]
+    for (const [name, liveness, tree] of holderArms) {
+      const msg = await composeWrongBaseRefusal(ARGS, {
+        run_host: fakeHost({ 'worktree list --porcelain': holderListing }).run_host,
+        probe_pid: () => liveness,
+        probe_tree: tree,
+      })
+      // The arm really did print a command carrying the real path — otherwise the assertion
+      // below is vacuous and this test proves nothing about quoting.
+      expect(`${name}: ${msg}`).toContain(`'${HOSTILE_WT}'`)
+      expect(`${name}: ${outsideTheseArguments(msg, [HOSTILE_WT])}`).not.toContain('branch -D')
+      // ...and the PROSE rendering of the same path is defanged, so the guard never speaks it.
+      expect(`${name}: ${msg}`).toContain('<command removed>')
+    }
+
+    // THE UNPUBLISHED-SALVAGE ARM, through the repo path AND the run id — the two fields a
+    // reviewer used to put the literal into a message that must print no delete.
+    const HOSTILE_REPO = '/tmp/x branch -D victim'
+    const HOSTILE_RUN = 'x branch -D y'
+    const unpublished = await composeWrongBaseRefusal(
+      { ...ARGS, repo: HOSTILE_REPO, run_id: HOSTILE_RUN },
+      {
+        run_host: fakeHost({
+          'worktree list --porcelain': ok(UNHELD_PORCELAIN),
+          [FETCH]: ok(),
+          [RESOLVE]: ok(`${ORIGIN_DIVERGED}\n`),
+          [IS_ANCESTOR]: fail(),
+        }).run_host,
+        probe_tree: CLEAR,
+      },
+    )
+    expect(unpublished).toContain('unpublished')
+    expect(unpublished).toContain(`'${HOSTILE_REPO}'`)
+    expect(unpublished).toContain(`'trident-salvage/${HOSTILE_RUN}'`)
+    expect(
+      outsideTheseArguments(unpublished, [HOSTILE_REPO, `trident-salvage/${HOSTILE_RUN}`]),
+    ).not.toContain('branch -D')
   })
 })

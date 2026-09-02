@@ -556,14 +556,28 @@ function defang(s: string): string {
  * `-z` parser exists because of it. Bounded for the reason a scrubbed lock reason is bounded —
  * a refusal is a sentence and PATH_MAX is 4096 — and the truncation is MARKED.
  *
- * WHAT THIS DOES NOT COVER, stated rather than implied (Argus nit): the COMMANDS in the
- * treat-as-live arms (`settleByHand`, `occupancyScan`) carry `sh(path)`, the real path, because
- * a remedy that names a different path than the one on disk cannot be run. So a worktree whose
- * PATH literally contains `branch -D` puts that text back into those arms, inside single quotes,
- * as an ARGUMENT to a read-only command rather than as an instruction. Defanging it there would
- * trade a quoted string for a settle nobody can execute, which is the worse of the two — and it
- * costs local `git worktree add` access to arrange, the same write access every other forgery
- * here needs.
+ * WHAT THIS DOES NOT COVER, stated rather than implied (Argus nit): every arm that prints a
+ * COMMAND carries `sh(path)`, the real path, because a remedy that names a different path than
+ * the one on disk cannot be run. So a field whose value literally contains `branch -D` puts that
+ * text back into those arms, inside single quotes, as an ARGUMENT to a command rather than as an
+ * instruction. Defanging it there would trade a quoted string for a remedy nobody can execute,
+ * which is the worse of the two — and it costs local `git worktree add` (or control of the run
+ * id, or of the repo path) to arrange, the same write access every other forgery here needs.
+ *
+ * THE ARMS THIS APPLIES TO, NAMED IN FULL rather than by the two helpers an earlier draft
+ * listed — reviewers reproduced the literal in arms this paragraph did not mention, which made
+ * a disclosure read as an enumeration (Argus finding, raised by two reviewers):
+ *
+ *   - the treat-as-live settles, `settleByHand` and `occupancyScan`, via `sh(wt)` / `sh(repo)`;
+ *   - the DEAD arm's release procedure, via `sh(wt)` in its `status --porcelain --ignored`,
+ *     its occupancy scan, and its `worktree unlock` / `worktree remove` pair;
+ *   - the unpublished-work arm's salvage, and the published arm's verify-then-delete chain, via
+ *     `sh(repo)`, `sh(refspec)` and the run id inside the salvage tag name.
+ *
+ * The one arm where NO command is printed at all is the ALIVE arm, and that is the contract this
+ * card pins: `standDown` prints prose only, so no quoted argument exists there to carry the
+ * literal. `wrong-base-remedy.test.ts` pins both halves — the ALIVE arm free of the literal
+ * outright, and the other arms carrying it only ever inside a POSIX single-quoted argument.
  *
  * EXPORTED, because the OUTER guard owes the same contract (Argus blocker). `orchestrator.ts`
  * composes its own pre-launch UNKNOWN refusals and used to interpolate `run.repo_path` RAW into
@@ -1332,10 +1346,19 @@ export async function composeWrongBaseRefusal(
     // exits 0 while the tracking ref stays STALE, and the comparison below would then rest on
     // a sha origin no longer carries and print a delete. Naming the destination closes that.
     const refspec = `+refs/heads/${branch}:refs/remotes/origin/${branch}`
+    // `--no-recurse-submodules` KEEPS THE WRITE SENTENCE TRUE (Argus blocker, raised against the
+    // launcher's twin of this command). `delivery.ts` tells the reader the only writes this
+    // guard can make live "under .git" — this repo's. `git fetch` recurses into submodules
+    // whenever `fetch.recurseSubmodules` says so (the config default is `on-demand`, and a repo
+    // may set `true`), and a recursed fetch writes inside the SUBMODULE's git dir. That is git's
+    // own write, not a hook's, so no caveat covers it. This guard wants one ref of the
+    // superproject and the refspec above already says so; the flag costs nothing and is what
+    // makes the enumerated boundary a measurement.
+    //
     // Each attempt prices its budget at spawn time, so a retry can only spend what the total leaves.
     const fetchOnce = () =>
       run(
-        ['git', '-C', repo, 'fetch', '--no-tags', 'origin', refspec],
+        ['git', '-C', repo, 'fetch', '--no-tags', '--no-recurse-submodules', 'origin', refspec],
         // The ONE marker this module reads out of git's own prose is matched below, and git
         // translates its messages. Pinning the child's locale is what makes that match a
         // measurement rather than a guess about the host's environment.
@@ -1484,7 +1507,11 @@ export async function composeWrongBaseRefusal(
         // `-- <branch>` and not a bare argument: `git check-ref-format 'refs/heads/-foo'`
         // exits 0, so a legal leading-dash branch name parses as OPTIONS in the printed
         // command. It fails closed today (git errors) but the reader is told to RUN this text.
-        const verify = `git -C ${sh(repo)} fetch --no-tags origin ${sh(refspec)} && test "$(git -C ${sh(repo)} rev-parse --verify ${sh(`refs/heads/${branch}`)})" = ${sh(branch_tip)} && git -C ${sh(repo)} merge-base --is-ancestor ${sh(branch_tip)} ${sh(`refs/remotes/origin/${branch}`)} && ${salvage()} && git -C ${sh(repo)} branch -D -- ${sh(branch)}`
+        // The printed fetch carries `--no-recurse-submodules` for the same reason the guard's
+        // own does: this line runs in the reader's repo, and a recursed fetch writes inside a
+        // submodule's git dir. A remedy this message vouches for should touch exactly the ref
+        // the argument beside it names.
+        const verify = `git -C ${sh(repo)} fetch --no-tags --no-recurse-submodules origin ${sh(refspec)} && test "$(git -C ${sh(repo)} rev-parse --verify ${sh(`refs/heads/${branch}`)})" = ${sh(branch_tip)} && git -C ${sh(repo)} merge-base --is-ancestor ${sh(branch_tip)} ${sh(`refs/remotes/origin/${branch}`)} && ${salvage()} && git -C ${sh(repo)} branch -D -- ${sh(branch)}`
         return `${prefix}The wrong-base launch guard found no worktree holding the branch, and origin/${branchProse} ${relation} — every commit on the local branch is already on origin, so dropping the local ref loses nothing. Delete it ONLY through the chain that re-establishes both of those facts at the moment it runs: ${verify}. The fetch re-reads origin, so a force-push that dropped these commits before you run this stops the delete; the test re-compares the local ref against the evidenced tip, so a branch that moved stops it too; the ancestry check re-proves origin contained that tip as of that fetch; the tag takes a local snapshot of the evidenced commit IMMEDIATELY before the delete, and being create-only it stops the chain rather than overwriting an earlier receipt; and branch -D is the delete git RE-CHECKS holders for — it refuses ("used by worktree at ...") if a lane has taken the branch since, and that refusal is a stand-down signal, never something to route around with a low-level ref delete. What the chain does NOT close, and you should know before running it: it is compare-THEN-delete, so a commit landing on the ref in the gap between the test and the delete would be deleted with it, and the ancestry link reads a TRACKING ref that is only as fresh as this chain's own fetch, so a force-push landing after that fetch is not seen at all. Nothing in git closes either gap for a branch delete; what bounds them is that each gap is one command wide, that branch -D still refuses a branch a lane has checked out, and that the snapshot tag is taken inside the window — so if origin has since dropped these commits they are still reachable here by that tag rather than by nothing. Then re-dispatch.`
       }
     }

@@ -1111,7 +1111,7 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
   const DIVERGED = 'd'.repeat(40)
   const WT = '/repo/.claude/worktrees/wf_a'
   const ARGS = { repo: '/repo', branch: 'feat-x', base: 'main', branch_tip: TIP, ahead_count: '3', run_id: 'run-77' }
-  const FETCH = 'fetch --no-tags origin +refs/heads/feat-x:refs/remotes/origin/feat-x'
+  const FETCH = 'fetch --no-tags --no-recurse-submodules origin +refs/heads/feat-x:refs/remotes/origin/feat-x'
   const RESOLVE = 'rev-parse --verify --quiet refs/remotes/origin/feat-x'
   const clear = (): TreeOccupancy => ({ kind: 'clear' })
 
@@ -1332,7 +1332,7 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
     // the same "found no worktree holding the branch" phrase the SUCCESSFUL arm opens with — so
     // a prefix test credited them with a refreshed tracking ref, a reflog append and downloaded
     // objects the fetch never made. Reproduced in a scratch repo: with no `origin` configured,
-    // `git fetch --no-tags origin +refs/heads/<b>:refs/remotes/origin/<b>` exits 128 and
+    // `git fetch --no-tags --no-recurse-submodules origin +refs/heads/<b>:refs/remotes/origin/<b>` exits 128 and
     // `rev-parse --verify refs/remotes/origin/<b>` still fails afterwards. Overcounting writes
     // is the same defect as undercounting them, in the message whose subject is not claiming
     // things nobody established — so these arms say what is actually established: the fetch was
@@ -1410,8 +1410,21 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
       // The claim is SCOPED — "the guard itself" — and the launcher's own write is named and
       // attributed to the launcher rather than folded into the guard's accounting or dropped.
       expect(`${name}: ${out.input_needed}`).toContain('That accounts for the guard itself.')
-      expect(`${name}: ${out.input_needed}`).toContain("a fresh PR launch refreshes origin's base ref before this guard runs")
+      // AND IT IS CONDITIONAL IN ITS OWN WORDS (Argus finding). This clause is appended
+      // UNCONDITIONALLY — only `wrongBaseWrites` is arm-aware — so it also rides on the
+      // local-merge and already-pinned launches, where `orchestrator.ts`'s
+      // `freshBuild && merge_mode === 'pr'` gate means no launcher fetch ran at all. The
+      // sentence must therefore say WHEN it applies and name the other case, rather than
+      // stating a fetch as something that happened.
+      expect(`${name}: ${out.input_needed}`).toContain('IF this refusal came from a fresh PR launch')
+      expect(`${name}: ${out.input_needed}`).toContain('A launch that does not fetch')
+      expect(`${name}: ${out.input_needed}`).toContain('made no such write at all')
       expect(`${name}: ${out.input_needed}`).toContain('that write belongs to the launcher')
+      // The boundary names WHOSE .git it measures, which is only true because the launcher's
+      // fetch passes --no-recurse-submodules (orchestrator.ts) — a recursed fetch writes inside
+      // a submodule's git dir, and that is git's own write, not a hook's.
+      expect(`${name}: ${out.input_needed}`).toContain("under this repo's .git")
+      expect(`${name}: ${out.input_needed}`).toContain('recurses into no submodule')
       // ...and it does not become licence to retry: the branch is still not this run's to take.
       expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
     }
