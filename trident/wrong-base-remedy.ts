@@ -372,9 +372,15 @@ function samePath(a: string, b: string): boolean {
  *      arguments are therefore read as a BOUNDED WINDOW OF TOKENS and each token tested on its
  *      own, so option order, count and clustering stop mattering — the earlier docblock claimed
  *      "every option ORDER collapses to one replacement", which was stronger than the regex and
- *      is only now true of the code. Still LINEAR: the window is at most four tokens, tokens are
- *      whitespace-delimited so none can nest inside another, and each option test is anchored at
- *      both ends. Measured at 200k of adversarial input, 2ms.
+ *      is only now true of the code. AND COUNT STILL MATTERED PAST FOUR (Argus finding): a
+ *      four-token window read `branch --verbose --quiet --color --no-column --delete --force
+ *      victim` — a real, runnable delete on git 2.43 — as if the delete were not in it, because
+ *      the option RUN alone is six tokens long. Git's own grammar is "options, then the ref", so
+ *      the window is now that: an unbounded run of leading OPTION tokens (`-`-prefixed, so it
+ *      cannot swallow the prose after the command) plus at most four tokens after it. Still
+ *      LINEAR: every token is tested once, tokens are whitespace-delimited so none can nest
+ *      inside another, and each option test is anchored at both ends. Measured at 200k of
+ *      adversarial input, 2ms.
  *
  *      AND THE RULE IS GIT-VERB-SCOPED, WHICH IS A BOUNDARY AND NOT A GAP THIS PRETENDS TO
  *      COVER (Argus nit, both reviewers). It enumerates git's own delete verbs and nothing else,
@@ -406,14 +412,16 @@ function defang(s: string): string {
     // `push --force origin :feat`, `push origin -d feat`, `push -d origin feat` (`-d` IS a delete
     // per `git push -h`; only `--delete`/`--mirror` were neutralised). Reading the window as
     // whitespace-delimited TOKENS removes the whole class instead of one spelling of it: order,
-    // count and clustering stop mattering, and the rule stays LINEAR — the window is at most four
-    // tokens, tokens cannot nest, and each option test is anchored at both ends.
-    .replace(/\b(branch|update-ref|tag)((?:\s+\S+){0,4})/g, (whole: string, verb: string, tail: string) =>
+    // count and clustering stop mattering, and the rule stays LINEAR — every token is tested
+    // once, tokens cannot nest, and each option test is anchored at both ends. The window is the
+    // LEADING OPTION RUN (`-`-prefixed tokens, unbounded, because six real options before the
+    // delete is a spelling git accepts and a four-token window missed) plus four tokens after it.
+    .replace(/\b(branch|update-ref|tag)((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, verb: string, tail: string) =>
       defangTokens(tail).some((t) => DELETE_OPTION.test(t)) ? `${verb} <command removed>` : whole)
     .replace(/\b(worktree)(\s+)remove\b/g, '$1$2<command removed>')
     // `push` deletes three ways: by option (`-d`, `--delete`), by wiping the remote (`--mirror`),
     // and by REFSPEC with no option at all (`push origin :feat`, `push origin +:feat`).
-    .replace(/\bpush((?:\s+\S+){0,4})/g, (whole: string, tail: string) =>
+    .replace(/\bpush((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, tail: string) =>
       defangTokens(tail).some((t) => PUSH_DELETE.test(t)) ? 'push <command removed>' : whole)
 }
 
@@ -450,6 +458,33 @@ const EVIDENCE_PROSE_MAX = 300
 export function foldEvidence(s: string): string {
   const folded = defang(s)
   return folded.length > EVIDENCE_PROSE_MAX ? `…${folded.slice(-EVIDENCE_PROSE_MAX)}` : folded
+}
+
+/**
+ * A REF NAME rendered as prose — the branch and the base. Not the same job as `foldEvidence`,
+ * and the difference is what a downstream ANCHOR rests on (Argus blocker).
+ *
+ * `foldEvidence` folds every forgery codepoint to an ASCII SPACE, which is right for a path or
+ * a fragment of stderr — free prose, where a space separates nothing that matters. It is wrong
+ * for a name field: `delivery.ts`'s `WRONG_BASE_PREFIX` spells the branch and base fields
+ * `[^ \n]+`, deliberately, because the ASCII space is exactly what git's ref rules forbid and
+ * therefore the one character that cannot appear inside a legal name. Fold a LEGAL name
+ * containing U+2028 (git 2.43: `check-ref-format --branch` exits 0 on it, 128 on an ASCII
+ * space) to `feat x` and the composed prefix carries a space where the classifier promised
+ * none — the anchor misses, and the refusal falls through to the substring classifiers that
+ * answer "Reply to retry the build", the one advice this whole class exists to forbid. The
+ * fold, not the anchor, reopened the hole delivery.ts's docblock says is closed.
+ *
+ * So a name field is folded to ONE TOKEN: every whitespace and every forgery codepoint becomes
+ * `?` — a character git's ref rules also forbid, so it cannot be mistaken for part of a real
+ * name — BEFORE `foldEvidence` runs. That is also why no `<command removed>` appears here and
+ * none is needed: the substitution happens first, so a forged `branch -D -- victim` inside a
+ * name arrives at the message as `branch?-D?--?victim`, which is not a command anybody can run
+ * and not a string any classifier reads, and `defang` (which needs whitespace between a verb
+ * and its options) can no longer re-introduce a space by rewriting one.
+ */
+export function foldRefName(s: string): string {
+  return foldEvidence(s.replace(/[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g, '?'))
 }
 
 /**
@@ -624,6 +659,13 @@ export function readRebaseHead(worktree: string): RebaseHead {
 /**
  * Every UNKNOWN exit shares one tail: name what could not be established, authorise nothing.
  * `branchProse` is the FOLDED branch name — this renders prose, never a runnable command.
+ *
+ * AND EVERY CALL SITE PASSES THE FOLDED ONE (Argus finding). Three of the six passed the RAW
+ * `branch`, so the enumeration-failed arm, the not-NUL-listing arm and the outer catch rendered
+ * a legal branch name's U+2028 and its verbatim `branch -D` inside a refusal contracted to
+ * authorise nothing — the exact forgery the other three arms fold out. The parameter is named
+ * for the folded value and the type system cannot tell two strings apart, so the rule lives
+ * here: nothing but `branchProse` may reach this argument.
  */
 function unknownHolder(prefix: string, branchProse: string, what: string, detail: string): string {
   return `${prefix}The wrong-base launch guard ${what} (${detail}) — the holder is UNKNOWN, and UNKNOWN does not authorise anything destructive. Determine by hand which worktree holds ${branchProse} before touching it, then re-dispatch only once it is free.`
@@ -715,8 +757,18 @@ export async function composeWrongBaseRefusal(
   // separator several renderers break on — and `feat<U+202E>evil`, a bidi override that reorders
   // what is DISPLAYED without changing a byte. A legal branch name could therefore draw a line of
   // this guard's own message, carrying the instruction the live-holder arm's contract forbids.
-  const branchProse = foldEvidence(branch)
-  const prefix = `branch ${branchProse} already carries ${ahead_count} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. `
+  //
+  // AND IT IS FOLDED AS A NAME, NOT AS FREE PROSE (Argus blocker). `foldEvidence` folds those
+  // codepoints to an ASCII SPACE, and the ASCII space is the one character git's ref rules
+  // forbid — which is precisely what `delivery.ts`'s `WRONG_BASE_PREFIX` anchors on when it
+  // spells these two fields `[^ \n]+`. So the fold itself put a space inside a name field, the
+  // anchor missed, and this refusal fell through to the classifiers that answer "Reply to
+  // retry the build". `foldRefName` keeps every name field a single token; see its docblock.
+  // THE BASE IS A NAME FIELD TOO: it reaches here from `detectBaseBranch`/`opts.base_branch`
+  // and can carry the same codepoints for the same reason.
+  const branchProse = foldRefName(branch)
+  const baseProse = foldRefName(base)
+  const prefix = `branch ${branchProse} already carries ${ahead_count} commit(s) not on origin/${baseProse} — it was not cut from origin/${baseProse}; refusing to build on another lane's work. `
   try {
     // PER-RUN, not per-branch (orchestrator.ts:2608 is the same namespace). A stable
     // `trident-salvage/<branch>` tag would MOVE on the next salvage of the same branch and
@@ -800,7 +852,7 @@ export async function composeWrongBaseRefusal(
     if (!listed.ok) {
       return unknownHolder(
         prefix,
-        branch,
+        branchProse,
         "could not enumerate worktrees to find the branch's holder",
         // A killed child writes no stderr; without this the detail renders empty.
         listed.timed_out === true
@@ -828,7 +880,7 @@ export async function composeWrongBaseRefusal(
     if (listed.stdout !== '' && !listed.stdout.endsWith('\0\0')) {
       return unknownHolder(
         prefix,
-        branch,
+        branchProse,
         'got a worktree listing that is not the NUL-delimited form it asked for',
         listed.stdout.includes('\0')
           ? 'git worktree list --porcelain -z exited 0 but its output does not end in the empty attribute that terminates a record, so the stream was cut mid-record and a holder may have lost the branch attribute that names it'
@@ -971,7 +1023,7 @@ export async function composeWrongBaseRefusal(
         // and `git checkout <base> --` does not give that (the name is still parsed as an
         // option). Measured on git 2.43: `git switch -- <branch>` switches exactly like
         // `git checkout <branch>`.
-        return `${prefix}The wrong-base launch guard found the branch checked out in the repo's OWN shared checkout at ${wtProse} — no separate worktree holds it, so there is no other lane to wait for; this is the shape a run that crashed mid-merge leaves behind. Restore the shared checkout to the base once no merge is in flight, and preflight it FIRST, because this guard did not measure that checkout and the switch is not the refusal-free operation it looks like: git -C ${sh(repo)} status --porcelain --ignored lists what is there. Switching REFUSES a tracked modification, and such a refusal is work to look at rather than force past — but a file ignored here and TRACKED on ${base} (a local-only .env is the measured case) is silently replaced with the base's copy and nothing is said, so move any such file aside before you switch. Only then: git -C ${sh(repo)} switch -- ${sh(base)}. Then re-resolve the branch. Nothing here authorises deleting it.`
+        return `${prefix}The wrong-base launch guard found the branch checked out in the repo's OWN shared checkout at ${wtProse} — no separate worktree holds it, so there is no other lane to wait for; this is the shape a run that crashed mid-merge leaves behind. Restore the shared checkout to the base once no merge is in flight, and preflight it FIRST, because this guard did not measure that checkout and the switch is not the refusal-free operation it looks like: git -C ${sh(repo)} status --porcelain --ignored lists what is there. Switching REFUSES a tracked modification, and such a refusal is work to look at rather than force past — but a file ignored here and TRACKED on ${baseProse} (a local-only .env is the measured case) is silently replaced with the base's copy and nothing is said, so move any such file aside before you switch. Only then: git -C ${sh(repo)} switch -- ${sh(base)}. Then re-resolve the branch. Nothing here authorises deleting it.`
       }
       if (holder.prunable) {
         // The directory is gone; git still lists the administrative entry, so the branch reads
@@ -1283,7 +1335,7 @@ export async function composeWrongBaseRefusal(
   } catch (err) {
     return unknownHolder(
       prefix,
-      branch,
+      branchProse,
       "could not resolve the branch's holder or its publication because remedy resolution threw",
       scrub(err instanceof Error ? err.message : String(err)),
     )

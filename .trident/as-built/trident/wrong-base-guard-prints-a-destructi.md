@@ -492,3 +492,60 @@ commands. `probeTreeOccupancy` reads /proc synchronously without passing through
 runner, and is bounded by different facts (a kernel pseudo-filesystem, one shallow pass, every
 failing read swallowed rather than retried) — a budget that reads as covering everything while
 pricing only the spawns is the same overclaiming in miniature.
+
+### A NAME FIELD IS FOLDED AS A NAME, NOT AS FREE PROSE
+
+The fold that was supposed to close the forged-line hole reopened it one layer down. `foldEvidence`
+replaces every forgery codepoint — the C0 controls, U+2028/U+2029, the bidi overrides — with an
+ASCII SPACE. That is right for a path or a fragment of git's stderr, which are free prose. It is
+wrong for the two NAME fields the refusal quotes, because the ASCII space is the one character
+git's ref rules forbid, and it is exactly what `delivery.ts` anchors its wrong-base classifier on:
+`WRONG_BASE_PREFIX` spells the branch and base fields `[^ \n]+` on that ground. Measured on git
+2.43: `check-ref-format --branch` exits 0 for a name holding U+2028 and 128 for one holding a
+space. So a git-legal branch name folded to a name with a space in it, the anchor missed, and the
+refusal fell through to the substring classifiers that answer "Reply to retry the build" — the one
+advice this class exists to forbid, restored by nothing more than somebody's choice of name.
+
+`foldRefName` folds a name to ONE TOKEN instead: every whitespace and every forgery codepoint
+becomes `?`, a character git's ref rules also forbid, BEFORE `foldEvidence` runs. That is also what
+neutralises a payload inside a name — `branch -D -- victim` arrives as `branch?-D?--?victim`, which
+is not a command anybody can run and not a string any classifier reads — and it removes the way
+`defang` could put a space back by rewriting a verb it recognised. The branch and the base both go
+through it, in the composer and in the launcher's own pre-launch refusals; paths and stderr keep
+`foldEvidence`, which is still the right fold for prose. The seam is pinned where it broke: the
+composer's real output, over four git-legal hostile names, through the real `interpretFailure`.
+
+Three of `unknownHolder`'s six call sites passed the RAW branch where the parameter's own docblock
+required the folded one — the enumeration-failed arm, the not-NUL-listing arm and the outer catch.
+The arms with the least evidence were carrying the most dangerous text: a legal name rendered its
+own line break and a verbatim `branch -D -- victim` inside refusals contracted to authorise
+nothing. All six now pass the folded name, and the rule is written where the parameter is declared,
+because the type system cannot tell two strings apart.
+
+### THE BASE FETCH NOW WRITES THE REF ITS OWN REFUSAL SAYS IT WROTE
+
+The launcher fetched its base with `git fetch --no-tags origin <base>` and then rev-parsed
+`refs/remotes/origin/<base>` for the sha it pins the build to. Reproduced on git 2.43 in a scratch
+clone: with a narrowed `remote.origin.fetch`, that shorthand exits 0, moves FETCH_HEAD, and leaves
+the tracking ref exactly where it was. The build would then have been cut from a STALE base — the
+one thing the surrounding retry exists to prevent — while the UNKNOWN refusal downstream stated as
+fact that the fetch had written that ref. Naming the destination (`+refs/heads/<base>:refs/remotes/
+origin/<base>`) makes both true; `wrong-base-remedy.ts` already fetches its own branch that way,
+for this reason. The refusal quotes the argv that actually ran, refspec included.
+
+### THE OPTION RUN IS NOT FOUR TOKENS LONG EITHER
+
+`defang`'s window read at most four tokens after a git verb, so an option run longer than that put
+the delete out of range: `git branch --verbose --quiet --color --no-column --delete --force
+victim2` — a real delete on git 2.43 — rendered VERBATIM out of a forged lock reason into the
+live-holder arm, whose pinned contract is that it carries no such instruction. Git's own grammar is
+options-then-ref, so the window is now that: an unbounded run of leading `-`-prefixed tokens (which
+cannot swallow the prose after the command) plus four tokens after it. Still linear, still one test
+per token, and the benign controls still render unchanged.
+
+### STILL DISCLOSED, STILL NOT FIXED HERE
+
+The DEAD-holder arm remains reachable in production only when the occupancy probe can conclude:
+`probeTreeOccupancy`'s unknown-veto fires first and answers "occupancy is UNKNOWN — treat it as
+live". That is the fail-safe direction and it is disclosed at the arm, so it is left alone
+deliberately; reversing the order would let an unreadable process table authorise a removal.

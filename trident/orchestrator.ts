@@ -79,7 +79,7 @@ import { hasArgusProvenance } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
-import { composeWrongBaseRefusal, foldEvidence } from './wrong-base-remedy.ts'
+import { composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import {
   runMutationProofGate,
   type MutationGateInput,
@@ -3224,9 +3224,28 @@ export function buildTridentOrchestrator(
     // own writes, and a fetch is not write-free (see `noWrites` there) — but only this arm
     // performs one, so a flat claim either over- or under-counts depending on the path taken.
     let fetchedBase = false
+    // WHAT THE REFUSALS BELOW QUOTE, AND WHAT THE FETCH ARGV IS, ARE THE SAME STRING.
+    //
+    // AN EXPLICIT DESTINATION REFSPEC (Argus finding, reproduced on git 2.43). `git fetch
+    // --no-tags origin <base>` updates FETCH_HEAD and only INCIDENTALLY
+    // refs/remotes/origin/<base>: under a narrowed `remote.origin.fetch` it exits 0 while that
+    // tracking ref does NOT move — and this path then rev-parses that ref for `base_sha`, pins
+    // it, and cuts the build branch from it, while the refusal downstream states as fact that
+    // the fetch wrote it. A stale base is the very thing the retry above exists to avoid, and a
+    // false write-accounting sentence is the overclaiming this message class exists to stop.
+    // Naming the destination closes both. `wrong-base-remedy.ts` already fetches its own branch
+    // this way, for this reason.
+    const baseRefspec = `+refs/heads/${base}:refs/remotes/origin/${base}`
+    // AND THE BASE IS FOLDED WHEREVER A REFUSAL QUOTES IT (Argus finding). It arrives from
+    // `detectBaseBranch`/`opts.base_branch`, and git accepts U+2028 and U+202E in a branch name
+    // exactly as it does for the build branch — so a base name could forge a line inside these
+    // pre-launch refusals the same way. `foldRefName`, not `foldEvidence`: a name field stays
+    // one token, because folding a forgery codepoint to an ASCII space is what broke the
+    // wrong-base classifier's anchor in `delivery.ts`.
+    const baseProse = foldRefName(base)
     if (freshBuild && launchRun.merge_mode === 'pr') {
       fetchedBase = true
-      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
+      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', baseRefspec]
       let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
       if (!fetched.ok) {
         await (opts.sleep ?? realSleep)(1000)
@@ -3235,7 +3254,7 @@ export function buildTridentOrchestrator(
       if (!fetched.ok) {
         const detail = redactPushError(fetched.stderr).trim().slice(-300)
         return {
-          run: failedRun(launchRun, `trident infra: could not fetch origin/${base} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${baseProse} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
           changed: true,
           waiting: false,
           note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
@@ -3250,7 +3269,7 @@ export function buildTridentOrchestrator(
       if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
         const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
         return {
-          run: failedRun(launchRun, `trident infra: fetched origin/${base} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          run: failedRun(launchRun, `trident infra: fetched origin/${baseProse} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
           changed: true,
           waiting: false,
           note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
@@ -3322,7 +3341,17 @@ export function buildTridentOrchestrator(
         // here made this seam contradict the threat model of the module it exists to guard.
         // Only the shas stay raw, and they are `^[0-9a-f]{40}$`-tested above.
         const repoProse = foldEvidence(launchRun.repo_path)
-        const branchProse = foldEvidence(launchRun.branch)
+        // NAME FIELDS ARE FOLDED AS NAMES (Argus blocker/finding). `foldEvidence` folds a
+        // forgery codepoint to an ASCII SPACE, and the ASCII space is the one character git's
+        // ref rules forbid — the character `delivery.ts` anchors its wrong-base classifier on.
+        // `foldRefName` folds a name to a single token instead, so the fold cannot put a space
+        // inside a field the reader (and the classifier) reads as one name.
+        //
+        // AND THE BASE IS ONE OF THEM. The refusals below said "every field this refusal quotes
+        // is folded" while interpolating `base` RAW — it arrives from `detectBaseBranch` or
+        // `opts.base_branch` and git accepts U+2028 and U+202E in a branch name exactly as it
+        // does for `launchRun.branch`, so the same forged line was available through the base.
+        const branchProse = foldRefName(launchRun.branch)
         // WHAT THIS PATH WROTE, COUNTED EXACTLY. `git fetch --no-tags origin <base>` above is not
         // write-free: it force-updates that tracking ref, appends the ref's reflog, rewrites
         // FETCH_HEAD and writes whatever objects it downloaded (delivery.ts names the same set
@@ -3338,7 +3367,7 @@ export function buildTridentOrchestrator(
         // IS established is the class: everything that fetch can touch lives under `.git`, and
         // "file" in the clause below means a file in the TREE, which is the reassurance owed.
         const noWrites = fetchedBase
-          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${base} made under .git — refs/remotes/origin/${base}, that ref's reflog, FETCH_HEAD, the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top`
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${foldRefName(baseRefspec)} made under .git — refs/remotes/origin/${baseProse}, that ref's reflog, FETCH_HEAD, the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top`
           : 'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
         const probeDetail = (res: HostCommandResult): string =>
           res.timed_out === true
@@ -3355,7 +3384,7 @@ export function buildTridentOrchestrator(
           return {
             run: failedRun(
               pinnedRun,
-              `trident infra: could not establish whether branch ${branchProse} at ${branchTip} is contained in origin/${base} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+              `trident infra: could not establish whether branch ${branchProse} at ${branchTip} is contained in origin/${baseProse} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
               false,
             ),
             changed: true,
@@ -3377,7 +3406,7 @@ export function buildTridentOrchestrator(
             return {
               run: failedRun(
                 pinnedRun,
-                `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${base} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase)}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+                `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${baseProse} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase)}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
                 false,
               ),
               changed: true,
