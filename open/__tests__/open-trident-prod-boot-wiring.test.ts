@@ -684,19 +684,58 @@ describe('Open foundational-Trident prod-boot wiring', () => {
      * applied to the real source at the bottom of this test and must come out RED.
      */
     const bindingScopesOf = (file: ts.SourceFile, name: string): ts.Node[] => {
+      /**
+       * AND A `var` DOES NOT LIVE IN ITS BLOCK (Argus r9 BLOCKER, codex's
+       * executed mutant). This scan asks which declarations of
+       * `tridentHostRunner` COVER a dispatch site, and it read every
+       * `VariableDeclaration` as belonging to its nearest BLOCK — but `var` is
+       * function-scoped and HOISTS. So `if (true) { var tridentHostRunner =
+       * <stub> }`, written in an executed sibling block one line ABOVE the
+       * `dispatchBoardBoundBuild(` call, binds the stub for that whole closure
+       * at runtime while the block it is written in closes before the site: the
+       * count stayed 1, `unshadowed` stayed true, the ▶ site handed the
+       * chokepoint an uncredentialed runner — and `tsc --noEmit` was silent,
+       * because a `var` shadow is as legal as a `const` one.
+       *
+       * So a declaration gets the scope JAVASCRIPT gives it: `let` and `const`
+       * (and a destructured binding of either) take the nearest block, while a
+       * `var` — and, deliberately, a `function` declaration, whose sloppy-mode
+       * hoisting has the same shape — skips every block and takes the nearest
+       * function or module body. Widening is the SAFE direction here: a scope
+       * that is too wide can only ever report a site AMBIGUOUS, and an ambiguous
+       * site is reported UNWIRED.
+       */
+      const hoistsToFunctionScope = (decl: ts.Node): boolean => {
+        if (ts.isFunctionDeclaration(decl)) return true
+        if (!ts.isVariableDeclaration(decl) && !ts.isBindingElement(decl)) return false
+        // A `var`'s list carries neither the `Let` nor the `Const` flag. A
+        // destructured binding reaches its list through its own declaration, and
+        // a PARAMETER's destructuring reaches a function first — parameters are
+        // function-scoped anyway, and the walk below stops on the function.
+        for (let p: ts.Node | undefined = decl.parent; p !== undefined; p = p.parent) {
+          if (ts.isVariableDeclarationList(p)) {
+            return (p.flags & (ts.NodeFlags.Let | ts.NodeFlags.Const)) === 0
+          }
+          if (ts.isFunctionLike(p) || ts.isSourceFile(p)) return false
+        }
+        return false
+      }
       /** The node whose scope a declaration belongs to — its nearest scope ancestor. */
       const scopeOf = (decl: ts.Node): ts.Node => {
+        const hoists = hoistsToFunctionScope(decl)
         for (let p: ts.Node | undefined = decl.parent; p !== undefined; p = p.parent) {
+          // A function body, a module body and the file itself bound EVERY
+          // binding form, hoisted or not.
+          if (ts.isSourceFile(p) || ts.isModuleBlock(p) || ts.isFunctionLike(p)) return p
+          // …and only a block-scoped binding stops at a block.
+          if (hoists) continue
           if (
-            ts.isSourceFile(p) ||
             ts.isBlock(p) ||
-            ts.isModuleBlock(p) ||
             ts.isCaseBlock(p) ||
             ts.isForStatement(p) ||
             ts.isForInStatement(p) ||
             ts.isForOfStatement(p) ||
-            ts.isCatchClause(p) ||
-            ts.isFunctionLike(p)
+            ts.isCatchClause(p)
           ) {
             return p
           }
@@ -728,6 +767,47 @@ describe('Open foundational-Trident prod-boot wiring', () => {
           ts.isSourceFile(scope) || (scope.getStart(file) <= idx && scope.getEnd() >= idx),
       ).length
 
+    /**
+     * AND AN ESCAPE IS NOT A SPELLING (Argus r9 BLOCKER, codex's executed
+     * mutant). `...{ ['host' + 'Runner']: undefined }` is caught by the
+     * legibility rule below because its key position holds a `[` — but a
+     * STRING-LITERAL key needs no `[` and no concatenation:
+     * `...{ '\u0068ostRunner': undefined },` spliced in after the wired property
+     * binds `hostRunner` to `undefined` at runtime while the TOKEN `hostRunner`
+     * appears nowhere in the text. The computed-key rule does not fire, the
+     * spread's payload is an inline object literal, last-mention-wins has no
+     * later mention to find — and the site read as wired while production took
+     * the uncredentialed fallback. Chasing escape spellings is the same losing
+     * game as chasing `'host' + 'Runner'`: `'\x68ostRunner'`, `'ho\u0073tRunner'`,
+     * and the next one is free.
+     *
+     * So the answer is the same one, asked of TypeScript's OWN parse tree rather
+     * than of the text: every property NAME in the literal, at any depth, must be
+     * spelled as a plain IDENTIFIER. A name this scan cannot read literally is a
+     * name it cannot compare against the wired one, and "I could not tell" is not
+     * "it is wired". All four production sites spell every key as an identifier
+     * today — asserted as a positive control below, before any mutant is applied.
+     */
+    const keysAreIdentifiers = (file: ts.SourceFile, idx: number): boolean => {
+      const lit = innermostObjectAt(file, idx)
+      if (lit === null) return false
+      let ok = true
+      const visit = (node: ts.Node): void => {
+        if (
+          ts.isPropertyAssignment(node) ||
+          ts.isShorthandPropertyAssignment(node) ||
+          ts.isMethodDeclaration(node) ||
+          ts.isGetAccessorDeclaration(node) ||
+          ts.isSetAccessorDeclaration(node)
+        ) {
+          if (!ts.isIdentifier(node.name)) ok = false
+        }
+        ts.forEachChild(node, visit)
+      }
+      visit(lit)
+      return ok
+    }
+
     interface DepsSite {
       /** Everything between the literal's braces, nesting included. */
       body: string
@@ -737,6 +817,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       handedOver: boolean
       /** Whether the wired identifiers resolve unambiguously at THIS position. */
       unshadowed: boolean
+      /** Whether every property NAME in the literal is spelled as an identifier. */
+      identifierKeys: boolean
     }
     const dispatchDepsSites = (text: string): DepsSite[] => {
       const file = parseSource(text)
@@ -758,6 +840,7 @@ describe('Open foundational-Trident prod-boot wiring', () => {
           unshadowed:
             bindingsCovering(file, 'tridentHostRunner', range[0]) === 1 &&
             bindingsCovering(file, 'tridentLandedProbe', range[0]) === 1,
+          identifierKeys: keysAreIdentifiers(file, range[0]),
         })
       }
       return out
@@ -840,9 +923,11 @@ describe('Open foundational-Trident prod-boot wiring', () => {
      * construct this scan cannot statically READ is reported UNWIRED, because "I
      * could not tell" is not "it is wired".
      *
-     * Two constructs are unreadable, and neither appears in any of the four
-     * production sites: a COMPUTED KEY (`[` in key position — nothing else can name
-     * a property without spelling it), and a spread of anything but an inline
+     * Three constructs are unreadable, and none appears in any of the four
+     * production sites: a COMPUTED KEY (`[` in key position), a STRING-LITERAL KEY
+     * (whose escapes this scan does not evaluate — see `keysAreIdentifiers` above,
+     * which covers both by asking the parse tree for the key's KIND instead of
+     * asking the text for a character), and a spread of anything but an inline
      * object literal (`...deps`, `...overrides()`, `...(cond ? {…} : other)` — its
      * keys live somewhere this scan is not looking). The hold sweep's site, the one
      * legitimate user of spreads, writes every one of them as
@@ -850,6 +935,9 @@ describe('Open foundational-Trident prod-boot wiring', () => {
      * identifier keys, which stays readable and stays wired.
      */
     const legible = (site: DepsSite): boolean => {
+      // A property NAME that is not an identifier — a computed key, or a string
+      // literal whose escapes this scan does not evaluate (`keysAreIdentifiers`).
+      if (!site.identifierKeys) return false
       // A computed key, in key position: at the start of the literal, or after a
       // `{` or a `,`. An array VALUE (`k: [1, 2]`) follows a `:` and is untouched.
       if (/(^|[{,])\s*\[/.test(site.body)) return false
@@ -906,6 +994,10 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // see exactly ONE binding of each wired identifier today, so it cannot be
     // answering "unwired" for everything below.
     expect(dispatchDepsSites(src).filter((site) => site.unshadowed).length).toBe(4)
+    // Positive control for the key gate, same reason: all four production sites
+    // spell every property name — at every depth — as a plain identifier today,
+    // so `keysAreIdentifiers` cannot be answering "unwired" for everything below.
+    expect(dispatchDepsSites(src).filter((site) => site.identifierKeys).length).toBe(4)
     expect(dispatchDepsSites(src).filter((site) => !siteIsWired(site)).length).toBe(0)
 
     // THE REVIEWERS' MUTANTS, APPLIED TO THE REAL SOURCE. Both unwire the app's ▶
@@ -1017,6 +1109,29 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     )
     expect(camelPairs(opaqueMutant).every((paired) => paired)).toBe(true)
     expect(dispatchDepsSites(opaqueMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // r9 — codex's mutant, the SAME override with the `[` taken out. A plain,
+    // ESCAPED string-literal key is `hostRunner` to the engine and is not the
+    // token `hostRunner` to any text scan: the computed-key rule has no `[` to
+    // fire on, the spread's payload is an inline literal so the spread rule is
+    // satisfied, and last-mention-wins has no later mention to find. Caught by
+    // the key's KIND, read off the parse tree.
+    const escapedKeyMutant = splice(victimRunner, [
+      "        ...{ '\\u0068ostRunner': undefined },",
+    ])
+    // The mutant SPELLS NOTHING: not one line more of the file names the token…
+    const namesRunner = (text: string): number =>
+      text.split('\n').filter((l) => /\bhostRunner\b/.test(l)).length
+    expect(namesRunner(escapedKeyMutant)).toBe(namesRunner(src))
+    expect(count('hostRunner', 'tridentHostRunner', escapedKeyMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    // …and it carries no computed key, so the r23 rule cannot be what catches it.
+    expect(escapedKeyMutant).not.toMatch(/\.\.\.\{\s*\[/)
+    expect(camelPairs(escapedKeyMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(escapedKeyMutant).length).toBe(4)
+    expect(dispatchDepsSites(escapedKeyMutant).filter((site) => site.identifierKeys).length).toBe(3)
+    expect(dispatchDepsSites(escapedKeyMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
 
     // POSITIVE CONTROL FOR THE LEGIBILITY GATE: it must not answer "unwired" for
     // everything. The hold sweep's site carries five conditional spreads today and
@@ -1150,6 +1265,47 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     expect(dispatchDepsSites(unrelatedLocalMutant).filter((site) => !siteIsWired(site)).length).toBe(
       0,
     )
+
+    // r9 — codex's mutant, and the one the scope gate missed because it read a
+    // declaration's scope as its nearest BLOCK: `var` is function-scoped and
+    // HOISTS. The stub is declared inside an executed sibling block one line
+    // ABOVE the `dispatchBoardBoundBuild(` call, so the block it is written in
+    // closes long before the site — while at runtime the binding covers the whole
+    // closure and the ▶ site hands the chokepoint the uncredentialed stub.
+    const hoistMutant = lines
+      .flatMap((l, i) =>
+        i === dispatchCallAt
+          ? [
+              '            if (true) { var tridentHostRunner = async () => ({ ok: false as const, stdout: 0, stderr: 0, exit_code: 1 }) }',
+              l,
+            ]
+          : [l],
+      )
+      .join('\n')
+    // Same as the r8 shadow, it DELETES NOTHING: both counts are untouched, every
+    // site is still a site, still handed over and still legible.
+    expect(count('hostRunner', 'tridentHostRunner', hoistMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(count('landedProbe', 'tridentLandedProbe', hoistMutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe'),
+    )
+    expect(camelPairs(hoistMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(hoistMutant).length).toBe(4)
+    expect(
+      dispatchDepsSites(hoistMutant).filter((site) => site.handedOver && legible(site)).length,
+    ).toBe(4)
+    // …and the scope gate now reads the binding where JS puts it, so exactly one
+    // site — the mutated one — is ambiguous, and unwired.
+    expect(dispatchDepsSites(hoistMutant).filter((site) => !site.unshadowed).length).toBe(1)
+    expect(dispatchDepsSites(hoistMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+    // …and hoisting stops at the FUNCTION, not at the file: a `var` of the same
+    // name inside a block of a function that covers no dispatch site leaves every
+    // site wired, so this is a scope rule and not a name count.
+    const unrelatedVarMutant = splice(0, [
+      'const unrelatedVar = () => { { var tridentHostRunner = 1 } return tridentHostRunner }',
+    ])
+    expect(dispatchDepsSites(unrelatedVarMutant).filter((site) => !siteIsWired(site)).length).toBe(0)
 
     // FAIL-CLOSED, PROVEN RATHER THAN CLAIMED (Argus r8 major). The hand-off rule
     // names `resolve_context` because that is the one production entry whose

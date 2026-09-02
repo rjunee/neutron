@@ -304,12 +304,48 @@ earlier rule is blind to it. The same round also stops the `resolve_context` han
 taken on trust: renaming that property is asserted to red the gate, so the name-anchoring is proven
 fail-closed rather than merely described as such.
 
+AND A `var` IS NOT ITS BLOCK'S (Argus r9 blocker, codex's executed mutant). The scope rule above
+asked how many declarations COVER a dispatch site, and it read every variable declaration as
+belonging to its nearest BLOCK — but `var` is function-scoped and HOISTS. So
+`if (true) { var tridentHostRunner = <stub> }`, written in an executed sibling block one line above
+the `dispatchBoardBoundBuild(` call, binds the stub for that whole closure at runtime while the
+block it is written in closes long before the site: the covering count stayed 1, the site read
+unshadowed, and the ▶ site handed the chokepoint an uncredentialed runner with the gate green and
+`tsc --noEmit` silent, because a `var` shadow is as legal as a `const` one. A declaration now gets
+the scope JAVASCRIPT gives it — `let`/`const` and their destructured bindings stop at the nearest
+block, while a `var`, and deliberately also a `function` declaration whose sloppy-mode hoisting has
+the same shape, skips every block and takes the nearest function or module body. Widening is the
+safe direction: a scope that is too wide can only report a site AMBIGUOUS, and an ambiguous site is
+reported UNWIRED. The mutant is applied to the real `open/composer.ts` in-test and asserted RED,
+with a positive control that a `var` in a block of a function covering no dispatch site leaves every
+site wired — so this is a scope rule and not a name count.
+
+AND AN ESCAPE IS NOT A SPELLING (Argus r9 blocker, codex's executed mutant). Legibility rejected a
+COMPUTED key (`...{ ['host' + 'Runner']: undefined }`) by looking for a `[` in key position, but a
+string-literal key needs no `[` and no concatenation: `...{ '\u0068ostRunner': undefined },` spliced
+in after the wired property is `hostRunner` to the engine and is not the token `hostRunner` to any
+text scan, so the computed-key rule did not fire, the spread's payload was an inline literal, and
+last-mention-wins had no later mention to find — the site read wired while production took the
+uncredentialed fallback. Chasing escape spellings loses the same way chasing `'host' + 'Runner'`
+does, so the rule is asked of TypeScript's own parse tree instead: every property NAME in the
+literal, at any depth, must be a plain IDENTIFIER, and a name this scan cannot read literally is a
+name it cannot compare. All four production sites spell every key as an identifier, pinned as a
+positive control before any mutant runs; the escaped-key mutant is applied to the real
+`open/composer.ts` in-test and asserted RED, beside an assertion that it carries no computed key, so
+the earlier rule cannot be what catches it.
+
 AND THE WORD IS NOT THE WIRE (Argus r29, major, mutant executed). The caller enumeration in
 `trident/__tests__/codex-seat-probe.test.ts` asserted `toContain('hostRunner')` per caller file,
 which survives DELETING `/code`'s forwarding spread: the word is still spelled by the optional
 field's own declaration and by the docblock above it, and an optional field means the compiler does
 not close the gap either. The rule now reads BINDINGS — `hostRunner:` followed by a value, on a line
 that is not a comment — and executes that exact deletion in-test, asserting the guard goes red.
+AND A COMMENT IS WHATEVER THE COMPILER SAYS IT IS (Argus r9, major): "not a comment" was a line
+PREFIX rule, so a forwarding line sitting between a lone `/*` and a lone `*/` was gone from the
+build and still read here as a binding — the same delete-nothing-comment-it-out mutant the composer
+wiring gate was fixed for. The comment ranges now come from TypeScript's own parse of the caller
+file and are blanked in place, and the commented-out mutant is executed in-test against the real
+`trident/code-command.ts` beside a positive control that the unmutated file still reads as bound.
 
 AND A CITATION BY LINE NUMBER IS UNGUARDABLE (Argus r29, major). `docs/INVARIANTS.md` #118 — the
 invariant this card writes — carried nine `path:LINE` anchors and every one had drifted

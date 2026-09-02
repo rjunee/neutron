@@ -23,6 +23,7 @@
  */
 
 import { afterAll, afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import ts from 'typescript'
 import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
@@ -1068,10 +1069,43 @@ describe('dispatch preflight (P4)', () => {
      * compiler — not this grep — is the guarantee). A `?:` declaration and a
      * docblock mention are neither.
      */
+    /**
+     * AND A COMMENT IS WHATEVER THE COMPILER SAYS IT IS (Argus r9). The strip
+     * this rule used to run was a line-PREFIX rule — it dropped a line only when
+     * the line itself STARTED with `*`, `//` or a block opener. So a forwarding
+     * line sitting between a lone block opener and a lone block closer is gone
+     * from the build and still read here as a binding, which is the same
+     * "delete nothing, comment it out" mutant the wiring gate in
+     * `open/__tests__/open-trident-prod-boot-wiring.test.ts` was fixed for.
+     * The comment ranges now come from TypeScript's OWN parse of the file and
+     * are blanked in place, so a comment is whatever the compiler says it is and
+     * every position stays where it was. The mutant is executed below.
+     */
+    const executable = (text: string): string => {
+      const parsed = ts.createSourceFile(
+        'caller.scan.ts',
+        text,
+        ts.ScriptTarget.Latest,
+        /* setParentNodes */ true,
+        ts.ScriptKind.TS,
+      )
+      const chars = text.split('')
+      const blank = (range: ts.CommentRange): void => {
+        for (let i = range.pos; i < range.end; i++) if (chars[i] !== '\n') chars[i] = ' '
+      }
+      const visit = (node: ts.Node): void => {
+        // Every comment is leading or trailing trivia of exactly one token, and
+        // the EOF token carries the ones at the end of the file.
+        for (const range of ts.getLeadingCommentRanges(text, node.getFullStart()) ?? []) blank(range)
+        for (const range of ts.getTrailingCommentRanges(text, node.getEnd()) ?? []) blank(range)
+        for (const child of node.getChildren(parsed)) visit(child)
+      }
+      visit(parsed)
+      return chars.join('')
+    }
     const bindsCredential = (text: string): boolean =>
-      text
+      executable(text)
         .split('\n')
-        .filter((l) => !/^\s*(\*|\/\/|\/\*)/.test(l))
         .some((l) => /\bhostRunner:\s*[A-Za-z_$]/.test(l))
 
     for (const file of callers) {
@@ -1109,6 +1143,28 @@ describe('dispatch preflight (P4)', () => {
     expect(unwired.split('\n').length).toBe(codeCommandSrc.split('\n').length - 1)
     expect(unwired).toContain('hostRunner')
     expect(bindsCredential(unwired)).toBe(false)
+    // …AND THE SAME DELETION SPELLED AS A COMMENT (Argus r9, the mutant the
+    // line-prefix strip survived): wrap the forwarding line in a block comment
+    // and it is as absent from the build as deleting it, while the line itself
+    // is still spelled character for character and still starts with neither a
+    // block opener nor a `*`.
+    const forwardingAt = codeCommandSrc
+      .split('\n')
+      .findIndex((l) => /\.\.\.\(ctx\.hostRunner !== undefined/.test(l))
+    expect(forwardingAt).toBeGreaterThan(-1)
+    const commentedOut = codeCommandSrc
+      .split('\n')
+      .flatMap((l, i) => (i === forwardingAt ? ['/*', l, '*/'] : [l]))
+      .join('\n')
+    // The mutant DELETES NOTHING — which is exactly why a line-prefix strip
+    // could not tell it from the wired file.
+    expect(commentedOut).toContain(codeCommandSrc.split('\n')[forwardingAt]!)
+    expect(commentedOut.split('\n').length).toBe(codeCommandSrc.split('\n').length + 2)
+    expect(bindsCredential(commentedOut)).toBe(false)
+    // Positive control for the strip: it must not blank executable code — the
+    // unmutated file still reads as bound, and a `//` inside a string survives.
+    expect(bindsCredential(codeCommandSrc)).toBe(true)
+    expect(executable("const u = 'https://example'")).toContain('https://example')
     // …and the ▶ closure specifically: the same shared object, by name, inside
     // the `boardStartBuild` dispatch call.
     //
