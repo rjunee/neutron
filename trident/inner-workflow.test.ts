@@ -2276,7 +2276,10 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
     const { stripAdvisoryMarkers } = load()
     const clean = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'blocker' }] }
     expect(stripAdvisoryMarkers(clean)).toBe(clean)
-    const dead = { verdict: 'REQUEST_CHANGES' }
+    // Typed with the optional `findings` the loader's signature declares: a bare
+    // `{ verdict }` literal is a WEAK type against that signature, and `toBe` rejects an
+    // expected value with no property in common with it.
+    const dead: { verdict: string; findings?: unknown[] } = { verdict: 'REQUEST_CHANGES' }
     expect(stripAdvisoryMarkers(dead)).toBe(dead)
     expect(stripAdvisoryMarkers(null)).toBeNull()
   })
