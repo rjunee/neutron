@@ -162,6 +162,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // set comparison below passes on nothing.
     expect(described.length).toBeGreaterThan(1)
     for (const d of described) expect(d).toContain('_test.')
+    for (const d of described) expect(d).toContain('<ext> is one of')
 
     // The suffixes the SCHEMA names, in either spelling it has used
     // (`*_test.go/py` and `*_test.go or *_test.py`).
@@ -186,6 +187,46 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // nominate — which is the only outcome that leaves such a diff provable.
     expect(classifyMutationTarget('src/pricing_test.rs')).toBe('production')
     expect([...schemaSuffixes]).not.toContain('rs')
+
+    // AND THE DOTTED FAMILY, which had drifted the same way and WIDER. The
+    // schema said `*.test.*` / `*.spec.*` — any extension at all — while
+    // `TEST_BASENAME` spells out eight and deliberately excludes the hybrids
+    // `.cjsx`, `.mjsx`, `.ctsx`, `.mtsx` (no runner collects them, so declaring
+    // them a test would sell a diff the no-production-file exemption for a file
+    // nothing would ever run). So `classifyMutationTarget('src/payments.test.cjsx')`
+    // is `production` — the file a build MUST nominate for such a diff to be
+    // provable — while the schema forbade naming it: the identical unresolvable
+    // refusal loop as `_test.rs`, one wildcard wide.
+    const dotSuffixes = new Set(
+      described.flatMap((d) => [...d.matchAll(/<ext> is one of ([a-z/]+)/g)].flatMap((m) => m[1]!.split('/'))),
+    )
+    // The CLASSIFIER's list, probed off the real function rather than re-typed
+    // here, over every extension the two JS/TS families can spell.
+    const universe: string[] = []
+    for (const prefix of ['', 'c', 'm']) {
+      for (const letter of ['j', 't']) for (const x of ['', 'x']) universe.push(`${prefix}${letter}s${x}`)
+    }
+    universe.push('go', 'py', 'rs', 'coffee', 'vue')
+    const declared = universe.filter((ext) => classifyMutationTarget(`src/payments.test.${ext}`) === 'test')
+    // POSITIVE CONTROL on the probe: the universe really SPLITS — some
+    // extensions declare a test and some do not — so the comparison below can
+    // pass neither on an empty answer nor on an all-inclusive one.
+    expect(declared.length).toBeGreaterThan(0)
+    expect(declared.length).toBeLessThan(universe.length)
+    expect([...dotSuffixes].sort()).toEqual([...declared].sort())
+
+    // AND THE BEHAVIOUR, in both spellings the regex covers: every extension the
+    // schema forbids really is refused as `.test.` AND as `.spec.`.
+    for (const ext of dotSuffixes) {
+      expect([ext, classifyMutationTarget(`src/payments.test.${ext}`)]).toEqual([ext, 'test'])
+      expect([ext, classifyMutationTarget(`src/payments.spec.${ext}`)]).toEqual([ext, 'test'])
+    }
+    // The hybrids that started this: named by NEITHER side now, so a diff whose
+    // only code file is `src/payments.test.cjsx` has a legal nomination.
+    for (const hybrid of ['cjsx', 'mjsx', 'ctsx', 'mtsx']) {
+      expect([hybrid, classifyMutationTarget(`src/payments.test.${hybrid}`)]).toEqual([hybrid, 'production'])
+      expect([...dotSuffixes]).not.toContain(hybrid)
+    }
   })
 
   test('NO Forge schema has a field for a mutation RESULT — only for a nomination', async () => {

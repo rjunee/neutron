@@ -850,6 +850,39 @@ function modulePathsOf(arg: string): string[] {
 }
 
 /**
+ * THE SPELLING A LOADER REWRITES: a `.js` specifier that loads a `.ts` file.
+ * bun (and tsc's `allowImportingTsExtensions`-less resolution, and node's
+ * type-stripping loaders) resolve `./tests/support/clamp.js` to
+ * `tests/support/clamp.ts` when that is the file on disk — verified on bun
+ * 1.3.x — so `--preload=./tests/support/clamp.js` loads the MUTATED library
+ * into the very process that runs the guard while equalling no repo-relative
+ * target. Every lexical arm of `guardRunsTheMutatedFile` compares exact
+ * normalized spellings and missed it, and this seam `realpath`ed the literal
+ * `.js` name, got ENOENT and dropped the element: a forged proof came back
+ * `proved: true` with nothing asserting the mutated file's behaviour.
+ *
+ * ONE DIRECTION ONLY, and only as a CANDIDATE. No loader rewrites `.ts` into
+ * `.js`, so the map runs `js -> ts|tsx`, `jsx -> tsx`, `mjs -> mts`, `cjs ->
+ * cts`. And a rewrite is refused only where every other candidate is: when it
+ * RESOLVES to the mutated file. A guard that names a `.js` file which really
+ * exists resolves to that file and is untouched, so this can only ever refuse
+ * the collision it is named for.
+ */
+const LOADER_REWRITTEN_EXTENSION: Record<string, string[]> = {
+  js: ['ts', 'tsx'],
+  jsx: ['tsx'],
+  mjs: ['mts'],
+  cjs: ['cts'],
+}
+
+function loaderRewrites(path: string): string[] {
+  const dot = path.lastIndexOf('.')
+  if (dot <= 0 || dot < path.lastIndexOf('/')) return []
+  const swaps = LOADER_REWRITTEN_EXTENSION[path.slice(dot + 1)]
+  return swaps === undefined ? [] : swaps.map((ext) => `${path.slice(0, dot + 1)}${ext}`)
+}
+
+/**
  * Every guard argv element that could NAME SOMETHING ON DISK, paired with the
  * element it came from — for the RESOLVED tautology check in the prover, which
  * follows symlinks and so cannot be done from a spelling alone.
@@ -877,6 +910,13 @@ function guardPathCandidates(guard: readonly string[]): { arg: string; path: str
     const path = normalizeArg(raw)
     if (namesASearch(path)) continue
     out.push({ arg, path })
+    // …AND THE SPELLING A LOADER REWRITES on its way to disk, so the `.js` name
+    // of a `.ts` file is asked about as the file it actually loads. Pushed
+    // AFTER the literal path, so a guard that names something real is reported
+    // in its own words and only the collision falls through to this one.
+    for (const rewritten of loaderRewrites(path)) {
+      out.push({ arg: `${arg} (which a loader resolves to ${rewritten})`, path: rewritten })
+    }
     // …AND WHAT A DOTTED MODULE SELECTOR WOULD IMPORT. `src.limit` resolves to
     // nothing, so on its own it is dropped here — while `python3 -m unittest
     // src.limit` imports `src/limit.py`, and a committed symlink is enough to

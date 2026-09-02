@@ -753,6 +753,68 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     expect(fine.observed).not.toBeNull()
   })
 
+  test('a `.js` specifier IS the `.ts` file the loader loads, so it names the mutated file', async () => {
+    // THE BYPASS THIS CLOSES. `--preload=./tests/support/clamp.js` loads
+    // `tests/support/clamp.ts` — bun rewrites the specifier — so the guard
+    // process carries the MUTATED library while the argv equals no
+    // repo-relative target: every lexical arm compares exact spellings and saw
+    // nothing, and this seam `realpath`ed the literal `.js` name, got ENOENT and
+    // dropped the element. Red mutated, green restored, `proved: true`, with
+    // nothing having asserted the mutated file's behaviour.
+    const wt = proofWorktreePath('/repo', RUN)
+    const file = 'tests/support/clamp.ts'
+    // `tests/support/clamp.js` exists in NO tree — which is precisely why the
+    // loader falls through to the `.ts` file, and why a `realpath` of the
+    // literal spelling can never see it. Everything else resolves to itself.
+    const absent = new Set([join(wt, 'tests/support/clamp.js')])
+    const disk = async (path: string) => {
+      if (absent.has(path)) throw new Error(`ENOENT ${path}`)
+      return path
+    }
+    for (const arg of ['--preload=./tests/support/clamp.js', '-r./tests/support/clamp.js', 'tests/support/clamp.js']) {
+      const fs = memFs({ [join(wt, file)]: SRC_BEFORE })
+      fs.realpath = disk
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: {
+          ...CLAIM,
+          file,
+          // The argv ALSO names a separate test, so no whole-suite arm is what
+          // refuses this: the refusal has to come from the rewritten spelling.
+          guard: ['bun', 'test', arg, 'tests/separate.test.ts'],
+          control: ['bun', 'test', 'tests/other-control.test.ts'],
+        },
+      })
+      expect([arg, out.proved, out.reason.includes('tautology')]).toEqual([arg, false, true])
+      // The refusal SAYS which file the spelling resolves to, so the next build
+      // is not left re-deriving the rewrite.
+      expect([arg, out.reason.includes('which a loader resolves to tests/support/clamp.ts')]).toEqual([arg, true])
+      expect([arg, out.reason.includes('resolves to the same file')]).toEqual([arg, true])
+      // Refused BEFORE the mutation was written, like every other tautology.
+      expect([arg, fs.writes.length]).toEqual([arg, 0])
+      expect(host.calls.every((c) => !c.includes(arg))).toBe(true)
+    }
+
+    // POSITIVE CONTROL — a `.js` argument that resolves to a file of its OWN is
+    // untouched. The rewrite is a CANDIDATE, refused only where it really is the
+    // mutated file; delete that condition and this line goes red instead.
+    const fs = memFs({ [join(wt, file)]: SRC_BEFORE })
+    fs.realpath = disk
+    const { prover } = proverOver({}, fs)
+    const fine = await prover.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file,
+        guard: ['bun', 'test', '--preload=./tests/support/unrelated.js', 'tests/separate.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
   test('a dotted module RESOLVES too — `unittest tests.alias` where tests/alias.py is the mutated file', async () => {
     // The lexical module rule compares SPELLINGS: `tests.alias` expands to
     // `tests/alias.py`, which is not `src/limit.py`, so it passes — while the
