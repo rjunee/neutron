@@ -533,8 +533,11 @@ export class TridentRunStore {
    * in the same repository. The read and the INSERT share one transaction,
    * closing the check-then-create race between concurrent dispatches.
    *
-   * An EMPTY claim set skips the scan entirely and always admits: the gate
-   * cannot hold on paths it never measured.
+   * An EMPTY claim set skips the PATH scan entirely: the gate cannot hold on
+   * paths it never measured. It does NOT mean unconditional admission — the
+   * branch/slug liveness check below runs for every call, claims or none, and
+   * can still refuse with `conflict: 'branch'` (Argus r8 nit: this sentence used
+   * to say "always admits", which the paragraph three lines down contradicts).
    *
    * IT ALSO RE-TAKES THE BRANCH-LIVENESS CHECK, and that is not redundant with
    * the dispatch gate that already ran. `dispatchBoardBoundBuild` reads the live

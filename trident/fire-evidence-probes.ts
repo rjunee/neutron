@@ -457,6 +457,16 @@ export function buildFireEvidenceGatherer(opts: BuildFireEvidenceGathererOptions
           }
     }
 
+    // MTIME, NOT CTIME — DELIBERATE, and it is a WIDENING (Argus r8 minor). The
+    // card asks for a worktree CREATED at/after the fire; `lstat` gives no
+    // portable creation time (`birthtime` is 0 on the ext4/overlayfs this runs
+    // on), so the directory's MODIFICATION time stands in. The substitution can
+    // only over-report: a pre-existing worktree merely TOUCHED after the fire
+    // reads as a fresh launch. That direction is the safe one here — this arm
+    // returns `launched`, which HOLDS the lane rather than terminalizing it, and
+    // the hold is itself bounded by the 90-minute no-advance reaper. Under-
+    // reporting would put a second lane on a live branch, which is the whole
+    // defect this seam exists to close.
     const fresh_worktree =
       holder.mtime_ms !== null && holder.mtime_ms >= input.fire_started_at_ms - FRESH_WORKTREE_SKEW_MS
 

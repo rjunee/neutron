@@ -45,7 +45,6 @@ import { changeSignatureEntries, type MergeMode, type TridentRun, type TridentRu
 import { LIVENESS_PROBE_INTERVAL_MS } from './liveness.ts'
 import { detectBaseBranch, type RunHostCommand } from './merge.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
-
 import { createLogger } from '@neutronai/logger'
 
 const log = createLogger('trident-tick')

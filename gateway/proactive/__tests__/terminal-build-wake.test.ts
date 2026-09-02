@@ -135,6 +135,21 @@ describe('terminal build wake', () => {
     expect(prompt).not.toContain('Do NOT relaunch this build yet')
     expect(prompt).toContain('To retry or resume a failed build')
   })
+  // ARGUS r8 (major): the token fixed the English collision, not the mechanism —
+  // `includes()` matched the token wherever it appeared, and a launcher-crash
+  // reason embeds substrate output verbatim. Suppressing THIS relaunch is the
+  // expensive direction, so the match anchors on the producer's head.
+  test('a failure reason that EMBEDS the literal machine token mid-string is NOT read as published', () => {
+    const reason =
+      'inner workflow fire failed: substrate said: expected reason to contain ' +
+      `${FIRE_PUBLISHED_REASON_MARKER} but it did not`
+    const prompt = buildTerminalBuildWakePrompt({
+      run: run({ phase: 'failed', failure_reason: reason }),
+      board_item_id: 'item',
+    })
+    expect(prompt).not.toContain('Do NOT relaunch this build yet')
+    expect(prompt).toContain('To retry or resume a failed build')
+  })
   test('every other failure reason keeps instruction 2 byte-identical', () => {
     const ORIGINAL_INSTRUCTION_2 =
       '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'

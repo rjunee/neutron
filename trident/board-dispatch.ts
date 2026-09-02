@@ -524,7 +524,21 @@ export async function dispatchBoardBoundBuild(
   const queueDecision = (): QueueDecision => {
     const card = deps.board.get(deps.project_slug, board_item_id) ?? item
     const linkedRunId = card.linked_run_id ?? null
-    const linkedPhase = linkedRunId === null ? null : (deps.store.get(linkedRunId)?.phase ?? null)
+    // SCOPE THE LOOKUP TO THIS PROJECT (Argus r8 BLOCKER), exactly as
+    // `runProgressForItem` (`trident/run-progress.ts`) and
+    // `work-wakeup-selection.ts` already do: `TridentRunStore.get` is keyed on
+    // the run id ALONE, so a stale or mis-copied `linked_run_id` naming ANOTHER
+    // project's run would be read as this card's driver. Those two consumers
+    // fail safe when that happens; this one would fail DESTRUCTIVE — a foreign
+    // live run makes `linkedLive` true, which sends `queueHold` down the
+    // `deleteByItem` arm (erasing the card's queued hold) and tells the operator
+    // that run "owns" the card. It does not: its terminal event fires on a
+    // different project's board and never re-dispatches this card, so the card
+    // wedges with nothing left to release it. A run that is not this project's
+    // drives nothing here, so it is ignored and the card stays queueable.
+    const linkedRun = linkedRunId === null ? null : (deps.store.get(linkedRunId) ?? null)
+    const linkedPhase =
+      linkedRun !== null && linkedRun.project_slug === deps.project_slug ? linkedRun.phase : null
     const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
     // The clause that replaces "…it will dispatch automatically…" when nothing
     // was queued. Promising an automatic re-fire that cannot come is the thing
@@ -892,12 +906,25 @@ export async function dispatchBoardBoundBuild(
         // dropped rather than parked behind the lane that beat it. The store
         // re-takes the same liveness fact inside the INSERT's transaction and
         // reports it as a conflict; the refusal is the gate's, word for word.
+        // SAY WHICH ARM COLLIDED (Argus r8 nit). `liveBranchOrSlugHolder` ORs two
+        // facts — this repo's branch, and this project's slug — and the second
+        // ignores `repo_path`, so a card dispatched against a DIFFERENT repo
+        // collides on the slug while its branch is free. Reporting that as
+        // "branch X is already being built" sends the operator to look at a
+        // branch nothing holds. The refusal and the queue behaviour are identical
+        // either way; only the diagnosis sentence changes.
+        const holder = admission.holding_run
+        const sameBranch = holder.repo_path === repo_path && holder.branch === branch
         return await refuseBranchLive(
-          `Refused: branch ${branch} is already being built by live run ${admission.holding_run.id.slice(0, 8)} ` +
-            `(${admission.holding_run.slug}, phase ${admission.holding_run.phase}) — it won the race for this card ` +
+          `Refused: ${
+            sameBranch
+              ? `branch ${branch} is already being built`
+              : `this card's slug ${slug} is already being built (on another repo path, branch ${holder.branch ?? 'none'})`
+          } by live run ${holder.id.slice(0, 8)} ` +
+            `(${holder.slug}, phase ${holder.phase}) — it won the race for this card ` +
             'while this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly ' +
             'if it is truly dead — and never delete the branch under it.',
-          admission.holding_run.id,
+          holder.id,
         )
       }
       // Decided AFTER the admission attempt — the last await before the write.
@@ -955,12 +982,28 @@ export async function dispatchBoardBoundBuild(
     // refusal and the same hold rather than a 500 that queues nothing. Any
     // other failure is still a genuine `backend_error`.
     if (/UNIQUE constraint failed:\s*code_trident_runs\.(project_slug|slug)/i.test(detail)) {
-      return await refuseBranchLive(
-        `Refused: branch ${branch} is already being built by a live run that won the race for this card while ` +
-          'this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly if ' +
-          'it is truly dead — and never delete the branch under it.',
-        null,
-      )
+      // CONTAINED, because this one is OUTSIDE the try (Argus r8 nit). The
+      // sibling call at the admission site runs inside it, so a throwing
+      // `holds.upsert`/`deleteByItem` there degrades to `backend_error`; here it
+      // would escape `dispatchBoardBoundBuild` as a rejected promise and turn a
+      // recoverable refusal into an unhandled failure at the surface. Same
+      // degradation, spelled out.
+      try {
+        return await refuseBranchLive(
+          `Refused: branch ${branch} is already being built by a live run that won the race for this card while ` +
+            'this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly if ' +
+            'it is truly dead — and never delete the branch under it.',
+          null,
+        )
+      } catch (holdErr) {
+        return {
+          ok: false,
+          code: 'backend_error',
+          message: `failed to start a build: ${detail}; and the branch-live hold could not be recorded: ${
+            holdErr instanceof Error ? holdErr.message : String(holdErr)
+          }`,
+        }
+      }
     }
     return {
       ok: false,

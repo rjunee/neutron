@@ -1,7 +1,7 @@
 import type { ToolDef } from '@neutronai/cores-sdk/manifest'
 import { getBestModel } from '@neutronai/runtime/models.ts'
 import type { AgentSpec } from '@neutronai/runtime/substrate.ts'
-import { FIRE_PUBLISHED_REASON_MARKER, FIRE_SETTLE_TIMEOUT_ERROR } from '@neutronai/trident/fire-evidence.ts'
+import { FIRE_SETTLE_TIMEOUT_ERROR, isPublishedUnreviewedReason } from '@neutronai/trident/fire-evidence.ts'
 import { isTerminalPhase } from '@neutronai/trident/state-machine.ts'
 import type { TridentRun } from '@neutronai/trident/store.ts'
 import { LIVE_AGENT_TOOL_NAMES } from '../wiring/build-live-agent-turn.ts'
@@ -54,19 +54,22 @@ export function buildTerminalBuildWakePrompt(args: { run: TridentRun; board_item
   // before base resolution and before the build workflow), and `bound_pr` is a
   // `work_board_dispatch_build` argument — `work_board_start` deliberately has
   // none. So name THAT tool, and say plainly what the other one would do.
-  // TWO MATCHES, AND ONLY ONE OF THEM NEEDED A TOKEN (Argus r6, nit). The
-  // published arm keys on a BRACKETED marker because a reason that merely quoted
-  // the English `already built and published` would have SUPPRESSED a genuinely
-  // failed build's relaunch — a collision that costs recovery. The settle-timeout
-  // arm still keys on its plain-English constant, deliberately: its collision
-  // costs the opposite. A reason that happens to contain
+  // TWO MATCHES, AND ONLY ONE OF THEM NEEDED HARDENING (Argus r6 nit, r8 major).
+  // The published arm asks `isPublishedUnreviewedReason`, which ANCHORS on the
+  // head `publishedFailureReason` writes at offset zero, because a reason that
+  // merely quoted the English `already built and published` — or, after r4, the
+  // bracketed token itself, which a substrate-embedding reason can carry
+  // verbatim — would have SUPPRESSED a genuinely failed build's relaunch, a
+  // collision that costs recovery. The settle-timeout arm still keys on a bare
+  // `includes` of its plain-English constant, deliberately: its collision costs
+  // the opposite. A reason that happens to contain
   // `fire turn did not settle within the budget` gets the CAUTIOUS instruction —
   // resolve the branch holder before re-dispatching — which is safe advice for
   // any terminal build, where suppressing a relaunch that should have happened
   // is not. Same `includes`, opposite blast radius, so the same hardening is not
   // warranted here.
   const reason = run.failure_reason ?? ''
-  const fireShape = reason.includes(FIRE_SETTLE_TIMEOUT_ERROR) || reason.includes(FIRE_PUBLISHED_REASON_MARKER)
+  const fireShape = reason.includes(FIRE_SETTLE_TIMEOUT_ERROR) || isPublishedUnreviewedReason(reason)
   const instruction2 = fireShape
     ? '2. Do NOT relaunch this build yet. The launcher turn timed out, but the workflow it fired may still be running — or the work may already be built and published. Resolve the branch holder first: check `git worktree list --porcelain` for a worktree holding this branch and whether its lock names a live pid, read the `inner_checkpoint` on the run row, and check the PR state. If the failure reason above says the work was already built and published, verify the PR is open at that sha and then run a REVIEW round on it: `work_board_dispatch_build` with `bound_pr` set to that PR number reviews the published head and never builds, which is the cheapest correct recovery. Do NOT use `work_board_start` for that — a fresh dispatch is created with no checkpoint, so it REBUILDS from scratch. Otherwise re-dispatch with `work_board_start` only once nothing live holds the branch.'
     : '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'

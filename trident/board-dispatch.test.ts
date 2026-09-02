@@ -678,6 +678,58 @@ describe('branch liveness refusal (branch_live)', () => {
     expect('hold' in result).toBe(false)
   })
 
+  // ARGUS r8 (BLOCKER): `TridentRunStore.get` is keyed on the run id ALONE, so a
+  // stale or mis-copied `linked_run_id` naming ANOTHER project's live run was
+  // read here as this card's driver — and unlike the two other consumers of that
+  // lookup (`run-progress.ts`, `work-wakeup-selection.ts`), which fail safe, this
+  // one failed DESTRUCTIVE: `linkedLive` sent `queueHold` down the `deleteByItem`
+  // arm, erasing the card's queued hold and promising a re-fire that a foreign
+  // project's terminal event never delivers. The card wedged with nothing left to
+  // release it. A foreign run drives nothing here.
+  test('a live linked run belonging to ANOTHER project does not own this card — the refusal still queues', async () => {
+    const repoDir = makeCommittedRepo('repo-foreign-linked')
+    const foreignRepo = makeCommittedRepo('repo-foreign-other-project')
+    const holds = new DispatchHoldStore(db)
+    // The card's linked_run_id names a LIVE run — of a different project.
+    const foreign = await store.create({
+      slug: 'some-other-card',
+      project_slug: 'proj-2',
+      repo_path: foreignRepo,
+      task: 'a different project entirely',
+      merge_mode: 'local',
+      ralph: false,
+      branch: 'trident/some-other-card',
+    })
+    // What actually refuses this dispatch: a worktree lock on the card branch.
+    addLockedWorktree(repoDir, 'wt-foreign-linked-holder', `claude agent test (pid ${process.pid})`)
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: foreign.id,
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    // The card is QUEUED, and the refusal neither claims the foreign run owns
+    // the card nor names it as the thing the card is waiting on.
+    expect(result.message).not.toContain('nothing stays queued')
+    expect(result.message).not.toContain(foreign.id.slice(0, 8))
+    expect('hold' in result).toBe(true)
+    if (!('hold' in result)) return
+    expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH })
+    expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+  })
+
   test('the branch_live hold names the holding RUN when there is one', async () => {
     const repoDir = makeCommittedRepo('repo-queued-row')
     const live = await store.create({

@@ -545,10 +545,13 @@ export interface BuildTridentOrchestratorOptions {
    * WAITING IS BOUNDED, and by ONE of the two bounds — the 90-minute no-advance
    * reaper, which runs BEFORE this point in `step()` and which a waiting lane
    * cannot outrun: waiting returns `changed: false`, so `last_advanced_at` never
-   * moves. (Argus r6, nit: this note used to claim the 2 h in-flight ceiling was
-   * also evaluated first. It is not — that check sits AFTER the orphan block —
-   * and citing a bound that has not run yet is exactly how a "bounded" comment
-   * stops being checkable.)
+   * moves. (Argus r6 nit, CORRECTED in r8: the r6 note said the 2 h in-flight
+   * ceiling "sits AFTER the orphan block". It does not — `overCeiling` is
+   * computed inside the hang-watchdog block (1b), i.e. BEFORE orphan recovery
+   * (2), on the SAME `elapsedSinceAdvance` clock as the reaper. The substantive
+   * point survives and is why only ONE bound is cited: a run that reaches the
+   * ceiling has already reached the 90-minute reaper, so the ceiling can never
+   * be the bound that actually ends a wait.)
    */
   probe_branch_holder?: (repo_path: string, branch: string) => Promise<BranchHolderProbe | null>
   /**

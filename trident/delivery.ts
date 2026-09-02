@@ -38,7 +38,7 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
-import { FIRE_PUBLISHED_REASON_MARKER } from './fire-evidence.ts'
+import { isPublishedUnreviewedReason } from './fire-evidence.ts'
 import {
   TRIDENT_SALVAGE_MARKER,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
@@ -109,6 +109,16 @@ export type FailureClass =
    * that sha. Recorded under phase `failed` because there is no other terminal phase
    * for "not merged", but it is NOT a failure and must not wear ❌ — the second class
    * (with `infra-blocked`) composed under its own glyph.
+   *
+   * WHERE THIS LIVES, AND WHY IT IS NOT `trident/run-disposition.ts` (Argus r8
+   * minor). The card names that module as the state's home, on the strength of a
+   * SIBLING card introducing it at the write site. That module does not exist on
+   * this branch, and inventing an empty one to hold a single union member would
+   * have made the two cards conflict over a file neither had landed. So the
+   * state is spelled HERE, as one more `FailureClass` over the existing columns —
+   * no new column, no backfill, no second NAME for "built and published, review
+   * not run". When the sibling lands `run-disposition.ts`, fold this member into
+   * it; this note is the cross-reference that says so.
    */
   | 'published-unreviewed'
   | 'underspecified'
@@ -271,9 +281,14 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
   // at that sha. CHECKED EARLY and by the marker `publishedFailureReason` authors,
   // because the generic tail would otherwise offer `retry` — inviting exactly the
   // rebuild the rest of this seam exists to prevent, one line under a summary that
-  // says the work is already done. THE TWO HALVES MUST MOVE TOGETHER: the marker is
-  // exported from `fire-evidence.ts` and imported here rather than retyped.
-  if (r.includes(FIRE_PUBLISHED_REASON_MARKER)) {
+  // says the work is already done. THE TWO HALVES MUST MOVE TOGETHER: the
+  // predicate is exported from `fire-evidence.ts` and imported here rather than
+  // retyped — and it ANCHORS on the head `publishedFailureReason` writes rather
+  // than looking for the marker anywhere in the string, so substrate text that
+  // merely QUOTES the token (this repo builds itself, and the crash-recovery
+  // reason below embeds substrate output verbatim) cannot claim a failed build
+  // was published.
+  if (isPublishedUnreviewedReason(r)) {
     return {
       klass: 'published-unreviewed',
       summary:

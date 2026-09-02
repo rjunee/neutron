@@ -313,3 +313,27 @@ export function publishedFailureReason(checkpoint: string): string {
   const short = rendered.length > budget ? `${whole}…` : rendered
   return `${PUBLISHED_REASON_HEAD}${short}${PUBLISHED_REASON_TAIL}`
 }
+
+/**
+ * DOES THIS `failure_reason` COME FROM `publishedFailureReason`? — the ONLY
+ * question either consumer actually wants answered.
+ *
+ * ANCHORED ON THE PRODUCER'S SHAPE, NOT ON A SUBSTRING ANYWHERE (Argus r8).
+ * Both consumers used to ask `reason.includes(FIRE_PUBLISHED_REASON_MARKER)`.
+ * Moving the match from the English phrase to a bracketed token (r4) killed the
+ * realistic collision, but not the mechanism: a reason that EMBEDS substrate
+ * text quoting the literal token still matched. That is not hypothetical here —
+ * trident builds trident, and `delivery.ts` documents that launcher-crash
+ * reasons embed substrate output VERBATIM, so a failed build whose stderr
+ * quoted this file would have been reported as "finished and pushed" and had
+ * its relaunch suppressed. The token appears at a FIXED position in every
+ * reason this seam authors — inside `PUBLISHED_REASON_HEAD`, at offset zero —
+ * so match the head, and quoted text can only ever appear after it.
+ *
+ * Case-insensitive and leading-space tolerant because `interpretFailure`
+ * lowercases and trims before classifying; the head is already lowercase, so
+ * this costs nothing and keeps the two call sites able to pass either form.
+ */
+export function isPublishedUnreviewedReason(reason: string): boolean {
+  return reason.trimStart().toLowerCase().startsWith(PUBLISHED_REASON_HEAD.toLowerCase())
+}

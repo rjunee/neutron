@@ -505,3 +505,81 @@ of `classifyFireTimeoutRow`, which reads the run's OWN `inner_checkpoint` and re
 it is the first check in the evidence list for exactly that reason, and it is the arm that
 would have saved runs `74dc3e77` and `8c88c96c` — both built, pushed and CI-green when the
 timeout called them failures.
+
+### Round 18 (2026-09-02) — Argus r8: the scope check the ID-only run lookup was missing, and the marker match moved off `includes`
+
+Round 17 nominated the mutation and the prover was satisfied; a fresh review round then found
+ONE blocker and one actionable major on the same approved code. Both are fixed here, each with
+a must-fail control that was watched red before it was watched green.
+
+**BLOCKER — `queueDecision` trusted an ID-only run lookup.** `TridentRunStore.get` is keyed on
+the run id ALONE. `dispatchBoardBoundBuild`'s new `queueDecision` read
+`deps.store.get(linkedRunId)?.phase` and never compared the returned row's `project_slug` to
+its own, so a stale or mis-copied `linked_run_id` naming ANOTHER project's live run made
+`linkedLive` true for this card. The repo already has this exact defensive check in two
+places — `run-progress.ts` ("a `linked_run_id` should only ever name this project's run, but
+never derive across instances") and `work-wakeup-selection.ts`, which documents the reachable
+cause — and BOTH of them fail safe. This one failed DESTRUCTIVE: `linkedLive` drives
+`queueHold` down its `deleteByItem` arm, erasing the card's queued hold, and drives prose
+telling the operator that run "owns" the card. It does not — a foreign run's terminal event
+fires on a different project's board and never re-dispatches this card, so the card wedges
+with nothing left to release it. The lookup is now scoped, one comparison, matching the two
+existing spellings. The control is a cross-project boundary test in `board-dispatch.test.ts`:
+the card's `linked_run_id` names a LIVE run in `proj-2` while a worktree lock on the card
+branch is what actually refuses the dispatch; the refusal must still QUEUE, must carry its
+`hold`, and must not name the foreign run. Removing the `project_slug` comparison reddens it
+(39 pass / 1 fail) and nothing else.
+
+**MAJOR — the published marker was substring-matched, so prose quoting the token collided.**
+Argus r4 moved the match from the English phrase `already built and published` to the bracketed
+token `[trident:published-unreviewed]`, which killed the collision anyone would hit by accident.
+It did not kill the MECHANISM: both consumers still asked `reason.includes(MARKER)`, and this
+repo builds itself. `delivery.ts` documents one screen below that a launcher-crash
+`failure_reason` embeds substrate output VERBATIM, so a genuinely failed build whose stderr
+quoted this file would have been classified `published-unreviewed` — reported as "finished and
+pushed", with its rebuild advice and its wake relaunch both suppressed. The fix is the one the
+finding asked for: anchor on the PRODUCER's shape. `isPublishedUnreviewedReason` (new, in
+`fire-evidence.ts` beside the reason it tests) asks whether the string STARTS WITH
+`PUBLISHED_REASON_HEAD` — the token sits at a fixed offset inside that head, so quoted text can
+only ever appear after it. It is trim/lowercase-tolerant because `interpretFailure` lowercases
+and trims before classifying, and `authoredFailureReason` only ever trims the TAIL, so the head
+survives every path that reaches either consumer. `delivery.ts` and `terminal-build-wake.ts` now
+both call it; `FIRE_PUBLISHED_REASON_MARKER` stays exported because the composition wiring test
+asserts the rendered reason still CONTAINS it. Controls: five new negative tests across the
+three suites — a mid-string token, an ENTIRE authored reason quoted inside other text, and the
+plain settle-timeout reason that must stay relaunchable. Reverting the predicate to
+`reason.includes(FIRE_PUBLISHED_REASON_MARKER)` reddens all five (104 pass / 5 fail).
+
+**The minors and nits, each fixed at the line it concerns.** `store.ts`'s
+`createIfClaimsAvailable` docblock no longer opens "an EMPTY claim set … always admits" — it
+skips the PATH scan; the branch/slug liveness check runs for every call and can still refuse
+(the paragraph three lines down already said so). The `conflict: 'branch'` refusal now says
+WHICH arm collided: `liveBranchOrSlugHolder` ORs this repo's branch against this project's
+slug, and the second arm ignores `repo_path`, so a card dispatched against a different repo
+path collided on the slug while its branch was free and was told to go look at a branch nothing
+held; the refusal and the queue behaviour are unchanged, only the diagnosis sentence. The
+`refuseBranchLive` call in the OUTER catch is now itself contained — its sibling runs inside the
+try, so a throwing `holds.upsert` there degrades to `backend_error`, while this one would have
+escaped as a rejected promise and turned a recoverable refusal into an unhandled failure at the
+surface. `fire-evidence-probes.ts` documents at the comparison site that `fresh_worktree` uses
+MTIME where the card says creation time, that `birthtime` is 0 on the filesystem this runs on,
+and that the substitution can only OVER-report — which is the safe direction, because this arm
+returns `launched` (holds the lane, bounded by the 90-minute reaper) rather than terminalizing.
+`orchestrator.ts`'s r6 "nit" correction was itself wrong and is corrected again: `overCeiling`
+is computed inside the hang-watchdog block (1b), BEFORE orphan recovery (2), not after; the
+substantive point — only ONE bound is worth citing, because a run that reaches the 2 h ceiling
+has already reached the 90-minute reaper on the same clock — survives. `delivery.ts` records
+why `published-unreviewed` is spelled as a `FailureClass` there and not in the
+`trident/run-disposition.ts` the card names: that module does not exist on this branch, a
+sibling card introduces it, and creating an empty one to hold a single union member would have
+made two cards conflict over a file neither had landed. The cross-reference says to fold it in
+when the sibling lands. And the stray blank line the r6 round left in `tick.ts`'s import block
+is gone.
+
+**Not done, deliberately.** The mutation nomination is unchanged: no round-18 edit touched
+`classifyFireTimeoutRow`, the find-string still occurs exactly once in `trident/fire-evidence.ts`
+(re-checked at this head, `occurrences=1`), and the guard/control pair still reddens and stays
+green respectively. The r8 findings about the worktree-lock reason with no ` start <n>` and about
+`branch_live` holds paying full dispatch cost every drain are left as written down: both are
+deliberate trades already argued in-file, and both would be closed by changing a bound rather
+than a defect.

@@ -17,7 +17,7 @@ import {
   type OutboundSink,
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
-import { publishedFailureReason } from './fire-evidence.ts'
+import { FIRE_PUBLISHED_REASON_MARKER, publishedFailureReason } from './fire-evidence.ts'
 import {
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_SNAPSHOT_MARKER,
@@ -75,6 +75,23 @@ describe('published-unreviewed is keyed on the machine token, not on English', (
 
   test('a reason that merely QUOTES the English phrase does NOT classify as published', () => {
     const reason = 'forge assertion failed: expected text already built and published to be absent'
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(interp.klass).not.toBe('published-unreviewed')
+    const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(out?.text.startsWith('📦')).toBe(false)
+  })
+
+  // ARGUS r8 (major): moving the match from English to a bracketed token killed
+  // the realistic collision but not the MECHANISM — `includes()` still matched
+  // the token ANYWHERE. This repo builds itself, and the crash-recovery branch
+  // one screen below deliberately embeds substrate stderr VERBATIM, so a
+  // genuinely failed build whose output quoted this file reported "finished and
+  // pushed" and had its rebuild advice suppressed. The match is now anchored on
+  // the head `publishedFailureReason` writes at offset zero.
+  test('a reason that EMBEDS the literal machine token mid-string does NOT classify as published', () => {
+    const reason =
+      'the build supervisor crashed; crash-recovery budget exhausted — substrate said: ' +
+      `expected reason to contain ${FIRE_PUBLISHED_REASON_MARKER} but it did not`
     const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: reason }))
     expect(interp.klass).not.toBe('published-unreviewed')
     const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: reason }))

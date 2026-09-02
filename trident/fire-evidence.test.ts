@@ -3,6 +3,7 @@ import {
   classifyFireTimeoutRow,
   FIRE_PUBLISHED_REASON_MARKER,
   FIRE_SETTLE_TIMEOUT_ERROR,
+  isPublishedUnreviewedReason,
   OUTER_PUBLISHED_CHECKPOINT,
   PUBLISHED_REASON_MAX_CHARS,
   publishedFailureReason,
@@ -255,6 +256,48 @@ describe('publishedFailureReason', () => {
 
   test('the settle-timeout error string is the one the fire actually resolves', () => {
     expect(FIRE_SETTLE_TIMEOUT_ERROR).toBe('fire turn did not settle within the budget')
+  })
+})
+
+// ARGUS r8 (major): both consumers asked `reason.includes(MARKER)`. The r4 move
+// from English to a bracketed token removed the collision anybody would hit by
+// accident, but not the one this repo creates for itself — trident builds
+// trident, and a launcher-crash failure_reason embeds substrate output VERBATIM,
+// so a genuinely failed build whose stderr quoted this file read as
+// "finished and pushed" and had its relaunch suppressed. The predicate anchors
+// on the head `publishedFailureReason` writes at offset zero.
+describe('isPublishedUnreviewedReason', () => {
+  test('accepts every reason publishedFailureReason authors', () => {
+    for (const checkpoint of [
+      PUBLISHED,
+      `outer-published:${SHA}:123:123456789:deviated`,
+      `outer-published:${SHA}:1234567890123:7`,
+      'not a checkpoint at all',
+    ]) {
+      expect(isPublishedUnreviewedReason(publishedFailureReason(checkpoint))).toBe(true)
+    }
+  })
+
+  test('survives the trim/lowercase `interpretFailure` applies before classifying', () => {
+    const reason = publishedFailureReason(PUBLISHED)
+    expect(isPublishedUnreviewedReason(`  ${reason.toUpperCase()}`)).toBe(true)
+  })
+
+  test('REJECTS a reason that merely embeds the machine token', () => {
+    expect(
+      isPublishedUnreviewedReason(
+        `crash-recovery budget exhausted — substrate said: expected ${FIRE_PUBLISHED_REASON_MARKER} here`,
+      ),
+    ).toBe(false)
+  })
+
+  test('REJECTS a reason that quotes an ENTIRE authored reason inside other text', () => {
+    const quoted = publishedFailureReason(PUBLISHED)
+    expect(isPublishedUnreviewedReason(`inner workflow fire failed: assertion: "${quoted}"`)).toBe(false)
+  })
+
+  test('REJECTS the plain settle-timeout failure, which must still be relaunchable', () => {
+    expect(isPublishedUnreviewedReason(`inner workflow fire failed: ${FIRE_SETTLE_TIMEOUT_ERROR}`)).toBe(false)
   })
 })
 
