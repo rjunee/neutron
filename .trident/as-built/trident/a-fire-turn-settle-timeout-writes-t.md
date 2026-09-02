@@ -273,3 +273,63 @@ the drain (it is `> 0`, so the gate takes the due-time branch, and
 `-Infinity + Infinity` is `NaN`, which every comparison rejects) — the docblock had
 claimed it drains every tick, which only `NaN` and `<= 0` do. And `branch_live` reaches
 409 through the catch-all `backend_error ? 500 : 409`, not an arm of its own.
+
+### Round 8 (Argus round 4) — the "nothing stays queued" rule now governs EVERY hold-producing gate
+
+Round 7 fixed the `branch_live` arm and its own comment named the hole it left: "the
+blocker gate twenty lines up upserts unconditionally". It does — and so does the
+path-contention gate below it. Both wrote a hold row for a card whose OWN linked run was
+live, and `buildDispatchHoldSweep` drops a hold only while that run is live AT SWEEP
+TIME, so stopping the card on purpose and letting the declared blocker finish dispatched
+a brand-new lane onto it. The branch's pinned contract — refuse, stop the run, sweep, no
+second run — was true of one gate out of three.
+
+The decision is now made ONCE, above all three gates: `queued = holds wired && the card's
+linked run is not live`, plus a single `queueHold` whose two arms are "upsert" and
+"delete whatever is already queued". Every gate routes through it, every refusal's prose
+says which arm ran (the "it will dispatch automatically" clause is replaced when nothing
+was queued), and no refusal returns a `hold` shape claiming a queue entry that does not
+exist. Pinned end to end in `dispatch-holds.test.ts` for the blocker gate (refuse behind
+a live run, stop that run, complete the blocker, sweep, no second run) and for the path
+gate, with a must-pass sibling proving a card with no live run of its own still queues
+and still carries its `blocker` hold.
+
+THE PUBLISHED MARKER IS A TOKEN, NOT A SENTENCE. `FIRE_PUBLISHED_REASON_MARKER` was the
+plain English `already built and published`, matched with `includes()` by both consumers
+(`terminal-build-wake.ts`, `delivery.ts`). Any failure_reason that merely QUOTED the
+phrase — `forge assertion failed: expected text already built and published to be
+absent` — classified a build that published nothing as `published-unreviewed` and
+suppressed its relaunch. The marker is now `[trident:published-unreviewed]`; the English
+still appears in the rendered reason for the operator, only the MATCH moved.
+`PUBLISHED_REASON_MAX_CHARS` grew from 200 to 231 — exactly the token's 30 chars plus its
+separating space — so the budget left for the rendered checkpoint is unchanged at 61 and
+no matched checkpoint is cut short. Both directions are pinned, in `delivery.test.ts` and
+in the wake's own test.
+
+THE PRODUCTION DRAIN WIRE HAS A TEST. `build-core-modules-trident-fire-evidence-wiring.test.ts`
+injects its own drain callback, so it proved the tick calls what it is handed and nothing
+about whether production hands anything over: deleting
+`drain_dispatch_holds: () => tridentHoldSweep()` from `open/composer.ts` left the whole
+suite green. That line is the ONLY trigger a worktree-only `branch_live` hold can ever
+have. `open/__tests__/open-dispatch-hold-drain-wiring.test.ts` pins it source-scoped, on
+the honest-coverage precedent of `open-terminal-build-wake-wiring.test.ts`.
+
+THE LANE-HOLDING SAVE CANNOT BE THROWN OUT OF. It spread the seen row verbatim, and a
+`REQUEST_CHANGES` with no findings — a shape `checkpoint.sh` can write and crash recovery
+preserves — is exactly what `saveIfActive` REFUSES. The tick swallows that throw,
+`subagent_run_id` stays NULL, and the next tick re-enters the launch site: a second lane
+at the same branch, which is the whole thing this seam exists to prevent. The verdict is
+now downgraded on that save exactly as `failedRun` does it.
+
+Two comments were prose-stronger than the code and are corrected: the launched arm's
+phase derivation reads `evidence.observed`, which is set when ANY workflow-owned column
+moved — so it can carry a prior round's checkpoint, harmless because `phaseForCheckpoint`
+is the same mapping the store applies; and the published arm's "can only become
+REVIEW_NOT_RUN" is a property of `persistRefireReset` nulling the verdict before a
+re-fire, not of `failedRun`, which passes an existing APPROVE through.
+
+Still accepted risk, unchanged: a `branch_live` hold has no age cap, so a stale worktree
+lock on a host whose `/proc` cannot be read queues a card indefinitely. The drop rule is
+positive-evidence-only by design; an age cap would need a give-up path that deletes a
+card's queue entry on a timer, which is the failure mode this file spent three rounds
+closing. Recorded as a follow-up, not built here.

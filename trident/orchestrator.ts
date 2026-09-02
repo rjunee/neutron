@@ -3558,6 +3558,23 @@ export function buildTridentOrchestrator(
               // between that read and the save is closed by the CAS below
               // (`workflow_columns_seen`), not by this spread.
               ...seenRow,
+              // …EXCEPT A REJECTION THE STORE WILL NOT ACCEPT (Argus r4 minor).
+              // `saveIfActive` THROWS `TridentEmptyFindingsRejectionError` on a
+              // `REQUEST_CHANGES` with no findings on the incoming row and none
+              // on the stored one — a shape `checkpoint.sh` can write and crash
+              // recovery preserves. Spreading `seenRow` verbatim carried it into
+              // the one save whose whole job is to HOLD the lane, and the tick's
+              // per-run catch swallows the throw: `subagent_run_id` stays NULL,
+              // so the next tick re-enters the launch site and fires a SECOND
+              // lane at the branch — the exact outcome this seam exists to
+              // prevent. Downgrade it exactly as `failedRun` does (an empty
+              // finding set is an approval or an infrastructure failure, never a
+              // rejection); the CAS still guards the column, and a real review
+              // that lands findings re-writes the verdict on its next checkpoint.
+              ...(seenRow.inner_verdict === 'REQUEST_CHANGES' &&
+              parseCheckpointFindings(seenRow.inner_checkpoint_findings).length === 0
+                ? { inner_verdict: 'REVIEW_NOT_RUN' as const }
+                : {}),
               // AND THE PHASE THAT CHECKPOINT IMPLIES. `phase` is NOT a
               // workflow-owned column — the tick owns it — but `checkpoint.sh`
               // derives it from `inner_checkpoint` at the inner workflow's write
@@ -3568,10 +3585,19 @@ export function buildTridentOrchestrator(
               // assigns `phase` plainly and applies no derivation of its own, so
               // the derivation has to happen HERE. `null` from the table means
               // the checkpoint implies nothing — the pinned phase stands.
-              // Derived from what the gatherer OBSERVED, never from the pinned
-              // checkpoint: absent an observation there is no new checkpoint to
-              // derive from, and a prior round's carried-forward checkpoint must
-              // not drag the phase backwards.
+              // Derived from `evidence.observed`, never from the pinned
+              // checkpoint: absent an observation there is no checkpoint to
+              // derive from at all and the pinned phase stands.
+              //
+              // AND THE OBSERVATION IS NOT ALWAYS A CHECKPOINT MOVE (Argus r4
+              // nit — the earlier wording said "what the gatherer OBSERVED" as
+              // if it always were). `classifyFireTimeoutRow` sets `observed` when
+              // ANY workflow-owned column moved, so a delta on `inner_result`
+              // alone carries whatever `inner_checkpoint` the row already had —
+              // possibly a prior round's. That is harmless rather than exact:
+              // `phaseForCheckpoint` is the same mapping `checkpoint.sh` and
+              // `TridentRunStore.update` apply, so the phase this derives is the
+              // one the row would already be wearing for that checkpoint.
               //
               // ONE RESIDUAL WINDOW, STATED PLAINLY (Argus r5): `phase` is not a
               // workflow-owned column, so it is written PLAINLY while
@@ -3610,8 +3636,15 @@ export function buildTridentOrchestrator(
         if (evidence.kind === 'published') {
           // THE WORK IS FINISHED. Terminal, but recorded HONESTLY: built and
           // published, review not run. The verdict is NOT set by hand —
-          // `failedRun` normalizes it, and an outer-published checkpoint carries
-          // no argus provenance, so it can only become REVIEW_NOT_RUN.
+          // `failedRun` normalizes it, and with no argus provenance on the row
+          // that normalization yields REVIEW_NOT_RUN.
+          //
+          // "CAN ONLY BECOME" WAS TOO STRONG (Argus r4 nit). `failedRun` passes
+          // an existing `inner_verdict === 'APPROVE'` through unchanged, so an
+          // APPROVE already on the row would survive here. It is not reachable on
+          // this path — `persistRefireReset` NULLs `inner_verdict` before a
+          // re-fire — but that is a property of the caller, not of `failedRun`,
+          // and the comment should not claim the callee enforces it.
           return {
             // Same rule as the held lane: terminalize over what the gatherer
             // actually READ, never over the pre-fire snapshot.

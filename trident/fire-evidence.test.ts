@@ -226,9 +226,9 @@ describe('publishedFailureReason', () => {
     expect(reason).not.toContain(SHA)
   })
 
-  test('stays inside the 200-char budget the honest fallback quotes verbatim', () => {
+  test('stays inside the char budget the honest fallback quotes verbatim', () => {
     for (const checkpoint of [PUBLISHED, `outer-published:${SHA}:123:123456789:deviated`]) {
-      expect(publishedFailureReason(checkpoint).length).toBeLessThanOrEqual(200)
+      expect(publishedFailureReason(checkpoint).length).toBeLessThanOrEqual(PUBLISHED_REASON_MAX_CHARS)
     }
   })
 
@@ -239,13 +239,13 @@ describe('publishedFailureReason', () => {
   test('shortens by FIELD: the round and :deviated survive a maximal checkpoint', () => {
     const reason = publishedFailureReason(`outer-published:${SHA}:123:123456789:deviated`)
     expect(reason).toContain(':123:123456789:deviated')
-    expect(reason.length).toBeLessThanOrEqual(200)
+    expect(reason.length).toBeLessThanOrEqual(PUBLISHED_REASON_MAX_CHARS)
   })
 
   test('an over-long remaining field is capped VISIBLY, never silently', () => {
     const reason = publishedFailureReason(`outer-published:${SHA}:1234567890123:7`)
     expect(reason).toContain('123456789…:7')
-    expect(reason.length).toBeLessThanOrEqual(200)
+    expect(reason.length).toBeLessThanOrEqual(PUBLISHED_REASON_MAX_CHARS)
   })
 
   test('contains none of the failure-classifier tokens', () => {
@@ -280,7 +280,7 @@ describe('round-2 findings — the carried columns and the length contract', () 
     expect(evidence.observed?.inner_verdict).toBe('REVIEW_NOT_RUN')
   })
 
-  // MINOR (round 2): the <=200 contract was prose. A 500-char non-matching input
+  // MINOR (round 2): the length contract was prose. A 500-char non-matching input
   // rendered a 639-char reason, because only the 40-hex sha was abbreviated.
   test('the fallback path is CAPPED, not merely documented', () => {
     const absurd = `outer-published:${SHA}:${'9'.repeat(500)}`

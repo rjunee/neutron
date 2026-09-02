@@ -3506,6 +3506,39 @@ describe('orchestrator — fire did not settle → failed', () => {
     expect(isTerminalPhase(after.phase)).toBe(false)
   })
 
+  // ARGUS r4 (minor): the held-lane save spread the seen row VERBATIM, and a
+  // `REQUEST_CHANGES` with no findings — a shape `checkpoint.sh` can write and
+  // crash recovery preserves — is exactly what `saveIfActive` REFUSES. The throw
+  // is swallowed by the tick's per-run catch, `subagent_run_id` stays NULL, and
+  // the next tick re-enters the launch site: a second lane at the same branch,
+  // which is the whole thing this seam exists to prevent.
+  test('a findings-free REQUEST_CHANGES on the row cannot make the lane-holding save throw', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => ({
+        kind: 'launched',
+        detail: 'live lock on the branch',
+        observed: pickWorkflowOwned(store.get(input.run.id)!),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // The rejected shape, written the way the checkpoint seam can write it.
+    await db.run(
+      `UPDATE code_trident_runs SET inner_verdict = 'REQUEST_CHANGES', inner_checkpoint_findings = NULL WHERE id = ?`,
+      [run.id],
+    )
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    // THE LANE IS HELD: not terminal, and carrying a dispatch id, so harvest and
+    // the stall guard own it rather than a fresh fire.
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    expect(after.subagent_run_id).not.toBeNull()
+    // And the unacceptable verdict was normalized, not persisted.
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
+  })
+
   test('the held row carries NO launcher generation (never a minted or inherited one)', async () => {
     const h = buildHarness({
       plan: () => ({ fire: TIMEOUT_FIRE }),

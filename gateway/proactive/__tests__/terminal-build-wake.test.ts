@@ -120,6 +120,21 @@ describe('terminal build wake', () => {
     expect(prompt).toContain('reviews the published head and never builds')
     expect(prompt).toContain('it REBUILDS from scratch')
   })
+  // ARGUS r4 (major): the marker used to be the plain English phrase `already
+  // built and published`, matched with `includes()`. Any failure_reason that
+  // merely QUOTED that phrase — this is a real forge assertion message — read as
+  // published-unreviewed and suppressed the relaunch of a build that never
+  // published anything. The marker is now a bracketed token; prose cannot collide.
+  test('a failure reason that merely QUOTES the English phrase is NOT read as published', () => {
+    const reason =
+      'forge assertion failed: expected text already built and published to be absent'
+    const prompt = buildTerminalBuildWakePrompt({
+      run: run({ phase: 'failed', failure_reason: reason }),
+      board_item_id: 'item',
+    })
+    expect(prompt).not.toContain('Do NOT relaunch this build yet')
+    expect(prompt).toContain('To retry or resume a failed build')
+  })
   test('every other failure reason keeps instruction 2 byte-identical', () => {
     const ORIGINAL_INSTRUCTION_2 =
       '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'

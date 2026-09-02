@@ -505,6 +505,83 @@ describe('UNMET BLOCKER REFUSED — a declared dependency holds the card', () =>
     expect(b.message).toContain('FAILED')
   })
 
+  // ARGUS r4 (VETO): the SAME hazard the branch_live refusal closes, one gate
+  // EARLIER. The blocker gate ran ahead of the branch-liveness block and upserted
+  // its row unconditionally, so a card that already had a live run of its own got
+  // a `blocker` hold anyway — and `buildDispatchHoldSweep` drops a hold only
+  // while the linked run is live AT SWEEP TIME. Stop that run on purpose, let the
+  // declared blocker finish, and the surviving row dispatched a brand-new lane
+  // onto a card someone had deliberately stopped. Pinned END TO END, over the
+  // real store and the real sweep.
+  test('a blocker refusal behind the card’s own live run queues NOTHING and cannot auto-restart it', async () => {
+    const live = await store.create({ slug: 'live', project_slug: SLUG, repo_path: REPO, task: 'build', claimed_paths: [] })
+    const board = stubBoard([
+      { id: 'A', title: 'the blocking card that must finish before B runs', design_doc_ref: null, status: 'upcoming' },
+      {
+        id: 'B',
+        title: 'the dependent card whose own build is already running against it',
+        design_doc_ref: null,
+        status: 'in_progress',
+        blockers: ['A'],
+        linked_run_id: live.id,
+      },
+    ])
+    // Seeded EARLIER, while the card was free — skipping the upsert alone would
+    // leave THIS row behind to do the same damage.
+    await holds.upsert({
+      project_slug: SLUG,
+      board_item_id: 'B',
+      task: 'build B',
+      hold_kind: 'blocker',
+      hold_reason: 'queued before this card had a run of its own',
+      held_on_blocker_id: 'A',
+    })
+
+    const refusal = await dispatchBoardBoundBuild({ task: 'build B', board_item_id: 'B' }, deps(board))
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('held')
+    // The prose no longer promises a dispatch that cannot come…
+    expect(refusal.message).not.toContain('it will dispatch automatically')
+    expect(refusal.message).toContain('nothing stays queued')
+    // …and the shape no longer claims a queue entry that does not exist.
+    expect('hold' in refusal).toBe(false)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+
+    // The card is STOPPED on purpose and the blocker then completes — the exact
+    // sequence that used to restart it.
+    await store.terminalTransition(live.id, { phase: 'stopped' })
+    board.cards.get('A')!.status = 'done'
+    await buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })(
+      store.get(live.id)!,
+    )
+    expect(runCount()).toBe(1)
+    expect(board.attached).toEqual([])
+  })
+
+  // The must-pass sibling: with no live run of its own the card is queued exactly
+  // as before, so the fix above cannot have been "never queue a blocked card".
+  test('a blocker refusal for a card with NO live run still queues and still carries its hold', async () => {
+    const board = stubBoard([
+      { id: 'A', title: 'the blocking card that must finish before B runs', design_doc_ref: null, status: 'upcoming' },
+      {
+        id: 'B',
+        title: 'the dependent card that waits for A to be marked done',
+        design_doc_ref: null,
+        status: 'upcoming',
+        blockers: ['A'],
+      },
+    ])
+    const refusal = await dispatchBoardBoundBuild({ task: 'build B', board_item_id: 'B' }, deps(board))
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.message).toContain('it will dispatch automatically')
+    expect('hold' in refusal).toBe(true)
+    if (!('hold' in refusal)) return
+    expect(refusal.hold).toEqual({ kind: 'blocker', blocker_id: 'A' })
+    expect(holds.getByItem(SLUG, 'B')?.hold_kind).toBe('blocker')
+  })
+
   test('a blocker id resolving to NO card is CLEARED, not waited on forever', async () => {
     const board = stubBoard([
       {
@@ -627,6 +704,39 @@ describe('STUCK CLAIM CANNOT WEDGE THE QUEUE', () => {
       board,
       makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
     })(store.get(live.id)!)
+    expect(runCount()).toBe(1)
+    expect(board.attached).toEqual([])
+  })
+
+  // The THIRD hold-producing gate, same rule (Argus r4 VETO, generalised): a
+  // path-contention hold written while the card's own run is live outlives that
+  // run exactly like the blocker one did.
+  test('the path-contention refusal behind the card’s own live run queues nothing either', async () => {
+    const live = await store.create({
+      slug: 'live',
+      project_slug: SLUG,
+      repo_path: REPO,
+      task: 'edit trident/foo.ts',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    const board = stubBoard([
+      { id: 'B', title: 'the card whose own build already claims the file', design_doc_ref: null, status: 'in_progress', linked_run_id: live.id },
+    ])
+    const refusal = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts again', board_item_id: 'B' },
+      deps(board),
+    )
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('held')
+    expect(refusal.message).not.toContain('will start automatically')
+    expect('hold' in refusal).toBe(false)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+
+    await store.terminalTransition(live.id, { phase: 'stopped' })
+    await buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })(
+      store.get(live.id)!,
+    )
     expect(runCount()).toBe(1)
     expect(board.attached).toEqual([])
   })

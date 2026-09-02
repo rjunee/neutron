@@ -34,12 +34,23 @@ import type { TridentRun } from './store.ts'
 export const FIRE_SETTLE_TIMEOUT_ERROR = 'fire turn did not settle within the budget'
 
 /**
- * The phrase that makes a terminal row READ as "the work was finished and
- * pushed, the review simply never ran" rather than as a failed fire. The wake
- * prompt keys on it to say "verify the PR and dispatch a review" instead of
- * "relaunch", so it is a contract string, not decoration.
+ * The MACHINE ANCHOR that makes a terminal row READ as "the work was finished
+ * and pushed, the review simply never ran" rather than as a failed fire. The
+ * wake prompt and `interpretFailure` key on it to say "verify the PR and
+ * dispatch a review" instead of "relaunch", so it is a contract string, not
+ * decoration.
+ *
+ * IT IS A BRACKETED TOKEN, NOT THE ENGLISH SENTENCE IT ACCOMPANIES (Argus r4).
+ * It used to be the plain phrase `already built and published`, and BOTH
+ * consumers match it with `includes()` — so any failure_reason that merely
+ * QUOTED that phrase (an assertion message, a diff excerpt, a reviewer's own
+ * words) classified a genuinely failed build as published-unreviewed and
+ * suppressed its relaunch. Measured repro: `forge assertion failed: expected
+ * text already built and published to be absent`. The English still appears in
+ * the rendered reason, for the operator; only the MATCH moved to a token that
+ * cannot occur in prose which is not deliberately imitating this one.
  */
-export const FIRE_PUBLISHED_REASON_MARKER = 'already built and published'
+export const FIRE_PUBLISHED_REASON_MARKER = '[trident:published-unreviewed]'
 
 /**
  * The outer loop's published-checkpoint shape, written by the orchestrator when
@@ -247,18 +258,26 @@ export function classifyFireTimeoutRow(
  * test that guards it: `interpretFailure` (`delivery.ts`) routes failure classes
  * by KEYWORDS, and the salvage-marker rules key on others. Any of those tokens in
  * here would report a finished, published build as a hang, a merge problem, or a
- * rejection. So: ≤200 chars (the honest fallback quotes it verbatim), none of the
- * classifier tokens, and NO filesystem paths (leak gate).
+ * rejection. So: bounded length (the honest fallback quotes it verbatim), none of
+ * the classifier tokens, and NO filesystem paths (leak gate).
  */
 /**
- * The ≤200-char ceiling `publishedFailureReason` promises — a CONSTANT the
- * function enforces, not a number in prose. The bound was documented and
- * unenforced: the non-matching fallback path rendered 639 chars from a 500-char
- * input, because only the 40-hex sha was abbreviated there.
+ * The ceiling `publishedFailureReason` enforces — a CONSTANT, not a number in
+ * prose. The bound was documented and unenforced: the non-matching fallback path
+ * rendered 639 chars from a 500-char input, because only the 40-hex sha was
+ * abbreviated there.
+ *
+ * IT IS 231, NOT 200, AND THE 31 IS EXACTLY THE MACHINE TOKEN'S COST (Argus r4:
+ * 30 chars of `FIRE_PUBLISHED_REASON_MARKER` plus its separating space). The
+ * ceiling grew by what the token added so that the budget left for the RENDERED
+ * CHECKPOINT is unchanged at 61 — the number the arithmetic below relies on. A
+ * flat 200 would have cut every matched checkpoint short and defeated the point
+ * of rendering it field-by-field.
  */
-export const PUBLISHED_REASON_MAX_CHARS = 200
+export const PUBLISHED_REASON_MAX_CHARS = 231
 
-const PUBLISHED_REASON_HEAD = `launcher settle timeout over work ${FIRE_PUBLISHED_REASON_MARKER} (`
+const PUBLISHED_REASON_HEAD =
+  `launcher settle timeout over work already built and published ${FIRE_PUBLISHED_REASON_MARKER} (`
 const PUBLISHED_REASON_TAIL =
   ') — review not run; verify the PR and dispatch a review round, not a rebuild'
 
