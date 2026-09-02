@@ -306,7 +306,21 @@ round_for_checkpoint() {
   if [[ "$name" =~ $ws_re ]]; then name="${BASH_REMATCH[1]}"; fi
   local fix_re='^fix-round-([0-9]{1,9})$'
   local pub_re='^outer-published:[0-9a-f]{40}:[0-9]+:([0-9]{1,9})(:deviated)?$'
-  if [[ "$name" =~ $fix_re ]] || [[ "$name" =~ $pub_re ]]; then
+  # `[0-9]` IS COLLATED, NOT ASCII, under a UTF-8 locale (Argus r23, two repros).
+  # On glibc `en_US.UTF-8` it also matches U+0663 ARABIC-INDIC DIGIT THREE, so
+  # `fix-round-٣` MATCHED here and then `$(( 10#٣ ))` threw "invalid integer
+  # constant" — under `set -euo pipefail` that aborts the whole invocation and the
+  # ENTIRE checkpoint UPDATE is lost, i.e. exactly the blind row this script's
+  # docblock forbids. `LC_ALL=C` for the duration of the two tests makes the class
+  # the ten ASCII digits the arithmetic can actually read, so a non-ASCII digit
+  # falls to the `else` and answers "not a round-bearing name", which is the same
+  # answer `checkpointRound` and the canonical SQL give it.
+  local saved_lc="${LC_ALL-}"
+  LC_ALL=C
+  local matched=0
+  if [[ "$name" =~ $fix_re ]] || [[ "$name" =~ $pub_re ]]; then matched=1; fi
+  if [ -n "$saved_lc" ]; then LC_ALL="$saved_lc"; else unset LC_ALL; fi
+  if [ "$matched" = 1 ]; then
     # `10#` normalizes leading zeros (base-10, not octal), so `fix-round-007`
     # answers 7 - the same value Number('007') gives the TypeScript copy.
     printf '%s' "$(( 10#${BASH_REMATCH[1]} ))"
@@ -703,6 +717,23 @@ if [ "$verdict_given" = 1 ]; then
     frozen_no_review=1
     frozen_label="the verdict '$verdict_value' with an emptying findings file"
   else
+    # A BARE VERDICT THAT IS NOT ONE OF THE THREE ABOVE — in practice `APPROVE`,
+    # with no findings file at all. It lands, and that is a DECISION, not an
+    # oversight (Argus r23, minor, reproduced): freezing it against a settled
+    # terminal rejection was considered and rejected, because the shape it would
+    # catch and the shape it would break are the same row. A row can only be
+    # terminal-and-rejected while its own workflow is still writing if the outer
+    # loop REAPED it mid-round; the workflow then approves round N+1 and this write
+    # is the only thing that corrects the row. Freezing would leave a run that was
+    # reviewed and approved recorded as a rejection — the same "real rejections"
+    # count skewed the other way, and worse, `terminalRunDisposition` would read it
+    # `reviewed-rejected` and decline the salvage seed, rebuilding work that exists.
+    # An APPROVE cannot merge anything from here (terminal rows never re-enter
+    # `applyResult`), so the only stake is the count, and the count is more honest
+    # taking the last thing a reviewer actually said. The ERASING shapes — a verdict
+    # arriving WITH an emptying findings file, a bare `REVIEW_NOT_RUN`, a
+    # verdict-clearing write — are all frozen above, because those bring no review
+    # at all; this one brings a verdict a reviewer reached.
     sets+=("inner_verdict='$(sql_quote "$verdict_value")'")
   fi
 elif [ "$findings_given" = 1 ]; then

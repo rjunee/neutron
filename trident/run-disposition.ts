@@ -71,6 +71,15 @@ const isTerminal = (phase: string): boolean =>
 /**
  * Checkpoints that mean "a commit exists and NOTHING has judged it yet".
  *
+ * EXPORTED BECAUSE THE WRITE SITE ENFORCES IT TOO (Argus r23, major). The
+ * predicate used to be reachable only through `builtButNeverReviewedSeed`, i.e.
+ * only in the CALLER, while `TridentRunStore.create` persisted any
+ * `inner_checkpoint` string it was handed — so a seed row spelling
+ * `argus-approved` would resume as an already-approved run and write a terminal
+ * APPROVE with no review, from a column nothing checked. That is the exact shape
+ * this card forbids ("do NOT put the check only in the caller"), so `create` now
+ * refuses a seed this function declines. One predicate, both places.
+ *
  * A SUBSET of the names `resumeOnUnchangedHead` (inner-workflow.mjs) routes to a
  * review on an unchanged head, and the subset is the point: that function also
  * routes `argus-request-changes[-round-N]` forward, but those names record that a
@@ -110,7 +119,7 @@ const OUTER_PUBLISHED = /^outer-published:([0-9a-f]{40}):\d+:\d{1,9}(?::deviated
  * number no writer can produce; narrowing the workflow instead would put a THIRD
  * bound on the resume path with nothing to gain.
  */
-function reviewCapableCheckpoint(name: string): boolean {
+export function reviewCapableCheckpoint(name: string): boolean {
   return name === 'forge-done' || /^fix-round-\d{1,9}$/.test(name) || OUTER_PUBLISHED.test(name)
 }
 

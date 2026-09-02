@@ -6337,7 +6337,14 @@ deleted, no dual path):
   iteration's build says nothing about how many tasks remain (`classifyResume` →
   `ralph-progress-unknown`). What the seed recovers in a governed repo is the
   `outer-published:<oid>:<remaining>:<round>` and `fix-round-N` window — the shapes that DO carry
-  a reviewable commit and a recorded remaining-task count — and what the verdict honesty fixes
+  a reviewable commit and a recorded remaining-task count — AND ONLY WHERE THE COMMIT IS ON A REF
+  THE RESUME CAN READ (Argus, major): the tip proof runs against `origin` in `pr` mode and the
+  local ref in `local` mode, and Forge is told not to push in `pr` mode, so a pr-mode
+  `fix-round-N` or `forge-done` commit is local-only, the origin probe answers `absent`, and the
+  seed correctly declines. In `pr` mode only `outer-published:*` — the commit the outer loop
+  already pushed — actually salvages; in `local` mode every salvageable checkpoint does. That
+  boundary is why the 33 measured `forge-done` rows (all 33 `pr` mode, 0 `local`) are NOT covered
+  by the seed, stated at length in `docs/AS_BUILT.md`. What the verdict honesty fixes
   everywhere, Ralph included, is the RECORDING: a run of the shape those 33 rows have — terminal
   at `forge-done`, no review, no findings — is now recorded `REVIEW_NOT_RUN` rather than
   inflating the rejection count. FROM NOW ON, not retroactively: the 33 measured rows still say

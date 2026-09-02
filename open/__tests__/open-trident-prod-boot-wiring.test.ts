@@ -534,7 +534,76 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         site.lines.some((l) => propLine(prop, value).test(l))
       )
     }
+    /**
+     * The balanced text of every spread in the literal — `{ … }` or `( … )` for a
+     * spread of something inline, and the bare token otherwise (`...deps`), which
+     * is enough to see that it is NOT inline.
+     */
+    const spreadPayloads = (body: string): string[] => {
+      const out: string[] = []
+      for (let i = body.indexOf('...'); i !== -1; i = body.indexOf('...', i + 3)) {
+        let k = i + 3
+        while (k < body.length && /\s/.test(body[k]!)) k++
+        const open = body[k]
+        if (open !== '{' && open !== '(') {
+          out.push(body.slice(k, k + 1))
+          continue
+        }
+        let depth = 0
+        let end = k
+        for (; end < body.length; end++) {
+          const c = body[end]
+          if (c === '{' || c === '(' || c === '[') depth++
+          else if (c === '}' || c === ')' || c === ']') {
+            depth--
+            if (depth === 0) break
+          }
+        }
+        out.push(body.slice(k, end + 1))
+      }
+      return out
+    }
+
+    /**
+     * A LITERAL THIS SCAN CANNOT READ IS NOT A WIRED LITERAL (Argus r23 blocker,
+     * codex's executed mutant). `...{ ['host' + 'Runner']: undefined },` spliced in
+     * after the wired property binds `hostRunner` to `undefined` at runtime while
+     * spelling no `hostRunner` TOKEN anywhere — so the last-mention scan above sees
+     * nothing to be last, every count stays equal, and production takes the
+     * uncredentialed fallback with this test green. Chasing the spelling cannot
+     * work: no text scan evaluates `'host' + 'Runner'`, and the next spelling is
+     * free. So the answer is the other way round — a literal that contains a
+     * construct this scan cannot statically READ is reported UNWIRED, because "I
+     * could not tell" is not "it is wired".
+     *
+     * Two constructs are unreadable, and neither appears in any of the four
+     * production sites: a COMPUTED KEY (`[` in key position — nothing else can name
+     * a property without spelling it), and a spread of anything but an inline
+     * object literal (`...deps`, `...overrides()`, `...(cond ? {…} : other)` — its
+     * keys live somewhere this scan is not looking). The hold sweep's site, the one
+     * legitimate user of spreads, writes every one of them as
+     * `...(x !== undefined ? { k: x } : {})`: both branches inline literals with
+     * identifier keys, which stays readable and stays wired.
+     */
+    const legible = (site: DepsSite): boolean => {
+      // A computed key, in key position: at the start of the literal, or after a
+      // `{` or a `,`. An array VALUE (`k: [1, 2]`) follows a `:` and is untouched.
+      if (/(^|[{,])\s*\[/.test(site.body)) return false
+      return spreadPayloads(site.body).every((payload) => {
+        if (!payload.startsWith('{') && !payload.startsWith('(')) return false
+        // Every branch of the spread must be an inline object literal: strip the
+        // balanced `{ … }` groups and no `?`/`:` may still be followed by a name.
+        let stripped = payload
+        for (let prev = ''; prev !== stripped; ) {
+          prev = stripped
+          stripped = stripped.replace(/\{[^{}]*\}/g, '')
+        }
+        return /\{|\}/.test(payload) && !/[?:]\s*\w/.test(stripped)
+      })
+    }
+
     const siteIsWired = (site: DepsSite): boolean => {
+      if (!legible(site)) return false
       const has = (prop: string, value: string): boolean =>
         site.lines.some((l) => propLine(prop, value).test(l))
       if (has('landedProbe', 'tridentLandedProbe')) {
@@ -646,6 +715,39 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     )
     expect(camelPairs(overrideMutant).every((paired) => paired)).toBe(true)
     expect(dispatchDepsSites(overrideMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // r23 — codex's mutant again, one indirection further: the override NAMES
+    // NOTHING. A computed key assembled from two fragments binds `hostRunner` to
+    // `undefined` while the token `hostRunner` never appears, so last-mention-wins
+    // has no later mention to find. Caught by legibility, not by spelling.
+    const computedMutant = splice(victimRunner, ["        ...{ ['host' + 'Runner']: undefined },"])
+    expect(computedMutant).not.toMatch(/\.\.\.\{ hostRunner/)
+    expect(count('hostRunner', 'tridentHostRunner', computedMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    // Every scan that reads a SPELLING is blind to it — the token is not there to
+    // read — and the site scan still reports the site unwired.
+    expect(camelPairs(computedMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(computedMutant).length).toBe(4)
+    expect(dispatchDepsSites(computedMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // …and the same override hidden behind a spread of a name defined elsewhere,
+    // which is the other construct a text scan cannot follow.
+    const opaqueMutant = splice(victimRunner, ['        ...runnerOverride,'])
+    expect(count('hostRunner', 'tridentHostRunner', opaqueMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(camelPairs(opaqueMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(opaqueMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // POSITIVE CONTROL FOR THE LEGIBILITY GATE: it must not answer "unwired" for
+    // everything. The hold sweep's site carries five conditional spreads today and
+    // is legible; so is a NEW conditional spread added to the victim site, which is
+    // the shape a future edit is most likely to add.
+    const legitSpreadMutant = splice(victimRunner, [
+      '                ...(chatId !== null ? { chat_id: chatId } : {}),',
+    ])
+    expect(dispatchDepsSites(legitSpreadMutant).filter((site) => !siteIsWired(site)).length).toBe(0)
   })
 
   test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {

@@ -61,15 +61,25 @@ describe('the Bash mirror in checkpoint.sh agrees with the TypeScript parser', (
   // `phase_for_checkpoint` exists — see checkpoint-phase.test.ts). Two copies of
   // one rule need a proof that they answer identically, or they drift.
 
-  /** Run the script's own `round_for_checkpoint` by sourcing it out of the file. */
-  function bashRoundFor(checkpoint: string): string {
+  /**
+   * Run the script's own `round_for_checkpoint` by sourcing it out of the file.
+   *
+   * `set -euo pipefail` matches the script's own header, because the defect this
+   * guards (see the locale test below) is an ABORT: without `-e` the arithmetic
+   * error prints and the function limps on, and the test would report the failure
+   * as a wrong answer rather than as the lost write it really is.
+   */
+  function bashRoundFor(checkpoint: string, locale?: string): string {
     const src = readFileSync(SCRIPT, 'utf8')
     const start = src.indexOf('round_for_checkpoint() {')
     expect(start).toBeGreaterThan(-1) // the function must still be findable
     const end = src.indexOf('\n}\n', start)
     expect(end).toBeGreaterThan(start)
     const fn = src.slice(start, end + 3)
-    const p = Bun.spawnSync(['bash', '-c', `${fn}\nround_for_checkpoint "$1"`, '_', checkpoint])
+    const p = Bun.spawnSync(
+      ['bash', '-c', `set -euo pipefail\n${fn}\nround_for_checkpoint "$1"`, '_', checkpoint],
+      locale === undefined ? {} : { env: { ...process.env, LC_ALL: locale } },
+    )
     expect(p.exitCode).toBe(0)
     return p.stdout.toString()
   }
@@ -138,6 +148,32 @@ describe('the Bash mirror in checkpoint.sh agrees with the TypeScript parser', (
   for (const name of CORPUS) {
     test(`both copies agree for ${JSON.stringify(name)}`, () => {
       expect(bashRoundFor(name)).toBe(String(checkpointRound(name) ?? ''))
+    })
+  }
+
+  // AND THE ANSWER DOES NOT DEPEND ON THE AMBIENT LOCALE (Argus r23, two
+  // independent repros). `[0-9]` inside `[[ =~ ]]` is COLLATED under glibc, so in
+  // `en_US.UTF-8` it also matches U+0663 ARABIC-INDIC DIGIT THREE: `fix-round-٣`
+  // matched, `$(( 10#٣ ))` threw "invalid integer constant", and under the
+  // script's own `set -euo pipefail` that aborts the whole invocation — the entire
+  // checkpoint UPDATE lost, which is the blind row the script's docblock forbids.
+  // The trim above was narrowed for the same reason (`[[:space:]]` is locale-
+  // dependent too); this is the digit class, the other half of the same bug.
+  const ARABIC_INDIC_THREE = '٣'
+  for (const locale of ['en_US.UTF-8', 'C']) {
+    test(`a non-ASCII digit is DECLINED, not thrown on, under ${locale}`, () => {
+      const name = `fix-round-${ARABIC_INDIC_THREE}`
+      // `bashRoundFor` asserts exit 0, which is the whole point: the failure mode
+      // was an abort, not a wrong number.
+      expect(bashRoundFor(name, locale)).toBe('')
+      expect(checkpointRound(name)).toBeNull()
+    })
+
+    test(`an ASCII round still parses under ${locale} — the locale pin is not a ban`, () => {
+      // Positive control: without it, a `round_for_checkpoint` that answered ''
+      // for everything would satisfy the assertion above.
+      expect(bashRoundFor('fix-round-3', locale)).toBe('3')
+      expect(bashRoundFor(`outer-published:${OID}:2:6:deviated`, locale)).toBe('6')
     })
   }
 })

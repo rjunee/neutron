@@ -21,6 +21,8 @@ import type { ProjectDb } from '@neutronai/persistence/index.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
 import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
+import { trimAsciiWs } from './ascii-trim.ts'
+import { reviewCapableCheckpoint } from './run-disposition.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -52,6 +54,13 @@ export class TridentRunReferenceAmbiguousError extends Error {
   constructor(reference: string) {
     super(`trident run reference is ambiguous: ${reference}`)
     this.name = 'TridentRunReferenceAmbiguousError'
+  }
+}
+
+export class TridentUnresumableSeedError extends Error {
+  constructor(checkpoint: string) {
+    super(`refusing to create a trident run seeded at inner_checkpoint='${checkpoint}': only a checkpoint that means "a commit exists and nothing has judged it yet" (forge-done, fix-round-N, outer-published:*) may seed a resume — anything else either has no commit to resume or has ALREADY been judged, and seeding it would route unreviewed work past a review`)
+    this.name = 'TridentUnresumableSeedError'
   }
 }
 
@@ -434,6 +443,21 @@ export class TridentRunStore {
       throw new Error(
         `wave child rows need BOTH parent_run_id and wave_task_id (${pairProblems.join(', ')})`,
       )
+    }
+    // THE SEED DOMAIN IS CHECKED HERE, NOT ONLY IN THE CALLER (Argus r23, major).
+    // `builtButNeverReviewedSeed` is the only writer of this column today and it
+    // never offers an unresumable name — but the column was persisted verbatim, so
+    // the safety of every seeded row rested on a predicate one function away. A row
+    // seeded `argus-approved` resumes as `{ mode: 'approved' }` and writes a
+    // terminal APPROVE having reviewed nothing, which is the merge-the-unreviewed
+    // hazard this card exists to close. The same `reviewCapableCheckpoint` the
+    // classifier uses answers here, on the trimmed value, because that is the value
+    // every reader compares (`trimAsciiWs`, the six ASCII characters all three
+    // copies agree on). A null/omitted seed is the fresh-dispatch shape and is
+    // untouched.
+    const seededCheckpoint = trimAsciiWs(input.inner_checkpoint ?? '')
+    if (seededCheckpoint !== '' && !reviewCapableCheckpoint(seededCheckpoint)) {
+      throw new TridentUnresumableSeedError(seededCheckpoint)
     }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()

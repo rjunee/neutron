@@ -10,6 +10,7 @@ import {
   COLS,
   TridentEmptyFindingsRejectionError,
   TridentRunStore,
+  TridentUnresumableSeedError,
   waveChildSlug,
 } from './store.ts'
 
@@ -481,6 +482,79 @@ describe('TridentRunStore', () => {
     expect(plainStored.inner_checkpoint_findings).toBeNull()
     expect(plainStored.base_sha).toBeNull()
     expect(plainStored.pr).toBeNull()
+  })
+
+  // THE SEED DOMAIN IS A WRITE-SITE PRECONDITION, NOT A CALLER'S HABIT (Argus r23,
+  // major). `create` persisted whatever `inner_checkpoint` it was handed while the
+  // only thing that decided which names are safe lived in `builtButNeverReviewedSeed`
+  // — the "check only in the caller" shape this card explicitly forbids. A row born
+  // at `argus-approved` resumes as an already-approved run and writes a terminal
+  // APPROVE having reviewed nothing, so the column's domain is enforced where the
+  // column is written.
+  test.each([
+    'argus-approved',
+    'argus-request-changes',
+    'argus-request-changes-round-7',
+    'pr-merged',
+    'inner-error',
+    'ralph-task-built',
+    'awaiting-trailer',
+    'who-knows',
+    // Out of the round domain both round parsers accept, so no reader would call it
+    // resumable either.
+    'fix-round-1000000000',
+    'fix-round-x',
+    `outer-published:${'z'.repeat(40)}:1:2`,
+  ])('create REFUSES a row seeded at %p', async (checkpoint) => {
+    const store = new TridentRunStore(db)
+    await expect(
+      store.create({
+        slug: 'refused',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: 'a'.repeat(40),
+        base_sha: 'c'.repeat(40),
+      }),
+    ).rejects.toThrow(TridentUnresumableSeedError)
+    // AND THE ROW IS NOT THERE. A refusal that still inserted would be worse than
+    // no check at all — the resume would run off a row nobody thinks exists.
+    expect(store.latestTerminalBySlug('t1', 'refused')).toBeNull()
+    expect(store.getBySlug('t1', 'refused')).toBeNull()
+    expect(store.listNonTerminal().filter((r) => r.slug === 'refused')).toHaveLength(0)
+  })
+
+  // POSITIVE CONTROL: the three names a real salvage emits still create, and the
+  // fresh (unseeded) shape is untouched. Without this, a `create` that threw for
+  // every seed would satisfy the refusals above.
+  test.each(['forge-done', 'fix-round-3', `outer-published:${'a'.repeat(40)}:2:6:deviated`, ' forge-done '])(
+    'create ACCEPTS a row seeded at %p',
+    async (checkpoint) => {
+      const store = new TridentRunStore(db)
+      const run = await store.create({
+        slug: 'accepted',
+        project_slug: 't1',
+        repo_path: '/r',
+        task: 't',
+        inner_checkpoint: checkpoint,
+        inner_checkpoint_head: 'a'.repeat(40),
+        base_sha: 'c'.repeat(40),
+      })
+      // Stored VERBATIM — the guard reads the trimmed value the classifier reads,
+      // and rewrites nothing.
+      expect(store.get(run.id)?.inner_checkpoint).toBe(checkpoint)
+    },
+  )
+
+  test('the refusal is on CREATE only — `update` still records any checkpoint the loop reaches', async () => {
+    // The live state machine writes `building`, `reviewing`, `inner-error`,
+    // `argus-approved` … through `update`, and those are the row saying where it
+    // IS, not a seed promising a resume. Narrowing them would blind the loop.
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'live', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+    expect(store.get(run.id)?.inner_checkpoint).toBe('argus-approved')
   })
 
   test('update applies a partial patch + re-stamps last_advanced_at', async () => {

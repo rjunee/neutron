@@ -202,6 +202,17 @@ a process later — it is the honest scope of what shipped. Closing that last ga
 pr-mode `forge-done` resume publish-then-review off its local commit, which is a change to the
 resume classifier rather than to the seed, and it is deliberately NOT in this card.
 
+AND THE SEED DOMAIN IS ENFORCED WHERE THE COLUMN IS WRITTEN (Argus r23, major). Which checkpoint
+names may seed a resume was decided only inside `builtButNeverReviewedSeed`, while
+`TridentRunStore.create` persisted any `inner_checkpoint` string handed to it — the "check only in
+the caller" shape this card explicitly forbids, one caller away from a row born at `argus-approved`
+that resumes as `{ mode: 'approved' }` and writes a terminal APPROVE having reviewed nothing.
+`create` now throws `TridentUnresumableSeedError` for any seed the shared
+`reviewCapableCheckpoint` (`trident/run-disposition.ts`, now exported for exactly this) declines,
+on the trimmed value every reader compares. The live loop is untouched: `update` still records
+`building` / `reviewing` / `argus-approved` and every other name the state machine reaches — those
+say where a row IS, not what a fresh row promises to resume.
+
 AND THE CREDENTIAL IS WIRED, WHICH IT WAS NOT (Argus r16 blocker). The runner was built ONLY
 from `secretsStore` + `owner_handle`, and NO production caller passes those: `/code`
 (`trident/code-command.ts`), the agent-native tool (`trident/work-board-build-tool.ts`), the
