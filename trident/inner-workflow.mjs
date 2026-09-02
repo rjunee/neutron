@@ -2786,14 +2786,26 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // so an unknown/absent/misspelled severity still counts as code and still re-Forges,
 // and a malformed (null) finding does too.
 function classifyBlock(synthesis, deferredPeers) {
-  if (!deferredPeers || deferredPeers.length === 0) return 'code'
   const findings = (synthesis && synthesis.findings) || []
   const codeFindings = findings.filter((f) => {
     if (f && f.kind === LANE_FINDING_KIND) return false
     if (isNonBlockingFinding(f)) return false
     return true
   })
-  return codeFindings.length === 0 ? 'infra-only' : 'code'
+  if (codeFindings.length > 0) return 'code'
+  if (deferredPeers && deferredPeers.length > 0) return 'infra-only'
+  // A COMPLETE PANEL DOES NOT MAKE AN ADVISORY INTO CODE WORK. This used to return 'code'
+  // the instant no peer was down, which read the finding list only when a lane had ALSO
+  // failed — so the whole advisory economy above (`enforceSeverityGate`, the CI hatch's
+  // non-forcing arm) was undone on the ordinary path: a REQUEST_CHANGES whose only
+  // findings were nits or a pre-existing red re-Forged a full round with nothing for
+  // Forge to change, exactly the waste `withSuiteBlocker` measured 15 times.
+  //
+  // THE EMPTY LIST STILL RE-FORGES. A rejection carrying no stated reason is malformed,
+  // not benign — this file's standing rule — and 'infra-only' would EXIT the loop on it,
+  // which is the unsafe direction. Only findings this file has ALREADY declared
+  // non-blocking buy the exit.
+  return findings.length === 0 ? 'code' : 'infra-only'
 }
 
 /**
@@ -2945,7 +2957,23 @@ const SYNTHESIS_UNAVAILABLE = synthesisUnavailable('The synthesis reviewer (argu
  * object, so a genuine verdict cannot be altered on its way to the loop.
  */
 function synthesisOrInfraBlock(synthesis) {
-  return usableStatus(synthesis, 'verdict') ? synthesis : SYNTHESIS_UNAVAILABLE
+  if (usableStatus(synthesis, 'verdict')) return synthesis
+  // FINDINGS A GATE ALREADY ATTACHED SURVIVE THE SUBSTITUTION. `withCi`'s non-forcing arm
+  // builds `{ ...(severityGated ?? {}), findings: [...ciFindings] }`, which over a DEAD
+  // synthesis seat is verdict-less by design — fail-closed, and replaced here. Replacing
+  // the WHOLE object threw the CI advisories away with it, so the report named the dead
+  // seat and said nothing at all about a red build: the `?? {}` above kept them only as
+  // far as this line. They are carried onto the block instead. The lane blocker still
+  // comes FIRST, and `verdict`/`blockKind` are still the constant's, so nothing a gate
+  // attached can turn this into an APPROVE or into a code round.
+  const carried = Array.isArray(synthesis?.findings)
+    ? synthesis.findings.filter((f) => f && typeof f === 'object' && f.kind !== LANE_FINDING_KIND)
+    : []
+  if (carried.length === 0) return SYNTHESIS_UNAVAILABLE
+  return Object.freeze({
+    ...SYNTHESIS_UNAVAILABLE,
+    findings: Object.freeze([...SYNTHESIS_UNAVAILABLE.findings, ...carried]),
+  })
 }
 
 /**
@@ -4566,7 +4594,14 @@ function roundLeftNoDiffFinding(round) {
 function infraTerminalCause(synthesis) {
   const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : []
   const lane = findings.find((f) => f && f.kind === LANE_FINDING_KIND && typeof f.title === 'string' && f.title !== '')
-  const any = lane || findings.find((f) => f && typeof f.title === 'string' && f.title !== '')
+  // A NON-BLOCKING FINDING IS NOT A CAUSE. `classifyInnerFailure` (trident/orchestrator.ts)
+  // reads 'infra-only' PLUS a non-empty cause as "infrastructure", and auto-retries the
+  // WHOLE run up to three times — which resumes straight back into the same fix round. So
+  // an advisory-only stop that reported the advisory's title as its cause turned "there is
+  // nothing to act on, stop" into three more runs of exactly that. Findings this file has
+  // already declared non-blocking are therefore not eligible to be the cause, and such a
+  // stop measures '' — genuine, terminal, not retried. A real blocker still names itself.
+  const any = lane || findings.find((f) => f && typeof f.title === 'string' && f.title !== '' && !isNonBlockingFinding(f))
   return any ? redactProbeText(any.title).slice(0, 300) : ''
 }
 
@@ -4794,6 +4829,48 @@ ${cmd}`,
   return classifyCi(res)
 }
 
+function encodeRefPath(ref) {
+  return String(ref).split('/').map((seg) => encodeURIComponent(seg)).join('/')
+}
+
+/**
+ * Cut ONE `___SECTION=<name>` block out of a probe reply and hand it back in the probe
+ * shape `classifyCi` takes, so the two halves of the base measurement go through the one
+ * parser separately instead of colliding inside it (`classifyCi` reads from the FIRST `[`
+ * to the LAST `]`, so two arrays in one string parse as neither).
+ *
+ * A dead seat (`null`) and a reply with no such marker both come back as an empty `raw`,
+ * which `classifyCi` already reads as 'unknown' — the direction that excuses nothing.
+ */
+function ciSection(probe, name) {
+  const raw = probe && typeof probe.raw === 'string' ? probe.raw : ''
+  const marker = `___SECTION=${name}`
+  const at = raw.indexOf(marker)
+  if (at < 0) return { raw: '', exit_code: 0 }
+  const from = at + marker.length
+  const next = raw.indexOf('___SECTION=', from)
+  return { raw: raw.slice(from, next < 0 ? raw.length : next), exit_code: 0 }
+}
+
+/**
+ * ONE ANSWER FROM THE TWO HALVES OF THE BASE MEASUREMENT.
+ *
+ * A half we could not read poisons the whole thing: half a base is not a base, and an
+ * excuse granted on it would forgive a red we never measured. Otherwise the reds add up,
+ * a pending half makes the base pending (which excuses nothing either), and only two
+ * lists that are both readable and clean report the base as clean.
+ */
+function mergeBaseCi(runs, statuses) {
+  if (runs.status === 'unknown' || statuses.status === 'unknown') {
+    return { status: 'unknown', failing: [], cause: runs.cause || statuses.cause || '' }
+  }
+  const failing = [...runs.failing, ...statuses.failing]
+  if (failing.length > 0) return { status: 'red', failing }
+  if (runs.status === 'pending' || statuses.status === 'pending') return { status: 'pending', failing: [] }
+  if (runs.status === 'none' && statuses.status === 'none') return { status: 'none', failing: [] }
+  return { status: 'green', failing: [] }
+}
+
 /**
  * Ask GitHub what the SAME checks are doing AT THE BASE — the measurement that earns
  * the pre-existing hatch.
@@ -4818,12 +4895,24 @@ async function probeCiBase(round) {
   // ENCODED AND QUOTED, exactly as `probeRequiredChecks` does below. `baseBranch` is a
   // workflow argument and `git check-ref-format --branch 'main$(id)'` accepts that name,
   // so a bare interpolation would put a legal branch name inside a bash command as code.
-  const encodedRef = encodeURIComponent(ref)
-  const api = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs?per_page=100`)} --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${ghReadCommand(api)} 2>&1; echo "___EXIT=$?"`
+  // PER SEGMENT, because a ref is a PATH: whole-string `encodeURIComponent` turns
+  // `release/1.x` into `release%2F1.x`, which the commits endpoint does not resolve, and
+  // the hatch then dies silently on every repository that does not build off a
+  // single-segment branch. Encoding each segment keeps the separator and still leaves no
+  // shell metacharacter in the string. The 40-hex `pinnedBase` path is unaffected.
+  const encodedRef = encodeRefPath(ref)
+  const runsApi = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs?per_page=100`)} --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
+  // BOTH KINDS OF CI, because the PR side reads both. `gh pr checks` reports check runs
+  // AND classic commit statuses; asking the base only for check-runs meant a status-context
+  // red — Buildkite, Travis, any webhook integration — could never appear in
+  // `ciPreexistingNames` and was charged as new every round. Fail-closed, but the hatch was
+  // inert for every repository whose CI is a status. `{context, state}` is reshaped to the
+  // same `{name, state}` rows `classifyCi` already parses, so there is still one parser.
+  const statusApi = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/status?per_page=100`)} --jq ${shSingleQuote('[.statuses[] | {name: .context, state: .state}]')}`
+  const cmd = `cd ${shSingleQuote(repoPath)} && echo "___SECTION=RUNS"; ${ghReadCommand(runsApi)} 2>&1; echo "___SECTION=STATUSES"; ${ghReadCommand(statusApi)} 2>&1; echo "___EXIT=0"`
   const res = await seatAttempt(`ci-base-probe-round-${round}`, () =>
     agent(
-      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM, and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM — both section markers included — and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
 ${cmd}`,
       withModel({ label: `ci-base-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
     ),
@@ -4831,7 +4920,7 @@ ${cmd}`,
   // A dead probe seat is `null`, which `classifyCi` reads as 'unknown' — and an unknown
   // base excuses nothing. The failure direction here is "everything stays a blocker",
   // never "everything is forgiven".
-  return { ...classifyCi(res), baseRef: ref }
+  return { ...mergeBaseCi(classifyCi(ciSection(res, 'RUNS')), classifyCi(ciSection(res, 'STATUSES'))), baseRef: ref }
 }
 
 /**

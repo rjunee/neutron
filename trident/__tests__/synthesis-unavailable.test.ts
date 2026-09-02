@@ -143,15 +143,22 @@ const real = new Function(
  */
 function reviewAndSynthesizeTail(
   synthesisRaw: unknown,
-  { ciRed = false, peers = [] as Peer[] } = {},
+  { ciRed = false, ciAdvisory = false, peers = [] as Peer[] } = {},
 ): Synthesis {
   const severityGated = real.enforceSeverityGate(synthesisRaw)
+  // The NON-FORCING arm, copied from the source it stands in for: every red is already
+  // failing at the base, so the findings ride along without setting the verdict.
+  const advisoryFindings = [
+    { severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck', evidence: 'red at base too' },
+  ]
   const withCi = ciRed
     ? {
         verdict: 'REQUEST_CHANGES',
         findings: [{ severity: 'blocker', title: 'CI FAILING: typecheck', evidence: 'red' }, ...(severityGated?.findings ?? [])],
       }
-    : severityGated
+    : ciAdvisory
+      ? { ...(severityGated ?? {}), findings: [...advisoryFindings, ...(severityGated?.findings ?? [])] }
+      : severityGated
   const gated = real.enforceCrossModelGate(withCi, peers)
   return { ...gated, blockKind: real.classifyBlock(gated, peers) }
 }
@@ -275,6 +282,38 @@ describe('the injected finding is a LANE finding, not a code finding', () => {
     expect(real.classifyBlock(real.SYNTHESIS_UNAVAILABLE, [laneBlocker])).toBe('infra-only')
   })
 
+  // A COMPLETE PANEL IS NOT A LICENCE TO RE-FORGE ANYTHING. `classifyBlock` returned
+  // 'code' the instant no peer was down — WITHOUT reading the findings — so the advisory
+  // economy above it only ever applied when a lane had ALSO failed. On the ordinary path
+  // a rejection whose only findings are nits, or a red that predates the branch, bought a
+  // whole fix round with nothing for Forge to change.
+  test('with a HEALTHY panel, findings this file calls non-blocking still buy no round', () => {
+    const advisory = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'major', advisory: true, title: 'pre-existing red' }] }
+    expect(real.classifyBlock(advisory, [])).toBe('infra-only')
+    const nits = { verdict: 'REQUEST_CHANGES', findings: [{ severity: 'nit', title: 'spacing' }, { severity: 'minor', title: 'name' }] }
+    expect(real.classifyBlock(nits, [])).toBe('infra-only')
+  })
+
+  test('...but one real finding among them is still code work', () => {
+    const mixed = {
+      verdict: 'REQUEST_CHANGES',
+      findings: [{ severity: 'nit', title: 'spacing' }, { severity: 'blocker', title: 'null deref' }],
+    }
+    expect(real.classifyBlock(mixed, [])).toBe('code')
+  })
+
+  // A rejection with no stated reason is MALFORMED, not benign — this file's standing
+  // rule. 'infra-only' would EXIT the loop on it, which is the unsafe direction, so the
+  // empty list keeps re-Forging exactly as it did before.
+  test('a REQUEST_CHANGES carrying no findings at all still re-Forges', () => {
+    expect(real.classifyBlock({ verdict: 'REQUEST_CHANGES', findings: [] }, [])).toBe('code')
+    expect(real.classifyBlock({ verdict: 'REQUEST_CHANGES' }, [])).toBe('code')
+    expect(real.classifyBlock(null, [])).toBe('code')
+    // An unknown/misspelled severity is not on the non-blocking list, so it is code.
+    expect(real.classifyBlock({ findings: [{ severity: 'trivial', title: 'x' }] }, [])).toBe('code')
+    expect(real.classifyBlock({ findings: [null] }, [])).toBe('code')
+  })
+
   test('it is a blocker — a lane that could not run may not be a nit', () => {
     expect(finding().severity).toBe('blocker')
   })
@@ -334,6 +373,30 @@ describe('the guard does not fire when a gate DID supply a verdict', () => {
     expect(out.blockKind).toBe('code')
     expect(wouldReForge(out)).toBe(true)
     expect(out.findings?.[0]?.title).toContain('CI FAILING')
+  })
+
+  // THE ADVISORY REACHED THE REPORT OR IT DID NOT EXIST. `withCi`'s non-forcing arm is
+  // verdict-less over a dead synthesis seat — deliberately, so the block still fires —
+  // and the guard used to return the bare shared constant, throwing the CI findings away
+  // with the empty object they were attached to. The operator was then told "the seat
+  // died" and NOTHING about a red build. This asserts the merge by RUNNING it, not by
+  // reading `?? {}` in the source: the source-scoped check passed the whole time.
+  test('a dead synthesis seat no longer swallows the CI advisories it was carrying', () => {
+    const out = real.synthesisOrInfraBlock(reviewAndSynthesizeTail(null, { ciAdvisory: true }))
+    expect(real.normalizeVerdict(out.verdict)).toBe('REQUEST_CHANGES')
+    expect(out.blockKind).toBe('infra-only')
+    // The lane blocker still comes first: the dead seat is the headline.
+    expect(out.findings?.[0]?.kind).toBe(real.LANE_FINDING_KIND)
+    expect(out.findings?.map((f) => f.title)).toContain('CI FAILING (pre-existing): typecheck')
+    // ...and it is still a stop, not a round: there is nothing for Forge to do.
+    expect(wouldReForge(out)).toBe(false)
+  })
+
+  test('carrying findings across does not mutate or unfreeze the shared constant', () => {
+    const out = real.synthesisOrInfraBlock(reviewAndSynthesizeTail(null, { ciAdvisory: true }))
+    expect(out).not.toBe(real.SYNTHESIS_UNAVAILABLE)
+    expect(real.SYNTHESIS_UNAVAILABLE.findings).toHaveLength(1)
+    expect(Object.isFrozen(out)).toBe(true)
   })
 
   // A deferred peer already produces the infra shape AND names which seat died,

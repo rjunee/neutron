@@ -80,6 +80,27 @@ function loadReal(): {
   return factory()
 }
 
+/**
+ * The base half of the gate: the section splitter and the merge, loaded off the SAME
+ * source as the parser they feed. `ciPreexistingNames` comes along because the only
+ * question worth asking of a merged base is which reds it excuses.
+ */
+function loadBaseProbe(): {
+  classifyCi: (probe: unknown) => CiResult & { cause?: string }
+  ciSection: (probe: unknown, name: string) => { raw: string; exit_code: number }
+  mergeBaseCi: (runs: CiResult, statuses: CiResult) => CiResult
+  ciPreexistingNames: (base: unknown) => Set<string>
+} {
+  const consts = SRC.slice(
+    SRC.indexOf('const CI_FAILED_STATES'),
+    SRC.indexOf('/**', SRC.indexOf('const CI_PENDING_STATES')),
+  )
+  const factory = new Function(
+    `${consts}\n${grab('classifyCi')}\n${grab('ciSection')}\n${grab('mergeBaseCi')}\n${grab('ciPreexistingNames')}\nreturn { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames }`,
+  ) as () => ReturnType<typeof loadBaseProbe>
+  return factory()
+}
+
 /** A `gh pr checks --json` reply, as the probe reports it. */
 const probe = (rows: unknown, exit = 0): { raw: string; exit_code: number } => ({
   raw: `${JSON.stringify(rows)}\n___EXIT=${exit}`,
@@ -1879,8 +1900,15 @@ describe('the deferred-CI peer quotes the probe', () => {
 describe('infraTerminalCause — the LANE finding is the measured cause', () => {
   function loadTerminalCause(source = SRC): (synthesis: unknown) => string {
     const kind = source.slice(source.indexOf('const LANE_FINDING_KIND'), source.indexOf('\n', source.indexOf('const LANE_FINDING_KIND')))
+    // `infraTerminalCause` asks the ONE non-blocking predicate too — a finding this file
+    // has already declared non-blocking may not be the measured cause of an infra stop.
+    const advisoryKey = source.split('\n').find((l) => l.startsWith('const ADVISORY_FINDING_KEY ='))
+    const severitySet = source.split('\n').find((l) => l.startsWith('const NON_BLOCKING_SEVERITIES ='))
+    if (advisoryKey === undefined || severitySet === undefined) {
+      throw new Error('ADVISORY_FINDING_KEY / NON_BLOCKING_SEVERITIES are no longer top-level consts')
+    }
     const factory = new Function(
-      `${kind}\n${grab('redactProbeText')}\n${grab('infraTerminalCause')}\nreturn infraTerminalCause`,
+      `${kind}\n${severitySet}\n${advisoryKey}\n${grab('isNonBlockingFinding')}\n${grab('redactProbeText')}\n${grab('infraTerminalCause')}\nreturn infraTerminalCause`,
     ) as () => (synthesis: unknown) => string
     return factory()
   }
@@ -1914,6 +1942,32 @@ describe('infraTerminalCause — the LANE finding is the measured cause', () => 
     expect(infraTerminalCause({})).toBe('')
     expect(infraTerminalCause(null)).toBe('')
     expect(infraTerminalCause({ findings: [{ severity: 'blocker' }, null, { title: '' }] })).toBe('')
+  })
+
+  // AN ADVISORY IS NOT AN INFRA CAUSE. `classifyInnerFailure` (trident/orchestrator.ts)
+  // reads blockKind 'infra-only' PLUS a non-empty cause as "infrastructure" and
+  // auto-retries the WHOLE run three times, resuming into the same fix round. So an
+  // advisory-only stop that named the advisory as its cause converted "there is nothing
+  // to act on, stop" into three more runs of exactly that. Measured '' → 'genuine'.
+  test('a stop whose only findings are non-blocking measures NO cause', () => {
+    const infraTerminalCause = loadTerminalCause()
+    expect(
+      infraTerminalCause({
+        findings: [
+          { severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck' },
+          { severity: 'nit', title: 'spacing' },
+        ],
+      }),
+    ).toBe('')
+    // ...and a LANE finding among them is still the cause, because a lane really did fail.
+    expect(
+      infraTerminalCause({
+        findings: [
+          { severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck' },
+          { severity: 'blocker', kind: 'lane', title: 'REVIEW DEFERRED — no seat ran' },
+        ],
+      }),
+    ).toBe('REVIEW DEFERRED — no seat ran')
   })
 
   test('a credential in a finding title is redacted, and the line is bounded', () => {
@@ -2743,10 +2797,89 @@ describe('the pre-existing CI hatch — earned by measuring the base, by name', 
     const at = SRC.indexOf('async function probeCiBase(')
     expect(at).toBeGreaterThan(-1)
     const body = SRC.slice(at, SRC.indexOf('\n}', at))
-    expect(body).toContain('encodeURIComponent(ref)')
+    expect(body).toContain('encodeRefPath(ref)')
     expect(body).toContain('shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs')
     // ...and the bare form is GONE, not merely accompanied by the safe one.
     expect(body).not.toContain('repos/{owner}/{repo}/commits/${ref}')
+  })
+
+  // A REF IS A PATH. Whole-string `encodeURIComponent` percent-encodes the separator, so
+  // `release/1.x` becomes `release%2F1.x` — a ref GitHub's commits endpoint does not
+  // resolve. The probe then answers 'unknown', which excuses nothing (safe) but spends a
+  // seat every red round to learn nothing (dead). Per SEGMENT keeps the path and still
+  // leaves no shell metacharacter behind.
+  test('a slash-bearing base branch survives encoding, and injection still does not', () => {
+    const factory = new Function(`${grab('encodeRefPath')}\nreturn encodeRefPath`) as () => (r: string) => string
+    const encodeRefPath = factory()
+    expect(encodeRefPath('release/1.x')).toBe('release/1.x')
+    expect(encodeRefPath('main')).toBe('main')
+    expect(encodeRefPath('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')).toBe(
+      'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    )
+    // The expansion characters are gone; `'` is not encoded by `encodeURIComponent` and
+    // does not need to be, because the whole URL still goes through `shSingleQuote` (the
+    // sibling test above pins that) — which is what actually closes the injection.
+    for (const evil of ['main$(id)', 'main`id`', 'a b', 'a/$(id)']) {
+      const out = encodeRefPath(evil)
+      for (const ch of ['$', '`', ' ']) expect(out).not.toContain(ch)
+    }
+  })
+
+  // THE PR SIDE READS BOTH KINDS OF CI, so the base must too. `gh pr checks` reports check
+  // runs AND classic commit statuses; a base probe that asked only for /check-runs could
+  // never match a status-context red, so the hatch was silently inert for every repository
+  // whose CI is a status — every such red charged as new, every round.
+  test('the base probe reads commit STATUSES as well as check runs', () => {
+    const at = SRC.indexOf('async function probeCiBase(')
+    const body = SRC.slice(at, SRC.indexOf('\n}', at))
+    expect(body).toContain('/check-runs?per_page=100')
+    expect(body).toContain('/status?per_page=100')
+    expect(body).toContain('.statuses[] | {name: .context, state: .state}')
+    expect(body).toContain('___SECTION=RUNS')
+    expect(body).toContain('___SECTION=STATUSES')
+  })
+
+  test('the two sections are parsed separately and merged, and a status red is excusable', () => {
+    const { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames } = loadBaseProbe()
+    const raw =
+      '___SECTION=RUNS\n[{"name":"CodeQL","state":"success"}]\n' +
+      '___SECTION=STATUSES\n[{"name":"buildkite/build","state":"failure"}]\n___EXIT=0'
+    const reply = { raw, exit_code: 0 }
+    // Both arrays in ONE string would parse as neither — `classifyCi` reads first `[` to
+    // last `]`. The sections keep them apart.
+    expect(classifyCi(reply).status).toBe('unknown')
+    const merged = mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES')))
+    expect(merged.status).toBe('red')
+    expect([...ciPreexistingNames(merged)]).toEqual(['buildkite/build'])
+  })
+
+  test('half a base is not a base: an unreadable half makes the whole measurement unknown', () => {
+    const { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames } = loadBaseProbe()
+    const raw = '___SECTION=RUNS\n[{"name":"ci","state":"failure"}]\n___SECTION=STATUSES\ngh: HTTP 403\n___EXIT=0'
+    const reply = { raw, exit_code: 0 }
+    const merged = mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES')))
+    expect(merged.status).toBe('unknown')
+    // ...so the red it DID read excuses nothing.
+    expect(ciPreexistingNames(merged).size).toBe(0)
+  })
+
+  test('a dead base-probe seat still reads as unknown through the sections', () => {
+    const { classifyCi, ciSection, mergeBaseCi } = loadBaseProbe()
+    expect(mergeBaseCi(classifyCi(ciSection(null, 'RUNS')), classifyCi(ciSection(null, 'STATUSES'))).status).toBe(
+      'unknown',
+    )
+  })
+
+  test('two clean halves are clean, and a pending half is pending', () => {
+    const { classifyCi, ciSection, mergeBaseCi } = loadBaseProbe()
+    const of = (runs: string, statuses: string) => {
+      const reply = { raw: `___SECTION=RUNS\n${runs}\n___SECTION=STATUSES\n${statuses}\n___EXIT=0`, exit_code: 0 }
+      return mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES'))).status
+    }
+    expect(of('[]', '[]')).toBe('none')
+    expect(of('[{"name":"ci","state":"success"}]', '[]')).toBe('green')
+    expect(of('[{"name":"ci","state":"queued"}]', '[]')).toBe('pending')
+    expect(of('[{"name":"ci","state":"success"}]', '[{"name":"bk","state":"pending"}]')).toBe('pending')
   })
 
   // THE HATCH'S SAFETY NET HAS TO BE READABLE BY SOMEONE. The advisory tells its reader to
