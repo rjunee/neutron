@@ -173,6 +173,31 @@ const PRE_LAUNCH_PREFIX = /^trident infra: /
 const BUILD_NOT_STARTED = 'the build was NOT started'
 
 /**
+ * THE ONE PRE-LAUNCH REFUSAL WHOSE REMEDY IS NOT "RETRY" (Argus blocker). The ancestry guard's
+ * depth arms refuse because `merge-base --is-ancestor` exited 1 in a history git cannot see past:
+ * the checkout is SHALLOW, or its depth could not be read at all. Both are UNKNOWN, both refuse
+ * correctly — and both are DETERMINISTIC in the shape the operator is left holding. Nothing on
+ * the launch path deepens that checkout (`healShallowCheckout` runs only on the replay path), so
+ * a retry re-runs the identical probe against the identical truncated history and re-refuses,
+ * forever. Delivered as the generic `retry` line, the only step that breaks that loop — the one
+ * the refusal's own evidence names — never reached the person told to act.
+ *
+ * MATCHED BY THE AUTHORED CLAUSE, not by the word "shallow". `orchestrator.ts`'s `probeDetail`
+ * writes this sentence at its two depth arms and nowhere else; the word "shallow" alone appears
+ * in git stderr, in branch names and in repo paths, all of which are interpolated into reasons on
+ * this same path. The clause is also read ONLY INSIDE the anchored pre-launch arm below, so it
+ * can never pull a post-launch failure out of the class it belongs to.
+ *
+ * A FALSE POSITIVE HERE IS SAFE BY CONSTRUCTION, which is why an `includes()` is enough: the
+ * worst it can do is add one additive, reversible step (`git fetch --unshallow origin`, which
+ * only downloads history) to a refusal that did not need it. No arm of this branch authorises an
+ * irreversible act — invariant 121, the same rule the composer obeys.
+ */
+const DEPTH_PROBE_CLAUSE =
+  'is a proven "not an ancestor" only in a COMPLETE history'
+const SHALLOW_CONFIRMED = 'says this checkout is SHALLOW'
+
+/**
  * The reassurance actually owed, and NOT ONE WORD MORE. This used to end "— the guard only READ
  * state", which contradicted the very next sentence on the fetching arm: a fetch WRITES (a
  * tracking ref, FETCH_HEAD, objects), so the pair asserted read-only and then described writes,
@@ -568,6 +593,24 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
   // and strip it of the retry advice it is owed. Both halves must move together: the clause is
   // authored verbatim at every one of these sites in `orchestrator.ts`.
   if (PRE_LAUNCH_PREFIX.test(reason) && reason.includes(BUILD_NOT_STARTED)) {
+    // ONE SUB-SHAPE CARRIES ITS OWN STEP OUT (see `DEPTH_PROBE_CLAUSE`). The depth arms of the
+    // ancestry guard refuse on a history git cannot see past, and nothing on this path deepens
+    // it, so the bare retry line is advice that is KNOWN in advance to reproduce the refusal. The
+    // step is named here, in the delivered text, because the delivered text is all the operator
+    // sees — the persisted reason that carries the same evidence is never rendered.
+    if (reason.includes(DEPTH_PROBE_CLAUSE)) {
+      const depth = reason.includes(SHALLOW_CONFIRMED)
+        ? 'this checkout is shallow, so the commits the check needs are simply absent from it'
+        : 'the depth of this checkout could not be read, so the check cannot tell an unrelated branch from one whose parents are merely missing'
+      return {
+        klass: 'infra',
+        summary: `I did not start this build: the check that compares the branch against its base could not reach a verdict — ${depth}. No build ran and nothing was merged.`,
+        // Retry is still the destination, but it is second: retrying FIRST re-runs the same probe
+        // over the same truncated history and lands on this same refusal.
+        input_needed:
+          'Complete the history in the build checkout first — `git fetch --unshallow origin` (already-complete checkouts are unaffected) — then reply to retry. Retrying without that step re-runs the same check against the same truncated history and stops here again.',
+      }
+    }
     return {
       klass: 'infra',
       // Says the one thing the misclassification denied: nothing ran, so nothing landed.

@@ -2662,3 +2662,118 @@ describe('composeWrongBaseRefusal: the two fields whose safety used to live in t
     expect(msg).toContain('branch -D -- feat-x')
   })
 })
+/**
+ * ROUND 5 — the three residual holes Argus named after the blocker fix, each pinned by the
+ * assertion that would have caught it. All three are the same defect the file already fights:
+ * a claim the MESSAGE (or a docblock) made that the CODE did not quite support.
+ */
+describe('composeWrongBaseRefusal: the invisible characters, the equals spelling, and the unbounded count', () => {
+  /** The same live-holder harness as above, re-declared local to this block. */
+  const withLockReason = async (reason: string): Promise<string> =>
+    composeWrongBaseRefusal(ARGS, {
+      run_host: fakeHost({
+        'worktree list --porcelain': ok(heldWith((f) => f.map((x) => (x.startsWith('locked') ? `locked ${reason}` : x)))),
+      }).run_host,
+      probe_pid: () => 'alive',
+      probe_tree: CLEAR,
+    })
+
+  test('a ZERO-WIDTH character inside the verb cannot render a visually intact delete', async () => {
+    // The fold class covered the control range and the bidi OVERRIDES and stopped there, so one
+    // invisible codepoint between `branch` and `-D` split the token, defeated the delete-verb
+    // rule, and rendered a `git branch -D victim` a reader sees whole — inside the one arm whose
+    // pinned contract is that no such instruction appears in it. The `includes('branch -D')`
+    // assertion passed the whole time, because the string it looked for was not the string on
+    // the screen. Every invisible codepoint is checked, not just the one that was reproduced.
+    for (const zw of ['‏', '‎', '​', '‌', '‍', '᠎', '⁠', '﻿']) {
+      const name = `U+${zw.codePointAt(0)!.toString(16).toUpperCase().padStart(4, '0')}`
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): git branch${zw}-D victim`)
+      expect(`${name}: ${msg}`).toContain('ALIVE')
+      expect(`${name}: ${msg}`).toContain('<command removed>')
+      // The literal, and the character that hid it from the literal.
+      expect(`${name}: ${msg}`).not.toContain('branch -D')
+      expect(`${name}: ${msg}`).not.toContain(zw)
+    }
+  })
+
+  test('`--delete=<value>` folds like every other spelling of the option', async () => {
+    // Not a form git itself runs, so nothing escaped through it — but the docblock claims this
+    // recognises the delete options, and a reader checking that claim found a token it did not.
+    for (const opt of ['--delete=victim', '--del=victim', '--d=victim']) {
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): git branch ${opt}`)
+      expect(`${opt}: ${msg}`).toContain('<command removed>')
+      expect(`${opt}: ${msg}`).not.toContain(`branch ${opt}`)
+    }
+
+    // POSITIVE CONTROL: an `=`-bearing option that is NOT a prefix of `--delete` is still quoted
+    // readably. Over-folding evidence is the safe direction, but shredding it is not free.
+    const kept = await withLockReason('claude agent wf_a (pid 4242 start 99): git fetch --depth=1 origin')
+    expect(kept).toContain('--depth=1')
+    expect(kept).not.toContain('<command removed>')
+  })
+
+  test('an absurd ahead_count cannot inflate the refusal past reading', async () => {
+    // `/^\d+$/` shaped the field but never bounded it, and a 50k-digit count produced a
+    // 50,587-character refusal — a message nobody gets through, which denies the evidence this
+    // composer exists to deliver just as surely as forging a line would.
+    const host = fakeHost({ 'worktree list --porcelain': ok(HELD_PORCELAIN) })
+    const msg = await composeWrongBaseRefusal(
+      { ...ARGS, ahead_count: '9'.repeat(50_000) },
+      { run_host: host.run_host, probe_pid: () => 'alive', probe_tree: CLEAR },
+    )
+    expect(msg).toContain('already carries ? commit(s)')
+    expect(msg.length).toBeLessThan(4000)
+
+    // POSITIVE CONTROL: a count this repo could actually produce is untouched. Without this, the
+    // bound could be satisfied by an implementation that printed `?` for every count.
+    const real = await composeWrongBaseRefusal(
+      { ...ARGS, ahead_count: '1234567' },
+      { run_host: host.run_host, probe_pid: () => 'alive', probe_tree: CLEAR },
+    )
+    expect(real).toContain('already carries 1234567 commit(s)')
+  })
+
+  test('proc_root drives the DEFAULT liveness probe too, not only the occupancy one', async () => {
+    // `proc_root` is declared as the process root for the default probe and was wired into one
+    // of the two, so a fixture root left the liveness half reading the real `/proc` and every
+    // compose-level case had to inject `probe_pid` as well — the substitution the fixture root
+    // exists to avoid. With NO `probe_pid`, the fixture must decide ALIVE vs DEAD by itself.
+    const root = mkdtempSync(join(tmpdir(), 'wrong-base-liveness-proc-'))
+    try {
+      const proc = join(root, 'proc')
+      const repo = join(root, 'repo')
+      const wt = join(repo, '.claude', 'worktrees', 'wf_a')
+      mkdirSync(wt, { recursive: true })
+      // The self-probe control: a root with no entry for THIS process is not procfs.
+      mkdirSync(join(proc, String(process.pid)), { recursive: true })
+      symlinkSync(root, join(proc, String(process.pid), 'cwd'))
+      const porcelain = zPorcelain(
+        [`worktree ${repo}`, 'HEAD ' + 'a'.repeat(40), 'branch refs/heads/main'],
+        [`worktree ${wt}`, 'HEAD ' + TIP, 'branch refs/heads/feat-x', 'locked claude agent (pid 4242 start 99)'],
+      )
+      const args = { repo, branch: 'feat-x', base: 'main', branch_tip: TIP, ahead_count: '3', run_id: RUN }
+      const deps = {
+        run_host: fakeHost({ 'worktree list --porcelain': ok(porcelain) }).run_host,
+        proc_root: proc,
+        probe_tree: CLEAR,
+      }
+
+      // 4242 has no entry under the fixture root: DEAD, and the release arm fires.
+      const dead = await composeWrongBaseRefusal(args, deps)
+      expect(dead).toContain('worktree unlock')
+      expect(dead).toContain('worktree remove')
+      expect(dead).not.toContain('branch -D')
+
+      // Give 4242 an entry and the SAME call must flip to ALIVE — which is the proof the answer
+      // came from the fixture and not from the host's real /proc.
+      mkdirSync(join(proc, '4242'), { recursive: true })
+      const alive = await composeWrongBaseRefusal(args, deps)
+      expect(alive).toContain('ALIVE')
+      expect(alive).toContain('Stand down')
+      expect(alive).not.toContain('worktree remove')
+      expect(alive).not.toContain('branch -D')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+})

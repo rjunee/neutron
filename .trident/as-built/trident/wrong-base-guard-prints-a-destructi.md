@@ -802,3 +802,56 @@ unchanged. Both halves are now pinned: five holder arms and the salvage arm with
 asserting the quoted form is present and that removing exactly those quoted arguments leaves no
 `branch -D` behind. The parity-splitting helper the earlier pin used cannot do this job, because
 these arms' own prose contains apostrophes.
+The depth-blind refusal now carries its remedy all the way to the reader. Everything the ancestry
+guard measures is written into the persisted `failure_reason`, and the persisted reason is never
+rendered: `composeTerminalDelivery` emits `interpretFailure`'s `summary` and `input_needed` and
+drops the reason entirely. Both depth arms match the anchored pre-launch prefix and carry the
+not-started clause, so both were flattened to the generic infra summary plus "Reply to retry the
+build" — and that advice is known in advance to fail here, because nothing on the launch path
+deepens the checkout (`healShallowCheckout` runs only on the replay path), so the retry re-runs the
+same probe over the same truncated history and lands on the same refusal. A refusal whose only
+actionable remedy is unreachable by the person told to act is the defect this card exists to
+remove, one layer further out than where it was first found.
+
+`interpretFailure` therefore reads one authored clause — `is a proven "not an ancestor" only in a
+COMPLETE history`, written by `orchestrator.ts`'s `probeDetail` at its two depth arms and nowhere
+else — and reads it ONLY INSIDE the pre-launch arm, which is anchored at position 0 by a prefix no
+interpolated field can produce. So a post-launch failure that merely quotes a depth refusal keeps
+the advice its own class is owed. The summary names which of the two shapes was measured — the
+checkout is shallow, or its depth could not be read — rather than letting either borrow the other's
+measurement, and the `input_needed` puts `git fetch --unshallow origin` FIRST and says in words
+that retrying without it stops in the same place. The class, the summary's "I did not start this
+build" opening and the refusal itself are unchanged; only the advice moves. A false positive on
+that `includes()` can only add one additive, reversible fetch to a refusal that did not need it,
+which is why an `includes()` is enough: no arm of this branch authorises an irreversible act.
+
+Three seams are pinned rather than one. `terminal-failure-reason.test.ts` drives all four
+depth-blind reasons (both probes crossed with both depth shapes) through `interpretFailure`,
+asserts the step and the absence of every destructive literal, tells the two shapes apart, and
+carries three positive controls — a bad object, a killed watchdog and a failed base fetch, all
+pre-launch refusals a deepen cannot touch, each of which must keep the plain retry — plus the
+quoted-clause control that the arm stays anchored. `orchestrator.test.ts` closes the loop end to
+end: the REAL composed reason from the real launcher goes through the REAL
+`composeTerminalDelivery`, and the proven-complete run beside it is the control that must NOT
+inherit an unshallow step it has no use for. Without that last assertion the fix could be satisfied
+by a message nobody ever renders, which is the exact failure being corrected.
+
+Four smaller holes closed in the same pass, each one a claim the code did not quite support.
+`defang`'s fold class covered the control range and the bidi OVERRIDES and stopped there, so a
+single zero-width codepoint between `branch` and `-D` split the token, defeated the delete-verb
+rule, and rendered a visually intact `git branch -D victim` inside the ALIVE arm while the pinned
+`includes('branch -D')` assertion passed the whole time — the string the test looked for was not
+the string on the screen. U+180E, U+200B-U+200F, U+2060 and U+FEFF join the class; they occupy no
+column, so folding each to a space cannot hide anything a reader could otherwise see, and it puts
+the forged token back in front of the command folder that exists to catch it. `isDeleteOption`
+recognises the `--delete=<value>` spelling of every prefix it already knew: nothing escaped through
+it, because git does not run that form, but the docblock claims to recognise the delete options and
+a reader checking that claim found a token it did not. `ahead_count` is bounded as well as shaped —
+`/^\d+$/` admitted a 50,000-digit count that composed a 50,587-character refusal, which denies the
+reader the evidence just as surely as forging a line would — and over the cap it becomes `?`, the
+stand-in the caller already emits for a count it could not read. And `deps.proc_root` reaches the
+DEFAULT liveness probe as well as the occupancy probe: it is declared as the process root for the
+default probes, and wiring it into one of the two left the liveness half of every fixture-root test
+reading the host's real `/proc`, so each compose-level case had to inject `probe_pid` as well —
+which is precisely the substitution the fixture root exists to avoid. A fixture that flips DEAD to
+ALIVE with no `probe_pid` injected at all is what proves the answer came from the fixture.

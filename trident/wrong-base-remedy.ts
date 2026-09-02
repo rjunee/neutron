@@ -476,9 +476,17 @@ function isRefDelete(t: string): boolean {
 function isPushDelete(t: string): boolean {
   return isDeleteOption(t) || t === '--mirror' || t.startsWith(':') || t.startsWith('+:') || isDeleteCluster(t)
 }
-/** `--delete` and every prefix of it git will expand — `--d`, `--de`, `--del`, `--dele`, `--delet`. */
+/**
+ * `--delete` and every prefix of it git will expand — `--d`, `--de`, `--del`, `--dele`, `--delet`
+ * — and the `--delete=<value>` spelling of each (Argus nit). `--delete=victim` is not a form git
+ * itself runs, so nothing escaped through it, but the docblock above claims this recognises the
+ * delete options and a reader checking that claim found a token it did not. Over-folding EVIDENCE
+ * is the safe direction here, which is what makes matching a non-runnable spelling free.
+ */
 function isDeleteOption(t: string): boolean {
-  return t.length >= 3 && '--delete'.startsWith(t)
+  const eq = t.indexOf('=')
+  const opt = eq < 0 ? t : t.slice(0, eq)
+  return opt.length >= 3 && '--delete'.startsWith(opt)
 }
 /** The delete VERBS, found ANYWHERE inside a token — one word character in front used to defeat the rule. */
 const REF_DELETE_VERB = /(branch|update-ref|tag)/
@@ -541,7 +549,18 @@ function defangCommands(s: string): string {
 function defang(s: string): string {
   return defangCommands(
     s
-      .replace(/[\u0000-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
+      // THE ZERO-WIDTH AND MARK CHARACTERS FOLD TOO (Argus nit). This class used to cover the
+      // control range and the explicit bidi OVERRIDES, and stopped there — so a lock reason
+      // spelling `branch\u200f-D` survived the token split, defeated the delete-verb rule, and
+      // RENDERED as a visually intact `git branch -D victim` in a terminal, through the real
+      // composer, while the pinned `includes('branch -D')` assertion still passed. `\u180e`,
+      // `\u200b`-`\u200f`, `\u2060` and `\ufeff` are the rest of the invisible set: they occupy no
+      // column, so folding each to a space cannot hide anything a reader could otherwise see,
+      // and it puts the forged token back in front of the command folder that exists to catch it.
+      .replace(
+        /[\u0000-\u001f\u007f\u180e\u200b-\u200f\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]+/g,
+        ' ',
+      )
       .replace(/"/g, "'")
       .replace(/(worktree)(\s+)remove\b/g, '$1$2<command removed>'),
   )
@@ -971,7 +990,16 @@ export async function composeWrongBaseRefusal(
   // newline as `$'…\n…'`, which spelled the banned `branch -D` literal out in plain sight inside
   // the salvage tag's own argument. A tip that is not a sha resolves to no commit anyway, so
   // degrading it costs a real remedy nothing, and every well-formed tip is unchanged.
-  const aheadProse = /^\d+$/.test(ahead_count) ? ahead_count : '?'
+  // AND THE COUNT IS BOUNDED AS WELL AS SHAPED (Argus nit). `/^\d+$/` alone admits any length,
+  // and a reviewer drove a 50k-digit count into a 50,587-character refusal — a message no reader
+  // gets through, which is the same denial of the evidence this composer exists to deliver. The
+  // single caller reads `rev-list --count`, so the value is a real count today and unreachable;
+  // the cap is here because every other interpolation on this path is bounded here too, and a
+  // count this repo could actually produce is nowhere near it. Over the cap it becomes `?`, the
+  // stand-in the caller already emits for a count it could not read.
+  const AHEAD_COUNT_MAX = 18
+  const aheadProse =
+    /^\d+$/.test(ahead_count) && ahead_count.length <= AHEAD_COUNT_MAX ? ahead_count : '?'
   const tipProse = /^[0-9a-f]{40}$/i.test(branch_tip) ? branch_tip : foldRefName(branch_tip)
   const prefix = `branch ${branchProse} already carries ${aheadProse} commit(s) not on origin/${baseProse} — it was not cut from origin/${baseProse}; refusing to build on another lane's work. `
   try {
@@ -1309,7 +1337,13 @@ export async function composeWrongBaseRefusal(
       const pidShown = Number.isSafeInteger(pid) && String(pid) !== pidRaw ? `${pidText} (probed as ${pid})` : pidText
       let liveness: PidLiveness
       try {
-        liveness = (deps.probe_pid ?? probePidLiveness)(pid)
+        // `proc_root` reaches BOTH default probes, not just the occupancy one (Argus nit). It is
+        // declared as "process root for the DEFAULT probes"; wiring it into one of the two left
+        // the liveness half of a fixture-root test reading the REAL `/proc`, so a fixture could
+        // never drive the arms end to end and every compose-level case had to inject
+        // `probe_pid` as well — which is the substitution the fixture root exists to avoid.
+        liveness =
+          deps.probe_pid !== undefined ? deps.probe_pid(pid) : probePidLiveness(pid, deps.proc_root)
       } catch {
         liveness = 'unknown'
       }

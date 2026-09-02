@@ -1668,3 +1668,107 @@ describe('interpretFailure — a pre-launch refusal is never delivered as a comp
     expect(quoted.klass).toBe('merge-mechanics')
   })
 })
+
+/**
+ * THE ONE PRE-LAUNCH REFUSAL WHOSE REMEDY IS NOT "RETRY" (Argus blocker).
+ *
+ * The ancestry guard's two depth arms refuse because `merge-base --is-ancestor` exited 1 in a
+ * history git cannot see past: the checkout is SHALLOW, or its depth could not be read at all.
+ * Both refuse correctly. Both also carry the only step that changes the answer — `git fetch
+ * --unshallow origin` — and both used to lose it: the reason matches the anchored pre-launch
+ * prefix and carries the not-started clause, so `interpretFailure` returned the generic infra
+ * summary plus "Reply to retry the build", and the persisted reason that holds the evidence is
+ * never rendered. Nothing on the launch path deepens the checkout (`healShallowCheckout` runs
+ * only on the replay path), so that retry re-runs the same probe over the same truncated
+ * history and lands on the same refusal, forever. A refusal whose only actionable remedy is
+ * unreachable by the person told to act is the same defect as a refusal that names none.
+ *
+ * `orchestrator.test.ts` pins this end-to-end against the REAL composed reason and the REAL
+ * delivered text. This table pins the classifier's own boundary — what carries the step, and
+ * just as importantly what must not.
+ */
+describe('interpretFailure — a depth-blind pre-launch refusal delivers the step that unblocks it', () => {
+  const REPO = '/repo'
+  const TIP = 'c'.repeat(40)
+  const BASE = 'b'.repeat(40)
+  const NOT_STARTED =
+    'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
+  // Authored verbatim by `orchestrator.ts`'s `probeDetail`, and nowhere else. The two halves
+  // must move together: if that sentence changes, this table is what says so.
+  const SHALLOW_DETAIL =
+    'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and git rev-parse --is-shallow-repository says this checkout is SHALLOW, where the parent commits are absent and exit 1 is also what a TRUE ancestor produces (git fetch --unshallow origin makes the probe answerable)'
+  const BLIND_DETAIL =
+    'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and the depth of this checkout could not be read (git rev-parse --is-shallow-repository neither answered true nor false), so exit 1 cannot be read as divergence'
+
+  const contained = (detail: string): string =>
+    `trident infra: could not establish whether branch feat-x at ${TIP} is contained in origin/main at ${BASE} in ${REPO} (${detail}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${NOT_STARTED}.`
+  const priorBase = (detail: string): string =>
+    `trident infra: branch feat-x at ${TIP} is not contained in origin/main at ${BASE}, but whether it descends from this run's own prior base ${BASE} — the shape its own crash leaves behind — could NOT be established in ${REPO} (${detail}); that is UNKNOWN, and UNKNOWN authorises nothing; ${NOT_STARTED}.`
+
+  const carries: [string, string][] = [
+    ['the containment probe, checkout proven SHALLOW', contained(SHALLOW_DETAIL)],
+    ['the containment probe, depth unreadable', contained(BLIND_DETAIL)],
+    ['the prior-base probe, checkout proven SHALLOW', priorBase(SHALLOW_DETAIL)],
+    ['the prior-base probe, depth unreadable', priorBase(BLIND_DETAIL)],
+  ]
+
+  test('every depth-blind refusal delivers the unshallow step, and still refuses', () => {
+    for (const [name, reason] of carries) {
+      const out = interpretFailure(run({ failure_reason: reason }))
+      // The class is unchanged — this is still "no build ran". Only the advice moves.
+      expect(`${name}: ${out.klass}`).toBe(`${name}: infra`)
+      expect(`${name}: ${out.summary}`).toContain('did not start this build')
+      expect(`${name}: ${out.summary}`).not.toContain('The build finished')
+      // THE STEP, in the text the operator actually sees.
+      expect(`${name}: ${out.input_needed}`).toContain('git fetch --unshallow origin')
+      // …and it is named as the thing to do FIRST, because retrying without it re-refuses.
+      expect(`${name}: ${out.input_needed}`).toContain('first')
+      expect(`${name}: ${out.input_needed}`).toContain('retry')
+      // UNKNOWN authorises nothing irreversible (docs/INVARIANTS.md §12 invariant 121).
+      expect(`${name}: ${out.input_needed}`).not.toContain('branch -D')
+      expect(`${name}: ${out.input_needed}`).not.toContain('rm -rf')
+    }
+  })
+
+  test('the two shapes are told apart — neither borrows the other’s measurement', () => {
+    const shallow = interpretFailure(run({ failure_reason: contained(SHALLOW_DETAIL) }))
+    expect(shallow.summary).toContain('shallow')
+    const blind = interpretFailure(run({ failure_reason: contained(BLIND_DETAIL) }))
+    // The unreadable-depth arm measured no shallowness, so it must not assert any.
+    expect(blind.summary).not.toContain('is shallow')
+    expect(blind.summary).toContain('could not be read')
+  })
+
+  test('POSITIVE CONTROL: the pre-launch refusals that retry DOES fix keep the plain retry', () => {
+    // An over-broad rule — one keyed on the word `shallow`, or on the pre-launch prefix alone —
+    // would bolt an unshallow step onto refusals a deepen cannot touch, sending the reader off
+    // to run a fetch that changes nothing about a bad object or a killed watchdog.
+    const untouched: [string, string][] = [
+      ['a bad object', contained('git merge-base --is-ancestor exited 128: fatal: bad object')],
+      ['a killed watchdog', contained('the ancestry probe was killed by its watchdog')],
+      [
+        'the base fetch failed',
+        `trident infra: could not fetch origin/main in ${REPO} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: fatal: unable to access`,
+      ],
+    ]
+    for (const [name, reason] of untouched) {
+      const out = interpretFailure(run({ failure_reason: reason }))
+      expect(`${name}: ${out.klass}`).toBe(`${name}: infra`)
+      expect(`${name}: ${out.input_needed}`).not.toContain('--unshallow')
+      expect(`${name}: ${out.input_needed}`).toContain('Reply to retry the build')
+    }
+  })
+
+  test('the depth clause is read ONLY inside the anchored pre-launch arm', () => {
+    // A post-launch failure that merely QUOTES a depth refusal is a merge failure, not a launch
+    // refusal, and must keep the advice its own class is owed. The clause is matched with an
+    // `includes()`, so the anchored prefix above it is the whole of its safety.
+    const quoted = interpretFailure(
+      run({
+        failure_reason: `merge failed: git push exited 1: the previous run said "${SHALLOW_DETAIL}"`,
+      }),
+    )
+    expect(quoted.klass).toBe('merge-mechanics')
+    expect(quoted.input_needed).not.toContain('--unshallow')
+  })
+})

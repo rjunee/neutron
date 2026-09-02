@@ -26,7 +26,7 @@ import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
-import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
+import { buildTridentDelivery, composeTerminalDelivery, type OutboundSink } from './delivery.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
 /**
@@ -5358,6 +5358,32 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(complete.inputs).toHaveLength(0)
     expect(reason3).toContain('already carries 3 commit(s) not on origin/')
     expect(reason3).toContain('branch -D -- trident/add-thing')
+
+    // AND THE STEP SURVIVES DELIVERY (Argus blocker). Everything above asserts the PERSISTED
+    // reason, which nobody reads: `composeTerminalDelivery` renders `summary` + `input_needed`
+    // and drops the reason entirely. Both depth refusals match the pre-launch prefix and carry
+    // the not-started clause, so both used to flatten to "Reply to retry the build" — and a
+    // retry re-runs the identical probe over the identical truncated history and re-refuses,
+    // deterministically, because nothing on the launch path deepens the checkout
+    // (`healShallowCheckout` runs only on the replay path). The one step that breaks that loop
+    // has to reach the person being told to act.
+    const delivered = (r: string): string => composeTerminalDelivery(store.get(r)!)?.text ?? ''
+    for (const [name, id] of [
+      ['shallow', run.id],
+      ['unreadable depth', run2.id],
+    ] as const) {
+      const text = delivered(id)
+      expect(`${name}: ${text}`).toContain('--unshallow')
+      expect(`${name}: ${text}`).toContain('did not start this build')
+      // The retry is still offered — it is just no longer the FIRST thing, and it is no longer
+      // the ONLY thing.
+      expect(`${name}: ${text}`).toContain('retry')
+      // UNKNOWN authorises nothing irreversible, in the delivered text as in the reason.
+      expect(`${name}: ${text}`).not.toContain('branch -D')
+    }
+    // POSITIVE CONTROL ON THE DELIVERY TOO: the proven-complete run is a wrong-base refusal, a
+    // different class entirely, and must not inherit an unshallow step it has no use for.
+    expect(delivered(run3.id)).not.toContain('--unshallow')
   })
 
   // THE TOCTOU BLOCKER, in three cases. The exit-1 read and the depth read are two separate
