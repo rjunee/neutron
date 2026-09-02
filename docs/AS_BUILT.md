@@ -281,6 +281,29 @@ value handed over, so the gate now asks whose return it is: the enclosing functi
 `resolve_context` property value. The inner-function mutant is applied to the REAL `open/composer.ts`
 in-test, and it reds the file under the old rule.
 
+AND A NAME IS NOT A VALUE (Argus r8 blocker, codex's executed mutant, reproduced here). Every rule
+above reads a SPELLING and asks where that literal goes — but JavaScript resolves an identifier by
+its BINDING, not by its spelling. Declaring `const tridentHostRunner = async () => ({ ok: false, … })`
+inside `boardStartBuild`, one line above the `dispatchBoardBoundBuild(` call, shadows the
+credentialed runner for that closure alone: the wired property line is untouched, so every count is
+equal, the pair is paired, the literal is legible, the runner is still the last mention on its own
+wired line and the literal is still a direct argument of the chokepoint BY NAME — and the ▶ site
+hands over an uncredentialed stub, with `tsc --noEmit` silent because shadowing is legal and the
+optional field is structurally satisfied. The behavioural half of the gate proves ONE value
+credentialed by RUNNING it (`tbd.host_runner` exports the planted token); what it could not say is
+that the other three sites name the same value. So the scan now asks the only question that closes
+that gap, off TypeScript's own parse: at each site's position, how many declarations of
+`tridentHostRunner` and `tridentLandedProbe` are IN SCOPE? Exactly one — the composer-level `const`
+the behavioural probe ran — means the site's reference IS that value; two means the reference is
+undecidable to this scan, and an undecidable reference is reported UNWIRED, on the same rule as
+legibility. It is scope resolution rather than a name count on purpose: a count would red on any
+unrelated local of the same name anywhere in a 7,000-line file, and a positive control in the test
+pins that a same-named local covering no dispatch site leaves every site wired. The mutant is
+applied to the real `open/composer.ts` in-test and asserted RED, beside assertions that every
+earlier rule is blind to it. The same round also stops the `resolve_context` hand-off anchor being
+taken on trust: renaming that property is asserted to red the gate, so the name-anchoring is proven
+fail-closed rather than merely described as such.
+
 AND THE WORD IS NOT THE WIRE (Argus r29, major, mutant executed). The caller enumeration in
 `trident/__tests__/codex-seat-probe.test.ts` asserted `toContain('hostRunner')` per caller file,
 which survives DELETING `/code`'s forwarding spread: the word is still spelled by the optional

@@ -652,6 +652,82 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       )
     }
 
+    /**
+     * AND A NAME IS NOT A VALUE (Argus r8 BLOCKER, codex's executed mutant). Every
+     * rule above reads the SPELLING `hostRunner: tridentHostRunner` and asks where
+     * that literal goes — but JavaScript does not resolve an identifier by its
+     * spelling, it resolves it by its BINDING. Declaring
+     * `const tridentHostRunner = async () => ({ ok: false, … })` inside
+     * `boardStartBuild`, one line above the `dispatchBoardBoundBuild(` call, shadows
+     * the credentialed runner for that whole closure: the wired property line is
+     * untouched, so every count is equal, the pair is paired, the literal is legible,
+     * the runner is still the last mention on its own wired line and the literal is
+     * still a direct argument of the chokepoint BY NAME — and the object the ▶ site
+     * hands over carries an uncredentialed stub. `tsc --noEmit` is silent, because
+     * shadowing is legal and `BoardBoundBuildDeps.hostRunner` is structurally
+     * satisfied by the stub.
+     *
+     * The behavioural half of this test proves ONE value credentialed by running it:
+     * `tbd.host_runner` — the composition's own `host_runner: tridentHostRunner`
+     * site — exports the planted token (above). What that cannot say by itself is
+     * that the OTHER three sites name the SAME value, and that is exactly what a
+     * shadowing binding breaks. So the scan asks the only question that closes the
+     * gap: at each site's position, how many declarations of `tridentHostRunner` (and
+     * of `tridentLandedProbe`) are IN SCOPE? Exactly one — the composer-level `const`
+     * the behavioural probe ran — means the site's reference is that value. Two means
+     * the reference is ambiguous to this scan, and an ambiguous reference is reported
+     * UNWIRED, on the same "I could not tell is not it is wired" rule as legibility.
+     *
+     * It is scope-resolution rather than a name count on purpose: the count would red
+     * on any unrelated local of the same name anywhere in a 7,000-line file, while
+     * this reds only a binding that actually covers a dispatch site. The mutant is
+     * applied to the real source at the bottom of this test and must come out RED.
+     */
+    const bindingScopesOf = (file: ts.SourceFile, name: string): ts.Node[] => {
+      /** The node whose scope a declaration belongs to — its nearest scope ancestor. */
+      const scopeOf = (decl: ts.Node): ts.Node => {
+        for (let p: ts.Node | undefined = decl.parent; p !== undefined; p = p.parent) {
+          if (
+            ts.isSourceFile(p) ||
+            ts.isBlock(p) ||
+            ts.isModuleBlock(p) ||
+            ts.isCaseBlock(p) ||
+            ts.isForStatement(p) ||
+            ts.isForInStatement(p) ||
+            ts.isForOfStatement(p) ||
+            ts.isCatchClause(p) ||
+            ts.isFunctionLike(p)
+          ) {
+            return p
+          }
+        }
+        return file
+      }
+      const out: ts.Node[] = []
+      const visit = (node: ts.Node): void => {
+        const named =
+          ts.isVariableDeclaration(node) ||
+          ts.isParameter(node) ||
+          ts.isBindingElement(node) ||
+          ts.isFunctionDeclaration(node) ||
+          ts.isClassDeclaration(node) ||
+          ts.isImportSpecifier(node) ||
+          ts.isImportClause(node)
+        if (named && node.name !== undefined && ts.isIdentifier(node.name) && node.name.text === name) {
+          out.push(scopeOf(node))
+        }
+        ts.forEachChild(node, visit)
+      }
+      ts.forEachChild(file, visit)
+      return out
+    }
+    /** How many declarations of `name` have `idx` inside their scope. */
+    const bindingsCovering = (file: ts.SourceFile, name: string, idx: number): number =>
+      bindingScopesOf(file, name).filter(
+        (scope) =>
+          ts.isSourceFile(scope) || (scope.getStart(file) <= idx && scope.getEnd() >= idx),
+      ).length
+
     interface DepsSite {
       /** Everything between the literal's braces, nesting included. */
       body: string
@@ -659,6 +735,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       lines: string[]
       /** Whether THAT literal is the value the chokepoint receives. */
       handedOver: boolean
+      /** Whether the wired identifiers resolve unambiguously at THIS position. */
+      unshadowed: boolean
     }
     const dispatchDepsSites = (text: string): DepsSite[] => {
       const file = parseSource(text)
@@ -673,7 +751,14 @@ describe('Open foundational-Trident prod-boot wiring', () => {
         // property of the literal the scan found, or the scan mis-parsed.
         if (!lines.some((l) => /^[ \t]*repo_path:[ \t]/.test(l))) continue
         if (!lines.some((l) => /^[ \t]*store:[ \t]/.test(l))) continue
-        out.push({ body, lines, handedOver: handedOverDirectly(file, range[0]) })
+        out.push({
+          body,
+          lines,
+          handedOver: handedOverDirectly(file, range[0]),
+          unshadowed:
+            bindingsCovering(file, 'tridentHostRunner', range[0]) === 1 &&
+            bindingsCovering(file, 'tridentLandedProbe', range[0]) === 1,
+        })
       }
       return out
     }
@@ -786,6 +871,9 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       // it says inside itself.
       if (!site.handedOver) return false
       if (!legible(site)) return false
+      // …and a literal whose wired identifiers do not resolve to the ONE
+      // credentialed binding is not a wired literal either, whatever it spells.
+      if (!site.unshadowed) return false
       const has = (prop: string, value: string): boolean =>
         site.lines.some((l) => propLine(prop, value).test(l))
       if (has('landedProbe', 'tridentLandedProbe')) {
@@ -814,6 +902,10 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // what their consumer receives, so it cannot be answering "unwired" for
     // everything below.
     expect(dispatchDepsSites(src).filter((site) => site.handedOver).length).toBe(4)
+    // Positive control for the scope gate, same reason: all four production sites
+    // see exactly ONE binding of each wired identifier today, so it cannot be
+    // answering "unwired" for everything below.
+    expect(dispatchDepsSites(src).filter((site) => site.unshadowed).length).toBe(4)
     expect(dispatchDepsSites(src).filter((site) => !siteIsWired(site)).length).toBe(0)
 
     // THE REVIEWERS' MUTANTS, APPLIED TO THE REAL SOURCE. Both unwire the app's ▶
@@ -1005,6 +1097,72 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // …but the hand-off gate now asks WHOSE return it is, so the site is unwired.
     expect(
       dispatchDepsSites(innerReturnMutant).filter((site) => !siteIsWired(site)).length,
+    ).toBe(1)
+
+    // r8 — codex's mutant, and the one every rule above missed because every rule
+    // above reads a SPELLING: DELETE NOTHING, CHANGE NOTHING, SHADOW THE NAME. An
+    // uncredentialed `const tridentHostRunner` declared inside `boardStartBuild`,
+    // immediately above the `dispatchBoardBoundBuild(` call, rebinds the identifier
+    // for that closure only — so the ▶ site hands the chokepoint a stub while its
+    // wired property line is byte-for-byte the one this file has always asserted.
+    // The ▶ site is the only production entry that CALLS the chokepoint inline, so
+    // this line is its call and the victim literal opens just below it.
+    const dispatchCallAt = lines.findIndex((l) => l.includes('await dispatchBoardBoundBuild('))
+    expect(dispatchCallAt).toBeGreaterThan(-1)
+    expect(lines.filter((l) => l.includes('await dispatchBoardBoundBuild(')).length).toBe(1)
+    expect(dispatchCallAt).toBeLessThan(victimProbe)
+    const shadowMutant = lines
+      .flatMap((l, i) =>
+        i === dispatchCallAt
+          ? [
+              '            const tridentHostRunner = async () => ({ ok: false as const, stdout: 0, stderr: 0, exit_code: 1 })',
+              l,
+            ]
+          : [l],
+      )
+      .join('\n')
+    // The mutant DELETES NOTHING: every wired property line is still spelled,
+    // character for character, and both counts are untouched.
+    expect(count('hostRunner', 'tridentHostRunner', shadowMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(count('landedProbe', 'tridentLandedProbe', shadowMutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe'),
+    )
+    // Every rule this file had before is blind to it — the pairs pair, the sites
+    // are sites, each is legible, each is handed over, and each half is still the
+    // last mention on its own wired line.
+    expect(camelPairs(shadowMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(shadowMutant).length).toBe(4)
+    expect(
+      dispatchDepsSites(shadowMutant).filter((site) => site.handedOver && legible(site)).length,
+    ).toBe(4)
+    // The scope gate is not: at the ▶ site TWO declarations of `tridentHostRunner`
+    // are in scope, so what that site's property names is no longer decidable — and
+    // exactly one site, the mutated one, is reported unwired.
+    expect(dispatchDepsSites(shadowMutant).filter((site) => !site.unshadowed).length).toBe(1)
+    expect(dispatchDepsSites(shadowMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+    // …and the gate is positional, not a name count: a same-named local in a scope
+    // that covers NO dispatch site leaves every site wired.
+    const unrelatedLocalMutant = splice(0, [
+      'const unrelated = () => { const tridentHostRunner = 1; return tridentHostRunner }',
+    ])
+    expect(dispatchDepsSites(unrelatedLocalMutant).filter((site) => !siteIsWired(site)).length).toBe(
+      0,
+    )
+
+    // FAIL-CLOSED, PROVEN RATHER THAN CLAIMED (Argus r8 major). The hand-off rule
+    // names `resolve_context` because that is the one production entry whose
+    // hand-off position is a `return`, and accepting ANY return re-opens the r29
+    // wrapper hole. The cost of naming it is that a RENAME of that property reads as
+    // unwired — which is the safe direction, and is asserted here so nobody has to
+    // take the docblock's word for it: the site goes red and has to be re-declared
+    // above, rather than silently ceasing to be checked.
+    const renamedHandoffMutant = src.replace('resolve_context: (input) =>', 'resolveContext: (input) =>')
+    expect(renamedHandoffMutant).not.toBe(src)
+    expect(dispatchDepsSites(renamedHandoffMutant).length).toBe(4)
+    expect(
+      dispatchDepsSites(renamedHandoffMutant).filter((site) => !siteIsWired(site)).length,
     ).toBe(1)
 
     // r4 — the simplest mutant of all, and the one every rule above missed: DELETE
