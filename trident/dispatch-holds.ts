@@ -246,6 +246,26 @@ export class DispatchHoldStore {
 }
 
 /**
+ * How long a `branch_live` hold may keep re-refusing before the sweep says so
+ * at ERROR rather than at warn. Six hours: longer than any healthy lane on this
+ * substrate (the hang watchdog terminalizes a run at 90 minutes, so a branch
+ * genuinely held by a live build clears well inside it), short enough that a
+ * card wedged behind a lock nobody will ever release is visible the same day.
+ *
+ * IT IS A LOG LEVEL, NOT A TTL. Expiring the hold would DELETE a queued card
+ * that nothing else ever re-dispatches — trading a card that is stuck-but-known
+ * for one that is silently gone, which is the worse of the two.
+ */
+export const BRANCH_LIVE_HOLD_STALE_MS = 6 * 60 * 60_000
+
+/** Age of a hold in ms, or null when `created_at` is not a readable timestamp. */
+function staleHoldAgeMs(created_at: string, nowMs: number): number | null {
+  const created = Date.parse(created_at)
+  if (!Number.isFinite(created)) return null
+  return Math.max(0, nowMs - created)
+}
+
+/**
  * Build the trident TERMINAL OBSERVER that drains the hold queue: every time a
  * run goes terminal, re-dispatch every held card through the SAME chokepoint.
  *
@@ -287,6 +307,8 @@ export function buildDispatchHoldSweep(deps: {
   makeDispatchDeps: (hold: DispatchHold) => BoardBoundBuildDeps & {
     preflight: NonNullable<BoardBoundBuildDeps['preflight']>
   }
+  /** Injectable clock (ms) for the stale-hold age line; defaults to wall clock. */
+  now?: () => number
 }): (run?: TridentRun) => Promise<void> {
   // THE RUN ARGUMENT IS OPTIONAL BECAUSE THE SWEEP HAS TWO TRIGGERS. As a
   // terminal observer it is handed the run that just terminalized (and ignores
@@ -349,12 +371,30 @@ export function buildDispatchHoldSweep(deps: {
         // run terminalizes, so a hold that keeps re-refusing is the signal that
         // the "live" holder is a stale worktree lock nothing will ever release.
         if (result.code === 'branch_live') {
-          log.warn('dispatch_hold_branch_live', {
+          // …AND GET LOUDER WHEN IT STOPS LOOKING TRANSIENT (Argus r6, minor).
+          // The hold is still never dropped — a card nothing re-dispatches is
+          // worse than a noisy one — but "transient" has a shape, and a branch
+          // still held after {@link BRANCH_LIVE_HOLD_STALE_MS} does not have it.
+          // The only holder that survives that long is a lock nothing will ever
+          // release (a third-party or legacy worktree lock whose reason carries
+          // no ` start <n>`, so the recycled-pid refinement cannot fire and a
+          // reused pid reads as alive forever). That was silent-forever behind a
+          // warn line indistinguishable from the healthy case; now it is an
+          // ERROR naming the age, which is the operator's cue to look at the
+          // worktree lock itself.
+          const heldForMs = staleHoldAgeMs(hold.created_at, deps.now?.() ?? Date.now())
+          const fields = {
             project: hold.project_slug,
             item: hold.board_item_id,
             held_since: hold.created_at,
+            held_for_ms: heldForMs,
             error: result.message,
-          })
+          }
+          if (heldForMs !== null && heldForMs >= BRANCH_LIVE_HOLD_STALE_MS) {
+            log.error('dispatch_hold_branch_live_stale', fields)
+          } else {
+            log.warn('dispatch_hold_branch_live', fields)
+          }
           continue
         }
         log.warn('dispatch_hold_rejected', {

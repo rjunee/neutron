@@ -333,3 +333,72 @@ lock on a host whose `/proc` cannot be read queues a card indefinitely. The drop
 positive-evidence-only by design; an age cap would need a give-up path that deletes a
 card's queue entry on a timer, which is the failure mode this file spent three rounds
 closing. Recorded as a follow-up, not built here.
+
+### Round 15 (Argus round 6) — the queue/no-queue decision is taken at the WRITE, not before the gates
+
+Round 8 made "may this refusal queue the card" one rule for all three hold-producing
+gates. It was still answered ONCE, at the top of `dispatchBoardBoundBuild`, off the card
+read in step (2) — and then applied by gates that run after `resolveBuildRepo`, the
+merge-mode probe, the landed-PR probe and the worktree holder probe. That is a
+seconds-wide window of awaits. A competing dispatch that BOUND the card inside it (the
+very run the branch-liveness gate then observes and refuses on) left this dispatch still
+holding "the card is free", so it upserted the hold anyway. `buildDispatchHoldSweep`
+drops a hold only while the linked run is live AT SWEEP TIME, so stopping that run on
+purpose released the survivor onto a card someone had deliberately stopped — precisely
+the hazard round 8's own comment says the delete arm exists to prevent, arriving through
+the door round 8 did not close.
+
+The rule is now a function, `queueDecision()`, that RE-READS the board and the store, and
+each gate calls it at its own write — synchronously, with no `await` between the read and
+the upsert-or-delete that acts on it, which is the only thing that makes the answer true
+when it is used. That forced one restructure worth naming: the branch-liveness refusal
+used to compose its whole message, TAIL INCLUDED, before the holder probe; the body is now
+built first and the tail ("this card is QUEUED" vs "run <id> owns it") appended after the
+probe, because the tail is a claim about the queue and may not be predicted across an
+await. Pinned in `dispatch-holds.test.ts` under `DISPATCH TOCTOU`: a competitor binds the
+card inside the holder probe (branch-liveness gate) and inside `resolveMergeMode` (path
+gate); both refusals return no `hold` shape, delete even a row seeded BEFORE the race, and
+after the competitor is STOPPED on purpose the sweep re-fires nothing. The must-pass
+sibling — nobody racing, same late refusal — still queues and still dispatches on the next
+sweep. The stub board's `get` now returns a COPY per read, like the real `WorkBoardStore`
+does; handing out the live map entry aliased every read to every other one and made the
+snapshot indistinguishable from a fresh look.
+
+Residual, stated: two dispatches in DIFFERENT processes can still interleave around the
+hold table itself. Closing that needs a transaction over (read card, write hold), which
+the hold store does not expose; the in-process ordering is what the reported defect was.
+And a hold written legitimately while the card was free, whose card is later bound and
+then stopped, still re-fires — correctly: that row is a real pending dispatch request
+nobody withdrew. Auto-deleting a card's holds on `stopped` was considered and rejected: it
+would silently drop the hold created when an operator re-dispatches a stopped card and is
+refused on branch liveness, i.e. it breaks the ordinary recovery path.
+
+A BRANCH-LIVE HOLD STILL HAS NO TTL — ON PURPOSE — BUT IT STOPS BEING SILENT. Round 8
+recorded the age cap as a follow-up and the argument against it stands: expiring the row
+deletes a queued card nothing else re-dispatches, which is worse than a card that is stuck
+but known. What was wrong is that a hold refused for the tenth hour logged the same warn
+line as one refused for the first, so a lock nothing will ever release (third-party or
+legacy, no ` start <n>` in its reason, so the recycled-pid refinement cannot fire and a
+reused pid reads alive forever) was indistinguishable from a healthy wait. Past
+`BRANCH_LIVE_HOLD_STALE_MS` (6 h — longer than any healthy lane, since the hang watchdog
+terminalizes at 90 min) the sweep logs `dispatch_hold_branch_live_stale` at ERROR with the
+age in ms. The row is untouched either way, and both arms are pinned.
+
+ONE REGEX FOR THE PUBLISHED CHECKPOINT. `fire-evidence.ts` carried a capturing, round-
+bounded copy whose docblock told a future dedupe to fold it into `run-disposition.ts` —
+a module that is not on `main`. The copy that IS on main, `checkpoint-round.ts`, went
+unnamed and had diverged: an unbounded round, so it read a round out of a checkpoint the
+gate classified as "not published". The capturing bounded form now lives in
+`checkpoint-round.ts` (the leaf, importing nothing) and `fire-evidence.ts` imports and
+re-exports it, so its own consumers are unchanged.
+
+Two findings surfaced rather than built. `inner_checkpoint_findings` is COALESCE-d, not
+CAS-ed like the checkpoint and verdict beside it, so a lane holding a save composed from
+an older read wins for one statement; the column is workflow-owned for DETECTION only (the
+settle-timeout gate reads column MOVEMENT, never findings text) and the window closes on
+the next checkpoint — the residual is now stated in the SQL itself. And the wake's
+settle-timeout arm still matches plain English where the published arm matches a bracketed
+token: the asymmetry is deliberate and now documented at the line — a false positive there
+yields the CAUTIOUS instruction (resolve the branch holder first), which is safe advice for
+any terminal build, where a false positive on the published marker suppressed a relaunch
+that should have happened.

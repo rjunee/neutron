@@ -24,6 +24,7 @@
  * PURE: no I/O, no clock, no process access. The probes live behind the seam.
  */
 import type { TridentRun } from './store.ts'
+import { OUTER_PUBLISHED_CHECKPOINT } from './checkpoint-round.ts'
 
 /**
  * The EXACT error string `buildSubstrateWorkflowFire` resolves on a launcher
@@ -53,31 +54,20 @@ export const FIRE_SETTLE_TIMEOUT_ERROR = 'fire turn did not settle within the bu
 export const FIRE_PUBLISHED_REASON_MARKER = '[trident:published-unreviewed]'
 
 /**
- * The outer loop's published-checkpoint shape, written by the orchestrator when
- * it pushes: `outer-published:<40-hex-oid>:<remaining_tasks>:<round>[:deviated]`.
+ * The outer loop's published-checkpoint shape — RE-EXPORTED, NOT RESPELLED.
  *
- * SEMANTICALLY IDENTICAL to `trident/run-disposition.ts`'s sibling on the
- * terminal-taxonomy branch (not on main yet) — same anchors, same field shapes,
- * same bounds. It is NOT character-for-character: this copy CAPTURES the sha,
- * remaining and round groups because `publishedFailureReason` renders them
- * field-by-field, where run-disposition's copy only tests. WHEN THAT MODULE
- * LANDS ON MAIN, DEDUPE TO ONE EXPORT (this capturing form is the superset) —
- * two copies of one regex is a temporary cost of two branches in flight, not a
- * design.
+ * There used to be a second copy here, because this gate CAPTURES the sha /
+ * remaining / round fields (`publishedFailureReason` renders them one by one)
+ * where `checkpoint-round.ts` only tested them. Two spellings of one shape
+ * diverged exactly as you would expect — the round was bounded here and
+ * unbounded there — so the capturing, bounded form moved into
+ * `checkpoint-round.ts` (the leaf, already on `main`, importing nothing) and
+ * this module imports it. The re-export keeps this file the one place the
+ * settle-timeout gate's own consumers import from.
  *
- * The round field is BOUNDED (`\d{1,9}`) ON PURPOSE: it matches what
- * `checkpointRound` / `checkpoint.sh` can actually write, so an absurd
- * pseudo-round cannot pass as a published checkpoint.
- *
- * THAT BOUND IS TIGHTER THAN THE RESUME SITES' `(\d+)` (`orchestrator.ts`,
- * `inner-workflow.mjs`), and the divergence is deliberate rather than an
- * oversight: a ≥10-digit round would resume as a review there and classify as
- * `none` here, i.e. this gate falls back to the ordinary RECOVERABLE `failed`
- * instead of the terminal published state. Diverging toward the recoverable
- * answer is the safe direction, and no writer in this repo can emit such a
- * round; when run-disposition lands and the copies dedupe, dedupe to THIS bound.
+ * Groups: 1 = sha, 2 = remaining tasks, 3 = round.
  */
-export const OUTER_PUBLISHED_CHECKPOINT = /^outer-published:([0-9a-f]{40}):(\d+):(\d{1,9})(?::deviated)?$/
+export { OUTER_PUBLISHED_CHECKPOINT } from './checkpoint-round.ts'
 
 /**
  * What a settle-timeout gatherer may report. THREE-VALUED, and only the first two

@@ -8,14 +8,18 @@
  * only the BOARD is a stub, because the chokepoint depends on it structurally.
  */
 
-import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { applyMigrations } from '@neutronai/migrations/runner.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
-import { TridentRunStore } from './store.ts'
-import { DispatchHoldStore, buildDispatchHoldSweep } from './dispatch-holds.ts'
+import { TridentRunStore, type TridentRun } from './store.ts'
+import {
+  BRANCH_LIVE_HOLD_STALE_MS,
+  DispatchHoldStore,
+  buildDispatchHoldSweep,
+} from './dispatch-holds.ts'
 import {
   dispatchBoardBoundBuild,
   type BoardBoundBuildDeps,
@@ -50,7 +54,15 @@ function stubBoard(cards: StubCard[]): StubBoard {
   return {
     cards: map,
     attached,
-    get: (_slug: string, id: string) => map.get(id) ?? null,
+    // A COPY PER READ, exactly like the real `WorkBoardStore.get` (which
+    // reconstructs the card from its row every call). Handing out the live map
+    // entry made every read alias every other one, so a test could not tell a
+    // FRESH read from a snapshot taken minutes earlier — which is precisely the
+    // distinction the dispatch TOCTOU rule is made of.
+    get: (_slug: string, id: string) => {
+      const c = map.get(id)
+      return c === undefined ? null : { ...c }
+    },
     attachRun: async (_slug: string, id: string, run_id: string) => {
       attached.push({ id, run_id })
     },
@@ -830,6 +842,232 @@ describe('STUCK CLAIM CANNOT WEDGE THE QUEUE', () => {
     await dispatchBoardBoundBuild({ task: 'build B again', board_item_id: 'B' }, deps(board))
     expect(holds.list()).toHaveLength(1)
     expect(holds.getByItem(SLUG, 'B')?.task).toBe('build B again')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARGUS r6 (BLOCKER) — DISPATCH TOCTOU. "May this refusal queue the card?" used
+// to be answered ONCE, from the card read at the top of `dispatchBoardBoundBuild`,
+// and then acted on by gates that run after `resolveBuildRepo`, the merge-mode
+// probe, the landed-PR probe and the worktree holder probe. A competing dispatch
+// that BOUND the card inside that seconds-wide window — the very run this
+// dispatch then observes and refuses on — left this one still holding "the card
+// is free", so it wrote the hold anyway. `buildDispatchHoldSweep` drops a hold
+// only while the linked run is live AT SWEEP TIME, so stopping that run on
+// purpose released the survivor onto a card someone had deliberately stopped.
+//
+// The window is closed by RE-READING at the write, synchronously: no `await`
+// between the board/store read and the upsert-or-delete that acts on it.
+// ---------------------------------------------------------------------------
+describe('DISPATCH TOCTOU — a card bound DURING the async gates is not queued behind its own run', () => {
+  /** The run a competing dispatch binds the card to, mid-flight. */
+  function competingRun(): Promise<TridentRun> {
+    return store.create({
+      slug: 'competing-lane',
+      project_slug: SLUG,
+      repo_path: REPO,
+      task: 'the competing dispatch that won the race for this card',
+      claimed_paths: [],
+    })
+  }
+
+  /** What the competitor does to the board the instant it wins the race. */
+  function bindCard(board: StubBoard, id: string, run: TridentRun): void {
+    board.cards.get(id)!.linked_run_id = run.id
+    board.cards.get(id)!.status = 'in_progress'
+  }
+
+  test('a dispatch refused on branch liveness AFTER a competitor bound the card queues NOTHING', async () => {
+    const board = stubBoard([
+      { id: 'B', title: 'the card two dispatches raced for, one microtask apart', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const competitor = await competingRun()
+    // Seeded while the card was genuinely free — the row the stale snapshot
+    // would have left behind even if this refusal wrote nothing itself.
+    await holds.upsert({
+      project_slug: SLUG,
+      board_item_id: 'B',
+      task: 'edit trident/foo.ts',
+      hold_kind: 'path',
+      hold_reason: 'queued before the competitor bound the card',
+    })
+
+    // THE INTERLEAVE. The holder probe is the last await before the hold write,
+    // so binding the card inside it reproduces the race exactly: free at the
+    // opening read, owned by the time the refusal is composed.
+    let probed = 0
+    const refusal = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'B' },
+      deps(board, {
+        branchHolderProbe: async () => {
+          probed += 1
+          bindCard(board, 'B', competitor)
+          return await liveHolder()
+        },
+      }),
+    )
+    expect(probed).toBe(1)
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('branch_live')
+    // The prose names the competitor as the card's owner…
+    expect(refusal.message).toContain('nothing stays queued')
+    expect(refusal.message).toContain(competitor.id.slice(0, 8))
+    // …the shape claims no queue entry…
+    expect('hold' in refusal).toBe(false)
+    // …and the row seeded before the race is gone with it.
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+
+    // The competitor is STOPPED on purpose. Nothing re-fires the card.
+    await store.terminalTransition(competitor.id, { phase: 'stopped' })
+    await buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })(store.get(competitor.id)!)
+    expect(runCount()).toBe(1)
+    expect(board.attached).toEqual([])
+  })
+
+  test('the same interleave at the PATH-CONTENTION gate queues nothing either', async () => {
+    const board = stubBoard([
+      { id: 'B', title: 'the card two dispatches raced for over one claimed file', design_doc_ref: null, status: 'upcoming' },
+    ])
+    // A live run elsewhere already claims the file this dispatch wants, so the
+    // path gate is the one that refuses.
+    const claimer = await store.create({
+      slug: 'claimer',
+      project_slug: SLUG,
+      repo_path: REPO,
+      task: 'edit trident/foo.ts',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    const competitor = await competingRun()
+    // The interleave rides on `resolveMergeMode` this time — any await ahead of
+    // the gate will do; the rule may not depend on WHICH one.
+    const refusal = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts as well', board_item_id: 'B' },
+      deps(board, {
+        resolveMergeMode: async () => {
+          bindCard(board, 'B', competitor)
+          return 'local'
+        },
+      }),
+    )
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('held')
+    expect(refusal.message).toContain('nothing stays queued')
+    expect(refusal.message).not.toContain('will start automatically')
+    expect('hold' in refusal).toBe(false)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+
+    await store.terminalTransition(claimer.id, { phase: 'done' })
+    await store.terminalTransition(competitor.id, { phase: 'stopped' })
+    await buildDispatchHoldSweep({ holds, board, makeDispatchDeps: () => deps(board) })(
+      store.get(competitor.id)!,
+    )
+    // Two runs existed before the sweep (the claimer and the competitor); a
+    // third would be the auto-restart this test exists to forbid.
+    expect(runCount()).toBe(2)
+    expect(board.attached).toEqual([])
+  })
+
+  // THE MUST-PASS SIBLING. The fix must not be "never queue a card refused after
+  // an await": with NOBODY binding the card during the same window, the refusal
+  // still queues and the sweep still fires it once the branch frees.
+  test('with no competitor the same late refusal DOES queue, and the sweep fires it', async () => {
+    const board = stubBoard([
+      { id: 'B', title: 'the card nobody raced for while its branch was held', design_doc_ref: null, status: 'upcoming' },
+    ])
+    const refusal = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'B' },
+      deps(board, { branchHolderProbe: liveHolder }),
+    )
+    expect(refusal.ok).toBe(false)
+    if (refusal.ok) return
+    expect(refusal.code).toBe('branch_live')
+    expect(refusal.message).toContain('QUEUED')
+    expect('hold' in refusal).toBe(true)
+    expect(holds.getByItem(SLUG, 'B')).not.toBeNull()
+
+    await buildDispatchHoldSweep({
+      holds,
+      board,
+      makeDispatchDeps: () => deps(board, { branchHolderProbe: async () => null }),
+    })({ id: 'unrelated' } as never)
+    expect(runCount()).toBe(1)
+    expect(holds.getByItem(SLUG, 'B')).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARGUS r6 (minor) — a `branch_live` hold is never dropped, which is right, but
+// it also said the SAME warn line forever. A lock nothing will ever release
+// (third-party/legacy, no ` start <n>` in its reason, so the recycled-pid
+// refinement cannot fire) then wedged a card silently. The hold still survives;
+// the LOG gets louder once the age stops looking transient.
+// ---------------------------------------------------------------------------
+describe('A BRANCH-LIVE HOLD THAT STOPS LOOKING TRANSIENT IS SAID OUT LOUD', () => {
+  const card = (): StubBoard =>
+    stubBoard([
+      { id: 'A', title: 'the card whose branch a lock nobody releases still holds', design_doc_ref: null, status: 'upcoming' },
+    ])
+
+  async function queueBranchLiveHold(board: StubBoard): Promise<number> {
+    const refusal = await dispatchBoardBoundBuild(
+      { task: 'edit trident/foo.ts', board_item_id: 'A' },
+      deps(board, { branchHolderProbe: liveHolder }),
+    )
+    expect(refusal.ok).toBe(false)
+    const hold = holds.getByItem(SLUG, 'A')
+    expect(hold).not.toBeNull()
+    return Date.parse(hold!.created_at)
+  }
+
+  test('a FRESH branch_live hold re-refuses at warn, not at error', async () => {
+    const board = card()
+    const created = await queueBranchLiveHold(board)
+    const errors = spyOn(console, 'error').mockImplementation(() => {})
+    const warns = spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      await buildDispatchHoldSweep({
+        holds,
+        board,
+        makeDispatchDeps: () => deps(board, { branchHolderProbe: liveHolder }),
+        now: () => created + 60_000,
+      })({ id: 'unrelated' } as never)
+      expect(errors.mock.calls.flat().join(' ')).not.toContain('dispatch_hold_branch_live_stale')
+      expect(warns.mock.calls.flat().join(' ')).toContain('dispatch_hold_branch_live')
+    } finally {
+      errors.mockRestore()
+      warns.mockRestore()
+    }
+    // Still queued — the age changes the LOG LEVEL, never the row.
+    expect(holds.getByItem(SLUG, 'A')).not.toBeNull()
+  })
+
+  test('past the stale budget the same refusal is an ERROR naming the age — and the hold survives', async () => {
+    const board = card()
+    const created = await queueBranchLiveHold(board)
+    const errors = spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await buildDispatchHoldSweep({
+        holds,
+        board,
+        makeDispatchDeps: () => deps(board, { branchHolderProbe: liveHolder }),
+        now: () => created + BRANCH_LIVE_HOLD_STALE_MS,
+      })({ id: 'unrelated' } as never)
+      const emitted = errors.mock.calls.flat().join(' ')
+      expect(emitted).toContain('dispatch_hold_branch_live_stale')
+      expect(emitted).toContain(String(BRANCH_LIVE_HOLD_STALE_MS))
+    } finally {
+      errors.mockRestore()
+    }
+    // A LOUD line, not a TTL: dropping the row would delete a queued card that
+    // nothing else ever re-dispatches.
+    expect(holds.getByItem(SLUG, 'A')).not.toBeNull()
+    expect(runCount()).toBe(0)
   })
 })
 

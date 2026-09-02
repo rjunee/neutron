@@ -1306,6 +1306,17 @@ export class TridentRunStore {
                 -- save. COALESCE writes only when the caller actually brought something.
                 -- (Keep this comment free of question marks: the driver counts every one
                 -- in the statement text as a bind parameter, comments included.)
+                -- (And free of BACKTICKS, for the same class of reason: this statement is
+                -- a template literal, so one backtick ends the string mid-SQL.)
+                -- STATED RESIDUAL (Argus r6, minor): this column is COALESCE-d, not
+                -- compare-and-swapped the way inner_checkpoint and inner_verdict are
+                -- above. A lane holding a save it composed from an older read then writes
+                -- its own findings over a newer set that landed in between -- last writer
+                -- wins for ONE statement. Left as is deliberately: the column is
+                -- workflow-owned for DETECTION only (the settle-timeout gate reads
+                -- movement, never the findings text), the window closes on the workflow's
+                -- very next checkpoint, and CAS-ing it would need a third guard column on
+                -- a statement whose two existing guards already decide the row's fate.
                 inner_checkpoint_findings = COALESCE(?, inner_checkpoint_findings),
                 base_sha = ?, base_behind = ?,
                 last_advanced_at = ?

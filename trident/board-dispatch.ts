@@ -379,6 +379,21 @@ export function detectReviewIntent(task: string): number | null {
 }
 
 /**
+ * "May this refusal queue the card?", answered at the instant a hold is about
+ * to be written — see `queueDecision` inside {@link dispatchBoardBoundBuild}.
+ */
+interface QueueDecision {
+  /** Write the hold row (true) or DELETE whatever is already queued (false). */
+  queued: boolean
+  /** The card already has a non-terminal run of its own — that run owns it. */
+  linkedLive: boolean
+  /** That run's id, for the prose that names who owns the card. */
+  linkedRunId: string | null
+  /** The sentence that replaces "…it will dispatch automatically…". */
+  notQueuedClause: string
+}
+
+/**
  * Create a board-bound trident run, enforcing the required-item + ask-gate
  * chokepoint rules. Pure of any chat/tool framing — the two callers wrap the
  * typed result in their own response shape.
@@ -465,7 +480,7 @@ export async function dispatchBoardBoundBuild(
     ...(bound_pr !== undefined && bound_pr !== null ? { bound_pr } : {}),
   }
 
-  // MAY THIS REFUSAL QUEUE THE CARD AT ALL? — decided ONCE, HERE, AHEAD OF EVERY
+  // MAY THIS REFUSAL QUEUE THE CARD AT ALL? — ONE rule, applied by EVERY
   // HOLD-PRODUCING GATE (Argus r4 VETO). It used to be decided inside the
   // branch-liveness gate alone, which left the two gates ABOVE and BELOW it
   // writing hold rows unconditionally — and either survivor outlives the card's
@@ -480,19 +495,40 @@ export async function dispatchBoardBoundBuild(
   // Every gate below therefore queues through `queueHold`, whose two arms are
   // "write the row" and "delete whatever is already queued", and says which one
   // happened in its own prose and in its returned shape.
-  const linkedRunId = item.linked_run_id ?? null
-  const linkedPhase = linkedRunId === null ? null : (deps.store.get(linkedRunId)?.phase ?? null)
-  const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
-  const queued = deps.holds !== undefined && !linkedLive
-  // The clause that replaces "…it will dispatch automatically…" when nothing was
-  // queued. Promising an automatic re-fire that cannot come is the thing that
-  // made the surviving row dangerous rather than merely wrong.
-  const notQueuedClause =
-    deps.holds === undefined
-      ? 'and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the card yourself once it clears.'
-      : `and nothing stays queued — run ${(linkedRunId ?? '').slice(0, 8)} is already bound to this card and ` +
-        'owns it; the card moves when that run finishes, not when this clears.'
-  const queueHold = async (entry: DispatchHoldInput): Promise<void> => {
+  //
+  // RE-READ, NEVER SNAPSHOTTED (Argus r6 BLOCKER — dispatch TOCTOU). The rule
+  // used to be evaluated ONCE here, off the `item` read at the top of this
+  // function, and then applied by gates that run AFTER `resolveBuildRepo`, the
+  // merge-mode probe, the gh landed probe and the worktree holder probe — a
+  // seconds-wide window of awaits. A competing dispatch that BOUND the card
+  // inside that window (the very thing the branch-liveness gate below then
+  // observes and refuses on) left this dispatch still holding "the card is
+  // free", so it wrote the hold anyway; stop that competing run on purpose and
+  // the sweep re-fires the survivor onto a deliberately stopped card. So the
+  // decision is taken FRESH, from the board and the store, and — this is the
+  // load-bearing half — SYNCHRONOUSLY, with no `await` between the read and the
+  // `queueHold` that acts on it. `deps.board.get` and `deps.store.get` are both
+  // sync, so nothing can interleave in between.
+  //
+  // A card that has VANISHED off the board mid-dispatch falls back to the
+  // opening snapshot rather than inventing a liveness answer: the sweep already
+  // drops holds whose card is gone, so this is not the place to decide that.
+  const queueDecision = (): QueueDecision => {
+    const card = deps.board.get(deps.project_slug, board_item_id) ?? item
+    const linkedRunId = card.linked_run_id ?? null
+    const linkedPhase = linkedRunId === null ? null : (deps.store.get(linkedRunId)?.phase ?? null)
+    const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
+    // The clause that replaces "…it will dispatch automatically…" when nothing
+    // was queued. Promising an automatic re-fire that cannot come is the thing
+    // that made the surviving row dangerous rather than merely wrong.
+    const notQueuedClause =
+      deps.holds === undefined
+        ? 'and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the card yourself once it clears.'
+        : `and nothing stays queued — run ${(linkedRunId ?? '').slice(0, 8)} is already bound to this card and ` +
+          'owns it; the card moves when that run finishes, not when this clears.'
+    return { queued: deps.holds !== undefined && !linkedLive, linkedLive, linkedRunId, notQueuedClause }
+  }
+  const queueHold = async (entry: DispatchHoldInput, decision: QueueDecision): Promise<void> => {
     if (deps.holds === undefined) return
     // NOT WRITING IS NOT ENOUGH — DELETE WHAT IS ALREADY THERE (Argus r3
     // BLOCKER, generalised in r4). Skipping the upsert only keeps THIS refusal
@@ -500,7 +536,7 @@ export async function dispatchBoardBoundBuild(
     // card had a live run, still survives it and re-fires once that run
     // terminalizes. The delete is idempotent and scoped to this (project, card)
     // pair, which is the hold table's own key.
-    if (queued) await deps.holds.upsert(entry)
+    if (decision.queued) await deps.holds.upsert(entry)
     else await deps.holds.deleteByItem(deps.project_slug, board_item_id)
   }
 
@@ -515,28 +551,32 @@ export async function dispatchBoardBoundBuild(
     if (blocker === null) continue
     const status = blocker.status
     if (status === undefined || status === 'done') continue
+    const decision = queueDecision()
     let message =
       `Plan item "${board_item_id}" is blocked by "${blocker_id}" ("${blocker.title}", status ${status}) — ` +
-      (queued ? 'it will dispatch automatically when the blocker completes.' : notQueuedClause)
+      (decision.queued ? 'it will dispatch automatically when the blocker completes.' : decision.notQueuedClause)
     if (status === 'failed') {
       message += ' That blocker has FAILED; it must be retried before this card can start.'
     }
-    await queueHold({
-      project_slug: deps.project_slug,
-      board_item_id,
-      task: input.task,
-      payload: holdPayload,
-      hold_kind: 'blocker',
-      hold_reason: message,
-      held_on_blocker_id: blocker_id,
-    })
+    await queueHold(
+      {
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        hold_kind: 'blocker',
+        hold_reason: message,
+        held_on_blocker_id: blocker_id,
+      },
+      decision,
+    )
     return {
       ok: false,
       code: 'held',
       message,
       // The `hold` shape is a claim that a queue entry EXISTS; only make it when
       // one was really written.
-      ...(queued ? { hold: { kind: 'blocker' as const, blocker_id } } : {}),
+      ...(decision.queued ? { hold: { kind: 'blocker' as const, blocker_id } } : {}),
     }
   }
 
@@ -647,31 +687,20 @@ export async function dispatchBoardBoundBuild(
   // path; running it first cost the clearer diagnosis on the common one.
   {
     const holdingRun = deps.store.listNonTerminalByRepo(repo_path).find((r) => r.branch === branch)
-    // WHAT WILL ACTUALLY RE-FIRE THIS CARD — say that, and nothing more. The
-    // decision itself (`queued`) is made ONCE at the top of the hold-producing
-    // gates; see the note there for why, and why the write follows the prose.
-    let tail: string
-    if (deps.holds === undefined) {
-      tail =
-        ' Nothing was dispatched, and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the ' +
-        'card yourself once the holder is gone.'
-    } else if (linkedLive) {
-      tail =
-        ` Nothing was dispatched now, and nothing stays queued — run ${(linkedRunId ?? '').slice(0, 8)} is already ` +
-        'bound to this card and owns it; the card moves when that run finishes.'
-    } else {
-      tail =
-        ' Nothing was dispatched now; this card is QUEUED and re-checked on every sweep, so it dispatches ' +
-        'automatically once nothing live holds the branch.'
-    }
-    let message: string | null = null
+    // THE REFUSAL BODY IS BUILT WITHOUT ITS TAIL, and the tail is appended below
+    // — because the tail states what will re-fire the card, and that is only
+    // knowable AFTER the last await in this gate (the holder probe). Deciding it
+    // here, ahead of the probe, is how the snapshot bug got in: a competing
+    // dispatch binding the card DURING the probe left this refusal promising an
+    // automatic re-fire and writing the row to make it happen.
+    let body: string | null = null
     let held_on_run_id: string | null = null
     if (holdingRun !== undefined) {
       held_on_run_id = holdingRun.id
-      message =
+      body =
         `Refused: branch ${branch} is already being built by live run ${holdingRun.id.slice(0, 8)} ` +
         `(${holdingRun.slug}, phase ${holdingRun.phase}). Resolve that run first — watch it finish, or stop it ` +
-        `explicitly if it is truly dead — and never delete the branch under it.` + tail
+        `explicitly if it is truly dead — and never delete the branch under it.`
     } else {
       let holder: BranchHolderProbe | null = null
       try {
@@ -680,16 +709,30 @@ export async function dispatchBoardBoundBuild(
         holder = null // a failed look is not a holder — positive evidence only
       }
       if (holder !== null && holder.pid_live) {
-        message =
+        body =
           `Refused: branch ${branch} is held by live worktree ${holder.worktree_basename}` +
           (holder.pid !== null ? ` (lock pid ${holder.pid}, alive)` : '') +
           ` — a lane appears to be building this branch right now even though no live run row says so ` +
           `(a launcher timeout may have mislabeled its run as failed). Resolve the holder first: check ` +
-          '`git worktree list --porcelain` and that pid; never delete the branch under a live lock.' +
-          tail
+          '`git worktree list --porcelain` and that pid; never delete the branch under a live lock.'
       }
     }
-    if (message !== null) {
+    if (body !== null) {
+      // WHAT WILL ACTUALLY RE-FIRE THIS CARD — say that, and nothing more, and
+      // decide it HERE: after every await in this gate, synchronously with the
+      // write that follows. See `queueDecision` for why the answer may not be
+      // carried across an await.
+      const decision = queueDecision()
+      const tail =
+        deps.holds === undefined
+          ? ' Nothing was dispatched, and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the ' +
+            'card yourself once the holder is gone.'
+          : decision.linkedLive
+            ? ` Nothing was dispatched now, and nothing stays queued — run ${(decision.linkedRunId ?? '').slice(0, 8)} is already ` +
+              'bound to this card and owns it; the card moves when that run finishes.'
+            : ' Nothing was dispatched now; this card is QUEUED and re-checked on every sweep, so it dispatches ' +
+              'automatically once nothing live holds the branch.'
+      const message = body + tail
       // QUEUE IT — a refusal is not a rejection. This condition ENDS the moment
       // the live lane finishes, which is exactly the shape the hold queue was
       // built for: without a row here the card is dropped on the floor and only
@@ -708,16 +751,19 @@ export async function dispatchBoardBoundBuild(
       // …UNLESS THE CARD'S OWN LIVE RUN IS THE REASON. `queueHold`'s other arm
       // DELETES instead, because writing a row anyway — or leaving one an
       // earlier dispatch wrote — is what let a stopped/failed card auto-restart
-      // once that run terminalized. See the note at `queued`.
-      await queueHold({
-        project_slug: deps.project_slug,
-        board_item_id,
-        task: input.task,
-        payload: holdPayload,
-        hold_kind: 'path',
-        hold_reason: message,
-        held_on_run_id,
-      })
+      // once that run terminalized. See the note at `queueDecision`.
+      await queueHold(
+        {
+          project_slug: deps.project_slug,
+          board_item_id,
+          task: input.task,
+          payload: holdPayload,
+          hold_kind: 'path',
+          hold_reason: message,
+          held_on_run_id,
+        },
+        decision,
+      )
       // SAY SO. The refusal used to be silent in the logs as well as in the
       // queue, so a card that stopped moving had no trace anywhere.
       log.warn('dispatch_branch_live', {
@@ -736,7 +782,7 @@ export async function dispatchBoardBoundBuild(
         // ONLY when a hold row was really written: with no store — or behind the
         // card's own live run — nothing was persisted, and a `hold` shape then
         // claims a queue entry that does not exist.
-        ...(queued
+        ...(decision.queued
           ? {
               hold: {
                 kind: 'branch' as const,
@@ -795,25 +841,32 @@ export async function dispatchBoardBoundBuild(
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     })
     if (!admission.ok) {
+      // Decided AFTER the admission attempt — the last await before the write.
+      const decision = queueDecision()
       const message =
         `"${admission.path}" is claimed by live run ${admission.holding_run.id.slice(0, 8)} ` +
         `(${admission.holding_run.slug}) — ` +
-        (queued ? 'this build will start automatically when that run goes terminal.' : notQueuedClause)
-      await queueHold({
-        project_slug: deps.project_slug,
-        board_item_id,
-        task: input.task,
-        payload: holdPayload,
-        claimed_paths: paths,
-        hold_kind: 'path',
-        hold_reason: message,
-        held_on_run_id: admission.holding_run.id,
-      })
+        (decision.queued
+          ? 'this build will start automatically when that run goes terminal.'
+          : decision.notQueuedClause)
+      await queueHold(
+        {
+          project_slug: deps.project_slug,
+          board_item_id,
+          task: input.task,
+          payload: holdPayload,
+          claimed_paths: paths,
+          hold_kind: 'path',
+          hold_reason: message,
+          held_on_run_id: admission.holding_run.id,
+        },
+        decision,
+      )
       return {
         ok: false,
         code: 'held',
         message,
-        ...(queued
+        ...(decision.queued
           ? {
               hold: {
                 kind: 'path' as const,

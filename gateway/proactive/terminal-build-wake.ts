@@ -54,6 +54,17 @@ export function buildTerminalBuildWakePrompt(args: { run: TridentRun; board_item
   // before base resolution and before the build workflow), and `bound_pr` is a
   // `work_board_dispatch_build` argument — `work_board_start` deliberately has
   // none. So name THAT tool, and say plainly what the other one would do.
+  // TWO MATCHES, AND ONLY ONE OF THEM NEEDED A TOKEN (Argus r6, nit). The
+  // published arm keys on a BRACKETED marker because a reason that merely quoted
+  // the English `already built and published` would have SUPPRESSED a genuinely
+  // failed build's relaunch — a collision that costs recovery. The settle-timeout
+  // arm still keys on its plain-English constant, deliberately: its collision
+  // costs the opposite. A reason that happens to contain
+  // `fire turn did not settle within the budget` gets the CAUTIOUS instruction —
+  // resolve the branch holder before re-dispatching — which is safe advice for
+  // any terminal build, where suppressing a relaunch that should have happened
+  // is not. Same `includes`, opposite blast radius, so the same hardening is not
+  // warranted here.
   const reason = run.failure_reason ?? ''
   const fireShape = reason.includes(FIRE_SETTLE_TIMEOUT_ERROR) || reason.includes(FIRE_PUBLISHED_REASON_MARKER)
   const instruction2 = fireShape
