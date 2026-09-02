@@ -390,7 +390,7 @@ with cross-references noted inline.
     `update`/`save`/`saveIfActive` throw `TridentEmptyFindingsRejectionError` when the effective
     post-write state would be `REQUEST_CHANGES` with NULL/`[]`/unparseable findings
     (`trident/store.ts`, the throw sites in `update`/`save`/`saveIfActive`; RED-on-revert pins in
-    `trident/store.test.ts:990`
+    `trident/store.test.ts`
     "empty-findings rejection guard"). Out-of-process: the LIVE inner workflow does not go through
     the store — it invokes `trident/checkpoint.sh`, which writes the verdict through a SQL CASE
     over the effective findings (`json_valid`/`json_type`/`json_array_length`, the SQL spelling of
@@ -1106,16 +1106,21 @@ and is not reused here.
      — never by convention at call sites. A guard at a caller is one more guard among many; a
      guard at the waist is the contract. The enforced instance: `inner_verdict='REQUEST_CHANGES'`
      with an empty findings list is a write the store REJECTS
-     (`TridentEmptyFindingsRejectionError`, `trident/store.ts:58`, thrown at `:1113`, `:1269`,
-     `:1345`). The write site is chosen precisely because it is unavoidable, and the store says so
-     about its own residual gap at `trident/store.ts:1106-1108`: the guard "makes findings-free
-     rejection structurally unwritable by in-process writers; `checkpoint.sh` remains
-     out-of-process SQL and bypasses it by construction". That residue is why #125 exists.
-     Protects: `trident/store.test.ts:990` ("empty-findings rejection guard — an empty finding set
+     (`TridentEmptyFindingsRejectionError`, declared in `trident/store.ts` and thrown from all
+     three of its writers — `update`, `save` and `saveIfActive`). The write site is chosen
+     precisely because it is unavoidable — for IN-PROCESS writers. The out-of-process writer is
+     not covered by that throw and does not have to be: `trident/checkpoint.sh` carries its OWN
+     copy of the rule, an atomic SQL CASE in the same UPDATE that records `REVIEW_NOT_RUN`
+     instead of rejecting (#118), and the store's comment at the `update` guard says exactly
+     that. It used to say `checkpoint.sh` "bypasses it by construction"; that stopped being true
+     when the second copy was written, and this entry quoted the stale sentence for one release.
+     The residue #125 exists for is the DUPLICATION, not a hole: two writers, two copies of one
+     rule, and nothing but review keeping them in step.
+     Protects: `trident/store.test.ts` ("empty-findings rejection guard — an empty finding set
      is never a rejection").
 125. An enforcement point must be UNWIREABLE-OFF. Only two qualify, and each covers the other's
      blind spot exactly: (a) the TYPE at the construction site — always on, a missing field is a
-     compile error, blind to out-of-process writers such as `trident/checkpoint.sh:445`, which
+     compile error, blind to out-of-process writers such as `trident/checkpoint.sh`, which
      issues raw `sqlite3 ... UPDATE code_trident_runs` no TypeScript type will ever see; and
      (b) the SCHEMA at the file — always on for every writer including that shell script, blind to
      whether a value was observed rather than typed. A separately-wired runtime gate is NOT an
@@ -1140,7 +1145,8 @@ and is not reused here.
      `runtime/subagent/registry.ts:18` defines `finished` as a process-status value. Activity is
      not output: a non-zero cost, a fresh timestamp and a process that replied are proxies for
      aliveness, which is exactly the mistake `last_advanced_at` encodes (#123).
-     Protects: `trident/store.test.ts:990` for the run half; the dispatch half is
+     Protects: `trident/store.test.ts` ("empty-findings rejection guard") for the run half;
+     the dispatch half is
      **unprotected — covered by review only.**
 127. A DERIVED JUDGEMENT PINS THE IDENTITY OF ITS INPUTS. "Is this PR green" is computed only
      from checks bound to the CURRENT head sha, never from a check list that does not say which
@@ -1163,7 +1169,8 @@ and is not reused here.
      leak gate, which exits **3** with `LEAK GATE: INCOMPLETE` rather than `SILENT ✅` when its
      rule could not run, because "I could not check" must not look like "I checked and it was
      clean" (`CONTRIBUTING.md`, "Git hooks").
-     Protects: `trident/store.test.ts:990` (the one guard that shipped with its honest sibling);
+     Protects: `trident/store.test.ts` ("empty-findings rejection guard" — the one guard that
+     shipped with its honest sibling);
      the general obligation is **unprotected — covered by review only**, and no totality test
      exists yet.
 
@@ -1183,7 +1190,7 @@ that was never recorded, so these are the same contract seen from the write side
      Protects: **unprotected — covered by review only.**
 130. NO ACTION MAY SILENTLY DO NOTHING: a call whose precondition is unmet is structurally
      incapable of returning success. The reference implementation already exists in this tree, in
-     shell, because its author could not get it from a type — `trident/checkpoint.sh:445-449` runs
+     shell, because its author could not get it from a type — `trident/checkpoint.sh` runs
      the UPDATE, reads `changes()`, and on zero prints
      `checkpoint.sh: run '<id>' not found — checkpoint NOT applied` and exits **3**, a distinct
      code for a distinct outcome. That is the whole contract in four lines; the job is to make it

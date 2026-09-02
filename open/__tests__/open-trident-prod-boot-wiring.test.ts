@@ -441,8 +441,8 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // mutant is applied to the real source at the bottom of this test and must
     // come out RED.
 
-    /** The `{ … }` body enclosing `text[idx]`, by bracket depth. */
-    const enclosingObject = (text: string, idx: number): string | null => {
+    /** The `{ … }` enclosing `text[idx]`, by bracket depth — its brace positions. */
+    const enclosingObjectRange = (text: string, idx: number): [number, number] | null => {
       let depth = 0
       let end = -1
       for (let k = idx; k < text.length; k++) {
@@ -471,7 +471,13 @@ describe('Open foundational-Trident prod-boot wiring', () => {
           depth--
         }
       }
-      return start === -1 || end === -1 ? null : text.slice(start + 1, end)
+      return start === -1 || end === -1 ? null : [start, end]
+    }
+
+    /** The body of that literal — everything between its braces, nesting included. */
+    const enclosingObject = (text: string, idx: number): string | null => {
+      const range = enclosingObjectRange(text, idx)
+      return range === null ? null : text.slice(range[0] + 1, range[1])
     }
 
     /** The lines of `body` that sit at ITS top level — i.e. its direct properties. */
@@ -547,24 +553,98 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // failing to compile — and a decoy `void { … }` has neither, so it is not a
     // site. Every site must then carry the probe AND the runner as direct
     // properties of ITSELF.
+    /**
+     * AND THE LITERAL IS NOT NECESSARILY THE ARGUMENT (Argus r6 blocker, codex's
+     * mutant, confirmed by the synthesizer). Every rule below reads the LITERAL —
+     * but the chokepoint is handed an EXPRESSION, and an expression may wrap the
+     * literal and rewrite it on the way past:
+     * `Object.assign({ store, repo_path, landedProbe: …, hostRunner: … }, { hostRunner: undefined })`
+     * leaves the wired literal untouched — every count equal, every site paired,
+     * every mention still last, nothing computed and nothing spread — while the
+     * second literal carries neither `store:` nor `repo_path:`, so it is not a
+     * site and is never read. Production takes the uncredentialed fallback with
+     * this test green.
+     *
+     * Chasing wrapper SPELLINGS cannot work (`Object.assign` today, a local alias
+     * or a merge helper of one's own tomorrow). So, as with legibility, the rule
+     * runs the other way round and FAILS CLOSED: the site's literal must sit in
+     * one of the hand-off positions this file actually uses, read off
+     * TypeScript's OWN parse tree — a `return`, a property value, an arrow's
+     * concise body, or a direct argument of `dispatchBoardBoundBuild` itself.
+     * Anything else is reported UNWIRED, because "something else receives this
+     * literal first" is not "the chokepoint receives this literal".
+     */
+    const parseSource = (text: string): ts.SourceFile =>
+      ts.createSourceFile(
+        'composer.scan.ts',
+        text,
+        ts.ScriptTarget.Latest,
+        /* setParentNodes */ true,
+        ts.ScriptKind.TS,
+      )
+
+    /** The INNERMOST object literal whose extent covers `idx`. */
+    const innermostObjectAt = (
+      file: ts.SourceFile,
+      idx: number,
+    ): ts.ObjectLiteralExpression | null => {
+      // Outermost first, so the last one pushed is the innermost.
+      const covering: ts.ObjectLiteralExpression[] = []
+      const visit = (node: ts.Node): void => {
+        if (node.getFullStart() > idx || node.getEnd() <= idx) return
+        if (ts.isObjectLiteralExpression(node)) covering.push(node)
+        ts.forEachChild(node, visit)
+      }
+      ts.forEachChild(file, visit)
+      return covering[covering.length - 1] ?? null
+    }
+
+    /** True when the literal at `idx` is what its consumer receives, unmodified. */
+    const handedOverDirectly = (file: ts.SourceFile, idx: number): boolean => {
+      const lit = innermostObjectAt(file, idx)
+      if (lit === null) return false
+      const parent = lit.parent
+      // `/code`'s `resolve_context`: `return { … }`.
+      if (ts.isReturnStatement(parent)) return true
+      // The agent-native entry: `trident_build_dispatch: { … }`.
+      if (ts.isPropertyAssignment(parent)) return parent.initializer === lit
+      // The hold sweep: `makeDispatchDeps: (hold) => ({ … })`.
+      if (ts.isParenthesizedExpression(parent)) {
+        return ts.isArrowFunction(parent.parent) && parent.parent.body === parent
+      }
+      if (ts.isArrowFunction(parent)) return parent.body === lit
+      // The app's ▶: `dispatchBoardBoundBuild(request, { … })` — the chokepoint BY
+      // NAME, so a merging helper cannot stand in for it under another identifier.
+      return (
+        ts.isCallExpression(parent) &&
+        parent.arguments.some((arg) => arg === lit) &&
+        ts.isIdentifier(parent.expression) &&
+        parent.expression.text === 'dispatchBoardBoundBuild'
+      )
+    }
+
     interface DepsSite {
       /** Everything between the literal's braces, nesting included. */
       body: string
       /** The lines of that body that are its DIRECT properties. */
       lines: string[]
+      /** Whether THAT literal is the value the chokepoint receives. */
+      handedOver: boolean
     }
     const dispatchDepsSites = (text: string): DepsSite[] => {
+      const file = parseSource(text)
       const re = /^[ \t]*repo_path:[ \t]/gm
       const out: DepsSite[] = []
       for (let m = re.exec(text); m !== null; m = re.exec(text)) {
-        const body = enclosingObject(text, m.index)
-        if (body === null) continue
+        const range = enclosingObjectRange(text, m.index)
+        if (range === null) continue
+        const body = text.slice(range[0] + 1, range[1])
         const lines = directPropertyLines(body)
         // Self-check, as above: the anchor line must come back as a DIRECT
         // property of the literal the scan found, or the scan mis-parsed.
         if (!lines.some((l) => /^[ \t]*repo_path:[ \t]/.test(l))) continue
         if (!lines.some((l) => /^[ \t]*store:[ \t]/.test(l))) continue
-        out.push({ body, lines })
+        out.push({ body, lines, handedOver: handedOverDirectly(file, range[0]) })
       }
       return out
     }
@@ -673,6 +753,9 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     }
 
     const siteIsWired = (site: DepsSite): boolean => {
+      // A literal the chokepoint never receives is not a wired literal, whatever
+      // it says inside itself.
+      if (!site.handedOver) return false
       if (!legible(site)) return false
       const has = (prop: string, value: string): boolean =>
         site.lines.some((l) => propLine(prop, value).test(l))
@@ -698,6 +781,10 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // exactly, so a FIFTH entry cannot be added without being wired here too —
     // and so a site that quietly disappears cannot read as "all sites paired".
     expect(dispatchDepsSites(src).length).toBe(4)
+    // Positive control for the hand-off gate: all four production literals ARE
+    // what their consumer receives, so it cannot be answering "unwired" for
+    // everything below.
+    expect(dispatchDepsSites(src).filter((site) => site.handedOver).length).toBe(4)
     expect(dispatchDepsSites(src).filter((site) => !siteIsWired(site)).length).toBe(0)
 
     // THE REVIEWERS' MUTANTS, APPLIED TO THE REAL SOURCE. Both unwire the app's ▶
@@ -818,6 +905,51 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       '                ...(chatId !== null ? { chat_id: chatId } : {}),',
     ])
     expect(dispatchDepsSites(legitSpreadMutant).filter((site) => !siteIsWired(site)).length).toBe(0)
+
+    // r6 — the wrapper mutant: DELETE NOTHING, CHANGE NOTHING INSIDE, and hand the
+    // chokepoint something else. The victim literal is spliced verbatim into
+    // `Object.assign(…, { hostRunner: undefined })`, so JS binds `hostRunner` to
+    // undefined in the object the call actually receives while the literal every
+    // scan above reads is character-for-character the wired one.
+    const offsetOfLine = (n: number): number =>
+      lines.slice(0, n).reduce((acc, l) => acc + l.length + 1, 0)
+    const victimRange = enclosingObjectRange(src, offsetOfLine(victimProbe))
+    expect(victimRange).not.toBeNull()
+    const [victimOpen, victimClose] = victimRange!
+    const wrap = (callee: string): string =>
+      `${src.slice(0, victimOpen)}${callee}(${src.slice(victimOpen, victimClose + 1)}, { hostRunner: undefined })${src.slice(victimClose + 1)}`
+    const wrappedMutant = wrap('Object.assign')
+    // The wired literal survives the mutation byte for byte…
+    expect(wrappedMutant).toContain(src.slice(victimOpen, victimClose + 1))
+    expect(count('hostRunner', 'tridentHostRunner', wrappedMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(count('landedProbe', 'tridentLandedProbe', wrappedMutant)).toBe(
+      count('landedProbe', 'tridentLandedProbe'),
+    )
+    // …so every rule that reads the literal is blind: the pairs are paired, the
+    // site is still a site, it is legible, and each half is still last-mentioned
+    // on its own wired line.
+    expect(camelPairs(wrappedMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(wrappedMutant).length).toBe(4)
+    expect(
+      dispatchDepsSites(wrappedMutant).filter((site) => legible(site) && site.handedOver).length,
+    ).toBe(3)
+    // The hand-off gate is not: one site's literal is no longer what the
+    // chokepoint receives.
+    expect(dispatchDepsSites(wrappedMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
+
+    // …and the same wrapper under a name of its own, because the rule is a
+    // whitelist of hand-off positions and not a blocklist of `Object.assign`.
+    const aliasWrappedMutant = wrap('mergeDeps')
+    expect(count('hostRunner', 'tridentHostRunner', aliasWrappedMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner'),
+    )
+    expect(camelPairs(aliasWrappedMutant).every((paired) => paired)).toBe(true)
+    expect(dispatchDepsSites(aliasWrappedMutant).length).toBe(4)
+    expect(
+      dispatchDepsSites(aliasWrappedMutant).filter((site) => !siteIsWired(site)).length,
+    ).toBe(1)
 
     // r4 — the simplest mutant of all, and the one every rule above missed: DELETE
     // NOTHING, COMMENT IT OUT. The wired property stays spelled exactly as it is,
