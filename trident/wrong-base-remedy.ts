@@ -653,6 +653,13 @@ export function foldRefName(s: string): string {
 const SCRUB_SCAN_MAX = 64_000
 const SCRUB_INPUT_MAX = 2_000
 const SCRUB_OUTPUT_MAX = 200
+/**
+ * The rendered width of the pid a lock reason names. See the interpolation site for why this
+ * exists at all; 32 is far above any real pid (Linux PID_MAX_LIMIT is seven digits) and above
+ * the oversized-but-plausible shapes the raw rendering exists to keep readable.
+ */
+const PID_TEXT_MAX = 32
+
 function scrub(s: string): string {
   const scanned = s.length > SCRUB_SCAN_MAX ? s.slice(-SCRUB_SCAN_MAX) : s
   // The linear passes see the WHOLE (scan-capped) input: forgery first, then the credentials
@@ -1212,8 +1219,19 @@ export async function composeWrongBaseRefusal(
       // (`pid 1000000000000000000000000`) stringifies as "1e+24", which names no process a
       // reader can look up. The parsed value is only for the probe, which answers 'unknown'
       // for anything at or above PID_MAX_LIMIT.
-      const pidText = pidMatch[1]!
-      const pid = Number.parseInt(pidText, 10)
+      const pidRaw = pidMatch[1]!
+      // ...AND THE DIGITS ARE BOUNDED, WITH THE TRUNCATION MARKED (Argus finding). This was the
+      // one attacker-shaped field in the refusal with no length limit: the lock reason it comes
+      // from is scrub-capped at 200 characters and the worktree path at 300, but the pid was
+      // interpolated raw into six arms, so a lock reason spelling `pid` followed by 200_000
+      // nines composed a 200KB refusal that is then PERSISTED and re-read. The bound is
+      // generous — a real pid is at most seven digits, and 32 keeps the oversized-but-plausible
+      // shape the raw rendering exists for whole — and it says what it dropped, the same way
+      // `scrub` marks its own truncation, because a number a reader cannot look up is worse
+      // than one they can see was cut.
+      const pidText =
+        pidRaw.length > PID_TEXT_MAX ? `${pidRaw.slice(0, PID_TEXT_MAX)}… (${pidRaw.length} digits)` : pidRaw
+      const pid = Number.parseInt(pidRaw, 10)
       // ...AND WHEN THE TWO DISAGREE, BOTH ARE NAMED (Argus finding). Rendering the raw digits
       // alone made the arm name a pid it had not measured: a lock reason spelling `pid 0000123`
       // probes 123 and printed `0000123`, so a reader looking that number up finds nothing while
@@ -1221,7 +1239,7 @@ export async function composeWrongBaseRefusal(
       // contract is naming the evidence it measured, so the probed value is stated whenever the
       // canonical decimal differs from what the lock wrote. The repo's own lock writer emits
       // plain decimal, so this renders identically for every lock trident itself takes.
-      const pidShown = Number.isSafeInteger(pid) && String(pid) !== pidText ? `${pidText} (probed as ${pid})` : pidText
+      const pidShown = Number.isSafeInteger(pid) && String(pid) !== pidRaw ? `${pidText} (probed as ${pid})` : pidText
       let liveness: PidLiveness
       try {
         liveness = (deps.probe_pid ?? probePidLiveness)(pid)

@@ -3382,8 +3382,15 @@ export function buildTridentOrchestrator(
         // items and closing the list was falsifiable by a config this path does not read. What
         // IS established is the class: everything that fetch can touch lives under `.git`, and
         // "file" in the clause below means a file in the TREE, which is the reassurance owed.
+        //
+        // AND THE REF UPDATE IS CONDITIONAL (Argus finding, same one `delivery.ts` carries for
+        // the composer's own fetch). A fetch whose tracking ref already sits at origin's tip
+        // makes no ref transaction: repeating the identical fetch against an unchanged remote
+        // leaves that ref's reflog at one line. Naming the refresh and the append flatly
+        // asserted, in the no-op case, writes that did not happen — overcounting, which this
+        // sentence exists to avoid in both directions. FETCH_HEAD is the unconditional one.
         const noWrites = fetchedBase
-          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${foldRefName(baseRefspec)} made under .git — refs/remotes/origin/${baseProse}, that ref's reflog, FETCH_HEAD, the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top; a hook configured on this repo is code of its own, and outside what this sentence measures`
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${foldRefName(baseRefspec)} made under .git — FETCH_HEAD, plus — if origin had moved that ref — refs/remotes/origin/${baseProse}, that ref's reflog and the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top; a hook configured on this repo is code of its own, and outside what this sentence measures`
           : 'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
         const probeDetail = (res: HostCommandResult): string =>
           res.timed_out === true

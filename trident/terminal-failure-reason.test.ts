@@ -1208,6 +1208,13 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
       expect(reason).toContain("refusing to build on another lane's work")
       expect(`${name}: ${out.klass}`).toBe(`${name}: branch-held`)
       expect(`${name}: ${out.input_needed}`).toContain('No branch, worktree, commit or file in the tree was changed or deleted')
+      // ...ATTRIBUTED, and never again the bare absolute it used to be (Argus blocker): a
+      // `reference-transaction` hook runs inside the very ref update the fetch below makes and
+      // may write anywhere, so the sentence every arm OPENS with says what was measured.
+      expect(`${name}: ${out.input_needed}`).toContain('deleted by git itself on this path')
+      expect(`${name}: ${out.input_needed}`).not.toContain('was changed or deleted.')
+      expect(`${name}: ${out.input_needed}`).toContain('All of that measures what GIT writes')
+      expect(`${name}: ${out.input_needed}`).toContain('reference-transaction hook runs inside the very ref update')
       // The advice this class exists to forbid — a launch that never happened is not retried
       // by replying, and the branch is not this run's to take until it is free.
       expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
@@ -1287,9 +1294,18 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
     const safe = await deliver({ run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear })
     expect(safe.reason).toContain('branch -D')
     expect(safe.out.input_needed).toContain('tracking ref')
-    expect(safe.out.input_needed).toContain('reflog')
+    expect(safe.out.input_needed).toContain("appending to that ref's reflog")
     expect(safe.out.input_needed).toContain('FETCH_HEAD')
     expect(safe.out.input_needed).not.toContain('no network call at all')
+    // ...AND THE REF UPDATE IS CONDITIONAL, which "that refreshes the origin tracking ref
+    // (appending to that ref's reflog)" was not (Argus finding). A fetch whose tracking ref is
+    // already at origin's tip runs no ref transaction at all — repeating the identical fetch
+    // against an unchanged remote leaves that reflog at one line — so the flat form asserted,
+    // in the no-op case, the very writes this sentence exists to count honestly. FETCH_HEAD is
+    // the one that IS unconditional (no --no-write-fetch-head), so the hedge is per item.
+    expect(safe.out.input_needed).toContain('if origin has moved it')
+    expect(safe.out.input_needed).toContain('updates no ref and appends nothing to that reflog')
+    expect(safe.out.input_needed).toContain('rewrites FETCH_HEAD')
 
     // REFUSED UPSTREAM OF THE FETCH: neither claim.
     const blind = await deliver({
@@ -1416,6 +1432,140 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
     // falsify: `fetch.writeCommitGraph` writes under `.git`, outside the four items named.
     expect(safe.out.input_needed).not.toContain('objects it downloads, and nothing else')
     expect(safe.out.input_needed).toContain('and nothing outside .git')
+  })
+
+  test('the write sentences say whose writes they measure, and no arm ends in an absolute a hook falsifies', async () => {
+    // THE OPENING SENTENCE WAS AN ABSOLUTE ABOUT THE WHOLE PATH (Argus blocker). "No branch,
+    // worktree, commit or file in the tree was changed or deleted." is composed into EVERY arm,
+    // and a `reference-transaction` hook falsifies it: the hook fires inside the very ref update
+    // the guard's fetch makes and may write anywhere it likes — demonstrated on the exact fetch
+    // form this path uses, which created two files in the working-tree root. A round earlier the
+    // same threat was answered by scoping the launcher's sentence ALONE, which left the opening
+    // reassurance and the failed-fetch arm's "nothing else can have been written either way"
+    // still promising away what no sentence here can bound. Both are attributed now, and the
+    // hook is named ONCE, covering every write sentence in the message.
+    const arms: [string, Parameters<typeof composeWrongBaseRefusal>[1]][] = [
+      ['live holder', { run_host: held, probe_pid: () => 'alive', probe_tree: clear }],
+      ['rebase holder', rebaseDeps],
+      ['unheld, origin carries the tip', { run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear }],
+      ['unheld, origin has diverged', { run_host: unheld(okRes(`${DIVERGED}\n`)), probe_tree: clear }],
+      [
+        'the fetch never landed',
+        {
+          run_host: host({
+            'worktree list --porcelain': okRes(zPorcelain(MAIN_FIELDS)),
+            [FETCH]: { ok: false, stdout: '', stderr: 'fatal: unable to access', exit_code: 128 },
+            'remote get-url origin': okRes('https://example.invalid/repo.git\n'),
+          }),
+          probe_tree: clear,
+        },
+      ],
+      ['resolution threw', { run_host: throwsAfterFetch, probe_tree: clear }],
+      [
+        'the worktree listing failed',
+        {
+          run_host: host({
+            'worktree list --porcelain': { ok: false, stdout: '', stderr: 'git died', exit_code: 128 },
+          }),
+          probe_tree: clear,
+        },
+      ],
+    ]
+    for (const [name, deps] of arms) {
+      const { out } = await deliver(deps)
+      // Attributed, and the caveat that makes the attribution true is present exactly once.
+      expect(`${name}: ${out.input_needed}`).toContain('deleted by git itself on this path')
+      expect(`${name}: ${out.input_needed}`).toContain("A hook this repo configures on git's own operations is code of its own")
+      expect(`${name}: ${out.input_needed}`.split('reference-transaction').length - 1).toBe(1)
+      // The two absolutes that survived the earlier scoping are gone from every arm.
+      expect(`${name}: ${out.input_needed}`).not.toContain('nothing else can have been written either way')
+      expect(`${name}: ${out.input_needed}`).not.toContain('was changed or deleted.')
+      // ...and the refusal is unweakened: still branch-held, still no retry advice.
+      expect(`${name}: ${out.klass}`).toBe(`${name}: branch-held`)
+      expect(`${name}: ${out.input_needed}`).not.toContain('Reply to retry')
+    }
+
+    // The UNKNOWN-write arms still say UNKNOWN — attributing the sentence must not have turned
+    // "what that fetch wrote is unknown" into a claim that it wrote nothing.
+    const threw = await deliver({ run_host: throwsAfterFetch, probe_tree: clear })
+    expect(threw.out.input_needed).toContain('is itself UNKNOWN')
+    expect(threw.out.input_needed).toContain('the guard makes no other write either way')
+  })
+
+  test('the next step each arm ends with is the one that arm\'s own evidence supports', async () => {
+    // "re-dispatch once the branch is free" was appended to ALL of them (Argus finding). On the
+    // arms where no worktree holds the branch it is wrong twice over: the branch IS free, so the
+    // clause reads "re-dispatch now" — the one action this class must not suggest — and it
+    // quietly contradicts the composed remedy, which is a verified delete (published) or a
+    // salvage (unpublished) BEFORE any re-dispatch. And an UNKNOWN holder is not an unheld
+    // branch, so it cannot borrow either tail.
+    const HELD_TAIL = 're-dispatch once the branch is free.'
+    const UNHELD_TAIL = 'no worktree holds this branch, so nothing here becomes safe by waiting'
+    const UNKNOWN_TAIL = 'the holder was never established, so do not re-dispatch until it is.'
+
+    // HELD — a holder exists, so waiting is exactly what is owed. POSITIVE CONTROL for the two
+    // groups below: an implementation that simply deleted the tail fails here.
+    for (const [name, deps] of [
+      ['live holder', { run_host: held, probe_pid: () => 'alive' as const, probe_tree: clear }],
+      ['dead holder', { run_host: held, probe_pid: () => 'dead' as const, probe_tree: clear }],
+      ['rebase holder', rebaseDeps],
+      [
+        'prunable holder',
+        {
+          run_host: listing(zPorcelain(MAIN_FIELDS, [...HELD_FIELDS, 'prunable gitdir file is gone'])),
+          probe_tree: clear,
+        },
+      ],
+    ] as [string, Parameters<typeof composeWrongBaseRefusal>[1]][]) {
+      const { out } = await deliver(deps)
+      expect(`${name}: ${out.input_needed}`).toContain(HELD_TAIL)
+      expect(`${name}: ${out.input_needed}`).not.toContain(UNHELD_TAIL)
+      expect(`${name}: ${out.input_needed}`).not.toContain(UNKNOWN_TAIL)
+    }
+
+    // UNHELD — the branch has no holder, so there is nothing to wait for and the reason's own
+    // step (verified delete, or salvage) comes first.
+    for (const [name, deps] of [
+      ['origin carries the tip', { run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear }],
+      ['origin has diverged', { run_host: unheld(okRes(`${DIVERGED}\n`)), probe_tree: clear }],
+      [
+        'the fetch never landed',
+        {
+          run_host: host({
+            'worktree list --porcelain': okRes(zPorcelain(MAIN_FIELDS)),
+            [FETCH]: { ok: false, stdout: '', stderr: 'fatal: unable to access', exit_code: 128 },
+            'remote get-url origin': okRes('https://example.invalid/repo.git\n'),
+          }),
+          probe_tree: clear,
+        },
+      ],
+    ] as [string, Parameters<typeof composeWrongBaseRefusal>[1]][]) {
+      const { reason, out } = await deliver(deps)
+      expect(`${name}: ${out.input_needed}`).toContain(UNHELD_TAIL)
+      expect(`${name}: ${out.input_needed}`).not.toContain(HELD_TAIL)
+      // The composed remedy really is a step, not a wait — the tail is not contradicting it.
+      expect(`${name}: ${reason}`).toContain('The wrong-base launch guard found no worktree holding the branch')
+    }
+
+    // UNKNOWN HOLDER — neither of the above may be asserted, because which one is true is
+    // exactly what the arm says it could not measure.
+    for (const [name, deps] of [
+      [
+        'the worktree listing failed',
+        {
+          run_host: host({
+            'worktree list --porcelain': { ok: false, stdout: '', stderr: 'git died', exit_code: 128 },
+          }),
+          probe_tree: clear,
+        },
+      ],
+      ['resolution threw', { run_host: throwsAfterFetch, probe_tree: clear }],
+    ] as [string, Parameters<typeof composeWrongBaseRefusal>[1]][]) {
+      const { out } = await deliver(deps)
+      expect(`${name}: ${out.input_needed}`).toContain(UNKNOWN_TAIL)
+      expect(`${name}: ${out.input_needed}`).not.toContain(UNHELD_TAIL)
+      expect(`${name}: ${out.input_needed}`).not.toContain(HELD_TAIL)
+    }
   })
 })
 

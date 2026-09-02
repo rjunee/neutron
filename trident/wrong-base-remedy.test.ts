@@ -158,6 +158,32 @@ describe('composeWrongBaseRefusal', () => {
     expect(big).toContain('1000000000000000000000000')
     expect(big).not.toContain('1e+24')
     expect(big).not.toContain('branch -D')
+
+    // ...BUT THE DIGITS ARE BOUNDED (Argus finding). The pid was the one attacker-shaped field
+    // in this refusal with no cap: the lock reason around it is scrubbed to 200 characters and
+    // the worktree path to 300, while the digits went in raw at six sites — so a forged lock
+    // reason spelling `pid` followed by 200_000 nines composed a 200KB refusal, persisted and
+    // re-read. It is cut and the cut is MARKED, because a number a reader can see was truncated
+    // beats one silently reshaped.
+    const forged = fakeHost({
+      'worktree list --porcelain': ok(
+        heldWith((f) => f.map((x) => (x.startsWith('locked') ? `locked pid ${'9'.repeat(200_000)}` : x))),
+      ),
+    })
+    const bounded = await composeWrongBaseRefusal(ARGS, {
+      run_host: forged.run_host,
+      probe_pid: () => 'unknown',
+      probe_tree: CLEAR,
+    })
+    expect(bounded.length).toBeLessThan(4_000)
+    expect(bounded).toContain(`pid ${'9'.repeat(32)}… (200000 digits)`)
+    // The pid FIELD is cut; the quoted lock reason beside it keeps its own 200-character bound
+    // (which is why a bare `'9'.repeat(33)` still appears in the message).
+    expect(bounded).not.toContain(`pid ${'9'.repeat(33)}`)
+    // The refusal is unweakened by the bound: liveness still could not be determined, the
+    // holder is still treated as live, and nothing destructive is printed.
+    expect(bounded).toContain('liveness could not be determined — treat it as live')
+    expect(bounded).not.toContain('branch -D')
   })
 
   test('the worktree listing is read in the -z form, so a newline in a path cannot hide a holder', async () => {

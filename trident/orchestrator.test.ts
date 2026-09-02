@@ -5720,6 +5720,13 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(reason).toContain('fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main')
     expect(reason).toContain('refs/remotes/origin/main')
     expect(reason).toContain('FETCH_HEAD')
+    // ...AND THE REF UPDATE IS NAMED AS THE CONDITIONAL IT IS (Argus finding). A fetch whose
+    // tracking ref already sits at origin's tip runs no ref transaction: repeating the identical
+    // fetch against an unchanged remote leaves that ref's reflog at one line. Asserting the
+    // refresh and the append flatly reported, in the no-op case, writes that did not happen —
+    // overcounting, which is the same defect as the undercount this sentence was written to fix.
+    expect(reason).toContain('if origin had moved that ref')
+    expect(reason).toContain("that ref's reflog")
 
     // POSITIVE CONTROL, and the OVERcounting half: a run that already carries a base pin makes
     // no fetch on this path, so naming one would report a write that never happened. An

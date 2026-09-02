@@ -683,3 +683,53 @@ only the LEADING letter run is the cluster now, which folds it while keeping the
 shape CodeQL's polynomial-redos rule reads. Both are pinned by table cases through the real composer,
 with positive controls: `--contains`, `--dry-run` and the guard's own safe `branch -D` remedy all
 still render.
+
+
+The write-safety sentence every arm OPENS with is attributed, and the hook that falsifies an
+absolute is named once. Scoping the launcher's own sentence answered the `reference-transaction`
+threat in exactly one place and left two siblings behind: `No branch, worktree, commit or file in
+the tree was changed or deleted.`, composed unconditionally into all of them, and the failed-fetch
+and threw arms' `nothing else can have been written either way`. A hook is arbitrary local code
+that fires inside the very ref update the fetch makes — reproduced on the exact fetch form this
+path uses: the fetch exits 0 and the hook's two files appear in the working-tree root — so all
+three were absolutes about a path this message cannot bound, in the module whose whole contract is
+that this message class never overclaims. Each is now attributed to what was actually measured
+(`… by git itself on this path`, `git makes no other write on this path either way`), and the
+caveat itself is stated ONCE, after the enumeration, covering every write sentence in the message
+rather than one of them. Pinned across every arm the composer can emit, including that the message
+carries the caveat exactly once and that neither retired absolute reappears anywhere.
+
+The successful fetch's enumeration became per-item conditional, because a no-op fetch makes no ref
+transaction. `that refreshes the origin tracking ref (appending to that ref's reflog)` guaranteed
+two writes that a fetch finding origin unchanged does not make: repeating the identical fetch
+against an unchanged remote leaves `git reflog show refs/remotes/origin/<b>` at one line — no
+update, no append. So in the no-op case the sentence asserted the very writes it exists to count
+honestly, which is the overcounting defect the failed-fetch arm was written to stop, one arm
+along. The refresh, the reflog append and the downloaded objects are hedged on origin having moved
+the ref; FETCH_HEAD stays unconditional, because this fetch does not pass `--no-write-fetch-head`.
+The same correction lands on the launch path's own `noWrites` sentence in `orchestrator.ts`, which
+enumerated the identical set for the base fetch. The guarding test asserted only the substring
+`reflog`, which is what let the overclaim survive a review round; it now pins the hedge and the
+one item that is not hedged.
+
+The tail is per arm, because "re-dispatch once the branch is free" was appended to all of them.
+On the arms where NO worktree holds the branch that clause is wrong twice over: the branch is
+already free, so it reads as "re-dispatch now" — the one action this delivery class must not
+suggest — and it quietly contradicts the composed remedy beneath it, which is a verified delete
+(published) or a salvage (unpublished) that must happen BEFORE any re-dispatch. There are three
+answers rather than two, and the third is this card's own subject: an UNKNOWN holder is not an
+unheld branch, so it may not borrow either tail — telling its reader no worktree holds the branch
+would assert exactly the fact that arm exists to say it could not measure. Held keeps the wait,
+unheld says the step comes first and re-dispatch only after it, and unknown authorises nothing
+until the holder is established. The arm openings the two halves of the seam read are now named
+constants used by both the write attribution and the tail, so they cannot drift apart.
+
+The pid the lock names is bounded, and the truncation is marked. It was the one attacker-shaped
+field in the refusal with no limit: the lock reason around it is scrubbed to 200 characters and
+the worktree path to 300, while the digits were interpolated raw at six sites, so a forged lock
+reason spelling `pid` followed by 200,000 nines composed a ~200KB refusal that is persisted and
+re-read. The rendered field is cut at 32 digits — far above Linux's seven-digit PID_MAX_LIMIT, and
+above the oversized-but-plausible shape the raw rendering exists to keep readable — and it says
+how many digits it dropped, the way `scrub` marks its own truncation, because a number a reader
+can see was cut beats one silently reshaped. The parse and the "probed as" comparison still run on
+the raw digits, so the arm still names the pid it actually measured.
