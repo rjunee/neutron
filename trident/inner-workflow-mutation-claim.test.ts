@@ -273,7 +273,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
 
     // CONTAINMENT, pinned by name: the agreement loop above compares two lists and
     // goes green again if an entry is deleted from BOTH sides, so a two-sided
-    // deletion would reopen a closed escape silently. These fourteen must be there.
+    // deletion would reopen a closed escape silently. These fifteen must be there.
     for (const name of [
       'preload',
       'require',
@@ -289,6 +289,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       'env-file',
       'env-file-if-exists',
       'tsconfig-override',
+      'conditions',
     ])
       expect([name, hookNames.includes(name)]).toEqual([name, true])
 
@@ -296,10 +297,12 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // wrapper loop reads EXECUTABLE names out of the prover, so a description
     // saying only `npm run …` passes it while the prover refuses the bare `npm
     // test` alias too — an unannounced refusal is how this whole family started.
-    // The short `-c`/`-r` spellings are invisible to the hook loop for the same
-    // reason: they are not `--<name>` and only this line requires them.
+    // The short `-c`/`-r`/`-C` spellings are invisible to the hook loop for the
+    // same reason: they are not `--<name>` and only this line requires them —
+    // and `-C` is node's alias for `--conditions`, whose value is a NAME, so the
+    // prover cannot narrow it the way it narrows the two path-valued letters.
     for (const d of described)
-      for (const spelling of ['npm test', '-c…', '-r…'])
+      for (const spelling of ['npm test', '-c…', '-r…', '-C…'])
         expect([spelling, d.includes(spelling)]).toEqual([spelling, true])
 
     // GO'S ONE-DASH HOOKS, read out of the prover's SECOND regex the same way.

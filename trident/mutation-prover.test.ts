@@ -1500,6 +1500,75 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
   })
 
+  test('a CONDITION is the RESOLUTION MAP with the file left implicit — the flag itself redirects the specifier', async () => {
+    // THE BYPASS THIS CLOSES, reproduced end to end on node v22.23.1. A
+    // `package.json` `imports` entry may be CONDITION-KEYED: `{"#lib": {"proof":
+    // "./src/limit.mjs", "default": "./src/decoy.mjs"}}`. The branch then
+    // nominates `node --test --conditions=proof tests/other.test.mjs`, where
+    // `tests/other.test.mjs` does nothing but `import '#lib'` and assert `1 + 1`
+    // — and the specifier means the MUTATED file only while the flag is there:
+    // healthy 0, mutated 1, restored 0 with `--conditions=proof`, and 0 while
+    // mutated WITHOUT it. So the FLAG is what reddens the guard, exactly as
+    // `--tsconfig-override`'s config is, with the one difference that made this
+    // spelling look innocent: the argv names no file at all, only a key into a
+    // map the branch committed. Refused beside the option it is a spelling of.
+    for (const [file, guard] of [
+      ['src/limit.mjs', ['node', '--test', '--conditions=proof', 'tests/other.test.mjs']],
+      // …the space-separated spelling of the identical instruction,
+      ['src/limit.mjs', ['node', '--test', '--conditions', 'proof', 'tests/other.test.mjs']],
+      // …node's SHORT alias, attached — the row the path-filtered short letters
+      // would wave straight through, since a condition NAME never looks like a
+      // path. Put `-C` beside `-r`/`-c` in `loadHookCarrying` and this row goes
+      // green again with the forgery intact.
+      ['src/limit.mjs', ['node', '--test', '-Cproof', 'tests/other.test.mjs']],
+      // …and separated,
+      ['src/limit.mjs', ['node', '--test', '-C', 'proof', 'tests/other.test.mjs']],
+      // …bun's spelling of the same option,
+      ['src/limit.ts', ['bun', 'test', '--conditions=proof', 'tests/other.test.ts']],
+      // …and a COLLECTIBLE target, because a condition redirects a specifier to
+      // a support library under `tests/` exactly as it redirects one to `src/`.
+      ['tests/support/lib.ts', ['bun', 'test', '--conditions=proof', 'tests/other.test.ts']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      // Refused on the spelling: nothing written, nothing run.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect([guard.join(' '), out.reason.includes('whose body the branch wrote')]).toEqual([guard.join(' '), true])
+      expect([guard.join(' '), fs.writes.length]).toEqual([guard.join(' '), 0])
+    }
+
+    // POSITIVE CONTROLS, because every assertion above would pass just as well
+    // against "refuse any argv carrying an option this test happened to name".
+    //  (1) the long name is ANCHORED, so a longer option that merely starts with
+    //      it stays legal — drop the `$` and this honest guard is refused;
+    //  (2) the lower-case letters stay NARROW: `go test -cover ./cmd` splits to
+    //      `-c` + `over`, which is no path, and widening the condition arm past
+    //      the single letter `-C` reddens every Go guard in the repo.
+    for (const [file, guard] of [
+      ['src/limit.ts', ['bun', 'test', '--conditions-file=./tests/cond.json', 'tests/other.test.ts']],
+      ['src/limit.go', ['go', 'test', '-cover', './cmd']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      // POSITIVE CONTROL ON THE EXTRACTION: the guard really ran.
+      expect([guard.join(' '), fine.observed !== null]).toEqual([guard.join(' '), true])
+    }
+  })
+
   test("`node --run` is a WRAPPER wearing node's name — a `--test` further along does not make it a runner", async () => {
     // THE BYPASS THIS CLOSES, the wrapper family under a sixth spelling. Node
     // v22's `--run <script>` executes a `package.json` script — a command line

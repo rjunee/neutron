@@ -694,12 +694,14 @@ function carriedValue(arg: string): string {
  * loads whatever it names; jest's `setupFiles` and pytest's `conftest.py` are
  * the same file under other names; and a committed `tests/tsconfig.json` needs
  * no flag AT ALL — bun walks up from the test file and applies its
- * `compilerOptions.paths`, so the aliasing `--tsconfig-override` is refused for
- * below is available to a branch that simply commits the file where the guard
- * already is. This function reads argv, so a branch that
- * commits such a config makes any guard load the mutated file, and the guard's
- * argv is byte-for-byte an honest one. It is not closed here and could not be:
- * the config is part of the branch under proof. The class pre-dates this rule
+ * `compilerOptions.paths`, so the ALIASING that `--tsconfig-override` and
+ * `--conditions` are refused for below is equally available to a branch that
+ * simply commits the map where the guard already is, and a committed
+ * `package.json` `imports` entry is that same map under node's own name. This
+ * function reads argv, so a branch that commits such a config makes any guard
+ * load the mutated file, and the guard's argv is byte-for-byte an honest one.
+ * It is not closed here and could not be: the config is part of the branch
+ * under proof. The class pre-dates this rule
  * for production files, and the same answer holds for both — a proof is
  * evidence for a reviewer, not a substitute for one.
  *
@@ -1269,6 +1271,19 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * refused in the same place and for the same reason: the branch wrote the file
  * and this argv does not show its contents.
  *
+ * A CONDITION SELECTS A BRANCH OF A MAP THE ARGV NEVER NAMES, and it is the
+ * same resolution hook with the file left implicit. `package.json` `imports`
+ * may be CONDITION-KEYED — `{"#lib": {"proof": "./src/limit.mjs", "default":
+ * "./src/decoy.mjs"}}` — so `node --test --conditions=proof
+ * tests/other.test.mjs` turns a bare `import '#lib'` inside an unrelated test
+ * into an import OF THE MUTATED FILE, while the SAME argv without the flag
+ * resolves to the decoy and stays green. Reproduced on node v22.23.1: healthy
+ * 0, mutated 1, restored 0 with the flag; 0 while mutated without it. The FLAG
+ * is what reddens the guard, which is precisely what `--tsconfig-override` is
+ * refused for, so it is refused beside it. Its value is a NAME, not a path, and
+ * node spells it `-C` as well — see `loadHookCarrying`, which keeps that letter
+ * out of the path-filtered short pair for exactly that reason.
+ *
  * ONLY THE OPTION THAT TAKES A PATH IS LISTED. `--project` and `--tsconfig` are
  * not added on suspicion: vitest's `--project <name>` selects a workspace
  * project by NAME, and a long name here is refused on the name alone, so
@@ -1292,11 +1307,20 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * the short-letter narrowing above is not widened to guess between them, and
  * the python side already carries the larger `conftest.py` residual named
  * above, which no argv rule can close.
+ *
+ * AND ONE MORE, NAMED HERE SO IT IS NOT REDISCOVERED: a short hook letter
+ * carrying a BARE SPECIFIER — `bun test -rmylib tests/other.test.ts` — escapes
+ * the letter arm, because that arm only fires on a value that looks like a
+ * path. It is not a widening: a bare specifier resolves only through a
+ * `tsconfig.json` or a `package.json` the branch COMMITTED, which is the
+ * argv-invisible residual already documented above and reachable with NO flag
+ * at all. Narrowing the letter is what keeps `go test -cover ./cmd/` legal, and
+ * the residual it leaves is one the committed-config class already contains.
  */
 // KEPT ON ONE LINE ON PURPOSE: `inner-workflow-mutation-claim.test.ts` reads
 // these names straight out of this source to check the Forge schema names them
 // too, and its extraction matches this declaration as written.
-const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|experimental-config-file|experimental-default-config-file|env-file|env-file-if-exists|tsconfig-override)$/
+const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters|config|experimental-config-file|experimental-default-config-file|env-file|env-file-if-exists|tsconfig-override|conditions)$/
 
 /**
  * GO SPELLS THE SAME HOOK WITH ONE DASH, and the `^--` anchor above cannot see
@@ -1335,7 +1359,13 @@ function loadHookCarrying(guard: readonly string[]): string | null {
     const attachedShort = !goHook && eq === -1 && SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg)
     const name = eq !== -1 ? arg.slice(0, eq) : attachedShort ? arg.slice(0, 2) : arg
     const short = name === '-r' || name === '-c'
-    if (!goHook && !short && !LOAD_HOOK_OPTION.test(name)) continue
+    // NODE SPELLS `--conditions` `-C`, AND ITS VALUE IS A NAME, NOT A PATH, so
+    // it is kept OUT of `short` above: the path filter below exists because
+    // `-cover` splits into `-c` + `over`, and applying it here would wave
+    // `-Cproof` straight through — the one spelling this option is forged with.
+    // A condition is refused for what it SELECTS, never for looking like a file.
+    const conditionShort = name === '-C'
+    if (!goHook && !short && !conditionShort && !LOAD_HOOK_OPTION.test(name)) continue
     // …and for the same reason its value is only ever the `=` half or the next
     // element: `carriedValue('-exec')` would answer `xec`.
     const attached = goHook && eq === -1 ? '' : carriedValue(arg)
@@ -1350,8 +1380,10 @@ function loadHookCarrying(guard: readonly string[]): string | null {
     if (next !== undefined && next.length > 0 && !next.startsWith('-')) return `${arg} ${next}`
     // …AND A LONG NAME CARRYING NOTHING IS STILL THE HOOK — see the docblock:
     // node's `--experimental-default-config-file` never carries anything, so
-    // this is the arm that sees it. Short letters stay out: `go test -c` really
-    // is a valueless flag of another runner.
+    // this is the arm that sees it. The two PATH-VALUED short letters stay out:
+    // `go test -c` really is a valueless flag of another runner. `-C` does not,
+    // because node's condition alias is malformed without its value and a
+    // refusal here costs nothing an honest guard can spell no other way.
     if (goHook || !short) return `${arg} (which reads a file this argv does not name)`
   }
   return null
