@@ -39,6 +39,18 @@
  * `disposition === 'reviewed-rejected'`, and everything else stops being counted
  * as a review outcome it never was.
  *
+ * THAT COUNT IS TRUSTWORTHY GOING FORWARD, NOT BACKWARD, and the difference is the
+ * whole measurement above (Argus r4, minor, with an executed repro). This
+ * classifier reads `inner_verdict` and does not second-guess it, because after the
+ * write-site precondition landed a `REQUEST_CHANGES` cannot exist without findings —
+ * the write refuses it and records `REVIEW_NOT_RUN` instead. The 97 rows that
+ * PREDATE it still carry a bare `REQUEST_CHANGES`, so over the 30-day base this
+ * function answers `reviewed-rejected` 160 times, not 63. For a count over
+ * historical rows the authoritative statement is the first SQL in
+ * `docs/AS_BUILT.md` (§ run dispositions), which applies the findings predicate to
+ * the stored column rather than trusting the verdict; this module is the reading
+ * for rows the fixed write site produced.
+ *
  * Leaf module on purpose — it imports nothing but the run type and the terminal
  * phase set, so the dispatch chokepoint, the delivery classifier and any query
  * tool can share ONE taxonomy instead of three prose-matching copies of it.

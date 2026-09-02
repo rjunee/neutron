@@ -350,13 +350,35 @@ describe('Open foundational-Trident prod-boot wiring', () => {
     // spelling has to be a real object property, i.e. begin its line after nothing
     // but whitespace. The mutant's line begins with `[` and no longer counts, and
     // every genuine site in `composer.ts` is written exactly this way.
-    const src = readFileSync(join(HERE, '..', 'composer.ts'), 'utf8')
-      .split('\n')
-      .filter((l) => {
-        const t = l.trimStart()
-        return !t.startsWith('//') && !t.startsWith('*') && !t.startsWith('/*')
-      })
-      .join('\n')
+    // AND A BLOCK COMMENT IS A COMMENT (Argus r4 blocker, reproduced). The strip
+    // above knew only about a comment's FIRST line: wrapping the live
+    // `hostRunner: tridentHostRunner,` in `/* … */` dropped the two delimiter lines
+    // and KEPT the property between them, so every count and every site scan below
+    // read the site as wired while the runtime object carried no `hostRunner` at
+    // all — and `BoardBoundBuildDeps.hostRunner` is OPTIONAL, so tsc says nothing
+    // either. The strip now carries block state across lines, and the mutant is
+    // applied to the real source at the bottom of this test and must come out RED.
+    /** `text` with its comments removed — what is commented out is not wiring. */
+    const executable = (text: string): string => {
+      const kept: string[] = []
+      let inBlock = false
+      for (const line of text.split('\n')) {
+        const t = line.trimStart()
+        if (inBlock) {
+          if (t.includes('*/')) inBlock = false
+          continue
+        }
+        if (t.startsWith('//') || t.startsWith('*')) continue
+        if (t.startsWith('/*')) {
+          if (!t.includes('*/')) inBlock = true
+          continue
+        }
+        kept.push(line)
+      }
+      return kept.join('\n')
+    }
+    const raw = readFileSync(join(HERE, '..', 'composer.ts'), 'utf8')
+    const src = executable(raw)
     const propLine = (prop: string, value: string): RegExp =>
       new RegExp(`^[ \\t]*${prop}: ${value},?[ \\t]*$`)
     const count = (prop: string, value: string, text: string = src): number =>
@@ -758,6 +780,41 @@ describe('Open foundational-Trident prod-boot wiring', () => {
       '                ...(chatId !== null ? { chat_id: chatId } : {}),',
     ])
     expect(dispatchDepsSites(legitSpreadMutant).filter((site) => !siteIsWired(site)).length).toBe(0)
+
+    // r4 — the simplest mutant of all, and the one every rule above missed: DELETE
+    // NOTHING, COMMENT IT OUT. The wired property stays spelled exactly as it is,
+    // between a `/*` and a `*/`, and the old line-prefix strip removed only the two
+    // delimiters — so the property survived into the "executable" text, every count
+    // stayed equal, every site stayed paired and bound, and production carried no
+    // `hostRunner`. Applied to the REAL source, before the strip, because that is
+    // where a comment can exist at all.
+    const rawLines = raw.split('\n')
+    const rawAnchors = rawLines.reduce<number[]>(
+      (acc, l, i) => (propLine('landedProbe', 'tridentLandedProbe').test(l) ? [...acc, i] : acc),
+      [],
+    )
+    expect(rawAnchors.length).toBeGreaterThanOrEqual(2)
+    const rawRunner = rawLines.findIndex(
+      (l, i) => i > rawAnchors[1]! && propLine('hostRunner', 'tridentHostRunner').test(l),
+    )
+    expect(rawRunner).toBeGreaterThan(rawAnchors[1]!)
+    const commentedRaw = rawLines
+      .flatMap((l, i) => (i === rawRunner ? ['/*', l, '*/'] : [l]))
+      .join('\n')
+    // The mutant DELETES NOTHING: the property line is still spelled, character for
+    // character, in the mutated source — which is exactly why a scan over the raw
+    // file cannot tell it from the wired file.
+    expect(commentedRaw.split('\n').filter((l) => propLine('hostRunner', 'tridentHostRunner').test(l))
+      .length).toBe(rawLines.filter((l) => propLine('hostRunner', 'tridentHostRunner').test(l)).length)
+    const commentedMutant = executable(commentedRaw)
+    // The strip takes it out of the executable text…
+    expect(count('hostRunner', 'tridentHostRunner', commentedMutant)).toBe(
+      count('hostRunner', 'tridentHostRunner') - 1,
+    )
+    // …and the site-derived scan says which site lost it, with the other three and
+    // the site count untouched.
+    expect(dispatchDepsSites(commentedMutant).length).toBe(4)
+    expect(dispatchDepsSites(commentedMutant).filter((site) => !siteIsWired(site)).length).toBe(1)
   })
 
   test('an LLM-less boot (no credential) leaves composition.trident unset (clean degrade)', async () => {

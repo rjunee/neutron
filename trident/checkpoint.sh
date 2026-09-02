@@ -108,10 +108,21 @@ fi
 # the pipeline puts any such newline AFTER the sentinel, where `$( … )`'s own
 # trailing-newline stripping removes it, and `${out%X}` then removes the sentinel —
 # so the output is the input's bytes plus the doubled quotes, on any sed.
+#
+# AND A SUBPROCESS THAT FAILS MUST NOT TAKE THE WRITE WITH IT (Argus r4, minor).
+# `set -euo pipefail` is on, so an unavailable/killed `sed` would abort the script
+# BEFORE the UPDATE — the run's row keeps its stale phase and verdict, which is the
+# blind row this file's docblock forbids, arrived at from the other side. The pure
+# bash substitution is kept as the fallback: quadratic, which is why it is not the
+# primary, but a slow correct write beats no write at all.
 sql_quote() {
   local out
-  out="$( { printf '%s' "$1"; printf 'X'; } | sed "s/'/''/g" )"
-  printf '%s' "${out%X}"
+  if out="$( { printf '%s' "$1"; printf 'X'; } | sed "s/'/''/g" )"; then
+    printf '%s' "${out%X}"
+    return 0
+  fi
+  local q="'"
+  printf '%s' "${1//$q/$q$q}"
 }
 
 # READ A FILE ONCE, AS A SQL LITERAL — the replacement for `CAST(readfile(<path>)
@@ -143,15 +154,25 @@ read_file_literal() {
     return 0
   fi
   content="$(cat -- "$path" 2>/dev/null; printf X)"
-  content="${content%X}"
-  # THE SENTINEL IS NEEDED TWICE, not once (Argus r1). `$(...)` strips trailing
-  # newlines from its OUTPUT as well as from what it captures, so quoting through
-  # a bare `$(sql_quote "$content")` re-stripped exactly the bytes the `printf X`
-  # above had just preserved: a file holding `abc\n` emitted `'abc'`. Escaping
-  # stays in `sql_quote` — one copy of the ' → '' rule — and the sentinel is
-  # re-applied around it.
+  literal_of "${content%X}"
+}
+
+# The literal half of the above, split out so the findings path can hold the BYTES
+# as well as the literal. `read_file_literal` runs inside a `$( … )`, i.e. a
+# SUBSHELL, so nothing it learns about the content survives the call — and reading
+# the file a second time to learn it is the very TOCTOU that function exists to
+# close. The findings branch therefore does the read itself and quotes through here.
+#
+# THE SENTINEL IS NEEDED TWICE, not once (Argus r1). `$(...)` strips trailing
+# newlines from its OUTPUT as well as from what it captures, so quoting through a
+# bare `$(sql_quote "$content")` re-stripped exactly the bytes the `printf X` in the
+# reader had just preserved: a file holding `abc\n` emitted `'abc'`. Escaping stays
+# in `sql_quote` — one copy of the ' → '' rule — and the sentinel is re-applied
+# around it. The literal itself ends in `'`, so the caller's own `$( … )` capture
+# has no trailing newline left to strip.
+literal_of() {
   local quoted
-  quoted="$(sql_quote "$content"; printf X)"
+  quoted="$(sql_quote "$1"; printf X)"
   quoted="${quoted%X}"
   printf "'%s'" "$quoted"
 }
@@ -234,9 +255,67 @@ read_file_literal() {
 #   $1 — the findings SQL expression (a literal, per read_file_literal above)
 #   $2 — SQL value when the findings are a real, non-empty rejection
 #   $3 — SQL value otherwise
+#   $4 — the UTF-8 well-formedness test for $1, as SQL (see utf8_wellformed below);
+#        callers pass it explicitly because the two kinds of operand this predicate
+#        runs over — a literal bash HAS, and the old row's stored column — are
+#        decided by different machinery and fail in opposite directions.
 findings_case() {
-  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) AND INSTR(%s, CHAR(0)) = 0 AND (%s NOT GLOB ('*[^' || CHAR(9) || CHAR(10) || CHAR(13) || ' -~]*') OR NOT EXISTS (WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < LENGTH(%s)) SELECT 1 FROM (SELECT CAST(SUBSTR(%s, i, 1) AS BLOB) AS b FROM c) WHERE b <> CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB) AND b NOT IN (x'EFBFBE', x'EFBFBF'))) THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
-    "$1" "$1" "$1" "$1" "$1" "$1" "$1" "$1" "$2" "$3" "$3"
+  printf "CASE WHEN json_valid(%s) AND SUBSTR(%s, 1, 1) <> CHAR(65279) AND INSTR(%s, CHAR(0)) = 0 AND (%s) THEN CASE WHEN json_type(%s) = 'array' AND json_array_length(%s) > 0 THEN %s ELSE %s END ELSE %s END" \
+    "$1" "$1" "$1" "$4" "$1" "$1" "$2" "$3" "$3"
+}
+
+# THE UTF-8 SCAN, AND ITS COST CEILING (Argus r4 blocker, reproduced).
+#
+# The GLOB in front of the scan was written as a cost gate whose stated premise —
+# "an all-ASCII findings payload … is every one this system has written,
+# `JSON.stringify` escaping the rest" — is simply FALSE: `JSON.stringify` emits
+# raw non-ASCII bytes, and LLM-authored findings carry em dashes and curly quotes
+# as a matter of course. So the gate misses, and what it lets through is quadratic:
+# SQLite's SUBSTR on TEXT is O(offset), measured on this box at 0.18 s for 8 K
+# characters, 0.73 s at 16 K, 3.0 s at 32 K and 12.4 s at 64 K, on the write that
+# RECORDS THE VERDICT, with nothing upstream bounding the size of a findings array.
+#
+# Two operands reach this predicate and neither is fixed by tightening the GLOB:
+#
+#   * THE LITERAL this invocation brings. bash already holds those bytes, so the
+#     answer is decided HERE, in one linear pass (`utf8_verdict`), and what reaches
+#     SQL is the constant 1 or 0 — no walk at any size. That is the fix; the SQL
+#     below is only its fallback for a host with no `iconv`.
+#   * THE OLD ROW'S STORED COLUMN, read by `settled_rejection` inside the same
+#     atomic UPDATE. bash does not have those bytes and cannot read them without
+#     re-opening the TOCTOU `read_file_literal` exists to close, so the scan stays —
+#     under a ceiling, above which it is not run at all.
+#
+# $2 IS THE ANSWER ABOVE THE CEILING, and it is per-caller because "I could not
+# check" fails in opposite directions for the two uses. For the stored column the
+# only question asked is "is this row a settled rejection whose findings must not be
+# erased", so an unverifiable value answers 1 — refuse the erasure. For the literal
+# it answers 0 — a rejection this script cannot justify is recorded REVIEW_NOT_RUN,
+# which is this whole script's fail-closed direction. Neither answer can merge
+# anything, and no live payload is near the ceiling (the corpus tops out ~14 KB).
+utf8_scan_max=16384
+utf8_wellformed() {
+  printf "%s NOT GLOB ('*[^' || CHAR(9) || CHAR(10) || CHAR(13) || ' -~]*') OR CASE WHEN LENGTH(%s) > %s THEN %s ELSE NOT EXISTS (WITH RECURSIVE c(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM c WHERE i < LENGTH(%s)) SELECT 1 FROM (SELECT CAST(SUBSTR(%s, i, 1) AS BLOB) AS b FROM c) WHERE b <> CAST(CHAR(UNICODE(CAST(b AS TEXT))) AS BLOB) AND b NOT IN (x'EFBFBE', x'EFBFBF')) END" \
+    "$1" "$1" "$utf8_scan_max" "$2" "$1" "$1"
+}
+
+# The same question about bytes bash HAS, answered linearly: '1' well-formed, '0'
+# not, '' when this host cannot tell and the SQL scan must decide instead.
+#
+# `iconv -f UTF-8 -t UTF-32LE` is the exact boundary the scan draws, verified byte
+# shape by byte shape: it rejects an orphan continuation, an overlong, a surrogate,
+# a truncated and an out-of-range sequence, and ACCEPTS U+FFFE/U+FFFF — the two
+# noncharacters SQLite's own reader folds to U+FFFD and the scan therefore excludes
+# by hand. (`-t UTF-8` alone is NOT that boundary: glibc passes U+110000 through.)
+# It reads the bytes bash already captured, on stdin, so it cannot see a different
+# file than the one being stored, and it never appears in argv.
+utf8_verdict() {
+  command -v iconv >/dev/null 2>&1 || return 0
+  if printf '%s' "$1" | iconv -f UTF-8 -t UTF-32LE >/dev/null 2>&1; then
+    printf '1'
+  else
+    printf '0'
+  fi
 }
 
 # A TERMINAL ROW'S LIVENESS COLUMNS ARE FROZEN — and ONLY those two.
@@ -422,6 +501,14 @@ frozen_label=''
 # reads what is already recorded when the invocation does not bring findings of its
 # own — exactly the precedence the store's guard uses (`patch ?? row`).
 findings_expr='inner_checkpoint_findings'
+# The UTF-8 well-formedness test for whatever `findings_expr` ends up being. While
+# it is the column, only SQL can answer, and above the scan's ceiling it answers 0:
+# the question this expression feeds is "may this write record a REJECTION", and a
+# value too large to verify does not justify one. `settled_rejection` below asks the
+# OTHER question of the same column — "must I refuse to ERASE this row's findings" —
+# and passes 1 there, because both answers are the fail-closed one for their own
+# question. A findings FILE replaces this with a linear verdict over its bytes.
+findings_utf8="$(utf8_wellformed inner_checkpoint_findings 0)"
 # The "this write would erase a settled rejection" SQL predicate, built below the
 # loop (it needs to know whether a verdict was also given). Empty means the guard
 # does not apply to this invocation at all.
@@ -488,7 +575,23 @@ while [ "$#" -gt 0 ]; do
       # fixing blind. NOT a liveness column: no freeze, and no `subagent_status`
       # side effect (a mid-run checkpoint is not a result).
       findings_given=1
-      findings_expr="$(read_file_literal "$value")"
+      # Read ONCE, here rather than through `read_file_literal`, because the UTF-8
+      # gate is decided from these same bytes (see `utf8_wellformed`) and a second
+      # read could see a different file than the one stored.
+      if [ -f "$value" ] && [ -r "$value" ]; then
+        findings_bytes="$(cat -- "$value" 2>/dev/null; printf X)"
+        findings_bytes="${findings_bytes%X}"
+        findings_expr="$(literal_of "$findings_bytes")"
+        findings_utf8="$(utf8_verdict "$findings_bytes")"
+      else
+        findings_expr='NULL'
+        findings_utf8=''
+      fi
+      # No `iconv` on this host: fall back to the SQL scan, whose above-the-ceiling
+      # answer on a literal is 0 — a rejection this script cannot verify is not one.
+      if [ -z "$findings_utf8" ]; then
+        findings_utf8="$(utf8_wellformed "$findings_expr" 0)"
+      fi
       # The column write itself is DEFERRED to the verdict block below, for the
       # same reason the verdict write is: what this write may do to a terminal
       # row's recorded findings depends on whether the invocation also carries a
@@ -678,7 +781,7 @@ fi
 # TERMINAL row that either CLAIMS a rejection or HOLDS findings that really parse.
 # Both erasure guards below are this predicate plus "…and what this write brings is
 # not findings".
-settled_rejection="phase IN $terminal_phases AND (inner_verdict = 'REQUEST_CHANGES' OR $(findings_case inner_checkpoint_findings 1 0) = 1)"
+settled_rejection="phase IN $terminal_phases AND (inner_verdict = 'REQUEST_CHANGES' OR $(findings_case inner_checkpoint_findings 1 0 "$(utf8_wellformed inner_checkpoint_findings 1)") = 1)"
 # "…and what this write BRINGS is not findings" — the second half of every guard
 # below. An invocation with no findings file of its own brings nothing by
 # definition; one with a file brings nothing when that file does not parse as a
@@ -694,7 +797,7 @@ brings_no_findings='1 = 1'
 # shape that brings no findings; which verdicts additionally freeze is decided
 # per-verdict below.
 if [ "$findings_given" = 1 ]; then
-  brings_no_findings="$(findings_case "$findings_expr" 1 0) = 0"
+  brings_no_findings="$(findings_case "$findings_expr" 1 0 "$findings_utf8") = 0"
   # "This write would ERASE a settled review": the row is terminal, it is either
   # claiming REQUEST_CHANGES or holding findings that really parse, and what this
   # write brings is not findings. Both halves of the OR are read from the OLD row
@@ -713,7 +816,7 @@ fi
 
 if [ "$verdict_given" = 1 ]; then
   if [ "$verdict_value" = 'REQUEST_CHANGES' ]; then
-    guarded_verdict="$(findings_case "$findings_expr" "'REQUEST_CHANGES'" "'REVIEW_NOT_RUN'")"
+    guarded_verdict="$(findings_case "$findings_expr" "'REQUEST_CHANGES'" "'REVIEW_NOT_RUN'" "$findings_utf8")"
     # …unless this write would erase a settled review, in which case the row keeps
     # both columns exactly as it recorded them (see the erasure block above).
     if [ -n "$erasure" ]; then
@@ -811,7 +914,7 @@ if [ "$verdict_given" = 1 ]; then
     sets+=("inner_verdict='$(sql_quote "$verdict_value")'")
   fi
 elif [ "$findings_given" = 1 ]; then
-  demotion="CASE WHEN inner_verdict = 'REQUEST_CHANGES' THEN $(findings_case "$findings_expr" "'REQUEST_CHANGES'" "'REVIEW_NOT_RUN'") ELSE inner_verdict END"
+  demotion="CASE WHEN inner_verdict = 'REQUEST_CHANGES' THEN $(findings_case "$findings_expr" "'REQUEST_CHANGES'" "'REVIEW_NOT_RUN'" "$findings_utf8") ELSE inner_verdict END"
   if [ -n "$erasure" ]; then
     demotion="CASE WHEN $erasure THEN inner_verdict ELSE $demotion END"
   fi

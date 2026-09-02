@@ -757,6 +757,78 @@ describe('checkpoint.sh — a REJECTION MUST STATE A REASON (the write-site prec
     }
   })
 
+  test('a LARGE well-formed non-ASCII rejection lands, and lands in bounded time', () => {
+    // Argus r4 blocker, reproduced. The GLOB in front of the character walk was a
+    // cost gate resting on "every findings payload this system writes is all-ASCII,
+    // `JSON.stringify` escaping the rest" — which is false: `JSON.stringify` emits
+    // raw non-ASCII bytes, and LLM-authored findings carry em dashes and curly
+    // quotes as a matter of course. Such a payload misses the gate and pays the
+    // walk, and the walk is quadratic (SQLite's SUBSTR on TEXT is O(offset)):
+    // measured on the build box at 0.73 s for 16 K characters, 3.0 s at 32 K and
+    // 12.4 s at 64 K, on the write that RECORDS THE VERDICT, with nothing upstream
+    // bounding the size of a findings array.
+    //
+    // 64 K accented characters is that payload, well-formed and perfectly valid
+    // JSON. It must record the rejection it justifies, and it must not spend the
+    // walk's twelve seconds doing it — the bytes are validated in one linear pass
+    // in bash (`utf8_verdict`), so what reaches SQL is a constant.
+    const big = `[{"severity":"blocker","title":"${'é'.repeat(65536)}"}]`
+    const f = join(dir, 'big-nonascii.json')
+    writeFileSync(f, big)
+    // The file really is non-ASCII and really is that big — a payload that had been
+    // ASCII-escaped on the way to disk would skip the gate for the wrong reason and
+    // leave this test asserting nothing.
+    expect(readFileSync(f).length).toBeGreaterThan(130_000)
+    expect(readFileSync(f).includes(0xc3)).toBe(true)
+    const started = Date.now()
+    const res = sh([dbPath, 'run-1', 'inner_findings_file', f, 'inner_verdict', 'REQUEST_CHANGES'])
+    const elapsed = Date.now() - started
+    expect({ code: res.code, stderr: res.stderr }).toEqual({ code: 0, stderr: '' })
+    expect(row('run-1').inner_verdict).toBe('REQUEST_CHANGES')
+    expect(String(row('run-1').inner_checkpoint_findings)).toBe(big)
+    // The ceiling, not a stopwatch on the machine: the walk alone costs ~12 s at
+    // this size and everything else this script does is milliseconds, so a run that
+    // took the walk cannot come in under this and a run that did not cannot exceed
+    // it, on any box slow enough to matter.
+    expect({ elapsed: elapsed < 6_000, ms: elapsed }).toMatchObject({ elapsed: true })
+
+    // POSITIVE CONTROL, and it is the whole point: skipping the walk must not
+    // become "stop checking". The same payload with ONE orphan continuation byte in
+    // it is still refused, at the same size.
+    const bad = join(dir, 'big-malformed.json')
+    writeFileSync(
+      bad,
+      Buffer.concat([
+        Buffer.from(`[{"severity":"blocker","title":"${'é'.repeat(65536)}`, 'utf8'),
+        Buffer.from([0x80]),
+        Buffer.from('"}]', 'utf8'),
+      ]),
+    )
+    expect(readFileSync(bad).includes(0x80)).toBe(true)
+    const badRes = sh([dbPath, 'run-1', 'inner_findings_file', bad, 'inner_verdict', 'REQUEST_CHANGES'])
+    expect(badRes.code).toBe(0)
+    expect(row('run-1').inner_verdict).toBe('REVIEW_NOT_RUN')
+  })
+
+  test('the scan the stored column still needs is CEILINGED, and the ceiling fails closed', () => {
+    // The literal this invocation brings is decided in bash, but `settled_rejection`
+    // reads the OLD row's stored column inside the same atomic UPDATE, where bash
+    // does not have the bytes and cannot get them without re-opening the TOCTOU
+    // `read_file_literal` exists to close. So the SQL scan stays for that operand —
+    // under a ceiling, above which it is not run at all.
+    const src = readFileSync(SCRIPT, 'utf8')
+    expect(src).toContain('utf8_scan_max=16384')
+    // Both answers above the ceiling are used, and each is the fail-closed one for
+    // the question it feeds: 1 where the question is "must I refuse to ERASE this
+    // row's findings", 0 where it is "may this write record a REJECTION".
+    expect(src).toContain('utf8_wellformed inner_checkpoint_findings 1')
+    expect(src).toContain('utf8_wellformed inner_checkpoint_findings 0')
+    // The linear validator is the exact boundary the scan draws, and `-t UTF-8`
+    // alone is NOT it (glibc passes U+110000 through); the target is pinned so a
+    // future edit cannot quietly widen what counts as well-formed.
+    expect(src).toContain('iconv -f UTF-8 -t UTF-32LE')
+  })
+
   test('the BOM clause is PINNED in the bash copy too, not only in the documented statements', () => {
     // Argus r16 (mutation): deleting `AND SUBSTR(%s, 1, 1) <> CHAR(65279)` from
     // `findings_case` left 197 tests green, because on both engines this project
