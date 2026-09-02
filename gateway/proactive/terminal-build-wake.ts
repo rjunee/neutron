@@ -42,10 +42,22 @@ export function buildTerminalBuildWakePrompt(args: { run: TridentRun; board_item
   // run may have already built, pushed and gone green with review simply never
   // run. Inviting `work_board_start` here dispatches a SECOND lane onto a branch
   // the first still holds. Resolve the branch holder before ever re-dispatching.
+  //
+  // AND `work_board_start` IS NOT A RESUME (Argus r5 blocker). This instruction
+  // used to tell the agent that starting the bound item resumes an
+  // `outer-published:` head into a review round without rebuilding. It does not:
+  // `dispatchBoardBoundBuild` → `store.create` writes `inner_checkpoint: null`
+  // unconditionally, so `orchestrator.ts`'s `resume_checkpoint` is null and the
+  // workflow REBUILDS — the exact ~2 h this shape exists to save. The review-only
+  // path that really does read the published head without building is a
+  // `bound_pr` dispatch (`orchestrator.ts` returns through `executeBoundReview`
+  // before base resolution and before the build workflow), and `bound_pr` is a
+  // `work_board_dispatch_build` argument — `work_board_start` deliberately has
+  // none. So name THAT tool, and say plainly what the other one would do.
   const reason = run.failure_reason ?? ''
   const fireShape = reason.includes(FIRE_SETTLE_TIMEOUT_ERROR) || reason.includes(FIRE_PUBLISHED_REASON_MARKER)
   const instruction2 = fireShape
-    ? '2. Do NOT relaunch this build yet. The launcher turn timed out, but the workflow it fired may still be running — or the work may already be built and published. Resolve the branch holder first: check `git worktree list --porcelain` for a worktree holding this branch and whether its lock names a live pid, read the `inner_checkpoint` on the run row, and check the PR state. If the failure reason above says the work was already built and published, verify the PR and then RESUME it: `work_board_start` on the bound item resumes an `outer-published:` head into a REVIEW round (it does not rebuild), which is the cheapest correct recovery. Otherwise re-dispatch with `work_board_start` only once nothing live holds the branch.'
+    ? '2. Do NOT relaunch this build yet. The launcher turn timed out, but the workflow it fired may still be running — or the work may already be built and published. Resolve the branch holder first: check `git worktree list --porcelain` for a worktree holding this branch and whether its lock names a live pid, read the `inner_checkpoint` on the run row, and check the PR state. If the failure reason above says the work was already built and published, verify the PR is open at that sha and then run a REVIEW round on it: `work_board_dispatch_build` with `bound_pr` set to that PR number reviews the published head and never builds, which is the cheapest correct recovery. Do NOT use `work_board_start` for that — a fresh dispatch is created with no checkpoint, so it REBUILDS from scratch. Otherwise re-dispatch with `work_board_start` only once nothing live holds the branch.'
     : '2. Take the most valuable concrete action now. To retry or resume a failed build, ask the outer build loop: call `work_board_start` (or `work_board_dispatch_build`) on the bound board item — the outer loop re-dispatches and reuses the existing branch/PR.'
   return [
     '[TERMINAL BUILD WAKE]',

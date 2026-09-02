@@ -608,9 +608,18 @@ export async function dispatchBoardBoundBuild(
     //    card. A refusal behind the card's own live run therefore queues
     //    nothing that survives the next sweep, and telling the operator to
     //    wait for a dispatch that will never come is worse than saying so.
+    //
+    // AND WHEN IT SAYS "NOTHING STAYS QUEUED", WRITE NOTHING (Argus r5 BLOCKER).
+    // Saying it while still upserting the row was not merely inconsistent, it
+    // was DANGEROUS: the sweep drops the hold only while the linked run is STILL
+    // live AT SWEEP TIME. The moment that run terminalizes — or `board-reconcile`
+    // detaches it — the surviving row falls through to `dispatchBoardBoundBuild`
+    // and re-fires a card whose own run was stopped or failed on purpose. So the
+    // prose and the write are now decided by ONE value.
     const linkedRunId = item.linked_run_id ?? null
     const linkedPhase = linkedRunId === null ? null : (deps.store.get(linkedRunId)?.phase ?? null)
     const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
+    const queued = deps.holds !== undefined && !linkedLive
     let tail: string
     if (deps.holds === undefined) {
       tail =
@@ -665,15 +674,21 @@ export async function dispatchBoardBoundBuild(
       // held branch IS the same fact the 'path' kind already records — a live
       // run owns a resource this dispatch needs. The reason string carries the
       // detail; nothing reads the kind to decide behaviour.
-      await deps.holds?.upsert({
-        project_slug: deps.project_slug,
-        board_item_id,
-        task: input.task,
-        payload: holdPayload,
-        hold_kind: 'path',
-        hold_reason: message,
-        held_on_run_id,
-      })
+      //
+      // …UNLESS THE CARD'S OWN LIVE RUN IS THE REASON. `queued` is false there,
+      // and writing a row anyway is what let a stopped/failed card auto-restart
+      // once that run terminalized — see the note at `queued`.
+      if (queued) {
+        await deps.holds?.upsert({
+          project_slug: deps.project_slug,
+          board_item_id,
+          task: input.task,
+          payload: holdPayload,
+          hold_kind: 'path',
+          hold_reason: message,
+          held_on_run_id,
+        })
+      }
       // SAY SO. The refusal used to be silent in the logs as well as in the
       // queue, so a card that stopped moving had no trace anywhere.
       log.warn('dispatch_branch_live', {
@@ -689,10 +704,10 @@ export async function dispatchBoardBoundBuild(
         // SAY IT IS QUEUED IN THE SHAPE, NOT ONLY IN THE PROSE. `held` and the
         // path-claim refusal both carry this; a `branch_live` without it made a
         // queued card look dropped to every structured consumer. It is present
-        // ONLY when a hold store took the row: with no store nothing was
-        // persisted, and a `hold` shape then claims a queue entry that does not
-        // exist.
-        ...(deps.holds !== undefined
+        // ONLY when a hold row was really written: with no store — or behind the
+        // card's own live run — nothing was persisted, and a `hold` shape then
+        // claims a queue entry that does not exist.
+        ...(queued
           ? {
               hold: {
                 kind: 'branch' as const,

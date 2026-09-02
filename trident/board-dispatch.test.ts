@@ -580,8 +580,15 @@ describe('branch liveness refusal (branch_live)', () => {
   // whose card already has a live linked run, so for the common shape (the
   // holding run IS this card's own linked run) no automatic dispatch ever
   // happens. The prose now matches the sweep.
-  test('when the card ALREADY has a live linked run, the refusal does not promise an automatic dispatch', async () => {
+  //
+  // ARGUS r5 (BLOCKER): the prose was fixed and the WRITE was not. The row was
+  // still upserted, and the sweep drops it only while the linked run is live AT
+  // SWEEP TIME — so once that run went `stopped`/`failed` (or board-reconcile
+  // detached it) the surviving hold re-fired a card that had been stopped on
+  // purpose. "Nothing stays queued" must mean nothing was written.
+  test('when the card ALREADY has a live linked run, the refusal does not promise an automatic dispatch — and QUEUES NOTHING', async () => {
     const repoDir = makeCommittedRepo('repo-linked-live')
+    const holds = new DispatchHoldStore(db)
     const live = await store.create({
       slug: 'build-the-thing',
       project_slug: 'proj-1',
@@ -603,7 +610,7 @@ describe('branch liveness refusal (branch_live)', () => {
 
     const result = await dispatchBoardBoundBuild(
       { task: TASK, board_item_id: 'ready' },
-      livenessDeps(repoDir, { board: linkedBoard }),
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
     )
 
     expect(result.ok).toBe(false)
@@ -612,6 +619,9 @@ describe('branch liveness refusal (branch_live)', () => {
     expect(result.message).toContain('nothing stays queued')
     expect(result.message).toContain(live.id.slice(0, 8))
     expect(result.message).not.toContain('QUEUED and re-checked')
+    // The refusal's own promise, kept: no row, and no `hold` shape claiming one.
+    expect(holds.list().filter((h) => h.board_item_id === 'ready')).toEqual([])
+    expect('hold' in result).toBe(false)
   })
 
   test('the branch_live hold names the holding RUN when there is one', async () => {

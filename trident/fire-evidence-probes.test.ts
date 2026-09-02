@@ -306,6 +306,67 @@ describe('the branch holder — a live lock is launch evidence', () => {
     expect(evidence.detail).not.toContain('wf_stale-1')
   })
 
+  // ARGUS r5 (BLOCKER): preferring a LIVE candidate fixed only half of it. With
+  // no live candidate the probe returned the FIRST one, and the caller can only
+  // ask its other liveness question — is the tree's mtime at/after the fire? —
+  // of the single probe it gets back. So a stale dead-pid entry listed first
+  // masked a same-branch tree cut AFTER the fire, and the run terminalized under
+  // a lane that had just started.
+  test('a STALE dead-pid entry listed FIRST does not mask the FRESH worktree behind it', async () => {
+    const STALE = '/repo/.claude/worktrees/wf_stale-1'
+    const gather = buildFireEvidenceGatherer({
+      read_run: () => run(),
+      run_host: async () =>
+        okHost(
+          porcelain(
+            linkedBlock({ path: STALE, locked: 'claude agent wf_stale (pid 999 start 111)' }),
+            linkedBlock(),
+          ),
+        ),
+      fs: makeFs({
+        lstat: async (p) => ({ mtimeMs: p === STALE ? FIRE_AT - 10 * 60_000 : FIRE_AT + 500 }),
+        readFile: async () => procStat(999, 111),
+      }),
+      probe_pid_alive: () => 'dead',
+    })
+    const evidence = await gather({ run: run(), fire_started_at_ms: FIRE_AT })
+    expect(evidence.kind).toBe('launched')
+    expect(evidence.detail).toContain('touched at/after the fire')
+    expect(evidence.detail).toContain(HOLDER_BASE)
+    expect(evidence.detail).not.toContain('wf_stale-1')
+  })
+
+  test('an UNREADABLE mtime never displaces a readable one', async () => {
+    // A stat that could not happen is not evidence of recency, so the freshest
+    // READABLE candidate stays the answer even when it is listed first.
+    const BLIND = '/repo/.claude/worktrees/wf_blind-1'
+    const gather = buildFireEvidenceGatherer({
+      read_run: () => run(),
+      run_host: async () => okHost(porcelain(linkedBlock(), linkedBlock({ path: BLIND }))),
+      fs: makeFs({
+        lstat: async (p) => {
+          if (p === BLIND) throw new Error('ENOENT')
+          return { mtimeMs: FIRE_AT + 500 }
+        },
+      }),
+      probe_pid_alive: () => 'dead',
+    })
+    const evidence = await gather({ run: run(), fire_started_at_ms: FIRE_AT })
+    expect(evidence.kind).toBe('launched')
+    expect(evidence.detail).toContain(HOLDER_BASE)
+  })
+
+  test('MUST STAY FAILED — two same-branch entries, both stale, are still no evidence', async () => {
+    const gather = buildFireEvidenceGatherer({
+      read_run: () => run(),
+      run_host: async () =>
+        okHost(porcelain(linkedBlock({ path: '/repo/.claude/worktrees/wf_stale-1' }), linkedBlock())),
+      fs: makeFs({ lstat: async () => ({ mtimeMs: FIRE_AT - 10 * 60_000 }) }),
+      probe_pid_alive: () => 'dead',
+    })
+    expect((await gather({ run: run(), fire_started_at_ms: FIRE_AT })).kind).toBe('none')
+  })
+
   test('MUST STAY FAILED — pid 1 in the lock reason is treated as absent', async () => {
     const asked: number[] = []
     const gather = buildFireEvidenceGatherer({

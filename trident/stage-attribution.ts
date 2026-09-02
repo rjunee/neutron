@@ -42,6 +42,36 @@ export const REPEATING_STAGES: ReadonlySet<string> = new Set([
 /** @deprecated Prior name, kept so an out-of-tree importer does not break. */
 export const HEARTBEAT_STAGES: ReadonlySet<string> = REPEATING_STAGES
 
+/**
+ * STAGES THAT STAND IN FOR ANOTHER — read when the named one CANNOT exist.
+ *
+ * `fire-unobserved-launch` (`orchestrator.ts`) is stamped on the settle-timeout
+ * hold path, which is a deliberate mirror of the fired return MINUS the
+ * `fire-settled` stamp: the launcher turn never confirmed, so claiming it
+ * settled would be a lie. The two are mutually exclusive by construction — the
+ * fired path stamps only `fire-settled`, this one stamps only the substitute.
+ *
+ * Without this table every HELD lane read as `unattributed(fire-settled)` on
+ * BOTH fire segments, i.e. the ledger lost exactly the runs this seam exists to
+ * rescue — 8 of 33 in the measured week. The instant the launcher stops being
+ * observed is still the honest boundary between "dispatching" and "the workflow
+ * is running", which is what those two segments measure.
+ */
+export const STAGE_ALTERNATIVES: Readonly<Record<string, readonly string[]>> = {
+  'fire-settled': ['fire-unobserved-launch'],
+}
+
+/** The stage's own stamp, or the first substitute present. See STAGE_ALTERNATIVES. */
+function lookupStage(first: ReadonlyMap<string, StageEvent>, stage: string): StageEvent | undefined {
+  const own = first.get(stage)
+  if (own !== undefined) return own
+  for (const alternative of STAGE_ALTERNATIVES[stage] ?? []) {
+    const event = first.get(alternative)
+    if (event !== undefined) return event
+  }
+  return undefined
+}
+
 export interface StageEvent {
   id?: number
   run_id: string
@@ -182,8 +212,8 @@ function durationBetween(
   from: string,
   to: string,
 ): { durationMs: number | null; status: string | null; hasBoth: boolean } {
-  const fromEvent = first.get(from)
-  const toEvent = first.get(to)
+  const fromEvent = lookupStage(first, from)
+  const toEvent = lookupStage(first, to)
   if (fromEvent === undefined || toEvent === undefined) {
     const missing = [fromEvent === undefined ? from : null, toEvent === undefined ? to : null]
       .filter((stage): stage is string => stage !== null)

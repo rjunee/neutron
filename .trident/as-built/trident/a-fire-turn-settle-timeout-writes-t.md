@@ -108,18 +108,30 @@ changes nothing, and with no evidence the `failed` path stays byte-identical:
   queueing refusals — it previously said "Nothing was dispatched … Re-dispatch
   only once nothing live holds the branch" while the same block queued the card,
   and returned no `hold` at all, so every structured consumer read a queued card
-  as dropped.
+  as dropped. WHEN IT SAYS NOTHING WAS QUEUED, NOTHING IS WRITTEN: behind the
+  card's own live linked run the refusal writes no hold row and returns no `hold`
+  field. Saying otherwise while still upserting was not merely inconsistent — the
+  sweep drops such a row only while that run is STILL live at sweep time, so the
+  moment it went `stopped`/`failed` (or board-reconcile detached it) the survivor
+  re-fired a card that had been stopped on purpose.
 - The terminal-build wake (`gateway/proactive/terminal-build-wake.ts`) stops
   inviting a relaunch for this failure shape: when the failure_reason carries the
   settle-timeout error or the published marker, instruction 2 becomes
   resolve-the-branch-holder-first (worktree lock and live pid, the run row's
   `inner_checkpoint`, the PR state; a published reason steers to a REVIEW round,
   never a rebuild). Every other failure_reason renders byte-identically, pinned by
-  asserting the original instruction survives verbatim. The published branch does
-  NOT forbid `work_board_start`: `inner-workflow.mjs`'s `resumeOnUnchangedHead`
-  resumes an unchanged `outer-published` head as mode `review`, so that call IS
-  the resume-to-review — the cheapest correct recovery — and the instruction says
-  so rather than ruling it out.
+  asserting the original instruction survives verbatim. The published branch names
+  the recovery that actually EXISTS: a `bound_pr` dispatch
+  (`work_board_dispatch_build`), which `orchestrator.ts` answers through
+  `executeBoundReview` before base resolution and before the build workflow — it
+  reviews the published head and never builds. It had briefly said
+  `work_board_start` resumes such a head into a review round; that was false and
+  is now stated as such in the prompt. `inner-workflow.mjs`'s
+  `resumeOnUnchangedHead` does resume an `outer-published` head as mode `review`,
+  but only when a checkpoint reaches it, and no dispatch entry point passes one:
+  `store.create` writes `inner_checkpoint: null` unconditionally (pinned in
+  `trident/store.test.ts`), so `orchestrator.ts`'s `resume_checkpoint` is null and
+  a fresh `work_board_start` REBUILDS — the ~2 h this card exists to save.
 
 The owner-facing copy moved with it. `interpretFailure` (`trident/delivery.ts`) now
 matches the published marker explicitly instead of falling to the generic tail,

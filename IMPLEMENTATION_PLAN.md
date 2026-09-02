@@ -2,6 +2,58 @@
 
 Card: `buildSubstrateWorkflowFire` (trident/inner-loop.ts) resolves `{status:'failed', error:'fire turn did not settle within the budget'}` on launcher-settle timeout, and the orchestrator (`orchestrator.ts` `outcome.status !== 'fired'` branch) unconditionally terminalized the run — but "not settled" does NOT imply "not fired". Measured: 8 of 33 runs in 7 days; the wake then invites a second lane onto a branch a live lane holds (stopped only by wrong-base-guard luck), and twice the timeout wrote `failed` over a run whose own row said `outer-published:*` (built, pushed, CI green). Fix in four layers: (1) never write plain `failed` on settle-timeout without checking positive evidence the workflow started — the run's own `inner_checkpoint` first, filesystem probes second; (2) a distinct launched-but-launcher-unobserved outcome that holds the lane instead of terminalizing, expressed over EXISTING columns only (no new column, no new phase); (3) the terminal-build wake must not tell an agent to relaunch for this failure shape — resolve the branch holder first; (4) dispatch must refuse on branch LIVENESS (live worktree lock / non-terminal run on the branch), not only on branch shape.
 
+## Resume state (round 11, 2026-09-02 — ARGUS ROUND-5 SYNTHESIS FINDINGS ADDRESSED; T1–T7 unchanged in shape)
+
+Round 11 fixed the three blockers the synthesis confirmed, plus the confirmed minors.
+No new column, no new phase, no new module; every change sits inside a seam T1–T4 owns.
+
+- **BLOCKER — the wake prompt promised a resume that does not exist.** Instruction 2 told
+  the agent that `work_board_start` on the bound item "resumes an `outer-published:` head
+  into a REVIEW round (it does not rebuild)", and the suite PINNED that sentence. It is
+  false: every dispatch entry point reaches `store.create`, which writes
+  `inner_checkpoint: null` unconditionally, so `orchestrator.ts`'s `resume_checkpoint` is
+  null and the workflow rebuilds — the exact ~2 h this card exists to remove. The review-only
+  path that really does read the published head without building is a `bound_pr` dispatch
+  (`executeBoundReview`, returned before base resolution), and `bound_pr` is a
+  `work_board_dispatch_build` argument — `work_board_start` deliberately has none. The
+  prompt now names that tool and says plainly that a fresh start REBUILDS; the wake test
+  asserts the old sentence is GONE, and `trident/store.test.ts` pins
+  `create → inner_checkpoint === null` so the claim can never be re-introduced silently.
+- **BLOCKER — the holder probe preferred the FIRST non-live candidate, not the freshest.**
+  Round 10 taught `probeBranchHolder` to prefer a LIVE holder, but the caller's other
+  liveness signal is the tree's mtime against the fire clock and it can only ask that of the
+  ONE probe returned. A stale dead-pid entry listed first therefore MASKED a same-branch
+  worktree cut after the fire → `kind: 'none'`, and the run terminalized under a lane that
+  had just started. With no live candidate the freshest readable mtime now wins; an
+  unreadable stat never displaces a readable one. Three probes tests (stale-first-fresh-second,
+  the unreadable-mtime rule, and a two-stale must-stay-failed control).
+- **BLOCKER — the `branch_live` refusal said "nothing stays queued" and queued it anyway.**
+  Behind the card's own live linked run the prose was fixed in round 10 but the upsert still
+  ran, and `buildDispatchHoldSweep` drops such a row only while the linked run is STILL live
+  at sweep time — so once it terminalized (or board-reconcile detached it) the surviving hold
+  re-fired a card that had been stopped or failed on purpose. One `queued` value now decides
+  the prose, the write and the `hold` field. The linked-live test asserts the hold store is
+  empty and no `hold` field is returned.
+- **MINOR — `fire-unobserved-launch` was unattributed in the latency ledger.** The hold path
+  stamps it INSTEAD OF `fire-settled` (the launcher never confirmed), so every held lane read
+  as `unattributed(fire-settled)` on both fire segments — the ledger lost exactly the runs
+  this seam rescues. `stage-attribution.ts` gained `STAGE_ALTERNATIVES`
+  (`fire-settled` ← `fire-unobserved-launch`) consulted by `durationBetween`; a window with
+  NEITHER terminator is still unattributed, pinned by its own control.
+- **MINOR — `publishedFailureReason` could emit a lone surrogate.** The fallback cap sliced at
+  a fixed UTF-16 code-unit index; an orphaned high surrogate is now dropped rather than
+  shipped. Latent (only the `m === null` arm), fixed because the cut is one line.
+- **NIT — the outer-published regex divergence** (`\d{1,9}` here vs `(\d+)` at the two resume
+  sites) is left as built and DOCUMENTED at the regex: it diverges toward the RECOVERABLE
+  `failed`, which is the safe direction, and no writer in this repo can emit a 10-digit round.
+- **NIT — `DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS` sat mid-import-block** in `tick.ts`; moved
+  below the imports beside the logger.
+- **Recorded, not changed:** the composed drain test asserts the WIRE only, deliberately —
+  `buildCoreModules` has no default sweep (production composes it in `open/composer.ts`), so
+  a behavioural assertion there would exercise a sweep the test built itself. The comment now
+  names where the behaviour IS pinned (`dispatch-holds.test.ts`, `tick.test.ts`). The stale
+  `branch_live` hold with no age cap remains the documented accepted risk.
+
 ## Resume state (round 10, 2026-09-02 — ARGUS ROUND-5 FINDINGS ADDRESSED; T1–T7 unchanged in shape)
 
 Round 10 addressed Argus round 5. No new column, no new phase, no new module; every change sits

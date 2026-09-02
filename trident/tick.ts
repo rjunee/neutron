@@ -46,15 +46,16 @@ import { LIVENESS_PROBE_INTERVAL_MS } from './liveness.ts'
 import { detectBaseBranch, type RunHostCommand } from './merge.ts'
 import { STALLED_WARN_MS } from './run-progress.ts'
 
+import { createLogger } from '@neutronai/logger'
+
+const log = createLogger('trident-tick')
+
 /**
  * How rarely the per-tick dispatch-hold drain may actually run. 90 s — the tick's
  * own baseline cadence, i.e. "once per settled sweep at most", NOT once per
  * watcher-driven wake. See `drain_dispatch_holds_min_interval_ms`.
  */
 export const DISPATCH_HOLD_DRAIN_MIN_INTERVAL_MS = 90_000
-import { createLogger } from '@neutronai/logger'
-
-const log = createLogger('trident-tick')
 
 /**
  * The per-run advance function the loop applies each tick. PR-2 derives

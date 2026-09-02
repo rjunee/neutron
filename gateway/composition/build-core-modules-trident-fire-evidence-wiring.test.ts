@@ -113,6 +113,17 @@ async function seedFreshRun(id: string, repo_path: string, branch: string): Prom
 // queued card never drains. The composed tick loop now drives the same sweep on
 // its own cadence — this proves the option is WIRED at the composition root, not
 // merely accepted by the type.
+//
+// AND THE WIRE IS ALL THIS PROVES, DELIBERATELY (Argus r5). `buildCoreModules`
+// has no default sweep to drive: the production drain is composed one level up
+// (`open/composer.ts` passes `drain_dispatch_holds: () => tridentHoldSweep()`),
+// so a behavioural assertion here would exercise a sweep this file built itself
+// — proving nothing about production. The DRAIN'S BEHAVIOUR is pinned where the
+// sweep really is: `trident/dispatch-holds.test.ts` ("a FIRST-EVER dispatch
+// refused on branch liveness is QUEUED, and the sweep fires it later" seeds a
+// hold, frees the holder, and asserts the row is gone and the run created; "the
+// sweep drains with NO run argument at all" pins the tick-cadence trigger), and
+// its cadence and failure-containment in `trident/tick.test.ts`.
 describe('trident hold-drain composition wiring — the composed tick drains the dispatch-hold queue', () => {
   test('drain_dispatch_holds is called by the composed loop on an ordinary tick', async () => {
     let drained = 0

@@ -340,6 +340,12 @@ describe('TridentRunStore', () => {
       task: 'build the thing',
     })
     // A fresh run has no checkpoint, so it has no commit to be about either.
+    // AND `create` TAKES NO CHECKPOINT AT ALL (Argus r5 blocker): every dispatch
+    // entry point — `dispatchBoardBoundBuild` included — lands here, so a newly
+    // dispatched run ALWAYS rebuilds. Anything that tells an operator a fresh
+    // start "resumes" a published head (the terminal-build wake once did) is
+    // wrong, and this is the assertion that says so.
+    expect(run.inner_checkpoint).toBeNull()
     expect(run.inner_checkpoint_head).toBeNull()
     expect(run.inner_checkpoint_findings).toBeNull()
 

@@ -297,6 +297,30 @@ describe('round-2 findings — the carried columns and the length contract', () 
     expect(reason.length).toBeLessThanOrEqual(PUBLISHED_REASON_MAX_CHARS)
   })
 
+  // ARGUS r5 (minor): the cap cut at a fixed UTF-16 code-unit index, so a cut
+  // landing between a surrogate pair emitted a LONE surrogate — a replacement
+  // glyph in every renderer and invalid UTF-8 to anything that re-encodes it.
+  test('the fallback cut never splits a surrogate pair', () => {
+    // Pad with astral characters so the budget lands INSIDE one of them.
+    for (let pad = 0; pad < 8; pad += 1) {
+      const reason = publishedFailureReason(`${'x'.repeat(pad)}${'\u{1f680}'.repeat(200)}`)
+      expect(reason.length).toBeLessThanOrEqual(PUBLISHED_REASON_MAX_CHARS)
+      for (let i = 0; i < reason.length; i += 1) {
+        const unit = reason.charCodeAt(i)
+        const isHigh = unit >= 0xd800 && unit <= 0xdbff
+        const isLow = unit >= 0xdc00 && unit <= 0xdfff
+        if (isHigh) {
+          const next = reason.charCodeAt(i + 1)
+          expect(next >= 0xdc00 && next <= 0xdfff).toBe(true)
+        }
+        if (isLow) {
+          const prev = reason.charCodeAt(i - 1)
+          expect(prev >= 0xd800 && prev <= 0xdbff).toBe(true)
+        }
+      }
+    }
+  })
+
   test('a MATCHED checkpoint is never cut by the ceiling — every field survives', () => {
     const maximal = `outer-published:${SHA}:123456789:123456789:deviated`
     const reason = publishedFailureReason(maximal)

@@ -57,6 +57,14 @@ export const FIRE_PUBLISHED_REASON_MARKER = 'already built and published'
  * The round field is BOUNDED (`\d{1,9}`) ON PURPOSE: it matches what
  * `checkpointRound` / `checkpoint.sh` can actually write, so an absurd
  * pseudo-round cannot pass as a published checkpoint.
+ *
+ * THAT BOUND IS TIGHTER THAN THE RESUME SITES' `(\d+)` (`orchestrator.ts`,
+ * `inner-workflow.mjs`), and the divergence is deliberate rather than an
+ * oversight: a ≥10-digit round would resume as a review there and classify as
+ * `none` here, i.e. this gate falls back to the ordinary RECOVERABLE `failed`
+ * instead of the terminal published state. Diverging toward the recoverable
+ * answer is the safe direction, and no writer in this repo can emit such a
+ * round; when run-disposition lands and the copies dedupe, dedupe to THIS bound.
  */
 export const OUTER_PUBLISHED_CHECKPOINT = /^outer-published:([0-9a-f]{40}):(\d+):(\d{1,9})(?::deviated)?$/
 
@@ -282,7 +290,17 @@ export function publishedFailureReason(checkpoint: string): string {
   // input was measured on that path; the docblock's "≤200" was prose until here.
   // The cut is still VISIBLE as a `…`, and it is applied to the rendered
   // checkpoint ALONE so the operator-facing sentence around it always survives.
+  //
+  // AND THE CUT DOES NOT SPLIT A CHARACTER. `slice` counts UTF-16 code units, so
+  // cutting between a surrogate pair emits a LONE surrogate — an unpaired code
+  // unit that reads as a replacement glyph wherever this reason is rendered and
+  // is not valid UTF-8 to anything that re-encodes it. Only the `m === null`
+  // fallback carries arbitrary text, so this is the only place it can happen;
+  // drop the orphaned half rather than ship it.
   const budget = PUBLISHED_REASON_MAX_CHARS - PUBLISHED_REASON_HEAD.length - PUBLISHED_REASON_TAIL.length
-  const short = rendered.length > budget ? `${rendered.slice(0, budget - 1)}…` : rendered
+  const cut = rendered.slice(0, budget - 1)
+  const lastUnit = cut.charCodeAt(cut.length - 1)
+  const whole = lastUnit >= 0xd800 && lastUnit <= 0xdbff ? cut.slice(0, -1) : cut
+  const short = rendered.length > budget ? `${whole}…` : rendered
   return `${PUBLISHED_REASON_HEAD}${short}${PUBLISHED_REASON_TAIL}`
 }

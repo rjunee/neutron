@@ -205,13 +205,24 @@ export async function probeBranchHolder(
   const candidates = entries.slice(1).filter((e) => e.branch === wantRef)
   if (candidates.length === 0) return null
 
-  let first: BranchHolderProbe | null = null
+  // WITH NO LIVE HOLDER, THE FRESHEST ONE WINS — not the first one listed. The
+  // caller's OTHER liveness signal is the tree's own mtime against the fire
+  // clock, and it can only ask that question of the ONE probe returned here.
+  // Returning the first non-live candidate therefore let a stale dead-pid entry
+  // MASK a same-branch tree that was cut after the fire: `kind: 'none'`, and the
+  // run terminalized under a lane that had just started — the same false
+  // negative the live-holder preference above exists to prevent, one signal
+  // over. A null mtime never displaces a readable one (an unreadable stat is not
+  // evidence), and with the common single match nothing changes.
+  let best: BranchHolderProbe | null = null
   for (const entry of candidates) {
     const probe = await probeWorktreeEntry(deps, entry)
     if (probe.pid_live) return probe
-    first ??= probe
+    if (best === null || (probe.mtime_ms !== null && (best.mtime_ms === null || probe.mtime_ms > best.mtime_ms))) {
+      best = probe
+    }
   }
-  return first
+  return best
 }
 
 /**

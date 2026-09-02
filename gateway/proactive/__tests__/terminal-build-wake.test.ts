@@ -102,14 +102,23 @@ describe('terminal build wake', () => {
   // ARGUS r4 (minor): the rewritten instruction ended "…ONLY once nothing live
   // holds the branch and no published work exists" — unsatisfiable for a
   // published row, which steered the agent away from the CHEAPEST correct
-  // recovery. `inner-workflow.mjs` resumes an `outer-published` head as mode
-  // 'review', so `work_board_start` on that row is a resume-to-review, not a
-  // rebuild. The instruction must say so.
-  test('the published instruction does not forbid the resume-to-review it should ask for', () => {
+  // recovery. The instruction must point at a recovery that exists.
+  //
+  // ARGUS r5 (BLOCKER): the recovery it then named was the WRONG one, and this
+  // test pinned the lie. `work_board_start` does NOT resume an `outer-published:`
+  // head — `store.create` writes `inner_checkpoint: null` unconditionally
+  // (pinned in `trident/store.test.ts`), so the orchestrator's
+  // `resume_checkpoint` is null and the dispatch rebuilds. The review-only path
+  // is a `bound_pr` dispatch, which `work_board_start` cannot express.
+  test('the published instruction names the review round that actually exists, not a start-as-resume', () => {
     const reason = publishedFailureReason(`outer-published:${'a'.repeat(40)}:0:3`)
     const prompt = buildTerminalBuildWakePrompt({ run: run({ phase: 'failed', failure_reason: reason }), board_item_id: 'item' })
     expect(prompt).not.toContain('no published work exists')
-    expect(prompt).toContain('resumes an `outer-published:` head into a REVIEW round')
+    // The claim that killed it: starting the item resumes instead of rebuilding.
+    expect(prompt).not.toContain('resumes an `outer-published:` head into a REVIEW round')
+    expect(prompt).toContain('`work_board_dispatch_build` with `bound_pr`')
+    expect(prompt).toContain('reviews the published head and never builds')
+    expect(prompt).toContain('it REBUILDS from scratch')
   })
   test('every other failure reason keeps instruction 2 byte-identical', () => {
     const ORIGINAL_INSTRUCTION_2 =
