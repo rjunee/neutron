@@ -425,10 +425,14 @@ function samePath(a: string, b: string): boolean {
  *      `branch -D` back inside the ALIVE arm whose pinned contract is that the string does not
  *      contain it. The anchor is dropped rather than widened, because there is no benign
  *      spelling to protect: the verbs are only rewritten when a DELETE OPTION is found in the
- *      bounded window after them, so prose that merely contains the letters (`rebranch`,
- *      `advantage`) is untouched, and over-folding evidence is the safe direction anyway. The
- *      cost is one substring in an unrunnable position; the alternative is a runnable-looking
- *      one in a message that promises none.
+ *      window after them, so prose that merely contains the letters is untouched UNLESS a
+ *      delete option follows it somewhere in the rest of the string — and where one does, the
+ *      prose is folded too. That is measured, not assumed (Argus nit, which caught this
+ *      docblock naming `rebranch` and `advantage` as untouched examples when both fold):
+ *      `foldEvidence('advantage of the -d flag')` returns `'advantag <command removed> flag'`,
+ *      because `tag` sits inside `advantage` and `-d` follows it. Over-folding EVIDENCE is the
+ *      safe direction, so this is a fidelity cost knowingly taken. The cost of the alternative
+ *      is a runnable-looking delete in a message that promises none.
  */
 /**
  * A COMBINED SHORT-OPTION CLUSTER CARRYING d/D — `-D`, `-Dr`, `-fd`, `-vvvvvD`. Written as a
@@ -440,16 +444,41 @@ function samePath(a: string, b: string): boolean {
  */
 function isDeleteCluster(t: string): boolean {
   if (!t.startsWith('-') || t.startsWith('--')) return false
-  const body = t.slice(1)
-  return /^[A-Za-z]+$/.test(body) && (body.includes('d') || body.includes('D'))
+  // ONLY THE LEADING LETTER RUN IS THE CLUSTER (Argus minor, reproduced through the real
+  // composer). Requiring the WHOLE body to be letters meant one trailing punctuation character
+  // defeated the rule: `-D.` failed `^[A-Za-z]+$`, so a lock reason spelling `branch -D. victim`
+  // rendered VERBATIM inside the ALIVE arm whose pinned contract is that the string does not
+  // contain `branch -D`. The injected text is not runnable, so what it costs is the contract,
+  // which is the whole point of the arm. Reading the leading run and ignoring the tail folds it,
+  // keeps `-D`/`-fd`/`-vvvvvD` folded, and stays free of the two-quantifier shape CodeQL flags —
+  // one anchored `+` with nothing after it cannot backtrack.
+  const lead = /^[A-Za-z]+/.exec(t.slice(1))
+  if (lead === null) return false
+  const body = lead[0]
+  return body.includes('d') || body.includes('D')
 }
-/** One option token that spells an irreversible ref delete: `--delete`, or a short cluster with d/D. */
+/**
+ * One option token that spells an irreversible ref delete: `--delete` (or any prefix of it git
+ * would accept), `--stdin`, or a short cluster with d/D.
+ *
+ * ABBREVIATIONS COUNT, BECAUSE GIT ACCEPTS THEM (Argus minor, measured on git 2.43:
+ * `git branch --del victim` really deletes). An exact-string test let `--del`/`--dele` through
+ * verbatim into the arm contracted to print no delete. `--d` is folded with the rest even where
+ * git would call it ambiguous — over-folding EVIDENCE is the safe direction, and the ambiguity
+ * depends on a subcommand this scan deliberately does not track. `--stdin` is here because
+ * `git update-ref --stdin` deletes by reading `delete <ref>` lines, an option that carries no
+ * delete letters at all.
+ */
 function isRefDelete(t: string): boolean {
-  return t === '--delete' || isDeleteCluster(t)
+  return isDeleteOption(t) || t === '--stdin' || isDeleteCluster(t)
 }
 /** The same for `push`, which ALSO deletes by REFSPEC (`:feat`, `+:feat`) and by `--mirror`. */
 function isPushDelete(t: string): boolean {
-  return t === '--delete' || t === '--mirror' || t.startsWith(':') || t.startsWith('+:') || isDeleteCluster(t)
+  return isDeleteOption(t) || t === '--mirror' || t.startsWith(':') || t.startsWith('+:') || isDeleteCluster(t)
+}
+/** `--delete` and every prefix of it git will expand — `--d`, `--de`, `--del`, `--dele`, `--delet`. */
+function isDeleteOption(t: string): boolean {
+  return t.length >= 3 && '--delete'.startsWith(t)
 }
 /** The delete VERBS, found ANYWHERE inside a token — one word character in front used to defeat the rule. */
 const REF_DELETE_VERB = /(branch|update-ref|tag)/

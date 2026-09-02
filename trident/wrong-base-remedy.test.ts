@@ -1631,6 +1631,63 @@ describe('composeWrongBaseRefusal: forged evidence cannot smuggle in a delete', 
     expect(safeArm).toContain('git -C /repo branch -D -- feat-x')
     expect(safeArm).not.toContain('<command removed>')
   })
+
+  test('an ABBREVIATED delete option, and a cluster with punctuation stuck to it, are still deletes', async () => {
+    // TWO SPELLINGS THE TOKEN TESTS DID NOT RECOGNISE (Argus minors, both reproduced through the
+    // real composer):
+    //   1. `--delete` was matched as an EXACT string, but git expands unambiguous prefixes —
+    //      `git branch --del victim` really deletes on git 2.43 — so `--del`/`--dele` rendered
+    //      verbatim in the arm contracted to print no delete. That one is RUNNABLE.
+    //   2. the short cluster required its whole body to be letters, so one trailing punctuation
+    //      character (`-D.`) fell through and put the literal `branch -D` back into the ALIVE
+    //      arm. That one is not runnable (git exits 129); what it costs is the pinned contract,
+    //      which is the arm's entire product.
+    expect(foldEvidence('git branch --del victim')).toContain('<command removed>')
+    expect(foldEvidence('git branch -D. victim')).not.toContain('branch -D')
+
+    const forgeries: [string, string][] = [
+      ['git branch --del victim', 'branch --del'],
+      ['git branch --dele victim', 'branch --dele'],
+      ['git branch --d victim', 'branch --d'],
+      ['git branch -D. victim', 'branch -D'],
+      ['git branch -D, victim', 'branch -D'],
+      ['git tag --del trident-salvage/run-77', 'tag --del'],
+      ['git push origin --del feat-x', 'push origin --del'],
+      // `update-ref --stdin` deletes by reading `delete <ref>` lines, with no delete letters in
+      // the option at all.
+      ['git update-ref --stdin', 'update-ref --stdin'],
+    ]
+    for (const [reason, banned] of forgeries) {
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): ${reason}`)
+      expect({ reason, neutralised: msg.includes('<command removed>'), leaks: msg.includes(banned) }).toEqual({
+        reason,
+        neutralised: true,
+        leaks: false,
+      })
+      expect(msg).toContain('ALIVE')
+    }
+
+    // POSITIVE CONTROL 1: `--d…` options that are NOT prefixes of `--delete` are still quoted
+    // readably — a rule that folded every long option starting `--d` would pass the loop above
+    // and shred the evidence.
+    for (const benign of ['git branch --contains abc1234', 'git branch --dry-run', 'git tag --dry-run -l']) {
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): ${benign}`)
+      expect(msg).toContain(benign)
+      expect(msg).not.toContain('<command removed>')
+    }
+
+    // POSITIVE CONTROL 2: the safe arm still composes its own delete.
+    const safeStill = await composeWrongBaseRefusal(ARGS, {
+      run_host: fakeHost({
+        'worktree list --porcelain': ok(UNHELD_PORCELAIN),
+        [FETCH]: ok(),
+        [RESOLVE]: ok(`${TIP}\n`),
+      }).run_host,
+      probe_tree: CLEAR,
+    })
+    expect(safeStill).toContain('git -C /repo branch -D -- feat-x')
+    expect(safeStill).not.toContain('<command removed>')
+  })
 })
 
 describe('composeWrongBaseRefusal: an operation git omits the branch attribute for', () => {

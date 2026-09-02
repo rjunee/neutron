@@ -1310,6 +1310,65 @@ describe('composeWrongBaseRefusal → interpretFailure — the two halves of the
     expect(threw.out.input_needed).toContain('either side of that fetch')
   })
 
+  test('a fetch that never landed is not credited with the writes a completed fetch makes', async () => {
+    // THE FAILED-FETCH ARMS WEAR THE FETCHING ARM'S OPENING (Argus blocker). Three unheld arms
+    // are reached BECAUSE the fetch produced no readable origin/<branch>, yet each opens with
+    // the same "found no worktree holding the branch" phrase the SUCCESSFUL arm opens with — so
+    // a prefix test credited them with a refreshed tracking ref, a reflog append and downloaded
+    // objects the fetch never made. Reproduced in a scratch repo: with no `origin` configured,
+    // `git fetch --no-tags origin +refs/heads/<b>:refs/remotes/origin/<b>` exits 128 and
+    // `rev-parse --verify refs/remotes/origin/<b>` still fails afterwards. Overcounting writes
+    // is the same defect as undercounting them, in the message whose subject is not claiming
+    // things nobody established — so these arms say what is actually established: the fetch was
+    // attempted, what it wrote is UNKNOWN, and the ceiling is unchanged.
+    const failedFetch = (stderr: string, getUrl: HostCommandResult) =>
+      host({
+        'worktree list --porcelain': okRes(zPorcelain(MAIN_FIELDS)),
+        [FETCH]: { ok: false, stdout: '', stderr, exit_code: 128 },
+        'remote get-url origin': getUrl,
+      })
+    const noUrl: HostCommandResult = { ok: false, stdout: '', stderr: 'error: No such remote', exit_code: 2 }
+    const url = okRes('https://example.invalid/repo.git\n')
+
+    const arms: [string, string, Parameters<typeof composeWrongBaseRefusal>[1]][] = [
+      [
+        'no reachable origin',
+        "no reachable 'origin' remote",
+        { run_host: failedFetch("fatal: 'origin' does not appear to be a git repository", noUrl), probe_tree: clear },
+      ],
+      [
+        'the fetch failed with a remote configured',
+        'could not read origin/feat-x',
+        { run_host: failedFetch('fatal: unable to access: transport died', url), probe_tree: clear },
+      ],
+      [
+        'origin has no such ref',
+        'origin has no feat-x at all',
+        { run_host: failedFetch("fatal: couldn't find remote ref refs/heads/feat-x", url), probe_tree: clear },
+      ],
+    ]
+    for (const [name, marker, deps] of arms) {
+      const { reason, out } = await deliver(deps)
+      expect(`${name}: ${reason}`).toContain(marker)
+      // The refusal still stands, and it still authorises nothing irreversible.
+      expect(`${name}: ${out.klass}`).toBe(`${name}: branch-held`)
+      expect(`${name}: ${reason}`).not.toContain('branch -D')
+      // The write attribution is the UNKNOWN one, not the completed-fetch enumeration.
+      expect(`${name}: ${out.input_needed}`).toContain('may have failed before writing anything')
+      expect(`${name}: ${out.input_needed}`).toContain('UNKNOWN')
+      expect(`${name}: ${out.input_needed}`).not.toContain('that refreshes the origin tracking ref')
+      // ...and it is not the held arms' claim either: a fetch WAS attempted on every one of these.
+      expect(`${name}: ${out.input_needed}`).not.toContain('no network call at all')
+      expect(`${name}: ${out.input_needed}`).not.toContain('refused before it could establish the holder')
+    }
+
+    // POSITIVE CONTROL: the arm whose fetch DID land still gets the completed enumeration, so an
+    // implementation that answered this finding by making every unheld arm say UNKNOWN fails.
+    const landed = await deliver({ run_host: unheld(okRes(`${TIP}\n`)), probe_tree: clear })
+    expect(landed.out.input_needed).toContain('that refreshes the origin tracking ref')
+    expect(landed.out.input_needed).not.toContain('may have failed before writing anything')
+  })
+
   test('the write accounting is scoped to the guard, and the launcher\'s own base fetch is not hidden by it', async () => {
     // THE GUARD IS NOT THE ONLY THING THAT RAN ON THIS PATH (Argus blocker). The held arms say
     // the guard "made no network call at all" — true of the guard, and read by the owner as

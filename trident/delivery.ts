@@ -225,6 +225,39 @@ function wrongBaseWrites(evidence: string): string {
   if (evidence.startsWith('The wrong-base launch guard found no worktree with')) {
     return 'The guard itself only READ state: it made no network call at all, because a worktree mid-rebase or mid-bisect is standing on the branch and that settles the question locally.'
   }
+  // THE FAILED-FETCH ARMS WEAR THE FETCHING ARM'S OPENING TOO (Argus blocker). Three of the
+  // composer's unheld arms are reached BECAUSE the fetch did not deliver a readable
+  // origin/<branch> — "this repo has no reachable 'origin' remote", "could not read
+  // origin/<b> (…)", and "origin has no <b> at all" (the fetch exited on `couldn't find remote
+  // ref`, so it updated nothing) — yet all three open with the "found no worktree holding the branch" phrase
+  // as the arm that fetched successfully, so the prefix test below credited them with a
+  // refreshed tracking ref, a reflog append and downloaded objects that a fetch exiting 128
+  // never made. Reproduced in a scratch repo: with no `origin` configured, `git fetch --no-tags
+  // origin +refs/heads/<b>:refs/remotes/origin/<b>` exits 128 and `rev-parse --verify
+  // refs/remotes/origin/<b>` still fails afterwards — the tracking ref was never written.
+  // Asserting writes that did not happen is exactly the overcounting the paragraph at the call
+  // site says this conditional exists to prevent, so these arms get their own attribution.
+  //
+  // ONE ARM, NOT THREE, and it says UNKNOWN rather than "nothing" (the honest answer for each).
+  // The "could not read" arm also covers a fetch that SUCCEEDED and whose tracking ref then
+  // failed to resolve, so "the fetch wrote nothing" would be a fresh false claim of the same
+  // class; the no-origin arm cannot establish where inside git's own bookkeeping the failed
+  // attempt stopped either. What IS established is the CEILING, and it is the same one: the
+  // only write this guard can make is a fetch of this one ref, and everything such a fetch can
+  // touch lives under .git.
+  if (
+    evidence.startsWith(
+      "The wrong-base launch guard found no worktree holding the branch, but this repo has no reachable 'origin' remote",
+    ) ||
+    evidence.startsWith(
+      'The wrong-base launch guard found no worktree holding the branch, but could not read origin/',
+    ) ||
+    evidence.startsWith(
+      'The wrong-base launch guard found no worktree holding the branch, and origin has no ',
+    )
+  ) {
+    return "The guard's only possible write is a fetch of this branch's own ref, to establish whether the commits are published; that fetch did not yield a readable origin ref and may have failed before writing anything, so whether it refreshed the origin tracking ref (and that ref's reflog), FETCH_HEAD, or any objects is itself UNKNOWN. Whatever it did write lives under .git — nothing else can have been written either way."
+  }
   if (evidence.startsWith('The wrong-base launch guard found no worktree holding the branch')) {
     // THE REFLOG IS ONE OF THE WRITES (Argus finding). `git fetch --no-tags origin
     // +refs/heads/<b>:refs/remotes/origin/<b>` also APPENDS to

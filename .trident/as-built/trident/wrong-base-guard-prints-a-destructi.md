@@ -651,3 +651,35 @@ hook is arbitrary local code, so the sentences now measure git's own writes and 
 hook is outside what they can bound. The reassurance actually owed — nothing this path does on its
 own touches the tree — is unchanged.
 
+
+The write attribution stopped crediting a fetch that never landed. `delivery.ts` picks its per-arm
+write sentence from a frozen copy of each arm's OPENING, and three of the composer's unheld arms are
+reached precisely BECAUSE the fetch produced no readable `origin/<branch>` — no reachable `origin`,
+"could not read origin/<b> (…)", and "origin has no <b> at all" — yet all three open with the same
+"found no worktree holding the branch" phrase as the arm whose fetch succeeded. The prefix test
+therefore credited them with a refreshed tracking ref, a reflog append, a rewritten FETCH_HEAD and
+downloaded objects that a fetch exiting 128 never made. Reproduced in a scratch repo: with no
+`origin` configured, `git fetch --no-tags origin +refs/heads/<b>:refs/remotes/origin/<b>` exits 128
+and `rev-parse --verify refs/remotes/origin/<b>` still fails afterwards. Overcounting writes is the
+same defect as undercounting them, in the message whose subject is not claiming things nobody
+established — so those three arms now get their own attribution: the fetch was ATTEMPTED, it did not
+yield a readable origin ref and may have failed before writing anything, so what it wrote is UNKNOWN,
+and the ceiling is the unchanged one (only a fetch of this single ref is possible at all, and
+everything such a fetch can touch lives under `.git`). One arm rather than three, because "the fetch
+wrote nothing" would itself be unestablished: the "could not read" arm also covers a fetch that
+SUCCEEDED and whose tracking ref then failed to resolve. The seam is pinned end to end — the REAL
+composer's output for each of the three arms, through the REAL classifier — with a positive control
+on the arm whose fetch did land, so an implementation that answers this by making every unheld arm
+say UNKNOWN fails.
+
+Two token spellings the defang scan did not recognise now fold. `--delete` was matched as an exact
+string, but git expands unambiguous prefixes — `git branch --del victim` really deletes on git 2.43 —
+so `--del`/`--dele` rendered verbatim inside the ALIVE arm contracted to print no delete, and that
+one is RUNNABLE; every prefix of `--delete` at least three characters long is now a delete option,
+along with `update-ref --stdin`, which deletes by reading `delete <ref>` lines and carries no delete
+letters at all. And the short cluster required its WHOLE body to be letters, so one trailing
+punctuation character (`-D.`) fell through and put the literal `branch -D` back into that same arm;
+only the LEADING letter run is the cluster now, which folds it while keeping the single-quantifier
+shape CodeQL's polynomial-redos rule reads. Both are pinned by table cases through the real composer,
+with positive controls: `--contains`, `--dry-run` and the guard's own safe `branch -D` remedy all
+still render.
