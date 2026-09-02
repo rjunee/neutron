@@ -271,6 +271,12 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     expect(hookNames.length).toBeGreaterThan(1)
     for (const d of described) for (const h of hookNames) expect([h, d.includes(`--${h}`)]).toEqual([h, true])
 
+    // CONTAINMENT, pinned by name: the agreement loop above compares two lists and
+    // goes green again if an entry is deleted from BOTH sides, so a two-sided
+    // deletion would reopen a closed escape silently. These eight must be there.
+    for (const name of ['preload', 'require', 'import', 'loader', 'experimental-loader', 'test-reporter', 'reporter', 'reporters'])
+      expect([name, hookNames.includes(name)]).toEqual([name, true])
+
     // …and both refusals really exist on the prover side, in the words its
     // reasons use, so this test fails if either shape is quietly re-allowed.
     expect(PROVER_SRC).toContain('whose script body the branch wrote')

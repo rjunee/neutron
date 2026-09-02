@@ -1120,12 +1120,37 @@ function carriedValueReaching(guard: readonly string[], target: string): string 
  * it carries LOOKS LIKE A PATH (`-r./tests/setup.ts` does; `-run`'s `un` does
  * not). A long name is unambiguous and needs no such test.
  *
+ * A REPORTER IS A LOAD HOOK TOO, and it is the same forged proof one option
+ * further along. Node v22's `--test-reporter` takes a MODULE SPECIFIER and
+ * executes that module inside the guard's own process while the runner is
+ * loading; mocha's and vitest's `--reporter` and jest's `--reporters` do the
+ * same. So a branch commits `tests/reporter.mjs` whose whole body is `import
+ * '../src/limit.mjs'`, nominates `node --test
+ * --test-reporter=./tests/reporter.mjs tests/other.test.mjs`, and the reporter
+ * drags the mutated PRODUCTION file into a process running an unrelated test:
+ * a syntax break reddens the guard, restoring it goes green, and nothing ever
+ * asserted the mutated behaviour.
+ *
+ * REFUSED ON THE SHAPE WHATEVER THE VALUE NAMES, including a built-in name like
+ * `spec` or `junit`. Telling a built-in reporter name from a bare module
+ * specifier is a vocabulary bet — one this gate would lose the first time a
+ * runner added a name, and losing it means accepting a forged proof — so it
+ * fails CLOSED and is spellable around by dropping the option, since the prover
+ * reads EXIT CODES and never a line of report output.
+ *
+ * `--test-reporter-destination` and `--reporter-outfile` STAY LEGAL on purpose:
+ * they name a file the runner WRITES, not one it loads, and the regex is
+ * anchored so it cannot match the longer option.
+ *
  * KNOWN RESIDUAL of the same shape, left open on purpose: pytest's `-p
- * my_plugin` executes a branch-authored plugin module. Its letter collides with
- * `go test -p 4`'s parallelism flag, and the python side already carries the
- * larger `conftest.py` residual named above, which no argv rule can close.
+ * my_plugin` executes a branch-authored plugin module, and mocha's short `-R`
+ * carries a reporter the same way its long spelling does. Their letters collide
+ * with `go test -p 4`'s parallelism flag and with other runners' short options,
+ * the short-letter narrowing above stays untouched, and the python side already
+ * carries the larger `conftest.py` residual named above, which no argv rule can
+ * close.
  */
-const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader)$/
+const LOAD_HOOK_OPTION = /^--(?:preload|require|import|loader|experimental-loader|test-reporter|reporter|reporters)$/
 
 function loadHookCarrying(guard: readonly string[]): string | null {
   const start = runnerPrefixLength(guard)

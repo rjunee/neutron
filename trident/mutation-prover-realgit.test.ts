@@ -466,6 +466,62 @@ describe('the mutation-proof gate against real git', () => {
     expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
+  test('a committed REPORTER module that imports the target is refused before anything runs', async () => {
+    // THE BYPASS THIS CLOSES, end to end against real git. Node v22 executes the
+    // module `--test-reporter` names inside the guard's own process, so the
+    // branch commits `tests/reporter.mjs` whose whole body is one import of
+    // `../src/limit.ts` and nominates `node --test
+    // --test-reporter=./tests/reporter.mjs tests/other-control.test.ts`: the
+    // reporter drags the mutated PRODUCTION module in, a syntax-shaped break
+    // reddens a guard that asserts nothing about it, and restoring goes green.
+    // The refusal must land BEFORE anything is executed — node itself is never
+    // spawned, so this test needs no node on the box.
+    const repo = await seedProductionLib()
+    writeFileSync(join(repo, 'tests', 'reporter.mjs'), "import '../src/limit.ts'\n")
+    await git(repo, 'add', '-A')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the branch-authored reporter module')
+    const run = { id: 'run-reporter', slug: 'production-lib', repo_path: repo, branch: 'trident/production-lib-proof' }
+    const claim = {
+      file: 'src/limit.ts',
+      find: 'n > max ? max : n',
+      replace: 'n',
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+    const out = await runMutationProofGate({
+      run,
+      claim: {
+        ...claim,
+        guard: ['node', '--test', '--test-reporter=./tests/reporter.mjs', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(out.reason).toContain('tautology')
+    expect(out.reason).toContain('whose body the branch wrote')
+    // …and the refusal quotes the option, so the next build knows which one.
+    expect(out.reason).toContain('--test-reporter')
+    // Nothing ran, so nothing was left behind.
+    expect(existsSync(proofWorktreePath(repo, run))).toBe(false)
+
+    // POSITIVE CONTROL, in the same repo with the reporter module committed and
+    // all: the spelling the refusal recommends — the separate test named with
+    // the runner that runs it — still proves red-then-green.
+    const fine = await runMutationProofGate({
+      run: { ...run, id: 'run-reporter-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/limit.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([fine.ok, fine.exempt, fine.evidence?.proved ?? null]).toEqual([true, false, true])
+    const obs = fine.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
+
   test('the mutated file under an ABSOLUTE or ..-and-back name is still its own guard, and is refused', async () => {
     // THE BYPASS, against real git and the real path the proof worktree lands
     // at. The guard below runs `tests/support/clamp.ts` — the MUTATED file —

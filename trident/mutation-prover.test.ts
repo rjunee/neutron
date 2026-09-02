@@ -1327,6 +1327,71 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
   })
 
+  test('a REPORTER is a LOAD HOOK too — the runner executes the module it names', async () => {
+    // THE BYPASS THIS CLOSES, the fifth escape of one family. Node v22 loads an
+    // arbitrary module from `--test-reporter=<path>` and runs it inside the
+    // guard's own process; mocha's and vitest's `--reporter` and jest's
+    // `--reporters` do the same. So the branch commits `tests/reporter.mjs`
+    // whose whole body is `import '../src/limit.mjs'` and nominates `node
+    // --test --test-reporter=./tests/reporter.mjs tests/other.test.mjs`: the
+    // reporter drags the mutated PRODUCTION file into a process running an
+    // unrelated test, a syntax break reddens that guard, restoring it goes
+    // green — the same false proof `--preload` already earns a refusal for.
+    for (const [file, guard] of [
+      ['src/limit.mjs', ['node', '--test', '--test-reporter=./tests/reporter.mjs', 'tests/other.test.mjs']],
+      // …the space-separated spelling of the identical instruction,
+      ['src/limit.mjs', ['node', '--test', '--test-reporter', './tests/reporter.mjs', 'tests/other.test.mjs']],
+      // …mocha's and vitest's spelling,
+      ['src/limit.ts', ['bun', 'test', '--reporter=./tests/reporter.ts', 'tests/other.test.ts']],
+      // …and jest's plural one,
+      ['src/limit.ts', ['bun', 'test', '--reporters', './tests/reporter.js', 'tests/other.test.ts']],
+      // …a BUILT-IN name, refused deliberately: telling `spec` from a bare
+      // module specifier is a vocabulary bet this gate loses the first time a
+      // runner adds a name, and losing it means accepting a forged proof. The
+      // shape is refused whatever the VALUE — over-refusing, failing closed, and
+      // spellable around by dropping the option, since the prover reads exit
+      // codes and never a line of report output.
+      ['src/limit.mjs', ['node', '--test', '--test-reporter=spec', 'tests/other.test.mjs']],
+      // …and a COLLECTIBLE target, because a reporter loads a support library
+      // under `tests/` into the guard process exactly as it loads `src/`.
+      ['tests/support/lib.ts', ['bun', 'test', '--test-reporter=./tests/reporter.ts', 'tests/other.test.ts']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      // Refused on the spelling: nothing written, nothing run.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect([guard.join(' '), out.reason.includes('whose body the branch wrote')]).toEqual([guard.join(' '), true])
+      expect([guard.join(' '), fs.writes.length]).toEqual([guard.join(' '), 0])
+    }
+
+    // POSITIVE CONTROL: a DESTINATION is not a load. `--test-reporter-destination`
+    // names a file the runner WRITES, and the anchored regex must not swallow the
+    // longer option — without the anchor this row goes red and every honest
+    // reporting guard with it. (`--reporter-outfile` is pinned legal further up.)
+    for (const [file, guard] of [
+      ['src/limit.mjs', ['node', '--test', '--test-reporter-destination=./out.txt', 'tests/other.test.mjs']],
+    ] as const) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: [...guard], control: ['bun', 'test', 'tests/control.test.ts'] },
+      })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      // POSITIVE CONTROL ON THE EXTRACTION: the guard really ran.
+      expect([guard.join(' '), fine.observed !== null]).toEqual([guard.join(' '), true])
+    }
+  })
+
   test("an OPTION'S VALUE NEED NOT WRITE THE EXTENSION — `--preload=./src/limit` loads `src/limit.ts`", async () => {
     // THE BYPASS, reproduced end to end on bun 1.3.x. A loader completes a bare
     // specifier from its extension list and falls back to a directory's
