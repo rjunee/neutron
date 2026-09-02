@@ -439,12 +439,31 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       ['node', '--test', 'x.js'],
       ['go', 'test', './...'],
       ['python3', '-m', 'pytest'],
-      ['npm', 'run', 'test:unit'],
       ['cargo', 'test'],
-      ['make', 'test-unit'],
     ]) {
       const accepted = await prover.prove({ run: RUN, claim: { ...CLAIM, guard } })
       expect(accepted.observed).not.toBeNull()
+    }
+
+    // THE WRAPPER SHAPES ARE ON THE ALLOWLIST AND ARE STILL NOT GUARDS. `npm
+    // run <script>` and `make <target>` pass the SHAPE check — the allowlist is
+    // untouched, and they remain legal CONTROLS — but their command line lives
+    // in a `package.json` script or a `Makefile` recipe the branch wrote, so
+    // the argv cannot show that it does not preload the mutated file. Refused
+    // on opacity, not on shape, and the reason says which.
+    for (const guard of [
+      ['npm', 'run', 'test:unit'],
+      ['make', 'test-unit'],
+    ]) {
+      const opaque = await prover.prove({ run: RUN, claim: { ...CLAIM, guard } })
+      expect([guard.join(' '), opaque.observed]).toEqual([guard.join(' '), null])
+      expect(opaque.reason).not.toContain('not a test runner')
+      expect(opaque.reason).not.toContain('must be a test invocation')
+      expect(opaque.reason).toContain('whose script body the branch wrote')
+      // …and the same program as the CONTROL is untouched: the tautology is
+      // about what the GUARD loads.
+      const asControl = await prover.prove({ run: RUN, claim: { ...CLAIM, control: guard } })
+      expect([guard.join(' '), asControl.observed === null]).toEqual([guard.join(' '), false])
     }
     expect(host.calls.length).toBeGreaterThan(0)
   })
@@ -615,10 +634,23 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       expect(out.reason).toContain(arg)
     }
 
-    // POSITIVE CONTROLS — a scheme is a scheme only when it is followed by a
-    // `/`. `npm run test:unit` and `make test:all` are honest guards whose
-    // SCRIPT NAME owns a colon, and refusing them would refuse a whole runner
-    // convention for a punctuation mark.
+    // POSITIVE CONTROL — a scheme is a scheme only when it is followed by a
+    // `/`, so an ordinary colon in an option's value is left alone. It really
+    // did get as far as RUNNING, so the assertion cannot be passing on a claim
+    // refused for some other reason first.
+    const { prover: colonOk } = proverOver()
+    const colon = await colonOk.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: [...CLAIM.guard, '--test-name-pattern=fast:path'] },
+    })
+    expect(colon.reason).not.toContain('repo-relative')
+    expect(colon.observed).not.toBeNull()
+
+    // …AND THE SAME COLON IN A SCRIPT NAME IS STILL NOT A SCHEME. `npm run
+    // test:unit` and `make test:all` are refused now — a wrapper's body is
+    // branch-authored and cannot be shown not to preload the mutated file — but
+    // NOT for the punctuation, which would refuse a whole runner convention for
+    // a character. The reason names the opacity, not the worktree.
     for (const guard of [
       ['npm', 'run', 'test:unit'],
       ['make', 'test:all'],
@@ -626,9 +658,7 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       const { prover } = proverOver()
       const fine = await prover.prove({ run: RUN, claim: { ...CLAIM, guard } })
       expect([guard.join(' '), fine.reason.includes('repo-relative')]).toEqual([guard.join(' '), false])
-      // …and it really did get as far as RUNNING them, so the assertion above
-      // cannot be passing on a claim refused for some other reason first.
-      expect(fine.observed).not.toBeNull()
+      expect(fine.reason).toContain('whose script body the branch wrote')
     }
 
     // AND THE SCHEME TEST IS LINEAR IN THE ELEMENT IT READS. `|` binds across
@@ -1251,6 +1281,135 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
   })
 
+  test("a SPACE is a separator too — `--preload ./src` is `--preload=./src`", async () => {
+    // THE BYPASS, reproduced against the branch prover with real git and real
+    // bun: `--preload=./src` was refused and the IDENTICAL `--preload ./src`
+    // came back `ok: true, proved: true`. `carriedValue` reads only the
+    // `=`-joined and attached-short spellings, so a value written after a space
+    // is one more positional to every arm here — while bun loads the mutated
+    // PRODUCTION module into the guard's own process just the same. Each
+    // spelling below is the `=` form of the test above with one character
+    // changed.
+    for (const guard of [
+      ['--preload', './src/limit'],
+      ['--preload', './src'],
+      ['--preload', './src/'],
+      ['--preload', './src/index'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', ...guard, 'tests/other.test.ts'] },
+      })
+      // Refused before a command ran, and the refusal quotes BOTH elements —
+      // an argument nobody wrote (`./src` alone) would send the next build
+      // looking for the wrong thing.
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect(out.reason).toContain(guard.join(' '))
+    }
+
+    // …and the spellings that write the WHOLE path after the space are refused
+    // by the arm that compares whole elements, which needs no separator at all.
+    // Listed apart because their refusal quotes the FILE, not the two elements.
+    for (const guard of [
+      ['-r', './src/limit.ts'],
+      ['--import', './src/limit.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', ...guard, 'tests/other.test.ts'] },
+      })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+    }
+
+    // POSITIVE CONTROLS, because every assertion above would pass just as well
+    // against "refuse any guard carrying two elements".
+    //  (1) an option value that is not a path at all — the commonest spelling
+    //      of all, and the one that would break every honest nomination;
+    //  (2) a space-separated value naming a DIRECTORY that does not hold the
+    //      mutated file;
+    //  (3) the RUNNER'S OWN option, whose operand is the test file and not a
+    //      loaded value: `node --test x.js` must survive, or node repos lose
+    //      every guard they can spell.
+    for (const guard of [
+      ['bun', 'test', '--timeout', '30000', 'src/other.test.ts'],
+      ['bun', 'test', '--preload', './tests', 'src/other.test.ts'],
+      ['node', '--test', 'src/other.test.js'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, file: 'src/limit.ts', guard } })
+      expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('a WRAPPER hides its command line, so it is no guard for a production target either', async () => {
+    // THE BYPASS TWO REVIEWERS REPRODUCED. `npm run test:unit` says nothing
+    // about what it runs; with `"test:unit": "bun test --preload=./src/limit.ts
+    // tests/other.test.ts"` in the branch's own `package.json` it loads the
+    // mutated PRODUCTION file into a process running an unrelated test, and a
+    // syntax-shaped mutation reddens it with nothing asserting the mutated
+    // behaviour. Every arm above reads argv; the body is not in argv. A
+    // COLLECTIBLE target already refused every wrapper — the production half is
+    // the one that was open, and it is closed by refusing the shape.
+    for (const guard of [
+      ['npm', 'run', 'test:unit'],
+      ['npm', 'test'],
+      ['pnpm', 'run', 'test:unit'],
+      ['yarn', 'run', 'test-ci'],
+      ['make', 'test-unit'],
+      // …and with a real test file named beside it, which is the shape that
+      // reads most like an honest targeted guard.
+      ['npm', 'run', 'test:unit', 'src/other.test.ts'],
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file: 'src/limit.ts', guard } })
+      expect([guard.join(' '), out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([
+        guard.join(' '),
+        false,
+        true,
+        0,
+      ])
+      expect(out.reason).toContain('whose script body the branch wrote')
+    }
+
+    // POSITIVE CONTROLS.
+    //  (1) the spelling the refusal recommends — the runner that actually runs
+    //      the test — is still a guard, so this is not "no guard is legal";
+    //  (2) a wrapper as the CONTROL is untouched: the tautology is about what
+    //      the GUARD loads, and the control's job is only to stay green.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', 'src/limit.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+    const { prover: ok2 } = proverOver({}, memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE }))
+    const asControl = await ok2.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: 'src/limit.ts', control: ['npm', 'run', 'test:unit'] },
+    })
+    expect(asControl.reason).not.toContain('tautology')
+    expect(asControl.observed).not.toBeNull()
+  })
+
   test("a POSITIONAL directory is still legal for a production target — the ungating is the OPTION's alone", async () => {
     // THE CONTROL THAT BOUNDS THE FIX ABOVE. `--preload=./src` is refused
     // because an option's value is LOADED; `bun test src/` is a DISCOVERY root,
@@ -1862,13 +2021,13 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     }
 
     // POSITIVE CONTROLS — the same suffixes on a DIFFERENT file are untouched,
-    // and a single colon is a SCRIPT NAME, not a node ID. Without these the cut
-    // above would read as "any guard carrying punctuation is refused", which
-    // would close the class this branch exists to open.
+    // and a single colon is not a node ID. Without these the cut above would
+    // read as "any guard carrying punctuation is refused", which would close
+    // the class this branch exists to open.
     for (const [file, guard] of [
       ['src/limit.mjs', ['node', '--test', '--import=./tests/setup.mjs?once', 'tests/limit.test.mjs']],
       ['src/limit.py', ['python3', '-m', 'pytest', 'tests/limit_test.py::test_probe']],
-      ['src/limit.ts', ['npm', 'run', 'test:unit']],
+      ['src/limit.ts', ['bun', 'test', 'tests/limit.test.ts', '--test-name-pattern=fast:path']],
     ] as const) {
       const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
       const { prover: ok } = proverOver({}, fs)
@@ -2127,6 +2286,41 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     expect(fine.observed).not.toBeNull()
   })
 
+  test('a percent-encoded ESCAPE still leaves the worktree — the ESCAPE rule decodes too', async () => {
+    // The decode inside `argvEscapesTheWorktree` is a SECOND decode, and it was
+    // unpinned: the one in `normalizeArg` is what the test above exercises, and
+    // deleting this one left both suites green while `--import=%2E%2E/x/lib.ts`
+    // and `-r%2Fetc%2Fx.js` were accepted and RUN. `%2E%2E` is a `..` and `%2F`
+    // a `/` with two characters of punctuation on them, node decodes both (a
+    // module specifier is a URL), so each of these climbs OUT of the worktree —
+    // where the argv can name the mutated file under a spelling no arm here
+    // compares.
+    for (const arg of ['--import=%2E%2E/x/lib.ts', '-r%2Fetc%2Fx.js', '%2E%2E/x/lib.ts']) {
+      const { prover, host } = proverOver()
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, guard: ['bun', 'test', arg, 'src/other.test.ts'] },
+      })
+      expect([arg, out.proved, out.reason.includes('must be a repo-relative path inside the worktree')]).toEqual([
+        arg,
+        false,
+        true,
+      ])
+      expect(out.observed).toBeNull()
+      expect(host.calls).toHaveLength(0)
+    }
+
+    // POSITIVE CONTROL — an encoding that decodes to nothing escaping is left
+    // alone, so the rule above is not refusing every `%`.
+    const { prover: ok } = proverOver()
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: ['bun', 'test', 'src/other.test.ts', '--test-name-pattern=a%2Db'] },
+    })
+    expect(fine.reason).not.toContain('repo-relative')
+    expect(fine.observed).not.toBeNull()
+  })
+
   test('a URL inside an option VALUE still leaves the worktree', async () => {
     // The scheme test was anchored at `(^|=)`, so in
     // `--import=data:text/javascript,import("file:///…")` the value at the `=`
@@ -2162,10 +2356,13 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       expect(host.calls).toHaveLength(0)
     }
 
-    // POSITIVE CONTROL — a SCRIPT NAME's colon is not a scheme. `npm run
-    // test:unit` is an honest guard and stays one.
+    // POSITIVE CONTROL — an ordinary colon is not a scheme, and the guard
+    // carrying one is RUN.
     const { prover: ok } = proverOver()
-    const fine = await ok.prove({ run: RUN, claim: { ...CLAIM, guard: ['npm', 'run', 'test:unit'] } })
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: [...CLAIM.guard, '--test-name-pattern=fast:path'] },
+    })
     expect(fine.reason).not.toContain('must be a repo-relative path inside the worktree')
     expect(fine.observed).not.toBeNull()
   })

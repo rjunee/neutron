@@ -573,6 +573,27 @@ function aRunnerMayCollect(path: string): boolean {
  */
 const SHORT_OPTION_WITH_ATTACHED_VALUE = /^-[A-Za-z][^-=]/
 
+/**
+ * AND THE SPACE IS THE FIFTH SPELLING — the one a reviewer forged a `proved:
+ * true` out of. `--preload ./src` and `--preload=./src` are the SAME
+ * instruction to bun and node, but `carriedValue` reads only the `=`-joined and
+ * attached-short forms, so the space-separated value was invisible to
+ * `carriedValueReaching` while the runtime loaded the mutated module into the
+ * guard's own process. An element is an option WHOSE VALUE IS THE NEXT ELEMENT
+ * when it starts with `-`, carries nothing itself, and is not the `--`
+ * separator (whose "value" is every remaining positional, a class
+ * `whyNoSelection` already refuses).
+ *
+ * WHICH OPTIONS TAKE A VALUE IS NOT KNOWABLE from argv — `--coverage` takes
+ * none — so `carriedValueReaching` reads EVERY operand after a bare option as
+ * one, and over-refuses `bun test --coverage src/` for a target under `src/`.
+ * It fails CLOSED and it is spellable around: write the path BEFORE the option
+ * (`bun test src/ --coverage`), where no option precedes it.
+ */
+function isBareOption(arg: string): boolean {
+  return arg.startsWith('-') && arg !== '--' && !arg.includes('=') && !SHORT_OPTION_WITH_ATTACHED_VALUE.test(arg)
+}
+
 function carriedValue(arg: string): string {
   if (!arg.startsWith('-')) return ''
   const eq = arg.indexOf('=')
@@ -619,21 +640,19 @@ function carriedValue(arg: string): string {
  * The class pre-dates this rule for production files, and the same answer holds
  * for both — a proof is evidence for a reviewer, not a substitute for one.
  *
- * A WRAPPER'S BODY IS THE SAME RESIDUAL, and belongs on this list beside the
- * configs because a reviewer reproduced it and did not find it written down: a
- * `package.json` script or a `Makefile` recipe is a command line the BRANCH
- * wrote, and the argv `npm run test:unit` says nothing about it. With
- * `"test:unit": "bun test --preload=./src/limit.ts tests/unrelated.test.ts"`
- * that guard loads the mutated PRODUCTION file into a process running an
- * unrelated test, so a syntax-shaped mutation reddens it with nothing asserting
- * the mutated behaviour — reproduced end to end on npm 10.9.8. This function
- * cannot see it: for a production target it returns at the `aRunnerMayCollect`
- * line below, and even for a collectible one the opacity is the point.
- * `forwardsPositionalsToAScript` bounds the class — no wrapper POSITIONAL ever
- * counts as a selection, for npm, pnpm, yarn or make — but the wrapper's own
- * body stays outside argv, and closing it would mean parsing `package.json` and
- * every `Makefile` dialect. The answer is the one above: a proof is evidence
- * for a reviewer, not a substitute for one.
+ * A WRAPPER'S BODY WAS THE SAME RESIDUAL AND IS NO LONGER ONE. A `package.json`
+ * script or a `Makefile` recipe is a command line the BRANCH wrote, and the
+ * argv `npm run test:unit` says nothing about it; with `"test:unit": "bun test
+ * --preload=./src/limit.ts tests/unrelated.test.ts"` that guard loads the
+ * mutated PRODUCTION file into a process running an unrelated test — reproduced
+ * end to end on npm 10.9.8. It is NOT closable by reading argv and would not be
+ * closable by parsing `package.json` and every `Makefile` dialect either, so it
+ * is closed by REFUSING the shape: a wrapper is no longer a legal guard for any
+ * target. A collectible one already refused every wrapper via
+ * `forwardsPositionalsToAScript` (no wrapper positional counts as a selection);
+ * the production half is refused at the `aRunnerMayCollect` gate below. Unlike
+ * a config, this one costs nothing honest — the wrapper's body is a runner
+ * invocation the nomination can simply write out.
  */
 function guardRunsTheMutatedFile(guard: readonly string[], file: string): string | null {
   const target = normalizeArg(file)
@@ -646,7 +665,24 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
   // collectible gate below — see `carriedValueReaching`.
   const carriedReach = carriedValueReaching(guard, target)
   if (carriedReach !== null) return carriedReach
-  if (!aRunnerMayCollect(target)) return null
+  if (!aRunnerMayCollect(target)) {
+    // A WRAPPER IS OPAQUE, AND OPACITY IS NOT INNOCENCE. Everything above reads
+    // argv; a wrapper's argv says `npm run test:unit` and its real command line
+    // lives in a `package.json` script or a `Makefile` recipe THE BRANCH WROTE.
+    // With `"test:unit": "bun test --preload=./src/limit.ts tests/other.test.ts"`
+    // that guard loads the mutated PRODUCTION file into a process running an
+    // unrelated test, so a syntax-shaped mutation reddens it with nothing
+    // asserting the mutated behaviour — reproduced end to end on npm 10.9.8.
+    // A COLLECTIBLE target already refuses every wrapper (no wrapper positional
+    // counts as a selection, so the no-selection arm below fires); the
+    // production side was the half still open, and it is closed the same way.
+    // Over-refusal, failing CLOSED, and spellable around: name the runner that
+    // actually runs the test, which is what the script would have run anyway.
+    if (forwardsPositionalsToAScript(guard)) {
+      return `runs ${guard[0]}, whose script body the branch wrote and this argv does not show, and so may load`
+    }
+    return null
+  }
   const selectors = pathArgs(guard)
   if (selectors.length === 0) {
     // The "so it reaches" half belongs to each ARM, not to this call site: it
@@ -1007,19 +1043,31 @@ function extensionCompletions(path: string): string[] {
  * spell the guard's argument as the thing it means.
  */
 function carriedValueReaching(guard: readonly string[], target: string): string | null {
-  for (let i = runnerPrefixLength(guard); i < guard.length; i += 1) {
+  const start = runnerPrefixLength(guard)
+  for (let i = start; i < guard.length; i += 1) {
     const arg = guard[i] as string
-    const value = carriedValue(arg)
+    // THE SEPARATOR IS NOT ALWAYS AN `=`: an option's value may be the next
+    // element instead (`--preload ./src`), which is the same load with one
+    // character changed — see `isBareOption`. The element BEFORE the loop's
+    // first candidate belongs to the runner's own invocation (`node --test
+    // x.ts`), so the pairing starts one element in.
+    const previous = i > start ? (guard[i - 1] as string) : ''
+    const attached = carriedValue(arg)
+    const separated = attached.length === 0 && !arg.startsWith('-') && isBareOption(previous) ? normalizeArg(arg) : ''
+    const value = attached.length > 0 ? attached : separated
+    // The refusal names the SPELLING the build wrote, so a space-separated
+    // value is reported as the two elements it really is.
+    const spelling = attached.length > 0 ? arg : `${previous} ${arg}`
     if (value.length === 0 || value === '.' || namesASearch(value)) continue
     // The loader-REWRITE spelling (`clamp.js` for `clamp.ts`) is deliberately
     // NOT asked here: `guardPathCandidates` already carries it, and its refusal
     // names the file the rewrite lands on, which this arm cannot say as well.
-    if (value === target || extensionCompletions(value).includes(target)) return `loads it as ${arg}`
+    if (value === target || extensionCompletions(value).includes(target)) return `loads it as ${spelling}`
     // A DIRECTORY'S `index` IS THE DIRECTORY, for this question: `--preload=./src/index`
     // executes the entry point every module under `src` is reached through.
     const dir = value.endsWith('/index') ? value.slice(0, -'/index'.length) : value
     if (dir.length > 0 && target.startsWith(`${dir}/`)) {
-      return `loads it via ${arg}, which names the directory holding it`
+      return `loads it via ${spelling}, which names the directory holding it`
     }
   }
   return null
@@ -1167,10 +1215,10 @@ function runnerPrefixLength(argv: readonly string[]): number {
  * guard spelling. That is an OVER-refusal and it is spellable around — name the
  * test file with the runner that actually runs it (`bun test
  * tests/x.test.ts`), which is what the script or recipe would have run anyway.
- * A PRODUCTION target is untouched: `guardRunsTheMutatedFile` returns before
- * any of this unless a runner would COLLECT the mutated file wholesale — which
- * is why the WRAPPER-OPACITY class is only bounded here, not closed; see the
- * KNOWN RESIDUAL note on `guardRunsTheMutatedFile`.
+ * A PRODUCTION target no longer takes a different path: this same predicate is
+ * asked at the `aRunnerMayCollect` gate in `guardRunsTheMutatedFile`, so a
+ * wrapper is refused as a guard for any target and the WRAPPER-OPACITY class is
+ * closed rather than bounded.
  */
 function forwardsPositionalsToAScript(argv: readonly string[]): boolean {
   return argv[0] === 'npm' || argv[0] === 'pnpm' || argv[0] === 'yarn' || argv[0] === 'make'

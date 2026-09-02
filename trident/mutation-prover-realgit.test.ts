@@ -126,6 +126,51 @@ async function seedSupportLib(opts: { alias?: boolean } = {}): Promise<string> {
 }
 
 /**
+ * A repo whose branch adds an ORDINARY PRODUCTION module — `src/limit.ts`, a
+ * name no runner collects and no convention declares a test — plus the separate
+ * test that asserts it, an unrelated control, and the two BRANCH-AUTHORED
+ * command lines a reviewer forged a `proved: true` out of: a `package.json`
+ * script that preloads the mutated module behind an unrelated test, and the
+ * space-separated `--preload` spelling of the same thing.
+ */
+async function seedProductionLib(): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-production-lib-'))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
+
+  await git(repo, 'switch', '-q', '-c', 'trident/production-lib-proof')
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  mkdirSync(join(repo, 'tests'), { recursive: true })
+  writeFileSync(
+    join(repo, 'src', 'limit.ts'),
+    'export function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n',
+  )
+  writeFileSync(
+    join(repo, 'tests', 'limit.test.ts'),
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n  expect(clamp(2, 3)).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'tests', 'other-control.test.ts'),
+    "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated module', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'package.json'),
+    `${JSON.stringify(
+      { name: 'production-lib', scripts: { 'test:unit': 'bun test --preload=./src/limit.ts tests/other-control.test.ts' } },
+      null,
+      2,
+    )}\n`,
+  )
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the production module, its separate test and the branch-authored script')
+  return repo
+}
+
+/**
  * A repo whose branch adds a LIBRARY whose NAME a runner collects but no
  * convention declares a test — `src/thing_test.ts` — plus the separate test
  * that asserts it and an unrelated control. This is the shape a bare substring
@@ -297,6 +342,72 @@ describe('the mutation-proof gate against real git', () => {
     // on a shared runner. A 30s cap was a timing bet on the machine, and the
     // budget the prover itself works to is 15 MINUTES — a cap tighter than the
     // thing under test only ever buys a red that means "the box was busy".
+  }, 120_000)
+
+  test('a PRODUCTION target cannot be proved by a wrapper or by a space-separated preload', async () => {
+    // THE TWO BYPASSES A REVIEW PANEL REPRODUCED end to end against the branch
+    // prover, both of them forging `ok: true, proved: true` for an ordinary
+    // production module:
+    //
+    //  1. `npm run test:unit`, whose body — in the branch's own `package.json`,
+    //     committed below — is `bun test --preload=./src/limit.ts
+    //     tests/other-control.test.ts`. The argv shows a script NAME; the run
+    //     loads the mutated module into a process running an unrelated test, so
+    //     a syntax-shaped mutation reddens it with nothing asserting the
+    //     mutated behaviour.
+    //  2. `--preload ./src`, which is `--preload=./src` — refused since the
+    //     round before — with the `=` written as a space. `carriedValue` read
+    //     only the `=`-joined and attached-short spellings, so the value was
+    //     one more positional to every arm.
+    //
+    // Both must be refused BEFORE anything is executed or any worktree exists.
+    const repo = await seedProductionLib()
+    const run = { id: 'run-prod', slug: 'production-lib', repo_path: repo, branch: 'trident/production-lib-proof' }
+    const claim = {
+      file: 'src/limit.ts',
+      find: 'n > max ? max : n',
+      replace: 'n',
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+    for (const [guard, names] of [
+      [['npm', 'run', 'test:unit'], 'whose script body the branch wrote'],
+      [['bun', 'test', '--preload', './src', 'tests/other-control.test.ts'], '--preload ./src'],
+      [['bun', 'test', '--preload', './src/limit', 'tests/other-control.test.ts'], '--preload ./src/limit'],
+    ] as const) {
+      const out = await runMutationProofGate({
+        run: { ...run, id: `run-prod-${guard.join('-')}` },
+        claim: { ...claim, guard: [...guard] },
+        base_branch: 'main',
+        run_host: spawnCapture,
+      })
+      expect([guard.join(' '), out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([
+        guard.join(' '),
+        false,
+        false,
+        false,
+      ])
+      expect(out.reason).toContain('tautology')
+      expect(out.reason).toContain(names)
+      expect(existsSync(proofWorktreePath(repo, { ...run, id: `run-prod-${guard.join('-')}` }))).toBe(false)
+    }
+
+    // POSITIVE CONTROL, and the one that stops all of the above from passing on
+    // "a production module can no longer be proved at all": the spelling each
+    // refusal recommends — the separate test named with the runner that runs it
+    // — proves red-then-green in this very repo, `package.json` and all.
+    const fine = await runMutationProofGate({
+      run: { ...run, id: 'run-prod-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/limit.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([fine.ok, fine.exempt, fine.evidence?.proved ?? null]).toEqual([true, false, true])
+    const obs = fine.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
   test('a make GOAL beside a real path runs a BRANCH-AUTHORED recipe, not a targeted guard, and is refused', async () => {
