@@ -19,6 +19,7 @@ import {
   RESUME_HEAD_RETRY_DELAYS_MS,
   sweepStrandedFailures,
   truncateNote,
+  truncateStageReason,
 } from './orchestrator.ts'
 import { MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
@@ -752,6 +753,39 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     // the assertion above would pass just as well if the note were empty.
     expect(truncateNote('a'.repeat(300)).startsWith('a'.repeat(240))).toBe(true)
     expect(truncateNote('short')).toBe('short')
+  })
+
+  test('the DURABLE copy of an exemption reason is capped too — generously, and only past a real diff', () => {
+    // The stage row keeps the full file list because that list is the evidence,
+    // and that was the whole of the reasoning: the list is bounded only by the
+    // diff, so a multi-thousand-file test-only refactor writes an unbounded blob
+    // into the stage ledger's `meta`, once per exempt merge. The ceiling here is
+    // ~30x the tick note's — big enough that no diff a human would open cuts,
+    // small enough that the pathological one cannot.
+    const real =
+      'no production file in this diff — nothing to mutate: all 120 changed files are declared tests (' +
+      Array.from({ length: 120 }, (_, i) => `tests/support/f-${i}.test.ts`).join(', ') +
+      ')'
+    expect(real.length).toBeGreaterThan(240)
+    // POSITIVE CONTROL — a reason of realistic size is returned BYTE FOR BYTE,
+    // which is what stops this cap from quietly becoming the note's.
+    expect(truncateStageReason(real)).toBe(real)
+    expect(truncateNote(real)).not.toBe(real)
+
+    const huge = 'x'.repeat(50_000)
+    const cut = truncateStageReason(huge)
+    expect(cut.length).toBeLessThan(4_200)
+    expect(cut).toContain('50000 chars')
+    expect(cut).toContain('full reason in the mutation_proof_exempt log line')
+
+    // …and cut on a CHARACTER, for the same reason the note is: the cut lands on
+    // data, and a lone surrogate reaches a UI and a DB.
+    const straddling = `${'a'.repeat(3_999)}🙂${'b'.repeat(200)}`
+    const paired = truncateStageReason(straddling)
+    expect([...paired].filter((c) => {
+      const code = c.codePointAt(0) as number
+      return code >= 0xd800 && code <= 0xdfff
+    })).toEqual([])
   })
 
   test('the outer publisher refuses a commit that is not the local branch tip — naming BOTH values', async () => {

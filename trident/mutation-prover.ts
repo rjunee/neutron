@@ -624,8 +624,12 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
   if (guard.some((a) => normalizeArg(a) === target || carriedValue(a) === target)) return 'names'
   // A DOTTED MODULE IS THE FIFTH SPELLING, and it reaches a PRODUCTION target,
   // so it is asked BEFORE the collectible gate below — see `modulePathsOf`.
-  const asModule = guard.slice(runnerPrefixLength(guard)).find((a) => modulePathsOf(a).includes(target))
+  const asModule = guard.slice(runnerPrefixLength(guard)).find((a) => dottedModuleReaches(a, target))
   if (asModule !== undefined) return `names the module ${asModule}, which IMPORTS`
+  // AN OPTION'S VALUE IS LOADED, NOT DISCOVERED, so it is asked BEFORE the
+  // collectible gate below — see `carriedValueReaching`.
+  const carriedReach = carriedValueReaching(guard, target)
+  if (carriedReach !== null) return carriedReach
   if (!aRunnerMayCollect(target)) return null
   const selectors = pathArgs(guard)
   if (selectors.length === 0) {
@@ -826,20 +830,30 @@ const DOTTED_MODULE = /^[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)*$/
  * 3s wall-clock pin. That is an availability cost, never a bypass, but it is
  * paid on input the gate does not control.
  *
- * The cap is on PREFIX DEPTH rather than on element length, and that choice is
- * what keeps it from failing OPEN. Each expanded prefix is only ever compared
- * against the ONE target path, so a prefix deeper than the target's own
- * directory nesting can never equal it: with 24 levels every repo path this
- * gate could be asked about is still expanded and still refuses, while the
- * work is bounded at 24 prefixes. Dropping the element wholesale on length
- * would instead let `src.limit.<40 000 junk segments>` stop naming
- * `src/limit.py` at all.
+ * THE CAP ONCE CLAIMED TO FAIL CLOSED AND DID NOT. It read: "a prefix deeper
+ * than the target's own directory nesting can never equal it, so with 24 levels
+ * every repo path this gate could be asked about is still expanded". That is
+ * only true while the TARGET is shallower than 24 — and `claim.file` is written
+ * by the same build that writes the diff, so a tree nested 25 directories deep
+ * is a thing a branch can simply commit. At that depth the selector's matching
+ * prefix was past the cap, the truncated expansion matched nothing, and the
+ * dotted arm fell open on the one input that was trying to bypass it.
+ *
+ * So the SPELLING comparison no longer expands at all: `dottedModuleReaches`
+ * asks the question backwards, deriving the target's own dotted stem once and
+ * testing `raw === stem || raw.startsWith(stem + '.')` in linear time, with no
+ * cap and no depth at which it stops answering. What is left here is the
+ * SYMLINK seam (`guardPathCandidates`), which needs real paths to `realpath`
+ * and so must enumerate; the cap bounds THAT work, and its residual is a dotted
+ * selector that reaches the target only through a symlink at a nesting past 24.
+ * Dropping the element wholesale on length would instead let
+ * `src.limit.<40 000 junk segments>` stop naming `src/limit.py` at all.
  */
 const MAX_MODULE_DEPTH = 24
 
 function modulePathsOf(arg: string): string[] {
-  const raw = arg.startsWith('-') ? carriedValue(arg) : arg
-  if (raw.length === 0 || !DOTTED_MODULE.test(raw)) return []
+  const raw = dottedSelectorOf(arg)
+  if (raw === null) return []
   const segments = raw.split('.')
   const out: string[] = []
   for (let i = 1; i <= Math.min(segments.length, MAX_MODULE_DEPTH); i += 1) {
@@ -847,6 +861,45 @@ function modulePathsOf(arg: string): string[] {
     out.push(`${stem}.py`, `${stem}/__init__.py`)
   }
   return out
+}
+
+/** The dotted selector an argv element carries, or null if it is not one. */
+function dottedSelectorOf(arg: string): string | null {
+  const raw = arg.startsWith('-') ? carriedValue(arg) : arg
+  return raw.length > 0 && DOTTED_MODULE.test(raw) ? raw : null
+}
+
+/**
+ * Does this argv element name, as a DOTTED MODULE, the mutated file or
+ * something inside it — asked WITHOUT expanding the element.
+ *
+ * The expansion in `modulePathsOf` is quadratic in the element and capped, and
+ * the cap was a bypass (see `MAX_MODULE_DEPTH`). The same question has a linear
+ * form: the target has exactly ONE dotted spelling, so derive that and ask
+ * whether the selector IS it or CONTINUES it. `src/limit.py` is `src.limit`, so
+ * `src.limit` matches and so does `src.limit.LimitTest.test_under` — unittest
+ * imports the module either way — while `src.limits` does not, because the dot
+ * is required. `src/limit/__init__.py` is the package `src.limit` and gets the
+ * same treatment. No cap, no depth at which it stops answering, and it still
+ * only ever REFUSES.
+ */
+function dottedModuleReaches(arg: string, target: string): boolean {
+  const raw = dottedSelectorOf(arg)
+  if (raw === null) return false
+  const stem = dottedStemOf(target)
+  return stem !== null && (raw === stem || raw.startsWith(`${stem}.`))
+}
+
+/** The dotted module spelling of a python target, or null if it has none. */
+function dottedStemOf(target: string): string | null {
+  const stripped = target.endsWith('/__init__.py')
+    ? target.slice(0, -'/__init__.py'.length)
+    : target.endsWith('.py')
+      ? target.slice(0, -'.py'.length)
+      : null
+  if (stripped === null || stripped.length === 0) return null
+  const dotted = stripped.split('/').join('.')
+  return DOTTED_MODULE.test(dotted) ? dotted : null
 }
 
 /**
@@ -863,10 +916,19 @@ function modulePathsOf(arg: string): string[] {
  *
  * ONE DIRECTION ONLY, and only as a CANDIDATE. No loader rewrites `.ts` into
  * `.js`, so the map runs `js -> ts|tsx`, `jsx -> tsx`, `mjs -> mts`, `cjs ->
- * cts`. And a rewrite is refused only where every other candidate is: when it
- * RESOLVES to the mutated file. A guard that names a `.js` file which really
- * exists resolves to that file and is untouched, so this can only ever refuse
- * the collision it is named for.
+ * cts`. A rewrite is refused only where every other candidate is: when it
+ * RESOLVES to the mutated file.
+ *
+ * IT OVER-REFUSES AT THE SAME-STEM BOUNDARY, and an earlier wording of this
+ * block denied it. "A guard that names a `.js` file which really exists is
+ * untouched" is false: the rewrite is pushed UNCONDITIONALLY, so with both
+ * `clamp.js` and `clamp.ts` on disk beside each other, a guard naming the real
+ * `clamp.js` still offers `clamp.ts` as a candidate and is refused for a
+ * collision the loader would never make (it would have taken the `.js`). That
+ * is a genuine over-refusal — pinned as such — and it is kept because it fails
+ * CLOSED and because deciding it properly means re-implementing a resolver's
+ * precedence, which is exactly the thing this seam exists to avoid trusting.
+ * The cost is one nomination having to spell its guard differently.
  */
 const LOADER_REWRITTEN_EXTENSION: Record<string, string[]> = {
   js: ['ts', 'tsx'],
@@ -883,6 +945,71 @@ function loaderRewrites(path: string): string[] {
 }
 
 /**
+ * THE EXTENSION A SPECIFIER DOES NOT HAVE TO WRITE. `--preload=./src/limit`
+ * loads `src/limit.ts`, and `--preload=./src` loads `src/index.ts`: node and
+ * bun both complete a bare specifier from the extension list and both fall back
+ * to a directory's `index`. Every arm of `guardRunsTheMutatedFile` compares
+ * WRITTEN spellings, and `guardPathCandidates` `realpath`ed the literal
+ * `src/limit`, got ENOENT and dropped it — so five spellings of "preload the
+ * mutated file" (`--preload=./src/limit`, `-r./src/limit`, `--preload=./src`,
+ * `--preload=./src/`, `--preload=./src/index`) all passed while bun really
+ * loaded the mutated module into the guard's own process. Reproduced end to end
+ * on bun 1.3.x.
+ *
+ * ONLY WHERE AN EXTENSION IS ABSENT, so a written one is never second-guessed:
+ * `report.xml` expands to nothing and stays the one file it names. Like
+ * `loaderRewrites` these are CANDIDATES — each is refused only where every
+ * candidate is, when it resolves to the mutated file — so the widening can add
+ * refusals and never a pass.
+ */
+const COMPLETED_EXTENSION = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs'] as const
+
+function extensionCompletions(path: string): string[] {
+  const leaf = path.slice(path.lastIndexOf('/') + 1)
+  if (leaf.length === 0 || leaf.includes('.')) return []
+  return COMPLETED_EXTENSION.flatMap((ext) => [`${path}.${ext}`, `${path}/index.${ext}`])
+}
+
+/**
+ * How an OPTION'S CARRIED VALUE reaches the mutated file, or null if none does
+ * — asked of a PRODUCTION target too, which is the whole point.
+ *
+ * `guardRunsTheMutatedFile` short-circuits its directory and filter arms on
+ * `aRunnerMayCollect`, because for a production module a whole-suite or
+ * whole-directory guard is legal: discovery does not run `src/limit.ts`. That
+ * reasoning is about DISCOVERY, and an option's value is not discovered — it is
+ * LOADED. `--preload=./src` hands bun a directory to execute code out of, and
+ * the collectible gate meant no arm ever looked. So the carried values are read
+ * here, before that gate, under the rule that fits them: a value that names the
+ * file (in any spelling a loader completes), or names a directory holding it,
+ * or names that directory's `index` entry, reaches it.
+ *
+ * IT OVER-REFUSES ON PURPOSE at the directory edge: `--grep=src` carries a word
+ * that happens to be a directory prefix of the target and is refused as if it
+ * were a preload. That is the same trade the collectible directory arm already
+ * makes for test targets, it fails CLOSED, and the answer is the same one —
+ * spell the guard's argument as the thing it means.
+ */
+function carriedValueReaching(guard: readonly string[], target: string): string | null {
+  for (let i = runnerPrefixLength(guard); i < guard.length; i += 1) {
+    const arg = guard[i] as string
+    const value = carriedValue(arg)
+    if (value.length === 0 || value === '.' || namesASearch(value)) continue
+    // The loader-REWRITE spelling (`clamp.js` for `clamp.ts`) is deliberately
+    // NOT asked here: `guardPathCandidates` already carries it, and its refusal
+    // names the file the rewrite lands on, which this arm cannot say as well.
+    if (value === target || extensionCompletions(value).includes(target)) return `loads it as ${arg}`
+    // A DIRECTORY'S `index` IS THE DIRECTORY, for this question: `--preload=./src/index`
+    // executes the entry point every module under `src` is reached through.
+    const dir = value.endsWith('/index') ? value.slice(0, -'/index'.length) : value
+    if (dir.length > 0 && target.startsWith(`${dir}/`)) {
+      return `loads it via ${arg}, which names the directory holding it`
+    }
+  }
+  return null
+}
+
+/**
  * Every guard argv element that could NAME SOMETHING ON DISK, paired with the
  * element it came from — for the RESOLVED tautology check in the prover, which
  * follows symlinks and so cannot be done from a spelling alone.
@@ -896,11 +1023,12 @@ function loaderRewrites(path: string): string[] {
  * repo with a top-level `test/` directory would otherwise see `bun test`'s own
  * `test` word resolve to it and refuse every honest guard for a library inside.
  */
-function guardPathCandidates(guard: readonly string[]): { arg: string; path: string }[] {
-  const out: { arg: string; path: string }[] = []
+function guardPathCandidates(guard: readonly string[]): { arg: string; path: string; carried: boolean }[] {
+  const out: { arg: string; path: string; carried: boolean }[] = []
   for (let i = runnerPrefixLength(guard); i < guard.length; i += 1) {
     const arg = guard[i] as string
-    const raw = arg.startsWith('-') ? carriedValue(arg) : arg
+    const carried = arg.startsWith('-')
+    const raw = carried ? carriedValue(arg) : arg
     if (raw.length === 0) continue
     // NORMALISE BEFORE ASKING WHETHER IT IS A SEARCH. Asked of the RAW element,
     // `./src/limit.mjs?proof` answered yes — a `?` is a glob character — so the
@@ -909,20 +1037,26 @@ function guardPathCandidates(guard: readonly string[]): { arg: string; path: str
     // carries its `*`/`?` inside the path part.
     const path = normalizeArg(raw)
     if (namesASearch(path)) continue
-    out.push({ arg, path })
+    out.push({ arg, path, carried })
+    // …AND THE EXTENSION THE SPECIFIER DID NOT WRITE, so `--preload=./src/limit`
+    // and `--preload=./src` are asked about as the files a loader completes them
+    // into (`src/limit.ts`, `src/index.ts`). See `extensionCompletions`.
+    for (const completed of extensionCompletions(path)) {
+      out.push({ arg: `${arg} (which a loader completes to ${completed})`, path: completed, carried })
+    }
     // …AND THE SPELLING A LOADER REWRITES on its way to disk, so the `.js` name
     // of a `.ts` file is asked about as the file it actually loads. Pushed
     // AFTER the literal path, so a guard that names something real is reported
     // in its own words and only the collision falls through to this one.
     for (const rewritten of loaderRewrites(path)) {
-      out.push({ arg: `${arg} (which a loader resolves to ${rewritten})`, path: rewritten })
+      out.push({ arg: `${arg} (which a loader resolves to ${rewritten})`, path: rewritten, carried })
     }
     // …AND WHAT A DOTTED MODULE SELECTOR WOULD IMPORT. `src.limit` resolves to
     // nothing, so on its own it is dropped here — while `python3 -m unittest
     // src.limit` imports `src/limit.py`, and a committed symlink is enough to
     // make that a different file from the one the spelling names. The lexical
     // arm compares spellings; this is the same question asked of the disk.
-    for (const path of modulePathsOf(raw)) out.push({ arg, path })
+    for (const path of modulePathsOf(raw)) out.push({ arg, path, carried })
   }
   return out
 }
@@ -1593,8 +1727,16 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
         continue
       }
       if (resolved === leaf) return `names it as ${candidate.arg}, which resolves to the same file`
-      if (collectible && leaf.startsWith(resolved.endsWith(sep) ? resolved : resolved + sep)) {
-        return `collects it via ${candidate.arg}, which resolves to a directory holding it`
+      // THE DIRECTORY ARM IS GATED ON DISCOVERY, NOT ON THE CANDIDATE. A
+      // positional directory is a discovery root, and discovery only reaches a
+      // file a runner COLLECTS — so `bun test src/` stays legal for a production
+      // module. An option's value is not discovered but LOADED
+      // (`--preload=./src`), so for a carried candidate the gate does not apply
+      // and a directory holding the mutated file is a refusal whatever the
+      // target's name. Same reasoning as `carriedValueReaching`, asked of the
+      // disk so a symlinked directory cannot spell its way around it.
+      if ((collectible || candidate.carried) && leaf.startsWith(resolved.endsWith(sep) ? resolved : resolved + sep)) {
+        return `${candidate.carried ? 'loads' : 'collects'} it via ${candidate.arg}, which resolves to a directory holding it`
       }
     }
     return null
@@ -2463,7 +2605,11 @@ export function diffHasNoLegalMutationTarget(files: readonly string[] | null): b
  */
 export function legalMutationTargets(files: readonly string[] | null, deleted: readonly string[] = []): string[] {
   if (files === null) return []
-  return files.filter((f) => classifyMutationTarget(f) === 'production' && !deleted.includes(f))
+  // A SET, because both lists come from git and neither is bounded: `includes`
+  // inside `filter` is O(files x deleted), ~2.5e7 comparisons on a 5k/5k rename.
+  // Availability hygiene only — the answer is identical.
+  const gone = new Set(deleted)
+  return files.filter((f) => classifyMutationTarget(f) === 'production' && !gone.has(f))
 }
 
 /**
@@ -2476,6 +2622,18 @@ export function legalMutationTargets(files: readonly string[] | null, deleted: r
 /** A source extension an allowlisted runner actually executes — used ONLY to
  *  pick which legal target the refusal names, never to decide legality. */
 const EXECUTABLE_SOURCE = /\.([cm]?[jt]sx?|go|py|rs)$/
+
+/**
+ * A path AS A REASON STRING PRINTS IT. Git's `-z` parse preserves every byte of
+ * a filename, correctly — a path really may contain a newline — but a reason is
+ * a one-line record that reaches a log line, a status post and a DB row, and
+ * `src/new\nline.ts` interpolated raw turns one of those into two. Escaped, not
+ * dropped: the reader still needs the name to find the file.
+ */
+function asReason(path: string): string {
+  // eslint-disable-next-line no-control-regex
+  return /[\u0000-\u001f\u007f]/.test(path) ? JSON.stringify(path) : path
+}
 
 export function missingClaimRefusalReason(files: readonly string[] | null, deleted: readonly string[] = []): string {
   if (files === null) {
@@ -2501,7 +2659,7 @@ export function missingClaimRefusalReason(files: readonly string[] | null, delet
       executable === undefined
         ? ' — if no allowlisted runner can execute it, that is a finding for the reviewer rather than a nomination the build can make'
         : ''
-    return `mutation proof required but the build nominated no mutation to run — a legal mutation target existed: ${named} changed in this diff and is neither a declared test nor documentation${caveat}`
+    return `mutation proof required but the build nominated no mutation to run — a legal mutation target existed: ${asReason(named)} changed in this diff and is neither a declared test nor documentation${caveat}`
   }
   // THE DELETION-ONLY DIFF, said out loud. This branch is REACHABLE and is not
   // a gate defect: a deleted production file is a production change (so no
@@ -2510,18 +2668,19 @@ export function missingClaimRefusalReason(files: readonly string[] | null, delet
   // [that] existed" and told the build to nominate it — which the prover then
   // refused for being absent. Naming the deadlock is the whole fix available
   // here: exempting it would be the rename bypass in a new coat.
-  const gone = files.filter((f) => deleted.includes(f) && classifyMutationTarget(f) === 'production')
+  const deletedSet = new Set(deleted)
+  const gone = files.filter((f) => deletedSet.has(f) && classifyMutationTarget(f) === 'production')
   if (gone.length > 0) {
     return (
       `mutation proof required but NO mutation of this diff can be run: its only production changes are DELETIONS ` +
-      `(${gone.join(', ')}), which are absent at the head being proved — nominating one is refused because the ` +
+      `(${gone.map(asReason).join(', ')}), which are absent at the head being proved — nominating one is refused because the ` +
       `mutation cannot apply, and nothing else in the diff is a legal target. This diff needs a reviewer's ` +
       `judgement, not a proof.`
     )
   }
   const first = files[0] as string
   const why = classifyMutationTarget(first) === 'test' ? 'a declared test file' : 'documentation'
-  return `mutation proof required but no file in this diff is a legal mutation target — e.g. ${first} is ${why} — yet no exemption fired; that disagreement is a gate defect, not a build omission`
+  return `mutation proof required but no file in this diff is a legal mutation target — e.g. ${asReason(first)} is ${why} — yet no exemption fired; that disagreement is a gate defect, not a build omission`
 }
 
 /**
@@ -2676,7 +2835,7 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     // and the cost of that is one long log line on a large rename.
     return {
       ok: true,
-      reason: `no production file in this diff — nothing to mutate: all ${changed.length} changed files are declared tests or documentation (${changed.join(', ')})`,
+      reason: `no production file in this diff — nothing to mutate: all ${changed.length} changed files are declared tests or documentation (${changed.map(asReason).join(', ')})`,
       exempt: true,
       evidence: null,
     }

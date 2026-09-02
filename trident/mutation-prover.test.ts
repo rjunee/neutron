@@ -1207,6 +1207,165 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     expect(fine.observed).not.toBeNull()
   })
 
+  test("an OPTION'S VALUE NEED NOT WRITE THE EXTENSION — `--preload=./src/limit` loads `src/limit.ts`", async () => {
+    // THE BYPASS, reproduced end to end on bun 1.3.x. A loader completes a bare
+    // specifier from its extension list and falls back to a directory's
+    // `index`, so FIVE spellings of "preload the mutated file" wrote a path that
+    // equalled no repo-relative target and named nothing on disk: the lexical
+    // arms compared written spellings and missed every one, `guardPathCandidates`
+    // ENOENTed on `src/limit` and dropped it, and the directory arm that WOULD
+    // have caught `--preload=./src` was gated behind `aRunnerMayCollect`, which
+    // a production module never satisfies. Red mutated, green restored,
+    // `proved: true`, with the mutated file supplying both halves itself.
+    for (const arg of [
+      '--preload=./src/limit',
+      '-r./src/limit',
+      '--preload=./src',
+      '--preload=./src/',
+      '--preload=./src/index',
+    ]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', arg, 'tests/other.test.ts'] },
+      })
+      // The host must never be reached: a refused nomination runs no command.
+      expect([arg, out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([arg, false, true, 0])
+    }
+
+    // POSITIVE CONTROLS, three of them, because every assertion above would pass
+    // just as well against "refuse every option that carries a word".
+    //  (1) a bare specifier for a DIFFERENT module,
+    //  (2) a DIRECTORY that does not hold the mutated file,
+    //  (3) an option whose value is not a path at all.
+    for (const arg of ['--preload=./tests/setup', '--preload=./tests', '--reporter-outfile=report.xml']) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({
+        run: RUN,
+        claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', arg, 'src/other.test.ts'] },
+      })
+      expect([arg, fine.reason.includes('tautology')]).toEqual([arg, false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test("a POSITIONAL directory is still legal for a production target — the ungating is the OPTION's alone", async () => {
+    // THE CONTROL THAT BOUNDS THE FIX ABOVE. `--preload=./src` is refused
+    // because an option's value is LOADED; `bun test src/` is a DISCOVERY root,
+    // and discovery never runs `src/limit.ts` — so ungating the directory arm
+    // for positionals too would have refused every whole-directory guard a
+    // production module is entitled to. This is the assertion that fails if the
+    // `candidate.carried` condition is widened to `true`.
+    for (const dir of ['src', 'src/']) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'src/limit.ts')]: SRC_BEFORE })
+      const { prover: ok } = proverOver({}, fs)
+      const fine = await ok.prove({
+        run: RUN,
+        claim: { ...CLAIM, file: 'src/limit.ts', guard: ['bun', 'test', dir] },
+      })
+      expect([dir, fine.reason.includes('tautology')]).toEqual([dir, false])
+      expect(fine.observed).not.toBeNull()
+    }
+  })
+
+  test('a LOADER-REWRITTEN candidate refuses at the SAME-STEM boundary too — pinned as an over-refusal', async () => {
+    // The rewrite `clamp.js -> clamp.ts` is pushed unconditionally, so with BOTH
+    // files really on disk the guard that names the real `clamp.js` is refused
+    // for a collision the loader would never make. That is an over-refusal, it
+    // fails CLOSED, and it is pinned here rather than left to a docblock that
+    // used to claim the opposite ("a guard that names a `.js` file which really
+    // exists ... is untouched"). If the seam ever grows an existence check, this
+    // is the assertion that has to change with it — deliberately, not silently.
+    const wt = proofWorktreePath('/repo', RUN)
+    const fs = memFs({
+      [join(wt, 'tests/support/clamp.ts')]: SRC_BEFORE,
+      [join(wt, 'tests/support/clamp.js')]: SRC_BEFORE,
+    })
+    const { prover } = proverOver({}, fs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file: 'tests/support/clamp.ts',
+        guard: ['bun', 'test', '--preload=./tests/support/clamp.js', 'tests/separate.test.ts'],
+      },
+    })
+    // The refusal comes from the RESOLVED seam, which runs inside the proof
+    // worktree — so unlike the lexical arms it has already set one up. What must
+    // not happen is the GUARD running, and `observed` stays null when it did not.
+    expect([out.proved, out.reason.includes('tautology'), out.observed]).toEqual([false, true, null])
+
+    // POSITIVE CONTROL — a DIFFERENT stem beside the mutated one is untouched,
+    // so the assertion above is about the stem and not about `.js` as such.
+    const fs2 = memFs({ [join(wt, 'tests/support/clamp.ts')]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs2)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: {
+        ...CLAIM,
+        file: 'tests/support/clamp.ts',
+        guard: ['bun', 'test', '--preload=./tests/support/unrelated.js', 'tests/separate.test.ts'],
+      },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+  })
+
+  test('a DOTTED SELECTOR still refuses PAST the expansion cap — a 30-deep target is not a bypass', async () => {
+    // THE BYPASS THE CAP OPENED. `modulePathsOf` stopped expanding at 24
+    // prefixes, and its docblock justified that as fail-closed: "a prefix deeper
+    // than the target's own directory nesting can never equal it". That holds
+    // only while the TARGET is shallower than 24 — and `claim.file` is written
+    // by the same build that writes the diff, so a tree nested 30 directories
+    // deep is a thing a branch can simply commit. At that depth the matching
+    // prefix sat past the cap, the truncated expansion matched nothing, and the
+    // dotted arm fell open on exactly the input that was trying to defeat it.
+    // The spelling comparison is linear now (`dottedModuleReaches`) and has no
+    // depth at which it stops answering.
+    const deepDirs = Array.from({ length: 30 }, (_, i) => `d${i}`)
+    const file = `${deepDirs.join('/')}/limit.py`
+    const dotted = `${deepDirs.join('.')}.limit`
+    for (const selector of [dotted, `${dotted}.LimitTest.test_under`]) {
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: {
+          ...CLAIM,
+          file,
+          guard: ['python3', '-m', 'unittest', selector],
+          control: ['python3', '-m', 'pytest', 'tests/other_test.py'],
+        },
+      })
+      expect([out.proved, out.reason.includes('IMPORTS'), host.calls.length]).toEqual([false, true, 0])
+    }
+
+    // POSITIVE CONTROL — a SIBLING module at the same absurd depth is a separate
+    // test and stays legal, so the rule above is matching the stem rather than
+    // refusing every long dotted word. Without this, an implementation that
+    // refused all over-depth selectors would pass the assertions above.
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, fs)
+    const fine = await ok.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['python3', '-m', 'unittest', `${deepDirs.join('.')}.test_limit`] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
+
+    // …and the near-miss stays a near-miss: `d0.d1….limits` is a DIFFERENT
+    // module and the dot is required, so a prefix match is not a substring match.
+    const fs3 = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const { prover: ok3 } = proverOver({}, fs3)
+    const near = await ok3.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['python3', '-m', 'unittest', `${dotted}s`] },
+    })
+    expect(near.reason).not.toContain('tautology')
+  })
+
   test("an OPTION'S OPERAND is not a path — `bun test --timeout 1000` names no test", async () => {
     // THE BYPASS: read element-wise, `1000` looked like a path argument, so the
     // argv looked TARGETED and the no-path arm never fired — while the runner
@@ -2125,6 +2284,23 @@ describe('diffHasNoLegalMutationTarget — the exemption predicate, both its arm
 })
 
 describe('missingClaimRefusalReason — the refusal names WHY, and never blames the build unfairly', () => {
+  test('a path containing a NEWLINE stays on one line — a reason is a record, not a document', () => {
+    // Git's `-z` parse preserves every byte of a filename, correctly: a path
+    // really may contain a newline. A reason is a ONE-LINE record that reaches a
+    // log line, a status post and a DB row, so interpolated raw that one path
+    // turns one record into two, and the second half reads as its own event.
+    const nasty = 'src/new\nline.ts'
+    const reason = missingClaimRefusalReason([nasty])
+    expect(reason).not.toContain('\n')
+    // ESCAPED, NOT DROPPED — the reader still has to be able to find the file.
+    expect(reason).toContain('src/new')
+    expect(reason).toContain('line.ts')
+
+    // POSITIVE CONTROL — an ordinary path is spelled EXACTLY as git wrote it, so
+    // the escaping above cannot be quoting every name it prints.
+    expect(missingClaimRefusalReason(['src/limit.ts'])).toContain('src/limit.ts changed in this diff')
+  })
+
   const UNREADABLE = 'mutation proof required but the branch diff could not be read — a proof cannot be bound to it'
 
   test('an unreadable diff and an EMPTY one say different things, and neither blames the build', () => {

@@ -597,6 +597,27 @@ export function truncateNote(reason: string): string {
   return `${whole}… (${reason.length} chars; full reason in the mutation_proof_exempt log line)`
 }
 
+/**
+ * The ceiling on the DURABLE copy of an exemption reason.
+ *
+ * The stage row is where the exemption's evidence lives, so it gets the FULL
+ * file list — the tick note's 240 characters would delete the very thing a
+ * reviewer opens the row for. But the list is bounded only by the diff, and a
+ * test-only refactor of a few thousand files writes that whole list into
+ * `code_trident_stage_events.meta`, once per exempt merge. Generous enough that
+ * no real diff is cut (a 4 000-character reason is ~120 paths) and small enough
+ * that a pathological one cannot put an unbounded blob on the row.
+ */
+const STAGE_REASON_CEILING = 4_000
+
+export function truncateStageReason(reason: string): string {
+  if (reason.length <= STAGE_REASON_CEILING) return reason
+  const head = reason.slice(0, STAGE_REASON_CEILING)
+  const last = head.charCodeAt(head.length - 1)
+  const whole = last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
+  return `${whole}… (${reason.length} chars; full reason in the mutation_proof_exempt log line)`
+}
+
 export interface StrandedReconcileOptions {
   /** False when the boot sweep observed another live run on this branch (or
    * could not establish that no such run exists). Commit publication remains
@@ -3889,11 +3910,13 @@ export function buildTridentOrchestrator(
         log.info('mutation_proof_exempt', { run_id: run.id, branch, reason: proof.reason })
         // The tick persists the run row, never `note` — so the note is display
         // and the stage ledger row is the exemption's durable place in the run
-        // record. FULL reason here (the file list is the reviewer's evidence);
-        // only the one-line tick note above is capped. Best-effort like every
+        // record. The file list is the reviewer's evidence, so this copy keeps
+        // it — capped only where the diff itself stops being a list and starts
+        // being a blob (`STAGE_REASON_CEILING`, ~30x the tick note), with the
+        // uncapped text still in the log line above. Best-effort like every
         // stamp.
         try {
-          opts.record_stage?.(run.id, 'mutation-proof-exempt', proof.reason)
+          opts.record_stage?.(run.id, 'mutation-proof-exempt', truncateStageReason(proof.reason))
         } catch {
           // a stamp must never fail a merge
         }
