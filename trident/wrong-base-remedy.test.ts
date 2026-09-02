@@ -404,6 +404,14 @@ describe('composeWrongBaseRefusal', () => {
     expect(msg).toContain(`ls -l /proc/[0-9]*/cwd 2>/dev/null | grep -F -- ${WT}`)
     expect(msg).toContain('does NOT re-check occupancy')
     expect(msg).toContain('SAMPLED')
+    // AND `remove` DOES NOT CHECK OCCUPANCY EITHER (Argus finding). The sampled clearance is a
+    // preflight, and the message used to leave a reader to assume that git would catch a lane
+    // that entered afterwards. It does not: measured on git 2.43, a non-force
+    // `git worktree remove` exited 0 while a `sleep` held the tree as its cwd, and
+    // /proc/<pid>/cwd then read `<worktree> (deleted)`. What git refuses on is DIRT, so the
+    // occupancy re-check has to be named as the reader's own job, not implied.
+    expect(msg).toContain('NEITHER DOES remove')
+    expect(msg).toContain('never on a process standing in the tree')
   })
 
   test('the DEAD arm prints its preflights BEFORE the unlock, and says what the unlock exposes', async () => {
@@ -1571,6 +1579,58 @@ describe('composeWrongBaseRefusal: forged evidence cannot smuggle in a delete', 
     expect(safe).toContain('git -C /repo branch -D -- feat-x')
     expect(safe).not.toContain('<command removed>')
   })
+
+  test('POSITIONALS IN FRONT OF THE OPTION are still a delete — git permutes its own argv', async () => {
+    // `git branch w x y z -D victim` DELETES victim on git 2.43 (measured in a scratch repo):
+    // "options, then the ref" is git's documentation, not git's behaviour, and four positionals
+    // in front of the option put the delete outside the window that read the leading option run
+    // plus four tokens. The forged reason then rendered VERBATIM inside the ALIVE arm whose
+    // pinned contract is that `branch -D` appears nowhere in it — the third bounded window to
+    // fall to the same move, which is why the window is now the rest of the evidence.
+    expect(foldEvidence('git branch w x y z -D victim')).not.toContain('branch -D')
+    expect(foldEvidence('git branch w x y z -D victim')).toContain('<command removed>')
+
+    const forgeries: [string, string][] = [
+      ['git branch w x y z -D victim', 'branch -D'],
+      ['git branch w x y z q r s t u -D victim', 'branch -D'],
+      ['git branch victim -D', 'branch victim -D'],
+      ['git tag w x y z --delete trident-salvage/run-77', 'tag w'],
+      ['git update-ref w x y z -d refs/heads/feat-x', 'update-ref w'],
+      ['git push w x y z origin :feat-x', 'push w'],
+    ]
+    for (const [reason, banned] of forgeries) {
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): ${reason}`)
+      // Reported PER CASE, so a failure names WHICH permutation got through.
+      expect({ reason, neutralised: msg.includes('<command removed>'), leaks: msg.includes(banned) }).toEqual({
+        reason,
+        neutralised: true,
+        leaks: false,
+      })
+      expect(msg).toContain('ALIVE')
+    }
+
+    // POSITIVE CONTROL 1: an unbounded window is only safe if it still folds nothing that
+    // carries no delete option at all — a rule that ate every `branch` would pass the loop above
+    // and shred the evidence that identifies the owner.
+    for (const benign of ['git branch --contains abc1234 --sort=committerdate', 'git branch -a -v --list feat*']) {
+      const msg = await withLockReason(`claude agent wf_a (pid 4242 start 99): ${benign}`)
+      expect(msg).toContain(benign)
+      expect(msg).not.toContain('<command removed>')
+    }
+
+    // POSITIVE CONTROL 2: the guard's OWN safe remedy is composed, never folded, so widening the
+    // window costs the safe arm nothing.
+    const safeArm = await composeWrongBaseRefusal(ARGS, {
+      run_host: fakeHost({
+        'worktree list --porcelain': ok(UNHELD_PORCELAIN),
+        [FETCH]: ok(),
+        [RESOLVE]: ok(`${TIP}\n`),
+      }).run_host,
+      probe_tree: CLEAR,
+    })
+    expect(safeArm).toContain('git -C /repo branch -D -- feat-x')
+    expect(safeArm).not.toContain('<command removed>')
+  })
 })
 
 describe('composeWrongBaseRefusal: an operation git omits the branch attribute for', () => {
@@ -2114,6 +2174,37 @@ describe('composeWrongBaseRefusal: the branch NAME is evidence too', () => {
     expect(nameField.startsWith('feat-x')).toBe(true)
     // POSITIVE CONTROL: the readable half survives, so the refusal still names its branch.
     expect(msg).toContain('feat-x')
+  })
+
+  test('a LEADING DASH in the branch name cannot spell the banned literal out of the NAME', async () => {
+    // The fold neutralises every forgery codepoint INSIDE a name, and a name needs none: the
+    // arms render the field as `branch <name> already carries…`, so the name `-D-victim` puts
+    // the literal `branch -D` into the live-holder arm whose pinned contract is that the string
+    // appears nowhere in it — falsified from the REF NAME rather than from the evidence, and out
+    // of `defang`'s reach because a folded name has no whitespace left to make a verb-plus-option
+    // shape out of. The `?` is prepended, so the name still reads in full.
+    const DASHED = '-D-victim'
+    const heldDashed = zPorcelain(MAIN_FIELDS, [
+      `worktree ${WT}`,
+      'HEAD ' + TIP,
+      `branch refs/heads/${DASHED}`,
+      'locked claude agent wf_a (pid 4242 start 99)',
+    ])
+    const msg = await composeWrongBaseRefusal(
+      { ...ARGS, branch: DASHED },
+      {
+        run_host: fakeHost({ 'worktree list --porcelain': ok(heldDashed) }).run_host,
+        probe_pid: () => 'alive',
+        probe_tree: CLEAR,
+      },
+    )
+    expect(msg).toContain('ALIVE')
+    expect(msg).not.toContain('branch -D')
+    // POSITIVE CONTROL: the arm still names its evidence — the branch in full, the worktree and
+    // the pid — so an implementation that answered this by dropping the name would fail here.
+    expect(msg).toContain(DASHED)
+    expect(msg).toContain(WT)
+    expect(msg).toContain('4242')
   })
 
   test('the UNKNOWN arms fold the name too — the three that used to interpolate it RAW', async () => {

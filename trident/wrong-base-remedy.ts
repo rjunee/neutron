@@ -372,18 +372,42 @@ function samePath(a: string, b: string): boolean {
  *      `push -f origin :feat`, `push --force origin :feat`, `push origin -d feat` and
  *      `push -d origin feat` all rendered verbatim (the three `branch` spellings were verified
  *      to really delete on git 2.43; `-d` is a real `push` delete per `git push -h`). The verb's
- *      arguments are therefore read as a BOUNDED WINDOW OF TOKENS and each token tested on its
- *      own, so option order, count and clustering stop mattering — the earlier docblock claimed
- *      "every option ORDER collapses to one replacement", which was stronger than the regex and
- *      is only now true of the code. AND COUNT STILL MATTERED PAST FOUR (Argus finding): a
- *      four-token window read `branch --verbose --quiet --color --no-column --delete --force
- *      victim` — a real, runnable delete on git 2.43 — as if the delete were not in it, because
- *      the option RUN alone is six tokens long. Git's own grammar is "options, then the ref", so
- *      the window is now that: an unbounded run of leading OPTION tokens (`-`-prefixed, so it
- *      cannot swallow the prose after the command) plus at most four tokens after it. Still
- *      LINEAR: every token is tested once, tokens are whitespace-delimited so none can nest
- *      inside another, and each option test is anchored at both ends. Measured at 200k of
- *      adversarial input, 2ms.
+ *      arguments are therefore read as TOKENS and each token tested on its own, so option order,
+ *      count and clustering stop mattering — the earlier docblock claimed "every option ORDER
+ *      collapses to one replacement", which was stronger than the regex and is only now true of
+ *      the code.
+ *
+ *      AND EVERY BOUNDED WINDOW IS FALSIFIED BY ONE MORE TOKEN (Argus finding, reproduced).
+ *      Two bounds fell in turn. A four-token window read `branch --verbose --quiet --color
+ *      --no-column --delete --force victim` as if no delete were in it, because the option RUN
+ *      alone is six tokens long. Widening the window to "the leading option run plus four
+ *      tokens" assumed git's documented grammar — options, then the ref — and git does not
+ *      hold to it: `git branch w x y z -D victim` DELETES victim on git 2.43 (measured in a
+ *      scratch repo), because git permutes its argv, and four positionals in front of the
+ *      option put the delete outside that window too. There is no token count that closes a
+ *      class whose next member is the same string with one more word in it. So the window is
+ *      now the REST OF THE EVIDENCE: a delete verb is rewritten when a delete option appears
+ *      anywhere after it in the same (bounded) string. That over-folds — evidence that says
+ *      `branch` in one sentence and `-d` three sentences later loses the verb — and over-folding
+ *      EVIDENCE is the safe direction, because the guard's own remedies are its own prose and
+ *      never pass through here (the DEAD arm's `worktree remove` and the safe arm's
+ *      `branch -D` are both asserted to survive).
+ *
+ *      STILL LINEAR, AND WITH NO NESTED QUANTIFIER LEFT (Argus blocker: CodeQL
+ *      js/polynomial-redos, high severity, on the `(?:\s+-\S+)*(?:\s+\S+){0,4}` window). The
+ *      rule is no longer a regex over the whole string at all: it is one split on whitespace,
+ *      one right-to-left pass recording the nearest delete option at or after each index, and
+ *      one left-to-right pass rewriting. Every token is examined a constant number of times,
+ *      each token test is anchored at both ends and free of the `[A-Za-z]*[Dd][A-Za-z]*`
+ *      ambiguity CodeQL reads as polynomial (the cluster test is a `startsWith` plus one
+ *      unambiguous `^[A-Za-z]+$`). MEASURED ON THIS HOST WITH THE CURRENT CODE, through
+ *      `foldEvidence` and therefore through its 64k input cap, over 1M characters of each
+ *      adversarial shape — bare verbs, verb-plus-option pairs, 200-character option clusters,
+ *      `push origin +:x` runs, and one single unbroken 1M-character token: 8.1ms was the worst
+ *      of them and most were under 6ms. The figure the previous docblock carried — "200k of
+ *      adversarial input, 2ms" — belonged to a superseded regex and is replaced rather than
+ *      kept (Argus minor), because this module's thesis is that it asserts nothing it has not
+ *      measured.
  *
  *      AND THE RULE IS GIT-VERB-SCOPED, WHICH IS A BOUNDARY AND NOT A GAP THIS PRETENDS TO
  *      COVER (Argus nit, both reviewers). It enumerates git's own delete verbs and nothing else,
@@ -406,38 +430,92 @@ function samePath(a: string, b: string): boolean {
  *      cost is one substring in an unrunnable position; the alternative is a runnable-looking
  *      one in a message that promises none.
  */
+/**
+ * A COMBINED SHORT-OPTION CLUSTER CARRYING d/D — `-D`, `-Dr`, `-fd`, `-vvvvvD`. Written as a
+ * prefix test plus one unambiguous anchored regex rather than `^-[A-Za-z]*[Dd][A-Za-z]*$`: that
+ * spelling puts two `*` quantifiers over the SAME character class either side of one optional
+ * letter, which backtracks quadratically on a long letter run that fails the anchor and is the
+ * shape CodeQL's js/polynomial-redos flags. This runs on the launch tick over attacker-shaped
+ * evidence, so it is kept free of that shape by construction rather than by measurement.
+ */
+function isDeleteCluster(t: string): boolean {
+  if (!t.startsWith('-') || t.startsWith('--')) return false
+  const body = t.slice(1)
+  return /^[A-Za-z]+$/.test(body) && (body.includes('d') || body.includes('D'))
+}
 /** One option token that spells an irreversible ref delete: `--delete`, or a short cluster with d/D. */
-const DELETE_OPTION = /^(?:--delete|-[A-Za-z]*[Dd][A-Za-z]*)$/
+function isRefDelete(t: string): boolean {
+  return t === '--delete' || isDeleteCluster(t)
+}
 /** The same for `push`, which ALSO deletes by REFSPEC (`:feat`, `+:feat`) and by `--mirror`. */
-const PUSH_DELETE = /^(?:--delete|--mirror|-[A-Za-z]*[Dd][A-Za-z]*|\+?:\S*)$/
-/** Split one bounded argument window. Whitespace-delimited, so no token nests inside another. */
-function defangTokens(tail: string): string[] {
-  return tail.split(/\s+/).filter((t) => t !== '')
+function isPushDelete(t: string): boolean {
+  return t === '--delete' || t === '--mirror' || t.startsWith(':') || t.startsWith('+:') || isDeleteCluster(t)
+}
+/** The delete VERBS, found ANYWHERE inside a token — one word character in front used to defeat the rule. */
+const REF_DELETE_VERB = /(branch|update-ref|tag)/
+
+/**
+ * Rewrite every git delete VERB whose arguments carry a delete option, reading the arguments as
+ * whitespace-delimited TOKENS and the window as the REST OF THE STRING. The docblock above says
+ * why the window is unbounded (every bounded one was falsified by adding one more token, and
+ * `git branch w x y z -D victim` — a real delete on git 2.43 — was the last of them) and why
+ * over-folding EVIDENCE is the safe direction.
+ *
+ * Linear, with no nested quantifier anywhere in it: one split, one right-to-left pass recording
+ * the nearest delete option at or after each index, one left-to-right pass rewriting. Every
+ * token is examined a constant number of times.
+ */
+function defangCommands(s: string): string {
+  // The capture keeps the separators, so everything NOT rewritten is rebuilt character for character.
+  const parts = s.split(/(\s+)/)
+  const n = parts.length
+  // `[i]` = the nearest index >= i whose token is a delete option, or -1. The extra slot at `n`
+  // is the "nothing follows the last token" answer, so the forward pass can always read `i + 1`.
+  const nextRefDelete = new Int32Array(n + 1).fill(-1)
+  const nextPushDelete = new Int32Array(n + 1).fill(-1)
+  let ref = -1
+  let push = -1
+  for (let i = n - 1; i >= 0; i--) {
+    const tok = parts[i] as string
+    if (isRefDelete(tok)) ref = i
+    if (isPushDelete(tok)) push = i
+    nextRefDelete[i] = ref
+    nextPushDelete[i] = push
+  }
+  const out: string[] = []
+  let i = 0
+  while (i < n) {
+    const tok = parts[i] as string
+    // The delete has to come AFTER the verb, hence `i + 1`: a token is never its own argument.
+    const refVerb = REF_DELETE_VERB.exec(tok)
+    const refAt = nextRefDelete[i + 1] as number
+    if (refVerb !== null && refAt >= 0) {
+      out.push(`${tok.slice(0, refVerb.index)}${refVerb[1] as string} <command removed>`)
+      i = refAt + 1
+      continue
+    }
+    // `push` deletes three ways: by option (`-d`, `--delete`), by wiping the remote (`--mirror`),
+    // and by REFSPEC with no option at all (`push origin :feat`, `push origin +:feat`).
+    const pushAt = tok.indexOf('push')
+    const pushDeleteAt = nextPushDelete[i + 1] as number
+    if (pushAt >= 0 && pushDeleteAt >= 0) {
+      out.push(`${tok.slice(0, pushAt)}push <command removed>`)
+      i = pushDeleteAt + 1
+      continue
+    }
+    out.push(tok)
+    i++
+  }
+  return out.join('')
 }
 
 function defang(s: string): string {
-  return s
-    .replace(/[\u0000-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
-    .replace(/"/g, "'")
-    // THE VERB IS MATCHED, THEN A BOUNDED WINDOW OF ITS ARGUMENTS IS READ AS TOKENS. An earlier
-    // draft spelled the option run inside the regex and allowed exactly ONE option token before
-    // the delete, with the short cluster bounded at four letters per side — and both reviewers
-    // measured real, runnable spellings straight through it: `branch -v -q -D feat`,
-    // `branch -Dvvvvv feat`, `branch -vvvvvD feat`, `push -f origin :feat`,
-    // `push --force origin :feat`, `push origin -d feat`, `push -d origin feat` (`-d` IS a delete
-    // per `git push -h`; only `--delete`/`--mirror` were neutralised). Reading the window as
-    // whitespace-delimited TOKENS removes the whole class instead of one spelling of it: order,
-    // count and clustering stop mattering, and the rule stays LINEAR — every token is tested
-    // once, tokens cannot nest, and each option test is anchored at both ends. The window is the
-    // LEADING OPTION RUN (`-`-prefixed tokens, unbounded, because six real options before the
-    // delete is a spelling git accepts and a four-token window missed) plus four tokens after it.
-    .replace(/(branch|update-ref|tag)((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, verb: string, tail: string) =>
-      defangTokens(tail).some((t) => DELETE_OPTION.test(t)) ? `${verb} <command removed>` : whole)
-    .replace(/(worktree)(\s+)remove\b/g, '$1$2<command removed>')
-    // `push` deletes three ways: by option (`-d`, `--delete`), by wiping the remote (`--mirror`),
-    // and by REFSPEC with no option at all (`push origin :feat`, `push origin +:feat`).
-    .replace(/push((?:\s+-\S+)*(?:\s+\S+){0,4})/g, (whole: string, tail: string) =>
-      defangTokens(tail).some((t) => PUSH_DELETE.test(t)) ? 'push <command removed>' : whole)
+  return defangCommands(
+    s
+      .replace(/[\u0000-\u001f\u007f\u2028\u2029\u202a-\u202e\u2066-\u2069]+/g, ' ')
+      .replace(/"/g, "'")
+      .replace(/(worktree)(\s+)remove\b/g, '$1$2<command removed>'),
+  )
 }
 
 /**
@@ -470,8 +548,18 @@ function defang(s: string): string {
  * would drift.
  */
 const EVIDENCE_PROSE_MAX = 300
+/**
+ * The same INPUT cap `scrub` applies before its own passes (Argus nit). Every current caller's
+ * input is already bounded — a path by PATH_MAX, git stderr by the orchestrator's own slice —
+ * so this changes no output that exists today; the asymmetry was the thing worth removing,
+ * because "unbounded attacker-controlled string into a rewrite loop" is the premise the CodeQL
+ * alert on this file rested on, and a cap states the bound in the code instead of in a comment
+ * about the callers. Only the TAIL is kept, matching `scrub`, and the OUTPUT truncation below
+ * is what a reader actually sees.
+ */
+const EVIDENCE_SCAN_MAX = 64_000
 export function foldEvidence(s: string): string {
-  const folded = defang(s)
+  const folded = defang(s.length > EVIDENCE_SCAN_MAX ? s.slice(-EVIDENCE_SCAN_MAX) : s)
   return folded.length > EVIDENCE_PROSE_MAX ? `…${folded.slice(-EVIDENCE_PROSE_MAX)}` : folded
 }
 
@@ -499,7 +587,17 @@ export function foldEvidence(s: string): string {
  * and its options) can no longer re-introduce a space by rewriting one.
  */
 export function foldRefName(s: string): string {
-  return foldEvidence(s.replace(/[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g, '?'))
+  const named = s.replace(/[\s\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]+/g, '?')
+  // AND A LEADING DASH IS MARKED (Argus finding, reproduced through the real composer). The arms
+  // render a name field as `branch <name> already carries…`, so the git-legal name `-D-victim`
+  // put the literal `branch -D` back into the live-holder arm whose pinned contract is that the
+  // string appears nowhere in it — falsified by the REF NAME this time rather than by the
+  // evidence, and `defang` cannot reach it: a name has no whitespace left by the line above, so
+  // there is no verb-plus-option shape in it to rewrite. The `?` is PREPENDED rather than
+  // substituted so the name still reads in full (a reader has to be able to look it up), it is
+  // the same character this function already folds to, and no name git's own CLI accepts without
+  // a `--` starts with a dash.
+  return foldEvidence(named.startsWith('-') ? `?${named}` : named)
 }
 
 /**
@@ -1167,7 +1265,7 @@ export async function composeWrongBaseRefusal(
         const reaperWindow = reapable
           ? ' The unlock is itself an exposure, and this tree is named wf_*: the worktree reaper sweeps exactly those when they are NOT locked, and its dirt check ignores ignored files, so run the pair back to back — any gap is a window in which the reaper, not you, removes this tree.'
           : ''
-        return `${prefix}The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that process is DEAD and no process is standing inside the tree. Release the stale worktree, and run BOTH preflights FIRST — neither needs the lock off, and that occupancy was SAMPLED when this refusal was composed and is read minutes to hours later. git -C ${sh(wt)} status --porcelain --ignored lists what is in the tree — remove DELETES ignored local-only files (build output, .env, logs) without refusing, and only refuses tracked modifications and untracked non-ignored files, a refusal that is unpushed work to salvage rather than force past. status does NOT re-check occupancy, so re-check it directly: ${occupancyScan(wt)} names any process standing in the tree right now, and it can only see processes this user may read. If either preflight names anything, stop. Only once both are clean: git -C ${sh(repo)} worktree unlock ${sh(wt)}, then git -C ${sh(repo)} worktree remove ${sh(wt)}.${reaperWindow} Only then reconsider the branch.`
+        return `${prefix}The wrong-base launch guard found the branch checked out in worktree ${wtProse}, whose lock names pid ${pidShown}${lockQuote}; that process is DEAD and no process is standing inside the tree. Release the stale worktree, and run BOTH preflights FIRST — neither needs the lock off, and that occupancy was SAMPLED when this refusal was composed and is read minutes to hours later. git -C ${sh(wt)} status --porcelain --ignored lists what is in the tree — remove DELETES ignored local-only files (build output, .env, logs) without refusing, and only refuses tracked modifications and untracked non-ignored files, a refusal that is unpushed work to salvage rather than force past. status does NOT re-check occupancy, and NEITHER DOES remove — it refuses on tracked modifications and untracked non-ignored files and never on a process standing in the tree (measured on git 2.43: a non-force remove exited 0 under a live cwd and left that process in a deleted directory), so re-check it directly: ${occupancyScan(wt)} names any process standing in the tree right now, and it can only see processes this user may read. If either preflight names anything, stop. Only once both are clean: git -C ${sh(repo)} worktree unlock ${sh(wt)}, then git -C ${sh(repo)} worktree remove ${sh(wt)}.${reaperWindow} Only then reconsider the branch.`
       }
       return standDown(
         prefix,

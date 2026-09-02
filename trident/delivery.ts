@@ -198,9 +198,18 @@ const NO_DESTRUCTIVE_WRITE = 'No branch, worktree, commit or file in the tree wa
  * the fetching arm ran (only a fresh PR build fetches), and enumerating a write that may not have
  * happened is the overcounting the per-arm conditional above exists to prevent. The launch path
  * counts its own writes at its own site, exactly (`noWrites` in `orchestrator.ts`).
+ *
+ * AND THE CLAIM IS SCOPED TO WHAT THE FETCH ITSELF DOES (Argus minor). "never the tree" and
+ * "nothing outside .git" were absolutes about a fetch, and a fetch runs LOCAL CODE if this repo
+ * configures it to: a `reference-transaction` hook fires inside the very ref update this
+ * sentence describes and may write anywhere it likes, which a reviewer demonstrated on the
+ * exact fetch form the launcher uses. A hook is arbitrary local code, so the honest fix is to
+ * say what is measured — git's own writes — rather than to promise away something no sentence
+ * here can bound. The reassurance actually owed is unchanged: nothing this path does on its own
+ * touches the tree.
  */
 const LAUNCH_PATH_FETCH =
-  "That accounts for the guard itself. Separately, a fresh PR launch refreshes origin's base ref before this guard runs; that write belongs to the launcher, is counted where it happens, and moves only origin's base pointer and git's own bookkeeping under .git — never the tree."
+  "That accounts for the guard itself. Separately, a fresh PR launch refreshes origin's base ref before this guard runs; that write belongs to the launcher, is counted where it happens, and moves only origin's base pointer and git's own bookkeeping under .git — the fetch itself writes nothing in the tree (a hook configured on this repo is code of its own, and outside what this sentence measures)."
 
 /** What the guard actually wrote, per arm; see the call site for why this is not one sentence. */
 function wrongBaseWrites(evidence: string): string {
@@ -230,7 +239,7 @@ function wrongBaseWrites(evidence: string): string {
     // "and nothing else" was falsifiable by a config this guard does not read. What is actually
     // established is the CLASS: everything a fetch of one ref can touch lives under `.git`, and
     // none of it is a branch, a worktree, a commit or a file in the tree.
-    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog), FETCH_HEAD, and any objects it downloads, plus whatever bookkeeping that fetch's own configuration adds under .git (fetch.writeCommitGraph writes a commit-graph, for one) — and nothing outside .git."
+    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog), FETCH_HEAD, and any objects it downloads, plus whatever bookkeeping that fetch's own configuration adds under .git (fetch.writeCommitGraph writes a commit-graph, for one) — and nothing outside .git that the fetch itself writes."
   }
   // THE THROW ARM CAN FIRE ON EITHER SIDE OF THE FETCH (Argus finding). The composer's outer
   // catch wraps its WHOLE body — enumeration, fetch, and the composition after it — so a throw

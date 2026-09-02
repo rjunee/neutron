@@ -589,3 +589,65 @@ The `invariant 122` citations now name their section. The numbered rules live IN
 the citation dangles. It does not — "UNKNOWN never authorises an irreversible action" is at
 `docs/INVARIANTS.md:916`; the card's "121" is the off-by-one, and the citations say §12 so either
 number can be resolved.
+
+The rewrite rule is no longer a regex, and that closes a CI blocker and a real bypass at once. CodeQL
+raised a HIGH-severity `js/polynomial-redos` alert on `defang`'s window
+`(branch|update-ref|tag)((?:\s+-\S+)*(?:\s+\S+){0,4})` — the head went UNSTABLE and stayed
+unmergeable. A reviewer measured the runtime as linear, so the alert is a false positive about speed
+and a true statement about SHAPE, and this module composes on the launch tick over attacker-shaped
+evidence, which is exactly where a shape like that does not belong. The rule became a token scan: one
+split on whitespace, one right-to-left pass recording the nearest delete option at or after each
+index, one left-to-right pass rewriting. No nested quantifier survives it, and the short-cluster test
+gave up `^-[A-Za-z]*[Dd][A-Za-z]*$` (two `*` over the same class either side of one letter, quadratic
+on a long letter run that fails the anchor) for a `startsWith` plus one unambiguous `^[A-Za-z]+$`.
+Measured through `foldEvidence` and its new 64k input cap, over 1M characters of each adversarial
+shape — bare verbs, verb-plus-option pairs, 200-character clusters, one unbroken 1M-character token —
+the worst was 8.1ms. The stale "200k, 2ms" figure belonged to a superseded regex and is gone.
+
+The same change retires the last BOUNDED WINDOW, which is the finding that mattered more than the
+alert. `git branch w x y z -D victim` DELETES victim on git 2.43 — git permutes its argv, so
+"options, then the ref" is git's documentation and not git's behaviour — and four positionals in
+front of the option put the delete outside the window, so the forged lock reason rendered VERBATIM
+inside the ALIVE arm whose pinned contract is that `branch -D` appears nowhere in it. That is the
+third window to fall to "add one more token", and there is no count that closes a class whose next
+member is the same string with one more word in it. The window is now the REST OF THE EVIDENCE: a
+delete verb is rewritten whenever a delete option appears anywhere after it. That over-folds, and
+over-folding EVIDENCE is the safe direction — the guard's own remedies are its own prose and never
+pass through the fold, which two positive controls pin (the DEAD arm's `worktree remove` and the safe
+arm's `branch -D` both survive), while a benign `git branch --contains abc1234 --sort=committerdate`
+still quotes readably.
+
+The NAME field could spell the banned literal without any evidence at all. `foldRefName` folds
+whitespace and forgery codepoints, and a name has neither: the git-legal `-D-victim` renders through
+the prefix every arm carries as `branch -D-victim already carries…`, so `msg.includes('branch -D')`
+was TRUE in the arm sworn to contain no such string. `defang` cannot reach it either — a folded name
+has no whitespace left to make a verb-plus-option shape out of. A leading dash is therefore MARKED
+with the `?` this function already folds to, prepended rather than substituted so the name still
+reads in full for a reader who has to look it up.
+
+`git worktree remove` does not check occupancy at all, and the DEAD arm now says so. The arm already
+disclosed that its clearance was SAMPLED at composition time and printed the /proc re-check, but it
+left a reader free to assume git would catch a lane that entered afterwards. Reproduced here on git
+2.43: a non-force `worktree remove` exited 0 while a process held the tree as its cwd, and
+`/proc/<pid>/cwd` then read `<worktree> (deleted)`. What git refuses on is DIRT — tracked
+modifications and untracked non-ignored files — so the occupancy re-check is the reader's own job and
+the sentence now says that rather than implying it.
+
+The DEAD arm's production reachability is now in the ACCEPTANCE CLAIM, not only in this file. The
+plan's opening said the as-built ships all four arms; the honest version states the precondition,
+because two reviewers measured it independently: `probeTreeOccupancy` answers UNKNOWN if ANY
+`/proc/<pid>/cwd` on the box is unreadable, so off euid 0 every dead lock pid degrades to the
+treat-as-live UNKNOWN arm and only injected fixtures reach unlock/remove. Three arms fire in
+production at non-root euid, four where /proc is fully readable. The degradation stays — an
+unreadable entry may be a process standing in the tree, and 'clear' is the answer that would print
+`worktree remove` — and the arm it degrades to names the dead pid, says why occupancy could not be
+established, prints the read that settles it, and authorises nothing (invariant 122, `docs/INVARIANTS.md`
+§12).
+
+Finally, the fetch write-safety prose is scoped to what the fetch ITSELF writes. "never the tree" and
+"nothing outside .git" were absolutes about a command that runs local code when the repo configures
+it to: a `reference-transaction` hook fires inside the very ref update those sentences describe. A
+hook is arbitrary local code, so the sentences now measure git's own writes and say that a configured
+hook is outside what they can bound. The reassurance actually owed — nothing this path does on its
+own touches the tree — is unchanged.
+

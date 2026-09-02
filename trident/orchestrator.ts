@@ -3383,7 +3383,7 @@ export function buildTridentOrchestrator(
         // IS established is the class: everything that fetch can touch lives under `.git`, and
         // "file" in the clause below means a file in the TREE, which is the reassurance owed.
         const noWrites = fetchedBase
-          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${foldRefName(baseRefspec)} made under .git — refs/remotes/origin/${baseProse}, that ref's reflog, FETCH_HEAD, the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top`
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted, and the only writes on this path are the ones the earlier git fetch --no-tags origin ${foldRefName(baseRefspec)} made under .git — refs/remotes/origin/${baseProse}, that ref's reflog, FETCH_HEAD, the objects it downloaded, and whatever bookkeeping that fetch's own configuration adds on top; a hook configured on this repo is code of its own, and outside what this sentence measures`
           : 'the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted'
         const probeDetail = (res: HostCommandResult): string =>
           res.timed_out === true
