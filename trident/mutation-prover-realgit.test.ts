@@ -233,7 +233,7 @@ async function seedCollectibleLib(opts: { decoys?: boolean } = {}): Promise<stri
  * preload of the MUTATED file reddens the control too and would fail the proof
  * for a different reason than the one under test.
  */
-async function seedBunfigRepo(where: 'branch' | 'main'): Promise<string> {
+async function seedBunfigRepo(where: 'branch' | 'main' | 'hook'): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), `mutation-prover-realgit-bunfig-${where}-`))
   created.push(root)
   const repo = join(root, 'repo')
@@ -241,7 +241,7 @@ async function seedBunfigRepo(where: 'branch' | 'main'): Promise<string> {
   mkdirSync(join(repo, 'tests', 'support'), { recursive: true })
   writeFileSync(join(repo, 'README.md'), 'seed\n')
   writeFileSync(join(repo, 'tests', 'support', 'noop.ts'), 'export const NOOP = true\n')
-  if (where === 'main') writeFileSync(join(repo, 'bunfig.toml'), '[test]\npreload = ["./tests/support/noop.ts"]\n')
+  if (where !== 'branch') writeFileSync(join(repo, 'bunfig.toml'), '[test]\npreload = ["./tests/support/noop.ts"]\n')
   await git(repo, 'add', '-A')
   await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
 
@@ -260,6 +260,9 @@ async function seedBunfigRepo(where: 'branch' | 'main'): Promise<string> {
     "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated module', () => {\n  expect(1 + 1).toBe(2)\n})\n",
   )
   if (where === 'branch') writeFileSync(join(repo, 'bunfig.toml'), '[test]\npreload = ["./src/limit.ts"]\n')
+  // THE THIRTEENTH ESCAPE: the config is MAIN's and untouched, and the branch
+  // rewrites the file it preloads so that every bun process loads the target.
+  if (where === 'hook') writeFileSync(join(repo, 'tests', 'support', 'noop.ts'), "import '../../src/limit.ts'\n\nexport const NOOP = true\n")
   await git(repo, 'add', '-A')
   await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its separate test and the config')
   return repo
@@ -278,8 +281,8 @@ async function seedBunfigRepo(where: 'branch' | 'main'): Promise<string> {
  * exists to fix), `rewrite` edits the MAP (which redirects a bare specifier and
  * must still be refused).
  */
-async function seedManifestRepo(what: 'bump' | 'rewrite'): Promise<string> {
-  const root = mkdtempSync(join(tmpdir(), `mutation-prover-realgit-manifest-${what}-`))
+async function seedManifestRepo(what: 'bump' | 'rewrite', key: 'exports' | 'main' = 'exports'): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), `mutation-prover-realgit-manifest-${key}-${what}-`))
   created.push(root)
   const repo = join(root, 'repo')
   await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
@@ -287,8 +290,17 @@ async function seedManifestRepo(what: 'bump' | 'rewrite'): Promise<string> {
   mkdirSync(join(repo, 'tests'), { recursive: true })
   writeFileSync(join(repo, 'README.md'), 'seed\n')
   writeFileSync(join(repo, 'src', 'index.ts'), 'export const NAME = "manifest"\n')
+  // `main` IS THE SAME REDIRECTION with the key left implicit: node's CJS
+  // resolver falls back to it when no `exports` map is present, so a seat
+  // forged a proof through `require('..')` on a branch-authored `main`.
   const manifest = (deps: string, target: string): string =>
-    `${JSON.stringify({ name: 'manifest', dependencies: { zod: deps }, exports: { '.': target } }, null, 2)}\n`
+    `${JSON.stringify(
+      key === 'exports'
+        ? { name: 'manifest', dependencies: { zod: deps }, exports: { '.': target } }
+        : { name: 'manifest', dependencies: { zod: deps }, main: target },
+      null,
+      2,
+    )}\n`
   writeFileSync(join(repo, 'package.json'), manifest('^3.0.0', './src/index.ts'))
   await git(repo, 'add', '-A')
   await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed, manifest and all')
@@ -455,6 +467,32 @@ describe('the mutation-proof gate against real git', () => {
     expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
+  test('a preload MAIN wrote, aimed at a file THIS BRANCH rewrites, is refused against REAL git', async () => {
+    // THE THIRTEENTH ESCAPE, against real git. Neither authorship arm sees it:
+    // `bunfig.toml` is not in the diff (so it is no candidate) and its `preload`
+    // is byte-identical to main's (so the provenance comparison calls it main's)
+    // — while the file that preload names is rewritten by this branch and runs
+    // in every bun test process before a single test does.
+    const repo = await seedBunfigRepo('hook')
+    const out = await runMutationProofGate({
+      run: { id: 'run-bunfig-hook', slug: 'bunfig-hook', repo_path: repo, branch: 'trident/bunfig-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('bunfig.toml')
+    expect(out.reason).toContain('tests/support/noop.ts')
+    expect(out.evidence?.observed ?? null).toBeNull()
+  })
+
   test('a dependency bump beside a map MAIN wrote keeps its bun nomination against REAL git', async () => {
     // THE OVER-REFUSAL, reproduced against real git and then closed. The arm
     // used to refuse on the FILE being in the diff and the key being present at
@@ -511,6 +549,56 @@ describe('the mutation-proof gate against real git', () => {
     expect(out.reason).toContain('exports')
     expect(out.evidence?.observed ?? null).toBeNull()
   })
+
+  test('a `main` THIS BRANCH writes is the same redirection, and is refused against REAL git', async () => {
+    // The key a seat forged through on node v22: with no `exports` map present
+    // the CJS resolver falls back to `main`, so `require('..')` in an unrelated
+    // guard loaded the mutated file. Same arm, same comparison, third key.
+    const repo = await seedManifestRepo('rewrite', 'main')
+    const out = await runMutationProofGate({
+      run: { id: 'run-manifest-main', slug: 'manifest-main', repo_path: repo, branch: 'trident/manifest-bump' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('the main in package.json')
+    expect(out.evidence?.observed ?? null).toBeNull()
+  })
+
+  test('…and a `main` MAIN already carried keeps its bun nomination against REAL git', async () => {
+    // The positive control on the row above: `main` is in nearly every
+    // published manifest, so refusing on its presence would cost a bun-only
+    // repo the only nomination it has.
+    const repo = await seedManifestRepo('bump', 'main')
+    const out = await runMutationProofGate({
+      run: { id: 'run-manifest-main-ok', slug: 'manifest-main-ok', repo_path: repo, branch: 'trident/manifest-bump' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.reason ?? '').not.toContain('package.json')
+    expect(out.ok).toBe(true)
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
 
   test('a support LIBRARY under tests/ proves red-then-green against REAL git and bun', async () => {
     // THE #489 CLASS, end to end. `tests/support/clamp.ts` declares no test

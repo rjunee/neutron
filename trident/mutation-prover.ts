@@ -161,6 +161,12 @@ const TEST_COMMAND_SHAPES: ReadonlyArray<{
     // bun scoping is sound. Until that card lands, the entry below is REACHABLE
     // ONLY in a repo whose root carries no pytest ini file and whose test
     // directories carry no `__init__`, which is not the conventional layout.
+    //
+    // AND IT IS WIDER THAN "A PYTHON REPO": the basename match runs at ANY
+    // depth, so ONE nested `pyproject.toml` anywhere in a polyglot tree — a
+    // vendored sample, a fixture, a sibling service — kills `-m pytest` for the
+    // whole repository, python or not. Same direction (CLOSED), same follow-up
+    // card; stated here so the scope is not read as narrower than it is.
     program: 'python3',
     shape: 'python3 -m pytest|unittest …',
     ok: (a) => a[1] === '-m' && (a[2] === 'pytest' || a[2] === 'unittest'),
@@ -1345,7 +1351,9 @@ export function pytestConfigShadow(argv: readonly string[], paths: readonly stri
  * the diff is read over the whole range `<base>...<ref>`, so only a separate PR
  * relieved it. What decides it now is `bunConfigHookSlice`: the key's VALUE at
  * the head is compared with its value at the MERGE BASE, and only a map the
- * BRANCH wrote is refused. Where the map POINTS is still not reasoned about.
+ * BRANCH wrote is refused. Where a PRELOAD points is reasoned about one block
+ * down, in `bunConfigInspected`/`hookTargetChangedByBranch`; where a resolution
+ * MAP points still is not, and that block says why.
  */
 const BUN_LOAD_CONFIG_BASENAME = /^(?:bunfig\.toml|package\.json|(?:ts|js)config(?:\.[\w-]+)*\.json)$/
 
@@ -1375,6 +1383,40 @@ export function bunConfigCandidates(argv: readonly string[], changedPaths: reado
 }
 
 /**
+ * THE CONFIG THE BRANCH DID NOT HAVE TO TOUCH. `bunConfigCandidates` is scoped
+ * to the DIFF, and a review seat walked straight through that scoping: main
+ * carries a `bunfig.toml` whose `[test] preload` names `tests/support/hook.ts`,
+ * the branch leaves the config alone and rewrites THE HOOK, and every test
+ * process bun starts executes the branch's code before a single test runs. The
+ * config is not in the diff, so no candidate existed; the key is byte-identical
+ * to main's, so `hookIsInherited` said "main's" — and a syntax-breaking
+ * mutation with an unrelated guard came back `ok: true, proved: true` with
+ * nothing asserting the target's behaviour. The docblock above conceded exactly
+ * this: "Where the map POINTS is still not reasoned about."
+ *
+ * SO THE ROOT BUNFIG IS READ WHETHER OR NOT THE BRANCH TOUCHED IT — `bun test`
+ * reads `bunfig.toml` out of its working directory, which is the worktree root
+ * — and it is inspected for where its `preload` POINTS, never for who wrote it:
+ * a config the branch never touched cannot be refused for being branch-authored
+ * (see the `changedFiles` guard at the call site).
+ *
+ * THE RESOLUTION MAPS ARE DELIBERATELY NOT WIDENED THIS WAY. `imports`,
+ * `exports`, `main` and a tsconfig `paths` redirect a SPECIFIER: the target is
+ * loaded only if some test imports it, and the map's own text is already
+ * compared against the merge base. Refusing a nomination because main's
+ * `exports` map happens to name a file this branch edited would take the bun
+ * nomination away from nearly every PR in a bun repo — the "no legal nomination
+ * exists" defect this card exists to fix, arriving through the door marked
+ * "security". A branch-changed file reached through a map is the general
+ * transitive-import problem and is not decidable here.
+ */
+export function bunConfigInspected(argv: readonly string[], changedPaths: readonly string[]): string[] {
+  const candidates = bunConfigCandidates(argv, changedPaths)
+  if (argv[0] !== 'bun' || candidates.includes('bunfig.toml')) return candidates
+  return [...candidates, 'bunfig.toml']
+}
+
+/**
  * ONE KEY, FOUR SPELLINGS, AND THE PARSER TAKES ALL OF THEM. A line-anchored
  * bare-key rule (`/(^|\n)[ \t]*preload[ \t]*=/`) was the whole bunfig defence
  * and a review seat walked straight past it: `"preload" = [...]`, `'preload' =
@@ -1393,8 +1435,16 @@ export function bunConfigCandidates(argv: readonly string[], changedPaths: reado
  * ESCAPES ARE DECODED FIRST because a TOML basic-string key may spell itself in
  * `\u`: `"preload"` is the key `preload` to the parser and is not the
  * substring `preload` to a regex.
+ *
+ * THE DELIMITER IS LOOKED AT, NOT CONSUMED. An alternation (`(?:^|[^A-Za-z0-9_-])`)
+ * eats the character before the key, so under the `g`-scan in
+ * `bunConfigHookSlice` two occurrences sharing one character could not both
+ * match — and a missed occurrence makes the head and base slices differ, which
+ * REFUSES. Unreachable in valid TOML and failing closed either way, but a
+ * lookbehind says the same thing without the hazard, so a later widening does
+ * not inherit it.
  */
-const TOML_PRELOAD_KEY = /(?:^|[^A-Za-z0-9_-])["']?preload["']?[ \t]*=/
+const TOML_PRELOAD_KEY = /(?<![A-Za-z0-9_-])["']?preload["']?[ \t]*=/
 
 function decodeTomlEscapes(text: string): string {
   return text.replace(/\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})/g, (whole, short: string, long: string) => {
@@ -1406,9 +1456,25 @@ function decodeTomlEscapes(text: string): string {
 const JSON_HOOK_KEY: Record<string, RegExp> = {
   imports: /"imports"[ \t]*:/,
   exports: /"exports"[ \t]*:/,
+  main: /"main"[ \t]*:/,
   'compilerOptions.paths': /"paths"[ \t]*:/,
   'compilerOptions.baseUrl': /"baseUrl"[ \t]*:/,
 }
+
+/**
+ * THE THREE MANIFEST KEYS THAT DECIDE WHICH FILE A SPECIFIER MEANS. `main` was
+ * missing and a review seat forged a proof through the gap on node v22: with no
+ * `exports` map present the CJS resolver falls back to `main`, so a
+ * branch-authored `"main": "./src/limit.cjs"` made `require('..')` inside an
+ * otherwise unrelated guard load the mutated file — red under the mutation,
+ * green restored, and nothing testing the target's behaviour. It is the same
+ * redirection `imports`/`exports` already cover, spelled in the oldest key of
+ * the three, and it gets the same treatment: refused only where the BRANCH
+ * wrote the key, compared against the merge base by `hookIsInherited`, so an
+ * inherited `main` (which nearly every published manifest carries) costs a
+ * nomination nothing.
+ */
+const MANIFEST_HOOK_KEY = ['imports', 'exports', 'main'] as const
 
 /**
  * EVERY load-hook key such a file carries, not just the first one. The
@@ -1427,7 +1493,7 @@ export function bunConfigLoadHooks(path: string, text: string): string[] {
   // in the file (deps, scripts, version) redirects nothing, and refusing on the
   // basename alone would cost a bun-only repo its nomination on every bump.
   if (base === 'package.json') {
-    return ['imports', 'exports'].filter((k) => (JSON_HOOK_KEY[k] as RegExp).test(text))
+    return MANIFEST_HOOK_KEY.filter((k) => (JSON_HOOK_KEY[k] as RegExp).test(text))
   }
   // ANYWHERE IN THE TEXT for the JSON pair: a tsconfig is routinely written on
   // one line, and a key rule anchored to the line start read `{ "compilerOptions":
@@ -1517,6 +1583,52 @@ function readHookValue(text: string, from: number): string | null {
   const nl = text.indexOf('\n', i)
   const line = (nl === -1 ? text.slice(i) : text.slice(i, nl)).trim()
   return line.length === 0 ? null : line
+}
+
+/** Every path a hook's VALUE spells: its quoted strings, or the whole value if it quotes nothing. */
+export function hookValuePaths(value: string): string[] {
+  const quoted = /"((?:[^"\\]|\\.)*)"|'((?:[^'\\]|\\.)*)'/g
+  const out: string[] = []
+  for (let m = quoted.exec(value); m !== null; m = quoted.exec(value)) {
+    const raw = (m[1] ?? m[2] ?? '').replace(/\\(.)/g, '$1')
+    if (raw.length > 0) out.push(raw)
+  }
+  // A BARE VALUE IS A PATH TOO (`preload = ./hook.ts` is not valid TOML, but a
+  // JSON `"main": ./x` misspelling and a rest-of-line read both land here). An
+  // empty GROUP is not: `[]` names nothing, and reading the brackets as a
+  // filename would be a spelling no loader ever resolves.
+  const bare = value.trim()
+  if (out.length === 0 && bare.length > 0 && !'[{'.includes(bare[0] as string)) out.push(bare)
+  return out
+}
+
+/**
+ * WHERE THE PRELOAD POINTS: the branch-changed file this config hands the
+ * runner to EXECUTE, or null if it names none.
+ *
+ * This is the arm that closes the escape `bunConfigInspected` describes. It
+ * asks nothing about who wrote the config — an inherited `preload` is the worst
+ * case, because the branch then had to touch nothing the diff-scoped arm looks
+ * at. It asks only whether the code that config runs before every test is code
+ * THIS BRANCH wrote.
+ *
+ * THE SPELLING IS CANONICALISED THE WAY EVERY OTHER PATH ON THIS SEAM IS, and
+ * the loader's own rewrites are candidates too: `./tests/support/hook.js` is
+ * `tests/support/hook.ts` on disk, and `./tests/support/hook` is as well. Each
+ * is a CANDIDATE — matching one only ever adds a refusal.
+ */
+export function hookTargetChangedByBranch(text: string, key: string, changedPaths: readonly string[]): string | null {
+  if (key !== 'preload') return null
+  const value = bunConfigHookSlice(text, key)
+  if (value === null) return null
+  const changed = new Set(changedPaths.map((p) => normalizeArg(p)))
+  for (const spelling of hookValuePaths(value)) {
+    const named = normalizeArg(spelling)
+    for (const candidate of [named, ...loaderRewrites(named), ...extensionCompletions(named)]) {
+      if (changed.has(candidate)) return candidate
+    }
+  }
+  return null
 }
 
 /**
@@ -2836,33 +2948,42 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // a full `proved: true` that way. The diff comes from git via the gate, the
     // text from the pinned checkout, and a candidate absent there was deleted by
     // this branch and loads nothing. See `bunConfigCandidates` for why this arm
-    // is diff-scoped where the pytest one is tree-wide.
+    // is diff-scoped where the pytest one is tree-wide — with the ROOT BUNFIG
+    // added back unconditionally, for the reason `bunConfigInspected` gives.
     //
     // AND IT IS THE KEY'S VALUE THAT DECIDES, not the file's presence in the
     // diff. A manifest carrying a map main already wrote is main's, exactly as
     // an inherited `bunfig.toml` is; refusing it for a dependency bump beside it
-    // took a bun-only repository's only nomination away. `hookIsInherited`
+    // took a bun-only repository's only nomination away. `hookProvenance`
     // compares the key at the MERGE BASE with the key at the head and refuses
     // only what this branch actually wrote. Every step of it fails CLOSED: no
-    // base, no merge base, no file there, an unreadable value — all read as
-    // branch-authored.
+    // base, no merge base, an unreadable value — all read as branch-authored;
+    // a file the base does not have at all is 'added', which refuses too but
+    // says something a branch can act on rather than "restore what main
+    // carries", which for an ADDED file names nothing that exists.
     let mergeBase: string | null | undefined
-    async function hookIsInherited(candidate: string, key: string, headText: string): Promise<boolean> {
-      if (baseRef === null || baseRef.trim().length === 0) return false
+    /**
+     * 'inherited' — the key's value is byte-for-byte what the merge base carried;
+     * 'added'     — the base has no such FILE, so the branch brought it;
+     * 'branch'    — anything else, including every step that could not be decided.
+     */
+    async function hookProvenance(candidate: string, key: string, headText: string): Promise<'inherited' | 'added' | 'branch'> {
+      if (baseRef === null || baseRef.trim().length === 0) return 'branch'
       if (mergeBase === undefined) {
         const mb = await deps.run_host(['git', '-C', wt, 'merge-base', baseRef, headSha], wt)
         const sha = mb.stdout.trim().toLowerCase()
         mergeBase = mb.ok && HEX40.test(sha) ? sha : null
       }
-      if (mergeBase === null) return false
+      if (mergeBase === null) return 'branch'
       const show = await deps.run_host(['git', '-C', wt, 'show', `${mergeBase}:${candidate}`], wt)
-      if (!show.ok) return false
+      if (!show.ok) return 'added'
       const here = bunConfigHookSlice(headText, key)
       const there = bunConfigHookSlice(show.stdout, key)
-      return here !== null && there !== null && here === there
+      return here !== null && there !== null && here === there ? 'inherited' : 'branch'
     }
+    const changedSet = new Set(changedFiles)
     for (const [which, argv] of nominated) {
-      for (const candidate of bunConfigCandidates(argv, changedFiles)) {
+      for (const candidate of bunConfigInspected(argv, changedFiles)) {
         let text: string
         try {
           text = await fs.read(join(wt, candidate))
@@ -2870,11 +2991,32 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
           continue
         }
         for (const key of bunConfigLoadHooks(candidate, text)) {
-          if (await hookIsInherited(candidate, key, text)) continue
+          // WHERE IT POINTS, FIRST — the one question that does not care who
+          // wrote the config. A `preload` main itself carries, aimed at a file
+          // this branch rewrote, runs the branch's code in every test process.
+          const pointed = hookTargetChangedByBranch(text, key, changedFiles)
+          if (pointed !== null) {
+            return refuse(
+              run_id,
+              claim,
+              `claim.${which} ${argv[0]} would load BRANCH-SUPPLIED code with nothing on the argv to show for it: the ${key} in ${candidate} names ${pointed}, which this branch rewrites, and it is executed in EVERY test process this runner starts before a single test runs — that the config itself is main's changes nothing about whose code it runs; land the change to ${pointed} in a PR of its own, or nominate a runner that does not read ${candidate}`,
+            )
+          }
+          // AND WHO WROTE IT, second — asked only of a config in the DIFF. A
+          // config the branch never touched cannot be "the map the branch
+          // wrote", and reading the root bunfig unconditionally must not turn
+          // an unresolvable merge base into a refusal for main's own file.
+          if (!changedSet.has(candidate)) continue
+          const provenance = await hookProvenance(candidate, key, text)
+          if (provenance === 'inherited') continue
+          const remedy =
+            provenance === 'added'
+              ? `${candidate} is NEW on this branch, so there is nothing at ${baseRef ?? 'the base branch'} to restore it to: land the new file in a PR of its own, or nominate a runner that does not read it`
+              : `restore ${key} to what ${baseRef ?? 'the base branch'} carries, land it in a PR of its own, or nominate a runner that does not read it`
           return refuse(
             run_id,
             claim,
-            `claim.${which} ${argv[0]} would load BRANCH-SUPPLIED code with nothing on the argv to show for it: this branch writes the ${key} in ${candidate}, and it decides which files the runner loads for every test it runs — a runner whose behaviour the branch changes with no flag is not evidence of a test runner; restore ${key} to what ${baseRef ?? 'the base branch'} carries, land it in a PR of its own, or nominate a runner that does not read it`,
+            `claim.${which} ${argv[0]} would load BRANCH-SUPPLIED code with nothing on the argv to show for it: this branch writes the ${key} in ${candidate}, and it decides which files the runner loads for every test it runs — a runner whose behaviour the branch changes with no flag is not evidence of a test runner; ${remedy}`,
           )
         }
       }

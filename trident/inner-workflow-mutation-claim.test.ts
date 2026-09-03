@@ -444,7 +444,36 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       expect(['bun config spellings', d.includes('test.preload')]).toEqual(['bun config spellings', true])
       expect(['bun config spellings', d.includes('inline table')]).toEqual(['bun config spellings', true])
       expect(['bun package map', d.includes('package.json `imports`/`exports`')]).toEqual(['bun package map', true])
+      // …AND THE KEY WITH ITS NAME LEFT IMPLICIT. A seat forged `proved: true`
+      // on node v22 through `main`: with no `exports` map present the CJS
+      // resolver falls back to it, so a branch-authored `"main"` redirects
+      // `require('..')` inside an unrelated guard at the mutated file. A build
+      // told only about `imports`/`exports` would write the third one.
+      expect(['bun package main key', d.includes('`imports`/`exports`/`main`')]).toEqual([
+        'bun package main key',
+        true,
+      ])
+      // …AND WHERE AN INHERITED PRELOAD POINTS. The thirteenth escape of the
+      // family walks between both authorship arms: leave main's bunfig alone and
+      // rewrite THE FILE ITS PRELOAD NAMES. Nothing on the argv, nothing in the
+      // config diff — and the branch's code runs in every bun test process. A
+      // build told only "a config YOUR DIFF writes is refused" would read this
+      // as permitted, which is exactly how it was forged.
+      expect(['inherited preload target', d.includes('when the root bunfig.toml')]).toEqual([
+        'inherited preload target',
+        true,
+      ])
+      expect(['inherited preload target', d.includes('names a file THIS BRANCH CHANGES')]).toEqual([
+        'inherited preload target',
+        true,
+      ])
     }
+    // Two-sided: the prover must really read the root bunfig whether or not the
+    // branch touched it, and really compare the preload's target against the
+    // diff, or the two sentences above are promises nothing keeps.
+    expect(PROVER_SRC).toContain('export function bunConfigInspected(')
+    expect(PROVER_SRC).toContain('export function hookTargetChangedByBranch(')
+    expect(PROVER_SRC).toContain("const MANIFEST_HOOK_KEY = ['imports', 'exports', 'main'] as const")
     expect(PROVER_SRC).toContain('bunConfigCandidates')
     expect(PROVER_SRC).toContain('bunConfigLoadHook')
     // Two-sided, like every other entry in this test: the prover must really

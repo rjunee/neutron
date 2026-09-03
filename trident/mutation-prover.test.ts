@@ -24,6 +24,9 @@ import {
   bunConfigHookSlice,
   bunConfigLoadHook,
   bunConfigLoadHooks,
+  bunConfigInspected,
+  hookValuePaths,
+  hookTargetChangedByBranch,
   pythonImportShadow,
   pythonModuleShadow,
   pythonPackageShadow,
@@ -771,6 +774,11 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     // The TOML side, read through the same escape decoding the key rule uses.
     expect(bunConfigHookSlice('[test]\npreload = ["./a.ts"]\n', 'preload')).toBe('["./a.ts"]')
     expect(bunConfigHookSlice('[test]\n"p\\u0072eload" = ["./a.ts"]\n', 'preload')).toBe('["./a.ts"]')
+    // THE DELIMITER IS LOOKED AT, NOT CONSUMED. Under an alternation that eats
+    // the character before the key, two occurrences sharing one character
+    // cannot both match — and a missed occurrence makes the head and base
+    // slices differ, which refuses. A lookbehind finds both.
+    expect(bunConfigHookSlice('[test]\npreload=preload=["./b.ts"]\n', 'preload')).toContain(' | ')
     // FAILS CLOSED: unreadable, absent, or a key this seam does not know.
     expect(bunConfigHookSlice('{ "exports": { ".": "./x.ts"', 'exports')).toBeNull()
     expect(bunConfigHookSlice('{ "name": "x" }', 'exports')).toBeNull()
@@ -842,6 +850,177 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts'] })
     expect(evidence.reason).not.toContain('bunfig.toml')
     expect(evidence.proved).toBe(true)
+  })
+
+  // ── WHERE AN INHERITED PRELOAD POINTS ────────────────────────────────────
+  //
+  // THE THIRTEENTH ESCAPE. Both of the two arms above ask who wrote the CONFIG,
+  // and a seat walked between them: leave main's `bunfig.toml` alone and rewrite
+  // THE FILE ITS PRELOAD NAMES. No config in the diff, so no candidate existed;
+  // the key byte-identical to main's, so the provenance comparison said "main's".
+  // The branch's code ran in every bun test process regardless, and a
+  // syntax-breaking mutation with an unrelated guard came back proved:true.
+  const BUNFIG_MAIN_HOOK = '[test]\npreload = ["./tests/support/hook.ts"]\n'
+
+  test("a preload MAIN wrote, aimed at a file THIS BRANCH rewrites, is still the branch's code → refused", async () => {
+    const { prover, host } = proverOver(
+      // The config is inherited in the strongest sense available: identical at
+      // the merge base, and not in the diff at all.
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'bunfig.toml': BUNFIG_MAIN_HOOK } },
+      bunFs({ [join(BUN_WT, 'bunfig.toml')]: BUNFIG_MAIN_HOOK }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'tests/support/hook.ts'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('bunfig.toml')
+    expect(evidence.reason).toContain('tests/support/hook.ts')
+    expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+    // Nothing ran: the refusal lands at the claim, before a byte is mutated.
+    expect(host.calls.every((c) => c[0] !== 'bun')).toBe(true)
+  })
+
+  test('…in every spelling a loader completes — a `.js` name, and no extension at all', async () => {
+    // The value is a SPECIFIER, not a path: bun resolves `./tests/support/hook.js`
+    // and `./tests/support/hook` to the `.ts` file on disk, and comparing written
+    // spellings would have missed both.
+    for (const spelling of ['./tests/support/hook.js', './tests/support/hook', 'tests/support/hook.ts']) {
+      const body = `[test]\npreload = ["${spelling}"]\n`
+      const { prover } = proverOver(
+        { mergeBase: 'b'.repeat(40), baseFiles: { 'bunfig.toml': body } },
+        bunFs({ [join(BUN_WT, 'bunfig.toml')]: body }),
+      )
+      const evidence = await prover.prove({
+        run: RUN,
+        claim: CLAIM,
+        changed_files: ['src/limit.ts', 'tests/support/hook.ts'],
+        base_ref: 'main',
+      })
+      expect([spelling, evidence.proved]).toEqual([spelling, false])
+      expect([spelling, (evidence.reason ?? '').includes('tests/support/hook.ts')]).toEqual([spelling, true])
+    }
+  })
+
+  test('…and the same inherited preload, aimed at a file the branch did NOT touch, still proves', async () => {
+    // THE POSITIVE CONTROL on the two rows above, and the whole reason this arm
+    // reads WHERE the preload points instead of refusing every repo that ships
+    // one. Same config, same claim, same base: only the diff differs.
+    const { prover } = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'bunfig.toml': BUNFIG_MAIN_HOOK } },
+      bunFs({ [join(BUN_WT, 'bunfig.toml')]: BUNFIG_MAIN_HOOK }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'tests/support/other.ts'],
+      base_ref: 'main',
+    })
+    expect(evidence.reason ?? '').not.toContain('BRANCH-SUPPLIED')
+    expect(evidence.proved).toBe(true)
+  })
+
+  test('node reads no bunfig, so an inherited preload aimed at a changed file does not refuse it', async () => {
+    const { prover } = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'bunfig.toml': BUNFIG_MAIN_HOOK } },
+      bunFs({ [join(BUN_WT, 'bunfig.toml')]: BUNFIG_MAIN_HOOK }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: NODE_CLAIM,
+      changed_files: ['src/limit.ts', 'tests/support/hook.ts'],
+      base_ref: 'main',
+    })
+    expect(evidence.reason ?? '').not.toContain('BRANCH-SUPPLIED')
+    expect(evidence.observed).not.toBeNull()
+  })
+
+  test('hookValuePaths / hookTargetChangedByBranch — the predicate itself, both directions', () => {
+    expect(hookValuePaths('["./a.ts", \'./b.ts\']')).toEqual(['./a.ts', './b.ts'])
+    expect(hookValuePaths('  ./bare.ts  ')).toEqual(['./bare.ts'])
+    expect(hookValuePaths('[]')).toEqual([])
+
+    const cfg = '[test]\npreload = ["./tests/support/hook.ts", "./tests/support/other.ts"]\n'
+    expect(hookTargetChangedByBranch(cfg, 'preload', ['tests/support/other.ts'])).toBe('tests/support/other.ts')
+    expect(hookTargetChangedByBranch(cfg, 'preload', ['src/limit.ts'])).toBeNull()
+    // A RESOLUTION MAP IS NOT WIDENED THIS WAY: `exports` names files too, and
+    // refusing a nomination because main's map mentions a file this branch
+    // edited is the over-refusal this card exists to remove.
+    expect(hookTargetChangedByBranch('{ "exports": { ".": "./src/limit.ts" } }', 'exports', ['src/limit.ts'])).toBeNull()
+    expect(hookTargetChangedByBranch('{ "name": "x" }', 'preload', ['src/limit.ts'])).toBeNull()
+
+    // The root bunfig is inspected whether or not the branch touched it, once —
+    // and node, which does not read it, is not handed it at all.
+    expect(bunConfigInspected(CLAIM.guard, ['src/limit.ts'])).toEqual(['bunfig.toml'])
+    expect(bunConfigInspected(CLAIM.guard, ['bunfig.toml'])).toEqual(['bunfig.toml'])
+    expect(bunConfigInspected(['node', '--test', 'tests/x.test.mjs'], ['src/limit.ts'])).toEqual([])
+    expect(bunConfigInspected(['go', 'test', './...'], ['src/limit.ts', 'bunfig.toml'])).toEqual([])
+  })
+
+  // ── AND `main` IS A RESOLUTION MAP WITH THE KEY LEFT IMPLICIT ────────────
+  //
+  // A seat forged a proof on node v22 through the one manifest key this arm did
+  // not know: with no `exports` map present the CJS resolver falls back to
+  // `main`, so a branch-authored `"main": "./src/limit.cjs"` made `require('..')`
+  // inside an otherwise unrelated guard load the mutated file.
+  const PKG_MAIN_BASE = '{\n  "name": "x",\n  "main": "./src/index.ts"\n}\n'
+
+  test('a package.json `main` THIS BRANCH writes redirects require(\'..\') at the mutated file → refused', async () => {
+    const head = '{\n  "name": "x",\n  "main": "./src/limit.ts"\n}\n'
+    const { prover, host } = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'package.json': PKG_MAIN_BASE } },
+      bunFs({ [join(BUN_WT, 'package.json')]: head }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('the main in package.json')
+    expect(host.calls.every((c) => c[0] !== 'bun')).toBe(true)
+  })
+
+  test('…and a `main` MAIN already carried keeps its nomination — the same comparison, not the basename', async () => {
+    // The load-bearing control: nearly every published manifest carries `main`,
+    // so refusing on its PRESENCE would cost every such repo its nomination.
+    const head = '{\n  "name": "x",\n  "main": "./src/index.ts",\n  "dependencies": { "zod": "^4" }\n}\n'
+    const { prover } = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'package.json': PKG_MAIN_BASE } },
+      bunFs({ [join(BUN_WT, 'package.json')]: head }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.reason ?? '').not.toContain('package.json')
+    expect(evidence.proved).toBe(true)
+  })
+
+  test('a manifest this branch ADDS is refused with a remedy that EXISTS — nothing to restore it to', async () => {
+    // The refusal used to tell an added file to "restore <key> to what main
+    // carries". For a file main does not have, that names nothing, and both
+    // remedies it offered were impossible — which is this card's own defect,
+    // re-created in a refusal string.
+    const { prover } = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: {} },
+      bunFs({ [join(BUN_WT, 'packages/newpkg/package.json')]: '{\n  "exports": { ".": "./index.ts" }\n}\n' }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'packages/newpkg/package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('NEW on this branch')
+    expect(evidence.reason).not.toContain('restore exports')
   })
 
   test('a branch-authored config with NO load hook keeps its nomination — the KEY is what is refused', async () => {
@@ -4461,9 +4640,15 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     // Byte-identical worktree, byte-identical claim: only the git-derived file
     // list differs. Without this row the assertion above would pass just as
     // happily on a gate that refused every bun nomination outright.
+    //
+    // WHAT IT PRELOADS IS A FILE THIS DIFF DOES NOT TOUCH, which is the shape a
+    // repository that merely ships a bunfig actually has. An inherited preload
+    // aimed at a file the BRANCH rewrites is a different question with its own
+    // rows above — the config being main's does not make the code it runs
+    // main's.
     const fs = memFs({
       [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE,
-      [join(proofWorktreePath('/repo', RUN), 'bunfig.toml')]: '[test]\npreload = ["./src/limit.ts"]\n',
+      [join(proofWorktreePath('/repo', RUN), 'bunfig.toml')]: '[test]\npreload = ["./tests/support/noop.ts"]\n',
     })
     const out = await runMutationProofGate({
       run: RUN,
