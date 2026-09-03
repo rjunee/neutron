@@ -434,6 +434,15 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // `node --test` with the package.json forgery `bun test` was refusing,
       // because the arm was gated on `argv[0] === 'bun'`.
       expect(['node manifest arm', d.includes('refuses `node --test` too')]).toEqual(['node manifest arm', true])
+      // …ALL THREE KEYS ON THAT SIDE. `MANIFEST_HOOK_KEY` is asked of a node
+      // nomination too, `main` included, while the sentence named only
+      // `imports`/`exports` — enforcement stricter than the contract, which
+      // reads to a build as an unexplained refusal. Both existing `main` tests
+      // used bun guards, so nothing red when the wording and the list diverged.
+      expect(['node manifest arm names main', d.includes('`imports`/`exports`/`main` map refuses `node --test`')]).toEqual([
+        'node manifest arm names main',
+        true,
+      ])
       // THE SPELLINGS AND THE SECOND MAP, pinned literally because two seats
       // forged a full `proved: true` past the first wording of this arm: the
       // defence matched ONE spelling of `preload` while the parser accepts four,
@@ -548,7 +557,24 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
         'a wrapper is not a legal guard',
         true,
       ])
+      // …AND THE LIMIT ON THAT PERMISSION. The sentence above used to end "a
+      // control merely has to stay green", which a seat read as licence and
+      // then forged a full `proved: true` out of: a control is branch-authored
+      // code running BETWEEN the guard's red and its green, and one whose module
+      // body rewrote the guard's own test file made the restored guard green
+      // with nothing having tested the target. A build told only "a wrapper is
+      // a legal control" would write exactly that shape.
+      expect(['a control may not write into the tree', d.includes('MAY NOT WRITE INTO THE WORKTREE')]).toEqual([
+        'a control may not write into the tree',
+        true,
+      ])
+      expect(['and the proof refuses it', d.includes('REFUSES OUTRIGHT')]).toEqual(['and the proof refuses it', true])
     }
+    // Two-sided: the fence really exists on the prover side, in the words its
+    // refusal uses, so the sentence cannot drift into a promise the gate does
+    // not keep.
+    expect(PROVER_SRC).toContain('the worktree changed underneath the proof')
+    expect(PROVER_SRC).toContain('function shapeDrift(')
     // Two-sided: the prover really refuses the wrapper for the GUARD only, so
     // the sentence above cannot drift into a permission the gate does not give.
     expect(PROVER_SRC).toContain('function guardRunsTheMutatedFile(')

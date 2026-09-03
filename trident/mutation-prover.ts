@@ -268,6 +268,13 @@ function isNodeRunOption(arg: string): boolean {
  * two real families are listed: a `[cm]` prefix takes no `x` (`.cjs`, `.cts`,
  * `.mjs`, `.mts`) and the bare form takes an optional one (`.js`, `.jsx`,
  * `.ts`, `.tsx`).
+ *
+ * `_test.rs` IS DELIBERATELY ABSENT, and the guard side is where that lands:
+ * cargo collects `#[test]` functions from any module, so `src/pricing_test.rs`
+ * is production here and a legal TARGET — while its only plausible guard is
+ * `cargo test`, which COMPILES the crate before it runs anything. See the
+ * compile-tautology note in `guardRunsTheMutatedFile`: that guard is latent,
+ * deferred, and unreachable in this bun-only repository.
  */
 const TEST_BASENAME = /\.(test|spec)\.(?:[cm][jt]s|[jt]sx?)$|_test\.(go|py)$/
 
@@ -830,6 +837,17 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
     if (forwardsPositionalsToAScript(guard)) {
       return `runs ${guard[0]}, whose script body the branch wrote and this argv does not show, and so may load`
     }
+    // A COMPILED LANGUAGE'S RUNNER IS A COMPILE FIRST, and this arm knowingly
+    // lets it through. `go test` / `cargo test` build the whole package or
+    // crate before a test runs, so a syntax-shaped mutation of ANY `.go`/`.rs`
+    // file in it reddens the guard through COMPILATION with nothing asserting
+    // the target's behaviour. It is not closed here because closing it lexically
+    // means refusing `go`/`cargo` as a guard for every target in such a repo —
+    // which IS the "no legal nomination" defect this whole card exists to fix,
+    // paid a second time. It is unreachable in this bun-only tree (no toolchain,
+    // so the restored guard reds too and `evaluate` refuses), recorded as a
+    // deferral in IMPLEMENTATION_PLAN.md, and it belongs to a card that can
+    // reason about a compile-unit target and its guard together.
     return null
   }
   const selectors = pathArgs(guard)
@@ -2576,6 +2594,46 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     return { ...e, proof_token: createHmac('sha256', key).update(canonicalPayload(e)).digest('hex') }
   }
 
+  /**
+   * WHAT GIT SAYS THE WORKTREE LOOKS LIKE, as a sorted set of porcelain lines.
+   *
+   * The proof's whole logic is "one file changed, and only one": the guard reds
+   * under the mutation and greens once the mutation is gone. Between those two
+   * observations the CONTROL runs — branch-authored code, by construction — and
+   * until this fence existed the only thing re-checked afterwards was
+   * `claim.file`'s own digest. So a control whose module body rewrote the
+   * GUARD'S TEST FILE into a passing one forged `proved: true` end to end:
+   * guard red (mutated), control green, guard green (restored) — with nothing
+   * having tested the target. `make …` and any test file are deliberately legal
+   * controls, and a test file's module body runs on load, so the shape was
+   * reachable with no shell and no hook.
+   *
+   * The proof worktree is a FRESH detached checkout of `headSha`, so this is
+   * near-empty on the way in; comparing the two snapshots rather than demanding
+   * emptiness is what keeps an injected `run_host` (which answers `git status`
+   * with whatever a test wired) from changing behaviour: two identical answers,
+   * however unhelpful, describe a tree that did not move. Untracked-but-ignored
+   * paths (`node_modules/`, caches) are not reported by `--porcelain`, so an
+   * honest test run's own scratch does not trip it.
+   */
+  async function worktreeShape(wt: string): Promise<string[]> {
+    const res = await deps.run_host(['git', '-C', wt, 'status', '--porcelain'], wt)
+    if (!res.ok) return [`git status unavailable (exit ${res.exit_code})`]
+    return res.stdout
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0)
+      .sort()
+  }
+
+  /** Every line present in exactly one of the two snapshots, sorted. */
+  function shapeDrift(before: readonly string[], after: readonly string[]): string[] {
+    const b = new Set(before)
+    const a = new Set(after)
+    const drift = [...before.filter((l) => !a.has(l)), ...after.filter((l) => !b.has(l))]
+    return [...new Set(drift)].sort()
+  }
+
   function refuse(run_id: string, claim: MutationClaim, reason: string): MutationEvidence {
     return sign({
       schema: MUTATION_PROOF_SCHEMA,
@@ -3078,6 +3136,12 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `mutating ${claim.file} did not change its bytes — the mutation did not apply`)
     }
 
+    // THE TREE AS IT STANDS BEFORE A SINGLE BYTE MOVES. Read here, and again
+    // below before the restored guard runs: everything between the two is the
+    // window in which the guard's red and its green are supposed to differ by
+    // the mutation ALONE — see `worktreeShape`.
+    const shapeBefore = await worktreeShape(wt)
+
     try {
       await fs.write(target, mutated)
     } catch (err) {
@@ -3103,6 +3167,22 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `could not re-read ${claim.file} after restoring it`)
     }
     const restoredSha = sha256(restored)
+
+    // AND THE TREE AS IT STANDS NOW, before the restored guard is asked
+    // anything. A guard that greens because the control REWROTE it is not an
+    // observation of the mutation being gone, and the digest check above cannot
+    // see it: it looks at `claim.file` and at nothing else.
+    const drift = shapeDrift(shapeBefore, await worktreeShape(wt))
+    if (drift.length > 0) {
+      const named = drift.slice(0, 5).join(', ')
+      const rest = drift.length > 5 ? `, +${drift.length - 5} more` : ''
+      return refuse(
+        run_id,
+        claim,
+        `the worktree changed underneath the proof (${named}${rest}) — only ${claim.file} may change while a proof runs, so a control that writes into the tree cannot be told from one that proved anything: run the guard and the control against the tree as it is`,
+      )
+    }
+
     const guardRestored = await observe(claim.guard, wt, deadline)
 
     const observed: MutationObservations = {

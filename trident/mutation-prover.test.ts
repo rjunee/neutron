@@ -140,6 +140,13 @@ interface HostScript {
   /** file text `git show <merge-base>:<path>` reports — what the BASE carried.
    *  A path absent here reads as "the base did not have this file". */
   baseFiles?: Record<string, string>
+  /** `git status --porcelain` for the FIRST snapshot, taken before the mutation
+   *  is written. Absent → a clean worktree, which is what a fresh detached
+   *  checkout of the head actually is. */
+  statusBefore?: string
+  /** …and for the SECOND, taken after the control ran and before the restored
+   *  guard runs. Absent → identical to the first: a tree that did not move. */
+  statusAfterControl?: string
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -148,11 +155,17 @@ function scriptedHost(s: HostScript = {}): {
 } {
   const calls: string[][] = []
   let guardRuns = 0
+  let statusRuns = 0
   return {
     calls,
     async run(cmd) {
       calls.push(cmd)
       if (cmd.includes('rev-parse')) return s.headUnresolvable === true ? res(1) : res(0, `${HEAD}\n`)
+      if (cmd.includes('status')) {
+        statusRuns += 1
+        const before = s.statusBefore ?? ''
+        return res(0, statusRuns === 1 ? before : (s.statusAfterControl ?? before))
+      }
       if (cmd.includes('worktree')) {
         if (cmd.includes('add')) return s.worktreeAddFails === true ? res(1) : res(0)
         return res(0)
@@ -215,6 +228,31 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     expect(joined.filter((c) => c.includes('worktree remove')).length).toBe(2)
   })
 
+  test('a control that WRITES INTO THE TREE between the guard\'s red and its green is refused', async () => {
+    // THE FORGERY THIS FENCES. The control is branch-authored code that runs
+    // BETWEEN the two guard observations, and the only thing re-checked
+    // afterwards was `claim.file`'s digest — so a control whose module body
+    // rewrote the GUARD'S OWN TEST FILE into a passing one produced red,
+    // green, green with nothing having tested the target. A test file is a
+    // legal control and its module body runs on load, so no shell and no load
+    // hook were needed. Here the second `git status` reports that file dirty.
+    const { prover } = proverOver({ statusAfterControl: ' M tests/guard.test.ts\n' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('the worktree changed underneath the proof')
+    // It NAMES what moved, so the next build is not left guessing.
+    expect(evidence.reason).toContain('tests/guard.test.ts')
+    expect(evidence.observed).toBeNull()
+
+    // POSITIVE CONTROL, on the same seed: with the tree standing still the very
+    // same claim proves. Without this row, deleting the fence's `if` would leave
+    // the assertions above the only thing this file says about drift, and a
+    // fence that refused EVERY proof would pass them.
+    const still = await proverOver().prover.prove({ run: RUN, claim: CLAIM })
+    expect(still.proved).toBe(true)
+    expect(still.reason).not.toContain('the worktree changed underneath the proof')
+  })
+
   test('the guard that stays GREEN under the mutation is not a guard → not proved', async () => {
     const { prover } = proverOver({ guardMutated: 0, guardMutatedOut: '4 pass' })
     const evidence = await prover.prove({ run: RUN, claim: CLAIM })
@@ -251,6 +289,10 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
       run_host: async (cmd) => {
         if (cmd.includes('rev-parse')) return res(0, HEAD)
         if (cmd.includes('worktree')) return res(0)
+        // …and `git status` is the drift fence's own read of the worktree, not
+        // a command the claim nominated: it answers, so the ONLY thing hanging
+        // here is the guard.
+        if (cmd.includes('status')) return res(0)
         // The guard never resolves.
         return new Promise<HostCommandResult>(() => {})
       },
@@ -809,6 +851,48 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     expect(evidence.reason).toContain('package.json')
     expect(evidence.reason).toContain('imports')
     expect(host.calls.every((c) => c[0] !== 'node')).toBe(true)
+  })
+
+  test('…and `main` is the third key on the NODE side too — the boundary the contract now states', async () => {
+    // THE ENFORCEMENT/CONTRACT GAP a seat found: `MANIFEST_HOOK_KEY` carries
+    // three keys and applies to node nominations, while the forge contract said
+    // only `imports`/`exports` refuse `node --test`. Both `main` tests were bun
+    // guards, so nothing pinned this side and the wording could drift back
+    // without a red. It refuses — with no `exports` map present node's CJS
+    // resolver falls back to `main`, which is how the key entered this list.
+    const { prover, host } = proverOver(
+      {},
+      bunFs({ [join(BUN_WT, 'package.json')]: '{\n  "main": "./src/limit.ts"\n}\n' }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: NODE_CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('the main in package.json')
+    expect(host.calls.every((c) => c[0] !== 'node')).toBe(true)
+
+    // POSITIVE CONTROL: a `main` the BASE already carried costs the same node
+    // nomination nothing — otherwise this arm would refuse every published
+    // manifest and the row above would pass for the wrong reason.
+    const inherited = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'package.json': '{\n  "main": "./src/limit.ts"\n}\n' } },
+      bunFs({ [join(BUN_WT, 'package.json')]: '{\n  "main": "./src/limit.ts",\n  "version": "2.0.0"\n}\n' }),
+    )
+    const kept = await inherited.prover.prove({
+      run: RUN,
+      claim: NODE_CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    // A non-null `observed` is the proof it got PAST this arm and the runner
+    // actually ran (the scripted host answers only the bun argv, so the node
+    // guard's own exit codes say nothing here — see the bunfig row below).
+    expect(kept.reason).not.toContain('the main in package.json')
+    expect(kept.observed).not.toBeNull()
   })
 
   test("…but a bunfig and a tsconfig are BUN's alone — node reads neither, so neither refuses it", async () => {
