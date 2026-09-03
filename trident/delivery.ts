@@ -38,6 +38,7 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { isPublishedUnreviewedReason } from './fire-evidence.ts'
 import {
   TRIDENT_SALVAGE_MARKER,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
@@ -102,6 +103,25 @@ export type FailureClass =
    * from the `failure_reason` string, and the only one composed with 🚧 instead of ❌.
    */
   | 'infra-blocked'
+  /**
+   * THE WORK WAS BUILT AND PUSHED; ONLY THE REVIEW NEVER RAN. A launcher settle
+   * timeout landed on a row that already carried an `outer-published:<sha>:0:<round>`
+   * checkpoint (`fire-evidence.ts`), so the branch is on origin and the PR exists at
+   * that sha. Recorded under phase `failed` because there is no other terminal phase
+   * for "not merged", but it is NOT a failure and must not wear ❌ — the second class
+   * (with `infra-blocked`) composed under its own glyph.
+   *
+   * WHERE THIS LIVES, AND WHY IT IS NOT `trident/run-disposition.ts` (Argus r8
+   * minor). The card names that module as the state's home, on the strength of a
+   * SIBLING card introducing it at the write site. That module does not exist on
+   * this branch, and inventing an empty one to hold a single union member would
+   * have made the two cards conflict over a file neither had landed. So the
+   * state is spelled HERE, as one more `FailureClass` over the existing columns —
+   * no new column, no backfill, no second NAME for "built and published, review
+   * not run". When the sibling lands `run-disposition.ts`, fold this member into
+   * it; this note is the cross-reference that says so.
+   */
+  | 'published-unreviewed'
   | 'underspecified'
   /**
    * THE BUILD NEVER STARTED — the wrong-base launch guard refused because the branch is
@@ -636,6 +656,29 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE WORK WAS BUILT AND PUSHED — ONLY THE REVIEW NEVER RAN. The launcher's
+  // settle timeout fired over a row that already carried an `outer-published:…`
+  // checkpoint (`fire-evidence.ts`), so the branch is on origin and the PR exists
+  // at that sha. CHECKED EARLY and by the marker `publishedFailureReason` authors,
+  // because the generic tail would otherwise offer `retry` — inviting exactly the
+  // rebuild the rest of this seam exists to prevent, one line under a summary that
+  // says the work is already done. THE TWO HALVES MUST MOVE TOGETHER: the
+  // predicate is exported from `fire-evidence.ts` and imported here rather than
+  // retyped — and it ANCHORS on the head `publishedFailureReason` writes rather
+  // than looking for the marker anywhere in the string, so substrate text that
+  // merely QUOTES the token (this repo builds itself, and the crash-recovery
+  // reason below embeds substrate output verbatim) cannot claim a failed build
+  // was published.
+  if (isPublishedUnreviewedReason(r)) {
+    return {
+      klass: 'published-unreviewed',
+      summary:
+        'This build finished and pushed its work — the review round never ran, so I did not merge it.',
+      input_needed:
+        'Check the PR at its pushed commit and send it for review. Do not rebuild it: the work is already published.',
+    }
+  }
+
   // THE SUPERVISOR DIED REPEATEDLY AND THE RECOVERY BUDGET RAN OUT.
   // Checked EARLY and by its own token, because this reason deliberately EMBEDS the
   // latched launcher-crash text — whatever the substrate said — and that text is not
@@ -867,6 +910,15 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       if (interp.klass === 'infra-blocked') {
         return {
           text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}\n${interp.input_needed}${trail}`,
+        }
+      }
+      // A FINISHED, PUSHED BUILD IS NOT A FAILURE EITHER. The words already said
+      // "this build finished and pushed its work"; leading them with ❌ told the
+      // owner the opposite of the sentence underneath. Same carve-out shape as
+      // `infra-blocked` above — every other class keeps the ❌ line byte-identical.
+      if (interp.klass === 'published-unreviewed') {
+        return {
+          text: `📦 ${title} — built and pushed; the review never ran, so it is not merged.\n${interp.summary}\n${interp.input_needed}${trail}`,
         }
       }
       return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }

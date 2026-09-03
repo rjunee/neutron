@@ -893,9 +893,12 @@ and is not reused here.
      "I looked and there was nothing" and "I could not look" are different facts and an EMPTY
      check must never read as a PASSING check. Already typed:
      `trident/run-evidence.ts:44-47` (`observed: 'activity' | 'nothing' | 'unknown'`), with the
-     doctrine at `:21-26`. Representative violating site: `gateway/cores/integrations.ts:155`
-     (`connected` is a stored presence check for API-key slots — see the note at `:409-413` — so
-     a revoked credential reads healthy).
+     doctrine at `:21-26`. A probe that returned nothing reports UNKNOWN WITH A REASON, never an
+     implicit negative and never an implicit pass; the shape to copy is the PR-readiness parse,
+     which returns `{ status: 'unknown', reason }` on an unreadable probe rather than a negative
+     (`trident/inner-workflow.mjs:4041-4047`). Representative violating site:
+     `gateway/cores/integrations.ts:155` (`connected` is a stored presence check for API-key slots
+     — see the note at `:409-413` — so a revoked credential reads healthy).
      Protects: `trident/run-evidence.test.ts` (the type and the watchdog's use of it); every
      other consumer is **unprotected — covered by review only**.
 120. A recorded fact names its producer. A stored value that cannot say which probe observed it
@@ -939,9 +942,18 @@ and is not reused here.
      `:1248`). The write site is chosen precisely because it is unavoidable, and the store says so
      about its own residual gap at `trident/store.ts:1019-1021`: the guard "makes findings-free
      rejection structurally unwritable by in-process writers; `checkpoint.sh` remains
-     out-of-process SQL and bypasses it by construction". That residue is why #125 exists.
+     out-of-process SQL and bypasses it by construction". The bypass is accepted as an argument at
+     `trident/checkpoint.sh:182` and pinned as a known bypass by `trident/store.test.ts:1053`;
+     closing it is the work this line asks for, and that residue is why #125 exists. Note also what
+     the guard is NOT: it does not itself record the honest sibling row, because substituting
+     `REVIEW_NOT_RUN` is a separate decision one layer up, in `recordedTerminalVerdict`
+     (`trident/orchestrator.ts:912`, applied at `:3972`) — see #128 on why that sibling has to
+     exist at all. What the pair prevents is measured, not hypothetical: the superseded
+     findings-non-empty test recorded 113 never-reviewed runs as reviewed-and-rejected, which "is
+     what makes an un-reviewed queue read as reviewed-and-rejected"
+     (`trident/orchestrator.ts:2534-2540`).
      Protects: `trident/store.test.ts:918` ("empty-findings rejection guard — an empty finding set
-     is never a rejection").
+     is never a rejection") and `:1053` (the bypass, pinned rather than closed).
 125. An enforcement point must be UNWIREABLE-OFF. Only two qualify, and each covers the other's
      blind spot exactly: (a) the TYPE at the construction site — always on, a missing field is a
      compile error, blind to out-of-process writers such as `trident/checkpoint.sh:300`, which
@@ -979,7 +991,14 @@ and is not reused here.
      never ancestry against `main`: a squash-merge severs ancestry while the work is in `main`.
      The consumed field `mergeable` names the hazard in the other direction — it is
      "no textual conflict when GitHub last computed it" and says nothing about whether the checks
-     are still valid (`trident/gh-authed.ts:46-52` documents the read).
+     are still valid (`trident/gh-authed.ts:46-52` documents the read). AGE IS PART OF THAT
+     IDENTITY, so a consumer of a RECORDED value declares the maximum observation age it accepts;
+     age is provenance, not metadata. Note the two grades in play at the live consumer:
+     `classifyReviewReadiness` (`trident/inner-workflow.mjs:4017`, mergeability read at
+     `:4061-4065`) consumes what `probeReviewReadiness` (`:4708-4712`) fetched, so the PROBE is
+     OBSERVED — it runs now — while the VALUE is GitHub's own RECORDED mergeability computed at a
+     time GitHub does not expose. The consumer cannot state an age bound even if it wanted to,
+     which is exactly the gap this line names.
      Protects: **unprotected — covered by review only.**
 128. SATISFIABILITY IS PART OF THE GUARD. A guard that refuses a dishonest encoding must name the
      honest sibling row that is written instead, and it does not ship until a test enumerates the
@@ -1008,7 +1027,9 @@ that was never recorded, so these are the same contract seen from the write side
      `ok()` returns `{ ok: true }` both when a write landed and when it did not — and `:456-457`
      is the worse case: the reorder path discards `store.reorder()`'s result entirely and returns
      the bare shape unconditionally. An agent that cannot distinguish "reordered" from "did
-     nothing" re-fires the call.
+     nothing" re-fires the call. A bare FAILURE value is the same defect: `saveIfActive` returns a
+     bare `false` when the row has already reached a terminal phase (`trident/store.ts:1223`),
+     naming neither the phase nor the predicate that rejected the write.
      Protects: **unprotected — covered by review only.**
 130. NO ACTION MAY SILENTLY DO NOTHING: a call whose precondition is unmet is structurally
      incapable of returning success. The reference implementation already exists in this tree, in
@@ -1024,19 +1045,31 @@ that was never recorded, so these are the same contract seen from the write side
      attributes a refusal to the layer below is worse than no message: it sends the reader to the
      wrong subsystem. `agent-dispatch/tool.ts:127-133` is the shape to copy — the missing
      `board_item_id` refusal names the missing thing and what to do about it.
-     `trident/codex-build.sh:1165` is the shape to fix: a refusal that names the holding worktree
-     in its prose while its token, `CODEX_BUILD_BRANCH_UNBOUND`, still points the reader at the
-     executor.
+     `CODEX_BUILD_BRANCH_UNBOUND` is the shape to fix: it is emitted from EIGHT sites in
+     `trident/codex-build.sh` over at least three different causes — the branch held by the SHARED
+     main checkout, which is a positively known fact and no UNKNOWN at all (`:1165`); a worktree
+     holding it, either with a live process observed (`:1183`, a positive observation) or with no
+     way to prove one absent (`:1187`, the one genuine UNKNOWN, whose probe is `holder_is_live`);
+     and plain `ls-remote`/checkout/create failures with no worktree involved (`:1205`, `:1213`,
+     `:1220`, `:1226`, `:1232`). Each message does name its own cause in prose; the TOKEN a reader
+     greps for names the executor for all eight. A stale worktree that no longer exists is pruned
+     silently and emits nothing.
      Protects: **unprotected — covered by review only.**
 132. IDENTITY IS RESOLVED, NEVER TYPED. An action that takes a branch, a card, a project or a PR
      resolves the name to an identity and reports what it resolved to, before acting. A typed
      branch name and a card id belonging to another scope are the same defect — an unresolved
-     name accepted as an identity — and one of them force-updates a ref.
+     name accepted as an identity — and one of them force-updates a ref. The conforming site to
+     copy: the Work Board's storage scope is derived from the composing context and is "NEVER an
+     agent-supplied argument" (`work-board/agent-tool.ts:18-20`). The gap: a tool registration has
+     nowhere to declare what a name argument resolves to (`tools/registry.ts:97-112`).
      Protects: **unprotected — covered by review only.**
 133. PRECONDITIONS AND EFFECT ARE VISIBLE IN THE DECLARATION, BEFORE THE CALL — never discovered
      from the call's silence or its wreckage. If a relaunch derives its branch from a card's
      design-doc slug rather than from the failed run's branch, the declaration says so, because
-     the agent has to know that before the call cuts a new branch off `main`.
+     the agent has to know that before the call cuts a new branch off `main`. The declaration
+     surface that would carry it exists and does not: `ToolRegistration`
+     (`tools/registry.ts:97-112`) declares name, schemas, capability and approval policy — and no
+     preconditions and no effect.
      Protects: **unprotected — covered by review only.**
 134. A COMMISSION DECLARES ITS ARTEFACT, AND ITS GRANT IS RECORDED BY THE SPAWNER. A delegation to
      another agent is a state change like any other, so: (a) the request declares the artefact it

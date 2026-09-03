@@ -14,9 +14,11 @@ the upstream system and the exact source file a pattern came from, e.g.:
 Those citations are **intentional traceability** — they are not scrubbed. This
 file is the decoder ring for the codenames they use.
 
-> Note: these are lineage/provenance names only. They do **not** name any live
-> module, package, or API in this repo — every shipped surface is under the
-> `neutron` / `@neutronai/*` namespace.
+> Note: the codenames below are lineage/provenance names only. They do **not**
+> name any live module, package, or API in this repo — every shipped surface is
+> under the `neutron` / `@neutronai/*` namespace. The final section is the one
+> exception, and it is here because this file is where a reader already comes to
+> find out what a name really means.
 
 > Second decoder, added 2026-08-31: ["Names whose plain reading is
 > false"](#names-whose-plain-reading-is-false) at the foot of this file covers the opposite
@@ -139,16 +141,20 @@ these entries are being moved toward is `docs/INVARIANTS.md` §12 (the honesty c
 (the action contract); a name below that survives is a line in §12 that is not yet closed.
 
 - **`last_advanced_at`** (`code_trident_runs`) — reads as "when this run last showed life".
-  Means "when this run last crossed a checkpoint boundary". It is "stale by construction during a
-  long Forge step, so a reaper keyed on it asks 'has a phase ended recently', not 'is anything
-  alive'" (`trident/store.ts:562-567`; same reasoning at `trident/liveness.ts:24`). Mid-phase
-  stage events are the positive liveness evidence this column is not.
+  Means "when this run last crossed a checkpoint boundary". Mechanically it is stamped on EVERY
+  store write (`trident/store.ts:999`), but a long build round performs none, so in practice it
+  moves only between phases: it is "stale by construction during a long Forge step, so a reaper
+  keyed on it asks 'has a phase ended recently', not 'is anything alive'"
+  (`trident/store.ts:562-567`; same reasoning at `trident/liveness.ts:24`). Mid-phase stage events
+  are the positive liveness evidence this column is not.
 - **`inner_verdict = 'REQUEST_CHANGES'`** (`trident/store.ts:49`) — reads as "a reviewer read this
   work and rejected it". On historical rows it is also written when the run never reached a
   reviewer at all. New writes with an empty findings list are now refused at the store
   (`TridentEmptyFindingsRejectionError`, `trident/store.ts:58`); rows written before that guard
   are deliberately not rewritten, because they are the measurement evidence
-  (`migrations/0138_code_trident_runs_review_not_run.sql:4-8`).
+  (`migrations/0138_code_trident_runs_review_not_run.sql:4-8`). The guard binds in-process writers
+  only — `checkpoint.sh` updates the same column with raw out-of-band SQL (`trident/checkpoint.sh:182`)
+  and bypasses it by construction, pinned as a known bypass by `trident/store.test.ts:1053`.
 - **`REVIEW_NOT_RUN`** (`trident/store.ts:49`) — reads as "the run failed before it built
   anything". Means only "no reviewer produced a verdict on this row": per `trident/store.ts:147-152`
   it covers crash, infrastructure stop, provenance reject or a lost round, and "it is never a
@@ -166,9 +172,11 @@ these entries are being moved toward is `docs/INVARIANTS.md` §12 (the honesty c
   now". For API-key slots it is a presence check against the stored rows, not a probe — see the
   docblock at `:409-413`. A revoked key reads `connected: true` until something exercises it.
   (OAuth slots do a live read, so the same field carries two different grades.)
-- **`mergeable` / `MERGEABLE`** (GitHub PR field; read via `trident/gh-authed.ts:46-52`) — reads
-  as "safe to merge". Means "no textual conflict, when GitHub last computed it". It says nothing
-  about whether the checks attached to the PR still describe the current head.
+- **`mergeable` / `MERGEABLE`** (GitHub PR field; read via `trident/gh-authed.ts:46-52`, probed at
+  `trident/inner-workflow.mjs:4708-4712`, consumed at `:4061-4065`) — reads as "safe to merge".
+  Means "no textual conflict, when GitHub last computed it". It says nothing about whether the
+  checks attached to the PR still describe the current head, and GitHub does not expose WHEN it
+  computed the value — so a consumer cannot even state an age bound on it.
 - **`phase = 'done'`** (`code_trident_runs`) — reads as "this run's work shipped". Means "this run
   reached its own terminal success phase". The two diverge in both directions: work lands in
   `main` from runs recorded failed, because the merged PR was squashed and ancestry no longer
@@ -179,10 +187,15 @@ these entries are being moved toward is `docs/INVARIANTS.md` §12 (the honesty c
   repository": `trident/merge.ts:906` places it at `<repo>/.trident-worktrees/<slug>-<id8>`, so it
   shares the git object store, the ref namespace, `node_modules`, the process environment and the
   temp directory with the checkout it was cut from. It is a directory boundary, not a sandbox.
-- **`CODEX_BUILD_BRANCH_UNBOUND`** (`trident/codex-build.sh:1165`) — reads as an executor fault
-  ("the build could not bind its branch"). Means "another worktree already holds this branch, so
-  we refused before spending anything". The message names the holding worktree; the token still
-  sends the reader to the wrong subsystem.
+- **`CODEX_BUILD_BRANCH_UNBOUND`** (`trident/codex-build.sh`, eight emission sites) — reads as an
+  executor fault ("the build could not bind its branch"). Is one token over at least three
+  unrelated causes: the branch is held by the SHARED main checkout (`:1165`), or by another
+  worktree — either with a live process observed (`:1183`) or with no way to prove one absent
+  (`:1187`) — or an ordinary `ls-remote`/checkout/create failed with no worktree involved
+  (`:1205`–`:1232`). Each message names its own cause and the refusal is cheap ("DEFERRED before
+  any tokens were spent"); the token a reader greps for names the executor for all eight and sends
+  them to the wrong subsystem. A stale worktree that no longer exists is pruned silently and emits
+  nothing.
 - **`capability_gate`** (`mcp/server.ts:78`) — reads as a gate. Is not one: the default is
   `?? (() => true)` and the sole production construction site passes no gate
   (`gateway/composition/build-core-modules.ts:360-364`). The source says so — "LOG-ONLY … it does

@@ -6794,6 +6794,10 @@ export function buildOpenGraphComposer(
               fire_inner_workflow: tridentFireInnerWorkflow,
               on_run_terminal: tridentOnRunTerminal,
               on_terminal_wake: terminalBuildWake,
+              // The SAME sweep the terminal chain runs, also on the tick's own
+              // cadence — the only trigger a worktree-only `branch_live` hold
+              // can ever have (a pid exiting fires no terminal observer).
+              drain_dispatch_holds: () => tridentHoldSweep(),
               // PULL launcher-death detection covers missed push events instead
               // of leaving the lane occupied until the 90-minute reaper.
               probe_launcher_alive: buildTridentLauncherLivenessProbe(),

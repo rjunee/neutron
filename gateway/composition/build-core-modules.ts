@@ -83,6 +83,7 @@ import { unwiredPublisherCredential } from '@neutronai/trident/git-mode.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { countActiveBuildRuns } from '@neutronai/trident/active-runs.ts'
 import { buildRunEvidenceGatherer } from '@neutronai/trident/run-evidence-probes.ts'
+import { buildFireEvidenceGatherer, defaultBranchHolderProbe } from '@neutronai/trident/fire-evidence-probes.ts'
 import { buildWorktreeReaperLoop } from '@neutronai/trident/worktree-reaper.ts'
 import { TaskStore } from '@neutronai/tasks/store.ts'
 import {
@@ -654,6 +655,29 @@ export function buildCoreModules(
           // it through a canned stub would let bookkeeping impersonate evidence
           // again, which is the defect this card exists to fix.
           gather_run_evidence: buildRunEvidenceGatherer(),
+          // THE SETTLE-TIMEOUT EVIDENCE GATE'S PROBES (`fire-evidence-probes.ts`).
+          // UNCONDITIONAL, for the same reason as `gather_run_evidence` above: the
+          // orchestrator consults this seam only on the one settle-timeout error
+          // string and treats an absent, blind, or throwing gatherer as "no
+          // evidence" (today's plain `failed`), so gating the wire-up behind a flag
+          // would be how this fix ships green, tested, and inert in production.
+          //
+          // DEFAULT-CONSTRUCTED probes — deliberately NOT this wiring's `run_host`
+          // (the canned build-operation runner): the probes carry their own 15 s
+          // REAL-host bound, and evidence must observe the actual host or contribute
+          // nothing. The ONE injected piece is `read_run`, which must re-read the
+          // SAME store the orchestrator writes: the run's own row
+          // (`outer-published:…`, a moved workflow-owned column) is the cheapest
+          // evidence there is and needs no filesystem at all.
+          gather_fire_evidence: buildFireEvidenceGatherer({ read_run: (id) => store.get(id) }),
+          // THE SAME BRANCH-LIVENESS PROBE, AT ORPHAN RECOVERY. The settle-timeout
+          // hold lives in the orchestrator's in-memory `fired` set, so a restart
+          // turns a genuinely live lane into an orphan the default `redispatch`
+          // policy would fire a SECOND workflow over. The filesystem survives that
+          // restart; the set does not. Unconditional for the same reason as the
+          // gatherer above — a null/failed/non-live look redispatches exactly as
+          // before, so wiring it can only remove the double-lane case.
+          probe_branch_holder: (repo_path, branch) => defaultBranchHolderProbe(repo_path, branch),
         }
         // The hang watchdog's SECOND positive-liveness source: the same launcher
         // pid probe the 'trident-liveness' tick loop uses. The loop acts only on a
@@ -772,6 +796,12 @@ export function buildCoreModules(
           // landings, credential blinks, restarts). Wired ONLY here: the stub branch
           // runs no builds, so it has nothing staged to fold.
           fold_staged_as_built: buildAsBuiltCatchup(runHost),
+          // THE HOLD QUEUE'S SECOND TRIGGER. Wired ONLY on the real-orchestrator
+          // branch, for the same reason as `fold_staged_as_built`: the stub branch
+          // dispatches nothing, so it has nothing queued to drain.
+          ...(tridentWiring?.drain_dispatch_holds !== undefined
+            ? { drain_dispatch_holds: tridentWiring.drain_dispatch_holds }
+            : {}),
           ...transitionOpt,
           ...watchOpt,
           ...livenessOpt,
