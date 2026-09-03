@@ -1052,6 +1052,51 @@ function dottedStemOf(target: string): string | null {
 }
 
 /**
+ * DOES THE TREE ITSELF SUPPLY THE `-m` MODULE? The ELEVENTH escape of this
+ * family, and the same shape as every load hook before it: THE ARGV DOES NOT
+ * SHOW WHAT WILL EXECUTE. The repro, run against this branch's own gate: commit
+ * a `pytest/__main__.py` whose body is nothing but an import of the target,
+ * nominate `python3 -m pytest tests/unrelated_test.py` for a syntax-breaking
+ * mutation with an unrelated `unittest` control, and the proof comes back
+ * `proved: true` — guard red mutated, control green, guard green restored —
+ * with no test having asserted the target's behaviour. `-m` resolves the module
+ * from the working directory first, so the runner the argv names is
+ * branch-authored code. A runner the worktree can shadow is not evidence of a
+ * test runner.
+ *
+ * WHAT "COULD RESOLVE" MEANS is read off python's own finders for a single path
+ * entry, not guessed: a DIRECTORY named `<module>` (a regular package OR a
+ * NAMESPACE package — no `__init__.py` is required), a `<module>.py`, a
+ * sourceless `<module>.pyc`, and an extension module `<module>.so` or
+ * `<module>.<abi>.so`. `pytest.ini` and `conftest.py` match none of those and
+ * stay legal. MATCHING IS ON THE NAME, file or directory alike, because
+ * `ls-tree --name-only` does not distinguish them and python does not care: an
+ * extensionless FILE named `pytest` is an over-refusal, and it fails CLOSED —
+ * it is spellable around by renaming the entry. Only `python3` can reach here;
+ * every other python spelling is off the allowlist already.
+ *
+ * KNOWN RESIDUALS, named so the next reader does not re-derive them. Windows-
+ * only suffixes (`.pyw`, `.pyd`) are not probed — guards run on this host. The
+ * rootdir `conftest.py` pytest itself loads is the recorded config-with-no-flag
+ * residual. And DEPENDENCY shadowing — a committed `_pytest/`, or a stdlib name
+ * the real runner imports after startup — fails OPEN and is deliberately out of
+ * scope: this check constrains the NOMINATED MODULE'S OWN NAME, and the
+ * dependency surface is not enumerable from the argv. It belongs to a follow-up
+ * card.
+ */
+export function pythonModuleShadow(argv: readonly string[], topLevelNames: readonly string[]): string | null {
+  if (argv[0] !== 'python3' || argv[1] !== '-m' || typeof argv[2] !== 'string') return null
+  const top = argv[2].split('.')[0] ?? ''
+  if (top.length === 0) return null
+  for (const n of topLevelNames) {
+    if (n === top || n === `${top}.py` || n === `${top}.pyc` || (n.startsWith(`${top}.`) && n.endsWith('.so'))) {
+      return n
+    }
+  }
+  return null
+}
+
+/**
  * THE SPELLING A LOADER REWRITES: a `.js` specifier that loads a `.ts` file.
  * bun (and tsc's `allowImportingTsExtensions`-less resolution, and node's
  * type-stripping loaders) resolve `./tests/support/clamp.js` to
@@ -2272,6 +2317,41 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     const contained = await withinWorktree(target, wt)
     if (!contained) {
       return refuse(run_id, claim, `${claim.file} resolves outside the proof worktree (a symlink) — refusing to mutate it`)
+    }
+
+    // RUNNER PROVENANCE, read off the PINNED TREE. `-m` resolves the module
+    // from the working directory first, so a `python3 -m <mod>` argv does not
+    // say whose code will run — the tree's own top level does. The list comes
+    // from git, never from the agent; it is asked BEFORE anything is mutated or
+    // run; and a listing we could not read fails CLOSED.
+    const nominated: Array<[string, readonly string[]]> = [
+      ['guard', claim.guard],
+      ['control', claim.control],
+    ]
+    const pythonArgvs = nominated.filter(([, a]) => a[0] === 'python3' && a[1] === '-m')
+    if (pythonArgvs.length > 0) {
+      const ls = await deps.run_host(['git', '-C', wt, 'ls-tree', '--name-only', '-z', headSha], wt)
+      if (!ls.ok) {
+        return refuse(
+          run_id,
+          claim,
+          `could not read the top level of ${headSha.slice(0, 8)} to establish runner provenance for a python -m nomination — refusing rather than trusting a runner the worktree may shadow`,
+        )
+      }
+      const names = ls.stdout
+        .split('\0')
+        .map((n) => n.trim())
+        .filter((n) => n.length > 0)
+      for (const [which, argv] of pythonArgvs) {
+        const shadow = pythonModuleShadow(argv, names)
+        if (shadow !== null) {
+          return refuse(
+            run_id,
+            claim,
+            `claim.${which} python3 -m ${argv[2]} would run BRANCH-SUPPLIED code, not the installed runner: -m resolves the module from the working directory first, and this tree's own top level contains ${shadow} — a runner the worktree can shadow is not evidence of a test runner; rename ${shadow} or nominate a runner the tree cannot shadow`,
+          )
+        }
+      }
     }
 
     // THE TAUTOLOGY, RESOLVED. Before a single byte is mutated: does any guard

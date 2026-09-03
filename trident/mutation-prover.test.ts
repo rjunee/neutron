@@ -20,6 +20,7 @@ import {
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
   proofWorktreePath,
+  pythonModuleShadow,
   resolveMergeHeadSha,
   runMutationProofGate,
   spawnGuardCommand,
@@ -118,6 +119,10 @@ interface HostScript {
    *  indistinguishable, which the prover treats as impossible. */
   guardMutatedOut?: string
   guardRestoredOut?: string
+  /** top-level names `git ls-tree` reports for the pinned head. */
+  topLevel?: string[]
+  /** `git ls-tree` fails — the provenance probe must fail CLOSED. */
+  lsTreeFails?: boolean
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -135,6 +140,7 @@ function scriptedHost(s: HostScript = {}): {
         if (cmd.includes('add')) return s.worktreeAddFails === true ? res(1) : res(0)
         return res(0)
       }
+      if (cmd.includes('ls-tree')) return s.lsTreeFails === true ? res(1) : res(0, (s.topLevel ?? []).join('\0'))
       if (cmd.join(' ') === CLAIM.guard.join(' ')) {
         guardRuns += 1
         return guardRuns === 1
@@ -313,6 +319,93 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     const prover = createMutationProver({ run_host: host.run, fs })
     await prover.prove({ run: RUN, claim: CLAIM })
     expect(fs.files[path]).toBe(SRC_BEFORE)
+  })
+})
+
+describe('a worktree that can SHADOW the -m module is not a test runner', () => {
+  const PY_GUARD = ['python3', '-m', 'pytest', 'tests/unrelated_test.py']
+  const PY_CONTROL = ['python3', '-m', 'unittest', 'tests/other_test.py']
+
+  test('THE REPRO: a committed pytest/ entry means python3 -m pytest is BRANCH-SUPPLIED', async () => {
+    const { prover, host } = proverOver({ topLevel: ['pytest', 'src', 'tests'] })
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: PY_GUARD, control: PY_CONTROL },
+    })
+
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+    expect(evidence.reason).toContain('pytest')
+    expect(evidence.reason).toContain('claim.guard')
+    // The probe FIRED — a check that silently never runs proves nothing.
+    expect(host.calls.some((c) => c.includes('ls-tree'))).toBe(true)
+    // …and nothing was executed.
+    expect(host.calls.every((c) => c[0] !== 'python3')).toBe(true)
+  })
+
+  const SHADOWING = ['pytest', 'pytest.py', 'pytest.pyc', 'pytest.so', 'pytest.cpython-312-x86_64-linux-gnu.so']
+  for (const entry of SHADOWING) {
+    test(`a top-level ${entry} shadows the module → refused`, async () => {
+      const { prover } = proverOver({ topLevel: [entry] })
+      const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+      expect(evidence.proved).toBe(false)
+      expect(evidence.observed).toBeNull()
+      expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+      expect(evidence.reason).toContain(entry)
+    })
+  }
+
+  const LEGAL = ['pytest.ini', 'pytest.json', 'pytest-fixtures', 'conftest.py', 'mypytest.py']
+  for (const entry of LEGAL) {
+    test(`a top-level ${entry} is not the module → the proof RUNS`, async () => {
+      const { prover, host } = proverOver({ topLevel: [entry] })
+      const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+      // Not `proved` — the scripted host exits 0 for an unrecognised argv — but
+      // the proof really ran, which is the property this row is defending.
+      expect(evidence.observed).not.toBeNull()
+      expect(evidence.reason).not.toContain('BRANCH-SUPPLIED')
+      // POSITIVE CONTROL against an empty extraction: the probe DID fire here,
+      // so "legal" means the check looked and found nothing, not that it slept.
+      expect(host.calls.some((c) => c.includes('ls-tree'))).toBe(true)
+    })
+  }
+
+  test('the CONTROL side is read too — a shadowed unittest is refused', async () => {
+    const { prover } = proverOver({ topLevel: ['unittest'] })
+    const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, control: PY_CONTROL } })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('claim.control')
+    expect(evidence.reason).toContain('unittest')
+  })
+
+  test('a top level we could not read FAILS CLOSED', async () => {
+    const { prover } = proverOver({ lsTreeFails: true })
+    const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('runner provenance')
+  })
+
+  test('SCOPE: an all-bun claim never asks for the tree listing, and still proves', async () => {
+    const { prover, host } = proverOver()
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.observed).not.toBeNull()
+    expect(host.calls.every((c) => !c.includes('ls-tree'))).toBe(true)
+  })
+
+  test('pythonModuleShadow — the predicate itself, both directions', () => {
+    for (const entry of SHADOWING) {
+      expect([entry, pythonModuleShadow(PY_GUARD, [entry, 'src'])]).toEqual([entry, entry])
+    }
+    for (const entry of LEGAL) {
+      expect([entry, pythonModuleShadow(PY_GUARD, [entry, 'src'])]).toEqual([entry, null])
+    }
+    // Not a python -m argv at all.
+    expect(pythonModuleShadow(['bun', 'test', 'x'], ['pytest'])).toBeNull()
+    // The module asked about is the one that must be shadowed.
+    expect(pythonModuleShadow(['python3', '-m', 'unittest'], ['pytest'])).toBeNull()
   })
 })
 

@@ -522,6 +522,65 @@ describe('the mutation-proof gate against real git', () => {
     expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
+  test('a committed pytest/ package IS the runner, and the -m guard is refused before anything runs', async () => {
+    // THE BYPASS THIS CLOSES, end to end against real git. `-m` resolves the
+    // module from the working directory first, so a branch that commits its own
+    // top-level `pytest/` package supplies the runner the argv names: the guard
+    // reddens under a syntax-shaped break of the target while asserting nothing
+    // about it, and restoring goes green. The refusal must land BEFORE anything
+    // is executed — python is never spawned, so this test needs no pytest on
+    // the box, and the marker file below is how we know.
+    const repo = await seedProductionLib()
+    mkdirSync(join(repo, 'pytest'), { recursive: true })
+    // A RELATIVE marker path: the guard's cwd is the proof worktree at
+    // `<repo>/.trident-worktrees/proof-…`, so `../../` is the repo root, which
+    // outlives the worktree's removal.
+    writeFileSync(
+      join(repo, 'pytest', '__main__.py'),
+      "open('../../pwned-by-python-shadow','w').write('x')\n",
+    )
+    writeFileSync(join(repo, 'tests', 'unrelated_test.py'), 'def test_ok():\n    assert True\n')
+    await git(repo, 'add', '-A')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the branch-authored pytest package')
+    const run = { id: 'run-py-shadow', slug: 'production-lib', repo_path: repo, branch: 'trident/production-lib-proof' }
+    const claim = {
+      file: 'src/limit.ts',
+      find: 'n > max ? max : n',
+      replace: 'n',
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+    const out = await runMutationProofGate({
+      run,
+      claim: { ...claim, guard: ['python3', '-m', 'pytest', 'tests/unrelated_test.py'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(out.reason).toContain('BRANCH-SUPPLIED')
+    expect(out.reason).toContain('pytest')
+    expect(out.reason).toContain('claim.guard')
+    // Nothing was spawned, so the shadow module never wrote its marker…
+    expect(existsSync(join(repo, 'pwned-by-python-shadow'))).toBe(false)
+    // …and nothing was left behind.
+    expect(existsSync(proofWorktreePath(repo, run))).toBe(false)
+
+    // POSITIVE CONTROL, in the same repo with the shadowing package committed
+    // and all: a runner the tree cannot shadow still proves red-then-green.
+    const fine = await runMutationProofGate({
+      run: { ...run, id: 'run-py-shadow-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/limit.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([fine.ok, fine.exempt, fine.evidence?.proved ?? null]).toEqual([true, false, true])
+    const pyObs = fine.evidence?.observed
+    expect(pyObs ?? null).not.toBeNull()
+    if (!pyObs) throw new Error('unreachable')
+    expect(pyObs.guard_mutated.exit_code).not.toBe(0)
+    expect(pyObs.control_mutated.exit_code).toBe(0)
+    expect(pyObs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
+
   test('the mutated file under an ABSOLUTE or ..-and-back name is still its own guard, and is refused', async () => {
     // THE BYPASS, against real git and the real path the proof worktree lands
     // at. The guard below runs `tests/support/clamp.ts` — the MUTATED file —

@@ -349,6 +349,20 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     for (const d of described) expect(['node --run', d.includes('node --run')]).toEqual(['node --run', true])
     expect(PROVER_SRC).toContain('never --run')
 
+    // …AND PYTHON'S `-m` IS SHADOWABLE BY THE TREE, which no name loop above can
+    // ever see: the refusal is not about a name in the argv at all, it is about
+    // an ENTRY IN THE REPOSITORY, so only a two-sided literal pin can require
+    // the schema to foresee it and the prover to enforce it.
+    for (const d of described) {
+      expect(['python -m shadow', d.includes('-m resolves the module from the working directory first')]).toEqual([
+        'python -m shadow',
+        true,
+      ])
+      expect(['python -m shadow', d.includes('BRANCH-SUPPLIED')]).toEqual(['python -m shadow', true])
+    }
+    expect(PROVER_SRC).toContain('pythonModuleShadow')
+    expect(PROVER_SRC).toContain('-m resolves the module from the working directory first')
+
     // …AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
     // OPTION, invisible to every loop above for the same reason. Node forwards a
     // `--test` written after an entry script straight to that BRANCH-AUTHORED
