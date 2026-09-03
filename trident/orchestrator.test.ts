@@ -730,6 +730,41 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(outcome.note ?? '').toContain('mutation proof skipped')
   })
 
+  test('the stamp WRITES the capped reason — the cap lives at the call site, not only in the helper', async () => {
+    // PINS THE CALL SITE. `truncateStageReason` has its own row below, and the
+    // exempt-stamp row above asserts the meta EQUALS its reason — which is true
+    // of a capped stamp and an uncapped one alike, because that reason is a few
+    // hundred characters. So deleting the `truncateStageReason(…)` wrapper in
+    // the orchestrator left this whole file green. Only a reason past the
+    // ceiling can tell the two apart, so here is one.
+    const huge =
+      'no production file in this diff — nothing to mutate: all 600 changed files are declared tests (' +
+      Array.from({ length: 600 }, (_, i) => `tests/support/enormous-${i}.test.ts`).join(', ') +
+      ')'
+    expect(huge.length).toBeGreaterThan(4_000)
+
+    const stamps: Array<{ id: string; stage: string; meta: string | null | undefined }> = []
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' as const, branch: 'feat-x' } }),
+      prove_mutation: buildSimMutationProofGate({ exempt: true, reason: huge }),
+      record_stage: (id, stage, meta) => void stamps.push({ id, stage, meta }),
+    })
+    const run = await createRun()
+    await h.loop.runOnce()
+    await h.complete()
+    const outcome = await h.step(store.get(run.id)!)
+    expect(outcome.run.phase).toBe('done')
+
+    const stamp = stamps.find((st) => st.stage === 'mutation-proof-exempt')
+    expect(stamp ?? null).not.toBeNull()
+    expect(stamp?.meta).toBe(truncateStageReason(huge))
+    // …and the two are really different strings, so the equality above is not
+    // satisfied by an identity function.
+    expect(truncateStageReason(huge)).not.toBe(huge)
+    expect((stamp?.meta ?? '').length).toBeLessThan(4_200)
+    expect(stamp?.meta ?? '').toContain('full reason in the mutation_proof_exempt log line')
+  })
+
   test('the tick note is cut on a CHARACTER — a truncated reason never ends in half of one', () => {
     // `slice` counts UTF-16 CODE UNITS, and the exemption's reason interpolates
     // every changed path, so where the cut lands is data rather than a choice.

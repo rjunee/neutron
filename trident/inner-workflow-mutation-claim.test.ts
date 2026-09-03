@@ -595,7 +595,26 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // restored observation read the forged tree. The truth is the seam.
       expect(['the restored tree is fresh', d.includes('re-provisioned')]).toEqual(['the restored tree is fresh', true])
       expect(d).not.toContain('merely has to stay green')
+      // …AND THE QUALIFIER, because the promise is not unconditional. A fresh
+      // tree stops what a control WRITES INTO the tree; it does not stop a
+      // process the control leaves RUNNING, and it only stops an out-of-tree
+      // write because provisioning disables repository hooks (a planted
+      // `post-checkout` was executed BY the re-provision into the fresh tree).
+      // An unqualified sentence here reads as a licence for both.
+      expect(['the promise is about what a control writes', d.includes('WRITES INTO THE WORKTREE')]).toEqual([
+        'the promise is about what a control writes',
+        true,
+      ])
+      expect(['hooks do not run either', d.includes('hooks disabled')]).toEqual(['hooks do not run either', true])
+      expect(['a surviving process is not covered', d.includes('leaves RUNNING')]).toEqual([
+        'a surviving process is not covered',
+        true,
+      ])
     }
+    // Two-sided again: the hook clause above is a promise the prover keeps by
+    // overriding `core.hooksPath` on the `worktree add` calls, so deleting the
+    // override reds this row as well as the prover's own.
+    expect(PROVER_SRC).toContain('core.hooksPath=')
     // Two-sided: the re-provision really exists on the prover side — the
     // closure that throws the tree away and re-adds it at the pinned sha, and
     // the refusal it spends when that cannot happen — so the sentence above

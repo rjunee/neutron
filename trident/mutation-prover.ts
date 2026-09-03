@@ -2558,6 +2558,22 @@ export function parseMutationClaim(value: unknown): MutationClaim | null {
 }
 
 /**
+ * PROVISION THE PROOF TREE WITH NO REPOSITORY HOOKS. `git worktree add` runs
+ * `post-checkout`, and hooks live in `$GIT_COMMON_DIR/hooks` — the repo's
+ * shared `.git`, which is OUTSIDE the proof worktree and therefore survives
+ * `worktree remove --force --force`. So a nominated command that plants a hook
+ * there has the RE-PROVISION ITSELF execute branch-authored code into the
+ * "fresh" tree, which is the forgery the re-provision exists to stop, spelled
+ * through git instead of through the tree. Pointing `core.hooksPath` at a
+ * directory that cannot exist means neither provisioning runs a hook at all.
+ *
+ * It is a `-c` override rather than `GIT_CONFIG_*` because it must beat a
+ * `core.hooksPath` already set in any config file, and command-line `-c` is the
+ * highest-precedence source git has.
+ */
+const NO_HOOKS = ['-c', 'core.hooksPath=/nonexistent/trident-proof-no-hooks'] as const
+
+/**
  * Where a run's throwaway PROOF worktree lives. Sibling of the merge worktree
  * convention (`merge.ts:runWorktreePath`), and INSIDE the repo for a second
  * reason beyond that one: a guard command has to be runnable there. Because the
@@ -2704,10 +2720,15 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // DETACHED at the head sha, never at the branch name: the branch may still
     // be checked out in the build worktree, and `worktree add <branch>` would
     // fail "already checked out". Detached also means nothing this phase does
-    // can move a ref.
+    // can move a ref. `NO_HOOKS` on both adds: `worktree add` runs
+    // `post-checkout`, and a hook is the one piece of branch-reachable code
+    // that provisioning would otherwise execute (see `NO_HOOKS`).
     const wt = proofWorktreePath(repo, run)
     await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
-    const add = await deps.run_host(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha], repo)
+    const add = await deps.run_host(
+      ['git', ...NO_HOOKS, '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha],
+      repo,
+    )
     if (!add.ok) return refuse(run.id, claim, 'could not provision the proof worktree')
 
     // A TREE THE NOMINATED COMMANDS COULD NOT HAVE EDITED. The guard and the
@@ -2716,12 +2737,21 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // observation green and forged `proved: true` (reproduced via `bun test`
     // and via `make`). Restoring `claim.file` restores exactly one file, so
     // before the restored-guard observation the worktree is thrown away and
-    // re-provisioned at the SAME pinned sha. Double --force: an unclean tree
-    // (which a just-run test tree is) must still be removable; if git cannot
-    // remove or re-add it, the proof REFUSES rather than observes.
+    // re-provisioned at the SAME pinned sha, with `NO_HOOKS` so the re-add
+    // itself runs nothing the branch wrote. The two --force flags are two
+    // different powers, per git-worktree(1): the first removes an UNCLEAN tree
+    // (which a just-run test tree is), the second a LOCKED one — and a
+    // nominated command can `git worktree lock` this tree, so the removal that
+    // MUST succeed asks for both. The outer `finally` below asks for one
+    // because its failure only leaks a directory, which the next run's own
+    // remove-then-add clears or REFUSES on; if git cannot remove or re-add here,
+    // the proof REFUSES rather than observes.
     const reprovision = async (): Promise<boolean> => {
       await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', '--force', wt], repo)
-      const readd = await deps.run_host(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha], repo)
+      const readd = await deps.run_host(
+        ['git', ...NO_HOOKS, '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha],
+        repo,
+      )
       return readd.ok
     }
 
@@ -3156,10 +3186,20 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // `git status --porcelain` was the weaker mechanism — a repo whose
     // committed CRLF bytes fight the working-tree filters is phantom-dirty on
     // a FRESH checkout, which would over-refuse honest proofs, and a fresh
-    // tree needs no detector. What this deliberately does NOT close: code
-    // that edits the host outside the worktree (the parent repo's .git
-    // included) or leaves a detached survivor process racing the fresh tree
-    // — that is the standing arbitrary-code limit recorded at `evaluate`.
+    // tree needs no detector.
+    //
+    // WRITING OUTSIDE THE TREE IS NOT AUTOMATICALLY OUTSIDE THE PROOF, and one
+    // spelling of it had to be closed here rather than deferred: a control that
+    // plants `$GIT_COMMON_DIR/hooks/post-checkout` — outside the worktree, so it
+    // survives the removal — would have the RE-PROVISION run it into the fresh
+    // tree. `NO_HOOKS` on both `worktree add` calls is what stops that. What
+    // remains open is the same-user PROCESS boundary: a nominated command that
+    // leaves a background writer running past its own exit can still race the
+    // fresh tree, and a command may edit the host anywhere its user may write.
+    // That is a machine-level residual of running branch-authored commands at
+    // all — recorded as such on the plan's deferred list, and a DIFFERENT limit
+    // from the assertion-blindness one recorded at `evaluate`, which is about
+    // what three exit codes can see.
     const fresh = await reprovision()
     if (!fresh) {
       return refuse(

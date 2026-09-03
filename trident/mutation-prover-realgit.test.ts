@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -31,6 +31,13 @@ import {
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
 const BRANCH = 'trident/head-resolves-without-a-local-ref'
 const created: string[] = []
+
+/** What a planted `post-checkout` hook writes into whatever tree git has just
+ *  checked out: the guard's committed red test file, rewritten green. Shared
+ *  by the forging control and by the git-level positive control that shows an
+ *  UNGUARDED `worktree add` really does execute it. */
+const HOOK_SCRIPT =
+  "#!/bin/sh\ncat > tests/g.test.ts <<'EOF'\nimport { expect, test } from 'bun:test'\n\ntest('rewritten by the hook', () => {\n  expect(1).toBe(1)\n})\nEOF\n"
 
 afterAll(() => {
   for (const dir of created) rmSync(dir, { recursive: true, force: true })
@@ -234,6 +241,20 @@ async function seedControlForgeryRepo(): Promise<string> {
   writeFileSync(
     join(repo, 'tests', 'self-forging-guard.test.ts'),
     "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nwriteFileSync(\n  'tests/self-forging-guard.test.ts',\n  \"import { expect, test } from 'bun:test'\\n\\ntest('rewritten', () => {\\n  expect(1).toBe(1)\\n})\\n\",\n)\n\ntest('this guard is red until it has rewritten itself', () => {\n  expect(1).toBe(2)\n})\n",
+  )
+  // THE SAME FORGERY PLANTED OUTSIDE THE TREE, where the removal cannot reach
+  // it: hooks live in the shared `.git`, and `git worktree add` RUNS
+  // `post-checkout`. So this control does not write into the tree at all — it
+  // writes the RE-PROVISION's own hook, and lets the fresh checkout rewrite the
+  // guard green for it. The cwd is the proof worktree,
+  // `<repo>/.trident-worktrees/proof-…`, so the repo's `.git` is two levels up.
+  writeFileSync(
+    join(repo, 'tests', 'hook-forge-control.test.ts'),
+    "import { chmodSync, mkdirSync, writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\n"
+      + "mkdirSync('../../.git/hooks', { recursive: true })\nwriteFileSync(\n  '../../.git/hooks/post-checkout',\n  "
+      + JSON.stringify(HOOK_SCRIPT)
+      + ",\n)\nchmodSync('../../.git/hooks/post-checkout', 0o755)\n\n"
+      + "test('the control passes, having planted a hook outside the tree', () => {\n  expect(1 + 1).toBe(2)\n})\n",
   )
   // THE SAME FORGERY SPELLED AS A WRAPPER. `make …` is refused as a GUARD and
   // stays a LEGAL CONTROL, so this is the shape the schema itself invites — the
@@ -1648,6 +1669,60 @@ describe('the mutation-proof gate against real git', () => {
     if (!obs) throw new Error('unreachable')
     expect(obs.guard_mutated.exit_code).not.toBe(0)
     expect(obs.control_mutated.exit_code).toBe(0)
+  }, 120_000)
+
+  test('…and a control that plants a post-checkout HOOK, which the RE-PROVISION itself runs, cannot either', async () => {
+    // THE FIFTEENTH ESCAPE: the forgery rides in on the fix. This control never
+    // writes into the worktree — it writes `$GIT_COMMON_DIR/hooks/post-checkout`,
+    // which lives in the repo's shared `.git`, OUTSIDE every worktree and
+    // therefore untouched by `worktree remove --force --force`. The
+    // re-provision's own `worktree add` then EXECUTES it into the tree it has
+    // just created, rewriting the guard's committed red file green. No race and
+    // no surviving process: the seam does the writing.
+    //
+    // EXPECTATION VERIFIED TO FAIL — proved:true, the forged verdict — with the
+    // `NO_HOOKS` override removed from the two `worktree add` calls in
+    // mutation-prover.ts, then restored.
+    const repo = await seedControlForgeryRepo()
+    const out = await runMutationProofGate({
+      run: { id: 'run-hook-forgery', slug: 'hook-forgery', repo_path: repo, branch: 'trident/control-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/g.test.ts'],
+        control: ['bun', 'test', 'tests/hook-forge-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.evidence?.proved ?? null).toBe(false)
+    expect(out.reason).toContain('did not return to GREEN after the restore')
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    // POSITIVE CONTROL that the plant really happened: the hook is still on
+    // disk after the proof, because nothing the proof removes can reach it.
+    expect(existsSync(join(repo, '.git', 'hooks', 'post-checkout'))).toBe(true)
+
+    // …AND THE MECHANISM ITSELF, at git level, so the row above cannot pass
+    // merely because the hook was inert. Same repo, same planted hook, two
+    // `worktree add` calls that differ in one flag: the UNGUARDED one comes
+    // back with the guard file rewritten — that is the forgery — and the one
+    // carrying `core.hooksPath` pointed at a directory that does not exist
+    // comes back with the committed bytes.
+    const scratch = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-hook-mechanism-'))
+    created.push(scratch)
+    const unguarded = join(scratch, 'unguarded')
+    const guarded = join(scratch, 'guarded')
+    await git(repo, 'worktree', 'add', '--detach', '--force', unguarded, 'HEAD')
+    await git(repo, '-c', `core.hooksPath=${join(scratch, 'no-such-hooks')}`, 'worktree', 'add', '--detach', '--force', guarded, 'HEAD')
+    expect(readFileSync(join(unguarded, 'tests', 'g.test.ts'), 'utf8')).toContain('rewritten by the hook')
+    expect(readFileSync(join(guarded, 'tests', 'g.test.ts'), 'utf8')).toContain('this guard asserts nothing')
   }, 120_000)
 
   test('…while an HONEST pair still proves red-then-green THROUGH the re-provision', async () => {

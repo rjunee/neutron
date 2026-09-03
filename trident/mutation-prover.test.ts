@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -408,6 +409,38 @@ describe('the restored-guard observation is of a tree the nominated commands cou
     const removeIdxs = joined.map((c, i) => [c, i] as const).filter(([c]) => c.includes('worktree remove'))
     const midRemove = removeIdxs.find(([, i]) => i > controlIdx && i < secondAddIdx)
     expect(midRemove === undefined).toBe(false)
+  })
+
+  test('EVERY provisioning of the proof tree disables repository hooks', async () => {
+    // THE FIFTEENTH ESCAPE, and it is the re-provision itself carrying the
+    // forgery in. `git worktree add` runs `post-checkout`, and hooks live in
+    // `$GIT_COMMON_DIR/hooks` — the shared `.git`, OUTSIDE the worktree, so a
+    // control that plants one there survives `worktree remove --force --force`
+    // and is EXECUTED into the "fresh" tree. No race and no second process: the
+    // fresh tree writes the forgery for us. A reviewer reproduced it end to end
+    // (`{ok: true, proved: true}` with nothing testing the target), so both
+    // adds carry `-c core.hooksPath=<a path that cannot exist>`, which is the
+    // highest-precedence config source git has and therefore beats a
+    // `core.hooksPath` already set in any file.
+    const { prover, host } = proverOver()
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(true)
+
+    const adds = host.calls.filter((c) => c.includes('worktree') && c.includes('add'))
+    // POSITIVE CONTROL on the extraction: zero adds would satisfy an `every`
+    // by vacuity, and one would mean the re-provision never happened.
+    expect(adds.length).toBe(2)
+    for (const argv of adds) {
+      const i = argv.indexOf('-c')
+      // The override is a `-c` PAIR and it comes before the subcommand —
+      // `git worktree add -c …` is not a git invocation at all.
+      expect([argv[0], i > 0, i < argv.indexOf('worktree')]).toEqual(['git', true, true])
+      const setting = argv[i + 1] ?? ''
+      expect(setting.startsWith('core.hooksPath=')).toBe(true)
+      // …and the directory it points at must not exist, or the override would
+      // hand execution to whatever does live there.
+      expect(existsSync(setting.slice('core.hooksPath='.length))).toBe(false)
+    }
   })
 
   test('a re-provision that FAILS refuses — a tree the commands may have edited is not evidence', async () => {
@@ -3986,6 +4019,18 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
     ['a/b.test.mtsx', 'production'],
     ['testfoo.py', 'production'],
     ['src/test-foo.js', 'production'],
+    // FIXTURES AND SNAPSHOTS UNDER tests/ — the boundary D1 moved, pinned here
+    // rather than left to be re-derived. Under the OLD path rule both matched
+    // `TEST_FILE` and were refused outright; by declaration neither is a test
+    // (no test basename, no direct `__tests__/` parent), so both are legal
+    // NOMINATION TARGETS now. That is the narrower rule doing what it says, and
+    // it is honest about what such a proof would be worth: a `.snap` is data,
+    // so `aRunnerMayCollect` is false for it and the consuming test can serve
+    // as a guard, while what the proof would certify is the fixture's bytes,
+    // not production behaviour. Recorded as a deferred class in
+    // IMPLEMENTATION_PLAN.md; the rows exist so the class cannot move silently.
+    ['tests/__snapshots__/foo.test.ts.snap', 'production'],
+    ['tests/fixtures/golden.json', 'production'],
     ['test.ts', 'production'],
     ['tests/test.ts', 'production'],
     ['src/limit.ts', 'production'],
