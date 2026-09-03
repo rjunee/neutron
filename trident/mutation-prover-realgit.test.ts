@@ -581,6 +581,51 @@ describe('the mutation-proof gate against real git', () => {
     expect(pyObs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
+  test('a committed tests/__init__.py is a package the runner imports — refused before anything runs', async () => {
+    // THE TWELFTH ESCAPE, end to end. Neither sibling above sees it: the argv
+    // names `unittest`, which the tree does not shadow, and `tests` is a
+    // DIRECTORY, so it carries no `.py`/`.pyc`/`.so` suffix for the module-file
+    // arm to match. But `-m` puts the repo root first on `sys.path` and an
+    // `__init__.py` runs on import, so the branch supplies code either runner
+    // will execute. The marker stays unwritten, which is how we know nothing
+    // was spawned and this needs no python on the box.
+    const repo = await seedProductionLib()
+    writeFileSync(join(repo, 'tests', '__init__.py'), "open('../../pwned-by-package','w').write('x')\n")
+    writeFileSync(join(repo, 'tests', 'unrelated_test.py'), 'def test_ok():\n    assert True\n')
+    await git(repo, 'add', '-A')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'a branch-authored top-level package')
+    const run = { id: 'run-py-pkg', slug: 'production-lib', branch: 'trident/production-lib-proof', repo_path: repo }
+    const claim = {
+      file: 'src/limit.ts',
+      find: 'n > max ? max : n',
+      replace: 'n',
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+
+    const out = await runMutationProofGate({
+      run,
+      claim: { ...claim, guard: ['python3', '-m', 'unittest', 'tests.unrelated_test'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(out.reason).toContain('tests/__init__.py')
+    expect(out.reason).toContain('importable package')
+    expect(existsSync(join(repo, 'pwned-by-package'))).toBe(false)
+    expect(existsSync(proofWorktreePath(repo, run))).toBe(false)
+
+    // POSITIVE CONTROL, in the same repo with the package committed and all: a
+    // runner that does not search the tree still proves red-then-green, so the
+    // refusal is about the nomination and not about the repo.
+    const fine = await runMutationProofGate({
+      run: { ...run, id: 'run-py-pkg-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/limit.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([fine.ok, fine.exempt, fine.evidence?.proved ?? null]).toEqual([true, false, true])
+  }, 120_000)
+
   test('a committed conftest.py and a committed argparse.py are refused too — the tree without a flag', async () => {
     // THE TWO SIBLINGS of the shadow above, end to end. Neither puts anything
     // in the argv: `conftest.py` is imported BY PYTEST ITSELF before collection

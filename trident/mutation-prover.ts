@@ -1118,19 +1118,58 @@ export function pythonModuleShadow(argv: readonly string[], topLevelNames: reado
  * it fails CLOSED and is spellable around: move the file, or nominate `go`,
  * `cargo`, `bun`, `node` — nothing honest is made unprovable.
  *
- * THE ARM STILL OPEN, named so it is not rediscovered as new: a top-level
- * DIRECTORY shadows a dependency too (`_pytest/`, or `argparse/__init__.py`),
- * because python reads any directory as a namespace package. It is NOT refused
- * here, because every python repo has `tests/` and `src/` at its root and
- * refusing directories refuses every honest python nomination there is —
- * i.e. it would delete `python3 -m` from `TEST_COMMAND_SHAPES` by another
- * route. Closing it needs a rule that inspects the directory's contents rather
- * than its name, which is a follow-up card, not a line here.
+ * THE DIRECTORY HALF OF THIS ARM is closed beside it by `pythonPackageShadow`,
+ * not here: a top-level DIRECTORY shadows a dependency too, and this predicate
+ * cannot see it because `ls-tree --name-only` gives a directory no suffix to
+ * match. It is refused on its CONTENTS rather than its name, so a plain `src/`
+ * and a plain `tests/` stay legal.
  */
 export function pythonImportShadow(argv: readonly string[], topLevelNames: readonly string[]): string | null {
   if (argv[0] !== 'python3' || argv[1] !== '-m') return null
   for (const n of topLevelNames) {
     if (/\.(py|pyc|so)$/.test(n)) return n
+  }
+  return null
+}
+
+/**
+ * THE PACKAGE, not the module file — the TWELFTH escape of this family and the
+ * last arm of the python one. A review seat ran it against this branch's own
+ * gate: commit `tests/__init__.py` whose body is nothing but `import
+ * src.limit`, syntax-break `src/limit.py`, nominate `python3 -m unittest
+ * tests.unrelated_test` as the guard with an unrelated control, and the gate
+ * returned `ok: true, proved: true` — guard red mutated, control green, guard
+ * green restored — with nothing having asserted the target. `argparse/` with an
+ * `__init__.py` is the same escape shadowing a runner DEPENDENCY instead.
+ * Neither sibling sees it: `pythonModuleShadow` reads only the module the argv
+ * NAMES (here `unittest`, which the tree does not shadow), and
+ * `pythonImportShadow` matches SUFFIXES over top-level names, which a directory
+ * does not have.
+ *
+ * IT IS REFUSED ON THE DIRECTORY'S CONTENTS, NEVER ITS NAME, and that is the
+ * whole reason this can exist where a name rule could not: every python repo
+ * has `src/` and `tests/` at its root, so refusing top-level directories by
+ * name would delete `python3 -m` from `TEST_COMMAND_SHAPES` by another route.
+ * What is refused is a top-level directory DIRECTLY containing `__init__.py` or
+ * `__main__.py` — a REGULAR package, the only shape that puts branch-authored
+ * code on the import path with nothing on the argv to show for it. A namespace
+ * package (a directory with neither) shadows a name but EXECUTES NOTHING on
+ * import, so it cannot make a guard pass when restored and fail when mutated,
+ * which is what a forged proof needs.
+ *
+ * THE RECURSIVE LISTING ALREADY IN HAND ANSWERS IT — the marker is matched as a
+ * path of exactly two segments, so `src/pkg/__init__.py` a directory down is
+ * not refused: `-m` adds the ROOT to `sys.path`, and only its direct children
+ * are importable as top-level names. It fails CLOSED and is spellable around by
+ * deleting the marker (unittest and pytest both discover namespace-package test
+ * directories) or by nominating `go`, `cargo`, `bun`, `node`.
+ */
+const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\/(?:__init__|__main__)\.py$/
+
+export function pythonPackageShadow(argv: readonly string[], paths: readonly string[]): string | null {
+  if (argv[0] !== 'python3' || argv[1] !== '-m') return null
+  for (const p of paths) {
+    if (TOP_LEVEL_PACKAGE_MARKER.test(p)) return p
   }
   return null
 }
@@ -2452,6 +2491,18 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
             `claim.${which} python3 -m ${argv[2]} would run BRANCH-SUPPLIED code, not the installed runner: -m puts this tree's own top level first on sys.path, and it contains the module file ${dependency} — the runner imports modules the argv never names, so any top-level module can be the one it loads; move ${dependency} out of the tree root or nominate a runner that does not search it`,
           )
         }
+        // THE PACKAGE ARM IS LAST because it is the broadest reading of the same
+        // path entry: a top-level DIRECTORY is importable too, and the module
+        // files above cannot see it. Refused on the marker it CONTAINS, so a
+        // plain `src/`/`tests/` is untouched.
+        const pkg = pythonPackageShadow(argv, paths)
+        if (pkg !== null) {
+          return refuse(
+            run_id,
+            claim,
+            `claim.${which} python3 -m ${argv[2]} would run BRANCH-SUPPLIED code, not the installed runner: -m puts this tree's own top level first on sys.path, and ${pkg} makes its directory an importable package whose body executes on import — neither the runner the argv names nor any module it imports is safe from it; delete ${pkg} (both runners discover a namespace-package directory without it) or nominate a runner that does not search this tree`,
+          )
+        }
       }
     }
 
@@ -3291,9 +3342,13 @@ function asReason(path: string): string {
 const REASON_NAME_BUDGET = 4000
 
 /** As many of `paths` as fit the budget, in order, with the elision COUNTED
- *  rather than implied — a list that silently stops is worse than no list. At
- *  least one name is always printed, however long it is: a reason that names
- *  nothing but a count is not a reason. */
+ *  rather than implied — a list that silently stops is worse than no list. The
+ *  budget bounds the NAMES; the result may exceed it by two deliberate amounts,
+ *  because both are worth more than an exact ceiling: the `, … +N more` suffix
+ *  is appended after the budget is spent, and the FIRST name is always printed
+ *  however long it is, since a reason that names nothing but a count is not a
+ *  reason. Every consumer bounds its own copy (`truncateNote`,
+ *  `truncateStageReason`), so this is a courtesy cap, not a guarantee. */
 function namesWithinBudget(paths: readonly string[]): string {
   const kept: string[] = []
   let used = 0
@@ -3345,7 +3400,7 @@ export function missingClaimRefusalReason(files: readonly string[] | null, delet
   if (gone.length > 0) {
     return (
       `mutation proof required but NO mutation of this diff can be run: its only production changes are DELETIONS ` +
-      `(${gone.map(asReason).join(', ')}), which are absent at the head being proved — nominating one is refused because the ` +
+      `(${namesWithinBudget(gone)}), which are absent at the head being proved — nominating one is refused because the ` +
       `mutation cannot apply, and nothing else in the diff is a legal target. This diff needs a reviewer's ` +
       `judgement, not a proof.`
     )

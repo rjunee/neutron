@@ -22,6 +22,7 @@ import {
   proofWorktreePath,
   pythonImportShadow,
   pythonModuleShadow,
+  pythonPackageShadow,
   pytestConfigShadow,
   resolveMergeHeadSha,
   runMutationProofGate,
@@ -424,6 +425,61 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
       expect(evidence.reason).toContain(entry)
     })
   }
+
+  // ── THE PACKAGE: a top-level DIRECTORY the runner can import ─────────────
+  //
+  // The escape a review seat executed end-to-end against `7cfc3e07`: the module
+  // the argv names is the real runner and no top-level *file* shadows anything,
+  // but a committed `tests/__init__.py` whose body imports the target runs on
+  // import all the same. Refused on the marker the directory CONTAINS.
+  test('THE REPRO: a committed tests/__init__.py forges a proof through python3 -m unittest', async () => {
+    const { prover, host } = proverOver({
+      treePaths: ['src/limit.py', 'tests/__init__.py', 'tests/unrelated_test.py'],
+    })
+    const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_CONTROL } })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+    expect(evidence.reason).toContain('tests/__init__.py')
+    expect(evidence.reason).toContain('importable package')
+    // Nothing ran: the refusal is decided off the pinned tree alone.
+    expect(host.calls.every((c) => c[0] !== 'python3')).toBe(true)
+  })
+
+  const PACKAGES = ['tests/__init__.py', 'argparse/__init__.py', '_pytest/__main__.py']
+  for (const entry of PACKAGES) {
+    test(`a top-level package ${entry} executes on import → refused`, async () => {
+      const { prover } = proverOver({ treePaths: ['src/limit.py', entry] })
+      const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+      expect(evidence.proved).toBe(false)
+      expect(evidence.observed).toBeNull()
+      expect(evidence.reason).toContain(entry)
+    })
+  }
+
+  test('pythonPackageShadow — the predicate itself, both directions', () => {
+    for (const entry of PACKAGES) {
+      expect([entry, pythonPackageShadow(PY_GUARD, ['src/limit.py', entry])]).toEqual([entry, entry])
+    }
+    // THE OVER-REFUSAL GUARD, and the reason this is a CONTENTS rule and not a
+    // name rule: a plain `src/` and a plain `tests/` are what every honest
+    // python repo has, a package marker A DIRECTORY DOWN is not on the one
+    // `sys.path` entry `-m` adds, and `__init__.py` at the repo ROOT names no
+    // directory at all.
+    for (const entry of [
+      'src/limit.py',
+      'tests/unrelated_test.py',
+      'src/pkg/__init__.py',
+      'tests/support/__main__.py',
+      '__init__.py',
+      'tests/__init__.pyc',
+      'tests/my__init__.py',
+    ]) {
+      expect([entry, pythonPackageShadow(PY_GUARD, [entry])]).toEqual([entry, null])
+    }
+    // Not a python -m argv at all.
+    expect(pythonPackageShadow(['bun', 'test', 'x'], ['tests/__init__.py'])).toBeNull()
+  })
 
   test('pythonImportShadow — the predicate itself, both directions', () => {
     for (const entry of DEPENDENCIES) {
@@ -3353,6 +3409,22 @@ describe('missingClaimRefusalReason — the refusal names WHY, and never blames 
     expect(mixed).toContain('nominated no mutation')
     expect(mixed).toContain('src/limit.ts')
     expect(mixed).not.toContain('DELETIONS')
+  })
+
+  test('the DELETION list is capped by the same budget as the exemption list', () => {
+    // The exemption reason was capped and this one was not, so a deletion-only
+    // diff of a whole directory reproduced, verbatim, the multi-hundred-KB
+    // single log line / status post / DB row the cap was added to bound.
+    const gone = Array.from({ length: 1000 }, (_, i) => `src/generated/case-${i}.ts`)
+    const reason = missingClaimRefusalReason(gone, gone)
+    expect(reason).toContain('DELETIONS')
+    expect(reason.length).toBeLessThan(4500)
+    const named = (reason.split('(')[1] ?? '').split(')')[0]?.split(', ') ?? []
+    expect(named[named.length - 1]).toBe(`… +${1000 - (named.length - 1)} more`)
+    // POSITIVE CONTROL against an empty extraction: real names were printed, in
+    // order, starting at the first — the cap elides, it does not blank the list.
+    expect(named[0]).toBe(gone[0])
+    expect(named.length).toBeGreaterThan(10)
   })
 
   test('a deletion is a changed file and a production change — it just is not a TARGET', () => {
