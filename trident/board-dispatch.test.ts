@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test'
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
 import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from './store.ts'
+import { DispatchHoldStore } from './dispatch-holds.ts'
 import {
   detectReviewIntent,
   dispatchBoardBoundBuild,
@@ -13,6 +14,7 @@ import {
   type TridentBoardBinder,
 } from './board-dispatch.ts'
 import type { EnvCapableHostRunner, HostCommandResult } from './git-mode.ts'
+import type { BranchHolderProbe } from './fire-evidence-probes.ts'
 
 let tmp: string
 let db: ProjectDb
@@ -422,5 +424,606 @@ describe('dispatch refuses a card whose work already landed', () => {
     } finally {
       process.env['PATH'] = oldPath
     }
+  })
+})
+
+describe('branch liveness refusal (branch_live)', () => {
+  const TASK = 'build the thing'
+  const BRANCH = 'trident/build-the-thing' // pinned by the 'creates the expected card branch' test above
+
+  function makeCommittedRepo(name: string): string {
+    const dir = join(tmp, name)
+    mkdirSync(dir)
+    expect(Bun.spawnSync(['git', 'init'], { cwd: dir }).exitCode).toBe(0)
+    expect(
+      Bun.spawnSync([
+        'git',
+        '-C',
+        dir,
+        '-c',
+        'user.email=t@t',
+        '-c',
+        'user.name=t',
+        'commit',
+        '--allow-empty',
+        '-m',
+        'init',
+      ]).exitCode,
+    ).toBe(0)
+    return dir
+  }
+
+  function addLockedWorktree(repoDir: string, wtName: string, reason: string | null): string {
+    const wt = join(tmp, wtName)
+    expect(Bun.spawnSync(['git', '-C', repoDir, 'worktree', 'add', wt, '-b', BRANCH]).exitCode).toBe(0)
+    if (reason !== null) {
+      expect(Bun.spawnSync(['git', '-C', repoDir, 'worktree', 'lock', wt, '--reason', reason]).exitCode).toBe(0)
+    }
+    return wt
+  }
+
+  // ARGUS r5 (minor): these deps used to omit `holds`, so the QUEUED prose and
+  // the `hold` shape were asserted against a caller that persists NOTHING —
+  // which is not how any production composer calls this (open/composer.ts passes
+  // a store at all four sites). Wire the real store here and pin the hold-less
+  // caller's DIFFERENT wording in its own test below.
+  function livenessDeps(repoDir: string, over: Partial<BoardBoundBuildDeps> = {}): BoardBoundBuildDeps {
+    return {
+      store,
+      board,
+      holds: new DispatchHoldStore(db),
+      project_slug: 'proj-1',
+      repo_path: tmp,
+      resolveBuildRepo: async () => repoDir,
+      resolveMergeMode: async () => 'local',
+      resolveRalph: async () => false,
+      ...over,
+    }
+  }
+
+  test('a live worktree lock on the card branch REFUSES dispatch via the REAL default probe, creating no run', async () => {
+    const repoDir = makeCommittedRepo('repo-live')
+    // No `start` in the reason → signal-0 alone decides, and this process is alive.
+    addLockedWorktree(repoDir, 'wt-live-holder', `claude agent test (pid ${process.pid})`)
+    let attachCalls = 0
+    const recordingBoard: TridentBoardBinder = {
+      ...board,
+      attachRun: async () => {
+        attachCalls += 1
+      },
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: recordingBoard }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('wt-live-holder')
+    expect(result.message).toContain(String(process.pid))
+    expect(result.message).toContain(BRANCH)
+    expect(result.message).toContain('never delete the branch')
+    expect(result.message).toContain('Nothing was dispatched')
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+    expect(attachCalls).toBe(0)
+  })
+
+  test('a NON-terminal run row on the same repo+branch refuses a second dispatch of the same slug (combined control for the launched hold)', async () => {
+    const repoDir = makeCommittedRepo('repo-row')
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain(live.id.slice(0, 8))
+    expect(result.message).toContain(BRANCH)
+    expect(store.listNonTerminalByRepo(repoDir)).toHaveLength(1)
+  })
+
+  // ARGUS r4 (minor): the refusal said "Nothing was dispatched … Re-dispatch only
+  // once nothing live holds the branch" while the SAME block upserted a hold row
+  // and the sweep re-asks automatically — the sentence contradicted the
+  // behaviour — and it returned no `hold` field, unlike the two other refusals
+  // that queue. Both halves are pinned here.
+  test('the branch_live refusal SAYS it is queued and carries the hold, for a worktree-only holder', async () => {
+    const repoDir = makeCommittedRepo('repo-queued-wt')
+    addLockedWorktree(repoDir, 'wt-queued', `claude agent test (pid ${process.pid})`)
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('QUEUED')
+    // The old sentence told the operator to re-dispatch by hand. The sweep does it.
+    expect(result.message).not.toContain('Re-dispatch only once')
+    expect('hold' in result).toBe(true)
+    if (!('hold' in result)) return
+    expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH })
+  })
+
+  // ARGUS r5 (minor): the arm returned the QUEUED sentence and the `hold` shape
+  // unconditionally, including for a caller that wired NO hold store — claiming
+  // a queue entry nothing wrote. Every production composer passes a store, so
+  // this arm is hypothetical; it must still not lie.
+  test('with NO hold store the refusal says nothing was queued and carries no hold shape', async () => {
+    const repoDir = makeCommittedRepo('repo-no-holds')
+    addLockedWorktree(repoDir, 'wt-no-holds', `claude agent test (pid ${process.pid})`)
+
+    // `exactOptionalPropertyTypes` forbids passing `holds: undefined`; the ABSENT
+    // key is exactly the caller shape under test.
+    const { holds: _holds, ...withoutHolds } = livenessDeps(repoDir)
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, withoutHolds)
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('NOTHING WAS QUEUED')
+    expect(result.message).toContain('re-dispatch the card yourself')
+    expect('hold' in result).toBe(false)
+  })
+
+  // ARGUS r9 (BLOCKER): the branch-liveness gate's hold write sits AFTER the
+  // holder probe's try/catch closes and BEFORE the admission try opens, so a
+  // throwing `holds.upsert` escaped `dispatchBoardBoundBuild` as a rejected
+  // promise — and both callers (`trident/code-command.ts`, `open/composer.ts`)
+  // await it with no local try. A recoverable refusal became an unhandled
+  // failure at the surface. It must stay a TYPED refusal, with the queue claim
+  // retracted in both the prose and the shape.
+  test('a THROWING hold store still returns the typed branch_live refusal — never a rejected promise', async () => {
+    const repoDir = makeCommittedRepo('repo-hold-throws')
+    addLockedWorktree(repoDir, 'wt-hold-throws', `claude agent test (pid ${process.pid})`)
+    const holds = new DispatchHoldStore(db)
+    holds.upsert = async () => {
+      throw new Error('database is locked')
+    }
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir, { holds }))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    // The refusal itself survives — the branch really IS held, and that is what
+    // the caller acts on.
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain(BRANCH)
+    // …and the queue promise it just made is retracted, naming the cause.
+    expect(result.message).toContain('nothing could be QUEUED')
+    expect(result.message).toContain('database is locked')
+    expect(result.message).toContain('re-dispatch it yourself')
+    // No `hold` shape may claim a row that failed to write.
+    expect('hold' in result).toBe(false)
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+  })
+
+  // ARGUS r9 (BLOCKER), the sibling gate: the blocker gate's `queueHold` is
+  // likewise outside every try. Same containment, same retraction.
+  test('a THROWING hold store still returns the typed held refusal from the blocker gate', async () => {
+    const repoDir = makeCommittedRepo('repo-blocker-throws')
+    const blockerBoard: TridentBoardBinder = {
+      get: (_slug, id) =>
+        id === 'dep-card'
+          ? { id: 'dep-card', title: 'the dependency', design_doc_ref: null, status: 'in_progress' }
+          : {
+              id: 'ready',
+              title: 'wire the CSV export button to the new endpoint with tests',
+              design_doc_ref: null,
+              blockers: ['dep-card'],
+            },
+      attachRun: async () => {},
+    }
+    const holds = new DispatchHoldStore(db)
+    holds.upsert = async () => {
+      throw new Error('database is locked')
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: blockerBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('held')
+    expect(result.message).toContain('dep-card')
+    expect(result.message).toContain('nothing could be QUEUED')
+    expect(result.message).toContain('database is locked')
+    expect('hold' in result).toBe(false)
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+  })
+
+  // ARGUS r5 (minor): the run-holder arm promised "dispatches automatically once
+  // nothing live holds the branch" — but `buildDispatchHoldSweep` DELETES a hold
+  // whose card already has a live linked run, so for the common shape (the
+  // holding run IS this card's own linked run) no automatic dispatch ever
+  // happens. The prose now matches the sweep.
+  //
+  // ARGUS r5 (BLOCKER): the prose was fixed and the WRITE was not. The row was
+  // still upserted, and the sweep drops it only while the linked run is live AT
+  // SWEEP TIME — so once that run went `stopped`/`failed` (or board-reconcile
+  // detached it) the surviving hold re-fired a card that had been stopped on
+  // purpose. "Nothing stays queued" must mean nothing was written.
+  test('when the card ALREADY has a live linked run, the refusal does not promise an automatic dispatch — and QUEUES NOTHING', async () => {
+    const repoDir = makeCommittedRepo('repo-linked-live')
+    const holds = new DispatchHoldStore(db)
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: live.id,
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('nothing stays queued')
+    expect(result.message).toContain(live.id.slice(0, 8))
+    expect(result.message).not.toContain('QUEUED and re-checked')
+    // The refusal's own promise, kept: no row, and no `hold` shape claiming one.
+    expect(holds.list().filter((h) => h.board_item_id === 'ready')).toEqual([])
+    expect('hold' in result).toBe(false)
+  })
+
+  // ARGUS r3 (BLOCKER): skipping the upsert only stopped THIS refusal writing a
+  // row — a hold seeded EARLIER (the blocker gate upserts unconditionally, and
+  // any `path`/branch row written before the card had a live linked run) sailed
+  // straight through it. The sweep drops such a row only while the linked run is
+  // live AT SWEEP TIME, so the moment that run went `stopped` the survivor
+  // re-fired a card someone had stopped on purpose — exactly the hazard the
+  // `queued` rule claims to close, arriving one row early. The refusal now
+  // DELETES what it refuses to write.
+  test('a hold seeded BEFORE the card went live does not survive the refusal either', async () => {
+    const repoDir = makeCommittedRepo('repo-linked-live-seeded')
+    const holds = new DispatchHoldStore(db)
+    await holds.upsert({
+      project_slug: 'proj-1',
+      board_item_id: 'ready',
+      task: TASK,
+      hold_kind: 'blocker',
+      hold_reason: 'queued while the card had no live run of its own',
+      held_on_blocker_id: 'some-other-card',
+    })
+    expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: live.id,
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('nothing stays queued')
+    // The sentence is now true of the STORE, not just of this call.
+    expect(holds.getByItem('proj-1', 'ready')).toBeNull()
+    expect('hold' in result).toBe(false)
+  })
+
+  // ARGUS r10 (BLOCKER): the intersection the two throw tests above miss — a
+  // FAILING `deleteByItem`, i.e. the card has a live linked run (so the refusal
+  // takes the delete arm) AND the store throws. The seeded row SURVIVES, and it
+  // is exactly the survivor `buildDispatchHoldSweep` re-fires once the linked
+  // run terminalizes; the generic clause nonetheless said "this card will NOT
+  // re-dispatch on its own; re-dispatch it yourself", which is false in the
+  // dangerous direction — it invites a SECOND lane onto a card that may re-fire
+  // itself. The clause must describe the failure that actually happened.
+  test('a THROWING deleteByItem says the STALE hold survived and may re-fire — never "re-dispatch it yourself"', async () => {
+    const repoDir = makeCommittedRepo('repo-delete-throws')
+    const holds = new DispatchHoldStore(db)
+    await holds.upsert({
+      project_slug: 'proj-1',
+      board_item_id: 'ready',
+      task: TASK,
+      hold_kind: 'blocker',
+      hold_reason: 'queued while the card had no live run of its own',
+      held_on_blocker_id: 'some-other-card',
+    })
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: live.id,
+      }),
+    }
+    holds.deleteByItem = async () => {
+      throw new Error('database is locked')
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    // The refusal itself survives, typed, as in the upsert case.
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('database is locked')
+    // The row really is still there — this is the fact the prose must carry.
+    expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+    expect(result.message).toContain('could not be REMOVED')
+    expect(result.message).toContain('may still exist')
+    // …and the two sentences that would produce a double dispatch are absent.
+    expect(result.message).not.toContain('nothing could be QUEUED')
+    expect(result.message).not.toContain('re-dispatch it yourself once the reason above clears')
+    // No `hold` shape: this call queued nothing of its own.
+    expect('hold' in result).toBe(false)
+  })
+
+  // ARGUS r8 (BLOCKER): `TridentRunStore.get` is keyed on the run id ALONE, so a
+  // stale or mis-copied `linked_run_id` naming ANOTHER project's live run was
+  // read here as this card's driver — and unlike the two other consumers of that
+  // lookup (`run-progress.ts`, `work-wakeup-selection.ts`), which fail safe, this
+  // one failed DESTRUCTIVE: `linkedLive` sent `queueHold` down the `deleteByItem`
+  // arm, erasing the card's queued hold and promising a re-fire that a foreign
+  // project's terminal event never delivers. The card wedged with nothing left to
+  // release it. A foreign run drives nothing here.
+  test('a live linked run belonging to ANOTHER project does not own this card — the refusal still queues', async () => {
+    const repoDir = makeCommittedRepo('repo-foreign-linked')
+    const foreignRepo = makeCommittedRepo('repo-foreign-other-project')
+    const holds = new DispatchHoldStore(db)
+    // The card's linked_run_id names a LIVE run — of a different project.
+    const foreign = await store.create({
+      slug: 'some-other-card',
+      project_slug: 'proj-2',
+      repo_path: foreignRepo,
+      task: 'a different project entirely',
+      merge_mode: 'local',
+      ralph: false,
+      branch: 'trident/some-other-card',
+    })
+    // What actually refuses this dispatch: a worktree lock on the card branch.
+    addLockedWorktree(repoDir, 'wt-foreign-linked-holder', `claude agent test (pid ${process.pid})`)
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: foreign.id,
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    // The card is QUEUED, and the refusal neither claims the foreign run owns
+    // the card nor names it as the thing the card is waiting on.
+    expect(result.message).not.toContain('nothing stays queued')
+    expect(result.message).not.toContain(foreign.id.slice(0, 8))
+    expect('hold' in result).toBe(true)
+    if (!('hold' in result)) return
+    expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH })
+    expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+  })
+
+  test('the branch_live hold names the holding RUN when there is one', async () => {
+    const repoDir = makeCommittedRepo('repo-queued-row')
+    const live = await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+    })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect('hold' in result).toBe(true)
+    if (!('hold' in result)) return
+    expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH, holding_run_id: live.id })
+    expect(result.message).toContain('QUEUED')
+  })
+
+  test('an injected probe reporting a live pid refuses (seam shape)', async () => {
+    const repoDir = makeCommittedRepo('repo-stub')
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        branchHolderProbe: async (): Promise<BranchHolderProbe> => ({
+          worktree_basename: 'wt-x',
+          lock_reason: 'claude agent wf (pid 4242 start 1)',
+          pid: 4242,
+          pid_live: true,
+          mtime_ms: null,
+        }),
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('wt-x')
+    expect(result.message).toContain('4242')
+  })
+
+  // ARGUS r3 (nit): the recycled-pid REFINEMENT needs a readable `/proc`. Where
+  // there is none (macOS, a hardened container) `pid_live` keeps the signal-0
+  // answer, the lock reads as live, and this assertion inverts — a test failing
+  // on the platform, not on the code. Guarded rather than deleted: on Linux it
+  // is the real end-to-end proof that a recycled pid does not refuse a dispatch.
+  test.skipIf(!existsSync('/proc/self/stat'))('a recycled-pid lock (live pid, starttime mismatch) does NOT refuse — and neither does the fresh mtime', async () => {
+    const repoDir = makeCommittedRepo('repo-recycled')
+    // pid alive but the RECORDED starttime cannot match the real one, so the
+    // holder is gone. The worktree was cut milliseconds ago, so this also pins
+    // that dispatch consults no mtime freshness.
+    addLockedWorktree(repoDir, 'wt-recycled', `claude agent test (pid ${process.pid} start 1)`)
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.branch).toBe(BRANCH)
+  })
+
+  test('an unparseable lock reason does NOT refuse', async () => {
+    const repoDir = makeCommittedRepo('repo-manual')
+    addLockedWorktree(repoDir, 'wt-manual', 'manual hold, do not prune')
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('no worktree and no live row proceeds exactly as before', async () => {
+    const repoDir = makeCommittedRepo('repo-plain')
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.branch).toBe(BRANCH)
+  })
+
+  test('a TERMINAL run row on the same branch does not refuse', async () => {
+    const repoDir = makeCommittedRepo('repo-terminal')
+    await store.create({
+      slug: 'build-the-thing',
+      project_slug: 'proj-1',
+      repo_path: repoDir,
+      task: TASK,
+      merge_mode: 'local',
+      ralph: false,
+      branch: BRANCH,
+      phase: 'failed',
+    })
+
+    const result = await dispatchBoardBoundBuild({ task: TASK, board_item_id: 'ready' }, livenessDeps(repoDir))
+
+    expect(result.ok).toBe(true)
+  })
+
+  test('a throwing probe never blocks dispatch', async () => {
+    const repoDir = makeCommittedRepo('repo-throws')
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        branchHolderProbe: async () => {
+          throw new Error('boom')
+        },
+      }),
+    )
+
+    expect(result.ok).toBe(true)
+  })
+
+  // MINOR (round 2): the liveness gate used to run BEFORE the merged-PR gate, so
+  // a card whose work had already shipped — but whose branch still had a live
+  // worktree lock or a non-terminal run row — was told "a lane is building this
+  // branch right now" instead of "already merged as #N, verify the card". Both
+  // refuse and neither dispatches, so the whole cost is the diagnosis; the
+  // merged-PR sentence is the one the 2026-08-17 incidents were about.
+  test('a MERGED PR wins over branch liveness — the clearer refusal is the one the operator reads', async () => {
+    const repoDir = makeCommittedRepo('repo-landed-and-live')
+    // Both conditions true at once: a merged PR AND a live lock on the branch.
+    addLockedWorktree(repoDir, 'wt-landed-live', `claude agent test (pid ${process.pid})`)
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        resolveMergeMode: async () => 'pr',
+        landedProbe: async () => ({
+          pr: 336,
+          merged_at: '2026-08-16T23:27:00Z',
+          head_on_base: true,
+          base: 'main',
+        }),
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('already_landed')
+    expect(result.message).toContain('already merged as #336')
+    // Still nothing dispatched — the reorder changes the words, not the outcome.
+    expect(store.listNonTerminalByRepo(repoDir)).toEqual([])
+  })
+
+  test('branch liveness still refuses when the PR did NOT merge', async () => {
+    const repoDir = makeCommittedRepo('repo-live-not-landed')
+    addLockedWorktree(repoDir, 'wt-live-not-landed', `claude agent test (pid ${process.pid})`)
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, {
+        resolveMergeMode: async () => 'pr',
+        landedProbe: async () => null,
+      }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('wt-live-not-landed')
   })
 })

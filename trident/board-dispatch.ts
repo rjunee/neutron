@@ -45,6 +45,7 @@
 
 import type { Topic } from '@neutronai/channels/types.ts'
 import type { SecretsStore } from '@neutronai/auth/secrets-store.ts'
+import { createLogger } from '@neutronai/logger'
 import { githubProcessEnv, readGitHubToken } from '@neutronai/github/credential.ts'
 import { asOwnerHandle } from '@neutronai/persistence/index.ts'
 import {
@@ -64,9 +65,12 @@ import {
 import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
-import type { DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
+import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
 import { deriveClaimedPaths } from './claimed-paths.ts'
+import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+
+const log = createLogger('trident')
 
 export interface AlreadyLandedFinding {
   pr: number
@@ -235,6 +239,13 @@ export interface BoardBoundBuildDeps {
   resolveMergeMode?: (repo_path: string) => Promise<MergeMode>
   /** Outer-loop evidence that this card branch already has a merged PR. */
   landedProbe?: DispatchLandedProbe
+  /**
+   * BRANCH LIVENESS probe — finds the linked worktree holding a branch, if
+   * any (see `probeBranchHolder`). Default: the production probe over the
+   * real repo. Test seam. POSITIVE EVIDENCE ONLY: null (no worktree, failed
+   * look) and a non-live holder never refuse.
+   */
+  branchHolderProbe?: (repo_path: string, branch: string) => Promise<BranchHolderProbe | null>
   /** Credential source for direct callers that do not inject a merge-mode resolver. */
   secretsStore?: Pick<SecretsStore, 'get'>
   owner_handle?: string
@@ -280,6 +291,17 @@ export type BoardBoundBuildRejectionCode =
   | 'review_needs_bound_pr'
   | 'underspecified'
   | 'already_landed'
+  // Something LIVE already holds this card's branch — a non-terminal run row,
+  // or a linked-worktree lock naming a live pid. REFUSED *AND* QUEUED: nothing
+  // was dispatched now, and the card is parked in `code_trident_dispatch_holds`
+  // so the sweep re-asks. It is its own code rather than `held` because the
+  // operator-facing sentence is different (resolve the holder, never delete the
+  // branch) — but it carries a `hold` exactly like `held` does, because it is
+  // one. Measured origin (2026-09-01): a launcher settle timeout mislabeled a
+  // run `failed` while its detached workflow kept building the branch; only the
+  // wrong-base guard's SHAPE check stopped the relaunch. This code refuses on
+  // LIVENESS.
+  | 'branch_live'
   | 'executor_unavailable'
   | 'backend_error'
 
@@ -287,13 +309,28 @@ export type BoardBoundBuildResult =
   | { ok: true; run: TridentRun; merge_mode: MergeMode; ralph: boolean }
   | {
       ok: false
-      code: 'held'
+      // THE QUEUED REFUSAL — a `held`/`branch_live` that really did write a hold
+      // row. `branch_live` used to return a bare code+message while the same
+      // block upserted a hold — a refusal that told the caller "nothing is
+      // queued" about a queued card. The `kind` discriminator is the SURFACE's,
+      // not the column's: the stored `hold_kind` stays `'path'` (migration 0139
+      // pins that CHECK), and nothing reads the stored kind to decide behaviour.
+      //
+      // A `held`/`branch_live` that queued NOTHING — no hold store wired, or the
+      // card's own live run is the reason — is the member BELOW instead, whose
+      // `code` is the broad union and which carries no `hold`. So the presence
+      // of `hold` means "queued", exactly, and `'hold' in result` is the check
+      // (never `code === 'branch_live'`, which both members admit). Argus r6,
+      // minor: this comment used to read as "both codes ALWAYS carry a hold",
+      // which stopped being true the moment the queue decision moved to the write.
+      code: 'held' | 'branch_live'
       message: string
       hold: {
-        kind: 'blocker' | 'path'
+        kind: 'blocker' | 'path' | 'branch'
         blocker_id?: string
         holding_run_id?: string
         path?: string
+        branch?: string
       }
     }
   | { ok: false; code: BoardBoundBuildRejectionCode; message: string }
@@ -347,6 +384,42 @@ export function detectReviewIntent(task: string): number | null {
     if (match?.[1] !== undefined) return Number.parseInt(match[1], 10)
   }
   return null
+}
+
+/**
+ * "May this refusal queue the card?", answered at the instant a hold is about
+ * to be written — see `queueDecision` inside {@link dispatchBoardBoundBuild}.
+ */
+interface QueueDecision {
+  /** Write the hold row (true) or DELETE whatever is already queued (false). */
+  queued: boolean
+  /** The card already has a non-terminal run of its own — that run owns it. */
+  linkedLive: boolean
+  /** That run's id, for the prose that names who owns the card. */
+  linkedRunId: string | null
+  /** The sentence that replaces "…it will dispatch automatically…". */
+  notQueuedClause: string
+}
+
+/**
+ * What the hold write ACTUALLY did — see `queueHold` inside
+ * {@link dispatchBoardBoundBuild}. `queued` is the {@link QueueDecision}'s
+ * intent confirmed by a write that returned; a non-null `error` means the store
+ * threw and NOTHING is queued, so no refusal may claim a `hold` shape.
+ */
+interface QueueOutcome {
+  /** A hold row exists for this card because this call wrote one. */
+  queued: boolean
+  /** The hold store's failure message, or null when the write went through. */
+  error: string | null
+  /**
+   * WHICH write failed — the two failures have OPPOSITE consequences, so the
+   * refusal prose may not describe them with one sentence (Argus r10 BLOCKER).
+   * A failed `upsert` queued nothing, so the card really will not move on its
+   * own; a failed `delete` left a row that an EARLIER dispatch seeded, and the
+   * sweep re-fires that survivor once the card's linked run terminalizes.
+   */
+  attempted: 'upsert' | 'delete'
 }
 
 /**
@@ -429,6 +502,129 @@ export async function dispatchBoardBoundBuild(
     ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
     ...(deps.max_ralph_rounds !== undefined ? { max_ralph_rounds: deps.max_ralph_rounds } : {}),
+    // AND THE ROUND'S OWN KIND (Argus r3, minor). `bound_pr` is what makes this
+    // dispatch a REVIEW of a published head rather than a build; a hold that
+    // dropped it came back through the sweep as a full build, opening a second
+    // PR for work that is already published.
+    ...(bound_pr !== undefined && bound_pr !== null ? { bound_pr } : {}),
+  }
+
+  // MAY THIS REFUSAL QUEUE THE CARD AT ALL? — ONE rule, applied by EVERY
+  // HOLD-PRODUCING GATE (Argus r4 VETO). It used to be decided inside the
+  // branch-liveness gate alone, which left the two gates ABOVE and BELOW it
+  // writing hold rows unconditionally — and either survivor outlives the card's
+  // linked run. `buildDispatchHoldSweep` drops a hold only while that run is
+  // live AT SWEEP TIME and otherwise re-dispatches, so a `blocker` row written
+  // while the card had a live run auto-restarted a card that was later STOPPED
+  // on purpose, the moment the declared blocker completed. Two facts decide it:
+  //  - A HOLD STORE. A caller that wired none persists nothing, so there is no
+  //    queue for the card to be in (every production composer passes one).
+  //  - THE CARD'S OWN LINKED RUN. If it is live, that run owns the card and the
+  //    card's next move is that run's terminal event — never a queue replay.
+  // Every gate below therefore queues through `queueHold`, whose two arms are
+  // "write the row" and "delete whatever is already queued", and says which one
+  // happened in its own prose and in its returned shape.
+  //
+  // RE-READ, NEVER SNAPSHOTTED (Argus r6 BLOCKER — dispatch TOCTOU). The rule
+  // used to be evaluated ONCE here, off the `item` read at the top of this
+  // function, and then applied by gates that run AFTER `resolveBuildRepo`, the
+  // merge-mode probe, the gh landed probe and the worktree holder probe — a
+  // seconds-wide window of awaits. A competing dispatch that BOUND the card
+  // inside that window (the very thing the branch-liveness gate below then
+  // observes and refuses on) left this dispatch still holding "the card is
+  // free", so it wrote the hold anyway; stop that competing run on purpose and
+  // the sweep re-fires the survivor onto a deliberately stopped card. So the
+  // decision is taken FRESH, from the board and the store, and — this is the
+  // load-bearing half — SYNCHRONOUSLY, with no `await` between the read and the
+  // `queueHold` that acts on it. `deps.board.get` and `deps.store.get` are both
+  // sync, so nothing can interleave in between.
+  //
+  // A card that has VANISHED off the board mid-dispatch falls back to the
+  // opening snapshot rather than inventing a liveness answer: the sweep already
+  // drops holds whose card is gone, so this is not the place to decide that.
+  const queueDecision = (): QueueDecision => {
+    const card = deps.board.get(deps.project_slug, board_item_id) ?? item
+    const linkedRunId = card.linked_run_id ?? null
+    // SCOPE THE LOOKUP TO THIS PROJECT (Argus r8 BLOCKER), exactly as
+    // `runProgressForItem` (`trident/run-progress.ts`) and
+    // `work-wakeup-selection.ts` already do: `TridentRunStore.get` is keyed on
+    // the run id ALONE, so a stale or mis-copied `linked_run_id` naming ANOTHER
+    // project's run would be read as this card's driver. Those two consumers
+    // fail safe when that happens; this one would fail DESTRUCTIVE — a foreign
+    // live run makes `linkedLive` true, which sends `queueHold` down the
+    // `deleteByItem` arm (erasing the card's queued hold) and tells the operator
+    // that run "owns" the card. It does not: its terminal event fires on a
+    // different project's board and never re-dispatches this card, so the card
+    // wedges with nothing left to release it. A run that is not this project's
+    // drives nothing here, so it is ignored and the card stays queueable.
+    const linkedRun = linkedRunId === null ? null : (deps.store.get(linkedRunId) ?? null)
+    const linkedPhase =
+      linkedRun !== null && linkedRun.project_slug === deps.project_slug ? linkedRun.phase : null
+    const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
+    // The clause that replaces "…it will dispatch automatically…" when nothing
+    // was queued. Promising an automatic re-fire that cannot come is the thing
+    // that made the surviving row dangerous rather than merely wrong.
+    const notQueuedClause =
+      deps.holds === undefined
+        ? 'and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the card yourself once it clears.'
+        : `and nothing stays queued — run ${(linkedRunId ?? '').slice(0, 8)} is already bound to this card and ` +
+          'owns it; the card moves when that run finishes, not when this clears.'
+    return { queued: deps.holds !== undefined && !linkedLive, linkedLive, linkedRunId, notQueuedClause }
+  }
+  // A FAILED HOLD WRITE IS REPORTED, NEVER THROWN (Argus r9 BLOCKER). Both arms
+  // are DB writes and both can fail — a locked SQLite file, a closed handle, a
+  // full disk. Two of the three refusal gates that call this run OUTSIDE every
+  // try/catch in this function (the blocker gate, and the branch-liveness gate
+  // whose probe `try` closes before the write), so a throw there escaped
+  // `dispatchBoardBoundBuild` as a REJECTED PROMISE and turned a typed,
+  // recoverable refusal into an unhandled failure at the surface — both callers
+  // (`trident/code-command.ts`, `open/composer.ts`) await this function with no
+  // local try, and only the sweep (`trident/dispatch-holds.ts`) contains its
+  // own per-hold throws. So the throw is contained HERE, once, for every gate,
+  // and REPORTED instead: the caller still gets its typed refusal — the card
+  // really is blocked, the branch really is held, and that fact is what the
+  // caller acts on — with the QUEUE CLAIM retracted in both the prose and the
+  // shape, which is the one thing a failed write actually invalidates.
+  const queueHold = async (entry: DispatchHoldInput, decision: QueueDecision): Promise<QueueOutcome> => {
+    const attempted = decision.queued ? 'upsert' : 'delete'
+    if (deps.holds === undefined) return { queued: false, error: null, attempted }
+    try {
+      // NOT WRITING IS NOT ENOUGH — DELETE WHAT IS ALREADY THERE (Argus r3
+      // BLOCKER, generalised in r4). Skipping the upsert only keeps THIS refusal
+      // from queuing the card; a row seeded by an EARLIER dispatch, before the
+      // card had a live run, still survives it and re-fires once that run
+      // terminalizes. The delete is idempotent and scoped to this (project, card)
+      // pair, which is the hold table's own key.
+      if (decision.queued) await deps.holds.upsert(entry)
+      else await deps.holds.deleteByItem(deps.project_slug, board_item_id)
+    } catch (err) {
+      return { queued: false, error: err instanceof Error ? err.message : String(err), attempted }
+    }
+    return { queued: decision.queued, error: null, attempted }
+  }
+  // The sentence appended to a refusal whose queue write failed. WHICH write
+  // failed decides what it says (Argus r10 BLOCKER) — the two failures are not
+  // the same fact and the safe action differs:
+  //  - `upsert` threw: nothing was queued, so the card really will NOT move on
+  //    its own and the operator must re-dispatch it.
+  //  - `delete` threw: the row this arm exists to REMOVE is still there. That
+  //    survivor is exactly the one `buildDispatchHoldSweep` re-fires once the
+  //    card's linked run terminalizes, so telling the operator to re-dispatch
+  //    would invite a SECOND lane onto the card. Say the stale hold is still
+  //    queued and may re-fire, and ask for it to be cleared instead.
+  const queueFailureClause = (outcome: QueueOutcome): string => {
+    if (outcome.error === null) return ''
+    if (outcome.attempted === 'delete') {
+      return (
+        ` NOTE: a STALE hold for this card could not be REMOVED — the hold store failed (${outcome.error}) — so an ` +
+        'earlier queue entry may still exist and could re-dispatch this card on its own once the run that owns it ' +
+        'finishes; clear that hold before dispatching the card yourself, or two lanes will build it.'
+      )
+    }
+    return (
+      ` NOTE: nothing could be QUEUED — the hold store failed (${outcome.error}) — so this card will NOT ` +
+      're-dispatch on its own; re-dispatch it yourself once the reason above clears.'
+    )
   }
 
   // (4) DECLARED BLOCKERS — do not fan out onto an unmet dependency.
@@ -442,22 +638,33 @@ export async function dispatchBoardBoundBuild(
     if (blocker === null) continue
     const status = blocker.status
     if (status === undefined || status === 'done') continue
+    const decision = queueDecision()
     let message =
       `Plan item "${board_item_id}" is blocked by "${blocker_id}" ("${blocker.title}", status ${status}) — ` +
-      'it will dispatch automatically when the blocker completes.'
+      (decision.queued ? 'it will dispatch automatically when the blocker completes.' : decision.notQueuedClause)
     if (status === 'failed') {
       message += ' That blocker has FAILED; it must be retried before this card can start.'
     }
-    await deps.holds?.upsert({
-      project_slug: deps.project_slug,
-      board_item_id,
-      task: input.task,
-      payload: holdPayload,
-      hold_kind: 'blocker',
-      hold_reason: message,
-      held_on_blocker_id: blocker_id,
-    })
-    return { ok: false, code: 'held', message, hold: { kind: 'blocker', blocker_id } }
+    const outcome = await queueHold(
+      {
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        hold_kind: 'blocker',
+        hold_reason: message,
+        held_on_blocker_id: blocker_id,
+      },
+      decision,
+    )
+    return {
+      ok: false,
+      code: 'held',
+      message: message + queueFailureClause(outcome),
+      // The `hold` shape is a claim that a queue entry EXISTS; only make it when
+      // one was really written — which now includes "the write did not throw".
+      ...(outcome.queued ? { hold: { kind: 'blocker' as const, blocker_id } } : {}),
+    }
   }
 
   // Resolve THIS project's own git-initialized build workspace from the owner
@@ -524,6 +731,102 @@ export async function dispatchBoardBoundBuild(
   const slug = slugifyTask(input.task)
   const branch = `trident/${slug}`
 
+  /**
+   * THE ONE `branch_live` REFUSAL, composed in one place — the tail that says
+   * what will re-fire the card, the hold row (or the delete), the log line and
+   * the returned shape.
+   *
+   * IT HAS TWO CALL SITES because the condition has two moments. Gate (4b)
+   * below is the cheap look BEFORE the workspace is written; the admission
+   * refusal further down is the same fact re-taken INSIDE the insert's own
+   * transaction, which is the only place a competitor that bound the branch
+   * during (4b)'s worktree probe can still be caught (Argus r7 BLOCKER: that
+   * race used to escape as `UNIQUE constraint failed` → `backend_error` → HTTP
+   * 500, with no hold queued and therefore nothing to re-fire the card). Both
+   * moments owe the caller the same sentence and the same queue entry, so
+   * neither may compose its own.
+   *
+   * EVERY DECISION IS TAKEN HERE, after the caller's last await: `queueDecision`
+   * must not be carried across one — see its own note.
+   */
+  const refuseBranchLive = async (
+    body: string,
+    held_on_run_id: string | null,
+  ): Promise<BoardBoundBuildResult> => {
+    const decision = queueDecision()
+    const tail =
+      deps.holds === undefined
+        ? ' Nothing was dispatched, and NOTHING WAS QUEUED — this caller wired no hold store, so re-dispatch the ' +
+          'card yourself once the holder is gone.'
+        : decision.linkedLive
+          ? ` Nothing was dispatched now, and nothing stays queued — run ${(decision.linkedRunId ?? '').slice(0, 8)} is already ` +
+            'bound to this card and owns it; the card moves when that run finishes.'
+          : ' Nothing was dispatched now; this card is QUEUED and re-checked on every sweep, so it dispatches ' +
+            'automatically once nothing live holds the branch.'
+    const message = body + tail
+    // QUEUE IT — a refusal is not a rejection. This condition ENDS the moment
+    // the live lane finishes, which is exactly the shape the hold queue was
+    // built for: without a row here the card is dropped on the floor and only
+    // a human re-dispatching it ever revives it, while the path-claim gate
+    // below (the same "a live run owns this") auto-re-fires via
+    // `buildDispatchHoldSweep`. The sweep re-runs EVERY gate, so a still-live
+    // branch simply refreshes this row's reason and a freed one dispatches.
+    //
+    // `hold_kind: 'path'` and not a new `'branch'`: migration 0139 pins the
+    // column to CHECK (hold_kind IN ('blocker','path')), widening it needs a
+    // non-idempotent table rebuild the migrations contract forbids, and a
+    // held branch IS the same fact the 'path' kind already records — a live
+    // run owns a resource this dispatch needs. The reason string carries the
+    // detail; nothing reads the kind to decide behaviour.
+    //
+    // …UNLESS THE CARD'S OWN LIVE RUN IS THE REASON. `queueHold`'s other arm
+    // DELETES instead, because writing a row anyway — or leaving one an
+    // earlier dispatch wrote — is what let a stopped/failed card auto-restart
+    // once that run terminalized. See the note at `queueDecision`.
+    const outcome = await queueHold(
+      {
+        project_slug: deps.project_slug,
+        board_item_id,
+        task: input.task,
+        payload: holdPayload,
+        hold_kind: 'path',
+        hold_reason: message,
+        held_on_run_id,
+      },
+      decision,
+    )
+    // SAY SO. The refusal used to be silent in the logs as well as in the
+    // queue, so a card that stopped moving had no trace anywhere.
+    log.warn('dispatch_branch_live', {
+      project: deps.project_slug,
+      item: board_item_id,
+      branch,
+      held_on_run_id,
+      ...(outcome.error !== null ? { hold_write_failed: outcome.error } : {}),
+    })
+    return {
+      ok: false,
+      code: 'branch_live',
+      message: message + queueFailureClause(outcome),
+      // SAY IT IS QUEUED IN THE SHAPE, NOT ONLY IN THE PROSE. `held` and the
+      // path-claim refusal both carry this; a `branch_live` without it made a
+      // queued card look dropped to every structured consumer. It is present
+      // ONLY when a hold row was really written: with no store — or behind the
+      // card's own live run, or after a THROWING write (Argus r9) — nothing was
+      // persisted, and a `hold` shape then claims a queue entry that does not
+      // exist.
+      ...(outcome.queued
+        ? {
+            hold: {
+              kind: 'branch' as const,
+              branch,
+              ...(held_on_run_id !== null ? { holding_run_id: held_on_run_id } : {}),
+            },
+          }
+        : {}),
+    }
+  }
+
   // A gh outage or malformed response is no evidence and therefore degrades
   // open, matching detectMergedPr's rule that absence of evidence is not a merge.
   if (merge_mode === 'pr') {
@@ -537,6 +840,80 @@ export async function dispatchBoardBoundBuild(
       const message = `Refused: this card's work already merged as #${landed.pr} — branch ${branch} has a MERGED PR${landed.merged_at ? ` (merged ${landed.merged_at})` : ''}${landed.head_on_base === true ? ` and its head is contained in origin/${landed.base}` : ''}. Please verify the card instead of rebuilding: check what #${landed.pr} shipped; mark the Plan item done if complete, or put the unshipped half on a NEW Plan item with its own title. Nothing was dispatched.`
       return { ok: false, code: 'already_landed', message }
     }
+  }
+
+  // (4b) BRANCH LIVENESS — never aim a second lane at a branch something live
+  // already holds. Measured 2026-09-01: a fire-turn settle timeout wrote a run
+  // off as `failed` while its detached workflow kept building this exact
+  // branch; the terminal wake then instructed a relaunch and only the
+  // wrong-base guard's SHAPE check stopped two lanes building one branch. So
+  // refuse on LIVENESS, two positive checks, cheapest first:
+  //   (a) the store — a NON-terminal run on this repo already carries this
+  //       branch (also catches the orchestrator's launched-but-unobserved
+  //       hold, which keeps the row non-terminal on purpose);
+  //   (b) the worktrees — a linked worktree has the branch checked out under
+  //       a lock naming a LIVE pid (signal-0 + recycled-pid starttime check —
+  //       the same probe the fire-evidence gate uses).
+  // POSITIVE EVIDENCE ONLY: no worktree, an unlocked or unparseable lock, a
+  // dead or recycled pid, a throwing probe, a terminal same-branch row — all
+  // proceed exactly as before. Worktree mtime is NOT consulted here: dispatch
+  // has no fire clock to compare against, and recency without a reference is
+  // just another arbitrary threshold. A refusal creates no RUN and must never
+  // advise deleting the branch — it is the live lane's workspace.
+  //
+  // NO `bound_pr` EXEMPTION, deliberately (Argus r6, minor). A review-only round
+  // does not build, so exempting it looks free — but a `bound_pr` dispatch
+  // creates a RUN, and that run's fix rounds do build, on this exact branch,
+  // under whatever is still holding it. The cost of refusing is bounded and
+  // self-clearing: the refusal QUEUES the card WITH its `bound_pr` (see
+  // `holdPayload`), and the sweep replays the same review round the moment the
+  // holder is gone. The cost of exempting is the two-lanes-on-one-branch
+  // outcome this whole gate exists to prevent.
+  //
+  // IT RUNS *AFTER* `already_landed`, and the order is load-bearing. Both
+  // refuse and both dispatch nothing, so the only thing at stake is which
+  // sentence the operator reads — and "already merged as #N, verify the card"
+  // is strictly more actionable than "something is building this branch" for a
+  // card whose work has SHIPPED (the 2026-08-17 incidents this file's header
+  // names). Running the liveness probe second costs one `gh` call on the rarer
+  // path; running it first cost the clearer diagnosis on the common one.
+  {
+    const holdingRun = deps.store.listNonTerminalByRepo(repo_path).find((r) => r.branch === branch)
+    // THE REFUSAL BODY IS BUILT WITHOUT ITS TAIL, and the tail is appended below
+    // — because the tail states what will re-fire the card, and that is only
+    // knowable AFTER the last await in this gate (the holder probe). Deciding it
+    // here, ahead of the probe, is how the snapshot bug got in: a competing
+    // dispatch binding the card DURING the probe left this refusal promising an
+    // automatic re-fire and writing the row to make it happen.
+    let body: string | null = null
+    let held_on_run_id: string | null = null
+    if (holdingRun !== undefined) {
+      held_on_run_id = holdingRun.id
+      body =
+        `Refused: branch ${branch} is already being built by live run ${holdingRun.id.slice(0, 8)} ` +
+        `(${holdingRun.slug}, phase ${holdingRun.phase}). Resolve that run first — watch it finish, or stop it ` +
+        `explicitly if it is truly dead — and never delete the branch under it.`
+    } else {
+      let holder: BranchHolderProbe | null = null
+      try {
+        holder = await (deps.branchHolderProbe ?? defaultBranchHolderProbe)(repo_path, branch)
+      } catch {
+        holder = null // a failed look is not a holder — positive evidence only
+      }
+      if (holder !== null && holder.pid_live) {
+        body =
+          `Refused: branch ${branch} is held by live worktree ${holder.worktree_basename}` +
+          (holder.pid !== null ? ` (lock pid ${holder.pid}, alive)` : '') +
+          ` — a lane appears to be building this branch right now even though no live run row says so ` +
+          `(a launcher timeout may have mislabeled its run as failed). Resolve the holder first: check ` +
+          '`git worktree list --porcelain` and that pid; never delete the branch under a live lock.'
+      }
+    }
+    // WHAT WILL ACTUALLY RE-FIRE THIS CARD is decided inside `refuseBranchLive`
+    // — after every await in this gate, synchronously with the write that
+    // follows. See `queueDecision` for why the answer may not be carried across
+    // an await.
+    if (body !== null) return await refuseBranchLive(body, held_on_run_id)
   }
 
   // (5) FILE CONTENTION — do not start a build on a file a LIVE run already owns.
@@ -585,24 +962,72 @@ export async function dispatchBoardBoundBuild(
       ...(deps.channel_kind !== undefined ? { channel_kind: deps.channel_kind } : {}),
     })
     if (!admission.ok) {
+      if (admission.conflict === 'branch') {
+        // THE RACE THE GATE ABOVE CANNOT WIN (Argus r7 BLOCKER). Gate (4b) read
+        // the live rows, then awaited the worktree probe; a competing dispatch
+        // that bound this branch inside that window was invisible to it and used
+        // to surface HERE as `UNIQUE constraint failed: code_trident_runs.
+        // project_slug, code_trident_runs.slug` — caught by the bare handler at
+        // the bottom of this block, returned as `backend_error`, mapped to HTTP
+        // 500 by `work-board-surface.ts`, and queueing NOTHING, so the card was
+        // dropped rather than parked behind the lane that beat it. The store
+        // re-takes the same liveness fact inside the INSERT's transaction and
+        // reports it as a conflict; the refusal is the gate's, word for word.
+        // SAY WHICH ARM COLLIDED (Argus r8 nit). `liveBranchOrSlugHolder` ORs two
+        // facts — this repo's branch, and this project's slug — and the second
+        // ignores `repo_path`, so a card dispatched against a DIFFERENT repo
+        // collides on the slug while its branch is free. Reporting that as
+        // "branch X is already being built" sends the operator to look at a
+        // branch nothing holds. The refusal and the queue behaviour are identical
+        // either way; only the diagnosis sentence changes.
+        const holder = admission.holding_run
+        const sameBranch = holder.repo_path === repo_path && holder.branch === branch
+        return await refuseBranchLive(
+          `Refused: ${
+            sameBranch
+              ? `branch ${branch} is already being built`
+              : `this card's slug ${slug} is already being built (on another repo path, branch ${holder.branch ?? 'none'})`
+          } by live run ${holder.id.slice(0, 8)} ` +
+            `(${holder.slug}, phase ${holder.phase}) — it won the race for this card ` +
+            'while this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly ' +
+            'if it is truly dead — and never delete the branch under it.',
+          holder.id,
+        )
+      }
+      // Decided AFTER the admission attempt — the last await before the write.
+      const decision = queueDecision()
       const message =
         `"${admission.path}" is claimed by live run ${admission.holding_run.id.slice(0, 8)} ` +
-        `(${admission.holding_run.slug}) — this build will start automatically when that run goes terminal.`
-      await deps.holds?.upsert({
-        project_slug: deps.project_slug,
-        board_item_id,
-        task: input.task,
-        payload: holdPayload,
-        claimed_paths: paths,
-        hold_kind: 'path',
-        hold_reason: message,
-        held_on_run_id: admission.holding_run.id,
-      })
+        `(${admission.holding_run.slug}) — ` +
+        (decision.queued
+          ? 'this build will start automatically when that run goes terminal.'
+          : decision.notQueuedClause)
+      const outcome = await queueHold(
+        {
+          project_slug: deps.project_slug,
+          board_item_id,
+          task: input.task,
+          payload: holdPayload,
+          claimed_paths: paths,
+          hold_kind: 'path',
+          hold_reason: message,
+          held_on_run_id: admission.holding_run.id,
+        },
+        decision,
+      )
       return {
         ok: false,
         code: 'held',
-        message,
-        hold: { kind: 'path', holding_run_id: admission.holding_run.id, path: admission.path },
+        message: message + queueFailureClause(outcome),
+        ...(outcome.queued
+          ? {
+              hold: {
+                kind: 'path' as const,
+                holding_run_id: admission.holding_run.id,
+                path: admission.path,
+              },
+            }
+          : {}),
       }
     }
     const run = admission.run
@@ -614,10 +1039,45 @@ export async function dispatchBoardBoundBuild(
     await deps.holds?.deleteByItem(deps.project_slug, board_item_id)
     return { ok: true, run, merge_mode, ralph }
   } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err)
+    // THE SAME RACE, ONE PROCESS FURTHER OUT. The store closes the in-process
+    // window inside its own transaction, but two gateway processes on one DB
+    // file can still both pass their reads, and the loser then meets the
+    // live-only unique index (`(project_slug, slug)` WHERE phase NOT IN
+    // terminal, migration 0138) as a raw SQLite error. That is the SAME fact —
+    // something live already owns this card's branch — so it gets the same
+    // refusal and the same hold rather than a 500 that queues nothing. Any
+    // other failure is still a genuine `backend_error`.
+    if (/UNIQUE constraint failed:\s*code_trident_runs\.(project_slug|slug)/i.test(detail)) {
+      // BELT AND BRACES, kept from Argus r8. The hold write itself no longer
+      // throws — `queueHold` contains it for EVERY gate now (Argus r9 BLOCKER,
+      // which is what made the two unwrapped gates above safe) and reports the
+      // failure in the refusal instead. This catch remains only for the rest of
+      // `refuseBranchLive`: its `queueDecision` re-read of the board and the
+      // store, and the log line. Both run in a catch block already handling a
+      // failed write, so a second failure here degrades to `backend_error`
+      // rather than escaping as a rejected promise.
+      try {
+        return await refuseBranchLive(
+          `Refused: branch ${branch} is already being built by a live run that won the race for this card while ` +
+            'this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly if ' +
+            'it is truly dead — and never delete the branch under it.',
+          null,
+        )
+      } catch (holdErr) {
+        return {
+          ok: false,
+          code: 'backend_error',
+          message: `failed to start a build: ${detail}; and the branch-live hold could not be recorded: ${
+            holdErr instanceof Error ? holdErr.message : String(holdErr)
+          }`,
+        }
+      }
+    }
     return {
       ok: false,
       code: 'backend_error',
-      message: `failed to start a build: ${err instanceof Error ? err.message : String(err)}`,
+      message: `failed to start a build: ${detail}`,
     }
   }
 }

@@ -17,6 +17,7 @@ import {
   type OutboundSink,
 } from './delivery.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { FIRE_PUBLISHED_REASON_MARKER, publishedFailureReason } from './fire-evidence.ts'
 import {
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_SNAPSHOT_MARKER,
@@ -56,6 +57,47 @@ function recordingSink(): { sink: OutboundSink; sent: OutgoingMessage[] } {
     },
   }
 }
+
+// ARGUS r4 (major): `interpretFailure` routes to `published-unreviewed` on a
+// substring of the failure_reason. While that substring was the plain English
+// phrase `already built and published`, any reason that merely QUOTED it — a
+// forge assertion message, a diff excerpt — reported a build that published
+// NOTHING as finished-and-pushed, and told the owner not to rebuild it. Both
+// directions are pinned here because only one of them can be got wrong quietly.
+describe('published-unreviewed is keyed on the machine token, not on English', () => {
+  test('the reason publishedFailureReason authors classifies as published-unreviewed', () => {
+    const reason = publishedFailureReason(`outer-published:${'a'.repeat(40)}:0:3`)
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(interp.klass).toBe('published-unreviewed')
+    const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(out?.text.startsWith('📦')).toBe(true)
+  })
+
+  test('a reason that merely QUOTES the English phrase does NOT classify as published', () => {
+    const reason = 'forge assertion failed: expected text already built and published to be absent'
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(interp.klass).not.toBe('published-unreviewed')
+    const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(out?.text.startsWith('📦')).toBe(false)
+  })
+
+  // ARGUS r8 (major): moving the match from English to a bracketed token killed
+  // the realistic collision but not the MECHANISM — `includes()` still matched
+  // the token ANYWHERE. This repo builds itself, and the crash-recovery branch
+  // one screen below deliberately embeds substrate stderr VERBATIM, so a
+  // genuinely failed build whose output quoted this file reported "finished and
+  // pushed" and had its rebuild advice suppressed. The match is now anchored on
+  // the head `publishedFailureReason` writes at offset zero.
+  test('a reason that EMBEDS the literal machine token mid-string does NOT classify as published', () => {
+    const reason =
+      'the build supervisor crashed; crash-recovery budget exhausted — substrate said: ' +
+      `expected reason to contain ${FIRE_PUBLISHED_REASON_MARKER} but it did not`
+    const interp = interpretFailure(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(interp.klass).not.toBe('published-unreviewed')
+    const out = composeTerminalDelivery(runWith({ phase: 'failed', failure_reason: reason }))
+    expect(out?.text.startsWith('📦')).toBe(false)
+  })
+})
 
 describe('composeTerminalDelivery', () => {
   test('failed PR sentinel does not render PR #0', () => {
