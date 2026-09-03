@@ -16,6 +16,7 @@ import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan, buildSimMutationProofGa
 import { interpretFailure } from './delivery.ts'
 import {
   buildTridentOrchestrator,
+  isInfraDeath,
   isTridentHarvestTerminal,
   remoteAlreadyAtPublishHead,
   resolveClaimedCommit,
@@ -3002,7 +3003,7 @@ describe('REVIEW_NOT_RUN — terminal without the reviewer speaking', () => {
   async function harvestRawResult(over: {
     verdict: 'REQUEST_CHANGES' | null
     checkpoint: string | null
-    blockKind: 'code' | 'infra-only' | 'round-lost' | null
+    blockKind: 'code' | 'infra-only' | 'advisory-only' | 'round-lost' | null
     findings: string | null
     terminalCause?: string
   }): Promise<TridentRun> {
@@ -3074,6 +3075,87 @@ describe('REVIEW_NOT_RUN — terminal without the reviewer speaking', () => {
       })
       expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
     }
+  })
+
+  /**
+   * ...AND AN ADVISORY-ONLY STOP IS THE OPPOSITE CASE, which the same discriminator used
+   * to get wrong in the expensive direction.
+   *
+   * The inner workflow returns `blockKind: 'advisory-only'` when a HEALTHY panel judged the
+   * code and every finding it produced was one the workflow has already declared
+   * non-blocking (a nit, a minor, a pre-existing red). The fix loop exits without buying a
+   * round — that is the whole point — but a reviewer DID speak, so recording REVIEW_NOT_RUN
+   * ("no review seat ever judged the code") is simply false. It was also costly: a resume
+   * off that row re-Forged a full round on findings the run had already settled as
+   * non-actionable, which is the exact waste the advisory economy exists to stop.
+   *
+   * RED-mutation: change `advisory-only` back to `infra-only` in `classifyBlock`
+   * (inner-workflow.mjs) or drop it from `recordedTerminalVerdict` and this fails.
+   */
+  test('an advisory-only stop records REQUEST_CHANGES — a reviewer DID judge the code', async () => {
+    const findings = '[{"severity":"major","advisory":true,"title":"CI RED FOR PRE-EXISTING REASONS: shard 3/8"}]'
+    const final = await harvestRawResult({
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'argus-request-changes',
+      blockKind: 'advisory-only',
+      findings,
+    })
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+    expect(final.inner_checkpoint_findings).toBe(findings)
+  })
+
+  // ...AND THE SIMULATOR WRITES THE SAME ROW THE WORKFLOW WOULD. The test above seeds the
+  // verdict column by hand (deliberately — it models the OLD out-of-process writer the
+  // harvest must correct), so it cannot catch the simulated writer drifting away from
+  // production's. `inner-loop-sim.ts` widened its blockKind TYPE for 'advisory-only' and
+  // left its `inner_verdict` discriminator matching 'code' alone, which recorded
+  // REVIEW_NOT_RUN where production records REQUEST_CHANGES. This runs it.
+  test('the SIMULATED writer records an advisory-only stop the way production does', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        result: {
+          verdict: 'REQUEST_CHANGES' as const,
+          branch: 'feat-x',
+          checkpoint: 'argus-request-changes',
+          blockKind: 'advisory-only' as const,
+          findings: [{ severity: 'major', advisory: true, title: 'CI RED FOR PRE-EXISTING REASONS: shard 3/8' }],
+        },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const final = await runToTerminal(h, run.id)
+    expect(final.inner_verdict).toBe('REQUEST_CHANGES')
+  })
+
+  // ...and the provenance requirement is NOT relaxed by the new kind. An advisory-only
+  // claim with no Argus checkpoint behind it is still a claim nobody made.
+  test('advisory-only without Argus provenance is still REVIEW_NOT_RUN', async () => {
+    const final = await harvestRawResult({
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'forge-done',
+      blockKind: 'advisory-only',
+      findings: '[{"severity":"nit","title":"spacing"}]',
+    })
+    expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
+  })
+
+  // ...nor does it license the infra path. `isInfraDeath` reads 'infra-only' ONLY, so an
+  // advisory-only stop must not be reported to the owner as "review never ran".
+  test('an advisory-only stop is not an infra death', () => {
+    expect(isInfraDeath({
+      ok: true,
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'argus-request-changes',
+      block_kind: 'advisory-only',
+      findings_present: true,
+    })).toBe(false)
+    expect(isInfraDeath({
+      ok: true,
+      verdict: 'REQUEST_CHANGES',
+      checkpoint: 'argus-request-changes',
+      block_kind: 'infra-only',
+      findings_present: true,
+    })).toBe(true)
   })
 
   // THE SUITE-GATE HOLE, MEASURED. `failedRun` used to keep REQUEST_CHANGES on any

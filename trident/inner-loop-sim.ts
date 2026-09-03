@@ -50,7 +50,7 @@ export interface SimResult {
   publishRequested?: boolean
   publishHead?: string | null
   /** #240 — why the workflow stopped ('infra-only' means no review seat judged the code). */
-  blockKind?: 'none' | 'code' | 'infra-only' | 'round-lost' | null
+  blockKind?: 'none' | 'code' | 'infra-only' | 'advisory-only' | 'round-lost' | null
   /** T4 — the review findings the terminal result carried. Emitted only when the test sets
    *  it (the wrapper's catch path writes `findings: []`, and legacy rows omit it entirely),
    *  so the absent-field default decodes to `findings_present: false`. */
@@ -127,7 +127,12 @@ export async function writeSimulatedResult(
       sim.verdict === 'APPROVE'
         ? 'APPROVE'
         : sim.verdict === 'REQUEST_CHANGES' &&
-            sim.blockKind === 'code' &&
+            // The SAME discriminator production's writer uses (inner-workflow.mjs,
+            // `writeTerminalResult`): 'advisory-only' IS a review — the panel ran, judged
+            // the code and produced findings. A simulator that dropped it recorded
+            // REVIEW_NOT_RUN where production records REQUEST_CHANGES, which is the one
+            // drift a simulator of the writer must not have.
+            (sim.blockKind === 'code' || sim.blockKind === 'advisory-only') &&
             Array.isArray(sim.findings) &&
             sim.findings.length > 0
           ? 'REQUEST_CHANGES'

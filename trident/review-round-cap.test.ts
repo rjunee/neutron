@@ -177,15 +177,20 @@ describe('review-round cap — the two knobs may not drift apart', () => {
     // The concrete drift this catches: `round++` -> `round += 2` would skip
     // rounds, so a lane would get five fix rounds instead of nine while the cap
     // literal still read 10.
-    const loop = /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*synthesis\.blockKind !== 'infra-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
+    const loop =
+      /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*synthesis\.blockKind !== 'infra-only' &&\s*\n\s*synthesis\.blockKind !== 'advisory-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(
+        SRC,
+      )
     // Proved to have MATCHED before anything is concluded from it.
     expect(loop).not.toBeNull()
   })
 
-  test('the loop guards all THREE clauses — verdict, cap, and infra-only', () => {
+  test('the loop guards all FOUR clauses — verdict, cap, infra-only, advisory-only', () => {
     // Dropping the infra-only clause would spend the (now larger) round budget
-    // re-Forging against a review that never ran.
+    // re-Forging against a review that never ran; dropping the advisory-only clause
+    // would spend it re-Forging against findings already declared non-blocking.
     expect(SRC).toContain("finalVerdict === 'REQUEST_CHANGES' &&")
     expect(SRC).toContain("synthesis.blockKind !== 'infra-only'")
+    expect(SRC).toContain("synthesis.blockKind !== 'advisory-only'")
   })
 })

@@ -47,7 +47,7 @@ interface ReviewPanelResult {
   verdict: ReviewVerdict | null
   findings: unknown[]
   reviewed_sha: string | null
-  block_kind: 'none' | 'code' | 'infra-only' | 'round-lost' | null
+  block_kind: 'none' | 'code' | 'infra-only' | 'advisory-only' | 'round-lost' | null
   terminal_cause: string | null
   publish_requested?: boolean
   pr_merged?: boolean
