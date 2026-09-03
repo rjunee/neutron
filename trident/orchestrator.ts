@@ -74,6 +74,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
@@ -5053,7 +5054,7 @@ export function buildTridentOrchestrator(
         const injected = pendingFire.injected === true
         if (pendingFire.cancel !== null) {
           const cancel = pendingFire.cancel
-          void cancel().catch((err: unknown) => {
+          fireAndForget('orchestrator.unconfirmed_fire_cancel', cancel(), (err: unknown) => {
             log.error('unconfirmed_fire_cancel_failed', {
               run: run.id,
               slug: run.slug,
