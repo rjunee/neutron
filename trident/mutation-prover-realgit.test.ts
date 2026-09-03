@@ -581,6 +581,64 @@ describe('the mutation-proof gate against real git', () => {
     expect(pyObs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
+  test('a committed conftest.py and a committed argparse.py are refused too — the tree without a flag', async () => {
+    // THE TWO SIBLINGS of the shadow above, end to end. Neither puts anything
+    // in the argv: `conftest.py` is imported BY PYTEST ITSELF before collection
+    // (here a directory down, where pytest's rootdir search really looks), and
+    // `argparse.py` is a stdlib name the REAL runner imports on its way up,
+    // which the module-name check never looks at. Both markers stay unwritten,
+    // which is how we know nothing was executed and this needs no python on the
+    // box.
+    const repo = await seedProductionLib()
+    writeFileSync(join(repo, 'tests', 'conftest.py'), "open('../../pwned-by-conftest','w').write('x')\n")
+    writeFileSync(join(repo, 'argparse.py'), "open('../../pwned-by-argparse','w').write('x')\n")
+    writeFileSync(join(repo, 'tests', 'unrelated_test.py'), 'def test_ok():\n    assert True\n')
+    await git(repo, 'add', '-A')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'a conftest and a shadowed stdlib name')
+    const run = { id: 'run-py-conf', slug: 'production-lib', branch: 'trident/production-lib-proof', repo_path: repo }
+    const claim = {
+      file: 'src/limit.ts',
+      find: 'n > max ? max : n',
+      replace: 'n',
+      control: ['bun', 'test', 'tests/other-control.test.ts'],
+    }
+
+    const conf = await runMutationProofGate({
+      run,
+      claim: { ...claim, guard: ['python3', '-m', 'pytest', 'tests/unrelated_test.py'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([conf.ok, conf.exempt, conf.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(conf.reason).toContain('tests/conftest.py')
+    expect(conf.reason).toContain('nothing on the argv')
+
+    const dep = await runMutationProofGate({
+      run: { ...run, id: 'run-py-dep' },
+      claim: { ...claim, guard: ['python3', '-m', 'unittest', 'tests.unrelated_test'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([dep.ok, dep.exempt, dep.evidence?.proved ?? null]).toEqual([false, false, false])
+    expect(dep.reason).toContain('argparse.py')
+    expect(dep.reason).toContain('sys.path')
+
+    expect(existsSync(join(repo, 'pwned-by-conftest'))).toBe(false)
+    expect(existsSync(join(repo, 'pwned-by-argparse'))).toBe(false)
+    expect(existsSync(proofWorktreePath(repo, run))).toBe(false)
+
+    // POSITIVE CONTROL, in the same repo with both files committed: a runner
+    // that does not search the tree still proves red-then-green, so these two
+    // refusals are about the nomination and not about the repo.
+    const fine = await runMutationProofGate({
+      run: { ...run, id: 'run-py-conf-control' },
+      claim: { ...claim, guard: ['bun', 'test', 'tests/limit.test.ts'] },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([fine.ok, fine.exempt, fine.evidence?.proved ?? null]).toEqual([true, false, true])
+  }, 120_000)
+
   test('the mutated file under an ABSOLUTE or ..-and-back name is still its own guard, and is refused', async () => {
     // THE BYPASS, against real git and the real path the proof worktree lands
     // at. The guard below runs `tests/support/clamp.ts` — the MUTATED file —

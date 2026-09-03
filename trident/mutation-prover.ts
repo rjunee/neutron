@@ -1068,30 +1068,102 @@ function dottedStemOf(target: string): string | null {
  * entry, not guessed: a DIRECTORY named `<module>` (a regular package OR a
  * NAMESPACE package — no `__init__.py` is required), a `<module>.py`, a
  * sourceless `<module>.pyc`, and an extension module `<module>.so` or
- * `<module>.<abi>.so`. `pytest.ini` and `conftest.py` match none of those and
- * stay legal. MATCHING IS ON THE NAME, file or directory alike, because
- * `ls-tree --name-only` does not distinguish them and python does not care: an
- * extensionless FILE named `pytest` is an over-refusal, and it fails CLOSED —
- * it is spellable around by renaming the entry. Only `python3` can reach here;
- * every other python spelling is off the allowlist already.
+ * `<module>.<abi>.so`. MATCHING IS ON THE NAME, file or directory alike,
+ * because `ls-tree --name-only` does not distinguish them and python does not
+ * care: an extensionless FILE named `pytest` is an over-refusal, and it fails
+ * CLOSED — it is spellable around by renaming the entry. Only `python3` can
+ * reach here; every other python spelling is off the allowlist already.
  *
- * KNOWN RESIDUALS, named so the next reader does not re-derive them. Windows-
- * only suffixes (`.pyw`, `.pyd`) are not probed — guards run on this host. The
- * rootdir `conftest.py` pytest itself loads is the recorded config-with-no-flag
- * residual. And DEPENDENCY shadowing — a committed `_pytest/`, or a stdlib name
- * the real runner imports after startup — fails OPEN and is deliberately out of
- * scope: this check constrains the NOMINATED MODULE'S OWN NAME, and the
- * dependency surface is not enumerable from the argv. It belongs to a follow-up
- * card.
+ * THIS ARM CONSTRAINS THE NOMINATED MODULE'S OWN NAME ONLY. The two sibling
+ * escapes it does NOT see — a DEPENDENCY the real runner imports, and a config
+ * pytest reads with no flag on the argv — are closed beside it by
+ * `pythonImportShadow` and `pytestConfigShadow`; each is refused separately so
+ * the refusal says which one fired. Windows-only suffixes (`.pyw`, `.pyd`) are
+ * not probed — guards run on this host.
  */
 export function pythonModuleShadow(argv: readonly string[], topLevelNames: readonly string[]): string | null {
   if (argv[0] !== 'python3' || argv[1] !== '-m' || typeof argv[2] !== 'string') return null
+  // The dotted split is DEFENCE IN DEPTH, not a reachable spelling today:
+  // `TEST_COMMAND_SHAPES` gates argv[2] to the literal `pytest` or `unittest`
+  // on guard AND control, so `-m pkg.mod` never reaches here. It is kept so
+  // this predicate stays correct if that shape is ever widened — read it as
+  // "the first segment is what a path entry resolves", not as evidence that a
+  // dotted `-m` is reachable.
   const top = argv[2].split('.')[0] ?? ''
   if (top.length === 0) return null
   for (const n of topLevelNames) {
     if (n === top || n === `${top}.py` || n === `${top}.pyc` || (n.startsWith(`${top}.`) && n.endsWith('.so'))) {
       return n
     }
+  }
+  return null
+}
+
+/**
+ * THE DEPENDENCY the runner imports, not the module the argv names. Measured
+ * against this branch's own gate at `62638679`: commit a top-level
+ * `argparse.py` whose body is `import sys / import src.limit / sys.exit(0)`,
+ * syntax-break `src/limit.py`, nominate `python3 -m unittest
+ * tests.unrelated_test` as the guard, and the gate returns `ok: true, proved:
+ * true` — nothing asserted the target. `pythonModuleShadow` never sees it:
+ * `argparse` is not the nominated module, it is a module the REAL runner
+ * imports on the way up, and `-m` has already put the worktree's own top level
+ * first on `sys.path`.
+ *
+ * WHICH NAMES THE RUNNER IMPORTS IS NOT ENUMERABLE FROM THE ARGV, so this does
+ * not try: for a `python3 -m` nomination ANY top-level MODULE FILE — `*.py`,
+ * `*.pyc`, `*.so` — is treated as branch-supplied runner code and refused. That
+ * is deliberately broader than the repro. The cost is an over-refusal of an
+ * honest python repo that keeps a `setup.py` or a `noxfile.py` at its root, and
+ * it fails CLOSED and is spellable around: move the file, or nominate `go`,
+ * `cargo`, `bun`, `node` — nothing honest is made unprovable.
+ *
+ * THE ARM STILL OPEN, named so it is not rediscovered as new: a top-level
+ * DIRECTORY shadows a dependency too (`_pytest/`, or `argparse/__init__.py`),
+ * because python reads any directory as a namespace package. It is NOT refused
+ * here, because every python repo has `tests/` and `src/` at its root and
+ * refusing directories refuses every honest python nomination there is —
+ * i.e. it would delete `python3 -m` from `TEST_COMMAND_SHAPES` by another
+ * route. Closing it needs a rule that inspects the directory's contents rather
+ * than its name, which is a follow-up card, not a line here.
+ */
+export function pythonImportShadow(argv: readonly string[], topLevelNames: readonly string[]): string | null {
+  if (argv[0] !== 'python3' || argv[1] !== '-m') return null
+  for (const n of topLevelNames) {
+    if (/\.(py|pyc|so)$/.test(n)) return n
+  }
+  return null
+}
+
+/**
+ * THE CONFIG WITH NO FLAG ON THE ARGV. pytest loads the rootdir `conftest.py`
+ * itself, before collection and with nothing on the command line to show for
+ * it, and it obeys `addopts` out of `pytest.ini` / `tox.ini` / `setup.cfg` /
+ * `pyproject.toml` — so a committed `conftest.py` whose body is `import
+ * src.limit` reproduces the same forgery as a committed `pytest/__main__.py`,
+ * while every argv-shaped arm of this file looks straight past it. It is the
+ * residual the previous round recorded and left OPEN; this closes it, on the
+ * same pinned tree the module probe reads.
+ *
+ * MATCHING IS ON THE BASENAME AT ANY DEPTH, not just the repo root, because
+ * pytest's rootdir is derived from the ARGS: `python3 -m pytest tests/x_test.py`
+ * finds `tests/conftest.py` and an ini file in `tests/` just as readily as the
+ * ones beside `.git`. Enumerating which of them would actually win the rootdir
+ * race means reimplementing pytest's discovery; refusing the whole basename
+ * fails CLOSED and is spellable around by renaming the file or nominating
+ * `unittest`, which loads none of them.
+ *
+ * ONLY `pytest` READS THESE. `python3 -m unittest` has no config file and no
+ * auto-loaded hook, so it is not refused for a `conftest.py` sitting in a tree
+ * it will never look at.
+ */
+const PYTEST_CONFIG_BASENAME = /^(?:conftest\.py|pytest\.ini|\.pytest\.ini|tox\.ini|setup\.cfg|pyproject\.toml)$/
+
+export function pytestConfigShadow(argv: readonly string[], paths: readonly string[]): string | null {
+  if (argv[0] !== 'python3' || argv[1] !== '-m' || argv[2] !== 'pytest') return null
+  for (const p of paths) {
+    const base = p.split('/').pop() ?? p
+    if (PYTEST_CONFIG_BASENAME.test(base)) return p
   }
   return null
 }
@@ -2321,27 +2393,35 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
 
     // RUNNER PROVENANCE, read off the PINNED TREE. `-m` resolves the module
     // from the working directory first, so a `python3 -m <mod>` argv does not
-    // say whose code will run — the tree's own top level does. The list comes
+    // say whose code will run — the tree's own contents do. The listing comes
     // from git, never from the agent; it is asked BEFORE anything is mutated or
     // run; and a listing we could not read fails CLOSED.
+    //
+    // IT IS RECURSIVE, and the top level is derived from it as each path's
+    // first segment, because the three things it has to see live at different
+    // depths: the `-m` module and a shadowed dependency resolve off the ROOT
+    // (that is the one `sys.path` entry `-m` adds), while pytest's
+    // `conftest.py` and its ini files are found from the ARGS upward and are
+    // routinely a directory down. One listing answers all three.
     const nominated: Array<[string, readonly string[]]> = [
       ['guard', claim.guard],
       ['control', claim.control],
     ]
     const pythonArgvs = nominated.filter(([, a]) => a[0] === 'python3' && a[1] === '-m')
     if (pythonArgvs.length > 0) {
-      const ls = await deps.run_host(['git', '-C', wt, 'ls-tree', '--name-only', '-z', headSha], wt)
+      const ls = await deps.run_host(['git', '-C', wt, 'ls-tree', '-r', '--name-only', '-z', headSha], wt)
       if (!ls.ok) {
         return refuse(
           run_id,
           claim,
-          `could not read the top level of ${headSha.slice(0, 8)} to establish runner provenance for a python -m nomination — refusing rather than trusting a runner the worktree may shadow`,
+          `could not read the tree of ${headSha.slice(0, 8)} to establish runner provenance for a python -m nomination — refusing rather than trusting a runner the worktree may shadow`,
         )
       }
-      const names = ls.stdout
+      const paths = ls.stdout
         .split('\0')
         .map((n) => n.trim())
         .filter((n) => n.length > 0)
+      const names = [...new Set(paths.map((p) => p.split('/')[0] as string))]
       for (const [which, argv] of pythonArgvs) {
         const shadow = pythonModuleShadow(argv, names)
         if (shadow !== null) {
@@ -2349,6 +2429,27 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
             run_id,
             claim,
             `claim.${which} python3 -m ${argv[2]} would run BRANCH-SUPPLIED code, not the installed runner: -m resolves the module from the working directory first, and this tree's own top level contains ${shadow} — a runner the worktree can shadow is not evidence of a test runner; rename ${shadow} or nominate a runner the tree cannot shadow`,
+          )
+        }
+        // THE CONFIG ARM IS ASKED BEFORE THE DEPENDENCY ARM, and the order is
+        // about the MESSAGE, not about legality: a top-level `conftest.py`
+        // satisfies both (it is a module file, and it is the file pytest
+        // imports itself), and the reader is better served by the arm that
+        // names what pytest does with it than by the general one.
+        const config = pytestConfigShadow(argv, paths)
+        if (config !== null) {
+          return refuse(
+            run_id,
+            claim,
+            `claim.${which} python3 -m pytest would load BRANCH-SUPPLIED code with nothing on the argv to show for it: this tree contains ${config}, and pytest imports conftest.py itself and obeys addopts out of its ini files — a runner whose behaviour the tree can change with no flag is not evidence of a test runner; rename ${config} or nominate python3 -m unittest, which reads neither`,
+          )
+        }
+        const dependency = pythonImportShadow(argv, names)
+        if (dependency !== null) {
+          return refuse(
+            run_id,
+            claim,
+            `claim.${which} python3 -m ${argv[2]} would run BRANCH-SUPPLIED code, not the installed runner: -m puts this tree's own top level first on sys.path, and it contains the module file ${dependency} — the runner imports modules the argv never names, so any top-level module can be the one it loads; move ${dependency} out of the tree root or nominate a runner that does not search it`,
           )
         }
       }
@@ -3182,6 +3283,30 @@ function asReason(path: string): string {
   return /[\u0000-\u001f\u007f]/.test(path) ? JSON.stringify(path) : path
 }
 
+/** The budget in characters for a file list interpolated into ONE reason
+ *  string. Chosen so that every diff this gate has ever seen names every file
+ *  and nothing is elided in practice; it exists for the thousand-file rename,
+ *  which is bounded only by git and would otherwise reach a log line, a status
+ *  post and a DB row whole. */
+const REASON_NAME_BUDGET = 4000
+
+/** As many of `paths` as fit the budget, in order, with the elision COUNTED
+ *  rather than implied — a list that silently stops is worse than no list. At
+ *  least one name is always printed, however long it is: a reason that names
+ *  nothing but a count is not a reason. */
+function namesWithinBudget(paths: readonly string[]): string {
+  const kept: string[] = []
+  let used = 0
+  for (const p of paths) {
+    const name = asReason(p)
+    if (kept.length > 0 && used + name.length + 2 > REASON_NAME_BUDGET) break
+    kept.push(name)
+    used += name.length + 2
+  }
+  const elided = paths.length - kept.length
+  return elided > 0 ? `${kept.join(', ')}, … +${elided} more` : kept.join(', ')
+}
+
 export function missingClaimRefusalReason(files: readonly string[] | null, deleted: readonly string[] = []): string {
   if (files === null) {
     return 'mutation proof required but the branch diff could not be read — a proof cannot be bound to it'
@@ -3373,16 +3498,22 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     const changed = files as string[]
     // NAME THEM ALL — every changed file, not just the declared tests. These
     // are the names the exemption rests on, and this string is the only place
-    // they outlive the run. A truncated list hides exactly the entry a reviewer
-    // is here for — five ordinary `*.test.ts` names and a sixth that is
-    // production logic wearing a test's name — and a list FILTERED to the tests
-    // hides the rest of the diff the exemption also covered. So "the reason
-    // names the files" has to mean all of them or it means nothing. Bounded by
-    // the diff, which git wrote and the agent did not; deliberately uncapped,
-    // and the cost of that is one long log line on a large rename.
+    // they outlive the run. A list FILTERED to the tests hides the rest of the
+    // diff the exemption also covered, and a silent truncation hides exactly
+    // the entry a reviewer is here for — five ordinary `*.test.ts` names and a
+    // sixth that is production logic wearing a test's name. So the list is
+    // capped by TOTAL LENGTH, not by count, and the cap announces itself: every
+    // ordinary diff still names every file, and the pathological one — a
+    // thousand-file test-only rename — no longer interpolates a multi-hundred-KB
+    // single line into the log line. The tick note and the stage row cap their
+    // OWN copies already (`truncateNote`, `truncateStageReason`), and this does
+    // not replace them: it bounds the string where it is BUILT, so the cut is
+    // announced as a count of elided names rather than as a byte offset, and a
+    // consumer that does not truncate cannot be handed the blob in the first
+    // place. The count before the list is the honest total either way.
     return {
       ok: true,
-      reason: `no production file in this diff — nothing to mutate: all ${changed.length} changed files are declared tests or documentation (${changed.map(asReason).join(', ')})`,
+      reason: `no production file in this diff — nothing to mutate: all ${changed.length} changed files are declared tests or documentation (${namesWithinBudget(changed)})`,
       exempt: true,
       evidence: null,
     }

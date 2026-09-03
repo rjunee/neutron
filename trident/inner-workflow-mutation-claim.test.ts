@@ -363,6 +363,23 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     expect(PROVER_SRC).toContain('pythonModuleShadow')
     expect(PROVER_SRC).toContain('-m resolves the module from the working directory first')
 
+    // …AND THE TWO SIBLINGS OF THAT ESCAPE, which are about an entry in the
+    // repository for the same reason and are equally unreachable by any name
+    // loop: the DEPENDENCY a top-level module file shadows, and the pytest
+    // config the tree changes the run with NO FLAG AT ALL. A build that read
+    // only the module sentence would nominate a guard that is refused after the
+    // whole review had run, so the schema has to foresee both.
+    for (const d of described) {
+      expect(['python dependency shadow', d.includes('ANY top-level .py/.pyc/.so file is refused')]).toEqual([
+        'python dependency shadow',
+        true,
+      ])
+      expect(['pytest config shadow', d.includes('conftest.py')]).toEqual(['pytest config shadow', true])
+      expect(['pytest config shadow', d.includes('nothing on the argv')]).toEqual(['pytest config shadow', true])
+    }
+    expect(PROVER_SRC).toContain('pythonImportShadow')
+    expect(PROVER_SRC).toContain('pytestConfigShadow')
+
     // …AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
     // OPTION, invisible to every loop above for the same reason. Node forwards a
     // `--test` written after an entry script straight to that BRANCH-AUTHORED

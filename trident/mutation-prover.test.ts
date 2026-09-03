@@ -20,7 +20,9 @@ import {
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
   proofWorktreePath,
+  pythonImportShadow,
   pythonModuleShadow,
+  pytestConfigShadow,
   resolveMergeHeadSha,
   runMutationProofGate,
   spawnGuardCommand,
@@ -119,8 +121,10 @@ interface HostScript {
    *  indistinguishable, which the prover treats as impossible. */
   guardMutatedOut?: string
   guardRestoredOut?: string
-  /** top-level names `git ls-tree` reports for the pinned head. */
-  topLevel?: string[]
+  /** paths `git ls-tree -r` reports for the pinned head. The prover derives the
+   *  TOP LEVEL from these as each path's first segment, so a bare `pytest` here
+   *  is a root entry and `tests/conftest.py` is one a directory down. */
+  treePaths?: string[]
   /** `git ls-tree` fails — the provenance probe must fail CLOSED. */
   lsTreeFails?: boolean
 }
@@ -140,7 +144,7 @@ function scriptedHost(s: HostScript = {}): {
         if (cmd.includes('add')) return s.worktreeAddFails === true ? res(1) : res(0)
         return res(0)
       }
-      if (cmd.includes('ls-tree')) return s.lsTreeFails === true ? res(1) : res(0, (s.topLevel ?? []).join('\0'))
+      if (cmd.includes('ls-tree')) return s.lsTreeFails === true ? res(1) : res(0, (s.treePaths ?? []).join('\0'))
       if (cmd.join(' ') === CLAIM.guard.join(' ')) {
         guardRuns += 1
         return guardRuns === 1
@@ -327,7 +331,7 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
   const PY_CONTROL = ['python3', '-m', 'unittest', 'tests/other_test.py']
 
   test('THE REPRO: a committed pytest/ entry means python3 -m pytest is BRANCH-SUPPLIED', async () => {
-    const { prover, host } = proverOver({ topLevel: ['pytest', 'src', 'tests'] })
+    const { prover, host } = proverOver({ treePaths: ['pytest', 'src', 'tests'] })
     const evidence = await prover.prove({
       run: RUN,
       claim: { ...CLAIM, guard: PY_GUARD, control: PY_CONTROL },
@@ -347,7 +351,7 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
   const SHADOWING = ['pytest', 'pytest.py', 'pytest.pyc', 'pytest.so', 'pytest.cpython-312-x86_64-linux-gnu.so']
   for (const entry of SHADOWING) {
     test(`a top-level ${entry} shadows the module → refused`, async () => {
-      const { prover } = proverOver({ topLevel: [entry] })
+      const { prover } = proverOver({ treePaths: [entry] })
       const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
       expect(evidence.proved).toBe(false)
       expect(evidence.observed).toBeNull()
@@ -356,10 +360,21 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     })
   }
 
-  const LEGAL = ['pytest.ini', 'pytest.json', 'pytest-fixtures', 'conftest.py', 'mypytest.py']
+  // WHAT IS STILL LEGAL, and it is a SHORTER list than the round that wrote it
+  // first claimed. `pytest.ini` and `conftest.py` were rows here asserting the
+  // proof RUNS — they are now refused by `pytestConfigShadow` (pytest reads
+  // both with nothing on the argv), and `mypytest.py` is refused by
+  // `pythonImportShadow` (a top-level module file can shadow a dependency the
+  // runner imports). A row that pins a residual as legal is a contract a later
+  // round has to delete, so they are deleted here rather than kept.
+  //
+  // The last two rows are the OVER-REFUSAL GUARD: a python file and a test path
+  // A DIRECTORY DOWN must stay legal, or no honest python repo could ever
+  // nominate a guard at all.
+  const LEGAL = ['pytest.json', 'pytest-fixtures', 'README.md', 'src/limit.py', 'tests/unrelated_test.py']
   for (const entry of LEGAL) {
-    test(`a top-level ${entry} is not the module → the proof RUNS`, async () => {
-      const { prover, host } = proverOver({ topLevel: [entry] })
+    test(`a tree containing ${entry} does not supply the runner → the proof RUNS`, async () => {
+      const { prover, host } = proverOver({ treePaths: [entry] })
       const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
       // Not `proved` — the scripted host exits 0 for an unrecognised argv — but
       // the proof really ran, which is the property this row is defending.
@@ -372,12 +387,95 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
   }
 
   test('the CONTROL side is read too — a shadowed unittest is refused', async () => {
-    const { prover } = proverOver({ topLevel: ['unittest'] })
+    const { prover } = proverOver({ treePaths: ['unittest'] })
     const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, control: PY_CONTROL } })
     expect(evidence.proved).toBe(false)
     expect(evidence.observed).toBeNull()
     expect(evidence.reason).toContain('claim.control')
     expect(evidence.reason).toContain('unittest')
+  })
+
+  // ── THE DEPENDENCY, not the module the argv names ────────────────────────
+  //
+  // The escape a review seat executed end-to-end against this branch: the
+  // nominated module is the REAL runner, and the branch shadows something the
+  // runner imports on its way up.
+  test('THE REPRO: a committed argparse.py forges a proof through python3 -m unittest', async () => {
+    const { prover, host } = proverOver({ treePaths: ['argparse.py', 'src/limit.py', 'tests/unrelated_test.py'] })
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, guard: PY_CONTROL },
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+    expect(evidence.reason).toContain('argparse.py')
+    expect(evidence.reason).toContain('sys.path')
+    // Nothing ran: the refusal is decided off the pinned tree alone.
+    expect(host.calls.every((c) => c[0] !== 'python3')).toBe(true)
+  })
+
+  const DEPENDENCIES = ['argparse.py', 'unittest.pyc', 'socket.so']
+  for (const entry of DEPENDENCIES) {
+    test(`a top-level ${entry} can shadow a module the runner imports → refused`, async () => {
+      const { prover } = proverOver({ treePaths: [entry, 'tests/unrelated_test.py'] })
+      const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+      expect(evidence.proved).toBe(false)
+      expect(evidence.reason).toContain(entry)
+    })
+  }
+
+  test('pythonImportShadow — the predicate itself, both directions', () => {
+    for (const entry of DEPENDENCIES) {
+      expect([entry, pythonImportShadow(PY_GUARD, [entry, 'src'])]).toEqual([entry, entry])
+    }
+    // A module file A DIRECTORY DOWN is not on the `-m` path entry, so the
+    // top-level names the prover derives never contain it — and must not.
+    expect(pythonImportShadow(PY_GUARD, ['src', 'tests', 'README.md'])).toBeNull()
+    // Not a python -m argv at all.
+    expect(pythonImportShadow(['bun', 'test', 'x'], ['argparse.py'])).toBeNull()
+  })
+
+  // ── THE CONFIG WITH NO FLAG ON THE ARGV ──────────────────────────────────
+  const PYTEST_CONFIGS = ['conftest.py', 'tests/conftest.py', 'pytest.ini', 'tox.ini', 'setup.cfg', 'pyproject.toml']
+  for (const entry of PYTEST_CONFIGS) {
+    test(`a committed ${entry} changes what pytest runs with NO flag → refused`, async () => {
+      const { prover, host } = proverOver({ treePaths: ['src', entry] })
+      const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+      expect(evidence.proved).toBe(false)
+      expect(evidence.observed).toBeNull()
+      expect(evidence.reason).toContain(entry)
+      expect(evidence.reason).toContain('nothing on the argv')
+      expect(host.calls.every((c) => c[0] !== 'python3')).toBe(true)
+    })
+  }
+
+  test('unittest reads none of them — a conftest.py does not refuse a unittest nomination', async () => {
+    const { prover, host } = proverOver({ treePaths: ['src', 'tests/conftest.py'] })
+    const evidence = await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_CONTROL } })
+    expect(evidence.observed).not.toBeNull()
+    expect(evidence.reason).not.toContain('conftest')
+    // POSITIVE CONTROL: the probe fired and found the file — it just does not
+    // apply to this runner. Without this the row would pass on an empty listing.
+    expect(host.calls.some((c) => c.includes('ls-tree'))).toBe(true)
+    expect(pytestConfigShadow(PY_CONTROL, ['tests/conftest.py'])).toBeNull()
+  })
+
+  test('pytestConfigShadow — the predicate itself, both directions', () => {
+    for (const entry of PYTEST_CONFIGS) {
+      expect([entry, pytestConfigShadow(PY_GUARD, ['src/limit.py', entry])]).toEqual([entry, entry])
+    }
+    for (const entry of ['tests/conftest_helpers.py', 'docs/pyproject.toml.md', 'setup.py', 'pytest.json']) {
+      expect([entry, pytestConfigShadow(PY_GUARD, [entry])]).toEqual([entry, null])
+    }
+  })
+
+  test('THE LISTING IS RECURSIVE — a conftest.py a directory down is still seen', async () => {
+    const { prover, host } = proverOver({ treePaths: ['src', 'tests/conftest.py'] })
+    await prover.prove({ run: RUN, claim: { ...CLAIM, guard: PY_GUARD } })
+    const ls = host.calls.find((c) => c.includes('ls-tree'))
+    expect(ls).toBeDefined()
+    expect(ls).toContain('-r')
   })
 
   test('a top level we could not read FAILS CLOSED', async () => {
@@ -4082,8 +4180,9 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     // hides exactly the entry a reviewer is here for: five ordinary names and a
     // sixth that a reader would want to look at twice. A cap of five put that
     // sixth behind a `+1 more`; a filter to the declared TESTS dropped the prose
-    // entries out of a mixed diff and left the count unexplained. Deliberately
-    // uncapped: the list is bounded by the diff, which git wrote.
+    // entries out of a mixed diff and left the count unexplained. Every
+    // realistic diff — this one included — is named in full; the length cap
+    // below exists only for the diff that is not realistic.
     const names = ['a', 'b', 'c', 'd', 'e'].map((n) => `tests/${n}.test.ts`)
     const all = [...names, 'src/z-suspicious.spec.ts', 'docs/notes.md', 'README.md']
     const out = await runMutationProofGate({
@@ -4102,6 +4201,37 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     const named = (out.reason.split('documentation (')[1] ?? '').replace(/\)$/, '').split(', ')
     expect(named).toEqual(all)
     expect(out.reason).not.toContain('more)')
+  })
+
+  test('a THOUSAND-file test-only rename is capped, and the cap COUNTS what it elided', async () => {
+    // The reason reaches a log line, a status post and a DB row, and nothing
+    // downstream truncates it. Bounded by the diff is not bounded: a test-only
+    // rename of a whole directory is a legal diff and would interpolate
+    // hundreds of KB onto ONE line. The cap is on total length, not on a file
+    // count, so the realistic diff above still names everything.
+    const all = Array.from({ length: 1000 }, (_, i) => `tests/support/generated/case-${i}.test.ts`)
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-status')) return diffRes(nameStatus(`${all.join('\0')}\0`))
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        return res(0)
+      },
+    })
+    expect(out.exempt).toBe(true)
+    expect(out.reason.length).toBeLessThan(4500)
+    // The COUNT is the honest total even though the list is not, and the
+    // elision says how many are missing rather than trailing off.
+    expect(out.reason).toContain('all 1000 changed files')
+    const named = (out.reason.split('documentation (')[1] ?? '').replace(/\)$/, '').split(', ')
+    const elided = named[named.length - 1] as string
+    expect(elided).toBe(`… +${1000 - (named.length - 1)} more`)
+    // POSITIVE CONTROL against an empty extraction: real names were printed,
+    // in order, starting at the first.
+    expect(named[0]).toBe(all[0])
+    expect(named.length).toBeGreaterThan(10)
   })
 
   test('a test-only diff whose branch MOVES under the new exemption is not exempt', async () => {
