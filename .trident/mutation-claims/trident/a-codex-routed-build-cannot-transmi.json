@@ -1,0 +1,8 @@
+{
+  "file": "trident/mutation-claim-artifact.ts",
+  "find": "32 * 1024",
+  "replace": "0",
+  "guard": ["bun", "test", "trident/mutation-claim-artifact.test.ts"],
+  "control": ["bun", "test", "trident/mutation-prover.test.ts"],
+  "rationale": "Zeroing the artifact byte-cap makes every non-empty committed nomination decode to null: the reader suite's non-null reads and its at-cap boundary control go red, while the prover suite never imports the constant and stays green."
+}

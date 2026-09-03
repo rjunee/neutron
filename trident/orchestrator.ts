@@ -4366,26 +4366,30 @@ export function buildTridentOrchestrator(
       // is filled by the bridge, which never sees the build's reasoning; and in
       // pr mode the workflow process ends at every publish handoff, so the
       // in-result claim arrives null even when the build nominated. The build
-      // therefore COMMITS its nomination to `.trident/mutation-claim.json`, and
-      // this reads it back AT THE REVIEWED OID — the very commit the gate pins —
-      // ONLY when the in-result claim is null (`??` short-circuits: a
-      // schema-supplied claim is never shadowed, and no read even happens). The
+      // therefore COMMITS its nomination to `.trident/mutation-claims/<branch>.json`,
+      // and this reads it back AT THE REVIEWED OID — the very commit the gate
+      // pins — ONLY when the in-result claim is null (the read is not even
+      // attempted otherwise, so a schema-supplied claim is never shadowed). The
       // artifact stays branch-controlled, UNTRUSTED input: the reader decodes
       // shape only, and the gate below validates and actually RUNS it on the
       // same terms as an agent-supplied claim. Every absence or failure reads
       // as null — which the gate already refuses — so the fallback can never
       // turn a missing nomination into a pass.
       const expectedHead = reviewedHeadOid(run)
-      const claim =
-        result.mutation_claim ??
-        (await readCommittedMutationClaim(opts.run_host, run.repo_path, {
-          expected_head: expectedHead,
-          branch,
-        }))
+      const baseBranch = await resolveBase(run)
+      const committed =
+        result.mutation_claim === null || result.mutation_claim === undefined
+          ? await readCommittedMutationClaim(opts.run_host, run.repo_path, {
+              expected_head: expectedHead,
+              branch,
+              base_branch: baseBranch,
+            })
+          : null
+      const claim = result.mutation_claim ?? committed?.claim ?? null
       const proof = await proveMutation({
         run: { ...run, branch },
         claim,
-        base_branch: await resolveBase(run),
+        base_branch: baseBranch,
         run_host: opts.run_host,
         expected_head: expectedHead,
       })
@@ -4394,7 +4398,16 @@ export function buildTridentOrchestrator(
         // them: Argus really did approve, and its provenance is the audit trail.
         // Rewriting either would misattribute the block — this is a MISSING
         // PROOF, not a reviewer's finding, and `failure_reason` says which.
-        const blocked: TridentRun = { ...failedRun(run, proof.reason, true), pr, branch }
+        //
+        // WHY THE READER'S NOTE IS APPENDED. "The build nominated no mutation"
+        // was the same sentence for a build that genuinely nominated nothing, a
+        // wrong path, an oversized blob and a malformed one — an ambiguity this
+        // card's own history records as misdiagnosed for days as an agent
+        // omission. The note says which, and only when the artifact channel was
+        // actually consulted and came back empty.
+        const reason =
+          committed !== null && committed.claim === null ? `${proof.reason} — ${committed.note}` : proof.reason
+        const blocked: TridentRun = { ...failedRun(run, reason, true), pr, branch }
         return { run: blocked, changed: true, waiting: false, note: 'APPROVE blocked (mutation prover) → failed' }
       }
       try {

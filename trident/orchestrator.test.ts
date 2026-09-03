@@ -30,6 +30,7 @@ import {
   type MutationGateInput,
   type MutationGateOutcome,
 } from './mutation-prover.ts'
+import { mutationClaimArtifactPath } from './mutation-claim-artifact.ts'
 import { MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -2429,7 +2430,23 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     guard: ['bun', 'test', 'trident/limit.test.ts'],
     control: ['bun', 'test', 'trident/other.test.ts'],
   }
-  const SHOW_ARTIFACT = `git -C /repo show ${SIM_REVIEWED_HEAD}:.trident/mutation-claim.json`
+  // The PER-BRANCH artifact path, derived by the production helper from the branch
+  // the sim plan resolves — never spelled out here, so a layout change reddens.
+  const ARTIFACT_PATH = mutationClaimArtifactPath('feat-x') as string
+  const DIFF_ARTIFACT = `git -C /repo diff --name-only main...${SIM_REVIEWED_HEAD}`
+  const SIZE_ARTIFACT = `git -C /repo cat-file -s ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
+  const SHOW_ARTIFACT = `git -C /repo show ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
+
+  /** A host that serves the three legs of a successful committed-nomination read. */
+  function serveArtifact(body: string): (cmd: string[]) => HostCommandResult {
+    return (cmd) => {
+      const j = cmd.join(' ')
+      if (j === DIFF_ARTIFACT) return ok(`${ARTIFACT_PATH}\ntrident/limit.ts\n`)
+      if (j === SIZE_ARTIFACT) return ok(String(Buffer.byteLength(body, 'utf8')))
+      if (j === SHOW_ARTIFACT) return ok(body)
+      return ok()
+    }
+  }
 
   /** Records every claim the gate was handed; mirrors the REAL gate's null
    *  refusal (mutation-prover.ts's "nominated no mutation" reason) so a null
@@ -2458,8 +2475,7 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       // A REAL cleanup would provision a worktree at a `/repo` that does not exist.
       merge_deps: {},
-      hostResponder: (cmd) =>
-        cmd.join(' ') === SHOW_ARTIFACT ? ok(JSON.stringify(ARTIFACT_CLAIM)) : ok(),
+      hostResponder: serveArtifact(JSON.stringify(ARTIFACT_CLAIM)),
     })
     const run = await createRun()
 
@@ -2471,13 +2487,52 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     expect(seen[0]).toEqual(parseMutationClaim(ARTIFACT_CLAIM))
     // Bound to the REVIEWED OID (the commit the gate pins), never the branch
     // tip — the whole argv, because this is the injection surface.
-    expect(h.hostCalls).toContainEqual([
-      'git',
-      '-C',
-      '/repo',
-      'show',
-      `${SIM_REVIEWED_HEAD}:.trident/mutation-claim.json`,
-    ])
+    expect(h.hostCalls).toContainEqual(['git', '-C', '/repo', 'show', `${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`])
+    // ...and the path is the PER-BRANCH one, so a nomination inherited from a
+    // merged branch's file is not even looked at.
+    expect(ARTIFACT_PATH).toBe('.trident/mutation-claims/feat-x.json')
+  })
+
+  test('an artifact this branch did NOT write is ignored — an inherited nomination is not a nomination', async () => {
+    // The tracked-path inheritance defect: after one branch merges, every later
+    // branch is born holding that file. It is absent from THIS branch's diff, so
+    // the read must be null and the required proof must still refuse.
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: claimSpyGate(seen),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: (cmd) => {
+        const j = cmd.join(' ')
+        // The blob EXISTS and is perfectly well-formed at the reviewed commit...
+        if (j === SIZE_ARTIFACT) return ok(String(Buffer.byteLength(JSON.stringify(ARTIFACT_CLAIM), 'utf8')))
+        if (j === SHOW_ARTIFACT) return ok(JSON.stringify(ARTIFACT_CLAIM))
+        // ...but this branch's own diff never touched it.
+        if (j === DIFF_ARTIFACT) return ok('trident/limit.ts\n')
+        return ok()
+      },
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(seen).toEqual([null])
+    // The refusal NAMES the reason, instead of collapsing into the same sentence
+    // a genuine no-nomination build gets.
+    expect(final.failure_reason).toContain(ARTIFACT_PATH)
+    expect(final.failure_reason).toContain('is not in the diff')
+    // Positive control: the identical harness WITH the artifact in the diff
+    // reaches the gate with a claim and merges.
+    const seenOk: unknown[] = []
+    const h2 = buildHarness({
+      prove_mutation: claimSpyGate(seenOk),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: serveArtifact(JSON.stringify(ARTIFACT_CLAIM)),
+    })
+    const run2 = await createRun()
+    expect((await runToTerminal(h2, run2.id)).phase).toBe('done')
+    expect(seenOk[0]).not.toBeNull()
   })
 
   test('no committed nomination still means NULL — and a required proof still refuses', async () => {
@@ -2486,10 +2541,14 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       prove_mutation: claimSpyGate(seen),
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       merge_deps: {},
-      hostResponder: (cmd) =>
-        cmd.join(' ').includes(':.trident/mutation-claim.json')
-          ? { ok: false, stdout: '', stderr: 'fatal: path does not exist', exit_code: 128 }
-          : ok(),
+      // The build committed real work and NO nomination: the branch diff simply
+      // does not contain the artifact, and nothing serves its blob.
+      hostResponder: (cmd) => {
+        const j = cmd.join(' ')
+        if (j === DIFF_ARTIFACT) return ok('trident/limit.ts\n')
+        if (j.includes(ARTIFACT_PATH)) return { ok: false, stdout: '', stderr: 'fatal: path does not exist', exit_code: 128 }
+        return ok()
+      },
     })
     const run = await createRun()
 
@@ -2500,7 +2559,7 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     expect(final.inner_verdict).toBe('APPROVE')
     expect(seen).toEqual([null])
     // The artifact WAS looked for — the assertion above is not vacuous.
-    expect(h.hostCalls.some((c) => c.join(' ').includes(':.trident/mutation-claim.json'))).toBe(true)
+    expect(h.hostCalls.map((c) => c.join(' '))).toContain(DIFF_ARTIFACT)
   })
 
   test('a schema-supplied claim WINS — the artifact is never even read', async () => {
@@ -2515,8 +2574,7 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       merge_deps: {},
       // The artifact is primed with a DIFFERENT claim — the trap for an
       // inverted or double-read implementation.
-      hostResponder: (cmd) =>
-        cmd.join(' ') === SHOW_ARTIFACT ? ok(JSON.stringify(ARTIFACT_CLAIM)) : ok(),
+      hostResponder: serveArtifact(JSON.stringify(ARTIFACT_CLAIM)),
     })
     const run = await createRun()
 
@@ -2525,8 +2583,8 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     expect(seen).toEqual([parseMutationClaim(IN_RESULT_CLAIM)])
     // Positive control against a null-vs-null equality.
     expect(seen[0]).not.toBeNull()
-    // The `??` short-circuit IS the no-shadowing guarantee.
-    expect(h.hostCalls.some((c) => c.join(' ').includes('.trident/mutation-claim.json'))).toBe(false)
+    // NOT READ AT ALL is the no-shadowing guarantee — not merely "not preferred".
+    expect(h.hostCalls.some((c) => c.join(' ').includes(ARTIFACT_PATH))).toBe(false)
   })
 })
 

@@ -18,8 +18,8 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
-import { MUTATION_CLAIM_ARTIFACT_PATH } from './mutation-claim-artifact.ts'
-import { parseMutationClaim } from './mutation-prover.ts'
+import { mutationClaimArtifactPath } from './mutation-claim-artifact.ts'
+import { isProseOnlyChange, parseMutationClaim } from './mutation-prover.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
 
@@ -38,8 +38,15 @@ const BUILD_CLAIM = {
 }
 const FIX_CLAIM = { ...BUILD_CLAIM, find: 'n <= LIMIT', rationale: 'round 2 moved the line' }
 
+/**
+ * Markdown the gate does NOT exempt (`isProseOnlyChange` returns false for each),
+ * so a branch whose whole diff is one of these still owes a nomination — and has
+ * no legal target unless the brief says these paths are themselves nominable.
+ */
+const EXECUTABLE_PROSE = ['SPEC.md', 'IMPLEMENTATION_PLAN.md', 'CLAUDE.md', 'AGENTS.md', 'SKILL.md']
+
 /** Run the real workflow body; return every captured agent call + its result. */
-async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
+async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean }): Promise<{
   captured: Captured[]
   result: Record<string, unknown>
 }> {
@@ -65,11 +72,21 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
     // `verdict: null`, and every assertion below reads a run that never reviewed
     // anything. (`typeof null === 'object'` is why this surfaced as a type error.)
     if (String(label).startsWith('head-probe-round-')) return { head: 'a'.repeat(40) }
-    if (label === 'forge:build') return { ...forgeResult, mutationClaim: BUILD_CLAIM }
+    // The codex BRIDGE fills CODEX_FORGE_SCHEMA from the wrapper's trailer; it
+    // reports mutationClaim null, which is the whole reason the committed
+    // artifact exists.
+    const codexBridge = opts.codex === true
+      ? { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, wrapperErrTail: '' }
+      : {}
+    if (label === 'forge:build') {
+      return opts.codex === true
+        ? { ...forgeResult, ...codexBridge, mutationClaim: null }
+        : { ...forgeResult, mutationClaim: BUILD_CLAIM }
+    }
     if (String(label).startsWith('forge:fix-round-')) {
       return opts.fixRoundClaim === undefined
-        ? forgeResult
-        : { ...forgeResult, mutationClaim: opts.fixRoundClaim }
+        ? { ...forgeResult, ...codexBridge }
+        : { ...forgeResult, ...codexBridge, mutationClaim: opts.fixRoundClaim }
     }
     if (label === 'argus:claude' || label === 'argus:adversarial') return { verdict: 'REQUEST_CHANGES', findings: [] }
     if (label === 'argus:synthesis') {
@@ -106,6 +123,18 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance: '',
+    // Pinning the BUILD phase to a cli-transport tier is what routes `forge:*`
+    // through `codexBuildPrompt` instead of straight to `agent()` — the route
+    // this card is about, and the one the brief has to survive intact.
+    ...(opts.codex === true
+      ? {
+          codexBuildScript: '/harness/trident/codex-build.sh',
+          phaseModels: { build: { model: 'gpt' } },
+          modelTiers: {
+            gpt: { model_id: 'gpt-5-codex', transport: 'cli', env_var: 'CODEX_BUILD_MODEL', group: 'codex' },
+          },
+        }
+      : {}),
   }
 
   const body = SRC.replace('export const meta', 'const meta')
@@ -170,7 +199,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     expect(parseMutationClaim(result.mutationClaim)).toEqual(BUILD_CLAIM)
   })
 
-  test('the BUILD CONTRACT asks for the committed nomination — path, exactly-once, and the prose opt-out', async () => {
+  test('the BUILD CONTRACT asks for the committed nomination — per-branch path, commit, exactly-once, prose opt-out', async () => {
     const { captured } = await runWorkflow({ fixRoundClaim: undefined })
     const forge = captured.filter((c) => String(c.label).startsWith('forge:'))
     // POSITIVE CONTROLS: build + at least one fix round, so the loop below can
@@ -178,15 +207,109 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     expect(forge.length).toBeGreaterThan(1)
     expect(forge.map((c) => c.label)).toContain('forge:build')
     expect(forge.some((c) => String(c.label).startsWith('forge:fix-round-'))).toBe(true)
+    // The path the READER derives, from the branch this workflow builds. Computed
+    // by the production helper rather than written out, so the two halves of the
+    // channel cannot drift apart: change the layout on one side and this reddens.
+    const artifactPath = mutationClaimArtifactPath('trident/test-run')
+    expect(artifactPath).toBe('.trident/mutation-claims/trident/test-run.json')
     for (const call of forge) {
       const brief = call.prompt
       expect(brief.length).toBeGreaterThan(0)
-      expect(brief).toContain(MUTATION_CLAIM_ARTIFACT_PATH)
+      expect(brief).toContain(artifactPath)
+      // EVERY clause the gate actually depends on. Deleting any one of them
+      // reintroduces a real, observed failure: an uncommitted file is invisible
+      // to `git show`; a `find` occurring twice is refused by `validateClaim`;
+      // and without the opt-out a docs-only branch nominates a target the gate
+      // must reject.
+      expect(brief).toContain('COMMIT it with your work')
       expect(brief).toContain('EXACTLY ONCE')
       expect(brief).toContain('do NOT write the file at all')
+      // The prose opt-out leads the block: a build that reads the first
+      // imperative and stops must not write a .json onto a documentation-only
+      // diff, which would destroy its own prose-only exemption. `indexOf`
+      // returns -1 for an absent needle and -1 is less than everything, so the
+      // ordering assertion is worthless without this presence control.
+      expect(brief).toContain('ENTIRE diff is INERT documentation')
+      expect(brief.indexOf('ENTIRE diff is INERT documentation')).toBeLessThan(brief.indexOf(artifactPath))
+      // ...and the opt-out says INERT for a reason: `isProseOnlyChange` refuses
+      // the exemption for harness-driving markdown, so a branch that only edits
+      // IMPLEMENTATION_PLAN.md is proof-required and must know those paths are
+      // legal targets rather than "documentation" it was told never to nominate.
+      for (const executableProse of EXECUTABLE_PROSE) {
+        // The production classifier, not a literal: these really are proof-required.
+        expect(isProseOnlyChange([executableProse])).toBe(false)
+        expect(brief).toContain(executableProse)
+      }
+      // ...against an inert one, which really does earn the exemption (control).
+      expect(isProseOnlyChange(['docs/notes.md'])).toBe(true)
+      expect(brief).toContain('they are themselves LEGAL targets')
       // The ask sits ABOVE the numbered CONTRACT, with the other standing blocks.
       expect(brief.indexOf('\nCONTRACT\n')).toBeGreaterThan(-1)
-      expect(brief.indexOf(MUTATION_CLAIM_ARTIFACT_PATH)).toBeLessThan(brief.indexOf('\nCONTRACT\n'))
+      expect(brief.indexOf(artifactPath)).toBeLessThan(brief.indexOf('\nCONTRACT\n'))
     }
+  })
+})
+
+/**
+ * THE CODEX ROUTE — the one the card is about.
+ *
+ * On this route `forge:*` does NOT go to `agent()` with the brief; it goes to the
+ * codex BRIDGE prompt, which carries the brief base64-chunked into a file the
+ * wrapper runs. The bridge fills the schema from the wrapper's six-line trailer
+ * and reports `mutationClaim: null` — so the ask has to survive INTO the wrapper
+ * brief, and the bridge has to be told not to invent the field it cannot measure.
+ */
+describe('the codex route carries the nomination ask, and never fabricates the field', () => {
+  /** The brief travels base64 (a model once deleted a phrase out of a prose
+   *  heredoc), so a `toContain` on the raw prompt cannot see it. Decode first. */
+  function decodeTransport(prompt: string): string {
+    const re = /base64 -d >>? '[^']*' <<'(NEUTRON_CODEX_B64_EOF_P\d+)'\n([\s\S]*?)\n\1/g
+    let m: RegExpExecArray | null
+    let out = ''
+    while ((m = re.exec(prompt)) !== null) {
+      out += Buffer.from(String(m[2]).replace(/\n/g, ''), 'base64').toString('utf8')
+    }
+    return out
+  }
+
+  test('the wrapper brief a codex build actually executes contains the nomination block', async () => {
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined, codex: true })
+    const build = captured.find((c) => c.label === 'forge:build')
+    expect(build).toBeDefined()
+    // POSITIVE CONTROL that this really is the codex route and not the Claude
+    // one: only the bridge prompt names the wrapper script and its schema.
+    expect(build?.prompt).toContain('codex-build.sh')
+    expect(build?.schema?.required).toContain('codexStatus')
+
+    const brief = decodeTransport(String(build?.prompt))
+    // POSITIVE CONTROL against an empty decode passing every assertion below.
+    expect(brief.length).toBeGreaterThan(0)
+    expect(brief).toContain('build the feature')
+
+    const artifactPath = mutationClaimArtifactPath('trident/test-run')
+    expect(brief).toContain(artifactPath)
+    expect(brief).toContain('COMMIT it with your work')
+    expect(brief).toContain('EXACTLY ONCE')
+  })
+
+  test('the BRIDGE is told to report mutationClaim null and never to invent one', async () => {
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined, codex: true })
+    const build = captured.find((c) => c.label === 'forge:build')
+    // The bridge cannot see the build's reasoning, and the schema REQUIRES the
+    // field — so without this instruction a fabricated object would short-circuit
+    // the committed-artifact read at the gate and shadow the real nomination.
+    expect(build?.prompt).toContain('mutationClaim is ALWAYS null on this route')
+    expect(build?.prompt).toContain('NEVER fabricate one')
+    // ...and the field really is required on this route (positive control).
+    expect(build?.schema?.required).toContain('mutationClaim')
+  })
+
+  test('a codex-routed build reports a NULL nomination — the gap the artifact closes', async () => {
+    const { result } = await runWorkflow({ fixRoundClaim: undefined, codex: true })
+    expect(parseMutationClaim(result.mutationClaim)).toBeNull()
+    // Control: the same workflow on the Claude route DOES carry one, so the null
+    // above is the route's doing and not an inert harness.
+    const claude = await runWorkflow({ fixRoundClaim: undefined })
+    expect(parseMutationClaim(claude.result.mutationClaim)).toEqual(BUILD_CLAIM)
   })
 })
