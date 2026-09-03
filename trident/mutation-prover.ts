@@ -239,10 +239,14 @@ function isNodeRunOption(arg: string): boolean {
  * its diff the no-production-file exemption for a suffix the build chose. It
  * covered no cargo test target that `tests/foo.rs` did not already miss, so
  * removing it makes every `.rs` path classify the same way and strictly
- * NARROWS the exemption. No tautology opens: a real cargo test target lives
- * under `tests/`, so `aRunnerMayCollect` still calls it collectible for its
- * parent and a `cargo test` guard is still refused — the dead end already
- * written down in `whyNoSelection`.
+ * NARROWS the exemption. The tautology it would otherwise open is closed on the
+ * GUARD side, which is where the tautology happens: `cargo test` compiles the
+ * whole crate, so a `#[cfg(test)]` block inside the very module being mutated
+ * would redden the bare guard out of the target's own compilation. So
+ * `_test.rs` is named in `RUNNER_COLLECTED_BASENAME` — a real cargo test target
+ * under `tests/` was already collectible for its parent directory, and this
+ * covers the `src/` sibling the reclassification created. Both land on the dead
+ * end already written down in `whyNoSelection`.
  *
  * WHAT IT DELIBERATELY DOES NOT COVER: every LOOSER name a runner still picks
  * up — `ab-test.ts`, `thing_test.ts`, `helper_spec.ts`, `test_probe.py`,
@@ -639,13 +643,23 @@ function normalizeArg(arg: string): string {
  * `*-test.js`, `*-spec.js`, `test.js` and `test-*.js`, and `python3 -m
  * unittest` discovers `test*.py` (not just `test_*.py`).
  *
+ * `_test.rs` IS HERE AND NOT IN `TEST_BASENAME`, and that split is the whole
+ * point of having two regexes. Cargo has no `_test.rs` convention, so the name
+ * must not DECLARE a test (see `TEST_BASENAME`) — `src/pricing_test.rs` is an
+ * ordinary Rust module and classifies production. But `cargo test` builds and
+ * runs the WHOLE crate, so if that module carries a `#[cfg(test)]` block the
+ * bare guard runs the mutated file as its own test: red-then-green out of the
+ * target's own compilation, which is the tautology. Naming it collectible here
+ * sends the bare guard to the no-selection arm and refuses it, while
+ * `cargo test --test integration_suite` — a guard that SELECTS — is untouched.
+ *
  * WHY IT IS NOT FOLDED INTO `TEST_BASENAME`: that regex also drives
  * `classifyMutationTarget`, and through it the no-production-file EXEMPTION —
  * where file NAMES are build-controlled, so every name added there is a name a
  * build could use to buy itself an exemption. The extra breadth belongs on this
  * side, where its only effect is to REFUSE a guard.
  */
-const RUNNER_COLLECTED_BASENAME = /^test[^/]*\.(py|[cm]?[jt]sx?)$|[._-](test|spec)\.[cm]?[jt]sx?$/
+const RUNNER_COLLECTED_BASENAME = /^test[^/]*\.(py|[cm]?[jt]sx?)$|[._-](test|spec)\.[cm]?[jt]sx?$|_test\.rs$/
 
 /** True of a path a runner may pick up WHOLESALE — because its NAME is one a
  *  runner collects, or because it lives under a directory a runner collects

@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import { createHash } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { basename, join } from 'node:path'
@@ -51,6 +51,11 @@ import {
  * a placeholder digest, a block from another prover, an edited real block — and
  * asserting that each is refused, with a reason that names what was wrong.
  */
+
+/** The ORCHESTRATOR's source, read rather than re-typed: `REASON_NAME_BUDGET`
+ *  here is chosen to sit under `STAGE_REASON_CEILING` there, and a test that
+ *  spells the ceiling as its own literal lets the two drift apart. */
+const ORCHESTRATOR_SRC = readFileSync(new URL('./orchestrator.ts', import.meta.url), 'utf8')
 
 const HEAD = 'a'.repeat(40)
 const SRC_BEFORE = 'export const LIMIT = 10\nexport function under(n: number) { return n < LIMIT }\n'
@@ -3762,6 +3767,52 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     expect(fine.observed).not.toBeNull()
   })
 
+  test('`cargo test` is not a legal guard for `src/pricing_test.rs` — the price of reclassifying it production', async () => {
+    // THE TRADE D1 MADE, AND ITS OTHER HALF. Dropping `rs` from `TEST_BASENAME`
+    // is right on the CLASSIFIER side — cargo has no `_test.rs` convention, so
+    // the suffix declared nothing and sold the no-production-file exemption for
+    // a name the build chose. But it hands `src/pricing_test.rs` to the gate as
+    // an ordinary production target, and `cargo test` compiles the WHOLE crate:
+    // a `#[cfg(test)]` block inside that very module supplies the guard's RED
+    // and its restore the GREEN, with nothing else having asserted anything.
+    // The `.go` twin never reaches here — `_test.go` still DECLARES a test and
+    // is refused one step earlier — so this row is the only thing standing
+    // between the reclassification and a forged proof. Deleting `_test\.rs$`
+    // from `RUNNER_COLLECTED_BASENAME` reddens it.
+    const rust = 'src/pricing_test.rs'
+    const rustFs = memFs({ [join(proofWorktreePath('/repo', RUN), rust)]: SRC_BEFORE })
+    const { prover, host } = proverOver({}, rustFs)
+    const out = await prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: rust, guard: ['cargo', 'test'], control: ['bun', 'test', 'src/other.test.ts'] },
+    })
+    expect(out.proved).toBe(false)
+    expect(out.reason).toContain('tautology')
+    expect(out.reason).toContain('it names no path at all')
+    expect(out.observed).toBeNull()
+    // NOTHING RAN — the refusal is on argv, before any process.
+    expect(host.calls).toHaveLength(0)
+
+    // …AND THE CLASSIFIER HALF IS UNCHANGED, which is what makes this the guard
+    // side's problem and not the classifier's: the module is still production,
+    // still nominatable, and the `.go` twin is still a declared test.
+    expect(classifyMutationTarget(rust)).toBe('production')
+    expect(classifyMutationTarget('src/pricing_test.go')).toBe('test')
+
+    // POSITIVE CONTROL — the widening is exactly one suffix wide. An ordinary
+    // Rust module keeps every cargo guard it had, including the bare one, so
+    // this row cannot be passing because `cargo test` was banned outright.
+    const plain = 'src/pricing.rs'
+    const plainFs = memFs({ [join(proofWorktreePath('/repo', RUN), plain)]: SRC_BEFORE })
+    const { prover: plainProver } = proverOver({}, plainFs)
+    const legal = await plainProver.prove({
+      run: RUN,
+      claim: { ...CLAIM, file: plain, guard: ['cargo', 'test'], control: ['bun', 'test', 'src/other.test.ts'] },
+    })
+    expect(legal.reason).not.toContain('tautology')
+    expect(legal.observed).not.toBeNull()
+  })
+
   test('a SEARCH beside a selector still searches — `go test ./cmd/ ./...` reaches the mutated file', async () => {
     // THE BLOCKER. A search was dropped from every comparison that compares a
     // SPELLING (`pathArgs`, `argumentOperands`, `guardPathCandidates`) on the
@@ -5226,6 +5277,22 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     })
     expect(out.exempt).toBe(true)
     expect(out.reason.length).toBeLessThan(4500)
+    // …AND THE CAP IS DERIVED FROM THE DURABLE ROW'S CEILING, not chosen beside
+    // it. This reason is written to `code_trident_stage_events.meta` through
+    // `truncateStageReason`, which cuts at `STAGE_REASON_CEILING` — mid-name,
+    // and the elision COUNT is the LAST thing on the line, so a name budget
+    // that lets this reason cross that ceiling destroys the one fact
+    // `namesWithinBudget` exists to preserve: that anything was elided at all.
+    // The ceiling is READ OUT OF orchestrator.ts rather than re-typed here, so
+    // the two constants can only agree by being the same number. Restoring the
+    // old 4_000 name budget reds this line.
+    const ceiling = ORCHESTRATOR_SRC.match(/const STAGE_REASON_CEILING = ([\d_]+)/)
+    expect(ceiling).not.toBeNull()
+    const ceilingChars = Number((ceiling![1] as string).replace(/_/g, ''))
+    // POSITIVE CONTROL on the extraction — a failed parse would give NaN or 0
+    // and make the comparison below pass or throw for the wrong reason.
+    expect(ceilingChars).toBeGreaterThan(1_000)
+    expect(out.reason.length).toBeLessThanOrEqual(ceilingChars)
     // The COUNT is the honest total even though the list is not, and the
     // elision says how many are missing rather than trailing off.
     expect(out.reason).toContain('all 1000 changed files')
@@ -5236,6 +5303,52 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     // in order, starting at the first.
     expect(named[0]).toBe(all[0])
     expect(named.length).toBeGreaterThan(10)
+  })
+
+  test('a SINGLE path longer than the whole budget is still NAMED — a reason that is only a count is not a reason', async () => {
+    // THE BRANCH THE CAP TURNS ON ITSELF. `namesWithinBudget` spends the budget
+    // name by name, so one path longer than the entire budget overruns it on
+    // the FIRST iteration: without the `kept.length > 0` guard the loop breaks
+    // before keeping anything and the whole reason collapses to `, … +1 more`
+    // — a record of an exemption that does not say what bought it, which is
+    // strictly worse than the unbounded line the cap was added to prevent.
+    // Paths this long are legal (git bounds a component at 255 bytes, not a
+    // path), and the courtesy cap is the wrong place to lose the evidence:
+    // `truncateNote` and `truncateStageReason` bound their own copies anyway.
+    // Deleting `kept.length > 0 &&` reds this row.
+    const long = `tests/support/${'a'.repeat(3_700)}.test.ts`
+    expect(long.length).toBeGreaterThan(3_600)
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-status')) return diffRes(nameStatus(`${long}\0`))
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        return res(0)
+      },
+    })
+    expect(out.exempt).toBe(true)
+    expect(out.reason).toContain(long)
+    // …and nothing was elided, so the count does not appear at all.
+    expect(out.reason).not.toContain('more)')
+    // POSITIVE CONTROL against a vacuous not-contains: the SAME path with a
+    // second one behind it does elide, and still names the first one whole.
+    // The second is over-budget too, so this control says what it means at any
+    // budget rather than only at today's.
+    const second = `tests/support/${'b'.repeat(3_700)}.test.ts`
+    const pair = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      run_host: async (cmd) => {
+        if (cmd.includes('--name-status')) return diffRes(nameStatus(`${long}\0${second}\0`))
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        return res(0)
+      },
+    })
+    expect(pair.reason).toContain(long)
+    expect(pair.reason).toContain('… +1 more')
   })
 
   test('a test-only diff whose branch MOVES under the new exemption is not exempt', async () => {
