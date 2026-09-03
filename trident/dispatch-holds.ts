@@ -18,6 +18,14 @@
  * is already written when its dependents re-evaluate. Re-dispatch goes back
  * through `dispatchBoardBoundBuild` itself, so EVERY gate re-runs and a card that
  * is still held simply refreshes its hold row.
+ *
+ * AND ON THE TICK'S OWN CADENCE, because a terminal event is not the only way a
+ * hold clears. A `branch_live` hold can be created for a holder that is NOT a
+ * run at all — a live worktree lock naming a bare pid, held_on_run_id null. That
+ * pid exiting fires no terminal observer, so on an instance with nothing else
+ * running the card would sit queued indefinitely. `TridentTickLoop`'s
+ * `drain_dispatch_holds` therefore calls the same sweep once per tick, sharing
+ * the tick's single-flight and cadence rather than adding a timer.
  */
 
 import type { ProjectDb } from '@neutronai/persistence/index.ts'
@@ -39,6 +47,18 @@ export interface DispatchHoldPayload {
   channel_kind?: Topic['channel_kind']
   max_rounds?: number
   max_ralph_rounds?: number
+  /**
+   * THE PR A HELD **REVIEW** ROUND WAS BOUND TO (Argus r3, minor). A `bound_pr`
+   * dispatch reviews a published head and never builds; a held one that lost the
+   * number came back through the sweep as a FULL BUILD, which opens a second PR
+   * for work that is already published — and the terminal-build wake now steers
+   * operators to exactly this dispatch, so the shape is no longer rare.
+   *
+   * It rides in the PAYLOAD, not a column: the payload is a JSON blob, so this
+   * needs no migration, and `payload` is already the "replay the dispatch as it
+   * was fired" bag the queue was built around.
+   */
+  bound_pr?: number | null
 }
 
 export interface DispatchHold {
@@ -226,6 +246,26 @@ export class DispatchHoldStore {
 }
 
 /**
+ * How long a `branch_live` hold may keep re-refusing before the sweep says so
+ * at ERROR rather than at warn. Six hours: longer than any healthy lane on this
+ * substrate (the hang watchdog terminalizes a run at 90 minutes, so a branch
+ * genuinely held by a live build clears well inside it), short enough that a
+ * card wedged behind a lock nobody will ever release is visible the same day.
+ *
+ * IT IS A LOG LEVEL, NOT A TTL. Expiring the hold would DELETE a queued card
+ * that nothing else ever re-dispatches — trading a card that is stuck-but-known
+ * for one that is silently gone, which is the worse of the two.
+ */
+export const BRANCH_LIVE_HOLD_STALE_MS = 6 * 60 * 60_000
+
+/** Age of a hold in ms, or null when `created_at` is not a readable timestamp. */
+function staleHoldAgeMs(created_at: string, nowMs: number): number | null {
+  const created = Date.parse(created_at)
+  if (!Number.isFinite(created)) return null
+  return Math.max(0, nowMs - created)
+}
+
+/**
  * Build the trident TERMINAL OBSERVER that drains the hold queue: every time a
  * run goes terminal, re-dispatch every held card through the SAME chokepoint.
  *
@@ -267,8 +307,17 @@ export function buildDispatchHoldSweep(deps: {
   makeDispatchDeps: (hold: DispatchHold) => BoardBoundBuildDeps & {
     preflight: NonNullable<BoardBoundBuildDeps['preflight']>
   }
-}): (run: TridentRun) => Promise<void> {
-  return async (_run: TridentRun): Promise<void> => {
+  /** Injectable clock (ms) for the stale-hold age line; defaults to wall clock. */
+  now?: () => number
+}): (run?: TridentRun) => Promise<void> {
+  // THE RUN ARGUMENT IS OPTIONAL BECAUSE THE SWEEP HAS TWO TRIGGERS. As a
+  // terminal observer it is handed the run that just terminalized (and ignores
+  // it — the queue is re-evaluated whole). The tick's per-cadence drain calls it
+  // with NO run at all, which is the only trigger a WORKTREE-ONLY holder can
+  // ever have: a `branch_live` hold whose `held_on_run_id` is null is waiting on
+  // a pid, and a pid exiting emits no terminal event, so on a quiet instance the
+  // observer alone would never fire again and the card would queue forever.
+  return async (_run?: TridentRun): Promise<void> => {
     const queued = deps.holds.list()
     for (const hold of queued) {
       try {
@@ -282,7 +331,18 @@ export function buildDispatchHoldSweep(deps: {
         const dispatchDeps = deps.makeDispatchDeps(hold)
         if (item.linked_run_id !== null && item.linked_run_id !== undefined) {
           const linked = dispatchDeps.store.get(item.linked_run_id)
-          if (linked !== null && !['done', 'failed', 'stopped'].includes(linked.phase)) {
+          // SCOPE THE LOOKUP TO THIS HOLD'S PROJECT (Argus r9, minor — the same
+          // hazard the r8 fix closed at `board-dispatch.ts`'s `queueDecision`).
+          // `TridentRunStore.get` is keyed on the run id ALONE, so a stale or
+          // mis-copied `linked_run_id` naming ANOTHER project's live run reads
+          // here as this card's driver — and the consequence on this path is
+          // DESTRUCTIVE: the hold is deleted, and that foreign run's terminal
+          // event fires on a different project's board and never re-dispatches
+          // this card, so the card is dropped with nothing left to revive it. A
+          // run that is not this project's drives nothing here, so the hold
+          // stands and the sweep re-dispatches as usual.
+          const phase = linked !== null && linked.project_slug === hold.project_slug ? linked.phase : null
+          if (phase !== null && !['done', 'failed', 'stopped'].includes(phase)) {
             // A successful dispatch through any entry point owns the card now.
             // Drop a stale hold rather than attaching a second concurrent run.
             await deps.holds.deleteByItem(hold.project_slug, hold.board_item_id)
@@ -290,7 +350,15 @@ export function buildDispatchHoldSweep(deps: {
           }
         }
         const result = await dispatchBoardBoundBuild(
-          { task: hold.task, board_item_id: hold.board_item_id },
+          {
+            task: hold.task,
+            board_item_id: hold.board_item_id,
+            // REPLAY THE ROUND THAT WAS HELD, NOT A DIFFERENT ONE. Without this
+            // a queued REVIEW round (`bound_pr` set) re-fired as a build.
+            ...(hold.payload?.bound_pr !== undefined && hold.payload.bound_pr !== null
+              ? { bound_pr: hold.payload.bound_pr }
+              : {}),
+          },
           dispatchDeps,
         )
         if (result.ok) {
@@ -300,6 +368,46 @@ export function buildDispatchHoldSweep(deps: {
           continue
         }
         if (result.code === 'held') continue // still blocked; the gate refreshed the row
+        // `branch_live` IS TRANSIENT, EXACTLY LIKE `held`. The dispatch gate
+        // refuses when a live worktree lock (or a non-terminal same-branch run)
+        // holds the card's branch — a condition that ends the moment that lane
+        // finishes. Deleting the hold there would silently drop a QUEUED card
+        // that nothing ever re-dispatches, converting "wait for the live lane"
+        // into "this card is gone". Keep it queued and let the next sweep ask
+        // again; the ONLY codes that delete are the permanent ones below.
+        //
+        // BUT SAY SO, WITH ITS AGE. `held` refreshes a row an operator can read;
+        // a silent `continue` made a branch-held card indistinguishable from one
+        // nobody queued. The age is the point: this sweep only runs when some
+        // run terminalizes, so a hold that keeps re-refusing is the signal that
+        // the "live" holder is a stale worktree lock nothing will ever release.
+        if (result.code === 'branch_live') {
+          // …AND GET LOUDER WHEN IT STOPS LOOKING TRANSIENT (Argus r6, minor).
+          // The hold is still never dropped — a card nothing re-dispatches is
+          // worse than a noisy one — but "transient" has a shape, and a branch
+          // still held after {@link BRANCH_LIVE_HOLD_STALE_MS} does not have it.
+          // The only holder that survives that long is a lock nothing will ever
+          // release (a third-party or legacy worktree lock whose reason carries
+          // no ` start <n>`, so the recycled-pid refinement cannot fire and a
+          // reused pid reads as alive forever). That was silent-forever behind a
+          // warn line indistinguishable from the healthy case; now it is an
+          // ERROR naming the age, which is the operator's cue to look at the
+          // worktree lock itself.
+          const heldForMs = staleHoldAgeMs(hold.created_at, deps.now?.() ?? Date.now())
+          const fields = {
+            project: hold.project_slug,
+            item: hold.board_item_id,
+            held_since: hold.created_at,
+            held_for_ms: heldForMs,
+            error: result.message,
+          }
+          if (heldForMs !== null && heldForMs >= BRANCH_LIVE_HOLD_STALE_MS) {
+            log.error('dispatch_hold_branch_live_stale', fields)
+          } else {
+            log.warn('dispatch_hold_branch_live', fields)
+          }
+          continue
+        }
         log.warn('dispatch_hold_rejected', {
           project: hold.project_slug,
           item: hold.board_item_id,

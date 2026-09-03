@@ -265,6 +265,25 @@ export interface CreateTridentRunInput {
 }
 
 /**
+ * The two WORKFLOW-OWNED columns `saveIfActive` assigns plainly, as the caller
+ * ACTUALLY READ THEM — the compare-and-swap half of {@link TridentRunStore.saveIfActive}.
+ *
+ * WHY IT EXISTS. The tick pins a run row, `await`s a long `step`, and saves the
+ * pinned snapshot back. `inner_checkpoint` / `inner_verdict` are written by the
+ * DETACHED inner workflow (`checkpoint.sh`), so any value that lands during that
+ * gap is overwritten by the outer loop's plainly-assigned snapshot — a lost
+ * update that silently un-does a live workflow's progress, and the exact class
+ * the fire settle-timeout gate exists to remove. Re-reading the row before the
+ * save NARROWS the window; it cannot close it, because the write is a separate
+ * statement.
+ *
+ * So a caller that cares passes what it read. The UPDATE then writes each of the
+ * two columns only while the stored value still equals it, and keeps the stored
+ * value otherwise. Callers that do not pass it are byte-identical to before.
+ */
+export type WorkflowColumnsSeen = Pick<TridentRun, 'inner_checkpoint' | 'inner_verdict'>
+
+/**
  * Partial update applied by the state machine + spawn layer. Every field
  * is optional; only the provided columns are written. `last_advanced_at`
  * is always re-stamped by `save`/`update` so callers never pass it.
@@ -514,22 +533,75 @@ export class TridentRunStore {
    * in the same repository. The read and the INSERT share one transaction,
    * closing the check-then-create race between concurrent dispatches.
    *
-   * An EMPTY claim set skips the scan entirely and always admits: the gate
-   * cannot hold on paths it never measured.
+   * An EMPTY claim set skips the PATH scan entirely: the gate cannot hold on
+   * paths it never measured. It does NOT mean unconditional admission — the
+   * branch/slug liveness check below runs for every call, claims or none, and
+   * can still refuse with `conflict: 'branch'` (Argus r8 nit: this sentence used
+   * to say "always admits", which the paragraph three lines down contradicts).
+   *
+   * IT ALSO RE-TAKES THE BRANCH-LIVENESS CHECK, and that is not redundant with
+   * the dispatch gate that already ran. `dispatchBoardBoundBuild` reads the live
+   * rows synchronously and then AWAITS a worktree probe before it gets here, so
+   * a competing dispatch that binds this branch DURING that await passes the
+   * gate and lands on the INSERT — where the live-only unique index
+   * (`(project_slug, slug)` WHERE phase NOT IN terminal, migration 0138) throws
+   * `UNIQUE constraint failed`, which the caller could only report as
+   * `backend_error` (HTTP 500), queueing nothing. Same fact, same transaction as
+   * the write, so the race has nowhere left to run: the caller gets the
+   * `branch_live` refusal it would have got a microsecond earlier, and the card
+   * is QUEUED instead of dropped on the floor.
+   *
+   * BOTH HALVES OF THE COLLISION ARE ASKED FOR: a live row on this repo already
+   * carrying the branch (what the dispatch gate checks), and a live row this
+   * project already has under this slug (what the index enforces — reachable
+   * when the same card is dispatched against a different `repo_path`).
    */
   async createIfClaimsAvailable(
     input: CreateTridentRunInput,
-  ): Promise<{ ok: true; run: TridentRun } | { ok: false; holding_run: TridentRun; path: string }> {
+  ): Promise<
+    | { ok: true; run: TridentRun }
+    | { ok: false; conflict: 'path'; holding_run: TridentRun; path: string }
+    | { ok: false; conflict: 'branch'; holding_run: TridentRun }
+  > {
     return this.db.transaction(async () => {
       const wanted = new Set(input.claimed_paths ?? [])
       if (wanted.size > 0) {
         for (const live of this.listNonTerminalByRepo(input.repo_path)) {
           const path = live.claimed_paths.find((candidate) => wanted.has(candidate))
-          if (path !== undefined) return { ok: false as const, holding_run: live, path }
+          if (path !== undefined) {
+            return { ok: false as const, conflict: 'path' as const, holding_run: live, path }
+          }
         }
+      }
+      const branchHolder = this.liveBranchOrSlugHolder(input)
+      if (branchHolder !== null) {
+        return { ok: false as const, conflict: 'branch' as const, holding_run: branchHolder }
       }
       return { ok: true as const, run: await this.create(input) }
     })
+  }
+
+  /**
+   * The live run that would collide with this insert on its BRANCH or on its
+   * SLUG, or null. Read inside {@link createIfClaimsAvailable}'s transaction —
+   * see the note there for why the dispatch gate's earlier look is not enough.
+   *
+   * A null branch claims nothing: a run with no branch cannot hold one, and the
+   * empty string bound in its place is never a real ref name.
+   */
+  private liveBranchOrSlugHolder(input: CreateTridentRunInput): TridentRun | null {
+    const row = this.db
+      .prepare<TridentRunDbRow, [string, string, string, string]>(
+        `SELECT ${COLS}
+           FROM code_trident_runs
+          WHERE phase NOT IN ${TERMINAL_PHASE_SQL}
+            AND ( (repo_path = ? AND branch IS NOT NULL AND branch = ?)
+               OR (project_slug = ? AND slug = ?) )
+          ORDER BY started_at ASC
+          LIMIT 1`,
+      )
+      .get(input.repo_path, input.branch ?? '', input.project_slug, input.slug)
+    return row === null ? null : rowToRun(row)
   }
 
   get(id: string): TridentRun | null {
@@ -1241,8 +1313,33 @@ export class TridentRunStore {
    * makes terminal a SINK state: whoever transitions the row first wins, and no
    * later writer (tick or terminate) moves it back out. A loser (`false`) tells
    * the tick to skip its observer fire entirely.
+   *
+   * `opts.workflow_columns_seen` — the OPTIONAL compare-and-swap on the two
+   * workflow-owned columns this statement assigns plainly. See
+   * {@link WorkflowColumnsSeen}: when supplied, `inner_checkpoint` /
+   * `inner_verdict` are written ONLY while the stored value still equals what
+   * the caller read; a value the inner workflow moved in between survives. Every
+   * other column is written exactly as without the option, and the terminal-sink
+   * predicate is untouched — a caller that lost the CAS still commits its own
+   * columns, so no save is ever silently dropped.
    */
-  async saveIfActive(run: TridentRun): Promise<boolean> {
+  async saveIfActive(run: TridentRun, opts?: { workflow_columns_seen?: WorkflowColumnsSeen }): Promise<boolean> {
+    // The two columns are written under a NULL-safe `IS` compare when the caller
+    // brought the values it read. `?` COUNT MATTERS: the driver binds by
+    // position, so each arm below carries its own bind pair in the same order.
+    const seen = opts?.workflow_columns_seen
+    const checkpointAssign =
+      seen === undefined
+        ? 'inner_checkpoint = ?'
+        : 'inner_checkpoint = CASE WHEN inner_checkpoint IS ? THEN ? ELSE inner_checkpoint END'
+    const verdictAssign =
+      seen === undefined
+        ? 'inner_verdict = ?'
+        : 'inner_verdict = CASE WHEN inner_verdict IS ? THEN ? ELSE inner_verdict END'
+    const checkpointBinds: (string | null)[] =
+      seen === undefined ? [run.inner_checkpoint] : [seen.inner_checkpoint, run.inner_checkpoint]
+    const verdictBinds: (string | null)[] =
+      seen === undefined ? [run.inner_verdict] : [seen.inner_verdict, run.inner_verdict]
     return this.db.transaction((tx) => {
       if (run.inner_verdict === 'REQUEST_CHANGES') {
         // VALIDATE WHAT WILL BE PERSISTED, NOT ONLY WHAT IS ALREADY THERE. This used to
@@ -1276,7 +1373,7 @@ export class TridentRunStore {
             SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
-                inner_checkpoint = ?, inner_verdict = ?, harvested_at = ?,
+                ${checkpointAssign}, ${verdictAssign}, harvested_at = ?,
                 -- COALESCE, NOT A PLAIN ASSIGNMENT. The verdict and the evidence for it
                 -- must land in the SAME statement or the guard above can never be
                 -- satisfied. But most callers of saveIfActive never touch findings, and a
@@ -1284,6 +1381,17 @@ export class TridentRunStore {
                 -- save. COALESCE writes only when the caller actually brought something.
                 -- (Keep this comment free of question marks: the driver counts every one
                 -- in the statement text as a bind parameter, comments included.)
+                -- (And free of BACKTICKS, for the same class of reason: this statement is
+                -- a template literal, so one backtick ends the string mid-SQL.)
+                -- STATED RESIDUAL (Argus r6, minor): this column is COALESCE-d, not
+                -- compare-and-swapped the way inner_checkpoint and inner_verdict are
+                -- above. A lane holding a save it composed from an older read then writes
+                -- its own findings over a newer set that landed in between -- last writer
+                -- wins for ONE statement. Left as is deliberately: the column is
+                -- workflow-owned for DETECTION only (the settle-timeout gate reads
+                -- movement, never the findings text), the window closes on the workflow's
+                -- very next checkpoint, and CAS-ing it would need a third guard column on
+                -- a statement whose two existing guards already decide the row's fate.
                 inner_checkpoint_findings = COALESCE(?, inner_checkpoint_findings),
                 base_sha = ?, base_behind = ?,
                 last_advanced_at = ?
@@ -1310,8 +1418,8 @@ export class TridentRunStore {
           run.worktree,
           run.failure_reason,
           run.workflow_run_id,
-          run.inner_checkpoint,
-          run.inner_verdict,
+          ...checkpointBinds,
+          ...verdictBinds,
           run.harvested_at,
           run.inner_checkpoint_findings,
           run.base_sha,

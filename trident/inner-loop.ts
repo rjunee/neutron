@@ -57,6 +57,7 @@ import { FABLE_MODEL, SONNET_MODEL, FAST_MODEL, getBestModel } from '@neutronai/
 import { modelTierRegistry } from './model-tiers.ts'
 import { parsePhaseModelConfig } from './phase-models.ts'
 import { DEFAULT_SETTLE_TIMEOUT_MS } from './liveness.ts'
+import { FIRE_SETTLE_TIMEOUT_ERROR } from './fire-evidence.ts'
 import { buildReflectionGuidance } from './reflection-guidance.ts'
 import { writeBriefParts, type BriefParts } from './brief-parts.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'

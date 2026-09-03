@@ -237,6 +237,95 @@ describe('TridentRunStore', () => {
     expect(store.get(run.id)?.brief_alert).toBe(second)
   })
 
+  // ── saveIfActive's workflow-column CAS ───────────────────────────────────
+  //
+  // The lost-update class the fire settle-timeout gate exists to remove. The tick
+  // pins a row, `await`s a long step, and saves the pinned snapshot; the DETACHED
+  // inner workflow writes `inner_checkpoint`/`inner_verdict` in that gap. Re-reading
+  // the row before the save narrows the window but cannot close it — the read and
+  // the write are two statements. `workflow_columns_seen` closes it.
+  test('saveIfActive() with workflow_columns_seen refuses to write a checkpoint the workflow moved in between', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-checkpoint', project_slug: 't1', repo_path: '/r', task: 't' })
+    // What the caller READ (and would carry forward).
+    await store.update(run.id, { inner_checkpoint: 'forge-done', inner_verdict: 'REVIEW_NOT_RUN' })
+    const seenRow = store.get(run.id)!
+    // The detached workflow advances the row AFTER that read.
+    await store.update(run.id, { inner_checkpoint: 'argus-approved', inner_verdict: 'APPROVE' })
+
+    expect(
+      await store.saveIfActive(
+        { ...seenRow, phase: 'argus', failure_reason: 'carried forward' },
+        {
+          workflow_columns_seen: {
+            inner_checkpoint: seenRow.inner_checkpoint,
+            inner_verdict: seenRow.inner_verdict,
+          },
+        },
+      ),
+    ).toBe(true)
+
+    const after = store.get(run.id)!
+    // The workflow's newer values SURVIVE …
+    expect(after.inner_checkpoint).toBe('argus-approved')
+    expect(after.inner_verdict).toBe('APPROVE')
+    // … and the caller's own columns still landed: the CAS narrows the write, it
+    // never drops the save.
+    expect(after.failure_reason).toBe('carried forward')
+  })
+
+  test('saveIfActive() with workflow_columns_seen still writes when nothing moved (and without the option it clobbers)', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-unmoved', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'forge-done', inner_verdict: 'REVIEW_NOT_RUN' })
+    const seen = store.get(run.id)!
+
+    // Nothing moved → the CAS holds and the caller's value lands.
+    expect(
+      await store.saveIfActive(
+        { ...seen, inner_verdict: 'APPROVE' },
+        { workflow_columns_seen: { inner_checkpoint: seen.inner_checkpoint, inner_verdict: seen.inner_verdict } },
+      ),
+    ).toBe(true)
+    expect(store.get(run.id)?.inner_verdict).toBe('APPROVE')
+
+    // THE CONTROL — the same stale snapshot WITHOUT the option is the plain
+    // assignment every other caller uses, and it does overwrite. This pins that the
+    // guard is opt-in and that nothing else changed shape.
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+    expect(await store.saveIfActive({ ...seen, phase: 'argus' })).toBe(true)
+    expect(store.get(run.id)?.inner_checkpoint).toBe('forge-done')
+  })
+
+  // ARGUS r10 (minor): the CAS is written with the NULL-SAFE `IS` compare, and
+  // the NULL half of it was pinned by nothing — swapping `IS` for `=` on
+  // `inner_checkpoint` left the whole suite green. It must not: a run that has
+  // not checkpointed yet holds NULL in both the row and the caller's `seen`
+  // value, and `NULL = NULL` is NULL, so under `=` the CAS reads as LOST and the
+  // very first checkpoint of every run is silently dropped. That is the settle
+  // path's own shape — the fire gate saves with the columns it read, and on a
+  // round-1 run it read NULL.
+  test('saveIfActive() CAS is NULL-safe — a first checkpoint lands over a NULL both sides saw', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-null-safe', project_slug: 't1', repo_path: '/r', task: 't' })
+    const seen = store.get(run.id)!
+    // Nothing has ever written these columns: both the row and what the caller
+    // read are NULL.
+    expect(seen.inner_checkpoint).toBeNull()
+    expect(seen.inner_verdict).toBeNull()
+
+    expect(
+      await store.saveIfActive(
+        { ...seen, inner_checkpoint: 'forge-done', inner_verdict: 'REVIEW_NOT_RUN' },
+        { workflow_columns_seen: { inner_checkpoint: seen.inner_checkpoint, inner_verdict: seen.inner_verdict } },
+      ),
+    ).toBe(true)
+
+    const after = store.get(run.id)!
+    expect(after.inner_checkpoint).toBe('forge-done')
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
+  })
+
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })
@@ -280,6 +369,12 @@ describe('TridentRunStore', () => {
       task: 'build the thing',
     })
     // A fresh run has no checkpoint, so it has no commit to be about either.
+    // AND `create` TAKES NO CHECKPOINT AT ALL (Argus r5 blocker): every dispatch
+    // entry point — `dispatchBoardBoundBuild` included — lands here, so a newly
+    // dispatched run ALWAYS rebuilds. Anything that tells an operator a fresh
+    // start "resumes" a published head (the terminal-build wake once did) is
+    // wrong, and this is the assertion that says so.
+    expect(run.inner_checkpoint).toBeNull()
     expect(run.inner_checkpoint_head).toBeNull()
     expect(run.inner_checkpoint_findings).toBeNull()
 
@@ -1618,5 +1713,130 @@ describe('countRunningByLauncher — live runs hosted by one launcher generation
 
     await store.crashRunningByLauncher('gen-1', 'pooled child evicted (abandon-poison)')
     expect(store.countRunningByLauncher('gen-1')).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// ARGUS r7 (BLOCKER) — the branch half of the admission transaction.
+//
+// `dispatchBoardBoundBuild`'s liveness gate reads the live rows SYNCHRONOUSLY
+// and then awaits a worktree probe before it reaches this insert, so a
+// competitor that binds the branch inside that window was invisible to it. The
+// insert then met the live-only unique index (migration 0138) as a raw
+// `UNIQUE constraint failed`, which the caller could only report as
+// `backend_error` (HTTP 500) with NOTHING queued. The admission transaction
+// re-takes the same liveness fact, so the race resolves as a refusal.
+// ---------------------------------------------------------------------------
+describe('createIfClaimsAvailable — the branch/slug conflict is a refusal, not a thrown constraint', () => {
+  test('a live run already carrying the branch in this repo refuses with conflict "branch"', async () => {
+    const store = new TridentRunStore(db)
+    const holder = await store.create({
+      slug: 'the-lane-that-won-the-race',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the competitor',
+      branch: 'trident/contested',
+    })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the loser',
+      branch: 'trident/contested',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    expect(admission.ok).toBe(false)
+    if (admission.ok) return
+    expect(admission.conflict).toBe('branch')
+    expect(admission.holding_run.id).toBe(holder.id)
+    // …and nothing was inserted behind the refusal.
+    expect(
+      db.prepare<{ n: number }, []>('SELECT COUNT(*) AS n FROM code_trident_runs').get()?.n,
+    ).toBe(1)
+  })
+
+  test('the SLUG half — a live run under this project+slug in another repo refuses too', async () => {
+    const store = new TridentRunStore(db)
+    // Different repo_path, so the branch scan cannot see it; this is exactly
+    // what the live-only unique index enforces, and the throw it used to be.
+    await store.create({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/elsewhere',
+      task: 'the competitor',
+      branch: 'trident/contested',
+    })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the loser',
+      branch: 'trident/contested',
+      claimed_paths: [],
+    })
+    expect(admission.ok).toBe(false)
+    if (admission.ok) return
+    expect(admission.conflict).toBe('branch')
+  })
+
+  // THE MUST-PASS SIBLINGS — the gate is LIVENESS, not branch shape.
+  test('a TERMINAL holder of the same branch and slug admits exactly as before', async () => {
+    const store = new TridentRunStore(db)
+    const holder = await store.create({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the finished lane',
+      branch: 'trident/contested',
+    })
+    await store.terminalTransition(holder.id, { phase: 'done' })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'contested',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'the next round',
+      branch: 'trident/contested',
+      claimed_paths: [],
+    })
+    expect(admission.ok).toBe(true)
+  })
+
+  test('a live run with NO branch holds none — a branchless dispatch still admits', async () => {
+    const store = new TridentRunStore(db)
+    await store.create({ slug: 'branchless-holder', project_slug: 't1', repo_path: '/r', task: 'no branch' })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'branchless-newcomer',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'also no branch',
+      claimed_paths: [],
+    })
+    expect(admission.ok).toBe(true)
+  })
+
+  test('the PATH conflict still reports its own kind and path', async () => {
+    const store = new TridentRunStore(db)
+    const claimer = await store.create({
+      slug: 'claimer',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'edit trident/foo.ts',
+      branch: 'trident/claimer',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    const admission = await store.createIfClaimsAvailable({
+      slug: 'newcomer',
+      project_slug: 't1',
+      repo_path: '/r',
+      task: 'edit trident/foo.ts as well',
+      branch: 'trident/newcomer',
+      claimed_paths: ['trident/foo.ts'],
+    })
+    expect(admission.ok).toBe(false)
+    if (admission.ok) return
+    expect(admission.conflict).toBe('path')
+    if (admission.conflict !== 'path') return
+    expect(admission.path).toBe('trident/foo.ts')
+    expect(admission.holding_run.id).toBe(claimer.id)
   })
 })
