@@ -265,6 +265,56 @@ async function seedBunfigRepo(where: 'branch' | 'main'): Promise<string> {
   return repo
 }
 
+/**
+ * A repo whose MAIN already carries a `package.json` with an `exports` map — the
+ * shape 13 of this repository's own workspace manifests have — and whose branch
+ * adds `src/limit.ts`, the separate test that asserts it and an unrelated
+ * control.
+ *
+ * `what` decides what the branch does to that manifest, and it is the only
+ * difference between the two rows: `bump` edits a DEPENDENCY RANGE beside the
+ * inherited map (a routine PR, which must keep its bun nomination — refusing it
+ * strips a bun-only repo of its only nomination, the very defect this card
+ * exists to fix), `rewrite` edits the MAP (which redirects a bare specifier and
+ * must still be refused).
+ */
+async function seedManifestRepo(what: 'bump' | 'rewrite'): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), `mutation-prover-realgit-manifest-${what}-`))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  mkdirSync(join(repo, 'tests'), { recursive: true })
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  writeFileSync(join(repo, 'src', 'index.ts'), 'export const NAME = "manifest"\n')
+  const manifest = (deps: string, target: string): string =>
+    `${JSON.stringify({ name: 'manifest', dependencies: { zod: deps }, exports: { '.': target } }, null, 2)}\n`
+  writeFileSync(join(repo, 'package.json'), manifest('^3.0.0', './src/index.ts'))
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed, manifest and all')
+
+  await git(repo, 'switch', '-q', '-c', 'trident/manifest-bump')
+  writeFileSync(
+    join(repo, 'src', 'limit.ts'),
+    'export function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n',
+  )
+  writeFileSync(
+    join(repo, 'tests', 'limit.test.ts'),
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n  expect(clamp(2, 3)).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'tests', 'other-control.test.ts'),
+    "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated module', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'package.json'),
+    what === 'bump' ? manifest('^4.0.0', './src/index.ts') : manifest('^3.0.0', './src/limit.ts'),
+  )
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its separate test and the manifest edit')
+  return repo
+}
+
 /** A repo whose branch carries `seed(repo)`'s changes on top of main — for the
  *  tests that are about what `changedFilesOnBranch` READS out of real git,
  *  rather than about running a proof. */
@@ -404,6 +454,63 @@ describe('the mutation-proof gate against real git', () => {
     expect(obs.control_mutated.exit_code).toBe(0)
     expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
+
+  test('a dependency bump beside a map MAIN wrote keeps its bun nomination against REAL git', async () => {
+    // THE OVER-REFUSAL, reproduced against real git and then closed. The arm
+    // used to refuse on the FILE being in the diff and the key being present at
+    // the head, so this PR — which edits nothing but a version range — lost
+    // `bun test`, and in a bun-only repo that is every nomination it had. The
+    // documented escape hatch ("land the manifest change on its own commit")
+    // cannot work: `changedFilesWithStatus` reads the WHOLE range
+    // `<base>...<ref>`, so a separate commit is still in the diff. What decides
+    // it now is the key's VALUE at the merge base.
+    const repo = await seedManifestRepo('bump')
+    const out = await runMutationProofGate({
+      run: { id: 'run-manifest-bump', slug: 'manifest-bump', repo_path: repo, branch: 'trident/manifest-bump' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.reason ?? '').not.toContain('package.json')
+    expect(out.ok).toBe(true)
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
+
+  test('…and rewriting that same map IS refused against REAL git — the control on the comparison', async () => {
+    // The load-bearing negative: same manifest, same base, same claim, and the
+    // only difference is that this branch edited the MAP instead of a version
+    // range. Without this row the row above would pass on a gate that had
+    // simply stopped reading package.json.
+    const repo = await seedManifestRepo('rewrite')
+    const out = await runMutationProofGate({
+      run: { id: 'run-manifest-rewrite', slug: 'manifest-rewrite', repo_path: repo, branch: 'trident/manifest-bump' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('package.json')
+    expect(out.reason).toContain('exports')
+    expect(out.evidence?.observed ?? null).toBeNull()
+  })
 
   test('a support LIBRARY under tests/ proves red-then-green against REAL git and bun', async () => {
     // THE #489 CLASS, end to end. `tests/support/clamp.ts` declares no test

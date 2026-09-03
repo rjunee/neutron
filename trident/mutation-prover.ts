@@ -417,6 +417,18 @@ export interface ProveInput {
    * merge can take, always supplies it (pinned by its own test).
    */
   changed_files?: readonly string[]
+  /**
+   * The BASE the branch is measured against — the same `base_branch` the gate
+   * read the diff with. Runner provenance needs more than the file list: a
+   * config file appearing in the diff says the branch TOUCHED it, never that the
+   * branch wrote the load hook inside it, and refusing on the file alone cost a
+   * routine dependency bump its only nomination. With a base, the hook key's
+   * value at the merge base is compared with its value at the head
+   * (`bunConfigHookSlice`) and only a branch-authored map is refused. Omitted
+   * (direct callers/tests) → no base is known and the arm falls back to the
+   * older, WIDER reading, which fails closed; the gate always supplies it.
+   */
+  base_ref?: string
 }
 
 /**
@@ -1196,8 +1208,13 @@ export function pythonImportShadow(argv: readonly string[], topLevelNames: reado
  * review seat forged a full `proved: true` through it one file extension away:
  * commit `argparse/__init__.pyc` with no `.py` source beside it and python
  * imports the directory as a regular package all the same
- * (`SourcelessFileLoader`), so the arm looked straight past it. The suffixes are
- * the sibling's — `py`, `pyc`, `so` (an extension module is an `__init__` too) —
+ * (`SourcelessFileLoader`), so the arm looked straight past it. AND THE ABI TAG
+ * IS THE SAME HOLE ONE SPELLING OVER: `importlib.machinery.EXTENSION_SUFFIXES`
+ * carries `.abi3.so` and `.cpython-<ver>-<platform>.so` beside the bare `.so`,
+ * so `argparse/__init__.abi3.so` is a regular package to python and was not one
+ * here — while `pythonModuleShadow` already matched the tagged spelling for the
+ * file half of the same question. The suffixes are the sibling's — `py`, `pyc`,
+ * `so`, tagged or not (an extension module is an `__init__` too) —
  * kept identical to `pythonImportShadow`'s on purpose: the two arms are the file
  * and directory halves of ONE question, and a suffix that is branch-authored
  * code in one is branch-authored code in the other. Windows-only spellings
@@ -1210,7 +1227,7 @@ export function pythonImportShadow(argv: readonly string[], topLevelNames: reado
  * deleting the marker (unittest and pytest both discover namespace-package test
  * directories) or by nominating `go`, `cargo`, `bun`, `node`.
  */
-const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\/(?:__init__|__main__)\.(?:py|pyc|so)$/
+const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\/(?:__init__|__main__)\.(?:py|pyc|so|[^/]*\.so)$/
 
 export function pythonPackageShadow(argv: readonly string[], paths: readonly string[]): string | null {
   if (argv[0] !== 'python3' || argv[1] !== '-m') return null
@@ -1317,23 +1334,44 @@ export function pytestConfigShadow(argv: readonly string[], paths: readonly stri
  * only, so the ordinary package.json edit (a dependency bump, a script) keeps
  * its bun nomination.
  *
- * ITS OVER-REFUSAL IS THE WIDEST ON THIS SEAM and is stated rather than hidden:
- * a manifest is edited far more often than a bunfig, and a monorepo's workspace
- * packages routinely carry an `exports` map, so a PR that adds a dependency to
- * one of them in the same commit as its code loses `bun test` — in a bun-only
- * repo, its only nomination. That is an over-refusal, never a forged proof, and
- * the escape hatch is the same one the whole arm offers: land the manifest
- * change on its own commit. Narrowing it to manifests that could actually
- * redirect toward the target means reasoning about where a map POINTS, which is
- * the thing this seam exists not to do; if the cost is felt in practice it is a
- * follow-up card, recorded under Deferred in IMPLEMENTATION_PLAN.md.
+ * ITS OVER-REFUSAL WAS THE WIDEST ON THIS SEAM and is now closed rather than
+ * merely stated: a manifest is edited far more often than a bunfig, and a
+ * monorepo's workspace packages routinely carry an `exports` map, so a PR that
+ * adds a dependency to one of them lost `bun test` — in a bun-only repo, its
+ * only nomination. A review seat ran that on this repository's own manifests and
+ * called it what it is: the "no legal nomination exists" defect this card exists
+ * to fix, re-created by the fix. The escape hatch this block used to offer,
+ * "land the manifest change on its own commit", was measured and does not work —
+ * the diff is read over the whole range `<base>...<ref>`, so only a separate PR
+ * relieved it. What decides it now is `bunConfigHookSlice`: the key's VALUE at
+ * the head is compared with its value at the MERGE BASE, and only a map the
+ * BRANCH wrote is refused. Where the map POINTS is still not reasoned about.
  */
 const BUN_LOAD_CONFIG_BASENAME = /^(?:bunfig\.toml|package\.json|(?:ts|js)config(?:\.[\w-]+)*\.json)$/
 
-/** The branch-changed files a `bun test` nomination would have loaded config out of. */
+/**
+ * NODE READS THE MANIFEST TOO, and gating this whole arm on `argv[0] === 'bun'`
+ * left the identical forgery open one runner over: two review seats drove the
+ * gate with a branch-rewritten `package.json` `imports` map redirecting a bare
+ * specifier inside MAIN's guard file and got `ok: true, proved: true` under
+ * `node --test`, byte-identical to the forgery `bun test` correctly refused.
+ * Node honours `imports` (`#x`) and `exports` for the package's own specifiers
+ * exactly as bun does, so the map decides which FILE an unrelated test means
+ * with nothing on the argv to show for it.
+ *
+ * PACKAGE.JSON ONLY FOR NODE, because the rest of the list is bun's alone: node
+ * does not read `bunfig.toml` at all, and it does not resolve bare specifiers
+ * through a tsconfig `paths`/`baseUrl` map (that is bun's and a bundler's
+ * behaviour, not the ESM resolver's). Refusing those for a node nomination
+ * would be an over-refusal with no forgery behind it.
+ */
+const NODE_LOAD_CONFIG_BASENAME = /^package\.json$/
+
+/** The branch-changed files a `bun test` / `node --test` nomination would have loaded config out of. */
 export function bunConfigCandidates(argv: readonly string[], changedPaths: readonly string[]): string[] {
-  if (argv[0] !== 'bun') return []
-  return changedPaths.filter((p) => BUN_LOAD_CONFIG_BASENAME.test(p.split('/').pop() ?? p))
+  const basename = argv[0] === 'bun' ? BUN_LOAD_CONFIG_BASENAME : argv[0] === 'node' ? NODE_LOAD_CONFIG_BASENAME : null
+  if (basename === null) return []
+  return changedPaths.filter((p) => basename.test(p.split('/').pop() ?? p))
 }
 
 /**
@@ -1365,26 +1403,120 @@ function decodeTomlEscapes(text: string): string {
   })
 }
 
-/** The load-hook key that makes such a file decide which code the runner loads. */
-export function bunConfigLoadHook(path: string, text: string): string | null {
+const JSON_HOOK_KEY: Record<string, RegExp> = {
+  imports: /"imports"[ \t]*:/,
+  exports: /"exports"[ \t]*:/,
+  'compilerOptions.paths': /"paths"[ \t]*:/,
+  'compilerOptions.baseUrl': /"baseUrl"[ \t]*:/,
+}
+
+/**
+ * EVERY load-hook key such a file carries, not just the first one. The
+ * single-key reading was sound while the only question was "is there a hook at
+ * all", and it stopped being sound the moment the answer had to be compared
+ * against the base branch: a manifest holding an inherited `imports` map AND a
+ * branch-rewritten `exports` map answered `imports`, the inherited one, and the
+ * rewritten map was never looked at. Both are asked, and the arm refuses on the
+ * first one the BRANCH wrote.
+ */
+export function bunConfigLoadHooks(path: string, text: string): string[] {
   const base = path.split('/').pop() ?? path
-  if (base === 'bunfig.toml') return TOML_PRELOAD_KEY.test(decodeTomlEscapes(text)) ? 'preload' : null
+  if (base === 'bunfig.toml') return TOML_PRELOAD_KEY.test(decodeTomlEscapes(text)) ? ['preload'] : []
   // A RESOLUTION MAP, NOT A MANIFEST. `imports`/`exports` are the two
   // package.json keys that decide which FILE a specifier means; everything else
   // in the file (deps, scripts, version) redirects nothing, and refusing on the
   // basename alone would cost a bun-only repo its nomination on every bump.
   if (base === 'package.json') {
-    if (/"imports"[ \t]*:/.test(text)) return 'imports'
-    return /"exports"[ \t]*:/.test(text) ? 'exports' : null
+    return ['imports', 'exports'].filter((k) => (JSON_HOOK_KEY[k] as RegExp).test(text))
   }
   // ANYWHERE IN THE TEXT for the JSON pair: a tsconfig is routinely written on
   // one line, and a key rule anchored to the line start read `{ "compilerOptions":
   // { "baseUrl": "." } }` as hookless. Matching the quoted key anywhere
   // over-refuses a tsconfig that merely mentions `"paths":` in a comment, which
   // is the direction this seam errs in everywhere else.
-  if (/"paths"[ \t]*:/.test(text)) return 'compilerOptions.paths'
-  if (/"baseUrl"[ \t]*:/.test(text)) return 'compilerOptions.baseUrl'
-  return null
+  return ['compilerOptions.paths', 'compilerOptions.baseUrl'].filter((k) => (JSON_HOOK_KEY[k] as RegExp).test(text))
+}
+
+/** The load-hook key that makes such a file decide which code the runner loads. */
+export function bunConfigLoadHook(path: string, text: string): string | null {
+  return bunConfigLoadHooks(path, text)[0] ?? null
+}
+
+/**
+ * WHAT THE HOOK KEY ACTUALLY SAYS, canonicalised so the same map written two
+ * ways compares equal — the seam that tells a map the BRANCH wrote from one it
+ * merely INHERITED. A review seat proved the arm above refused on the FILE being
+ * in the diff and the key being present at the head, never on the key being
+ * branch-authored: a dependency bump in any workspace manifest that carries an
+ * `exports` map stripped a bun-only repo of its only nomination, which is the
+ * "no legal nomination exists" defect this card exists to fix, arriving through
+ * the door marked "security". The escape hatch the docblock offered — land the
+ * manifest change on its own commit — cannot work either, because the diff is
+ * read over the whole range `<base>...<ref>`, so only a separate PR relieved it.
+ *
+ * SO THE VALUE IS COMPARED, NOT THE FILE. A `"exports"` map byte-identical to
+ * the one at the merge base is main's, reviewed like any other merged file, and
+ * the nomination stands; any difference — a new key, an edited target, a deleted
+ * entry — is the branch's and is refused.
+ *
+ * EVERY OCCURRENCE, JOINED, because a nested second spelling of the same key is
+ * a redirection the first one does not show. Whitespace runs collapse to a
+ * single space so a reformat is not a change; an UNTERMINATED value reads as
+ * `null`, which the caller treats as "not inherited" and refuses — this seam
+ * fails CLOSED like every other one on this path.
+ */
+export function bunConfigHookSlice(text: string, key: string): string | null {
+  const pattern = key === 'preload' ? TOML_PRELOAD_KEY : JSON_HOOK_KEY[key]
+  if (pattern === undefined) return null
+  const src = key === 'preload' ? decodeTomlEscapes(text) : text
+  const scan = new RegExp(pattern.source, 'g')
+  const values: string[] = []
+  for (let m = scan.exec(src); m !== null; m = scan.exec(src)) {
+    const value = readHookValue(src, m.index + m[0].length)
+    if (value === null) return null
+    values.push(value.replace(/\s+/g, ' ').trim())
+  }
+  if (values.length === 0) return null
+  return values.join(' | ')
+}
+
+/** The value that starts at or after `from`: a bracketed group, a quoted string, or the rest of the line. */
+function readHookValue(text: string, from: number): string | null {
+  let i = from
+  while (i < text.length && /\s/.test(text[i] as string)) i += 1
+  if (i >= text.length) return null
+  const open = text[i] as string
+  const close = open === '[' ? ']' : open === '{' ? '}' : null
+  if (close !== null) {
+    let depth = 0
+    let quote: string | null = null
+    for (let j = i; j < text.length; j += 1) {
+      const c = text[j] as string
+      if (quote !== null) {
+        if (c === '\\') j += 1
+        else if (c === quote) quote = null
+        continue
+      }
+      if (c === '"' || c === "'") quote = c
+      else if (c === open) depth += 1
+      else if (c === close) {
+        depth -= 1
+        if (depth === 0) return text.slice(i, j + 1)
+      }
+    }
+    return null
+  }
+  if (open === '"' || open === "'") {
+    for (let j = i + 1; j < text.length; j += 1) {
+      const c = text[j] as string
+      if (c === '\\') j += 1
+      else if (c === open) return text.slice(i, j + 1)
+    }
+    return null
+  }
+  const nl = text.indexOf('\n', i)
+  const line = (nl === -1 ? text.slice(i) : text.slice(i, nl)).trim()
+  return line.length === 0 ? null : line
 }
 
 /**
@@ -2447,7 +2579,15 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
 
     try {
       // ONE deadline for the whole proof, started once the worktree exists.
-      return await proveInWorktree(run.id, claim, wt, headSha, now() + budgetMs, input.changed_files ?? [])
+      return await proveInWorktree(
+        run.id,
+        claim,
+        wt,
+        headSha,
+        now() + budgetMs,
+        input.changed_files ?? [],
+        input.base_ref ?? null,
+      )
     } finally {
       await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
       await deps.run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
@@ -2596,6 +2736,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     headSha: string,
     deadline: number,
     changedFiles: readonly string[],
+    baseRef: string | null,
   ): Promise<MutationEvidence> {
     const target = join(wt, claim.file)
 
@@ -2696,6 +2837,30 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // text from the pinned checkout, and a candidate absent there was deleted by
     // this branch and loads nothing. See `bunConfigCandidates` for why this arm
     // is diff-scoped where the pytest one is tree-wide.
+    //
+    // AND IT IS THE KEY'S VALUE THAT DECIDES, not the file's presence in the
+    // diff. A manifest carrying a map main already wrote is main's, exactly as
+    // an inherited `bunfig.toml` is; refusing it for a dependency bump beside it
+    // took a bun-only repository's only nomination away. `hookIsInherited`
+    // compares the key at the MERGE BASE with the key at the head and refuses
+    // only what this branch actually wrote. Every step of it fails CLOSED: no
+    // base, no merge base, no file there, an unreadable value — all read as
+    // branch-authored.
+    let mergeBase: string | null | undefined
+    async function hookIsInherited(candidate: string, key: string, headText: string): Promise<boolean> {
+      if (baseRef === null || baseRef.trim().length === 0) return false
+      if (mergeBase === undefined) {
+        const mb = await deps.run_host(['git', '-C', wt, 'merge-base', baseRef, headSha], wt)
+        const sha = mb.stdout.trim().toLowerCase()
+        mergeBase = mb.ok && HEX40.test(sha) ? sha : null
+      }
+      if (mergeBase === null) return false
+      const show = await deps.run_host(['git', '-C', wt, 'show', `${mergeBase}:${candidate}`], wt)
+      if (!show.ok) return false
+      const here = bunConfigHookSlice(headText, key)
+      const there = bunConfigHookSlice(show.stdout, key)
+      return here !== null && there !== null && here === there
+    }
     for (const [which, argv] of nominated) {
       for (const candidate of bunConfigCandidates(argv, changedFiles)) {
         let text: string
@@ -2704,12 +2869,12 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
         } catch {
           continue
         }
-        const key = bunConfigLoadHook(candidate, text)
-        if (key !== null) {
+        for (const key of bunConfigLoadHooks(candidate, text)) {
+          if (await hookIsInherited(candidate, key, text)) continue
           return refuse(
             run_id,
             claim,
-            `claim.${which} bun test would load BRANCH-SUPPLIED code with nothing on the argv to show for it: this branch writes ${candidate}, whose ${key} decides which files the runner loads for every test it runs — a runner whose behaviour the branch changes with no flag is not evidence of a test runner; land ${candidate} on its own or nominate a runner that does not read it`,
+            `claim.${which} ${argv[0]} would load BRANCH-SUPPLIED code with nothing on the argv to show for it: this branch writes the ${key} in ${candidate}, and it decides which files the runner loads for every test it runs — a runner whose behaviour the branch changes with no flag is not evidence of a test runner; restore ${key} to what ${baseRef ?? 'the base branch'} carries, land it in a PR of its own, or nominate a runner that does not read it`,
           )
         }
       }
@@ -3850,11 +4015,15 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   // `changed_files` is the SAME git-derived list that bound the proof to this PR
   // two checks above. Runner provenance needs it: a config file this branch
   // wrote decides which code a `bun test` guard loads (`bunConfigCandidates`).
+  // `base_ref` is the other half of that question — the diff says the branch
+  // TOUCHED the file, and only the base says whether the branch wrote the load
+  // hook inside it.
   const evidence = await prover.prove({
     run: input.run,
     claim: input.claim,
     head_sha: pinnedSha,
     changed_files: files,
+    base_ref: input.base_branch,
   })
 
   // THE HEAD THE MERGE WILL TAKE, re-read AFTER the proof. A proof is bound to

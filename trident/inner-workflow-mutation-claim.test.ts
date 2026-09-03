@@ -397,7 +397,12 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // `proved: true` through an `argparse/__init__.pyc` while the marker matched
     // source only, so the suffix class is pinned as a literal here: narrowing it
     // back to `.py` reopens that hole and reddens this line.
-    expect(PROVER_SRC).toContain('const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\\/(?:__init__|__main__)\\.(?:py|pyc|so)$/')
+    // The ABI-TAGGED spellings are in the class for the same reason: python's
+    // own `EXTENSION_SUFFIXES` carries `.abi3.so` and `.cpython-<ver>-<platform>.so`, and
+    // the file-half sibling already matched them.
+    expect(PROVER_SRC).toContain(
+      'const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\\/(?:__init__|__main__)\\.(?:py|pyc|so|[^/]*\\.so)$/',
+    )
 
     // …AND THE SAME QUESTION ASKED OF BUN, the runner this repository actually
     // uses: a `bunfig.toml` `preload` or a `tsconfig.json` `paths` the BRANCH
@@ -408,10 +413,27 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     for (const d of described) {
       expect(['bun config shadow', d.includes('bunfig.toml')]).toEqual(['bun config shadow', true])
       expect(['bun config shadow', d.includes('tsconfig.json')]).toEqual(['bun config shadow', true])
-      expect(['bun config shadow', d.includes('only what your diff writes is refused')]).toEqual([
+      // THE NARROWING, IN THE WORDS THE GATE NOW ENFORCES. It was "only what
+      // your diff writes is refused", and that over-promised in the direction
+      // that costs a build its nomination: the arm fired on the FILE being in
+      // the diff and the KEY being present at the head, so a dependency bump
+      // beside an inherited `exports` map lost `bun test` — the "no legal
+      // nomination" defect this card exists to fix. What is compared is the
+      // key's VALUE against the merge base, and the schema must say so, because
+      // the escape hatch it used to name (land the manifest change on its own
+      // COMMIT) does not exist: the diff is the whole range.
+      expect(['bun config shadow', d.includes('a map main already carried is fine')]).toEqual([
         'bun config shadow',
         true,
       ])
+      expect(['bun config shadow', d.includes('compared against the merge base')]).toEqual([
+        'bun config shadow',
+        true,
+      ])
+      // …AND NODE READS THE SAME MAP. Two seats forged `proved: true` under
+      // `node --test` with the package.json forgery `bun test` was refusing,
+      // because the arm was gated on `argv[0] === 'bun'`.
+      expect(['node manifest arm', d.includes('refuses `node --test` too')]).toEqual(['node manifest arm', true])
       // THE SPELLINGS AND THE SECOND MAP, pinned literally because two seats
       // forged a full `proved: true` past the first wording of this arm: the
       // defence matched ONE spelling of `preload` while the parser accepts four,
@@ -430,6 +452,12 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // above is a promise nothing keeps.
     expect(PROVER_SRC).toContain('const TOML_PRELOAD_KEY = ')
     expect(PROVER_SRC).toContain("base === 'package.json'")
+    // …and the two halves of the round-22 sentence really exist on the prover
+    // side: node is a candidate runner for the manifest, and the refusal is
+    // decided by comparing the key's value with the merge base.
+    expect(PROVER_SRC).toContain("argv[0] === 'node' ? NODE_LOAD_CONFIG_BASENAME")
+    expect(PROVER_SRC).toContain('bunConfigHookSlice')
+    expect(PROVER_SRC).toContain("'merge-base', baseRef, headSha")
 
     // …AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
     // OPTION, invisible to every loop above for the same reason. Node forwards a
@@ -479,7 +507,23 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
         true,
       ])
       expect(['no general shell', d.includes('sh -c')]).toEqual(['no general shell', true])
+      // A WRAPPER IS A LEGAL CONTROL, and the schema said the opposite ("no
+      // wrapper"), which over-constrained the build against an enforcement that
+      // deliberately keeps `npm run …`/`make …` runnable as the GREEN half. A
+      // schema stricter than the gate costs nominations for nothing.
+      expect(['a wrapper is a legal control', d.includes('LEGAL CONTROL')]).toEqual([
+        'a wrapper is a legal control',
+        true,
+      ])
+      expect(['a wrapper is not a legal guard', d.includes('refused as a GUARD')]).toEqual([
+        'a wrapper is not a legal guard',
+        true,
+      ])
     }
+    // Two-sided: the prover really refuses the wrapper for the GUARD only, so
+    // the sentence above cannot drift into a permission the gate does not give.
+    expect(PROVER_SRC).toContain('function guardRunsTheMutatedFile(')
+    expect(PROVER_SRC).toContain('whose script body the branch wrote')
     // …and each of those is really enforced on the prover side, so a two-sided
     // deletion cannot quietly re-admit the shape.
     expect(PROVER_SRC).toContain("validateArgv(claim.control, 'control')")

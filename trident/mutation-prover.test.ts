@@ -21,7 +21,9 @@ import {
   parseMutationClaim,
   proofWorktreePath,
   bunConfigCandidates,
+  bunConfigHookSlice,
   bunConfigLoadHook,
+  bunConfigLoadHooks,
   pythonImportShadow,
   pythonModuleShadow,
   pythonPackageShadow,
@@ -130,6 +132,11 @@ interface HostScript {
   treePaths?: string[]
   /** `git ls-tree` fails — the provenance probe must fail CLOSED. */
   lsTreeFails?: boolean
+  /** the merge base `git merge-base <base> <head>` reports; absent → it fails. */
+  mergeBase?: string
+  /** file text `git show <merge-base>:<path>` reports — what the BASE carried.
+   *  A path absent here reads as "the base did not have this file". */
+  baseFiles?: Record<string, string>
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -148,6 +155,13 @@ function scriptedHost(s: HostScript = {}): {
         return res(0)
       }
       if (cmd.includes('ls-tree')) return s.lsTreeFails === true ? res(1) : res(0, (s.treePaths ?? []).join('\0'))
+      if (cmd.includes('merge-base')) return s.mergeBase === undefined ? res(1) : res(0, `${s.mergeBase}\n`)
+      if (cmd.includes('show')) {
+        const spec = cmd[cmd.length - 1] ?? ''
+        const path = spec.slice(spec.indexOf(':') + 1)
+        const text = (s.baseFiles ?? {})[path]
+        return text === undefined ? res(128) : res(0, text)
+      }
       if (cmd.join(' ') === CLAIM.guard.join(' ')) {
         guardRuns += 1
         return guardRuns === 1
@@ -529,6 +543,26 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     expect(pytestConfigShadow(PY_CONTROL, ['tests/conftest.py'])).toBeNull()
   })
 
+  test('an ABI-TAGGED __init__ is an __init__ — the tagged extension spellings python imports', () => {
+    // `importlib.machinery.EXTENSION_SUFFIXES` carries `.abi3.so` and
+    // `.cpython-<ver>-<platform>.so` beside the bare `.so`, so each of these
+    // makes its directory a REGULAR package whose body runs on import. The file
+    // half of the same question (`pythonModuleShadow`) already matched the
+    // tagged spelling; the directory half did not.
+    for (const marker of [
+      'argparse/__init__.abi3.so',
+      'argparse/__init__.cpython-311-x86_64-linux-gnu.so',
+      'tests/__main__.abi3.so',
+    ]) {
+      expect([marker, pythonPackageShadow(PY_GUARD, ['src/limit.py', marker])]).toEqual([marker, marker])
+    }
+    // THE CONTROL on that table: a plain directory, a tagged object that is not
+    // an `__init__`, and a marker a directory further down are all still legal.
+    for (const path of ['argparse/helpers.abi3.so', 'src/pkg/__init__.abi3.so', 'tests/support.py']) {
+      expect([path, pythonPackageShadow(PY_GUARD, [path])]).toEqual([path, null])
+    }
+  })
+
   test('pytestConfigShadow — the predicate itself, both directions', () => {
     for (const entry of PYTEST_CONFIGS) {
       expect([entry, pytestConfigShadow(PY_GUARD, ['src/limit.py', entry])]).toEqual([entry, entry])
@@ -630,6 +664,166 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     expect(evidence.proved).toBe(true)
   })
 
+  // ── THE KEY'S VALUE, NOT THE FILE'S PRESENCE IN THE DIFF ─────────────────
+  //
+  // A review seat drove this repository's OWN workspace manifests through the
+  // gate: they carry an `exports` map main wrote, so a PR that bumps a
+  // dependency in one of them lost `bun test` — in a bun-only repo, its only
+  // nomination. That is the "no legal nomination exists" defect this card
+  // exists to fix, re-created by the fix, and the escape hatch the code
+  // documented ("land the manifest change on its own commit") does not exist:
+  // the diff is read over the whole range `<base>...<ref>`.
+  const PKG_BASE_EXPORTS =
+    '{\n  "name": "x",\n  "dependencies": { "zod": "^3" },\n  "exports": { ".": "./src/index.ts" }\n}\n'
+  const MERGE_BASE = 'b'.repeat(40)
+
+  test('a dependency bump beside a map MAIN wrote keeps its bun nomination — the key is compared, not the file', async () => {
+    // THE BLOCKER, reproduced: the manifest IS in the diff and the `exports`
+    // key IS present at the head, and the only thing this branch changed inside
+    // it is a version range. Reformatted at the head too, so what is compared
+    // is the VALUE and not the bytes around it.
+    const head =
+      '{\n  "name": "x",\n  "dependencies": { "zod": "^4" },\n  "exports": {\n    ".": "./src/index.ts"\n  }\n}\n'
+    const { prover } = proverOver(
+      { mergeBase: MERGE_BASE, baseFiles: { 'package.json': PKG_BASE_EXPORTS } },
+      bunFs({ [join(BUN_WT, 'package.json')]: head }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.reason).not.toContain('package.json')
+    expect(evidence.proved).toBe(true)
+  })
+
+  test('…and EDITING that same map is still refused — the load-bearing control on the comparison', async () => {
+    // Without this row the row above would pass just as happily on a gate that
+    // stopped reading package.json altogether. Same file, same base, same
+    // claim: only the map's VALUE differs.
+    const head = '{\n  "name": "x",\n  "dependencies": { "zod": "^3" },\n  "exports": { ".": "./src/limit.ts" }\n}\n'
+    const { prover, host } = proverOver(
+      { mergeBase: MERGE_BASE, baseFiles: { 'package.json': PKG_BASE_EXPORTS } },
+      bunFs({ [join(BUN_WT, 'package.json')]: head }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('package.json')
+    expect(evidence.reason).toContain('exports')
+    expect(host.calls.every((c) => c[0] !== 'bun')).toBe(true)
+  })
+
+  test('an INHERITED imports map does not shelter a map the branch wrote beside it', async () => {
+    // The single-key reading answered `imports` — main's — and never looked at
+    // the `exports` map this branch rewrote one line down.
+    const base = '{\n  "imports": { "#lib": "./src/index.ts" },\n  "exports": { ".": "./src/index.ts" }\n}\n'
+    const head = '{\n  "imports": { "#lib": "./src/index.ts" },\n  "exports": { ".": "./src/limit.ts" }\n}\n'
+    const { prover } = proverOver(
+      { mergeBase: MERGE_BASE, baseFiles: { 'package.json': base } },
+      bunFs({ [join(BUN_WT, 'package.json')]: head }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('exports')
+  })
+
+  test('the comparison fails CLOSED — no base, no merge base, and no such file THERE all refuse', async () => {
+    const head = '{\n  "exports": { ".": "./src/index.ts" }\n}\n'
+    const cases: Array<[string, HostScript, string | undefined]> = [
+      ['no base_ref at all', { mergeBase: MERGE_BASE, baseFiles: { 'package.json': head } }, undefined],
+      ['merge-base fails', { baseFiles: { 'package.json': head } }, 'main'],
+      ['the file is new on this branch', { mergeBase: MERGE_BASE, baseFiles: {} }, 'main'],
+    ]
+    for (const [label, script, baseRef] of cases) {
+      const { prover } = proverOver(script, bunFs({ [join(BUN_WT, 'package.json')]: head }))
+      const evidence = await prover.prove({
+        run: RUN,
+        claim: CLAIM,
+        changed_files: ['src/limit.ts', 'package.json'],
+        ...(baseRef === undefined ? {} : { base_ref: baseRef }),
+      })
+      expect([label, evidence.proved]).toEqual([label, false])
+      expect([label, (evidence.reason ?? '').includes('exports')]).toEqual([label, true])
+    }
+  })
+
+  test('bunConfigHookSlice — a reformat is not a change, an edit is, and an unterminated value reads null', () => {
+    const a = '{ "exports": { ".": "./src/index.ts" } }'
+    const b = '{\n  "exports": {\n    ".": "./src/index.ts"\n  }\n}\n'
+    expect(bunConfigHookSlice(a, 'exports')).toBe(bunConfigHookSlice(b, 'exports') as string)
+    expect(bunConfigHookSlice(a, 'exports')).not.toBe(
+      bunConfigHookSlice('{ "exports": { ".": "./src/limit.ts" } }', 'exports') as string,
+    )
+    // EVERY OCCURRENCE, so a second spelling of the key deeper in the file is
+    // not invisible to the comparison.
+    expect(bunConfigHookSlice('{ "exports": { "a": 1 }, "x": { "exports": { "b": 2 } } }', 'exports')).toContain('"b"')
+    // The TOML side, read through the same escape decoding the key rule uses.
+    expect(bunConfigHookSlice('[test]\npreload = ["./a.ts"]\n', 'preload')).toBe('["./a.ts"]')
+    expect(bunConfigHookSlice('[test]\n"p\\u0072eload" = ["./a.ts"]\n', 'preload')).toBe('["./a.ts"]')
+    // FAILS CLOSED: unreadable, absent, or a key this seam does not know.
+    expect(bunConfigHookSlice('{ "exports": { ".": "./x.ts"', 'exports')).toBeNull()
+    expect(bunConfigHookSlice('{ "name": "x" }', 'exports')).toBeNull()
+    expect(bunConfigHookSlice('{ "exports": {} }', 'not-a-hook-key')).toBeNull()
+  })
+
+  // ── AND NODE RESOLVES THE SAME MAP ───────────────────────────────────────
+  //
+  // Two seats forged `ok:true, proved:true` under `node --test` with the very
+  // package.json `imports` forgery `bun test` was refusing, because this whole
+  // arm was gated on `argv[0] === 'bun'`.
+  const NODE_CLAIM: MutationClaim = {
+    ...CLAIM,
+    guard: ['node', '--test', 'tests/limit.test.mjs'],
+    control: ['node', '--test', 'tests/other.test.mjs'],
+  }
+
+  test('a package.json map THIS BRANCH writes refuses a `node --test` nomination too', async () => {
+    const { prover, host } = proverOver({}, bunFs({ [join(BUN_WT, 'package.json')]: PACKAGE_JSON_WITH_IMPORTS }))
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: NODE_CLAIM,
+      changed_files: ['src/limit.ts', 'package.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('package.json')
+    expect(evidence.reason).toContain('imports')
+    expect(host.calls.every((c) => c[0] !== 'node')).toBe(true)
+  })
+
+  test("…but a bunfig and a tsconfig are BUN's alone — node reads neither, so neither refuses it", async () => {
+    // THE POSITIVE CONTROL on the row above: admitting node must not admit the
+    // two files node does not read. A non-null `observed` is the proof the
+    // claim got past this arm and the runner actually ran.
+    const { prover } = proverOver(
+      {},
+      bunFs({
+        [join(BUN_WT, 'bunfig.toml')]: BUNFIG_WITH_PRELOAD,
+        [join(BUN_WT, 'tsconfig.json')]: TSCONFIG_WITH_PATHS,
+      }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: NODE_CLAIM,
+      changed_files: ['src/limit.ts', 'bunfig.toml', 'tsconfig.json'],
+      base_ref: 'main',
+    })
+    expect(evidence.reason ?? '').not.toContain('BRANCH-SUPPLIED')
+    expect(evidence.observed).not.toBeNull()
+  })
+
   test('a tsconfig.json THIS BRANCH writes can point a bare import at the mutated file → refused', async () => {
     const { prover } = proverOver({}, bunFs({ [join(BUN_WT, 'tsconfig.json')]: TSCONFIG_WITH_PATHS }))
     const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'tsconfig.json'] })
@@ -719,6 +913,19 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     )
     expect(bunConfigLoadHook('tsconfig.json', '{ "compilerOptions": { "strict": true } }')).toBeNull()
     expect(bunConfigLoadHook('tsconfig.json', BUNFIG_WITH_PRELOAD)).toBeNull()
+    // NODE READS THE MANIFEST AND NOTHING ELSE ON THIS LIST: it resolves
+    // `imports`/`exports` exactly as bun does, and it reads neither a bunfig
+    // nor a tsconfig `paths` map.
+    expect(bunConfigCandidates(['node', '--test', 'tests/x.test.mjs'], changed)).toEqual([])
+    expect(bunConfigCandidates(['node', '--test', 'tests/x.test.mjs'], ['package.json', 'app/package.json'])).toEqual([
+      'package.json',
+      'app/package.json',
+    ])
+    // ALL the keys a file carries, not just the first: an inherited `imports`
+    // map must not hide an `exports` map the branch wrote beside it.
+    expect(bunConfigLoadHooks('package.json', '{ "imports": {}, "exports": {} }')).toEqual(['imports', 'exports'])
+    expect(bunConfigLoadHooks('tsconfig.json', TSCONFIG_WITH_PATHS)).toEqual(['compilerOptions.paths'])
+    expect(bunConfigLoadHooks('package.json', '{ "name": "x" }')).toEqual([])
   })
 
   test('THE LISTING IS RECURSIVE — a conftest.py a directory down is still seen', async () => {
