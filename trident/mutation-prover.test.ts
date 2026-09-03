@@ -151,6 +151,21 @@ interface HostScript {
    *  this isolates the re-provision from the initial provisioning and the
    *  proof must fail CLOSED on it. */
   secondWorktreeAddFails?: boolean
+  /** The pinned commit's tree as the byte VERIFICATION reads it (`ls-tree -r
+   *  -z`, full format): path → the blob sha the commit records. Default empty,
+   *  which verifies vacuously — every row that does not care about this seam
+   *  keeps the behaviour it had before the seam existed. */
+  committedTree?: Record<string, string>
+  /** What the tree on DISK hashes to where it differs from the commit — i.e. a
+   *  checkout-time rewrite. Applied to every provisioning. */
+  checkedOut?: Record<string, string>
+  /** …and the same, applied ONLY from the re-provision onwards, which is the
+   *  shape a control plants mid-proof: the first tree was honest. */
+  checkedOutAfterReadd?: Record<string, string>
+  /** the verification's own `ls-tree` fails — it must refuse, not observe. */
+  treeListFails?: boolean
+  /** the verification's own `git hash-object` fails — same. */
+  hashObjectFails?: boolean
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -177,7 +192,21 @@ function scriptedHost(s: HostScript = {}): {
         }
         return res(0)
       }
-      if (cmd.includes('ls-tree')) return s.lsTreeFails === true ? res(1) : res(0, (s.treePaths ?? []).join('\0'))
+      // TWO DIFFERENT LISTINGS SHARE THIS PROGRAM NAME and must not share an
+      // answer: `--name-only` is the python-provenance read of the pinned tree,
+      // the full format is the checked-out-bytes verification.
+      if (cmd.includes('ls-tree')) {
+        if (cmd.includes('--name-only')) return s.lsTreeFails === true ? res(1) : res(0, (s.treePaths ?? []).join('\0'))
+        if (s.treeListFails === true) return res(1)
+        const entries = Object.entries(s.committedTree ?? {}).map(([path, sha]) => `100644 blob ${sha}\t${path}`)
+        return res(0, entries.length === 0 ? '' : `${entries.join('\0')}\0`)
+      }
+      if (cmd.includes('hash-object')) {
+        if (s.hashObjectFails === true) return res(1)
+        const onDisk = worktreeAdds >= 2 ? { ...s.checkedOut, ...s.checkedOutAfterReadd } : (s.checkedOut ?? {})
+        const paths = cmd.slice(cmd.indexOf('--') + 1)
+        return res(0, paths.map((path) => onDisk[path] ?? (s.committedTree ?? {})[path] ?? '').join('\n'))
+      }
       if (cmd.includes('merge-base')) return s.mergeBase === undefined ? res(1) : res(0, `${s.mergeBase}\n`)
       if (cmd.includes('show')) {
         const spec = cmd[cmd.length - 1] ?? ''
@@ -277,10 +306,11 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     const prover = createMutationProver({
       run_host: async (cmd) => {
         if (cmd.includes('rev-parse')) return res(0, HEAD)
-        // Every worktree op — the initial provisioning and the mid-proof
-        // re-provision alike — answers normally: this row is about a NOMINATED
-        // command that hangs, not about git.
-        if (cmd.includes('worktree')) return res(0)
+        // Every version-control call — the initial provisioning, the mid-proof
+        // re-provision, and the byte verification each of them is followed by —
+        // answers normally: this row is about a NOMINATED command that hangs,
+        // not about the provisioning.
+        if (cmd[0] === 'git') return res(0)
         // The guard never resolves.
         return new Promise<HostCommandResult>(() => {})
       },
@@ -464,6 +494,78 @@ describe('the restored-guard observation is of a tree the nominated commands cou
     const kept = await proverOver().prover.prove({ run: RUN, claim: CLAIM })
     expect(kept.proved).toBe(true)
     expect(kept.reason).not.toContain('could not re-provision the proof worktree')
+  })
+
+  test('a re-provisioned tree that is NOT THE COMMIT refuses — fresh and correct are two claims', async () => {
+    // THE SIXTEENTH ESCAPE, and it rode in on the fifteenth's fix. Disabling
+    // hooks stops provisioning EXECUTING branch-authored code; it says nothing
+    // about git REWRITING what it writes. A control that appends a filter
+    // driver to the repo's shared `.git/config` — outside every worktree, so
+    // the removal cannot reach it — has the fresh checkout itself rewrite the
+    // guard's committed red file green, because a committed `.gitattributes`
+    // routes that path through the driver. Brand new, and not the commit.
+    // So the tree is HASHED against the commit's own blobs before the restored
+    // guard reads it. The end-to-end forgery lives in
+    // mutation-prover-realgit.test.ts; this row pins the mechanism.
+    const committedTree = { 'src/limit.ts': 'a'.repeat(40), 'tests/g.test.ts': 'b'.repeat(40) }
+    const { prover, host } = proverOver({
+      committedTree,
+      checkedOutAfterReadd: { 'tests/g.test.ts': 'c'.repeat(40) },
+    })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('is not the bytes')
+    expect(evidence.reason).toContain('tests/g.test.ts')
+    // The check really ran, and it ran with git's own conversion OFF — hashing
+    // THROUGH the filters would hash the rewrite back into the committed sha,
+    // which is exactly what a `clean` half is for.
+    const hashes = host.calls.filter((c) => c.includes('hash-object'))
+    expect(hashes.length).toBeGreaterThan(0)
+    expect(hashes.every((c) => c.includes('--no-filters'))).toBe(true)
+
+    // THE FIRST PROVISIONING IS VERIFIED TOO, and it has to be: the mutated
+    // guard's RED is evidence as much as the restored GREEN, and a tree whose
+    // guard file was rewritten on the way in can manufacture it. Here the
+    // rewrite is present from the start, so nothing is ever run.
+    const { prover: early, host: earlyHost } = proverOver({
+      committedTree,
+      checkedOut: { 'src/limit.ts': 'd'.repeat(40) },
+    })
+    const first = await early.prove({ run: RUN, claim: CLAIM })
+    expect(first.proved).toBe(false)
+    expect(first.reason).toContain('is not the bytes')
+    expect(first.reason).toContain('src/limit.ts')
+    expect(earlyHost.calls.some((c) => c.join(' ') === CLAIM.guard.join(' '))).toBe(false)
+
+    // THE PAIRED POSITIVE CONTROL: the same tree, hashing to what the commit
+    // records, still proves. Without it these rows would pass on a check that
+    // refuses every proof — which is a gate that has stopped being one.
+    const honest = await proverOver({ committedTree }).prover.prove({ run: RUN, claim: CLAIM })
+    expect([honest.proved, honest.reason.includes('is not the bytes')]).toEqual([true, false])
+  })
+
+  test('a verification that cannot READ the tree refuses too — an unverifiable tree is not evidence', async () => {
+    // FAIL CLOSED on the check itself, both halves of it. A listing or a hash
+    // we could not take says nothing about the bytes, and "we could not look"
+    // must never read as "we looked and it was fine".
+    for (const script of [{ treeListFails: true }, { hashObjectFails: true }]) {
+      const { prover } = proverOver({ committedTree: { 'src/limit.ts': 'a'.repeat(40) }, ...script })
+      const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+      expect([Object.keys(script)[0], evidence.proved, evidence.observed === null]).toEqual([
+        Object.keys(script)[0],
+        false,
+        true,
+      ])
+      expect(evidence.reason).toContain('verify')
+    }
+    // POSITIVE CONTROL — the same tree with both reads working proves, so the
+    // rows above are about the failure and not about the listing existing.
+    const kept = await proverOver({ committedTree: { 'src/limit.ts': 'a'.repeat(40) } }).prover.prove({
+      run: RUN,
+      claim: CLAIM,
+    })
+    expect(kept.proved).toBe(true)
   })
 })
 
@@ -1316,11 +1418,18 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     expect(evidence.reason).toContain('runner provenance')
   })
 
-  test('SCOPE: an all-bun claim never asks for the tree listing, and still proves', async () => {
+  test('SCOPE: an all-bun claim never asks for the PROVENANCE listing, and still proves', async () => {
     const { prover, host } = proverOver()
     const evidence = await prover.prove({ run: RUN, claim: CLAIM })
     expect(evidence.observed).not.toBeNull()
-    expect(host.calls.every((c) => !c.includes('ls-tree'))).toBe(true)
+    // THE PROVENANCE READ IS THE `--name-only` ONE, and the flag is how the two
+    // are told apart: the byte verification of the provisioned tree asks
+    // `ls-tree` on EVERY proof by design — it is what says the tree is the
+    // commit — so a bare "no listing" assertion here would pin the wrong scope.
+    expect(host.calls.every((c) => !(c.includes('ls-tree') && c.includes('--name-only')))).toBe(true)
+    // POSITIVE CONTROL on the extraction: a run that asked for no listing at
+    // all would satisfy the line above by vacuity.
+    expect(host.calls.some((c) => c.includes('ls-tree'))).toBe(true)
   })
 
   test('pythonModuleShadow — the predicate itself, both directions', () => {
@@ -3301,6 +3410,43 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
       expect([guard.join(' '), fine.reason.includes('tautology')]).toEqual([guard.join(' '), false])
       expect(fine.observed).not.toBeNull()
     }
+  })
+
+  test('a runner COLLECTS `.Test.ts` as well — one shifted letter is not a way out of the tautology', async () => {
+    // THE BYPASS. `TEST_BASENAME` is case-SENSITIVE deliberately: it also drives
+    // the no-production-file EXEMPTION, where names are build-controlled, so
+    // every name added there is one a build could buy an exemption with. The
+    // price is that `src/limit.Test.ts` classifies PRODUCTION and is a legal
+    // target — while a RUNNER collects it anyway (verified on bun 1.3.13:
+    // `bun test src/` collects `limit.Test.ts` and `other.SPEC.tsx` and runs
+    // both). A directory guard therefore ran the mutated file as its own test:
+    // the very tautology the lower-case spelling is refused for, bought by
+    // shifting one letter. Collection is asked case-INSENSITIVELY for that
+    // reason, and only on the side that REFUSES a guard.
+    for (const file of ['src/limit.Test.ts', 'src/limit.SPEC.tsx']) {
+      // POSITIVE CONTROL, per row: the target really is a legal one, so the
+      // refusal below is the guard's and not an earlier "that is a test file".
+      expect([file, classifyMutationTarget(file)]).toEqual([file, 'production'])
+      const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, fs)
+      const out = await prover.prove({
+        run: RUN,
+        claim: { ...CLAIM, file, guard: ['bun', 'test', 'src/'], control: ['bun', 'test', 'tests/other.test.ts'] },
+      })
+      expect([file, out.proved, out.reason.includes('tautology'), host.calls.length]).toEqual([file, false, true, 0])
+    }
+
+    // …AND THE PAIRED POSITIVE CONTROL: the same target, guarded by a SEPARATE
+    // test file, is not refused. Without it the rows above would pass on a
+    // classifier that had simply started refusing every guard for these names.
+    const file = 'src/limit.Test.ts'
+    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), file)]: SRC_BEFORE })
+    const fine = await proverOver({}, fs).prover.prove({
+      run: RUN,
+      claim: { ...CLAIM, file, guard: ['bun', 'test', 'tests/limit.test.ts'] },
+    })
+    expect(fine.reason).not.toContain('tautology')
+    expect(fine.observed).not.toBeNull()
   })
 
   test('an ATTACHED SHORT OPTION carries a path too — `-r./lib.ts` is `--preload=./lib.ts`', async () => {

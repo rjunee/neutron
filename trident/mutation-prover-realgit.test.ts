@@ -39,6 +39,14 @@ const created: string[] = []
 const HOOK_SCRIPT =
   "#!/bin/sh\ncat > tests/g.test.ts <<'EOF'\nimport { expect, test } from 'bun:test'\n\ntest('rewritten by the hook', () => {\n  expect(1).toBe(1)\n})\nEOF\n"
 
+/** A git FILTER DRIVER definition, in config-file syntax, that rewrites the
+ *  guard's committed red assertion green ON THE WAY OUT of the object store and
+ *  back again on the way in. `clean` is the half that matters for detection:
+ *  with it defined, `git status` and `git diff` compare THROUGH it and report a
+ *  spotless tree over rewritten bytes. Planted by the forging control into the
+ *  repo's SHARED config, which no worktree removal reaches. */
+const FILTER_STANZA = '[filter "guardfix"]\n\tsmudge = sed \'s/toBe(2)/toBe(1)/\'\n\tclean = sed \'s/toBe(1)/toBe(2)/\'\n'
+
 afterAll(() => {
   for (const dir of created) rmSync(dir, { recursive: true, force: true })
 })
@@ -241,6 +249,24 @@ async function seedControlForgeryRepo(): Promise<string> {
   writeFileSync(
     join(repo, 'tests', 'self-forging-guard.test.ts'),
     "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nwriteFileSync(\n  'tests/self-forging-guard.test.ts',\n  \"import { expect, test } from 'bun:test'\\n\\ntest('rewritten', () => {\\n  expect(1).toBe(1)\\n})\\n\",\n)\n\ntest('this guard is red until it has rewritten itself', () => {\n  expect(1).toBe(2)\n})\n",
+  )
+  // THE ATTRIBUTE HALF OF THE CHECKOUT-TIME REWRITE, committed on the branch
+  // like any other file. The driver it names is UNDEFINED unless something
+  // defines it, and an undefined driver is inert (verified: the checkout writes
+  // the committed bytes), so this line costs every other row in this file
+  // nothing — it is the forging control below that supplies the other half.
+  writeFileSync(join(repo, '.gitattributes'), 'tests/g.test.ts filter=guardfix\n')
+  // THE FORGERY THAT NEEDS NO CODE OF ITS OWN TO RUN. This control writes
+  // neither the tree nor a hook: it appends a filter DRIVER to the repo's
+  // shared `.git/config`, two levels up from the proof worktree. Nothing
+  // executes it — `git worktree add` does, as part of writing the fresh tree,
+  // because the committed `.gitattributes` above says that file goes through
+  // the driver. Hooks being disabled is no defence: this is not a hook.
+  writeFileSync(
+    join(repo, 'tests', 'filter-forge-control.test.ts'),
+    "import { appendFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nappendFileSync('../../.git/config', "
+      + JSON.stringify(FILTER_STANZA)
+      + ")\n\ntest('the control passes, having left a checkout-time rewrite in the shared config', () => {\n  expect(1 + 1).toBe(2)\n})\n",
   )
   // THE SAME FORGERY PLANTED OUTSIDE THE TREE, where the removal cannot reach
   // it: hooks live in the shared `.git`, and `git worktree add` RUNS
@@ -1723,6 +1749,71 @@ describe('the mutation-proof gate against real git', () => {
     await git(repo, '-c', `core.hooksPath=${join(scratch, 'no-such-hooks')}`, 'worktree', 'add', '--detach', '--force', guarded, 'HEAD')
     expect(readFileSync(join(unguarded, 'tests', 'g.test.ts'), 'utf8')).toContain('rewritten by the hook')
     expect(readFileSync(join(guarded, 'tests', 'g.test.ts'), 'utf8')).toContain('this guard asserts nothing')
+  }, 120_000)
+
+  test('…and a control that leaves a checkout-time FILTER in the shared config, which the RE-PROVISION obeys, cannot either', async () => {
+    // THE SIXTEENTH ESCAPE, and the one that rode in on the fifteenth's fix.
+    // Disabling hooks stops provisioning EXECUTING branch-authored code; it says
+    // nothing about git rewriting what it writes. This control appends a filter
+    // DRIVER to the repo's shared `.git/config` — outside every worktree, so the
+    // removal cannot reach it — and the branch's committed `.gitattributes`
+    // routes the guard's own test file through it. The re-provision then writes
+    // a tree that is BRAND NEW and IS NOT THE COMMIT: the guard's red assertion
+    // arrives green, and the restored observation passes with nothing having
+    // tested `src/limit.ts`.
+    //
+    // EXPECTATION VERIFIED TO FAIL — proved:true, the forged verdict — with the
+    // `checkoutIsTheCommit` call removed from the re-provision, then restored.
+    const repo = await seedControlForgeryRepo()
+    const out = await runMutationProofGate({
+      run: { id: 'run-filter-forgery', slug: 'filter-forgery', repo_path: repo, branch: 'trident/control-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/g.test.ts'],
+        control: ['bun', 'test', 'tests/filter-forge-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.evidence?.proved ?? null).toBe(false)
+    // The refusal is about the TREE, not about the guard: the gate never got as
+    // far as an observation it could have believed.
+    expect(out.reason).toContain('is not the bytes')
+    expect(out.reason).toContain('tests/g.test.ts')
+    // …and it refuses with NO observations at all: the tree it was about to read
+    // is not the commit, so there is nothing here it is entitled to believe.
+    expect(out.evidence?.observed ?? null).toBeNull()
+    // POSITIVE CONTROLS that the forgery mechanics really executed rather than
+    // this being an early refusal that never reached the tree. The control ran
+    // — the stanza it appended is still in the shared config afterwards,
+    // because nothing the proof removes can reach it. And the refusal names the
+    // GUARD's file, which is the file the rewrite hit: the first provisioning
+    // verified clean (the stanza did not exist yet), so this is the
+    // re-provision's verification talking.
+    expect(readFileSync(join(repo, '.git', 'config'), 'utf8')).toContain('guardfix')
+    expect(out.reason).not.toContain('did not return to GREEN')
+
+    // …AND THE MECHANISM ITSELF, at git level, so the row above cannot pass
+    // merely because the driver was inert. Same repo, same planted stanza, an
+    // ordinary `worktree add`: the tree comes back with the guard REWRITTEN
+    // GREEN — that is the forgery — while `git status` calls the tree spotless,
+    // because it compares back through the driver's `clean` half. Only hashing
+    // the bytes with git's conversion off sees it, which is why that is the
+    // check the prover makes.
+    const scratch = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-filter-mechanism-'))
+    created.push(scratch)
+    const rewritten = join(scratch, 'rewritten')
+    await git(repo, 'worktree', 'add', '--detach', '--force', rewritten, 'HEAD')
+    expect(readFileSync(join(rewritten, 'tests', 'g.test.ts'), 'utf8')).toContain('expect(1).toBe(1)')
+    const status = await spawnCapture(['git', '-C', rewritten, 'status', '--porcelain'], rewritten)
+    expect(status.stdout.trim()).toBe('')
+    const onDisk = await git(rewritten, 'hash-object', '--no-filters', '--', 'tests/g.test.ts')
+    const committed = await git(rewritten, 'rev-parse', 'HEAD:tests/g.test.ts')
+    expect(onDisk).not.toBe(committed)
   }, 120_000)
 
   test('…while an HONEST pair still proves red-then-green THROUGH the re-provision', async () => {

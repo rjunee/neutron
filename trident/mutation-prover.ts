@@ -106,6 +106,16 @@ export const DEFAULT_PROOF_BUDGET_MS = 15 * 60_000
 const KILL_GRACE_MS = 5_000
 
 /**
+ * How many paths one `git hash-object` call is handed when verifying that a
+ * provisioned tree is the commit (`checkoutIsTheCommit`). Batched rather than
+ * one call per file (3,284 spawns on this repo) and rather than one call for
+ * the whole tree, because an argv is a fixed-size kernel buffer and a repo with
+ * enough long paths would overflow it — a limit that arrives as an unexplained
+ * failure to provision, i.e. as a refusal, on exactly the largest repos.
+ */
+const TREE_HASH_BATCH = 500
+
+/**
  * The guard/control commands a claim may nominate: an allowlist of TEST-RUNNER
  * INVOCATIONS, not of programs.
  *
@@ -658,8 +668,18 @@ function normalizeArg(arg: string): string {
  * where file NAMES are build-controlled, so every name added there is a name a
  * build could use to buy itself an exemption. The extra breadth belongs on this
  * side, where its only effect is to REFUSE a guard.
+ *
+ * AND IT IS CASE-INSENSITIVE, WHERE `TEST_BASENAME` IS NOT, for that same
+ * reason read in the other direction. A RUNNER'S collection is case-insensitive
+ * — verified on bun 1.3.13: `bun test src/` collects `limit.Test.ts` and
+ * `other.SPEC.tsx` and runs both — so `src/limit.Test.ts` classifies production
+ * (its name declares nothing), is a legal target, and a `bun test src/` guard
+ * would then run the mutated file as its own test. Case-sensitive here, that
+ * tautology was nominatable in a spelling the lowercase one is refused in. The
+ * `i` stays OFF `TEST_BASENAME`, because there it would widen the exemption
+ * instead of narrowing a guard.
  */
-const RUNNER_COLLECTED_BASENAME = /^test[^/]*\.(py|[cm]?[jt]sx?)$|[._-](test|spec)\.[cm]?[jt]sx?$|_test\.rs$/
+const RUNNER_COLLECTED_BASENAME = /^test[^/]*\.(py|[cm]?[jt]sx?)$|[._-](test|spec)\.[cm]?[jt]sx?$|_test\.rs$/i
 
 /** True of a path a runner may pick up WHOLESALE — because its NAME is one a
  *  runner collects, or because it lives under a directory a runner collects
@@ -2707,6 +2727,82 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     }
   }
 
+  /**
+   * ARE THE CHECKED-OUT BYTES THE COMMIT'S BYTES? Returns null when every
+   * tracked file in `wt` hashes to the blob `headSha` records for it, and the
+   * refusal reason otherwise.
+   *
+   * WHY PROVISIONING IS NOT ENOUGH ON ITS OWN. `NO_HOOKS` stops provisioning
+   * from EXECUTING branch-reachable code, and a fresh tree throws away whatever
+   * a nominated command wrote into the old one — but neither says the new tree
+   * holds what the commit holds. A checkout is a WRITE THROUGH GIT'S OWN
+   * CONVERSION: when an attribute names a `filter` driver, git runs that
+   * driver's `smudge` command over the blob and writes what it prints. The
+   * attribute can come from a committed `.gitattributes`, the driver from any
+   * config file — including the SHARED `.git/config`, which lives outside every
+   * worktree and so survives `worktree remove --force --force`. A nominated
+   * command that leaves such a pair behind has the RE-PROVISION itself rewrite
+   * the guard's test file into a passing one: red, green, with nothing having
+   * tested the target. `core.hooksPath` does not cover it, because it is not a
+   * hook; `core.attributesFile` is a second way to point at the same driver.
+   * Reproduced end to end by a reviewer against the real gate.
+   *
+   * `git status`/`git diff` ARE THE WRONG DETECTOR, twice over. They compare
+   * through the CLEAN filter, so a driver that defines both directions reports
+   * a spotless tree while the bytes on disk differ from the commit (verified:
+   * with `clean` set, `status --porcelain` is empty and `diff --quiet HEAD`
+   * exits 0 over rewritten content). And on a repo whose committed line endings
+   * fight its checkout settings they call a FRESH tree dirty, which would
+   * refuse honest proofs. `hash-object --no-filters` asks the only question
+   * that matters — what are the bytes — with git's conversion machinery off.
+   *
+   * WHICH WAY IT FAILS. Closed: a tree we cannot verify, or one that verifies
+   * as something other than the commit, REFUSES. A repo that legitimately
+   * materialises content at checkout time (git-lfs, a `working-tree-encoding`,
+   * an eol conversion) therefore cannot be proved through this gate rather than
+   * being proved loosely — the refusal names the first file that differs, so
+   * the reason is readable rather than a mystery. Symlinks and gitlinks are
+   * skipped: git applies no filter to either, and `hash-object` would follow a
+   * symlink to its target instead of hashing the link.
+   *
+   * Cost, measured on this repo at 3,284 tracked files: ~0.3 s for the listing
+   * and every hash, against a proof budget of 15 minutes.
+   */
+  async function checkoutIsTheCommit(wt: string, headSha: string): Promise<string | null> {
+    const ls = await deps.run_host(['git', '-C', wt, 'ls-tree', '-r', '-z', headSha], wt)
+    if (!ls.ok) {
+      return `could not list the tree of ${headSha.slice(0, 8)} to verify the proof worktree is that commit`
+    }
+    const want: Array<[string, string]> = []
+    for (const entry of ls.stdout.split('\0')) {
+      if (entry.length === 0) continue
+      const tab = entry.indexOf('\t')
+      if (tab < 0) return `could not parse the tree listing of ${headSha.slice(0, 8)}`
+      const [mode, type, sha] = entry.slice(0, tab).split(' ')
+      if (type !== 'blob' || mode === undefined || sha === undefined) continue
+      if (mode === '120000') continue
+      want.push([entry.slice(tab + 1), sha])
+    }
+    for (let i = 0; i < want.length; i += TREE_HASH_BATCH) {
+      const batch = want.slice(i, i + TREE_HASH_BATCH)
+      const hashed = await deps.run_host(
+        ['git', '-C', wt, 'hash-object', '--no-filters', '--', ...batch.map(([p]) => p)],
+        wt,
+      )
+      const lines = hashed.stdout.split('\n').filter((l) => l.trim().length > 0)
+      if (!hashed.ok || lines.length !== batch.length) {
+        return `could not hash the proof worktree's files to verify it is ${headSha.slice(0, 8)}`
+      }
+      for (let j = 0; j < batch.length; j++) {
+        const [path, sha] = batch[j] as [string, string]
+        if ((lines[j] as string).trim() !== sha) {
+          return `the proof worktree's ${path} is not the bytes ${headSha.slice(0, 8)} records for it — something rewrote the file on its way into the tree (a checkout-time filter or attributes file, configured outside the tree and so surviving its removal), and an observation of a tree that is not the commit is not evidence about the commit`
+        }
+      }
+    }
+    return null
+  }
+
   async function prove(input: ProveInput): Promise<MutationEvidence> {
     const { run, claim } = input
     const claimError = validateClaim(claim)
@@ -2744,6 +2840,13 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       repo,
     )
     if (!add.ok) return refuse(run.id, claim, 'could not provision the proof worktree')
+    // …AND IT REALLY IS THAT COMMIT. Checking out is not copying: git rewrites
+    // what it writes into the tree whenever an attribute says to, so the FIRST
+    // provisioning is verified for the same reason the second one is (see
+    // `checkoutIsTheCommit`). The mutated-guard RED is evidence too, and a tree
+    // whose guard file was rewritten on the way in can manufacture it.
+    const provisioned = await checkoutIsTheCommit(wt, headSha)
+    if (provisioned !== null) return refuse(run.id, claim, provisioned)
 
     // A TREE THE NOMINATED COMMANDS COULD NOT HAVE EDITED. The guard and the
     // control are BRANCH-AUTHORED code that RUNS mid-proof: a control whose
@@ -2760,13 +2863,22 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // because its failure only leaks a directory, which the next run's own
     // remove-then-add clears or REFUSES on; if git cannot remove or re-add here,
     // the proof REFUSES rather than observes.
-    const reprovision = async (): Promise<boolean> => {
+    //
+    // AND THE RE-ADD IS VERIFIED, because "fresh" and "the commit" are not the
+    // same claim: a checkout WRITES WHAT THE ATTRIBUTES SAY, so a tree can be
+    // brand new and still not be the commit (see `checkoutIsTheCommit`). The
+    // reason travels back as a string so the refusal names which of the two
+    // failed.
+    const reprovision = async (): Promise<string | null> => {
       await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', '--force', wt], repo)
       const readd = await deps.run_host(
         ['git', ...NO_HOOKS, '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha],
         repo,
       )
-      return readd.ok
+      if (!readd.ok) {
+        return 'could not re-provision the proof worktree for the restored observation — the nominated commands are branch-authored code that has just run in this tree, and a restored observation of a tree they may have edited is not evidence'
+      }
+      return await checkoutIsTheCommit(wt, headSha)
     }
 
     try {
@@ -2930,7 +3042,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     deadline: number,
     changedFiles: readonly string[],
     baseRef: string | null,
-    reprovision: () => Promise<boolean>,
+    reprovision: () => Promise<string | null>,
   ): Promise<MutationEvidence> {
     const target = join(wt, claim.file)
 
@@ -3202,11 +3314,17 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // a FRESH checkout, which would over-refuse honest proofs, and a fresh
     // tree needs no detector.
     //
-    // WRITING OUTSIDE THE TREE IS NOT AUTOMATICALLY OUTSIDE THE PROOF, and one
-    // spelling of it had to be closed here rather than deferred: a control that
+    // WRITING OUTSIDE THE TREE IS NOT AUTOMATICALLY OUTSIDE THE PROOF, and two
+    // spellings of it had to be closed here rather than deferred, because both
+    // reach INTO the fresh tree through provisioning itself. A control that
     // plants `$GIT_COMMON_DIR/hooks/post-checkout` — outside the worktree, so it
     // survives the removal — would have the RE-PROVISION run it into the fresh
-    // tree. `NO_HOOKS` on both `worktree add` calls is what stops that. What
+    // tree; `NO_HOOKS` on both `worktree add` calls is what stops that. And a
+    // control that leaves a checkout-time FILTER behind in that same shared
+    // config has the re-provision write rewritten bytes into the fresh tree
+    // without executing anything the hooks override can see; the re-provision
+    // is therefore VERIFIED to be the commit, byte for byte, before the
+    // restored guard reads it (`checkoutIsTheCommit`). What
     // remains open is the same-user PROCESS boundary: a nominated command that
     // leaves a background writer running past its own exit can still race the
     // fresh tree, and a command may edit the host anywhere its user may write.
@@ -3215,12 +3333,8 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // from the assertion-blindness one recorded at `evaluate`, which is about
     // what three exit codes can see.
     const fresh = await reprovision()
-    if (!fresh) {
-      return refuse(
-        run_id,
-        claim,
-        'could not re-provision the proof worktree for the restored observation — the nominated commands are branch-authored code that has just run in this tree, and a restored observation of a tree they may have edited is not evidence',
-      )
+    if (fresh !== null) {
+      return refuse(run_id, claim, fresh)
     }
 
     let restored: string
@@ -4009,7 +4123,15 @@ function asReason(path: string): string {
  *  written to prevent. The prefix around the list ("no production file in this
  *  diff — nothing to mutate: all N changed files are…") plus the `, … +N more`
  *  suffix is comfortably under 400 characters, so a 3,600 name budget keeps the
- *  WHOLE reason, elision count included, inside the durable row. */
+ *  WHOLE reason, elision count included, inside the durable row.
+ *
+ *  IT IS A MARGIN, NOT A PROOF, and the difference is one file wide:
+ *  `namesWithinBudget` prints the FIRST name however long it is, so a single
+ *  pathological ~4,000-character path still overruns the stage ceiling and is
+ *  cut there, elision count and all. That is the trade the first-name rule
+ *  makes on purpose — a reason that names nothing but a count is not a reason —
+ *  and it costs one truncated row, not a lost record, because every consumer
+ *  truncates its own copy anyway. */
 const REASON_NAME_BUDGET = 3_600
 
 /** As many of `paths` as fit the budget, in order, with the elision COUNTED

@@ -610,6 +610,16 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
         'a surviving process is not covered',
         true,
       ])
+      // …AND THE SECOND HALF OF THE OUT-OF-TREE CLAUSE. Disabling hooks covers
+      // the out-of-tree write that RUNS; it does nothing about the one that
+      // makes git itself rewrite the checkout — a filter driver left in the
+      // shared config, which a reviewer forged a `proved: true` out of. The
+      // sentence may only promise what the prover now checks: that the fresh
+      // tree IS the commit.
+      expect(['the fresh tree is checked against the commit', d.includes('VERIFIED byte for byte')]).toEqual([
+        'the fresh tree is checked against the commit',
+        true,
+      ])
     }
     // Two-sided again: the hook clause above is a promise the prover keeps by
     // overriding `core.hooksPath` on the `worktree add` calls, so deleting the
@@ -621,6 +631,15 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // cannot drift into a promise the gate does not keep.
     expect(PROVER_SRC).toContain('const reprovision')
     expect(PROVER_SRC).toContain('could not re-provision the proof worktree')
+    // Two-sided: the byte-for-byte clause is a promise the prover keeps by
+    // hashing the provisioned tree with git's conversion machinery OFF and
+    // comparing against the commit's own blobs — `--no-filters` is the whole
+    // point of the mechanism (with it removed the hash goes back through the
+    // clean filter, which is the attacker's), so deleting either the call or
+    // the flag reds this row.
+    expect(PROVER_SRC).toContain('async function checkoutIsTheCommit(')
+    expect(PROVER_SRC).toContain("'hash-object', '--no-filters'")
+    expect(PROVER_SRC).toContain('is not the bytes')
     // Two-sided: the prover really refuses the wrapper for the GUARD only, so
     // the sentence above cannot drift into a permission the gate does not give.
     expect(PROVER_SRC).toContain('function guardRunsTheMutatedFile(')
