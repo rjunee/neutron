@@ -737,6 +737,13 @@ function routeModel(label, tag) {
             ? ROLE_MODEL['build-trailer-probe']
             : label.startsWith('ci-probe-round-')
               ? ROLE_MODEL['ci-probe']
+              // The BASE probe is the same shape as the PR probe — one `gh api` read,
+              // transcribed verbatim — so it rides the same seat. Spelled out rather
+              // than folded into a looser prefix because `ci-probe-round-` is NOT a
+              // prefix of `ci-base-probe-round-`, and the silent fallback (Opus, high)
+              // is exactly the incident `head-probe-round-N` already cost once.
+              : label.startsWith('ci-base-probe-round-')
+                ? ROLE_MODEL['ci-probe']
               : label.startsWith('merge-probe-round-')
                 ? ROLE_MODEL['merge-probe']
           // A retry lane is the SAME lane. Routing it separately (or letting it fall
@@ -2383,7 +2390,10 @@ async function writeTerminalResult(result) {
     result.verdict === 'APPROVE'
       ? 'APPROVE'
       : result.verdict === 'REQUEST_CHANGES' &&
-          result.blockKind === 'code' &&
+          // 'advisory-only' IS A REVIEW. The panel ran, judged the code and produced
+          // findings; that they are all non-blocking makes the round cheap, not absent.
+          // Recording it as REVIEW_NOT_RUN said no seat ever looked at the diff.
+          (result.blockKind === 'code' || result.blockKind === 'advisory-only') &&
           Array.isArray(result.findings) &&
           result.findings.length > 0
         ? 'REQUEST_CHANGES'
@@ -2482,6 +2492,111 @@ function normalizeVerdict(v) {
 //     direction only; it vetoes nothing.
 const NON_BLOCKING_SEVERITIES = new Set(['minor', 'nit'])
 
+// A SECOND, NARROWER WAY TO BE NON-BLOCKING: the producer says so, per finding.
+//
+// THE DEFECT THIS CLOSES (measured over 6 rounds / 54 findings / 4 cards). Some
+// findings are emitted by THIS FILE and are declared non-blocking by THIS FILE in
+// the same breath — `fullSuiteFindings`' `failed-preexisting` entry ends its own
+// evidence with "it does not by itself prevent approval", and `suiteFindingsBlock`
+// agrees that only a blocker forces the verdict. But it carries `severity: 'major'`,
+// and major is not in `NON_BLOCKING_SEVERITIES`, so `enforceSeverityGate` refused the
+// downgrade and `classifyBlock` read the round as 'code' and re-Forged a whole round
+// — four reviewers and a fresh diff — to re-derive "not mine". TWO OF SIX MEASURED
+// ROUNDS PRODUCED THAT FINDING AS THEIR ONLY FINDING. Worse, it dragged every
+// `UNVERIFIED (single reviewer, …)` minor and nit in the same round back in with it,
+// because the gates are all-or-nothing over the finding list.
+//
+// WHY NOT SIMPLY ADD 'major' TO `NON_BLOCKING_SEVERITIES`. That set is a severity
+// allowlist read by both gates, and widening it would declare EVERY major finding in
+// the system non-blocking — including real ones a reviewer raised about the diff.
+// That is the dangerous direction: it silently passes defects. The severity says how
+// bad a finding is; it cannot say whether THIS finding is about THIS diff, which is
+// the actual question. So the marker is per finding, set by the producer that already
+// knows the answer, and it never widens a severity class.
+//
+// FAIL-CLOSED, in the same direction as `NON_BLOCKING_SEVERITIES`. The test is
+// `=== true` against one exact key, so absent, null, `'true'`, `1`, `'yes'`, a
+// misspelled key and a malformed finding are all BLOCKING. A marker that has to be
+// set correctly to weaken a gate can only fail towards blocking, which is the only
+// failure direction this harness permits a downgrade path to have.
+const ADVISORY_FINDING_KEY = 'advisory'
+
+// The ONE predicate both gates ask, so they cannot drift apart. `enforceSeverityGate`
+// and `classifyBlock` previously each spelled out `NON_BLOCKING_SEVERITIES.has(...)`
+// inline; a second reason to be non-blocking added to one and forgotten in the other
+// is how a finding stops costing a round in the verdict and keeps costing one in the
+// fix loop.
+function isNonBlockingFinding(f) {
+  if (!f || typeof f !== 'object') return false
+  // OWN PROPERTY ONLY, so this predicate and `stripAdvisoryMarkers` ask the SAME
+  // question. The strip tests `Object.hasOwn`; this used to test the VALUE through the
+  // prototype chain, so a finding whose prototype carried `advisory: true` read as
+  // non-blocking here and had nothing for the strip to remove. No path in this file
+  // produces such an object today (every finding that reaches these gates is a
+  // `JSON.parse` product, and `JSON.parse` cannot set a prototype), so this closes a
+  // shape, not a live hole — but the two readers of one marker disagreeing about what
+  // "has the marker" means is exactly the drift the shared predicate exists to prevent.
+  if (Object.hasOwn(f, ADVISORY_FINDING_KEY) && f[ADVISORY_FINDING_KEY] === true) return true
+  return NON_BLOCKING_SEVERITIES.has(f.severity)
+}
+
+/**
+ * THE ADVISORY MARKER IS A WORKFLOW FACT, NOT A REVIEWER OPINION — so it is stripped
+ * from every model-supplied finding before either gate reads it.
+ *
+ * `isNonBlockingFinding` gives `advisory: true` more power than any severity: it is the
+ * ONE key that makes a `blocker` non-blocking. That is safe only while the key is set in
+ * THIS FILE, by code that already knows the answer (`fullSuiteFindings` sets it on the
+ * `failed-preexisting` entry and deliberately not on its `blocker` siblings). The
+ * synthesis seat returns model-authored JSON, and the suite finding — marker and all —
+ * is quoted INTO its prompt, so a model that copies the shape back would hand itself a
+ * merge-anything hatch. `VERDICT_SCHEMA` is not a defence: an unknown key that survives
+ * parsing is exactly the key we are worried about.
+ *
+ * Stripping, not rejecting: a model finding that also happens to be a nit is still
+ * carried by `NON_BLOCKING_SEVERITIES`, which is severity the model is SUPPOSED to
+ * judge. All this removes is the one field it has no standing to set. Fail-closed —
+ * the marker's absence can only make a finding block.
+ */
+function stripAdvisoryMarkers(synthesis) {
+  const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : null
+  if (!findings) return synthesis
+  // EVERY WORKFLOW MARKER, not just the one this function is named for. `advisory` buys a
+  // single finding past `enforceSeverityGate`; `kind: LANE_FINDING_KIND` buys the whole
+  // ROUND past the fix loop, because `classifyBlock` reads a lane-kinded finding as "there
+  // is nothing here for Forge to change" and 'infra-only' EXITS the loop. The lane kind is
+  // stamped in THIS file by the gates that measured a seat dying, exactly as the advisory
+  // marker is — so a model that returns `kind: 'lane'` on a code blocker is laundering it
+  // into an infra stop. Stripped for the same reason and in the same place, before either
+  // gate reads it and before this file attaches its own lane findings downstream.
+  //
+  // AND `kind: SUITE_FINDING_KIND`, for the third time and the same reason. The suite
+  // gate stamps it on its OWN measurement of the build's report, and a resumed run reads
+  // it back out of a panel's recorded finding list (`resumeSuiteFindings`) to re-present
+  // it to the next panel as the workflow's own claim. A model that copies the kind back
+  // out of the prompt it was quoted into would therefore have model-authored text
+  // travelling a checkpoint and arriving in every reviewer's prompt under the workflow's
+  // header. Stripped here, so the kind can only ever mean "this file measured it".
+  const marked = (f) =>
+    f &&
+    typeof f === 'object' &&
+    (Object.hasOwn(f, ADVISORY_FINDING_KEY) ||
+      f.kind === LANE_FINDING_KIND ||
+      f.kind === SUITE_FINDING_KIND)
+  if (!findings.some(marked)) return synthesis
+  return {
+    ...synthesis,
+    findings: findings.map((f) => {
+      if (!marked(f)) return f
+      const { [ADVISORY_FINDING_KEY]: _modelSupplied, ...rest } = f
+      // Only the RESERVED values are the model's to lose. A `kind` of its own invention
+      // says nothing to any gate here, so it rides along untouched.
+      if (rest.kind === LANE_FINDING_KIND || rest.kind === SUITE_FINDING_KIND) delete rest.kind
+      return rest
+    }),
+  }
+}
+
 // DID THIS FIELD ACTUALLY ANSWER? Returns the status STRING, or '' for anything that
 // is not one — the single notion of "answered" shared by the lane retry and the
 // completeness gate.
@@ -2557,7 +2672,7 @@ function enforceSeverityGate(synthesis) {
   if (!synthesis || synthesis.verdict !== 'REQUEST_CHANGES') return synthesis
   const findings = Array.isArray(synthesis.findings) ? synthesis.findings : []
   if (findings.length === 0) return synthesis
-  if (!findings.every((f) => f && NON_BLOCKING_SEVERITIES.has(f.severity))) return synthesis
+  if (!findings.every((f) => isNonBlockingFinding(f))) return synthesis
   return { ...synthesis, verdict: 'APPROVE' }
 }
 
@@ -2594,6 +2709,35 @@ function enforceSeverityGate(synthesis) {
 // in one place and the classifier silently reads every lane blocker as a code
 // finding, sending the fix loop off to re-Forge a network timeout.
 const LANE_FINDING_KIND = 'lane'
+
+/**
+ * IS THERE CODE WORK IN THIS FINDING? The COMPLETE predicate, in one place, because two
+ * sites asking "is this worth a Forge round?" with different answers is how a round gets
+ * bought that the round economy above already refused to buy.
+ *
+ * Two exclusions, and BOTH matter at BOTH call sites:
+ *  - a LANE finding (`kind`, the field the gate stamps) is a dead review seat, not a
+ *    defect in the diff — re-Forging it edits code to "fix" a network timeout;
+ *  - a finding this file has ALREADY declared non-blocking (`isNonBlockingFinding` — an
+ *    explicit 'minor'/'nit', or a workflow-stamped advisory).
+ *
+ * `classifyBlock` spelled both out inline while the resume seam
+ * (`resumeHasCodeWork`) spelled out only the second, and its comment claimed parity it
+ * did not have: a persisted `{severity:'blocker', kind:'lane'}` finding — exactly what
+ * the lane gate writes onto an `argus-request-changes-round-N` checkpoint, and exactly
+ * what the orchestrator's infra-only auto-retry replays — read as CODE work at resume and
+ * bought a Forge fix round over a seat that had died. Same function now, so the parity is
+ * a fact rather than a comment.
+ *
+ * FAIL-CLOSED, in the same direction as both gates it replaces: anything unrecognised
+ * (absent/misspelled severity, malformed or null finding) is code work and still
+ * re-Forges.
+ */
+function isCodeWorkFinding(f) {
+  if (f && f.kind === LANE_FINDING_KIND) return false
+  if (isNonBlockingFinding(f)) return false
+  return true
+}
 
 // IT STAMPS ON EVERY VERDICT, NOT ONLY ON AN APPROVE. This used to early-return the
 // synthesis UNTOUCHED whenever it was already REQUEST_CHANGES — "already blocked, so
@@ -2705,15 +2849,69 @@ async function retryDeferredPeers({ verdicts, slots, invoke, attempts = 1, log: 
 // failure matches `enforceSeverityGate`: only the two LISTED severities are skipped,
 // so an unknown/absent/misspelled severity still counts as code and still re-Forges,
 // and a malformed (null) finding does too.
-function classifyBlock(synthesis, deferredPeers) {
-  if (!deferredPeers || deferredPeers.length === 0) return 'code'
-  const findings = (synthesis && synthesis.findings) || []
-  const codeFindings = findings.filter((f) => {
-    if (f && f.kind === LANE_FINDING_KIND) return false
-    if (f && NON_BLOCKING_SEVERITIES.has(f.severity)) return false
-    return true
-  })
-  return codeFindings.length === 0 ? 'infra-only' : 'code'
+// AND THE LIST IT READS IS NOT ALWAYS THE PANEL'S. `panelRejectedWithoutReason` is the
+// caller's answer to the one question this classifier cannot ask of the merged object:
+// did the SEAT state a reason, or did this file attach every finding on it? See the
+// arm at the bottom.
+function classifyBlock(synthesis, deferredPeers, noReviewRan = false, panelRejectedWithoutReason = false) {
+  // A NON-ARRAY `findings` IS MALFORMED, NOT EMPTY — and it must not crash the round.
+  // `(synthesis && synthesis.findings) || []` accepted any truthy value and then called
+  // `.filter` on it, so a synthesis carrying `findings: 'oops'` threw a TypeError out of
+  // `runReviewRound`. Every sibling gate in this file asks `Array.isArray` first; this one
+  // now does too, and reads the unreadable list as NO findings — which lands on the 'code'
+  // arm at the bottom, the direction that re-Forges rather than exiting the loop.
+  const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : []
+  const codeFindings = findings.filter(isCodeWorkFinding)
+  if (codeFindings.length > 0) return 'code'
+  if (deferredPeers && deferredPeers.length > 0) return 'infra-only'
+  // A COMPLETE PANEL DOES NOT MAKE AN ADVISORY INTO CODE WORK. This used to return 'code'
+  // the instant no peer was down, which read the finding list only when a lane had ALSO
+  // failed — so the whole advisory economy above (`enforceSeverityGate`, the CI hatch's
+  // non-forcing arm) was undone on the ordinary path: a REQUEST_CHANGES whose only
+  // findings were nits or a pre-existing red re-Forged a full round with nothing for
+  // Forge to change, exactly the waste `withSuiteBlocker` measured 15 times.
+  //
+  // THE EMPTY LIST STILL RE-FORGES. A rejection carrying no stated reason is malformed,
+  // not benign — this file's standing rule — and an exit would be the unsafe direction on
+  // it. Only findings this file has ALREADY declared non-blocking buy the exit.
+  //
+  // AND THE EXIT IS 'advisory-only', NOT 'infra-only'. Both stop the fix loop, which is the
+  // whole point; they differ in what they SAY, and the outer loop reads the difference.
+  // 'infra-only' means NO REVIEW SEAT EVER JUDGED THE CODE (trident/orchestrator.ts —
+  // `isInfraDeath`, `recordedTerminalVerdict`, `infra-block.ts`), and on this arm that is
+  // simply false: the panel was healthy, it answered, and every answer it gave was one this
+  // file has already declared non-blocking. Recording that as "review never ran" cost a
+  // resumed run a full re-Forge on findings nobody was ever going to act on — the exact
+  // waste the advisory economy exists to stop, reintroduced one seam downstream.
+  //
+  // AND 'advisory-only' ASSERTS A PANEL. It says the panel ran, judged the code and had
+  // nothing actionable — so it may not be emitted when NO seat judged anything. With every
+  // seat deliberately set to NONE the caller's own `reviewRecord` says 'NO REVIEW RAN' in
+  // words, and the blockKind said the opposite; 'infra-only' is the honest kind there, and
+  // it exits the loop the same way, so only what the run REPORTS changes.
+  if (findings.length === 0) return 'code'
+  // AND A LIST THIS FILE FILLED IN IS STILL AN EMPTY ONE, as far as the rule above is
+  // concerned. The arm directly above reads the MERGED object, and by the time it does,
+  // `reviewAndSynthesize`'s CI seam may have prepended its own advisories to a panel
+  // reply whose findings were `[]` — so a REQUEST_CHANGES the seat gave no reason for
+  // stopped being "empty", skipped the malformed arm, and came out 'advisory-only':
+  // a kind that ASSERTS the panel produced findings, which `writeTerminalResult` then
+  // records as a durable REQUEST_CHANGES reserved "for a reviewer that judged the CODE
+  // and produced at least one finding". Nobody had. The workflow's own advisories were
+  // laundered into the seat's reasons.
+  //
+  // The caller measures it, because only the caller still holds the seat's own reply
+  // (`severityGated`) beside the merged one. This is the exact mirror of the arm
+  // `withSuiteBlocker` already runs at the other injection seam, down to the kind it
+  // chooses: 'infra-only', not 'advisory-only', because 'advisory-only' says the panel
+  // judged the code and returned only non-blocking findings, and on a rejection carrying
+  // no stated reason that is false. The loop exits either way — what changes is only what
+  // the run REPORTS, and it reports REVIEW_NOT_RUN rather than a review nobody gave.
+  //
+  // Fail-closed, like every other gate here: nothing about this downgrades the verdict.
+  // A malformed rejection is still a rejection, and a red PR still holds the merge.
+  if (panelRejectedWithoutReason) return 'infra-only'
+  return noReviewRan ? 'infra-only' : 'advisory-only'
 }
 
 /**
@@ -2865,7 +3063,23 @@ const SYNTHESIS_UNAVAILABLE = synthesisUnavailable('The synthesis reviewer (argu
  * object, so a genuine verdict cannot be altered on its way to the loop.
  */
 function synthesisOrInfraBlock(synthesis) {
-  return usableStatus(synthesis, 'verdict') ? synthesis : SYNTHESIS_UNAVAILABLE
+  if (usableStatus(synthesis, 'verdict')) return synthesis
+  // FINDINGS A GATE ALREADY ATTACHED SURVIVE THE SUBSTITUTION. `withCi`'s non-forcing arm
+  // builds `{ ...(severityGated ?? {}), findings: [...ciFindings] }`, which over a DEAD
+  // synthesis seat is verdict-less by design — fail-closed, and replaced here. Replacing
+  // the WHOLE object threw the CI advisories away with it, so the report named the dead
+  // seat and said nothing at all about a red build: the `?? {}` above kept them only as
+  // far as this line. They are carried onto the block instead. The lane blocker still
+  // comes FIRST, and `verdict`/`blockKind` are still the constant's, so nothing a gate
+  // attached can turn this into an APPROVE or into a code round.
+  const carried = Array.isArray(synthesis?.findings)
+    ? synthesis.findings.filter((f) => f && typeof f === 'object' && f.kind !== LANE_FINDING_KIND)
+    : []
+  if (carried.length === 0) return SYNTHESIS_UNAVAILABLE
+  return Object.freeze({
+    ...SYNTHESIS_UNAVAILABLE,
+    findings: Object.freeze([...SYNTHESIS_UNAVAILABLE.findings, ...carried]),
+  })
 }
 
 /**
@@ -3387,6 +3601,10 @@ const CI_FAILED_STATES = new Set([
 ])
 /** States meaning the check has not finished yet. */
 const CI_PENDING_STATES = new Set(['PENDING', 'QUEUED', 'IN_PROGRESS', 'WAITING', 'REQUESTED'])
+// THE NAME A ROW WITHOUT ONE GETS. It is a placeholder, not an identity: two rows
+// carrying it are not the same check, so `ciPreexistingNames` refuses to match on it.
+// Named once, because a literal in both places is how the two quietly drift apart.
+const CI_UNNAMED_CHECK = 'unnamed check'
 
 // HOW LONG THE GATE WAITS FOR A REQUIRED CHECK — A MEASURED BUDGET, NOT A GUESS.
 //
@@ -4285,7 +4503,7 @@ function classifyCi(probe) {
   const failing = []
   let pending = 0
   for (const row of rows) {
-    const name = row && typeof row.name === 'string' ? row.name : 'unnamed check'
+    const name = row && typeof row.name === 'string' ? row.name : CI_UNNAMED_CHECK
     const state = row && typeof row.state === 'string' ? row.state.toUpperCase() : ''
     if (CI_FAILED_STATES.has(state)) {
       const link = row && typeof row.link === 'string' && row.link.length > 0 ? row.link : null
@@ -4310,15 +4528,76 @@ function classifyCi(probe) {
  * change it. Each failing check names itself and carries its link, because the
  * reviewers cannot see any of this from the diff.
  */
-function ciBlockerFindings(ci) {
-  return ci.failing.map((f) => ({
-    severity: 'blocker',
-    title: `CI FAILING: ${f.name}`,
-    evidence:
-      `The \`${f.name}\` check is ${f.state} on this PR. No reviewer can see this from the diff, ` +
-      `and the branch cannot merge while it is red — fix it in this round.` +
-      (f.link !== null ? `\n${f.link}` : ''),
-  }))
+function ciBlockerFindings(ci, preexisting = null) {
+  const priorRed = preexisting instanceof Set ? preexisting : new Set()
+  const at = typeof ci.baseRef === 'string' && ci.baseRef !== '' ? ci.baseRef : 'the base branch'
+  return ci.failing.map((f) => {
+    if (!priorRed.has(f.name)) {
+      return {
+        severity: 'blocker',
+        title: `CI FAILING: ${f.name}`,
+        evidence:
+          `The \`${f.name}\` check is ${f.state} on this PR. No reviewer can see this from the diff, ` +
+          `and the branch cannot merge while it is red — fix it in this round.` +
+          (f.link !== null ? `\n${f.link}` : ''),
+      }
+    }
+    return {
+      severity: 'major',
+      // The SAME hatch the full-suite gate has, earned the SAME way — by a measurement
+      // of the base, not by a claim. `isNonBlockingFinding` reads this key.
+      advisory: true,
+      title: `CI RED FOR PRE-EXISTING REASONS: ${f.name}`,
+      evidence:
+        `The \`${f.name}\` check is ${f.state} on this PR — AND it is already failing at ${at}, ` +
+        'which this branch did not touch. A round spent "fixing" it would edit code to repair a ' +
+        'red that predates the diff, and then pay a full panel to re-derive that it was never ' +
+        'this change. Surface it, do not block on it.' +
+        (f.link !== null ? `\n${f.link}` : '') +
+        '\nIf this check\'s failure at the base looks like a DIFFERENT failure from the one here, ' +
+        'or the diff touches the code it exercises, raise it as a BLOCKER. The merge is held on ' +
+        'a red PR either way — this text is not the thing deciding that.',
+    }
+  })
+}
+
+/**
+ * Does this round's CI have anything for Forge to DO?
+ *
+ * Mirrors `suiteFindingsBlock` exactly, and for the same reason: a red that predates the
+ * branch is not a defect of the branch. The predicate is `isNonBlockingFinding`, so the
+ * two hatches cannot drift apart.
+ */
+function ciFindingsBlock(ciFindings) {
+  return Array.isArray(ciFindings) && ciFindings.some((f) => !isNonBlockingFinding(f))
+}
+
+/**
+ * The names failing AT THE BASE — the only input that can turn a CI blocker advisory.
+ *
+ * FAIL-CLOSED IN EVERY DIRECTION THAT IS NOT A MEASURED RED. `unknown` (unparseable),
+ * `pending` (the base's own checks still running) and `none` all yield the EMPTY set, so
+ * every failing check on the PR stays a blocker. Only a base we could read, and read as
+ * red, may excuse anything — and it excuses a check BY NAME, so a branch that reds a
+ * check the base does not still pays its round.
+ *
+ * A MIXED BASE (some rows red, others still running) is `red`, and that is deliberate
+ * rather than a hole in the rule above: the excuse is granted per NAME, from `failing`
+ * only, so a base row that never settled contributes no name and excuses nothing. What
+ * "pending excuses nothing" means here is exactly that — the check whose base state we
+ * do not know yet is not in this set, and its PR-side red stays a blocker.
+ */
+function ciPreexistingNames(base) {
+  if (!base || base.status !== 'red' || !Array.isArray(base.failing)) return new Set()
+  // THE SENTINEL IS NOT A NAME. `classifyCi` writes 'unnamed check' for a row whose
+  // name it could not read, on BOTH sides — so keeping it here would let one malformed
+  // row at the base excuse a different malformed row on the PR. A red we cannot name is
+  // a red we cannot match, and an unmatched red stays a blocker.
+  return new Set(
+    base.failing
+      .map((f) => f.name)
+      .filter((n) => typeof n === 'string' && n !== '' && n !== CI_UNNAMED_CHECK),
+  )
 }
 
 /**
@@ -4428,7 +4707,14 @@ function roundLeftNoDiffFinding(round) {
 function infraTerminalCause(synthesis) {
   const findings = synthesis && Array.isArray(synthesis.findings) ? synthesis.findings : []
   const lane = findings.find((f) => f && f.kind === LANE_FINDING_KIND && typeof f.title === 'string' && f.title !== '')
-  const any = lane || findings.find((f) => f && typeof f.title === 'string' && f.title !== '')
+  // A NON-BLOCKING FINDING IS NOT A CAUSE. `classifyInnerFailure` (trident/orchestrator.ts)
+  // reads 'infra-only' PLUS a non-empty cause as "infrastructure", and auto-retries the
+  // WHOLE run up to three times — which resumes straight back into the same fix round. So
+  // an advisory-only stop that reported the advisory's title as its cause turned "there is
+  // nothing to act on, stop" into three more runs of exactly that. Findings this file has
+  // already declared non-blocking are therefore not eligible to be the cause, and such a
+  // stop measures '' — genuine, terminal, not retried. A real blocker still names itself.
+  const any = lane || findings.find((f) => f && typeof f.title === 'string' && f.title !== '' && !isNonBlockingFinding(f))
   return any ? redactProbeText(any.title).slice(0, 300) : ''
 }
 
@@ -4656,6 +4942,139 @@ ${cmd}`,
   return classifyCi(res)
 }
 
+function encodeRefPath(ref) {
+  return String(ref).split('/').map((seg) => encodeURIComponent(seg)).join('/')
+}
+
+/**
+ * Cut ONE `___SECTION=<name>` block out of a probe reply and hand it back in the probe
+ * shape `classifyCi` takes, so the two halves of the base measurement go through the one
+ * parser separately instead of colliding inside it (`classifyCi` reads from the FIRST `[`
+ * to the LAST `]`, so two arrays in one string parse as neither).
+ *
+ * A dead seat (`null`) and a reply with no such marker both come back as an empty `raw`,
+ * which `classifyCi` already reads as 'unknown' — the direction that excuses nothing.
+ */
+function ciSection(probe, name) {
+  const raw = probe && typeof probe.raw === 'string' ? probe.raw : ''
+  const marker = `___SECTION=${name}`
+  // WHOLE-LINE, AND THE LAST ONE — the discipline `probeSections` already uses, for the
+  // same reason. The probe writes each boundary with its own `echo`, so a real marker owns
+  // a whole line. An ECHOED transcript does not: a seat that quotes the command it ran puts
+  // the marker text mid-line and BEFORE the real output, and the first-match cut then handed
+  // `classifyCi` a slice with no JSON at all. That reads 'unknown', which excuses nothing
+  // (fail-shut) — but it also makes the entire pre-existing hatch inert on every round, with
+  // no signal anywhere that it never engaged. A check name poisoned with the marker text
+  // lands the same way. Anchoring to a line the PROBE ITSELF wrote takes both back.
+  const startsLine = (at) => at === 0 || raw[at - 1] === '\n'
+  const endsLine = (at, len) => {
+    const after = raw[at + len]
+    return after === undefined || after === '\n' || after === '\r'
+  }
+  let at = -1
+  let from = raw.length
+  while (from > 0) {
+    const found = raw.lastIndexOf(marker, from - 1)
+    if (found < 0) break
+    if (startsLine(found) && endsLine(found, marker.length)) {
+      at = found
+      break
+    }
+    from = found
+  }
+  if (at < 0) return { raw: '', exit_code: 0 }
+  const body = at + marker.length
+  // The CLOSING boundary is any later marker line, whatever its key — we do not know the
+  // next section's name. It must still start a line, so an echo inside the payload cannot
+  // truncate the section either.
+  let next = -1
+  let scan = body
+  while (scan <= raw.length) {
+    const found = raw.indexOf('___SECTION=', scan)
+    if (found < 0) break
+    if (startsLine(found)) {
+      next = found
+      break
+    }
+    scan = found + 1
+  }
+  return { raw: raw.slice(body, next < 0 ? raw.length : next), exit_code: 0 }
+}
+
+/**
+ * ONE ANSWER FROM THE TWO HALVES OF THE BASE MEASUREMENT.
+ *
+ * A half we could not read poisons the whole thing: half a base is not a base, and an
+ * excuse granted on it would forgive a red we never measured. Otherwise the reds add up,
+ * a pending half makes the base pending (which excuses nothing either), and only two
+ * lists that are both readable and clean report the base as clean.
+ */
+function mergeBaseCi(runs, statuses) {
+  if (runs.status === 'unknown' || statuses.status === 'unknown') {
+    return { status: 'unknown', failing: [], cause: runs.cause || statuses.cause || '' }
+  }
+  const failing = [...runs.failing, ...statuses.failing]
+  if (failing.length > 0) return { status: 'red', failing }
+  if (runs.status === 'pending' || statuses.status === 'pending') return { status: 'pending', failing: [] }
+  if (runs.status === 'none' && statuses.status === 'none') return { status: 'none', failing: [] }
+  return { status: 'green', failing: [] }
+}
+
+/**
+ * Ask GitHub what the SAME checks are doing AT THE BASE — the measurement that earns
+ * the pre-existing hatch.
+ *
+ * SPENT ONLY WHEN THE PR IS RED. A green/pending/absent PR has nothing to excuse, and a
+ * probe seat per round for a question that cannot change the outcome is the kind of cost
+ * this whole card is about.
+ *
+ * `--jq` reshapes the check-runs payload into exactly `gh pr checks --json name,state`'s
+ * shape — `{name, state}` rows — so `classifyCi` parses BOTH and there is one parser, not
+ * two that can drift. `.conclusion // .status` is deliberate: a check still running at the
+ * base has no conclusion, so it lands as QUEUED/IN_PROGRESS and `classifyCi` calls the
+ * base `pending`, which excuses NOTHING (see `ciPreexistingNames`).
+ *
+ * The ref is the LAUNCH-PINNED base sha when there is one — the commit the branch was
+ * actually cut from — and the base branch name otherwise. Reading `main`'s head instead
+ * of the pinned sha would compare against a base that has moved since the build started.
+ */
+async function probeCiBase(round) {
+  if (!isPr) return { status: 'none', failing: [] }
+  const ref = pinnedBase !== null ? pinnedBase : baseBranch
+  // ENCODED AND QUOTED, exactly as `probeRequiredChecks` does below. `baseBranch` is a
+  // workflow argument and `git check-ref-format --branch 'main$(id)'` accepts that name,
+  // so a bare interpolation would put a legal branch name inside a bash command as code.
+  // THE SHELL SAFETY IS `shSingleQuote`, not the encoding — the whole API argument is
+  // single-quoted below, and that is what makes a metacharacter in `ref` inert. The
+  // encoding is about URL CORRECTNESS, and it is PER SEGMENT because a ref is a PATH:
+  // whole-string `encodeURIComponent` turns `release/1.x` into `release%2F1.x`, which the
+  // commits endpoint does not resolve, and the hatch then dies silently on every
+  // repository that does not build off a single-segment branch. Encoding each segment
+  // keeps the separator and leaves the ref resolvable. The 40-hex `pinnedBase` path is
+  // unaffected by either.
+  const encodedRef = encodeRefPath(ref)
+  const runsApi = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs?per_page=100`)} --jq ${shSingleQuote('[.check_runs[] | {name: .name, state: (.conclusion // .status)}]')}`
+  // BOTH KINDS OF CI, because the PR side reads both. `gh pr checks` reports check runs
+  // AND classic commit statuses; asking the base only for check-runs meant a status-context
+  // red — Buildkite, Travis, any webhook integration — could never appear in
+  // `ciPreexistingNames` and was charged as new every round. Fail-closed, but the hatch was
+  // inert for every repository whose CI is a status. `{context, state}` is reshaped to the
+  // same `{name, state}` rows `classifyCi` already parses, so there is still one parser.
+  const statusApi = `api ${shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/status?per_page=100`)} --jq ${shSingleQuote('[.statuses[] | {name: .context, state: .state}]')}`
+  const cmd = `cd ${shSingleQuote(repoPath)} && echo "___SECTION=RUNS"; ${ghReadCommand(runsApi)} 2>&1; echo "___SECTION=STATUSES"; ${ghReadCommand(statusApi)} 2>&1; echo "___EXIT=0"`
+  const res = await seatAttempt(`ci-base-probe-round-${round}`, () =>
+    agent(
+      `Run EXACTLY this single Bash command and report its output through the schema. Put the FULL stdout+stderr in \`raw\` VERBATIM — both section markers included — and the number after ___EXIT= in \`exit_code\`. Do NOT interpret the result, do NOT decide whether CI passed, do NOT run anything else, do NOT modify any file.
+${cmd}`,
+      withModel({ label: `ci-base-probe-round-${round}`, phase: 'Review', schema: CI_PROBE_SCHEMA }),
+    ),
+  )
+  // A dead probe seat is `null`, which `classifyCi` reads as 'unknown' — and an unknown
+  // base excuses nothing. The failure direction here is "everything stays a blocker",
+  // never "everything is forgiven".
+  return { ...mergeBaseCi(classifyCi(ciSection(res, 'RUNS')), classifyCi(ciSection(res, 'STATUSES'))), baseRef: ref }
+}
+
 /**
  * ASK THE BASE BRANCH WHAT IT REQUIRES — the only authority on the question.
  *
@@ -4813,6 +5232,19 @@ function reviewPreconditionDeferred(readiness) {
  * `testStrategy === ''` (a legacy launcher, or a test harness that passes no strategy)
  * is inert — byte-identical old behaviour.
  */
+// THE FULL-SUITE GATE STAMPS ITS FINDINGS TOO — same reason as `LANE_FINDING_KIND`: a
+// later reader has to be able to tell "this is the suite gate's own measurement" from
+// "this is something a reviewer said", and re-deriving that from the title template is two
+// sites agreeing on a message format, which is a contract nothing enforces. The one reader
+// is `resumeSuiteFindings`, which has to find this claim again inside a PANEL's recorded
+// finding list after `withSuiteBlocker` merged the two.
+const SUITE_FINDING_KIND = 'suite'
+// How much of ONE suite finding may reach a reviewer's prompt. Sized to the widest shape
+// `fullSuiteFindings` can produce (a 4000-char clamped transcription inside ~1000 chars of
+// the gate's own framing, plus the title) so the cap never truncates the gate's own text —
+// see `suiteFindingsPrompt`, which is the one reader.
+const SUITE_FINDING_PROMPT_MAX = 6000
+
 function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
   if (testStrategy === '') return []
   if (
@@ -4823,6 +5255,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
     return [
       {
         severity: 'blocker',
+        kind: SUITE_FINDING_KIND,
         title: `CONTRADICTORY SUITE CLAIM — testsPassed=true cannot accompany suiteOutcome='${report.suiteOutcome}'`,
         evidence:
           "The TEST EXECUTION vocabulary says 'passed' is the only suite outcome that may accompany " +
@@ -4843,6 +5276,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
       return [
         {
           severity: 'blocker',
+          kind: SUITE_FINDING_KIND,
           title: 'FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE — the hatch fails closed',
           evidence:
             'The build claimed the red suite predates this branch but supplied no suiteEvidence ' +
@@ -4855,6 +5289,16 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
     return [
       {
         severity: 'major',
+        // ADVISORY BY CONSTRUCTION — see `isNonBlockingFinding`. This entry's own
+        // evidence ends "it does not by itself prevent approval", and
+        // `suiteFindingsBlock` already agrees it does not force the verdict. Without
+        // the marker the two gates disagreed with the text above them and re-Forged a
+        // whole round to re-derive that the red predates the branch. The `blocker`
+        // siblings in this function — FAILED-PREEXISTING CLAIMED WITHOUT EVIDENCE and
+        // FULL SUITE NOT PROVEN — deliberately carry NO marker and keep blocking: the
+        // hatch is earned by evidence, and an unearned or unproven claim is not this.
+        advisory: true,
+        kind: SUITE_FINDING_KIND,
         title: 'FULL SUITE RED FOR PRE-EXISTING REASONS — the build says the failures are not its diff',
         evidence:
           'The build ran the FULL suite (stage 2), reported testsPassed=false, and reported ' +
@@ -4873,6 +5317,7 @@ function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
   return [
     {
       severity: 'blocker',
+      kind: SUITE_FINDING_KIND,
       title: 'FULL SUITE NOT PROVEN — the build did not report testsPassed=true',
       evidence:
         `The build reported testsPassed=${JSON.stringify(report?.testsPassed ?? null)} and ` +
@@ -4931,8 +5376,42 @@ function withSuiteBlocker(synthesis, suiteFindings) {
   if (!Array.isArray(suiteFindings) || suiteFindings.length === 0) return synthesis
   const panelFindings = Array.isArray(synthesis?.findings) ? synthesis.findings : []
   const findings = [...suiteFindings, ...panelFindings]
-  if (!suiteFindingsBlock(suiteFindings)) return { ...synthesis, findings }
-  return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings }
+  if (suiteFindingsBlock(suiteFindings)) {
+    return { ...synthesis, verdict: 'REQUEST_CHANGES', blockKind: 'code', findings }
+  }
+  const merged = { ...synthesis, findings }
+  if (normalizeVerdict(merged.verdict) !== 'REQUEST_CHANGES') return merged
+  // The panel stated a reason of its own -> that reason is the round's work, and the
+  // two gates upstream have ALREADY judged it. Nothing here may second-guess them.
+  if (panelFindings.length > 0) return merged
+  // MEASURED 2026-09-01, 15 rows in code_trident_runs: a REQUEST_CHANGES whose findings
+  // list is EMPTY, merged with an advisory pre-existing-red suite finding, re-Forged a
+  // full round. The round had nothing to act on: the only text the fix prompt could show
+  // Forge was the advisory finding this file has already declared does not block, so the
+  // round could only re-derive "the red predates the branch" and pay five reviewers again.
+  //
+  // The verdict is NOT downgraded. This file's rule stands — a REQUEST_CHANGES carrying
+  // no findings is malformed, not benign, and a review we did not get is not an approval.
+  // What changes is only `blockKind`: it EXITS the fix loop instead of re-Forging.
+  //
+  // AND THE EXIT IS 'infra-only', NOT 'advisory-only'. The two differ in what they SAY, and
+  // this arm is reached ONLY when the panel stated no reason of its own (`panelFindings` is
+  // empty — the arm above returns the moment it is not). 'advisory-only' asserts the panel
+  // judged the code and everything it returned was non-blocking; on a rejection carrying no
+  // stated reason that is false, and this file's standing rule is that such a rejection is
+  // malformed, not benign. The only finding left is one THIS FILE prepended, so no seat
+  // spoke about the diff — which is exactly what 'infra-only' means, and it is what the
+  // terminal writer must record (REVIEW_NOT_RUN), not a review nobody gave.
+  //
+  // AND THE STOP REPORTS NO CAUSE, deliberately. `infraTerminalCause` excludes every
+  // finding this file has already declared non-blocking, so this stop measures '' — and
+  // `classifyInnerFailure` (trident/orchestrator.ts) requires a NON-EMPTY cause beside
+  // 'infra-only' before it will call a run 'infrastructure', so this one classifies
+  // 'genuine' and is not auto-retried back into the same round. The findings are not lost: they ride out on the terminal result's
+  // `findings` and reach the operator there. Only the one-line CAUSE is empty, and it
+  // is empty on purpose.
+  if (!findings.every((f) => isNonBlockingFinding(f))) return merged
+  return { ...merged, blockKind: 'infra-only' }
 }
 
 async function runReviewRound(diffFile, round, prForReview, paidReview = null, suiteFindings = []) {
@@ -5295,10 +5774,20 @@ async function reviewAndSynthesize(diffFile, round, prForCi, suiteFindings = [])
   // Unlike reflectionGuidance in the RB2 trust-boundary note, this block is composed
   // by the workflow from schema fields; any embedded build transcription is labelled
   // untrusted rather than granted authority.
+  // REDACTED AND BOUNDED, exactly like `ciFindingsPrompt` below. The evidence quoted here
+  // is the BUILD's own `suiteEvidence` transcription — build-authored text landing in every
+  // core reviewer's prompt — and a base-comparison log tail is precisely where an echoed
+  // remote URL or token would surface. It goes through the same `redactProbeText`.
+  //
+  // THE CAP IS WIDER THAN THE CI ONE ON PURPOSE. `fullSuiteFindings` already clamps the
+  // build's transcription to 4000 characters and then wraps it in ~1000 characters of the
+  // gate's own instructions to the reader; a 2000-character cap here would delete the
+  // base-branch comparison the finding exists to have verified. This cap bounds what an
+  // UNEXPECTED shape can cost the prompt without truncating the shape the gate produces.
   const suiteFindingsPrompt = suiteFindings.length === 0
     ? ''
     : `\nFULL-SUITE GATE FINDINGS (generated by the workflow from the build's STRUCTURED report — not free-form guidance; any quoted transcription inside is the build's own untrusted claim):\n${suiteFindings
-      .map((finding) => `[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`)
+      .map((finding) => redactProbeText(`[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`).slice(0, SUITE_FINDING_PROMPT_MAX))
       .join('\n')}\nWeigh these findings like any reviewer's: an unverified or contradicted suite claim is grounds for REQUEST_CHANGES.`
   const reviewers = []
   // THE CORE SEATS RECORD THEIR OWN SLOT, like codexSlot/kimiSlot below — never a
@@ -5464,6 +5953,44 @@ TASK: ${task}`
   const ci = await probeCi(prForCi, round)
   log(`trident-v2 ci: round=${round} status=${ci.status} failing=${ci.failing.length}`)
 
+  // A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER. The base is measured (one probe
+  // seat, spent only when the PR is red) and a failing check that is ALSO failing there
+  // becomes an advisory finding instead of a blocker — the same hatch the full-suite gate
+  // has, earned the same way. `ciFindingsBlock` is what decides whether the verdict is
+  // forced, so a check red only on the BRANCH still forces it, and so does a base we
+  // could not read.
+  //
+  // MEASURED HERE, ABOVE THE SYNTHESIS PROMPT, so the advisory is READABLE BY THE SEAT IT
+  // ADDRESSES. The excuse matches by check NAME, and a name is a coarse key: a check
+  // called `ci` can be red at the base for a lint failure and red here for a test this
+  // diff added. Its evidence tells the reader to call that a blocker in their own words —
+  // which was addressed to nobody while these findings were built after every prompt. The
+  // core reviewers still cannot see it (they are dispatched before CI is even probed, on
+  // purpose), but the synthesis seat can, and the synthesis seat is the one that sets the
+  // verdict — so a REQUEST_CHANGES it returns survives the non-forcing path below.
+  const ciBase = ci.status === 'red' ? await probeCiBase(round) : null
+  const ciFindings = ci.status === 'red' ? ciBlockerFindings({ ...ci, baseRef: ciBase?.baseRef }, ciPreexistingNames(ciBase)) : []
+  if (ci.status === 'red') {
+    log(
+      `trident-v2 CI gate: round=${round} failing=${ci.failing.length} base=${ciBase?.status ?? 'unmeasured'} — ${ciFindingsBlock(ciFindings) ? 'at least one red is NEW to this branch, forcing REQUEST_CHANGES' : 'every red is already failing at the base; surfaced without forcing'}`,
+    )
+  }
+  // REDACTED AND BOUNDED, like every other probe-derived text that reaches a prompt.
+  // A check's NAME comes from `.github/workflows/*.yml`, which Forge writes — so this is
+  // build-authored text landing in the seat that sets the verdict, and it goes through the
+  // same `redactProbeText` the sibling probe text does.
+  //
+  // AND IT NO LONGER ASKS THE MODEL TO BE THE GUARD. The old closing sentence told the seat
+  // to "return REQUEST_CHANGES in your own words" if the excuse looked wrong — a decision
+  // this gate's whole contract says is derived in code, never read by a model. It is derived
+  // in code now: an excused red no longer APPROVES (see `withCi`), so the model's answer can
+  // only ADD a blocker, never remove the hold.
+  const ciFindingsPrompt = ciFindings.length === 0
+    ? ''
+    : `\nCI GATE FINDINGS (generated by the workflow from GitHub's OWN check results — the PR's checks, and the same checks measured at the base commit this branch was cut from):\n${ciFindings
+      .map((finding) => redactProbeText(`[${String(finding?.severity ?? '').toUpperCase()}] ${finding?.title ?? ''}\n${finding?.evidence ?? ''}`).slice(0, 2000))
+      .join('\n')}\nWeigh these like any reviewer's finding. A check excused as pre-existing is matched by NAME ONLY: the excuse buys this branch no FIX ROUND, and it does NOT clear the red — the merge is held either way — so if this diff touches what an excused check exercises, say so.`
+
   // PANEL COMPLETENESS IS DERIVED IN CODE. Every seat's status comes from whether it
   // was CONFIGURED (it has a slot) and whether it actually ANSWERED — never from a
   // default applied to a missing verdict, which is how a crashed reviewer used to read
@@ -5526,7 +6053,7 @@ Synthesise these INDEPENDENT review verdicts into ONE final verdict, applying AS
 ${corePanelLines}
 ${offPanelLines}
 ${codexPanel}
-${kimiPanelLine}${suiteFindingsPrompt}`,
+${kimiPanelLine}${suiteFindingsPrompt}${ciFindingsPrompt}`,
       withModel({ label: 'argus:synthesis', phase: 'Synthesis', schema: VERDICT_SCHEMA }),
     )
   // THE SYNTHESIS SEAT IS RETRIED LIKE ANY OTHER, through the SAME bounded retry —
@@ -5536,15 +6063,24 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
   // nothing is. An exhausted retry still yields no verdict, and `synthesisOrInfraBlock`
   // at the call site turns that into the infra block — a retry never turns into an
   // APPROVE, and never into a throw.
-  const synthesisRaw = (
-    await retryDeferredPeers({
-      verdicts: [await seatAttempt('argus:synthesis', runSynthesis)],
-      slots: [{ name: 'argus:synthesis', slot: 0, statusKey: 'verdict' }],
-      attempts: LANE_RETRY_ATTEMPTS,
-      log,
-      invoke: runSynthesis,
-    })
-  )[0]
+  //
+  // THE ADVISORY MARKER IS STRIPPED AT THIS BINDING, not at the severity gate below, so
+  // that no unstripped copy of the model's JSON exists for any later reader to pick up by
+  // mistake. See `stripAdvisoryMarkers` for why that one key is not the model's to set.
+  // (Deliberately NOT quoting the gate's call expression here: the source-order invariant
+  // test greps the source for it, and an earlier match in prose would anchor that guard on
+  // a comment instead of on the call.)
+  const synthesisRaw = stripAdvisoryMarkers(
+    (
+      await retryDeferredPeers({
+        verdicts: [await seatAttempt('argus:synthesis', runSynthesis)],
+        slots: [{ name: 'argus:synthesis', slot: 0, statusKey: 'verdict' }],
+        attempts: LANE_RETRY_ATTEMPTS,
+        log,
+        invoke: runSynthesis,
+      })
+    )[0],
+  )
   // Deterministic never-silent-downgrade guard — a configured-but-failed codex
   // can NEVER become a silent APPROVE regardless of what the synthesis LLM said.
   // A NIT MAY NOT COST A ROUND — applied FIRST, so both gates below can re-block
@@ -5569,12 +6105,41 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
   // blockers without setting the verdict would have produced an APPROVE carrying a
   // "CI FAILING" finding, and merged a red build. That is precisely the bug this gate
   // exists to prevent, and it is asserted below rather than left to reading.
+  //
   const withCi =
     ci.status === 'red'
-      ? {
-          verdict: 'REQUEST_CHANGES',
-          findings: [...ciBlockerFindings(ci), ...(severityGated?.findings ?? [])],
-        }
+      ? ciFindingsBlock(ciFindings)
+        ? {
+            verdict: 'REQUEST_CHANGES',
+            findings: [...ciFindings, ...(severityGated?.findings ?? [])],
+          }
+        // THE EXCUSE BUYS A ROUND, NEVER A MERGE. The verdict is held at REQUEST_CHANGES
+        // even when EVERY red is excused, because the two questions are different and this
+        // arm used to answer both with one match on a check NAME: "is there code work here?"
+        // (no — the red predates the branch, so `ciFindingsBlock` is false and `classifyBlock`
+        // reads the advisories as 'advisory-only', which EXITS the fix loop without
+        // re-Forging) and "may this merge over a red PR?" (no — a failure this branch DID
+        // cause, landing inside a check that was ALREADY red for another reason, is invisible
+        // to a name match, and the old arm passed that APPROVE straight to `gh pr merge` with
+        // branch protection as the only backstop). Nothing here is inferred from the
+        // advisory text and nothing is delegated to the synthesis seat: the hold is
+        // unconditional on a red PR, and it costs no extra round.
+        //
+        // AND ONLY OVER A SEAT THAT SPOKE. `severityGated` is null when the synthesis seat
+        // died, and setting the verdict over that null FABRICATED a panel judgment no panel
+        // made: `synthesisOrInfraBlock` returns anything carrying a usable verdict UNTOUCHED,
+        // so a dead seat plus a fully-excused red walked past SYNTHESIS_UNAVAILABLE and
+        // landed as an ordinary 'advisory-only' rejection — no lane finding, no infra retry,
+        // and nothing anywhere naming the seat that died. The dead-seat arm is therefore
+        // VERDICT-LESS, which is the fail-closed shape this file already relies on; the CI
+        // advisories are not lost with it, they are carried onto the infra block there.
+        : severityGated
+          ? {
+              ...severityGated,
+              verdict: 'REQUEST_CHANGES',
+              findings: [...ciFindings, ...(severityGated.findings ?? [])],
+            }
+          : { findings: [...ciFindings] }
       : severityGated
   // EVERY EMPTY SEAT IS A PEER, whichever seat it was. The core reviewers go in FIRST
   // because a missing core seat is the most fundamental incompleteness the panel can
@@ -5588,10 +6153,21 @@ ${kimiPanelLine}${suiteFindingsPrompt}`,
   // when the only blocker is a lane that could not run — there is nothing in the
   // code to fix, and a re-Forge then costs a fresh round of four reviewers plus a
   // diff of noise. See classifyBlock.
-  const reviewRecord = offSeats.length === 4
+  const noReviewRan = offSeats.length === 4
+  const reviewRecord = noReviewRan
     ? 'NO REVIEW RAN — all four review seats were deliberately set to NONE; merge relied on build and CI gates alone.'
     : `Review panel: ${4 - offSeats.length} seat(s) ran; off: ${offSeats.length === 0 ? 'none' : offSeats.join(', ')}.`
-  return { ...gated, blockKind: classifyBlock(gated, peers), reviewRecord }
+  // DID THE SEAT STATE A REASON OF ITS OWN? Measured HERE because this is the last place
+  // the panel's own reply (`severityGated`) is still separable from the findings the CI
+  // seam above prepended to it — `gated` has them merged, and a classifier reading only
+  // the merged list cannot tell a reviewer's finding from one this file wrote. A
+  // rejection the seat gave no reason for is malformed whatever the workflow later
+  // attached to it; `classifyBlock` refuses to call that a panel judgment. Non-array
+  // findings count as none, exactly as `withSuiteBlocker` counts them at the other seam.
+  const panelFindings = Array.isArray(severityGated?.findings) ? severityGated.findings : []
+  const panelRejectedWithoutReason =
+    normalizeVerdict(severityGated?.verdict) === 'REQUEST_CHANGES' && panelFindings.length === 0
+  return { ...gated, blockKind: classifyBlock(gated, peers, noReviewRan, panelRejectedWithoutReason), reviewRecord }
 }
 
 // ── Inner loop ────────────────────────────────────────────────────────────────
@@ -5850,10 +6426,31 @@ try {
   // suite. (`fix` mode is the argus-request-changes path, whose findings ARE a panel's
   // and are already the input to its fix round.)
   //
+  // …EXCEPT THAT A PANEL'S RECORDED LIST CAN CARRY THE GATE'S CLAIM TOO. `withSuiteBlocker`
+  // prepends the suite finding to the synthesis BEFORE the verdict is checkpointed, so an
+  // `argus-request-changes-round-N` row holds both. On the fix-mode fall-through (a
+  // recorded hold with no code work, re-reviewed rather than replayed) this list was
+  // dropped wholesale, and a PAID `failed-preexisting` advisory then vanished from the
+  // terminal row of a resume that went on to APPROVE — a report-completeness loss, since
+  // no build ran in this process to re-derive it.
+  //
+  // ONLY THE GATE'S OWN ENTRIES ARE CARRIED, by `kind`, and deliberately not every
+  // workflow advisory in the row: a stale CI advisory IS re-measured here (the fall-through
+  // re-probes CI), so carrying that one forward would assert a red this round may be about
+  // to observe has gone green. The suite claim is the one measurement this process cannot
+  // retake.
+  //
   // `testStrategy !== ''` is the SAME arming condition the gate itself uses, repeated
   // here so a row written by a launcher that never had a strategy cannot be read as a
   // gate record by a workflow that does.
-  const resumeSuiteFindings = resumeMode === 'review' && testStrategy !== '' ? resumeFindingsList : []
+  const resumeSuiteFindings =
+    testStrategy === ''
+      ? []
+      : resumeMode === 'review'
+        ? resumeFindingsList
+        : resumeMode === 'fix'
+          ? resumeFindingsList.filter((f) => f && f.kind === SUITE_FINDING_KIND)
+          : []
   if (resumeSuiteFindings.length > 0) {
     log(
       `trident-v2 full-suite gate: resumed at ${resumeCheckpoint} with a recorded suite finding — the panel runs, and ${suiteFindingsBlock(resumeSuiteFindings) ? 'this round cannot APPROVE' : 'the finding is advisory (pre-existing red)'}`,
@@ -6455,26 +7052,61 @@ ${task}${reflectionGuidance}`,
   }
 
   // First review + synthesis — UNLESS this is a resume whose recorded
-  // REQUEST_CHANGES verdict is about exactly the commit in front of us. Then the
-  // panel has already judged this code and said what is wrong with it; re-running
-  // it would buy the same four verdicts a second time, which is precisely the
-  // waste a mid-loop resume exists to stop. Seed the loop with the RECORDED
-  // findings instead and go straight to the fix round.
+  // REQUEST_CHANGES verdict is about exactly the commit in front of us AND
+  // carries code work. Then the panel has already judged this code and said what
+  // is wrong with it; re-running it would buy the same four verdicts a second
+  // time, which is precisely the waste a mid-loop resume exists to stop. Seed
+  // the loop with the RECORDED findings instead and go straight to the fix round.
   //
-  // This shortcut can only ever produce REQUEST_CHANGES, so it cannot ship
+  // The shortcut can only ever produce REQUEST_CHANGES, so it cannot ship
   // anything: the fix round that follows re-reviews its own new head before any
-  // APPROVE is possible.
+  // APPROVE is possible. A resume whose recorded findings are ALL non-blocking
+  // takes the real review path below instead — the only APPROVE it can produce
+  // is one a fresh, complete panel just gave to this exact head.
   let synthesis
   // THE FULL-SUITE GATE'S ROUND-1 FINDINGS: this process's own build report when it
   // built, and otherwise the claim the building process recorded on the checkpoint this
   // run resumed from. Exactly one of the two can be non-empty.
   const round1SuiteFindings = buildReport === null ? resumeSuiteFindings : fullSuiteFindings(buildReport, buildSuiteScope)
-  if (resumeMode === 'fix') {
+  // THE PAID-REVIEW SHORTCUT IS FOR RECORDED CODE WORK ONLY. A checkpoint written by an
+  // advisory-only round carries findings this file has ALREADY declared non-blocking, and
+  // asserting 'code' over them re-Forged a full round on them at resume — undoing the
+  // exit the round itself had earned. Literally the same function as `classifyBlock`
+  // asks, so the two cannot drift.
+  //
+  // A LANE BLOCKER IS NOT RECORDED CODE WORK EITHER, and the predicate has to be the
+  // WHOLE one to know that. This read `!isNonBlockingFinding(f)` — the severity half
+  // only — while the classifier ALSO drops `kind: LANE_FINDING_KIND` first, so a
+  // persisted `{severity:'blocker', kind:'lane'}` finding (what the lane gate writes onto
+  // `argus-request-changes-round-N`, and what the orchestrator's infra-only auto-retry
+  // replays) asserted 'code' at resume and bought a Forge round to "fix" a dead review
+  // seat. `isCodeWorkFinding` is that whole predicate, shared.
+  //
+  // AND THE NON-CODE CASE MAY NOT REPLAY THE HOLD (run 4f28c9e0 round 4 — the review the
+  // watchdog reaped). Fabricating the recorded 'advisory-only' result here was a
+  // LIVELOCK: `runReviewRound` returns a paid review untouched — no CI probe, no
+  // reviewer — and the fix loop exits on 'advisory-only', so a rerun on the same head
+  // replayed the terminal hold forever and could never observe a red that had become
+  // green. Those findings are stale MEASUREMENTS (a CI red that predates the branch),
+  // not review debt, so they are re-measured: fall through to the ordinary round-1
+  // review below — CI re-probed, panel re-run, checkpoint re-recorded. That costs one
+  // panel, exactly what a fresh run at this head would pay, and the advisory economy is
+  // intact: the loop still exits on 'advisory-only', so no Forge fix round runs unless
+  // the FRESH round states code work.
+  const resumeHasCodeWork = resumeMode === 'fix' && resumeFindingsList.some(isCodeWorkFinding)
+  if (resumeHasCodeWork) {
     log(`trident-v2 resume: recorded REQUEST_CHANGES applies to ${recordedResumeHead} (head unchanged) — skipping the re-review, straight to the fix round with ${resumeFindingsList.length} recorded finding(s)`)
-    const paidReview = { verdict: 'REQUEST_CHANGES', findings: resumeFindingsList, blockKind: 'code' }
+    const paidReview = {
+      verdict: 'REQUEST_CHANGES',
+      findings: resumeFindingsList,
+      blockKind: 'code',
+    }
     synthesis = await runReviewRound(diffFile, round, pr, paidReview)
     finalVerdict = 'REQUEST_CHANGES'
   } else {
+    if (resumeMode === 'fix') {
+      log(`trident-v2 resume: recorded REQUEST_CHANGES at ${recordedResumeHead} (head unchanged) carries no code work — re-probing CI and re-reviewing instead of replaying the hold`)
+    }
     // THE GATE RIDES ON TOP OF THE PANEL'S VERDICT — see `withSuiteBlocker`. The panel
     // is still worth its cost (its findings are the next round's input); what it may not
     // do is APPROVE a commit whose required suite was never proven. Wrapped around the
@@ -6506,10 +7138,17 @@ ${task}${reflectionGuidance}`,
   // no code finding to act on, so another round would edit code to "fix" a
   // timeout and then pay for four more reviews to say the same thing. Stop and
   // report honestly; the operator fixes the lane and re-runs.
+  // AN ADVISORY-ONLY BLOCK EXITS FOR THE SAME REASON AND SAYS SOMETHING DIFFERENT.
+  // There is no code finding to act on there either — the panel ran, and everything it
+  // returned is a finding this file has already declared non-blocking — so another round
+  // could only re-derive that and pay five seats to say it again. The two kinds are kept
+  // apart because the OUTER loop reads them differently: 'infra-only' asserts no seat ever
+  // judged the code, which on this arm would be false.
   while (
     finalVerdict === 'REQUEST_CHANGES' &&
     round < maxRounds &&
-    synthesis.blockKind !== 'infra-only'
+    synthesis.blockKind !== 'infra-only' &&
+    synthesis.blockKind !== 'advisory-only'
   ) {
     round++
     log(`trident-v2 fix loop: round=${round}/${maxRounds} — re-Forge against findings`)
@@ -6723,6 +7362,9 @@ ${task}${reflectionGuidance}`,
     // nothing about the diff. Reporting that as an ordinary REQUEST_CHANGES is what
     // made 2026-08-08's summaries misleading: three runs read as code rejections
     // when at least two were lane failures.
+    // 'advisory-only' means the OPPOSITE of 'infra-only' about the panel: it ran, it
+    // answered, and nothing it said is actionable — so the loop exits without a fix round
+    // and the outer loop still records a real REQUEST_CHANGES.
     // A round whose work never reached the branch is its OWN kind of block, and
     // it must not read as a code rejection: the code was not re-judged at all.
     // A round that COMMITTED but produced no diff is 'round-lost' too: in both

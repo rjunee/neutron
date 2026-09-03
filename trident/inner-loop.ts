@@ -227,11 +227,14 @@ export interface InnerResult {
    */
   pr_merged: boolean
   /**
-   * WHY the run is blocked, verbatim from the workflow ('none'|'code'|'infra-only'|'round-lost').
+   * WHY the run is blocked, verbatim from the workflow
+   * ('none'|'code'|'infra-only'|'advisory-only'|'round-lost').
+   * 'advisory-only' means the panel DID judge the code and found nothing actionable: the fix
+   * loop exits without re-Forging, but a reviewer spoke, so it is a real REQUEST_CHANGES.
    * 'infra-only' means NO review seat ever judged the code — the stop says nothing about the
    * diff. null on legacy rows / any other value.
    */
-  block_kind: 'none' | 'code' | 'infra-only' | 'round-lost' | null
+  block_kind: 'none' | 'code' | 'infra-only' | 'advisory-only' | 'round-lost' | null
   /**
    * The MEASURED cause of a terminal stop — the probe's/lane's/thrown error's own words,
    * already redacted by the workflow. null when absent/empty/not a string; the reason then
@@ -782,13 +785,16 @@ export function parseInnerResult(raw: string | null | undefined): InnerResult | 
     publish_head: typeof p.publishHead === 'string' && /^[0-9a-fA-F]{7,40}$/.test(p.publishHead.trim())
       ? p.publishHead.trim()
       : null,
-    // WHY IT STOPPED — parsed FAIL-CLOSED: only the four strings the workflow writes
+    // WHY IT STOPPED — parsed FAIL-CLOSED: only the five strings the workflow writes
     // decode, anything else is null. The orchestrator keys a specific failure reason off
-    // 'infra-only', so an unrecognised value must never be read as one.
+    // 'infra-only', so an unrecognised value must never be read as one — and in particular
+    // 'advisory-only' decodes as ITSELF rather than falling to null, because null and
+    // 'infra-only' both read as "no reviewer spoke" downstream and that is the untrue half.
     block_kind:
       p.blockKind === 'none' ||
       p.blockKind === 'code' ||
       p.blockKind === 'infra-only' ||
+      p.blockKind === 'advisory-only' ||
       p.blockKind === 'round-lost'
         ? p.blockKind
         : null,

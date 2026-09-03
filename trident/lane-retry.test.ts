@@ -90,9 +90,18 @@ function extractConst(name: string): string {
 // predicate, and `retryDeferredPeers` closes over it. Restating it here would let the
 // retry and the completeness gate drift apart with this file still green — the very
 // divergence the const exists to close.
+// `isNonBlockingFinding` is the SINGLE predicate both gates now ask, so it comes along
+// for exactly the reason the severity set does: `classifyBlock` delegates to it, and a
+// local re-implementation would keep this file green through a change to the real one.
 const PRELUDE = [
   extractConst('LANE_FINDING_KIND'),
   extractConst('NON_BLOCKING_SEVERITIES'),
+  extractConst('ADVISORY_FINDING_KEY'),
+  extractFn('isNonBlockingFinding'),
+  // And the code-work predicate itself: `classifyBlock` delegates the WHOLE question
+  // (lane exclusion included) to it, and the resume seam asks the same function, so
+  // this file must load the shipped one rather than a local twin.
+  extractFn('isCodeWorkFinding'),
   extractConst('usableStatus'),
   extractConst('CORE_SEAT_STATUS_KEY'),
 ].join('\n')
@@ -126,6 +135,8 @@ const enforceCrossModelGate = load<GateFn>('enforceCrossModelGate')
 // The gate's half of the shared "did this seat answer" predicate, loaded from the same
 // source as the retry so the two can be asserted to AGREE rather than assumed to.
 const hasUsableVerdict = load<(v: unknown) => boolean>('hasUsableVerdict')
+// The one code-work predicate BOTH `classifyBlock` and the resume seam ask.
+const isCodeWorkFinding = load<(f: unknown) => boolean>('isCodeWorkFinding')
 
 const SLOTS = [
   { name: 'codex', slot: 0, statusKey: 'codexStatus' },
@@ -333,10 +344,69 @@ describe('the fix loop honours the classification', () => {
     // isolation. It asserts the wiring only — the behaviour of the classifier
     // itself is covered above.
     expect(SRC).toContain("synthesis.blockKind !== 'infra-only'")
+    // ...and the advisory-only exit, which stops the loop for the same reason while
+    // saying something DIFFERENT about the panel: it ran, and it had nothing actionable.
+    expect(SRC).toContain("synthesis.blockKind !== 'advisory-only'")
     // And the terminal result must SURFACE it, or an operator reads a lane failure
     // as a code rejection — which is exactly what made the 2026-08-08 run
     // summaries misleading.
     expect(SRC).toContain('blockKind:')
+  })
+
+  /**
+   * THE RESUME SEAM IS THE OTHER HALF OF THE SAME ECONOMY.
+   *
+   * A resume off a recorded REQUEST_CHANGES used to assert `blockKind: 'code'` over the
+   * recorded findings unconditionally — so a checkpoint written by an advisory-only round
+   * (nits, or a red that predates the branch) bought the full fix round at resume that the
+   * round itself had already refused to buy. The shortcut is now RESERVED for recorded
+   * code work, gated by the classifier's own predicate so the two cannot drift — and the
+   * non-code case may not fabricate the recorded 'advisory-only' result either: that
+   * replayed the terminal hold forever (`runReviewRound` returns a paid review untouched
+   * and the loop exits on 'advisory-only'), so a red that became green could never be
+   * observed. It re-reviews instead. This is a WIRING pin only; the behaviour is
+   * EXECUTED against the real workflow body in inner-workflow-resume.test.ts
+   * ("ONLY advisory findings → RE-REVIEW").
+   */
+  test('a resume on non-actionable findings does not assert code work — and does not replay the hold', () => {
+    const at = SRC.indexOf('const paidReview = {')
+    expect(at).toBeGreaterThan(-1)
+    const block = SRC.slice(at, SRC.indexOf('\n  }', at))
+    // The paid shortcut asserts code work ONLY — never a fabricated advisory-only result.
+    expect(block).toContain("blockKind: 'code'")
+    expect(block).not.toContain('advisory-only')
+    // The gate is the classifier's own predicate — the WHOLE one, by reference. Asking
+    // `isNonBlockingFinding` here instead was the severity half only, so a recorded LANE
+    // blocker (which `classifyBlock` drops FIRST, by `kind`) still asserted code work and
+    // bought a Forge round over a dead seat. Naming the shared function is what makes the
+    // parity a fact; the behaviour is EXECUTED in inner-workflow-resume.test.ts
+    // ("recorded LANE blocker … NO Forge round").
+    const derived = SRC.slice(SRC.indexOf('const resumeHasCodeWork ='), at)
+    expect(derived).toContain('isCodeWorkFinding')
+    expect(derived).toContain("resumeMode === 'fix'")
+  })
+
+  /**
+   * ONE PREDICATE, ASSERTED AS ONE FUNCTION. The two sites that ask "is there code work
+   * here?" — the classifier and the resume seam — must call the SAME function, not two
+   * spellings that happen to agree today.
+   */
+  test('the classifier and the resume seam share the one code-work predicate', () => {
+    // The classifier delegates the whole question, lane exclusion included…
+    expect(SRC).toContain('findings.filter(isCodeWorkFinding)')
+    // …and the predicate itself is the only place either exclusion is spelled out.
+    const body = SRC.slice(SRC.indexOf('function isCodeWorkFinding('))
+    const decl = body.slice(0, body.indexOf('\n}'))
+    expect(decl).toContain('f.kind === LANE_FINDING_KIND')
+    expect(decl).toContain('isNonBlockingFinding(f)')
+    // A lane blocker is not code work, and a nit is not either — executed, not grepped.
+    expect(isCodeWorkFinding({ severity: 'blocker', kind: 'lane', title: 'SEAT DOWN' })).toBe(false)
+    expect(isCodeWorkFinding({ severity: 'nit', title: 'name it better' })).toBe(false)
+    expect(isCodeWorkFinding({ severity: 'major', advisory: true, title: 'pre-existing red' })).toBe(false)
+    // …and everything else still is, including a malformed finding (fail-closed).
+    expect(isCodeWorkFinding({ severity: 'blocker', title: 'null deref' })).toBe(true)
+    expect(isCodeWorkFinding({ severity: 'lane', title: 'severity is not the field' })).toBe(true)
+    expect(isCodeWorkFinding(null)).toBe(true)
   })
 
   test('the retry runs BEFORE the verdicts are read', () => {

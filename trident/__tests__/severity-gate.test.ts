@@ -67,6 +67,17 @@ function severitySetDecl(): string {
   return SRC.slice(at + 1, SRC.indexOf('\n', at + 1))
 }
 
+/**
+ * The DECLARATION line of the advisory-marker key, anchored at column 0 for exactly the
+ * reason `severitySetDecl` is: the docblock above it names the const, so an unanchored
+ * match would extract prose and the sandbox would evaluate a comment.
+ */
+function advisoryKeyDecl(): string {
+  const at = SRC.indexOf('\nconst ADVISORY_FINDING_KEY')
+  if (at === -1) throw new Error('ADVISORY_FINDING_KEY is missing from inner-workflow.mjs')
+  return SRC.slice(at + 1, SRC.indexOf('\n', at + 1))
+}
+
 /** The whole comment block above the severity set — the thing #184's false claim hid in. */
 function gateDocblock(): string {
   const at = SRC.indexOf('// A NIT MAY NOT COST A ROUND.')
@@ -152,7 +163,7 @@ function loadReal(): {
 } {
   // The severity set is a const the function closes over, so it must come along.
   const factory = new Function(
-    `${severitySetDecl()}\n${grab('enforceSeverityGate')}\nreturn { enforceSeverityGate }`,
+    `${severitySetDecl()}\n${advisoryKeyDecl()}\n${grab('isNonBlockingFinding')}\n${grab('enforceSeverityGate')}\nreturn { enforceSeverityGate }`,
   ) as () => ReturnType<typeof loadReal>
   return factory()
 }

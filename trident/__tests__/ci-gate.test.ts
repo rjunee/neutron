@@ -44,8 +44,13 @@ function grab(name: string): string {
 
 function loadReal(): {
   classifyCi: (probe: unknown) => CiResult
-  ciBlockerFindings: (ci: CiResult) => Array<{ severity: string; title: string; evidence: string }>
+  ciBlockerFindings: (
+    ci: CiResult,
+    preexisting?: Set<string> | null,
+  ) => Array<{ severity: string; title: string; evidence: string; advisory?: unknown }>
   ciDeferredPeer: (ci: CiResult) => { name: string; title: string; evidence: string }
+  ciFindingsBlock: (findings: unknown[]) => boolean
+  ciPreexistingNames: (base: unknown) => Set<string>
 } {
   // The state sets are consts the functions close over, so they come along.
   const consts = SRC.slice(
@@ -60,9 +65,39 @@ function loadReal(): {
   if (!consts.includes('function probeCause(') || !consts.includes('function redactProbeText(')) {
     throw new Error('probeCause/redactProbeText are no longer inside the classifyCi const slice')
   }
+  // `ciFindingsBlock` delegates to `isNonBlockingFinding`, the ONE predicate the severity
+  // gate and the full-suite gate also ask. Lifted, not re-declared, for the same reason
+  // every other loader in this repo lifts it: a local copy stays green through a change
+  // to the real one.
+  const advisoryKey = SRC.split('\n').find((l) => l.startsWith('const ADVISORY_FINDING_KEY ='))
+  const severitySet = SRC.split('\n').find((l) => l.startsWith('const NON_BLOCKING_SEVERITIES ='))
+  if (advisoryKey === undefined || severitySet === undefined) {
+    throw new Error('ADVISORY_FINDING_KEY / NON_BLOCKING_SEVERITIES are no longer top-level consts')
+  }
   const factory = new Function(
-    `${consts}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer }`,
+    `${consts}\n${severitySet}\n${advisoryKey}\n${grab('isNonBlockingFinding')}\n${grab('classifyCi')}\n${grab('ciBlockerFindings')}\n${grab('ciFindingsBlock')}\n${grab('ciPreexistingNames')}\n${grab('ciDeferredPeer')}\nreturn { classifyCi, ciBlockerFindings, ciDeferredPeer, ciFindingsBlock, ciPreexistingNames }`,
   ) as () => ReturnType<typeof loadReal>
+  return factory()
+}
+
+/**
+ * The base half of the gate: the section splitter and the merge, loaded off the SAME
+ * source as the parser they feed. `ciPreexistingNames` comes along because the only
+ * question worth asking of a merged base is which reds it excuses.
+ */
+function loadBaseProbe(): {
+  classifyCi: (probe: unknown) => CiResult & { cause?: string }
+  ciSection: (probe: unknown, name: string) => { raw: string; exit_code: number }
+  mergeBaseCi: (runs: CiResult, statuses: CiResult) => CiResult
+  ciPreexistingNames: (base: unknown) => Set<string>
+} {
+  const consts = SRC.slice(
+    SRC.indexOf('const CI_FAILED_STATES'),
+    SRC.indexOf('/**', SRC.indexOf('const CI_PENDING_STATES')),
+  )
+  const factory = new Function(
+    `${consts}\n${grab('classifyCi')}\n${grab('ciSection')}\n${grab('mergeBaseCi')}\n${grab('ciPreexistingNames')}\nreturn { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames }`,
+  ) as () => ReturnType<typeof loadBaseProbe>
   return factory()
 }
 
@@ -257,11 +292,33 @@ describe('the gate is WIRED, not merely written', () => {
     // UNTOUCHED when there are no deferred peers, so attaching CI blockers without
     // setting the verdict would have produced an APPROVE carrying a "CI FAILING"
     // finding — merging a red build, the exact bug the gate exists to prevent.
+    //
+    // The forcing is now CONDITIONAL on `ciFindingsBlock`, which is the pre-existing-red
+    // hatch. That is a narrower gate, so the assertion is correspondingly narrower AND
+    // pins the condition itself: a `withCi` that forced unconditionally would pass the
+    // old check, and so would one that never forced at all.
     const at = code.indexOf('const withCi =')
     expect(at).toBeGreaterThan(-1)
     const block = code.slice(at, code.indexOf('const peers =', at))
     expect(block.includes("verdict: 'REQUEST_CHANGES'")).toBe(true)
-    expect(block.includes('ciBlockerFindings(ci)')).toBe(true)
+    expect(block.includes('ciFindingsBlock(ciFindings)')).toBe(true)
+    // The findings are attached on EVERY arm a red can take — an unforced red that
+    // dropped its findings would tell no one anything, and the dead-seat arm carries them
+    // for `synthesisOrInfraBlock` to keep. Three arms, three attachments.
+    expect(block.split('...ciFindings').length - 1).toBe(3)
+  })
+
+  test('the base is measured before any red is excused, and only when the PR is red', () => {
+    // `ciPreexistingNames` is the ONLY thing that can turn a blocker advisory, and it is
+    // fail-closed on every non-red base — so the wiring to pin is that its input comes
+    // from a real probe rather than from a default.
+    expect(code.includes("const ciBase = ci.status === 'red' ? await probeCiBase(round) : null")).toBe(
+      true,
+    )
+    expect(code.includes('ciPreexistingNames(ciBase)')).toBe(true)
+    const at = code.indexOf('async function probeCiBase(')
+    expect(at).toBeGreaterThan(-1)
+    expect(code.slice(at, code.indexOf('\n}', at)).includes('if (!isPr)')).toBe(true)
   })
 
   test('an unusable CI answer joins the EXISTING peer list — one gate, peers as data', () => {
@@ -276,7 +333,7 @@ describe('the gate is WIRED, not merely written', () => {
   test('classifyBlock reads the peers INCLUDING the CI one', () => {
     // Otherwise a CI deferral would not classify as infra-only and the loop would
     // re-Forge against a pending check.
-    expect(code.includes('classifyBlock(gated, peers)')).toBe(true)
+    expect(code.includes('classifyBlock(gated, peers')).toBe(true)
   })
 
   test('LOCAL mode never spends an agent on a PR that does not exist', () => {
@@ -1844,8 +1901,15 @@ describe('the deferred-CI peer quotes the probe', () => {
 describe('infraTerminalCause — the LANE finding is the measured cause', () => {
   function loadTerminalCause(source = SRC): (synthesis: unknown) => string {
     const kind = source.slice(source.indexOf('const LANE_FINDING_KIND'), source.indexOf('\n', source.indexOf('const LANE_FINDING_KIND')))
+    // `infraTerminalCause` asks the ONE non-blocking predicate too — a finding this file
+    // has already declared non-blocking may not be the measured cause of an infra stop.
+    const advisoryKey = source.split('\n').find((l) => l.startsWith('const ADVISORY_FINDING_KEY ='))
+    const severitySet = source.split('\n').find((l) => l.startsWith('const NON_BLOCKING_SEVERITIES ='))
+    if (advisoryKey === undefined || severitySet === undefined) {
+      throw new Error('ADVISORY_FINDING_KEY / NON_BLOCKING_SEVERITIES are no longer top-level consts')
+    }
     const factory = new Function(
-      `${kind}\n${grab('redactProbeText')}\n${grab('infraTerminalCause')}\nreturn infraTerminalCause`,
+      `${kind}\n${severitySet}\n${advisoryKey}\n${grab('isNonBlockingFinding')}\n${grab('redactProbeText')}\n${grab('infraTerminalCause')}\nreturn infraTerminalCause`,
     ) as () => (synthesis: unknown) => string
     return factory()
   }
@@ -1879,6 +1943,32 @@ describe('infraTerminalCause — the LANE finding is the measured cause', () => 
     expect(infraTerminalCause({})).toBe('')
     expect(infraTerminalCause(null)).toBe('')
     expect(infraTerminalCause({ findings: [{ severity: 'blocker' }, null, { title: '' }] })).toBe('')
+  })
+
+  // AN ADVISORY IS NOT AN INFRA CAUSE. `classifyInnerFailure` (trident/orchestrator.ts)
+  // reads blockKind 'infra-only' PLUS a non-empty cause as "infrastructure" and
+  // auto-retries the WHOLE run three times, resuming into the same fix round. So an
+  // advisory-only stop that named the advisory as its cause converted "there is nothing
+  // to act on, stop" into three more runs of exactly that. Measured '' → 'genuine'.
+  test('a stop whose only findings are non-blocking measures NO cause', () => {
+    const infraTerminalCause = loadTerminalCause()
+    expect(
+      infraTerminalCause({
+        findings: [
+          { severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck' },
+          { severity: 'nit', title: 'spacing' },
+        ],
+      }),
+    ).toBe('')
+    // ...and a LANE finding among them is still the cause, because a lane really did fail.
+    expect(
+      infraTerminalCause({
+        findings: [
+          { severity: 'major', advisory: true, title: 'CI FAILING (pre-existing): typecheck' },
+          { severity: 'blocker', kind: 'lane', title: 'REVIEW DEFERRED — no seat ran' },
+        ],
+      }),
+    ).toBe('REVIEW DEFERRED — no seat ran')
   })
 
   test('a credential in a finding title is redacted, and the line is bounded', () => {
@@ -2578,5 +2668,574 @@ describe('truncation is unreadable, not short', () => {
 
   test('the cost of that safety is written down where the guard is', () => {
     expect(SRC).toContain('SAY WHAT THAT COSTS, BECAUSE IT IS NOT FREE AND IT IS INVISIBLE')
+  })
+})
+
+
+// A RED THAT PREDATES THE BRANCH IS NOT A CODE BLOCKER.
+//
+// Owner-reported, and the exact sibling of the full-suite `failed-preexisting` hatch: a
+// check that is already failing on the base costs this branch a full fix round, in which
+// Forge edits code to repair a red its diff did not cause, and then a full panel is paid
+// to re-derive that it was never this change.
+//
+// The hatch is earned by MEASUREMENT (a probe of the base), never by a claim, and it
+// excuses a check BY NAME. Everything that is not a base we could read, and read as red,
+// fails CLOSED.
+describe('the pre-existing CI hatch — earned by measuring the base, by name', () => {
+  const red = (...names: string[]): CiResult =>
+    ({
+      status: 'red',
+      failing: names.map((name) => ({ name, state: 'FAILURE', link: null })),
+    }) as unknown as CiResult
+
+  test('a check red ONLY on the branch is a blocker and forces the round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings(red('ci'), new Set(['some-other-check']))
+    expect(f).toHaveLength(1)
+    expect(f[0]?.severity).toBe('blocker')
+    expect(f[0]?.advisory).toBeUndefined()
+    expect(String(f[0]?.title)).toBe('CI FAILING: ci')
+    expect(ciFindingsBlock(f)).toBe(true)
+  })
+
+  test('a check ALSO red at the base is advisory and does NOT force the round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings(red('ci'), new Set(['ci']))
+    expect(f).toHaveLength(1)
+    expect(f[0]?.advisory).toBe(true)
+    expect(f[0]?.severity).toBe('major')
+    expect(String(f[0]?.title)).toBe('CI RED FOR PRE-EXISTING REASONS: ci')
+    expect(ciFindingsBlock(f)).toBe(false)
+    // It is SURFACED, not suppressed — the reviewers still read it, and are told when to
+    // overrule it.
+    expect(String(f[0]?.evidence)).toContain('raise it as a BLOCKER')
+  })
+
+  test('ONE new red among pre-existing ones still forces the round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings(red('ci', 'CodeQL', 'purity'), new Set(['ci', 'purity']))
+    expect(f.filter((x) => x.advisory === true)).toHaveLength(2)
+    expect(f.filter((x) => x.severity === 'blocker')).toHaveLength(1)
+    expect(ciFindingsBlock(f)).toBe(true)
+  })
+
+  test('the evidence NAMES the base it was measured against', () => {
+    const { ciBlockerFindings } = loadReal()
+    const ci = { ...red('ci'), baseRef: 'deadbee' } as unknown as CiResult
+    expect(String(ciBlockerFindings(ci, new Set(['ci']))[0]?.evidence)).toContain('deadbee')
+  })
+
+  // FAIL-CLOSED, every direction. A base we could not read, one whose own checks are
+  // still running, one with no checks, and a green one all excuse NOTHING.
+  test('only a base measured RED can excuse anything', () => {
+    const { ciPreexistingNames } = loadReal()
+    for (const status of ['unknown', 'pending', 'none', 'green']) {
+      expect(ciPreexistingNames({ status, failing: [{ name: 'ci' }] }).size).toBe(0)
+    }
+    expect(ciPreexistingNames(null).size).toBe(0)
+    expect(ciPreexistingNames(undefined).size).toBe(0)
+    expect(ciPreexistingNames({ status: 'red' }).size).toBe(0)
+    // ...and the positive control, or the four above prove only that the function
+    // returns an empty set.
+    expect([...ciPreexistingNames({ status: 'red', failing: [{ name: 'ci' }] })]).toEqual(['ci'])
+  })
+
+  test('no base measurement at all leaves every red a blocker', () => {
+    const { ciBlockerFindings, ciFindingsBlock, ciPreexistingNames } = loadReal()
+    // This is the call shape the wiring uses when the base probe seat died.
+    const f = ciBlockerFindings(red('ci'), ciPreexistingNames(null))
+    expect(f[0]?.severity).toBe('blocker')
+    expect(ciFindingsBlock(f)).toBe(true)
+    // ...and the legacy one-argument call, which must not silently forgive anything.
+    expect(ciBlockerFindings(red('ci'))[0]?.severity).toBe('blocker')
+  })
+
+  test('a green PR produces no findings and nothing to force', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const f = ciBlockerFindings({ status: 'green', failing: [] } as unknown as CiResult, new Set(['ci']))
+    expect(f).toEqual([])
+    expect(ciFindingsBlock(f)).toBe(false)
+  })
+
+  // The base probe reuses `classifyCi`, so the check-runs payload has to parse through the
+  // SAME parser as `gh pr checks`. The `--jq` in `probeCiBase` reshapes it to {name,state}.
+  test('the base probe reshapes check-runs into the shape classifyCi already parses', () => {
+    const { classifyCi } = loadReal()
+    const reshaped = [
+      { name: 'ci', state: 'failure' },
+      { name: 'CodeQL', state: 'success' },
+      { name: 'slow', state: 'in_progress' },
+    ]
+    expect(classifyCi(probe(reshaped)).status).toBe('red')
+    expect(classifyCi(probe(reshaped)).failing.map((f) => f.name)).toEqual(['ci'])
+    // A base whose own checks have not finished is `pending`, which excuses nothing.
+    expect(classifyCi(probe([{ name: 'slow', state: 'queued' }])).status).toBe('pending')
+    expect(SRC).toContain('(.conclusion // .status)')
+  })
+
+  // A NAMELESS ROW IS NOT A NAME. `classifyCi` writes the same placeholder for any row
+  // whose name it could not read, on the PR side AND at the base — so matching on it would
+  // let one malformed base row excuse a different malformed PR row, which is the excuse
+  // hole with the fewest moving parts of all.
+  test('the unnamed-check placeholder can never excuse anything', () => {
+    const { classifyCi, ciBlockerFindings, ciFindingsBlock, ciPreexistingNames } = loadReal()
+    const base = classifyCi(probe([{ state: 'failure' }, { name: 'ci', state: 'failure' }]))
+    expect(base.failing.map((f) => f.name)).toEqual(['unnamed check', 'ci'])
+    // The named red is still excusable; the nameless one is not in the set at all.
+    expect([...ciPreexistingNames(base)]).toEqual(['ci'])
+    const pr = classifyCi(probe([{ state: 'failure' }]))
+    const f = ciBlockerFindings(pr, ciPreexistingNames(base))
+    expect(f[0]?.severity).toBe('blocker')
+    expect(ciFindingsBlock(f)).toBe(true)
+  })
+
+  // The ref reaches a BASH command. `baseBranch` is a workflow argument and
+  // `git check-ref-format --branch 'main$(id)'` accepts that name, so a bare
+  // interpolation is command substitution waiting for a legal branch. The sibling
+  // `probeRequiredChecks` already encodes AND quotes; this is the same file's own bar.
+  test('the base probe encodes and quotes the ref it interpolates into the URL', () => {
+    const at = SRC.indexOf('async function probeCiBase(')
+    expect(at).toBeGreaterThan(-1)
+    const body = SRC.slice(at, SRC.indexOf('\n}', at))
+    expect(body).toContain('encodeRefPath(ref)')
+    expect(body).toContain('shSingleQuote(`repos/{owner}/{repo}/commits/${encodedRef}/check-runs')
+    // ...and the bare form is GONE, not merely accompanied by the safe one.
+    expect(body).not.toContain('repos/{owner}/{repo}/commits/${ref}')
+  })
+
+  // A REF IS A PATH. Whole-string `encodeURIComponent` percent-encodes the separator, so
+  // `release/1.x` becomes `release%2F1.x` — a ref GitHub's commits endpoint does not
+  // resolve. The probe then answers 'unknown', which excuses nothing (safe) but spends a
+  // seat every red round to learn nothing (dead). Per SEGMENT keeps the path and still
+  // leaves no shell metacharacter behind.
+  test('a slash-bearing base branch survives encoding, and injection still does not', () => {
+    const factory = new Function(`${grab('encodeRefPath')}\nreturn encodeRefPath`) as () => (r: string) => string
+    const encodeRefPath = factory()
+    expect(encodeRefPath('release/1.x')).toBe('release/1.x')
+    expect(encodeRefPath('main')).toBe('main')
+    expect(encodeRefPath('deadbeefdeadbeefdeadbeefdeadbeefdeadbeef')).toBe(
+      'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef',
+    )
+    // The expansion characters are gone; `'` is not encoded by `encodeURIComponent` and
+    // does not need to be, because the whole URL still goes through `shSingleQuote` (the
+    // sibling test above pins that) — which is what actually closes the injection.
+    for (const evil of ['main$(id)', 'main`id`', 'a b', 'a/$(id)']) {
+      const out = encodeRefPath(evil)
+      for (const ch of ['$', '`', ' ']) expect(out).not.toContain(ch)
+    }
+  })
+
+  // THE PR SIDE READS BOTH KINDS OF CI, so the base must too. `gh pr checks` reports check
+  // runs AND classic commit statuses; a base probe that asked only for /check-runs could
+  // never match a status-context red, so the hatch was silently inert for every repository
+  // whose CI is a status — every such red charged as new, every round.
+  test('the base probe reads commit STATUSES as well as check runs', () => {
+    const at = SRC.indexOf('async function probeCiBase(')
+    const body = SRC.slice(at, SRC.indexOf('\n}', at))
+    expect(body).toContain('/check-runs?per_page=100')
+    expect(body).toContain('/status?per_page=100')
+    expect(body).toContain('.statuses[] | {name: .context, state: .state}')
+    expect(body).toContain('___SECTION=RUNS')
+    expect(body).toContain('___SECTION=STATUSES')
+  })
+
+  test('the two sections are parsed separately and merged, and a status red is excusable', () => {
+    const { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames } = loadBaseProbe()
+    const raw =
+      '___SECTION=RUNS\n[{"name":"CodeQL","state":"success"}]\n' +
+      '___SECTION=STATUSES\n[{"name":"buildkite/build","state":"failure"}]\n___EXIT=0'
+    const reply = { raw, exit_code: 0 }
+    // Both arrays in ONE string would parse as neither — `classifyCi` reads first `[` to
+    // last `]`. The sections keep them apart.
+    expect(classifyCi(reply).status).toBe('unknown')
+    const merged = mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES')))
+    expect(merged.status).toBe('red')
+    expect([...ciPreexistingNames(merged)]).toEqual(['buildkite/build'])
+  })
+
+  test('half a base is not a base: an unreadable half makes the whole measurement unknown', () => {
+    const { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames } = loadBaseProbe()
+    const raw = '___SECTION=RUNS\n[{"name":"ci","state":"failure"}]\n___SECTION=STATUSES\ngh: HTTP 403\n___EXIT=0'
+    const reply = { raw, exit_code: 0 }
+    const merged = mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES')))
+    expect(merged.status).toBe('unknown')
+    // ...so the red it DID read excuses nothing.
+    expect(ciPreexistingNames(merged).size).toBe(0)
+  })
+
+  test('a dead base-probe seat still reads as unknown through the sections', () => {
+    const { classifyCi, ciSection, mergeBaseCi } = loadBaseProbe()
+    expect(mergeBaseCi(classifyCi(ciSection(null, 'RUNS')), classifyCi(ciSection(null, 'STATUSES'))).status).toBe(
+      'unknown',
+    )
+  })
+
+  test('two clean halves are clean, and a pending half is pending', () => {
+    const { classifyCi, ciSection, mergeBaseCi } = loadBaseProbe()
+    const of = (runs: string, statuses: string) => {
+      const reply = { raw: `___SECTION=RUNS\n${runs}\n___SECTION=STATUSES\n${statuses}\n___EXIT=0`, exit_code: 0 }
+      return mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES'))).status
+    }
+    expect(of('[]', '[]')).toBe('none')
+    expect(of('[{"name":"ci","state":"success"}]', '[]')).toBe('green')
+    expect(of('[{"name":"ci","state":"queued"}]', '[]')).toBe('pending')
+    expect(of('[{"name":"ci","state":"success"}]', '[{"name":"bk","state":"pending"}]')).toBe('pending')
+  })
+
+  // THE HATCH'S SAFETY NET HAS TO BE READABLE BY SOMEONE. The advisory tells its reader to
+  // call a same-named-but-different failure a blocker in their own words — which was
+  // addressed to nobody while these findings were built after every prompt. The synthesis
+  // seat is the one that sets the verdict, so it is the seat that must see them.
+  test('the CI findings are built BEFORE the synthesis prompt, and are IN it', () => {
+    const promptAt = SRC.indexOf('${kimiPanelLine}${suiteFindingsPrompt}')
+    expect(promptAt).toBeGreaterThan(-1)
+    expect(SRC.slice(promptAt, SRC.indexOf('`,', promptAt))).toContain('${ciFindingsPrompt}')
+    const builtAt = SRC.indexOf('const ciFindingsPrompt =')
+    expect(builtAt).toBeGreaterThan(-1)
+    expect(builtAt).toBeLessThan(promptAt)
+    expect(SRC.indexOf('const ciFindings =')).toBeLessThan(builtAt)
+    // The prompt carries the finding's own evidence, not a summary of it — the
+    // "raise it as a BLOCKER" sentence is the whole point of showing it.
+    const block = SRC.slice(builtAt, SRC.indexOf('\n\n', builtAt))
+    expect(block).toContain('finding?.evidence')
+    expect(block).toContain('NAME ONLY')
+  })
+
+  // The old code spread a possibly-null `severityGated`, which silently dropped the CI
+  // advisories from the report; the code after THAT spread `?? {}` and then set a verdict
+  // over it, which is worse — a verdict-carrying object is one `synthesisOrInfraBlock`
+  // hands straight back, so the dead seat stopped being reported at all. Both are stated
+  // here as behaviour, on the arm as it is actually written (see the executed tests in
+  // 'a fully excused CI red still holds the merge').
+  test('a dead synthesis seat keeps its CI findings and gains no verdict', () => {
+    const { ciBlockerFindings } = loadReal()
+    const findings = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['shard 3/8']),
+    )
+    const at = SRC.indexOf('const withCi =')
+    const out = (
+      new Function(
+        'ci',
+        'ciFindings',
+        'ciFindingsBlock',
+        'severityGated',
+        `${SRC.slice(at, SRC.indexOf('const peers =', at))}\n  return withCi`,
+      ) as (
+        ci: unknown,
+        f: unknown[],
+        block: (f: unknown[]) => boolean,
+        s: unknown,
+      ) => Record<string, unknown>
+    )({ status: 'red' }, findings, loadReal().ciFindingsBlock, null)
+    expect((out.findings as unknown[]).length).toBe(1)
+    expect(Object.hasOwn(out, 'verdict')).toBe(false)
+  })
+})
+
+
+/**
+ * THE SECTION READER'S BOUNDARIES COME FROM LINES THE PROBE WROTE.
+ *
+ * `ciSection` used to take the FIRST occurrence of `___SECTION=<name>` anywhere in the
+ * reply, including inside a line that merely CONTAINS it. The sibling reader
+ * (`probeSections`) has required a whole-line, last-occurrence match since the day a
+ * ruleset context called `___SECTION=BRANCH` moved a boundary past the real payload.
+ *
+ * The failure direction is shut either way — a section cut at an echo holds no JSON, and
+ * `classifyCi` reads that as 'unknown', which excuses nothing. What it does instead is
+ * make the entire pre-existing hatch INERT, silently, on every round of every repository
+ * whose probe seat echoes the command it ran. A gate nobody can tell has stopped working
+ * is the expensive kind.
+ */
+describe('ciSection anchors to whole marker lines, not to the first mention', () => {
+  const echoed = (runs: string, statuses: string) =>
+    // The seat transcribes the command FIRST (both markers, mid-line), then the output.
+    '+ cd /repo && echo "___SECTION=RUNS"; gh api ... ; echo "___SECTION=STATUSES"; gh api ...\n' +
+    `___SECTION=RUNS\n${runs}\n___SECTION=STATUSES\n${statuses}\n___EXIT=0`
+
+  test('an echoed command transcript does not cut the sections short', () => {
+    const { classifyCi, ciSection, mergeBaseCi, ciPreexistingNames } = loadBaseProbe()
+    const reply = {
+      raw: echoed('[{"name":"shard 3/8","state":"failure"}]', '[{"name":"buildkite/build","state":"failure"}]'),
+      exit_code: 0,
+    }
+    // BEFORE: both sections were cut at the echo line and came back empty -> 'unknown'.
+    const merged = mergeBaseCi(classifyCi(ciSection(reply, 'RUNS')), classifyCi(ciSection(reply, 'STATUSES')))
+    expect(merged.status).toBe('red')
+    expect([...ciPreexistingNames(merged)].sort()).toEqual(['buildkite/build', 'shard 3/8'])
+  })
+
+  test('a check NAME carrying the marker text is payload, not a boundary', () => {
+    const { classifyCi, ciSection } = loadBaseProbe()
+    const reply = {
+      raw: '___SECTION=RUNS\n[{"name":"x___SECTION=STATUSES","state":"failure"}]\n___SECTION=STATUSES\n[]\n___EXIT=0',
+      exit_code: 0,
+    }
+    const runs = classifyCi(ciSection(reply, 'RUNS'))
+    expect(runs.status).toBe('red')
+    expect(runs.failing.map((f) => f.name)).toEqual(['x___SECTION=STATUSES'])
+    // ...and the REAL statuses boundary is still the one that closes the section.
+    expect(classifyCi(ciSection(reply, 'STATUSES')).status).toBe('none')
+  })
+
+  test('a missing section is still empty, and an empty section is still unknown', () => {
+    const { classifyCi, ciSection } = loadBaseProbe()
+    const reply = { raw: '___SECTION=RUNS\n[]\n___EXIT=0', exit_code: 0 }
+    expect(ciSection(reply, 'STATUSES').raw).toBe('')
+    expect(classifyCi(ciSection(reply, 'STATUSES')).status).toBe('unknown')
+    expect(classifyCi(ciSection(null, 'RUNS')).status).toBe('unknown')
+  })
+})
+
+/**
+ * THE EXCUSE BUYS A ROUND, NEVER A MERGE.
+ *
+ * `ciBlockerFindings` matches an excusable red by check NAME, and a name is a coarse key:
+ * `.github/workflows/ci.yml` names its jobs `shard N/8`, so a test THIS branch broke,
+ * landing in a shard that was already red for another reason, produces the same name and
+ * the same downgrade. The non-forcing arm then carried the panel's APPROVE through to
+ * `gh pr merge`, with branch protection as the only thing left in the way — and branch
+ * protection is repository CONFIGURATION, which is exactly what this gate exists to stop
+ * relying on.
+ *
+ * The two questions are answered separately now, both in code: "is there code work here?"
+ * (no — no fix round is bought) and "may this merge over a red PR?" (no).
+ */
+describe('a fully excused CI red still holds the merge', () => {
+  // THE ARM IS SLICED OUT OF THE SOURCE AND RUN, not grepped. Round 3 of this branch
+  // condemned exactly the grep technique this block used to use ("the guard greps the
+  // source and never executed the substitution, which is why it stayed green"), and it
+  // then re-earned that verdict here: a `.toContain("verdict: 'REQUEST_CHANGES'")` is
+  // equally true of an arm that sets the verdict over a DEAD synthesis seat, which
+  // fabricates a panel judgment no panel made. Only running it can tell those apart.
+  //
+  // Every free identifier in the arm is a parameter, so a rename in production fails
+  // this file loudly rather than leaving it asserting about history.
+  const runArm = (
+    ci: { status: string },
+    ciFindings: unknown[],
+    severityGated: Record<string, unknown> | null,
+  ): Record<string, unknown> => {
+    const { ciFindingsBlock } = loadReal()
+    const at = SRC.indexOf('const withCi =')
+    expect(at).toBeGreaterThan(-1)
+    const end = SRC.indexOf('const peers =', at)
+    expect(end).toBeGreaterThan(at)
+    const run = new Function(
+      'ci',
+      'ciFindings',
+      'ciFindingsBlock',
+      'severityGated',
+      `${SRC.slice(at, end)}\n  return withCi`,
+    ) as (
+      ci: unknown,
+      f: unknown[],
+      block: (f: unknown[]) => boolean,
+      s: unknown,
+    ) => Record<string, unknown>
+    return run(ci, ciFindings, ciFindingsBlock, severityGated)
+  }
+
+  const excused = () => {
+    const { ciBlockerFindings } = loadReal()
+    return ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['shard 3/8']),
+    )
+  }
+
+  test('a panel APPROVE over a fully excused red comes out REQUEST_CHANGES', () => {
+    const out = runArm({ status: 'red' }, excused(), { verdict: 'APPROVE', findings: [] })
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    // ...and the advisory rides along, so the report still says WHICH check is red.
+    expect((out.findings as { title: string }[]).map((f) => f.title)).toEqual([
+      'CI RED FOR PRE-EXISTING REASONS: shard 3/8',
+    ])
+  })
+
+  test('the hold does not depend on the synthesis seat reading the advisory', () => {
+    // The seat's own verdict, its findings and the advisory text are all varied; the hold
+    // is unconditional on a red PR, so none of them can move it.
+    for (const seat of [
+      { verdict: 'APPROVE', findings: [] },
+      { verdict: 'APPROVE', findings: [{ severity: 'nit', title: 'rename it' }] },
+      { verdict: 'REQUEST_CHANGES', findings: [] },
+    ]) {
+      expect(runArm({ status: 'red' }, excused(), seat).verdict).toBe('REQUEST_CHANGES')
+    }
+  })
+
+  // THE OTHER HALF OF THE SAME LINE, and the one a grep cannot see. `severityGated` is
+  // null when the synthesis seat died; setting the verdict over that null hands
+  // `synthesisOrInfraBlock` a usable verdict, and it returns such an object UNTOUCHED —
+  // so a dead seat plus a fully-excused red walked past SYNTHESIS_UNAVAILABLE and landed
+  // as an ordinary rejection: no lane finding, no infra retry, no seat named.
+  test('a DEAD synthesis seat is never given a verdict — the arm stays fail-closed', () => {
+    const out = runArm({ status: 'red' }, excused(), null)
+    expect(Object.hasOwn(out, 'verdict')).toBe(false)
+    // ...and the advisories it was carrying are still there for the infra block to keep.
+    expect((out.findings as unknown[]).length).toBe(1)
+  })
+
+  // A red this branch DID cause is code work, dead seat or not — the fail-closed shape
+  // above may not swallow the case the gate exists for.
+  test('an unexcused red still forces the verdict, dead seat or live', () => {
+    const { ciBlockerFindings } = loadReal()
+    const findings = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['lint']),
+    )
+    expect(runArm({ status: 'red' }, findings, null).verdict).toBe('REQUEST_CHANGES')
+    expect(runArm({ status: 'red' }, findings, { verdict: 'APPROVE', findings: [] }).verdict).toBe(
+      'REQUEST_CHANGES',
+    )
+  })
+
+  // A GREEN PR IS UNTOUCHED: the seat's verdict is handed back as-is, same object.
+  test('a green PR hands the panel verdict back unchanged', () => {
+    const seat = { verdict: 'APPROVE', findings: [] }
+    expect(runArm({ status: 'green' }, [], seat)).toBe(seat)
+  })
+
+  test('an excused red is still not code work, so it buys no fix round', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const ci = { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] }
+    const findings = ciBlockerFindings(ci, new Set(['shard 3/8']))
+    expect(ciFindingsBlock(findings)).toBe(false)
+    expect(findings.length).toBe(1)
+    expect(findings[0]?.severity).toBe('major')
+    expect(findings[0]?.advisory).toBe(true)
+  })
+
+  test('a red the base does NOT carry still forces the round, unchanged', () => {
+    const { ciBlockerFindings, ciFindingsBlock } = loadReal()
+    const ci = { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] }
+    expect(ciFindingsBlock(ciBlockerFindings(ci, new Set(['lint'])))).toBe(true)
+  })
+
+  // ...AND THE ADVISORIES IT ATTACHES MAY NOT BECOME THE PANEL'S REASONS. The arm above
+  // prepends this file's own findings to whatever the seat returned. When the seat
+  // returned REQUEST_CHANGES with NO findings — the shape this file calls malformed, not
+  // benign — the merged list was no longer empty, so `classifyBlock` skipped its
+  // reasonless-rejection arm and stamped 'advisory-only': a kind that ASSERTS the panel
+  // judged the code and produced findings, and one `writeTerminalResult` records as a
+  // durable REQUEST_CHANGES. Nobody had judged anything. Run, not grepped: the classifier
+  // and the caller's own tail are both sliced out of the source.
+  const classifyTail = (
+    severityGated: Record<string, unknown> | null,
+    gated: Record<string, unknown>,
+    peers: unknown[] = [],
+    noReviewRan = false,
+  ): Record<string, unknown> => {
+    const constLine = (name: string): string => {
+      const line = SRC.split('\n').find((l) => l.startsWith(`const ${name} =`))
+      if (line === undefined) throw new Error(`const ${name} is missing from inner-workflow.mjs`)
+      return line
+    }
+    const at = SRC.indexOf('  const panelFindings = Array.isArray(severityGated')
+    expect(at).toBeGreaterThan(-1)
+    const end = SRC.indexOf('\n}', at)
+    expect(end).toBeGreaterThan(at)
+    const run = new Function(
+      'severityGated',
+      'gated',
+      'peers',
+      'noReviewRan',
+      'reviewRecord',
+      [
+        constLine('NON_BLOCKING_SEVERITIES'),
+        constLine('ADVISORY_FINDING_KEY'),
+        constLine('LANE_FINDING_KIND'),
+        grab('isNonBlockingFinding'),
+        grab('isCodeWorkFinding'),
+        grab('normalizeVerdict'),
+        grab('classifyBlock'),
+        SRC.slice(at, end),
+      ].join('\n'),
+    ) as (
+      s: unknown,
+      g: unknown,
+      p: unknown[],
+      n: boolean,
+      r: string,
+    ) => Record<string, unknown>
+    return run(severityGated, gated, peers, noReviewRan, 'Review panel: 4 seat(s) ran; off: none.')
+  }
+
+  const seatSaid = (severityGated: Record<string, unknown> | null): Record<string, unknown> =>
+    classifyTail(severityGated, runArm({ status: 'red' }, excused(), severityGated))
+
+  test('a reasonless panel REQUEST_CHANGES is not laundered into a reviewed verdict', () => {
+    const out = seatSaid({ verdict: 'REQUEST_CHANGES', findings: [] })
+    // The advisory is still carried, and the merge is still held...
+    expect((out.findings as unknown[]).length).toBe(1)
+    expect(out.verdict).toBe('REQUEST_CHANGES')
+    // ...but no seat stated a reason, so this is not a review, and the loop still exits.
+    expect(out.blockKind).toBe('infra-only')
+  })
+
+  test('a panel that DID speak still gets the cheap exit, not a fix round', () => {
+    // APPROVE over an excused red: the panel judged and had nothing actionable.
+    expect(seatSaid({ verdict: 'APPROVE', findings: [] }).blockKind).toBe('advisory-only')
+    // A nit is a stated reason — a cheap one, which is exactly what 'advisory-only' is for.
+    expect(
+      seatSaid({ verdict: 'REQUEST_CHANGES', findings: [{ severity: 'nit', title: 'rename it' }] })
+        .blockKind,
+    ).toBe('advisory-only')
+  })
+
+  test('an unexcused red is still code work whatever the seat said', () => {
+    const { ciBlockerFindings } = loadReal()
+    const findings = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['lint']),
+    )
+    const seat = { verdict: 'REQUEST_CHANGES', findings: [] }
+    expect(classifyTail(seat, runArm({ status: 'red' }, findings, seat)).blockKind).toBe('code')
+  })
+})
+
+/**
+ * BUILD-AUTHORED TEXT REACHES THE SEAT THAT SETS THE VERDICT, SO IT IS REDACTED.
+ *
+ * A CI check's name comes from `.github/workflows/*.yml` — a file Forge writes. Once the
+ * CI findings began riding in the synthesis prompt, that became a path from build-authored
+ * text into the prompt of the seat that decides the verdict. Every sibling probe text in
+ * this file goes through `redactProbeText` and a length cap before it reaches a prompt;
+ * this one now does too.
+ */
+describe('the CI findings are redacted and bounded before they reach the prompt', () => {
+  const promptBlock = () => {
+    const at = SRC.indexOf('const ciFindingsPrompt =')
+    expect(at).toBeGreaterThan(-1)
+    return SRC.slice(at, SRC.indexOf('\n\n', at))
+  }
+
+  test('the prompt interpolation goes through redactProbeText and a cap', () => {
+    expect(promptBlock()).toContain('redactProbeText(')
+    expect(promptBlock()).toMatch(/\.slice\(0, \d+\)/)
+  })
+
+  test('the prompt no longer delegates the excuse decision to the model', () => {
+    // The seat may still ADD a blocker; what it may not be asked to do is be the only
+    // thing standing between an excused red and a merge.
+    expect(promptBlock()).not.toContain('return REQUEST_CHANGES')
+  })
+
+  // ...AND THE DELEGATION DOES NOT COME BACK IN THROUGH THE FINDINGS. The template const
+  // is only half the composed prompt: every advisory finding's own `evidence` is
+  // interpolated into it too, and that text was still ending "treat it as a BLOCKER in
+  // your own words" long after the const stopped saying anything of the kind. Asserted on
+  // the produced finding, not on the source, so no wording change can hide it.
+  test('the advisory finding text does not hand the decision to the seat either', () => {
+    const { ciBlockerFindings } = loadReal()
+    const [f] = ciBlockerFindings(
+      { status: 'red', failing: [{ name: 'shard 3/8', state: 'FAILURE', link: null }] },
+      new Set(['shard 3/8']),
+    )
+    expect(f?.advisory).toBe(true)
+    expect(String(f?.evidence)).not.toContain('in your own words')
   })
 })
