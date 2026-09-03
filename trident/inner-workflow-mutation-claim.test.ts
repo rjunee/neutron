@@ -477,6 +477,38 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
         true,
       ])
     }
+
+    // THE MANIFEST KEYS, read out of the prover's own constant rather than
+    // re-typed. The node clause and `MANIFEST_HOOK_KEY` used to agree by
+    // PARALLEL LITERALS — an agreement row pinned the phrase and a PROVER_SRC
+    // row pinned the constant — so a FOURTH key added to the constant would
+    // widen enforcement while both rows stayed green: exactly the drift this
+    // file exists to prevent. Build the phrase FROM the parsed names, so the
+    // schema sentence reds until it names every key the prover asks about.
+    const manifest = PROVER_SRC.match(/const MANIFEST_HOOK_KEY = \[([^\]]+)\] as const/)
+    expect(manifest).not.toBeNull()
+    const manifestKeys = [...(manifest![1] as string).matchAll(/'([^']+)'/g)].map((m) => m[1] as string)
+    // POSITIVE CONTROL on the extraction: three keys exist today. An empty or
+    // partial parse must fail HERE, not let the loop below pass vacuously.
+    expect(manifestKeys.length).toBeGreaterThanOrEqual(3)
+    const manifestPhrase = manifestKeys.map((k) => '`' + k + '`').join('/')
+    for (const d of described) {
+      // BOTH clauses carry the full derived phrase — the bun resolution-map
+      // sentence and the node arm — counted, so deleting either clause or a
+      // key from either spelling of the phrase reds this row.
+      expect(['manifest phrase in both clauses', d.split(manifestPhrase).length - 1 >= 2]).toEqual([
+        'manifest phrase in both clauses',
+        true,
+      ])
+      // …and the NODE occurrence sits immediately before that arm's own words,
+      // so two bun-side occurrences cannot satisfy the count while the node
+      // clause drops a key.
+      expect(['derived node clause', d.includes(manifestPhrase + ' map refuses `node --test` too')]).toEqual([
+        'derived node clause',
+        true,
+      ])
+    }
+
     // Two-sided: the prover must really read the root bunfig whether or not the
     // branch touched it, and really compare the preload's target against the
     // diff, or the two sentences above are promises nothing keeps.
