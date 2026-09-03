@@ -190,7 +190,7 @@ export function buildSimFirer(
 }
 
 export function buildSimMutationProofGate(
-  outcome: { ok?: boolean; reason?: string } = {},
+  outcome: { ok?: boolean; reason?: string; exempt?: boolean } = {},
   /** Every gate call, in order — so a test can assert WHAT was handed to the
    *  prover (the run it was asked to prove, and on which branch). */
   seen: Array<{ branch: string | null; run_id: string }> = [],
@@ -202,7 +202,10 @@ export function buildSimMutationProofGate(
     return {
       ok,
       reason: outcome.reason ?? (ok ? 'simulated mutation proof' : 'simulated mutation proof failure'),
-      exempt: false,
+      // An EXEMPT outcome is a merge on which the gate never ran. It defaults to
+      // false so every existing caller keeps proving; a test that wants the
+      // exemption asks for it, and asserts the run record says so.
+      exempt: outcome.exempt ?? false,
       evidence: null,
     }
   }

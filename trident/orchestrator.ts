@@ -576,6 +576,60 @@ function worktreeCaptureFailureSuffix(detail: string): string {
   return `${TRIDENT_SNAPSHOT_FAILURE_MARKER}: ${detail}`
 }
 
+/** A tick note is one line a human reads; the record lives in the log. The
+ *  mutation gate's no-production-file exemption names EVERY changed file, so a
+ *  large test-only refactor hands this a multi-kilobyte string. Truncated HERE
+ *  and never at the source: the full list still reaches
+ *  `log.info('mutation_proof_exempt')`, and the note says where to find it.
+ *
+ *  THE CEILING IS ON THE PREFIX KEPT, NOT ON THE RESULT. The pointer suffix is
+ *  appended PAST it, so a truncated note runs to roughly 310 characters — which
+ *  is what `orchestrator.test.ts` pins, and saying "capped at 240" here read as
+ *  a promise the code does not make. */
+const TICK_NOTE_CEILING = 240
+
+/** EXPORTED for the test that pins the cut: the boundary case is one character
+ *  wide and reaching it through a whole orchestrator tick would take a reason
+ *  built to land an astral character on code unit 240 by accident. */
+export function truncateNote(reason: string): string {
+  return truncateWithPointer(reason, TICK_NOTE_CEILING)
+}
+
+/** The cut both ceilings make. They differ in the number and in nothing else,
+ *  and two byte-identical bodies is one place for a fix to land and be missed.
+ *
+ *  CUT ON A CHARACTER, NOT ON A CODE UNIT. `slice` counts UTF-16 units, so a cut
+ *  landing between the halves of a surrogate pair leaves a LONE surrogate at the
+ *  end of a string that goes on to a UI and a DB. Drop the orphan. */
+function truncateWithPointer(reason: string, ceiling: number): string {
+  if (reason.length <= ceiling) return reason
+  const head = reason.slice(0, ceiling)
+  const last = head.charCodeAt(head.length - 1)
+  const whole = last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
+  return `${whole}… (${reason.length} chars; full reason in the mutation_proof_exempt log line)`
+}
+
+/**
+ * The ceiling on the DURABLE copy of an exemption reason.
+ *
+ * The stage row is where the exemption's evidence lives, so it gets the FULL
+ * file list — the tick note's 240 characters would delete the very thing a
+ * reviewer opens the row for. But the list is bounded only by the diff, and a
+ * test-only refactor of a few thousand files writes that whole list into
+ * `code_trident_stage_events.meta`, once per exempt merge. Generous enough that
+ * no real diff is cut (a 4 000-character reason is ~120 paths) and small enough
+ * that a pathological one cannot put an unbounded blob on the row.
+ *
+ * ON THE PREFIX KEPT, NOT ON THE RESULT, exactly as `TICK_NOTE_CEILING` is: the
+ * pointer suffix is appended past the cut, so a truncated reason lands near
+ * 4 070 characters. Bounded either way; the number is just not the total.
+ */
+const STAGE_REASON_CEILING = 4_000
+
+export function truncateStageReason(reason: string): string {
+  return truncateWithPointer(reason, STAGE_REASON_CEILING)
+}
+
 export interface StrandedReconcileOptions {
   /** False when the boot sweep observed another live run on this branch (or
    * could not establish that no such run exists). Commit publication remains
@@ -3844,6 +3898,41 @@ export function buildTridentOrchestrator(
         run_host: opts.run_host,
         expected_head: reviewedHeadOid(run),
       })
+      // AN EXEMPTION IS NOT A SILENT PASS. `proof.reason` is the only part of the
+      // outcome that outlives the process, and on the ok path it was being
+      // dropped — so a merge that ran NO mutation proof looked exactly like one
+      // that ran and passed. The tick note below is the HUMAN one-liner; the
+      // DURABLE run-record entry is the `mutation-proof-exempt` stage row
+      // stamped further down, because `tick.ts` persists the run row and never
+      // reads `outcome.note`. Both exemptions (prose-only, and
+      // no-production-file) say so, in both places.
+      // CAPPED HERE AND NOWHERE ELSE. The no-production-file exemption names
+      // EVERY changed file (that list is the reviewer's evidence and must not be
+      // filtered), so a large test-only refactor puts a multi-kilobyte string on
+      // the run row — a tick note is a one-line human summary, not a record. The
+      // full reason still goes to the log below, which is where it is meant to
+      // be read back.
+      const proofNote = proof.exempt ? `; mutation proof skipped — ${truncateNote(proof.reason)}` : ''
+      // …and into the log, which is where this run's non-fatal facts actually
+      // outlive the tick (`leak_preflight` above records the same way). Both
+      // exemptions log — prose-only and no-production-file — so "the gate ran
+      // and passed" and "the gate never ran" stop looking identical after the
+      // fact. `reason` carries WHICH one and the file count it saw.
+      if (proof.exempt) {
+        log.info('mutation_proof_exempt', { run_id: run.id, branch, reason: proof.reason })
+        // The tick persists the run row, never `note` — so the note is display
+        // and the stage ledger row is the exemption's durable place in the run
+        // record. The file list is the reviewer's evidence, so this copy keeps
+        // it — capped only where the diff itself stops being a list and starts
+        // being a blob (`STAGE_REASON_CEILING`, ~30x the tick note), with the
+        // uncapped text still in the log line above. Best-effort like every
+        // stamp.
+        try {
+          opts.record_stage?.(run.id, 'mutation-proof-exempt', truncateStageReason(proof.reason))
+        } catch {
+          // a stamp must never fail a merge
+        }
+      }
       if (!proof.ok) {
         // `inner_verdict` / `inner_checkpoint` are left EXACTLY as the review left
         // them: Argus really did approve, and its provenance is the audit trail.
@@ -3869,7 +3958,12 @@ export function buildTridentOrchestrator(
         } catch (err) {
           foldNote = `; as-built fold deferred (entry stays queued): ${err instanceof Error ? err.message : String(err)}`
         }
-        return { run: doneRun, changed: true, waiting: false, note: `APPROVE (argus-approved) → done; ${res.note}${foldNote}` }
+        return {
+          run: doneRun,
+          changed: true,
+          waiting: false,
+          note: `APPROVE (argus-approved) → done; ${res.note}${foldNote}${proofNote}`,
+        }
       } catch (err) {
         // #542 — the base moved materially between the review and the merge, so
         // the merge was HELD rather than landed. Fail the run with the hold text
