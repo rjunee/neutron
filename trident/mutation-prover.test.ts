@@ -164,6 +164,10 @@ interface HostScript {
   checkedOutAfterReadd?: Record<string, string>
   /** the verification's own `ls-tree` fails — it must refuse, not observe. */
   treeListFails?: boolean
+  /** RAW entries appended to the verification's `ls-tree -r -z` output, for the
+   *  shapes `committedTree` cannot spell: a `tree`/`commit` entry the check must
+   *  SKIP, and a short one it must REFUSE. */
+  extraTreeEntries?: string[]
   /** the verification's own `git hash-object` fails — same. */
   hashObjectFails?: boolean
 }
@@ -198,7 +202,10 @@ function scriptedHost(s: HostScript = {}): {
       if (cmd.includes('ls-tree')) {
         if (cmd.includes('--name-only')) return s.lsTreeFails === true ? res(1) : res(0, (s.treePaths ?? []).join('\0'))
         if (s.treeListFails === true) return res(1)
-        const entries = Object.entries(s.committedTree ?? {}).map(([path, sha]) => `100644 blob ${sha}\t${path}`)
+        const entries = [
+          ...Object.entries(s.committedTree ?? {}).map(([path, sha]) => `100644 blob ${sha}\t${path}`),
+          ...(s.extraTreeEntries ?? []),
+        ]
         return res(0, entries.length === 0 ? '' : `${entries.join('\0')}\0`)
       }
       if (cmd.includes('hash-object')) {
@@ -566,6 +573,60 @@ describe('the restored-guard observation is of a tree the nominated commands cou
       claim: CLAIM,
     })
     expect(kept.proved).toBe(true)
+  })
+
+  test('a tree entry we cannot PARSE refuses; a tree or gitlink entry is skipped', async () => {
+    // THE ONE FAIL-OPEN BRANCH in a verifier whose whole job is to fail closed.
+    // A short entry left `type` undefined, and `type !== 'blob'` then read it as
+    // "not a blob, skip" — dropping a file out of the verification silently, on
+    // exactly the input a malformed listing produces. It is unreachable with
+    // real `git ls-tree -r -z` output, which is why it must not be the thing
+    // deciding whether a file gets checked.
+    const committedTree = { 'src/limit.ts': 'a'.repeat(40) }
+    const { prover, host } = proverOver({ committedTree, extraTreeEntries: ['100644 blob\tsrc/short.ts'] })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('could not parse the tree listing')
+    // Refused on the LISTING, before anything was run.
+    expect(host.calls.some((c) => c.join(' ') === CLAIM.guard.join(' '))).toBe(false)
+
+    // POSITIVE CONTROL, and it is what keeps the refusal from being "any entry
+    // that is not a blob". A `tree` and a `commit` (gitlink) entry are both
+    // well-formed and carry nothing to hash, so they are still SKIPPED and the
+    // proof still proves — without this row the assertion above would pass on a
+    // check that refuses every listing git can produce.
+    const skipped = await proverOver({
+      committedTree,
+      extraTreeEntries: [`040000 tree ${'e'.repeat(40)}\tsrc`, `160000 commit ${'f'.repeat(40)}\tvendor/dep`],
+    }).prover.prove({ run: RUN, claim: CLAIM })
+    expect([skipped.proved, skipped.reason.includes('could not parse')]).toEqual([true, false])
+  })
+
+  test('a checkout that is not the commit REMOVES the tree it provisioned — a refusal may not leak a worktree', async () => {
+    // The refusal returns BEFORE the `try` whose `finally` removes the proof
+    // worktree, so left bare it leaked the tree it had just added — and the
+    // path carries the run id, so a repo that refuses here EVERY time (one with
+    // an eol conversion does) accumulates a registered worktree per attempt
+    // inside the repo itself.
+    const { prover, host } = proverOver({
+      committedTree: { 'src/limit.ts': 'a'.repeat(40) },
+      checkedOut: { 'src/limit.ts': 'd'.repeat(40) },
+    })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('is not the bytes')
+
+    const wt = proofWorktreePath('/repo', RUN)
+    const lastAdd = host.calls.findLastIndex((c) => c.includes('worktree') && c.includes('add'))
+    expect(lastAdd).toBeGreaterThan(-1)
+    // A removal of THIS tree, AFTER the add that created it — the pre-add
+    // remove the provisioning already does would satisfy a weaker assertion.
+    const removedAfter = host.calls.findIndex(
+      (c, i) => i > lastAdd && c.includes('worktree') && c.includes('remove') && c.includes(wt),
+    )
+    expect(removedAfter).toBeGreaterThan(lastAdd)
+    expect(host.calls.some((c, i) => i > lastAdd && c.includes('worktree') && c.includes('prune'))).toBe(true)
   })
 })
 
@@ -4010,6 +4071,36 @@ describe('PROVE THE MUTATION APPLIED — a no-op mutation is not a proof', () =>
     })
     expect(fine.reason).not.toContain('tautology')
     expect(fine.observed).not.toBeNull()
+  })
+
+  test('capitalising the directory does not un-collect it — `Tests/support/helper.go` + `go test ./...` is the same tautology', async () => {
+    // THE ESCAPE THE ROUND ABOVE LEFT OPEN BY HALF A REGEX. The BASENAME arm of
+    // `aRunnerMayCollect` was made case-insensitive because a runner's
+    // collection is; the DIRECTORY arm stayed a literal `seg === 'tests'`. A
+    // runner is no more case-sensitive about a directory than about a name —
+    // `go test ./...` reaches `Tests/support/helper.go` exactly as it reaches
+    // the lowercase spelling, and the whole-module run compiles the mutated
+    // file into its own red. So the refusal pinned above was re-nominatable by
+    // capitalising one segment.
+    for (const helper of ['Tests/support/helper.go', 'TESTS/support/helper.go', '__TESTS__/helper.ts']) {
+      const goFs = memFs({ [join(proofWorktreePath('/repo', RUN), helper)]: SRC_BEFORE })
+      const { prover, host } = proverOver({}, goFs)
+      const out = await prover.prove({ run: RUN, claim: { ...CLAIM, file: helper, guard: ['go', 'test', './...'] } })
+      expect([helper, out.proved, out.reason.includes('tautology')]).toEqual([helper, false, true])
+      expect(out.observed).toBeNull()
+      expect(host.calls).toHaveLength(0)
+    }
+
+    // POSITIVE CONTROL — the arm is about the SEGMENT, not about capitals. A
+    // library under a directory no runner collects keeps its whole-module
+    // guard, so these rows cannot be passing because an upper-case path became
+    // un-nominatable.
+    const support = 'Support/helper.go'
+    const okFs = memFs({ [join(proofWorktreePath('/repo', RUN), support)]: SRC_BEFORE })
+    const { prover: ok } = proverOver({}, okFs)
+    const fineGo = await ok.prove({ run: RUN, claim: { ...CLAIM, file: support, guard: ['go', 'test', './...'] } })
+    expect(fineGo.reason).not.toContain('tautology')
+    expect(fineGo.observed).not.toBeNull()
   })
 
   test('a percent-encoded spelling is the mutated file — the loader decodes what the comparison must too', async () => {

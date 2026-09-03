@@ -266,8 +266,11 @@ function isNodeRunOption(arg: string): boolean {
  * EXEMPTION — where the file NAMES are written by the build. Every name added
  * here is a name a build could give a production file to buy itself an
  * exemption (`src/ab-test.ts` was exactly that: production logic, a test's
- * name, an exemption for free); every name added there only ever REFUSES a
- * guard. The tautology the looser names would otherwise open — classify
+ * name, an exemption for free); a name added there cannot buy an exemption at
+ * all, because that regex never reaches the classifier (for the one way it can
+ * still WIDEN, read `RUNNER_COLLECTED_BASENAME`'s own docblock — it is a second
+ * consumer, `namesATestFile`, and not the exemption).
+ * The tautology the looser names would otherwise open — classify
  * `production`, then let a directory or bare-runner guard run the mutated file
  * as its own test — is closed on the guard side, in `guardRunsTheMutatedFile`,
  * which is where the tautology actually happens.
@@ -667,7 +670,22 @@ function normalizeArg(arg: string): string {
  * `classifyMutationTarget`, and through it the no-production-file EXEMPTION —
  * where file NAMES are build-controlled, so every name added there is a name a
  * build could use to buy itself an exemption. The extra breadth belongs on this
- * side, where its only effect is to REFUSE a guard.
+ * side, which never reaches the classifier.
+ *
+ * IT DOES NOT ONLY REFUSE, THOUGH, and that overclaim is corrected here rather
+ * than left standing. There is a SECOND consumer, `namesATestFile`, which
+ * decides whether an argv element counts as a SELECTION — so a name added here
+ * can move a guard OUT of the no-selection arm and thereby ACCEPT it.
+ * Measured: adding `_test.rs` flipped `{file: 'tests/support/helper.rs', guard:
+ * ['cargo', 'test', 'tests/integration_test.rs']}` from refused to accepted,
+ * because the positional now names a file a runner would run. The widening is
+ * bounded and it is NOT this direction's tautology: cargo reads a positional as
+ * a test-NAME filter, so that guard compiles every target either way — which is
+ * the whole-crate reach recorded on the plan's deferred list (and named in the
+ * residual note at the restored-guard re-provision), not something this suffix
+ * opened. What is NOT bounded, and so is not added here,
+ * is any name whose only effect would be to let a whole-suite argv pass as
+ * targeted; every name in this regex is one a runner genuinely collects.
  *
  * AND IT IS CASE-INSENSITIVE, WHERE `TEST_BASENAME` IS NOT, for that same
  * reason read in the other direction. A RUNNER'S collection is case-insensitive
@@ -689,7 +707,17 @@ const RUNNER_COLLECTED_BASENAME = /^test[^/]*\.(py|[cm]?[jt]sx?)$|[._-](test|spe
 function aRunnerMayCollect(path: string): boolean {
   const segments = path.split('/')
   if (RUNNER_COLLECTED_BASENAME.test(segments[segments.length - 1] ?? '')) return true
-  return segments.slice(0, -1).some((seg) => seg === 'tests' || seg === 'test' || seg === '__tests__')
+  // BOTH ARMS ARE CASE-INSENSITIVE, and they have to agree. The basename arm
+  // above carries an `i` because a RUNNER'S collection is case-insensitive; a
+  // directory segment is collected by exactly the same indifference — `go test
+  // ./...` reaches `Tests/support/helper.go` precisely as it reaches
+  // `tests/support/helper.go`, and the whole-module run then compiles the
+  // mutated file into its own red. Case-SENSITIVE here, the escape this branch
+  // pins refused was re-nominatable by capitalising one directory segment.
+  // Lowercasing narrows GUARDS only — `classifyMutationTarget` keeps its
+  // literal segments, where case-insensitivity would widen the EXEMPTION
+  // instead, and a name is build-controlled.
+  return segments.slice(0, -1).some((seg) => ['tests', 'test', '__tests__'].includes(seg.toLowerCase()))
 }
 
 /**
@@ -2778,8 +2806,18 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       if (entry.length === 0) continue
       const tab = entry.indexOf('\t')
       if (tab < 0) return `could not parse the tree listing of ${headSha.slice(0, 8)}`
-      const [mode, type, sha] = entry.slice(0, tab).split(' ')
-      if (type !== 'blob' || mode === undefined || sha === undefined) continue
+      // A MALFORMED ENTRY REFUSES; only a genuinely non-blob one is skipped.
+      // Read as `type !== 'blob'`, a short line left `type` undefined and
+      // `continue`d — dropping a file from the verification silently, the one
+      // fail-OPEN branch in a verifier whose whole job is to fail closed. It
+      // is unreachable with real `git ls-tree -r -z` output, which is exactly
+      // why it must not decide anything.
+      const fields = entry.slice(0, tab).split(' ')
+      if (fields.length !== 3) return `could not parse the tree listing of ${headSha.slice(0, 8)}`
+      const [mode, type, sha] = fields as [string, string, string]
+      // Trees and gitlinks are not blobs and carry nothing to hash; symlinks
+      // are blobs git applies no filter to, and `hash-object` would follow.
+      if (type !== 'blob') continue
       if (mode === '120000') continue
       want.push([entry.slice(tab + 1), sha])
     }
@@ -2846,7 +2884,18 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // `checkoutIsTheCommit`). The mutated-guard RED is evidence too, and a tree
     // whose guard file was rewritten on the way in can manufacture it.
     const provisioned = await checkoutIsTheCommit(wt, headSha)
-    if (provisioned !== null) return refuse(run.id, claim, provisioned)
+    if (provisioned !== null) {
+      // AND THIS REFUSAL CLEANS UP AFTER ITSELF. It returns BEFORE the `try`
+      // below whose `finally` removes the tree, so left bare it leaked the
+      // worktree it had just added — and the path carries the run id, so a repo
+      // that refuses here every time (an eol-converting one does) accumulates a
+      // registered worktree per attempt inside the repo. Same two calls the
+      // `finally` makes. Reproduced end to end in the real-git suite against an
+      // `* text eol=crlf` repo, which refuses on EVERY attempt.
+      await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
+      await deps.run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
+      return refuse(run.id, claim, provisioned)
+    }
 
     // A TREE THE NOMINATED COMMANDS COULD NOT HAVE EDITED. The guard and the
     // control are BRANCH-AUTHORED code that RUNS mid-proof: a control whose
@@ -3332,6 +3381,35 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // all — recorded as such on the plan's deferred list, and a DIFFERENT limit
     // from the assertion-blindness one recorded at `evaluate`, which is about
     // what three exit codes can see.
+    //
+    // AND A GUARD THAT REMEMBERS IS THE SIMPLEST SURVIVOR OF THAT RESIDUAL,
+    // named here in the shape it actually takes rather than left inside
+    // "background writers". The guard is observed exactly TWICE — mutated, then
+    // restored — and re-provisioning restores only the TREE. A guard that keeps
+    // one bit OUTSIDE the worktree (absent: record it and exit non-zero;
+    // present: exit zero) is therefore red then green with the mutation
+    // playing no part, and it satisfies every `evaluate` arm including the
+    // output digest comparison, which such a guard passes honestly. No
+    // in-tree check can see it, because the state is not in the tree; the two
+    // things that could are running the guard a third time at the pinned tree
+    // (which a stateful guard also answers, just once more) and denying the
+    // command a writable host, which is the machine-level deferral above.
+    // Deferred with it, and fails OPEN — so it is the residual worth naming
+    // first when this gate is next hardened.
+    //
+    // A THIRD DEFERRAL, on the GUARD side rather than this one, recorded where
+    // a reader of the re-provision will look for it: a whole-CRATE or
+    // whole-MODULE runner reaches the mutated PRODUCTION file's own inline
+    // tests. `cargo test` compiles every target, so a `#[cfg(test)]` block
+    // inside the mutated `src/pricing.rs` supplies the red; `go test ./...`
+    // does the same through a package-mate `_test.go`. `aRunnerMayCollect`
+    // refuses this one filename-suffix wide (`_test.rs`), not for the ordinary
+    // production target, because refusing it there would ban the bare
+    // whole-suite guard for EVERY production file — the commonest honest
+    // nomination there is. It is a weaker proof rather than a forged one (the
+    // mutation did break an assertion), it is latent in this repo (no `.rs` or
+    // `.go` files), and it behaves identically at the base commit. Follow-up
+    // card, not this branch's regression.
     const fresh = await reprovision()
     if (fresh !== null) {
       return refuse(run_id, claim, fresh)

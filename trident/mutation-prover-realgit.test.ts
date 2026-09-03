@@ -1816,6 +1816,46 @@ describe('the mutation-proof gate against real git', () => {
     expect(onDisk).not.toBe(committed)
   }, 120_000)
 
+  test('…and a repo that can never pass that check does not LEAK a worktree per attempt', async () => {
+    // THE COST OF FAILING CLOSED, paid by a repo that is not attacking anything.
+    // `* text eol=crlf` is an ordinary Windows-facing setting: the commit holds
+    // LF, the checkout writes CRLF, so a FRESH tree hashes to something the
+    // commit does not record and the verification refuses — correctly, since an
+    // observation of a tree that is not the commit is not evidence about the
+    // commit. That refusal returns from the FIRST provisioning, before the
+    // `try` whose `finally` removes the tree, so every attempt used to leave a
+    // registered `proof-<slug>-<id8>` worktree behind INSIDE the repo, and the
+    // path carries the run id, so they accumulate rather than being reused.
+    const repo = await seedDiffRepo('eol-refusal-leak', async (r) => {
+      writeFileSync(join(r, '.gitattributes'), '* text eol=crlf\n')
+      writeFileSync(join(r, 'src', 'limit.ts'), 'export const clamp = (n: number, max: number) => (n > max ? max : n)\n')
+    })
+    const before = await git(repo, 'worktree', 'list', '--porcelain')
+    const out = await runMutationProofGate({
+      run: { id: 'run-eol-leak', slug: 'eol-leak', repo_path: repo, branch: BRANCH },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/g.test.ts'],
+        control: ['bun', 'test', 'tests/other.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    // THE REFUSAL IS THE ONE THIS ROW IS ABOUT — if the repo stopped refusing,
+    // the cleanup below would be the ordinary `finally`'s and prove nothing.
+    expect(out.ok).toBe(false)
+    expect(out.reason).toContain('is not the bytes')
+
+    // NOTHING WAS LEFT BEHIND: git knows of no proof worktree, and the
+    // directory is gone from the disk.
+    const after = await git(repo, 'worktree', 'list', '--porcelain')
+    expect(after).not.toContain('proof-eol-leak')
+    expect(after).toBe(before)
+    expect(existsSync(proofWorktreePath(repo, { id: 'run-eol-leak', slug: 'eol-leak' }))).toBe(false)
+  }, 120_000)
+
   test('…while an HONEST pair still proves red-then-green THROUGH the re-provision', async () => {
     // THE POSITIVE CONTROL on both rows above: a seam that refused everything,
     // or a re-provision that broke the proof outright — a worktree that came
