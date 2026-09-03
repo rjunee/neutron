@@ -1150,6 +1150,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       run_host: async (cmd, cwd) => {
         calls.push(cmd)
         if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0) // the tracking ref is read ONLY after a fetch that succeeded
         if (cmd.includes('rev-parse')) {
           return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
@@ -1175,6 +1176,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     const sha = await resolveMergeHeadSha(
       async (cmd) => {
         calls.push(cmd)
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0)
         return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
       },
@@ -1196,12 +1198,89 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     ])
   })
 
+  test('the local ref is read FULLY QUALIFIED — the bare name lets a tag answer for the branch', async () => {
+    const calls: string[][] = []
+    const sha = await resolveMergeHeadSha(
+      async (cmd) => {
+        calls.push(cmd)
+        // Only the fully-qualified ref resolves. A bare `feat-x` — which is what
+        // a tag of the same name would answer — resolves to a DIFFERENT commit.
+        if (cmd[cmd.length - 1] === 'refs/heads/feat-x') return res(0, HEAD)
+        if (cmd[cmd.length - 1] === 'feat-x') return res(0, 'c'.repeat(40))
+        return res(1)
+      },
+      '/repo',
+      'feat-x',
+      null,
+    )
+    expect(sha).toBe(HEAD)
+    expect(calls[0]).toEqual([
+      'git',
+      '-C',
+      '/repo',
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      '--end-of-options',
+      'refs/heads/feat-x',
+    ])
+    expect(calls.some((c) => c[c.length - 1] === 'feat-x')).toBe(false)
+  })
+
+  test('a SYMBOLIC refs/remotes/origin/<branch> disqualifies the remote step — nothing is fetched', async () => {
+    // `git fetch` writes THROUGH a symbolic ref, so fetching into a planted
+    // `refs/remotes/origin/<b> -> refs/heads/injected` CREATES a local branch —
+    // the exact thing this resolver exists to avoid. The step declines; the
+    // object-verified expected_head answers instead.
+    const calls: string[][] = []
+    const sha = await resolveMergeHeadSha(
+      async (cmd) => {
+        calls.push(cmd)
+        if (cmd.includes('symbolic-ref')) return res(0, 'refs/heads/injected')
+        if (cmd.includes('cat-file')) return res(0)
+        return res(1)
+      },
+      '/repo',
+      'feat-x',
+      HEAD,
+    )
+    expect(sha).toBe(HEAD)
+    expect(calls.some((c) => c.includes('fetch'))).toBe(false)
+    expect(calls.some((c) => c.includes('rev-parse') && c[c.length - 1] === 'refs/remotes/origin/feat-x')).toBe(false)
+    expect(calls.find((c) => c.includes('symbolic-ref'))).toEqual([
+      'git',
+      '-C',
+      '/repo',
+      'symbolic-ref',
+      '--quiet',
+      '--end-of-options',
+      'refs/remotes/origin/feat-x',
+    ])
+  })
+
+  test('a symbolic destination with no usable expected_head resolves NOTHING — never the pointed-at ref', async () => {
+    const sha = await resolveMergeHeadSha(
+      async (cmd) => {
+        if (cmd.includes('symbolic-ref')) return res(0, 'refs/heads/injected')
+        if (cmd[cmd.length - 1] === 'refs/heads/feat-x') return res(1) // the #482 shape: no local branch
+        // Everything else "succeeds" — including a read of the tracking ref,
+        // which would hand back the sha the pointer names.
+        return res(0, 'c'.repeat(40))
+      },
+      '/repo',
+      'feat-x',
+      null,
+    )
+    expect(sha).toBeNull()
+  })
+
   test('a FAILED fetch does not license the tracking ref — the stale sha is never read', async () => {
     const STALE = 'b'.repeat(40)
     const calls: string[][] = []
     const sha = await resolveMergeHeadSha(
       async (cmd) => {
         calls.push(cmd)
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(1)
         if (cmd.includes('cat-file')) return res(0)
         return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, STALE) : res(1)
@@ -1211,7 +1290,9 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       HEAD,
     )
     expect(sha).toBe(HEAD)
-    expect(calls.some((c) => c[c.length - 1] === 'refs/remotes/origin/feat-x')).toBe(false)
+    // READ means `rev-parse`; the symbolic-ref probe names the same ref but only
+    // asks what KIND of ref it is, and it happens before the fetch.
+    expect(calls.some((c) => c.includes('rev-parse') && c[c.length - 1] === 'refs/remotes/origin/feat-x')).toBe(false)
     expect(calls.some((c) => c.includes('cat-file') && c.includes(`${HEAD}^{commit}`))).toBe(true)
   })
 
@@ -1301,6 +1382,48 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(calls).toEqual([['git', '-C', '/repo', 'check-ref-format', '--branch', 'a/.hidden']])
   })
 
+  test('a check-ref-format that never RAN says so — an unverified name is not a rejected name', async () => {
+    // `reason` is the durable audit trail. A spawn failure (`spawnCapture`
+    // reports exit_code -1 when the child never started) means git never judged
+    // the name, which sends an operator to the host rather than to the name.
+    // It still refuses.
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      expected_head: HEAD,
+      run_host: async (cmd) => {
+        if (cmd.includes('check-ref-format')) {
+          return { ok: false, stdout: '', stderr: 'Error: spawn git ENOENT', exit_code: -1 }
+        }
+        return res(0, HEAD)
+      },
+    })
+    expect(out.ok).toBe(false)
+    expect(out.evidence).toBeNull()
+    expect(out.reason).toContain('could not be RUN')
+    expect(out.reason).not.toContain('rejects it')
+  })
+
+  test('a leading underscore is a VALID branch name — git says so, and the gate must not pre-empt it', async () => {
+    // `git check-ref-format --branch _feature` exits 0. The allowlist excluded
+    // `_`, so the gate refused an otherwise-valid build before git could judge.
+    for (const name of ['_feature', 'feat_x', 'trident/fix_the_thing']) {
+      const calls: string[][] = []
+      const sha = await resolveMergeHeadSha(
+        async (cmd) => {
+          calls.push(cmd)
+          return cmd[cmd.length - 1] === `refs/heads/${name}` ? res(0, HEAD) : res(1)
+        },
+        '/repo',
+        name,
+        null,
+      )
+      expect(sha).toBe(HEAD)
+      expect(calls.length).toBeGreaterThan(0)
+    }
+  })
+
   test('drift is still caught when the head resolves through the REMOTE ref', async () => {
     // The widened resolution must not widen the binding: a branch that moves
     // between the pin and the re-read is still refused when the only ref that
@@ -1314,6 +1437,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       run_host: async (cmd, cwd) => {
         if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('rev-parse')) {
           if (cmd[cmd.length - 1] !== 'refs/remotes/origin/feat-x') return res(1)
@@ -1339,6 +1463,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       expected_head: 'e'.repeat(40),
       run_host: async (cmd) => {
         calls.push(cmd)
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('cat-file')) return res(1) // the object is not in this repo
         if (cmd.includes('rev-parse')) return res(1)
@@ -1358,6 +1483,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       expected_head: 'refs/heads/main',
       run_host: async (cmd) => {
         nameCalls.push(cmd)
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('cat-file')) return res(1)
         if (cmd.includes('rev-parse')) return res(1)
@@ -1379,6 +1505,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       expected_head: 'd'.repeat(40),
       run_host: async (cmd) => {
         calls.push(cmd)
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('rev-parse')) {
           return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)
@@ -1404,6 +1531,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       expected_head: HEAD,
       run_host: async (cmd, cwd) => {
         if (cmd.includes('--name-only')) return res(0, 'src/limit.ts\n')
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(1)
         if (cmd.includes('cat-file')) return res(0) // the commit IS here
         if (cmd.includes('rev-parse')) return res(1)
@@ -1426,6 +1554,7 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
       base_branch: 'main',
       run_host: async (cmd) => {
         if (cmd.includes('--name-only')) return res(0, 'README.md\ndocs/a.md\n')
+        if (cmd.includes('symbolic-ref')) return res(1) // real git: a NORMAL ref is not symbolic
         if (cmd.includes('fetch')) return res(0)
         if (cmd.includes('rev-parse')) {
           return cmd[cmd.length - 1] === 'refs/remotes/origin/feat-x' ? res(0, HEAD) : res(1)

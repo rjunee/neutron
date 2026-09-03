@@ -114,8 +114,14 @@ describe('the mutation-proof gate against real git', () => {
     const w = await seedWorld('hostile-name')
     const marker = join(w.root, 'upload-pack-executed')
     const before = await git(w.consumer, 'for-each-ref', '--format=%(refname) %(objectname)')
+    // RUN FIRST, ASSERT AFTER, STATE BEFORE OUTCOME. An `expect` inside the loop
+    // throws on the first failure and the repository-state assertions below —
+    // the ones this test exists for — never execute, so a run with the
+    // validation removed reported the wrong reason for its red.
+    const resolved: (string | null)[] = []
+    const refusals: { ok: boolean; reason: string }[] = []
     for (const hostile of [`--upload-pack=touch ${marker}`, 'feat-x:refs/heads/injected-by-branch']) {
-      expect(await resolveMergeHeadSha(spawnCapture, w.consumer, hostile, w.stale)).toBeNull()
+      resolved.push(await resolveMergeHeadSha(spawnCapture, w.consumer, hostile, w.stale))
       const out = await runMutationProofGate({
         run: { id: 'run-h', slug: 'hostile', repo_path: w.consumer, branch: hostile },
         claim: null,
@@ -123,8 +129,7 @@ describe('the mutation-proof gate against real git', () => {
         expected_head: w.stale,
         run_host: spawnCapture,
       })
-      expect(out.ok).toBe(false)
-      expect(out.reason).toContain('is rejected')
+      refusals.push({ ok: out.ok, reason: out.reason })
     }
     expect(existsSync(marker)).toBe(false)
     expect(await git(w.consumer, 'for-each-ref', '--format=%(refname) %(objectname)')).toBe(before)
@@ -136,6 +141,72 @@ describe('the mutation-proof gate against real git', () => {
         )
       ).ok,
     ).toBe(false)
+    // …and only now, the outcomes.
+    expect(resolved).toEqual([null, null])
+    for (const r of refusals) {
+      expect(r.ok).toBe(false)
+      expect(r.reason).toContain('is rejected')
+    }
+  })
+
+  test('a SYMBOLIC tracking ref is NOT fetched into — the fetch would write through it and create a local branch', async () => {
+    const w = await seedWorld('symbolic-dest')
+    // The plant: the destination the resolver would fetch into is a POINTER at
+    // a local branch that does not exist yet. Reproduced on git 2.43.0 —
+    // `fetch … +refs/heads/<b>:refs/remotes/origin/<b>` follows it and creates
+    // refs/heads/injected at the remote tip.
+    await git(w.consumer, 'symbolic-ref', `refs/remotes/origin/${BRANCH}`, 'refs/heads/injected')
+    const heads = () => git(w.consumer, 'for-each-ref', '--format=%(refname) %(objectname)', 'refs/heads')
+    const before = await heads()
+
+    const sha = await resolveMergeHeadSha(spawnCapture, w.consumer, BRANCH, w.stale)
+
+    // NO local ref was created — the invariant this whole resolver exists for.
+    expect(await heads()).toBe(before)
+    expect((await spawnCapture(['git', '-C', w.consumer, 'rev-parse', '--verify', '--quiet', 'refs/heads/injected'], w.consumer)).ok).toBe(false)
+    // The remote step DECLINED rather than reading a ref it did not write, so
+    // the object-verified expected_head answers — never the origin tip a fetch
+    // through the pointer would have produced.
+    expect(sha).toBe(w.stale)
+    expect(sha).not.toBe(w.current)
+  })
+
+  test('a FORCE-PUSHED branch still resolves — the refspec is `+`, and without it the fetch is rejected', async () => {
+    const w = await seedWorld('force-push')
+    const author = join(w.root, 'author')
+    // Origin is rewritten to a commit that is NOT a descendant of the tracking
+    // ref: the shape a rebase or an amend leaves behind.
+    await git(author, 'reset', '-q', '--hard', 'main')
+    writeFileSync(join(author, 'a.txt'), 'rebased onto a new base\n')
+    await git(author, 'add', '-A')
+    await git(author, ...GIT_ID, 'commit', '-q', '-m', 'the rebased commit that would actually merge')
+    await git(author, 'push', '-q', '--force', 'origin', BRANCH)
+    const rewritten = await git(author, 'rev-parse', 'HEAD')
+    expect(await git(w.consumer, 'rev-parse', `refs/remotes/origin/${BRANCH}`)).toBe(w.stale)
+
+    // THE BOUNDARY: the same refspec WITHOUT the `+` is refused as non-fast-forward
+    // and the tracking ref does not move.
+    const unforced = await spawnCapture(
+      ['git', '-C', w.consumer, 'fetch', '--no-tags', 'origin', `refs/heads/${BRANCH}:refs/remotes/origin/${BRANCH}`],
+      w.consumer,
+    )
+    expect(unforced.ok).toBe(false)
+    expect(await git(w.consumer, 'rev-parse', `refs/remotes/origin/${BRANCH}`)).toBe(w.stale)
+
+    expect(await resolveMergeHeadSha(spawnCapture, w.consumer, BRANCH, null)).toBe(rewritten)
+  })
+
+  test('a TAG of the branch name cannot answer for the branch — the local read is fully qualified', async () => {
+    const w = await seedWorld('tag-shadow')
+    // Both refs exist under the SAME name. Bare `rev-parse` prefers the tag.
+    await git(w.consumer, 'branch', BRANCH, w.stale)
+    await git(w.consumer, 'tag', BRANCH, 'refs/remotes/origin/main')
+    const tagged = await git(w.consumer, 'rev-parse', 'refs/remotes/origin/main')
+    expect(await git(w.consumer, 'rev-parse', '--verify', BRANCH)).toBe(tagged)
+    expect(tagged).not.toBe(w.stale)
+
+    // The merge takes refs/heads/<branch>, so the proof must bind to it.
+    expect(await resolveMergeHeadSha(spawnCapture, w.consumer, BRANCH, null)).toBe(w.stale)
   })
 
   test('a name the allowlist cannot judge is judged by REAL git — delegated, and its no refuses', async () => {
