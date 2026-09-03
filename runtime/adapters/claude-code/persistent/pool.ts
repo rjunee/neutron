@@ -577,7 +577,13 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           turn.injectionTail = initialDelivery.catch(() => undefined)
           activeTurnRoutes.set(activeTurnRouteKey(options), { session, turn })
           await initialDelivery
-          channel.push({ kind: 'status', message: 'working' })
+          // The post-inject status carries the child GENERATION now hosting this
+          // turn (the same key the completion carries). Trident's fire seam reads
+          // it: a launcher turn that outlives its settle budget is parked
+          // UNCONFIRMED, and this is what lets the orchestrator record which
+          // child hosts that run BEFORE the turn settles — so the pool's eviction
+          // guard (`hostsLiveWork`) and the crash latch can see it.
+          channel.push({ kind: 'status', message: 'working', launcher_session_key: session.childGeneration })
           // Flush any spawn-time buffered notices (e.g. the resume-picker
           // recovered/lost notice, which fired before this turn existed) onto the
           // now-live channel so they reach the user (Codex P2).

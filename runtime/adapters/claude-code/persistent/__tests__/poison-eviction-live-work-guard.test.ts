@@ -77,11 +77,15 @@ function makeWedgeOnceHost(): { host: PtyHost; spawnCount: () => number; message
             // Incarnation #1 wedges on its FIRST inject only (the abandoned turn);
             // everything else is answered, tagged with the replying child.
             if (!(incarnation === 1 && messagesOnThisChild === 1)) {
-              void post('/reply', {
-                session_id: sid,
-                text: `repl-${incarnation}:${body.text}`,
-                turn_id: body.turn_id,
-              })
+              // A real child answers AFTER the inject POST has returned; reply on
+              // the next tick so the pool's post-inject status precedes the completion.
+              setTimeout(() => {
+                void post('/reply', {
+                  session_id: sid,
+                  text: `repl-${incarnation}:${body.text}`,
+                  turn_id: body.turn_id,
+                })
+              }, 20)
             }
             return Response.json({ status: 'delivered' })
           }
@@ -178,6 +182,39 @@ async function abandonFirstTurn(
   await waitUntil(() => messagesSeen() >= 1)
   await h1.cancel()
 }
+
+describe('the post-inject `working` status names the child generation (the eviction guard key)', () => {
+  it('exactly one non-keepalive status carries launcher_session_key, equal to the completion generation', async () => {
+    const { host, messagesSeen } = makeWedgeOnceHost()
+    const sub = createPersistentReplSubstrate(opts(host))
+
+    // The wedge-once host ignores the first inject; abandon it and observe the
+    // answered second turn (served by the respawned child after the eviction).
+    await abandonFirstTurn(sub, messagesSeen)
+
+    const statuses: Array<{ message: string; keepalive: boolean; key: string | undefined }> = []
+    let completionKey: string | undefined
+    for await (const ev of sub.start(spec('turn-2')).events as AsyncIterable<Event>) {
+      if (ev.kind === 'status') {
+        statuses.push({ message: ev.message, keepalive: ev.keepalive === true, key: ev.launcher_session_key })
+      } else if (ev.kind === 'completion') {
+        completionKey = ev.launcher_session_key
+        break
+      } else if (ev.kind === 'error') {
+        throw new Error(`turn errored: ${ev.message}`)
+      }
+    }
+    const stamped = statuses.filter((s) => s.key !== undefined)
+    // Red mutation: dropping the stamp in pool.ts leaves this empty and the
+    // unconfirmed-fire row without a generation until (unless) the turn settles.
+    expect(stamped).toHaveLength(1)
+    expect(stamped[0]!.message).toBe('working')
+    expect(stamped[0]!.keepalive).toBe(false)
+    expect(completionKey).toBeDefined()
+    expect(stamped[0]!.key).toBe(completionKey!)
+    expect(statuses.filter((s) => s.keepalive).every((s) => s.key === undefined)).toBe(true)
+  })
+})
 
 describe('abandon-poison eviction guard — a poisoned launcher hosting live work is NOT evicted', () => {
   it('REGRESSION: with hostsLiveWork > 0 the next turn reuses the SAME child (no respawn), the poison is cleared, and the deferral is logged', async () => {

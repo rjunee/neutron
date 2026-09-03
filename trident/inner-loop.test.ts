@@ -871,6 +871,93 @@ describe('buildSubstrateWorkflowFire — fire + settle on a warm substrate', () 
     expect(res.error).toBe('fire turn did not settle within the budget (turn left running, not cancelled)')
     expect(res.turn_cancelled).toBe(false)
     expect(cancelled).toBe(false)
+    // Nothing injected: no generation on the outcome, and the caller can still
+    // withdraw the queued turn later (F3) — through the SAME handle.
+    expect(res.launcher_session_key).toBeUndefined()
+    expect(res.launcher).toBeDefined()
+    expect(res.cancel).toBeDefined()
+    await res.cancel!()
+    expect(cancelled).toBe(true)
+  })
+
+  // F2/F4/F6 (review): the pool reports the child generation on the ONE
+  // post-inject `working` status. A turn that injected before the budget carries
+  // it on the unconfirmed outcome; one that injects later resolves `launcher`.
+  test('a `working` status carrying the pool generation BEFORE the budget → the unconfirmed outcome names it, and `launcher` resolves to it', async () => {
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            yield { kind: 'status', message: 'working', launcher_session_key: 'generation-inject' } as Event
+            await new Promise<void>(() => {})
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    // Red mutation: ignoring status events leaves this undefined and the row null.
+    expect(res.launcher_session_key).toBe('generation-inject')
+    expect(await res.launcher!).toBe('generation-inject')
+  })
+
+  test('a generation that arrives AFTER the budget resolves `launcher` (parked for the orchestrator), and a keepalive status without one is ignored', async () => {
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            yield { kind: 'status', message: 'still working', keepalive: true } as Event
+            await released
+            yield { kind: 'status', message: 'working', launcher_session_key: 'generation-after' } as Event
+            yield { ...completion, launcher_session_key: 'generation-after' } as Event
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    expect(res.launcher_session_key).toBeUndefined()
+    release()
+    expect(await res.launcher!).toBe('generation-after')
+    const late = await res.settled!
+    expect(late).toEqual({ status: 'fired', error: null, launcher_session_key: 'generation-after' })
+  })
+
+  test('a stream that ends WITHOUT ever injecting resolves `launcher` to null', async () => {
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            await released
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    release()
+    expect(await res.launcher!).toBeNull()
+    expect((await res.settled!).status).toBe('failed')
   })
 
   test('a stream that ERRORS after the budget resolves `settled` as failed — it never rejects', async () => {

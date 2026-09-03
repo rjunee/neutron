@@ -396,7 +396,7 @@ describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
     expect(laneA.phase).toBe('failed')
     expect(laneA.failure_reason).toContain('inner workflow fire failed')
     expect(laneA.failure_reason).toContain('did not settle within the budget')
-    expect(laneA.failure_reason).toContain('not cancelled')
+    expect(laneA.failure_reason).toContain('launcher turn cancelled at the deadline')
     expect(laneA.failure_reason ?? '').not.toContain('exhausted')
     expect(laneA.crash_recoveries).toBe(1)
     expect(laneA.branch).toBe('trident/existing-a')

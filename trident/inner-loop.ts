@@ -304,7 +304,14 @@ export interface FireOutcome {
   status: 'fired' | 'failed' | 'unconfirmed'
   /** Non-null iff `failed` / `unconfirmed`: a short audit reason. */
   error: string | null
-  /** Exact persistent-pool child which owns the detached workflow. */
+  /** Exact persistent-pool child which owns the detached workflow. On `fired`
+   *  it comes from the turn's completion. On `unconfirmed` it is present iff the
+   *  turn had already been INJECTED when the budget elapsed (the pool stamps the
+   *  generation on its post-inject status): that child now hosts this run's
+   *  workflow, and the orchestrator records it at once so the pool's eviction
+   *  guard and the crash latch can see the run. Absent on `unconfirmed` = the
+   *  turn was still QUEUED behind the launcher's driver lock — nothing of this
+   *  fire is running inside any child yet. */
   launcher_session_key?: string
   /** `unconfirmed` only — how long the launcher turn had been running when the
    *  settle budget elapsed (the budget itself, in practice). */
@@ -320,7 +327,25 @@ export interface FireOutcome {
    *  settles: `fired` (with its `launcher_session_key`) on a completion event, else
    *  `failed`. Never rejects. */
   settled?: Promise<FireOutcome>
+  /** `unconfirmed` only — resolves with the launcher generation the moment the
+   *  turn INJECTS (at once when it already had by the budget), or `null` when the
+   *  stream ends without the turn ever injecting. Independent of `settled`, which
+   *  can take the pool's whole turn ceiling; this is how a run confirmed by its
+   *  workflow's own stage event still adopts its generation. Never rejects. */
+  launcher?: Promise<string | null>
+  /** `unconfirmed` only — ABANDON the launcher turn, for the orchestrator's
+   *  confirmation deadline. On a turn still queued behind the driver lock this is
+   *  poison-free: the driver returns before injecting, and no ghost `Workflow`
+   *  can fire on a run already failed. On an injected turn it abandon-poisons the
+   *  session exactly as any caller timeout does, and the pool's eviction guard
+   *  (`hostsLiveWork`) then decides whether that child may be evicted. */
+  cancel?: () => Promise<void>
 }
+
+/** The `unconfirmed` outcome's reason. Built ON `FIRE_SETTLE_TIMEOUT_ERROR` so
+ *  every reader that classifies a terminal reason by that phrase (the
+ *  terminal-build wake, delivery) still recognises the deadline failure. */
+export const FIRE_UNCONFIRMED_ERROR = `${FIRE_SETTLE_TIMEOUT_ERROR} (turn left running, not cancelled)`
 
 /** Input to one fire-and-settle launcher turn. */
 export interface FireInnerWorkflowInput {
@@ -914,18 +939,38 @@ export function buildSubstrateWorkflowFire(
     }
 
     const startedAt = Date.now()
+    // THE LAUNCHER GENERATION, LEARNED AT INJECT TIME. The pool stamps the child
+    // generation on its post-inject `working` status (and again on the
+    // completion). Capturing it here — not only from the completion — is what
+    // lets an UNCONFIRMED fire say which child hosts its work while the turn is
+    // still draining. `launcher` resolves once, the first time it is known, or
+    // with null when the stream ends without the turn ever injecting.
+    let launcherGeneration: string | undefined
+    let resolveLauncher: (generation: string | null) => void = () => {}
+    const launcher = new Promise<string | null>((resolve) => {
+      resolveLauncher = resolve
+    })
+    const learnGeneration = (generation: string | undefined): void => {
+      if (generation === undefined) return
+      if (launcherGeneration === undefined) launcherGeneration = generation
+      resolveLauncher(launcherGeneration)
+    }
     const consume = async (): Promise<FireOutcome> => {
       try {
         for await (const ev of handle.events) {
+          if (ev.kind === 'status') {
+            learnGeneration(ev.launcher_session_key)
+            continue
+          }
           if (ev.kind === 'completion') {
             // The launching turn settled (Workflow fired + replied). The workflow
             // is now detached in the background; harvest its result from the DB.
+            learnGeneration(ev.launcher_session_key)
+            const generation = ev.launcher_session_key ?? launcherGeneration
             return {
               status: 'fired',
               error: null,
-              ...(ev.launcher_session_key !== undefined
-                ? { launcher_session_key: ev.launcher_session_key }
-                : {}),
+              ...(generation !== undefined ? { launcher_session_key: generation } : {}),
             }
           }
           if (ev.kind === 'error') {
@@ -937,6 +982,10 @@ export function buildSubstrateWorkflowFire(
         }
       } catch {
         return { status: 'failed', error: 'fire stream error' }
+      } finally {
+        // The stream is over one way or another: a turn that never injected
+        // never will. (A no-op once the generation was already learned.)
+        resolveLauncher(launcherGeneration ?? null)
       }
 
       // Stream ended WITHOUT a terminal `completion` — a paused / abnormally-closed
@@ -966,16 +1015,20 @@ export function buildSubstrateWorkflowFire(
       timer = setTimer(() => {
         resolve({
           status: 'unconfirmed',
-          error: 'fire turn did not settle within the budget (turn left running, not cancelled)',
+          error: FIRE_UNCONFIRMED_ERROR,
           elapsed_ms: Math.max(0, Date.now() - startedAt),
           budget_ms: input.settle_timeout_ms,
           turn_cancelled: false,
+          // Present iff the turn had INJECTED by the budget — see `FireOutcome`.
+          ...(launcherGeneration !== undefined ? { launcher_session_key: launcherGeneration } : {}),
+          launcher,
           settled: consuming.catch(
             (e): FireOutcome => ({
               status: 'failed',
               error: `fire stream error: ${e instanceof Error ? e.message : String(e)}`,
             }),
           ),
+          cancel: () => handle.cancel(),
         })
       }, input.settle_timeout_ms)
     })
