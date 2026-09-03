@@ -562,19 +562,20 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // then forged a full `proved: true` out of: a control is branch-authored
       // code running BETWEEN the guard's red and its green, and one whose module
       // body rewrote the guard's own test file made the restored guard green
-      // with nothing having tested the target. A build told only "a wrapper is
-      // a legal control" would write exactly that shape.
-      expect(['the control is not unobserved', d.includes('status --porcelain --ignored')]).toEqual([
-        'the control is not unobserved',
+      // with nothing having tested the target. What is true is narrower and is
+      // now what the schema says: the control's EXIT CODE can only refuse a
+      // proof, and whatever it writes is discarded, because the worktree is
+      // re-provisioned at the pinned commit before the restored guard runs.
+      expect(['control writes are discarded', d.includes('re-provisions the worktree')]).toEqual([
+        'control writes are discarded',
         true,
       ])
       expect(d).not.toContain('merely has to stay green')
     }
-    // Two-sided: the fence really exists on the prover side, in the argv it
-    // spends and the words its refusal uses, so the sentence cannot drift into
-    // a promise the gate does not keep.
-    expect(PROVER_SRC).toContain("'status', '--porcelain', '--ignored'")
-    expect(PROVER_SRC).toContain('no longer matches')
+    // Two-sided: the re-provision really exists on the prover side, in the
+    // refusal it spends when it cannot happen, so the sentence above cannot
+    // drift into a promise the gate does not keep.
+    expect(PROVER_SRC).toContain('could not re-provision the proof worktree')
     // Two-sided: the prover really refuses the wrapper for the GUARD only, so
     // the sentence above cannot drift into a permission the gate does not give.
     expect(PROVER_SRC).toContain('function guardRunsTheMutatedFile(')

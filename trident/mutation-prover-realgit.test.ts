@@ -171,15 +171,17 @@ async function seedProductionLib(): Promise<string> {
 }
 
 /**
- * A repo whose branch adds `src/limit.ts` and FOUR test files: the honest pair
- * (a real test of the library, and an inert control), and the forging pair — a
- * guard that fails unconditionally and never imports the target, plus a control
- * whose MODULE BODY rewrites that guard into a passing stub before declaring a
- * passing test of its own. The second pair is a full red-then-green with
- * nothing having tested `src/limit.ts`.
+ * A repo whose branch adds `src/limit.ts` plus five test files: the honest pair
+ * (a real test of the library, and an unrelated control), and three files that
+ * exist to forge a proof by WRITING, not by loading — a guard that fails
+ * unconditionally and never imports the target, a control whose MODULE BODY
+ * rewrites that guard into a passing stub before declaring a passing test of
+ * its own, and the one-actor variant: a guard that rewrites ITSELF green on
+ * its first (red) run. Each forging pair is a full red-then-green with nothing
+ * having tested `src/limit.ts`.
  */
-async function seedForgingControlRepo(): Promise<string> {
-  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-forging-control-'))
+async function seedControlForgeryRepo(): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-control-forgery-'))
   created.push(root)
   const repo = join(root, 'repo')
   await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
@@ -187,7 +189,7 @@ async function seedForgingControlRepo(): Promise<string> {
   await git(repo, 'add', '-A')
   await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
 
-  await git(repo, 'switch', '-q', '-c', 'trident/forging-control')
+  await git(repo, 'switch', '-q', '-c', 'trident/control-forgery')
   mkdirSync(join(repo, 'src'), { recursive: true })
   mkdirSync(join(repo, 'tests'), { recursive: true })
   writeFileSync(
@@ -196,62 +198,34 @@ async function seedForgingControlRepo(): Promise<string> {
   )
   writeFileSync(
     join(repo, 'tests', 'limit.test.ts'),
-    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n})\n",
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n  expect(clamp(2, 3)).toBe(2)\n})\n",
   )
   writeFileSync(
-    join(repo, 'tests', 'inert-control.test.ts'),
+    join(repo, 'tests', 'other-control.test.ts'),
     "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated module', () => {\n  expect(1 + 1).toBe(2)\n})\n",
   )
-  // The guard the forgery leans on: red for a reason that has nothing to do
+  // The guard the forgery leans on: RED for a reason that has nothing to do
   // with the mutation, which is precisely why it is free to go green again.
   writeFileSync(
-    join(repo, 'tests', 'tautology.test.ts'),
+    join(repo, 'tests', 'g.test.ts'),
     "import { expect, test } from 'bun:test'\n\ntest('this guard asserts nothing about the library', () => {\n  expect(1).toBe(2)\n})\n",
   )
+  // The module body runs on LOAD, before any assertion in the file, and the
+  // process cwd is the proof worktree — so this relative path lands on the
+  // guard's own test file inside the tree the proof is about to re-observe.
   writeFileSync(
-    join(repo, 'tests', 'forger-control.test.ts'),
-    "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\n// Module body: this runs on LOAD, before any assertion in this file.\nwriteFileSync(\n  'tests/tautology.test.ts',\n  \"import { expect, test } from 'bun:test'\\n\\ntest('rewritten', () => {\\n  expect(1).toBe(1)\\n})\\n\",\n)\n\ntest('the control passes, having fixed the guard up', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+    join(repo, 'tests', 'forge-control.test.ts'),
+    "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nwriteFileSync(\n  'tests/g.test.ts',\n  \"import { expect, test } from 'bun:test'\\n\\ntest('rewritten', () => {\\n  expect(1).toBe(1)\\n})\\n\",\n)\n\ntest('the control passes, having fixed the guard up', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  // THE ONE-ACTOR VARIANT: no control is needed at all. This guard rewrites
+  // ITSELF green while running red, so the second observation of the same argv
+  // passes — and no inspection of the CONTROL could ever have seen it.
+  writeFileSync(
+    join(repo, 'tests', 'self-forging-guard.test.ts'),
+    "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nwriteFileSync(\n  'tests/self-forging-guard.test.ts',\n  \"import { expect, test } from 'bun:test'\\n\\ntest('rewritten', () => {\\n  expect(1).toBe(1)\\n})\\n\",\n)\n\ntest('this guard is red until it has rewritten itself', () => {\n  expect(1).toBe(2)\n})\n",
   )
   await git(repo, 'add', '-A')
-  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its test, and a control that rewrites a guard')
-  return repo
-}
-
-/**
- * THE OTHER HALF OF THE FENCE, and the row that makes `--ignored` load-bearing:
- * an HONEST guard over `src/limit.ts`, and a control whose module body writes
- * into a path `.gitignore` hides. `git status --porcelain` alone reports
- * nothing for it, so without `--ignored` this pair proves red-then-green while
- * branch-authored bytes (here a file; in the general case `node_modules/…`)
- * were written into the tree the restored guard then ran against.
- */
-async function seedIgnoredWritingControlRepo(): Promise<string> {
-  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-ignored-control-'))
-  created.push(root)
-  const repo = join(root, 'repo')
-  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
-  writeFileSync(join(repo, 'README.md'), 'seed\n')
-  writeFileSync(join(repo, '.gitignore'), 'scratch/\n')
-  await git(repo, 'add', '-A')
-  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
-
-  await git(repo, 'switch', '-q', '-c', 'trident/ignored-writing-control')
-  mkdirSync(join(repo, 'src'), { recursive: true })
-  mkdirSync(join(repo, 'tests'), { recursive: true })
-  writeFileSync(
-    join(repo, 'src', 'limit.ts'),
-    'export function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n',
-  )
-  writeFileSync(
-    join(repo, 'tests', 'g.test.ts'),
-    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n})\n",
-  )
-  writeFileSync(
-    join(repo, 'tests', 'control.test.ts'),
-    "import { mkdirSync, writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\n// Module body: this runs on LOAD, and `scratch/` is gitignored.\nmkdirSync('scratch', { recursive: true })\nwriteFileSync('scratch/poison.txt', 'x\\n')\n\ntest('the control stays green', () => {\n  expect(1 + 1).toBe(2)\n})\n",
-  )
-  await git(repo, 'add', '-A')
-  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its honest test, and a control that writes ignored scratch')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its test, and three files that forge a proof by writing')
   return repo
 }
 
@@ -1531,80 +1505,121 @@ describe('the mutation-proof gate against real git', () => {
     expect(nominated.reason).toContain('does not exist at')
   }, 60_000)
 
-  test('a control that REWRITES THE GUARD\'S TEST FILE forges red-then-green — and is refused against REAL git', async () => {
-    // THE FORGERY, end to end, exactly as a review seat ran it: the guard never
-    // imports the target and fails unconditionally, so it is RED under the
-    // mutation for free; the control is an ordinary test file whose MODULE BODY
-    // (which runs on load, before any assertion) overwrites the guard's file
-    // with a passing stub and then passes itself; the restored guard is
-    // therefore GREEN. Red, green, green — with nothing having tested
-    // `src/limit.ts`. Only `claim.file`'s digest was re-checked afterwards, so
-    // the tree moving underneath the proof was invisible.
-    const repo = await seedForgingControlRepo()
-    const forged = await runMutationProofGate({
-      run: { id: 'run-forging-control', slug: 'forging-control', repo_path: repo, branch: 'trident/forging-control' },
-      claim: {
-        file: 'src/limit.ts',
-        find: 'n > max ? max : n',
-        replace: 'n',
-        guard: ['bun', 'test', 'tests/tautology.test.ts'],
-        control: ['bun', 'test', 'tests/forger-control.test.ts'],
-      },
-      base_branch: 'main',
-      run_host: spawnCapture,
-    })
-    expect([forged.ok, forged.evidence?.proved ?? null]).toEqual([false, false])
-    expect(forged.exempt).toBe(false)
-    expect(forged.reason).toContain('no longer matches')
-    expect(forged.reason).toContain('tests/tautology.test.ts')
-
-    // POSITIVE CONTROL on the same repository: an honest guard over the same
-    // target with a control that writes nothing still proves. Without this row
-    // the assertion above would also pass on a fence that refused everything.
-    const honest = await runMutationProofGate({
-      run: { id: 'run-honest-control', slug: 'honest-control', repo_path: repo, branch: 'trident/forging-control' },
-      claim: {
-        file: 'src/limit.ts',
-        find: 'n > max ? max : n',
-        replace: 'n',
-        guard: ['bun', 'test', 'tests/limit.test.ts'],
-        control: ['bun', 'test', 'tests/inert-control.test.ts'],
-      },
-      base_branch: 'main',
-      run_host: spawnCapture,
-    })
-    expect([honest.ok, honest.evidence?.proved ?? null]).toEqual([true, true])
-    expect(honest.reason).not.toContain('no longer matches')
-  }, 120_000)
-
-  test('…and a control that writes into a GITIGNORED path is refused too — `--ignored` is load-bearing', async () => {
-    // DELETE `--ignored` FROM THE ARGV AND THIS ROW PROVES RED-THEN-GREEN.
-    // That is the row's whole job: a fresh `worktree add` materialises only
-    // tracked files, so the proof tree was born with no ignored entries either,
-    // and anything ignored that exists afterwards was written by the guard or
-    // the control while the proof was running. The guard here is HONEST — the
-    // refusal is about what the control put in the tree, not about the claim.
-    const repo = await seedIgnoredWritingControlRepo()
+  test("a control that REWRITES THE GUARD'S TEST FILE forges red-then-green — and dies in the fresh tree", async () => {
+    // THE FOURTEENTH ESCAPE, end to end, exactly as a review seat ran it: the
+    // guard never imports the target and fails unconditionally, so it is RED
+    // under the mutation for free; the control is an ordinary test file whose
+    // MODULE BODY (which runs on load, before any assertion) overwrites the
+    // guard's file with a passing stub and then passes itself. Every pre-run
+    // refusal passes this pair — nothing about the argv is wrong — and it used
+    // to come back red, green, green with nothing having tested `src/limit.ts`.
+    //
+    // KILL-THE-BRANCH CHECK, done once and restored: with the re-provision
+    // block commented out this expectation FAILS, the gate returning ok:true
+    // and proved:true.
+    const repo = await seedControlForgeryRepo()
     const out = await runMutationProofGate({
-      run: {
-        id: 'run-ignored-control',
-        slug: 'ignored-control',
-        repo_path: repo,
-        branch: 'trident/ignored-writing-control',
-      },
+      run: { id: 'run-control-forgery', slug: 'control-forgery', repo_path: repo, branch: 'trident/control-forgery' },
       claim: {
         file: 'src/limit.ts',
         find: 'n > max ? max : n',
         replace: 'n',
         guard: ['bun', 'test', 'tests/g.test.ts'],
-        control: ['bun', 'test', 'tests/control.test.ts'],
+        control: ['bun', 'test', 'tests/forge-control.test.ts'],
       },
       base_branch: 'main',
       run_host: spawnCapture,
     })
-    expect([out.ok, out.exempt]).toEqual([false, false])
-    expect(out.reason).toContain('no longer matches')
-    expect(out.reason).toContain('scratch')
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('did not return to GREEN')
+    // The exit codes say WHERE it died: red mutated and green control, so the
+    // forgery cleared every check that runs before anything is spawned, and the
+    // restored guard is red because the tree it ran in is the COMMIT again.
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).not.toBe(0)
+    // The re-provisioned worktree is still removed by the outer `finally`.
+    expect(
+      existsSync(
+        proofWorktreePath(repo, {
+          id: 'run-control-forgery',
+          slug: 'control-forgery',
+          repo_path: repo,
+          branch: 'trident/control-forgery',
+        }),
+      ),
+    ).toBe(false)
+  }, 120_000)
+
+  test('…and a GUARD that rewrites ITSELF green between its two runs dies there too', async () => {
+    // THE ONE-ACTOR VARIANT. The control is honest and inert; the forgery is
+    // entirely inside the guard, whose module body rewrites its own file before
+    // failing. Only the guard's SECOND run reads the rewritten copy — which is
+    // why no inspection of the control, however thorough, could have caught it,
+    // and why the fix is to throw the tree away rather than to police who wrote
+    // what.
+    //
+    // KILL-THE-BRANCH CHECK, done once and restored: with the re-provision
+    // block commented out this expectation FAILS, the gate returning ok:true
+    // and proved:true.
+    const repo = await seedControlForgeryRepo()
+    const out = await runMutationProofGate({
+      run: { id: 'run-self-forging', slug: 'self-forging', repo_path: repo, branch: 'trident/control-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/self-forging-guard.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('did not return to GREEN')
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).not.toBe(0)
+  }, 120_000)
+
+  test('…while an HONEST pair still proves red-then-green THROUGH the re-provision', async () => {
+    // THE POSITIVE CONTROL on both rows above: a re-provision that broke the
+    // proof outright — a worktree that came back empty, or a restore that did
+    // not survive it — would satisfy every assertion in them. Same repository,
+    // same real bun, same mutation: only the honesty of the pair differs.
+    const repo = await seedControlForgeryRepo()
+    const out = await runMutationProofGate({
+      run: {
+        id: 'run-honest-forgery-repo',
+        slug: 'honest-forgery-repo',
+        repo_path: repo,
+        branch: 'trident/control-forgery',
+      },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt, out.evidence?.proved ?? null]).toEqual([true, false, true])
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
   test('an expected_head that names a TREE is refused — only the `^{commit}` peel says so', async () => {

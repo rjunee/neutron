@@ -2713,6 +2713,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
         run.id,
         claim,
         wt,
+        repo,
         headSha,
         now() + budgetMs,
         input.changed_files ?? [],
@@ -2863,6 +2864,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     run_id: string,
     claim: MutationClaim,
     wt: string,
+    repo: string,
     headSha: string,
     deadline: number,
     changedFiles: readonly string[],
@@ -3114,6 +3116,44 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       await fs.write(target, before).catch(() => undefined)
     }
 
+    // THE TREE THE RESTORED-GUARD OBSERVATION IS OF. Everything that has run
+    // by this line is BRANCH-AUTHORED code: the control by construction (a
+    // wrapper, or any test file whose module body executes on load), and the
+    // guard's own first run just as much. It executed BETWEEN the guard's RED
+    // and its GREEN with write access to the whole worktree, and nothing
+    // checked what it wrote to anything but claim.file. Review round 8
+    // reproduced exactly that at this branch's head: an unconditionally-red
+    // guard that never imports the target, plus a control whose module body
+    // writeFileSync's a passing copy of the guard's test file, came back
+    // proved:true — red, green, green, with nothing having tested the target;
+    // and again with the control spelled as a make wrapper.
+    //
+    // RE-PROVISION rather than a `git status --porcelain` gate. Porcelain is
+    // blind to writes under ignored paths — a control that writes into
+    // node_modules plants code the guard then imports, and the tree still
+    // reads clean — and it would refuse honest runners that drop caches
+    // beside their tests (__pycache__, .pytest_cache, coverage output): a hole
+    // in one direction and an over-refusal in the other. A fresh checkout of
+    // the PINNED sha makes the final observation identical to the commit BY
+    // CONSTRUCTION, whatever ran and wherever it wrote.
+    //
+    // The same re-provision closes the ONE-ACTOR variant, which no inspection
+    // of the control could ever see: a GUARD whose first (red) run rewrites
+    // ITSELF green.
+    //
+    // Containment is not re-checked afterwards: the re-provisioned tree is the
+    // same immutable commit the check at the top of this function already
+    // passed against.
+    await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
+    const reAdd = await deps.run_host(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha], repo)
+    if (!reAdd.ok) {
+      return refuse(
+        run_id,
+        claim,
+        'could not re-provision the proof worktree after the nominated commands ran — the restored-guard observation must be of a tree no nominated command edited',
+      )
+    }
+
     let restored: string
     try {
       restored = await fs.read(target)
@@ -3121,61 +3161,6 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `could not re-read ${claim.file} after restoring it`)
     }
     const restoredSha = sha256(restored)
-
-    // THE TREE THE SECOND OBSERVATION IS OF. The guard and the control are
-    // branch-authored code that EXECUTED between the guard's RED and its
-    // GREEN, and restoring `claim.file` restores one file, not the tree. A
-    // control whose module body rewrites the guard's own test file turns
-    // red-then-green into a forgery with two honest exit codes — reproduced
-    // by review at this head: an unconditionally-red guard plus a control
-    // that writeFileSync's it green came back proved:true. So before the
-    // restored-guard observation, ask git — never the nominated commands —
-    // whether the worktree still IS the provisioned tree. `--ignored` is
-    // load-bearing: a fresh `worktree add` materialises only tracked files,
-    // so the tree was born with no ignored entries either, and node_modules
-    // poison written into the worktree would hide behind a .gitignore.
-    // Every arm fails CLOSED: a status that could not run, ran out of proof
-    // budget, or printed ANYTHING refuses. The ONE legal skip is an
-    // already-exhausted budget, where `observe` below returns timed_out
-    // without spawning and `evaluate` refuses a timed-out guard_restored —
-    // proved:true is unreachable on that path, and the budget stays the
-    // budget (`tick.ts` is single-flight; an unbounded await here would be
-    // a stall a hostile control could manufacture by dirtying the tree).
-    const statusBudget = deadline - now()
-    if (statusBudget > 0) {
-      const ceiling = after(statusBudget)
-      let status: HostCommandResult | 'timeout'
-      try {
-        status = await Promise.race([
-          deps.run_host(['git', '-C', wt, 'status', '--porcelain', '--ignored'], wt),
-          ceiling.promise,
-        ])
-      } finally {
-        ceiling.cancel()
-      }
-      if (status === 'timeout' || !status.ok) {
-        return refuse(
-          run_id,
-          claim,
-          'could not verify the proof worktree after the mutated observations (git status ' +
-            `${status === 'timeout' ? 'ran out of proof budget' : 'failed'}) — refusing rather than observing a tree the nominated commands may have edited`,
-        )
-      }
-      const dirt = status.stdout
-        .split('\n')
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0)
-      if (dirt.length > 0) {
-        return refuse(
-          run_id,
-          claim,
-          `the proof worktree no longer matches ${headSha.slice(0, 8)} after the mutated observations (${namesWithinBudget(dirt)}) — ` +
-            "the guard and control are branch-authored code executing between the guard's RED and its GREEN, and a restored-guard " +
-            'observation of a tree they edited would prove what they wrote, not what the commit does; nominate a guard and control ' +
-            'that leave the worktree exactly as provisioned',
-        )
-      }
-    }
 
     const guardRestored = await observe(claim.guard, wt, deadline)
 
