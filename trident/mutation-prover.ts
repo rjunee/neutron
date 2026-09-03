@@ -1409,6 +1409,22 @@ export function bunConfigCandidates(argv: readonly string[], changedPaths: reado
  * exists" defect this card exists to fix, arriving through the door marked
  * "security". A branch-changed file reached through a map is the general
  * transitive-import problem and is not decidable here.
+ *
+ * THE COST, STATED WHERE IT IS PAID (recorded in the plan's Deferred paragraph
+ * as JOB 2 of the round-8 review brief): this pair OVER-REFUSES a whole diff
+ * class. A diff that touches a file the ROOT bunfig's `preload` names — in
+ * this repository, either of the two support files under `tests/support/`
+ * that `bunfig.toml` preloads — has a legal mutation TARGET (the declared-test
+ * classifier reads such a file as a support library), yet NO legal bun
+ * nomination at all: the root bunfig is inspected for ANY bun argv, the
+ * refusal below covers whichever side of the nominated pair is bun — guard
+ * and control alike — and `node --test` cannot run `bun:test` files, so in a
+ * bun-only repo neither remedy the refusal prints exists. It fails CLOSED: an
+ * over-refusal, never a forged proof. Relief belongs to the named follow-up
+ * card — "trident: scope the inherited-preload arm so a diff touching a
+ * root-bunfig-preloaded support file keeps a legal bun nomination" — and not
+ * to a fix round, because every narrowing examined re-opens the escape this
+ * arm exists to close (rewrite the preloaded file, leave the config alone).
  */
 export function bunConfigInspected(argv: readonly string[], changedPaths: readonly string[]): string[] {
   const candidates = bunConfigCandidates(argv, changedPaths)
@@ -1611,6 +1627,11 @@ export function hookValuePaths(value: string): string[] {
  * case, because the branch then had to touch nothing the diff-scoped arm looks
  * at. It asks only whether the code that config runs before every test is code
  * THIS BRANCH wrote.
+ *
+ * Its over-refusal aggregate — the diff class this leaves with no legal bun
+ * nomination on EITHER side of the pair — is stated on `bunConfigInspected`,
+ * beside the unconditional root-bunfig read that creates it, with the
+ * follow-up card that owns the relief.
  *
  * THE SPELLING IS CANONICALISED THE WAY EVERY OTHER PATH ON THIS SEAM IS, and
  * the loader's own rewrites are candidates too: `./tests/support/hook.js` is

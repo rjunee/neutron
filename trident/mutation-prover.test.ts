@@ -1065,6 +1065,36 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     }
   })
 
+  test('…and it refuses the CONTROL side of the pair too — the whole nomination is the over-refusal', async () => {
+    // The refusal walks the nominated PAIR, so a bun CONTROL beside a non-bun
+    // guard is refused by this same arm. That is half of the aggregate the
+    // seam comment on `bunConfigInspected` records: a diff touching a
+    // root-bunfig-preloaded support file loses every bun guard AND every bun
+    // control, and `node --test` cannot run `bun:test` files, so in a bun-only
+    // repo no legal nomination remains on either side. Fails CLOSED; relief is
+    // the follow-up card "trident: scope the inherited-preload arm so a diff
+    // touching a root-bunfig-preloaded support file keeps a legal bun
+    // nomination", not a fix round's side effect.
+    const { prover, host } = proverOver(
+      { mergeBase: 'b'.repeat(40), baseFiles: { 'bunfig.toml': BUNFIG_MAIN_HOOK } },
+      bunFs({ [join(BUN_WT, 'bunfig.toml')]: BUNFIG_MAIN_HOOK }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      // The guard is node and reads no bunfig; only the CONTROL is bun.
+      claim: { ...CLAIM, guard: ['node', '--test', 'tests/limit.test.mjs'] },
+      changed_files: ['src/limit.ts', 'tests/support/hook.ts'],
+      base_ref: 'main',
+    })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    // Named on the CONTROL: the node guard walked past this arm refusal-free.
+    expect(evidence.reason).toContain('claim.control')
+    expect(evidence.reason).toContain('tests/support/hook.ts')
+    // Nothing ran — neither the node guard nor the bun control.
+    expect(host.calls.every((c) => c[0] !== 'bun' && c[0] !== 'node')).toBe(true)
+  })
+
   test('…and the same inherited preload, aimed at a file the branch did NOT touch, still proves', async () => {
     // THE POSITIVE CONTROL on the two rows above, and the whole reason this arm
     // reads WHERE the preload points instead of refusing every repo that ships
