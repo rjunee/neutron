@@ -268,13 +268,6 @@ function isNodeRunOption(arg: string): boolean {
  * two real families are listed: a `[cm]` prefix takes no `x` (`.cjs`, `.cts`,
  * `.mjs`, `.mts`) and the bare form takes an optional one (`.js`, `.jsx`,
  * `.ts`, `.tsx`).
- *
- * `_test.rs` IS DELIBERATELY ABSENT, and the guard side is where that lands:
- * cargo collects `#[test]` functions from any module, so `src/pricing_test.rs`
- * is production here and a legal TARGET — while its only plausible guard is
- * `cargo test`, which COMPILES the crate before it runs anything. See the
- * compile-tautology note in `guardRunsTheMutatedFile`: that guard is latent,
- * deferred, and unreachable in this bun-only repository.
  */
 const TEST_BASENAME = /\.(test|spec)\.(?:[cm][jt]s|[jt]sx?)$|_test\.(go|py)$/
 
@@ -837,17 +830,6 @@ function guardRunsTheMutatedFile(guard: readonly string[], file: string): string
     if (forwardsPositionalsToAScript(guard)) {
       return `runs ${guard[0]}, whose script body the branch wrote and this argv does not show, and so may load`
     }
-    // A COMPILED LANGUAGE'S RUNNER IS A COMPILE FIRST, and this arm knowingly
-    // lets it through. `go test` / `cargo test` build the whole package or
-    // crate before a test runs, so a syntax-shaped mutation of ANY `.go`/`.rs`
-    // file in it reddens the guard through COMPILATION with nothing asserting
-    // the target's behaviour. It is not closed here because closing it lexically
-    // means refusing `go`/`cargo` as a guard for every target in such a repo —
-    // which IS the "no legal nomination" defect this whole card exists to fix,
-    // paid a second time. It is unreachable in this bun-only tree (no toolchain,
-    // so the restored guard reds too and `evaluate` refuses), recorded as a
-    // deferral in IMPLEMENTATION_PLAN.md, and it belongs to a card that can
-    // reason about a compile-unit target and its guard together.
     return null
   }
   const selectors = pathArgs(guard)
@@ -2713,7 +2695,6 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
         run.id,
         claim,
         wt,
-        repo,
         headSha,
         now() + budgetMs,
         input.changed_files ?? [],
@@ -2864,7 +2845,6 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     run_id: string,
     claim: MutationClaim,
     wt: string,
-    repo: string,
     headSha: string,
     deadline: number,
     changedFiles: readonly string[],
@@ -3120,37 +3100,72 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     // by this line is BRANCH-AUTHORED code: the control by construction (a
     // wrapper, or any test file whose module body executes on load), and the
     // guard's own first run just as much. It executed BETWEEN the guard's RED
-    // and its GREEN with write access to the whole worktree, and nothing
-    // checked what it wrote to anything but claim.file. Review round 8
+    // and its GREEN observations with write access to the whole worktree, and
+    // nothing checked what it wrote to anything but claim.file. Review round 8
     // reproduced exactly that at this branch's head: an unconditionally-red
     // guard that never imports the target, plus a control whose module body
-    // writeFileSync's a passing copy of the guard's test file, came back
+    // rewrote the guard's committed test file into a passing stub, came back
     // proved:true — red, green, green, with nothing having tested the target;
-    // and again with the control spelled as a make wrapper.
+    // and again with the control spelled as a `make` wrapper. The escape is
+    // PRE-EXISTING AT THE BASE; the three steps below close it, each FAILING
+    // CLOSED.
     //
-    // RE-PROVISION rather than a `git status --porcelain` gate. Porcelain is
-    // blind to writes under ignored paths — a control that writes into
-    // node_modules plants code the guard then imports, and the tree still
-    // reads clean — and it would refuse honest runners that drop caches
-    // beside their tests (__pycache__, .pytest_cache, coverage output): a hole
-    // in one direction and an over-refusal in the other. A fresh checkout of
-    // the PINNED sha makes the final observation identical to the commit BY
-    // CONSTRUCTION, whatever ran and wherever it wrote.
+    // (1) TRACKED EDITS ARE REFUSED BY NAME rather than quietly undone. No
+    //     allowed runner shape rewrites committed files during a plain test
+    //     run, so a tracked edit is never an accident worth absorbing, and the
+    //     build learns WHICH file its nomination wrote instead of reading a
+    //     restored guard that mysteriously stayed red.
     //
-    // The same re-provision closes the ONE-ACTOR variant, which no inspection
-    // of the control could ever see: a GUARD whose first (red) run rewrites
-    // ITSELF green.
+    // (2) UNTRACKED ARTEFACTS ARE RUNNER CACHES — `__pycache__`,
+    //     `.pytest_cache`, coverage output — so they are TOLERATED in (1),
+    //     which keeps honest runners nominatable, and NEUTRALISED here:
+    //     `reset --hard` to the pinned head plus `clean -fdx` makes the second
+    //     observation a tree identical to the commit BY CONSTRUCTION, whatever
+    //     ran and wherever it wrote. That also closes the ONE-ACTOR variant no
+    //     inspection of the CONTROL could ever have seen: a GUARD whose first
+    //     (red) run plants something its second run reads.
     //
-    // Containment is not re-checked afterwards: the re-provisioned tree is the
-    // same immutable commit the check at the top of this function already
-    // passed against.
-    await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
-    const reAdd = await deps.run_host(['git', '-C', repo, 'worktree', 'add', '--detach', '--force', wt, headSha], repo)
-    if (!reAdd.ok) {
+    // (3) Only then is the restored guard observed.
+    //
+    // These are HOST git operations, not nominated commands, so they go
+    // through `deps.run_host` exactly like the `ls-tree` provenance listing
+    // above, and are not charged to the proof's command budget. Containment is
+    // not re-checked afterwards: the re-provisioned tree is the same immutable
+    // commit the check at the top of this function already passed against.
+    //
+    // THE RESIDUAL, recorded in the plan's Deferred paragraph: a nominated
+    // command that leaves a BACKGROUND writer running past its own exit, or
+    // that reaches OUTSIDE the worktree through the shared git directory or
+    // the executing user's own permissions, can still race these steps. That
+    // is the same-user process boundary — a machine-level surface no in-tree
+    // seam can close — and what is closed here is the whole in-tree,
+    // in-sequence family the reviewer reproduced.
+    const status = await deps.run_host(['git', '-C', wt, 'status', '--porcelain'], wt)
+    if (!status.ok) {
       return refuse(
         run_id,
         claim,
-        'could not re-provision the proof worktree after the nominated commands ran — the restored-guard observation must be of a tree no nominated command edited',
+        'could not inspect the proof worktree after the nominated commands ran — refusing rather than observing a tree they may have edited',
+      )
+    }
+    const trackedEdits = status.stdout
+      .split('\n')
+      .map((l) => l.trimEnd())
+      .filter((l) => l.length > 0 && !l.startsWith('??'))
+    if (trackedEdits.length > 0) {
+      return refuse(
+        run_id,
+        claim,
+        `the nominated commands edited the proof worktree while they ran: ${namesWithinBudget(trackedEdits)} — branch-authored code executes between the guard's RED and GREEN observations, and the restored-guard observation must be of the tree as committed at ${headSha.slice(0, 8)}, not of files a guard or control wrote; nominate commands that do not modify tracked files`,
+      )
+    }
+    const reset = await deps.run_host(['git', '-C', wt, 'reset', '--hard', headSha], wt)
+    const clean = reset.ok ? await deps.run_host(['git', '-C', wt, 'clean', '-fdx'], wt) : null
+    if (!reset.ok || clean === null || !clean.ok) {
+      return refuse(
+        run_id,
+        claim,
+        `could not re-provision the proof worktree to ${headSha.slice(0, 8)} before the restored-guard observation — refusing rather than observing a tree the nominated commands may have edited`,
       )
     }
 

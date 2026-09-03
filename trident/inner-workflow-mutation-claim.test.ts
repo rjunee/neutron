@@ -561,13 +561,14 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // control merely has to stay green", which a seat read as licence and
       // then forged a full `proved: true` out of: a control is branch-authored
       // code running BETWEEN the guard's red and its green, and one whose module
-      // body rewrote the guard's own test file made the restored guard green
-      // with nothing having tested the target. What is true is narrower and is
-      // now what the schema says: the control's EXIT CODE can only refuse a
-      // proof, and whatever it writes is discarded, because the worktree is
-      // re-provisioned at the pinned commit before the restored guard runs.
-      expect(['control writes are discarded', d.includes('re-provisions the worktree')]).toEqual([
-        'control writes are discarded',
+      // body rewrote the guard's own committed test file made the restored guard
+      // green with nothing having tested the target. What is true is narrower
+      // and is now what the schema says: nothing a control writes can REACH the
+      // observation that decides the proof, because the worktree is
+      // re-provisioned to the pinned commit first — and a tracked edit is
+      // refused outright.
+      expect(['control edits cannot reach the proof', d.includes('re-provisions the worktree to the pinned commit')]).toEqual([
+        'control edits cannot reach the proof',
         true,
       ])
       expect(d).not.toContain('merely has to stay green')
@@ -576,6 +577,11 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // refusal it spends when it cannot happen, so the sentence above cannot
     // drift into a promise the gate does not keep.
     expect(PROVER_SRC).toContain('could not re-provision the proof worktree')
+    // …and in the three host git calls that ARE the re-provision, so deleting
+    // any one of them reds this row as well as the prover's own.
+    expect(PROVER_SRC).toContain("'status', '--porcelain'")
+    expect(PROVER_SRC).toContain("'reset', '--hard', headSha")
+    expect(PROVER_SRC).toContain("'clean', '-fdx'")
     // Two-sided: the prover really refuses the wrapper for the GUARD only, so
     // the sentence above cannot drift into a permission the gate does not give.
     expect(PROVER_SRC).toContain('function guardRunsTheMutatedFile(')

@@ -140,10 +140,16 @@ interface HostScript {
   /** file text `git show <merge-base>:<path>` reports — what the BASE carried.
    *  A path absent here reads as "the base did not have this file". */
   baseFiles?: Record<string, string>
-  /** the SECOND `git worktree add` fails — the re-provision that must happen
-   *  between the control run and the restored-guard observation. The first
-   *  (initial provisioning) add still succeeds, so the proof reaches the seam. */
-  worktreeReAddFails?: boolean
+  /** what `git status --porcelain` reports in the proof worktree once the
+   *  nominated commands have run. DEFAULT `''` — a clean tree — which is what
+   *  keeps every pre-existing proved-true row in this file green. */
+  statusPorcelain?: string
+  /** `git status --porcelain` fails — the tracked-edit check must fail CLOSED. */
+  statusFails?: boolean
+  /** `git reset --hard <head>` fails — the re-provision must fail CLOSED. */
+  resetFails?: boolean
+  /** `git clean -fdx` fails — the re-provision must fail CLOSED. */
+  cleanFails?: boolean
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -152,24 +158,22 @@ function scriptedHost(s: HostScript = {}): {
 } {
   const calls: string[][] = []
   let guardRuns = 0
-  let addRuns = 0
   return {
     calls,
     async run(cmd) {
       calls.push(cmd)
       if (cmd.includes('rev-parse')) return s.headUnresolvable === true ? res(1) : res(0, `${HEAD}\n`)
       if (cmd.includes('worktree')) {
-        if (cmd.includes('add')) {
-          addRuns += 1
-          if (s.worktreeAddFails === true) return res(1)
-          // The RE-PROVISION is the second add: the first one is the initial
-          // provisioning, so failing only #2 puts the failure exactly at the
-          // seam this flag exists to test.
-          if (s.worktreeReAddFails === true && addRuns === 2) return res(1)
-          return res(0)
-        }
+        if (cmd.includes('add') && s.worktreeAddFails === true) return res(1)
         return res(0)
       }
+      // THE RE-PROVISION SEAM. Answered here, ahead of the guard/control
+      // matches, so every pre-existing row in this file runs it: the default
+      // porcelain is EMPTY, which is a clean tree, so no row that proved
+      // before is refused now.
+      if (cmd.includes('status')) return s.statusFails === true ? res(1) : res(0, s.statusPorcelain ?? '')
+      if (cmd.includes('reset')) return s.resetFails === true ? res(1) : res(0)
+      if (cmd.includes('clean')) return s.cleanFails === true ? res(1) : res(0)
       if (cmd.includes('ls-tree')) return s.lsTreeFails === true ? res(1) : res(0, (s.treePaths ?? []).join('\0'))
       if (cmd.includes('merge-base')) return s.mergeBase === undefined ? res(1) : res(0, `${s.mergeBase}\n`)
       if (cmd.includes('show')) {
@@ -225,10 +229,14 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     // It ran in a THROWAWAY worktree detached at the head — never the checkout.
     const joined = host.calls.map((c) => c.join(' '))
     expect(joined.some((c) => c.includes(`worktree add --detach --force ${proofWorktreePath('/repo', RUN)} ${HEAD}`))).toBe(true)
-    // THREE removes and TWO adds: the worktree is provisioned, RE-PROVISIONED
-    // after the control has run, and removed again by the outer `finally`.
-    expect(joined.filter((c) => c.includes('worktree remove')).length).toBe(3)
-    expect(joined.filter((c) => c.includes('worktree add --detach --force')).length).toBe(2)
+    // TWO removes and ONE add: a stale tree is cleared, the proof tree is
+    // provisioned, and the outer `finally` removes it again. The RE-PROVISION
+    // between the control and the restored guard is a `reset --hard` plus a
+    // `clean -fdx` INSIDE that same tree, not a second add — see the ordering
+    // row in "the restored-guard observation is of a tree the nominated
+    // commands did not edit".
+    expect(joined.filter((c) => c.includes('worktree remove')).length).toBe(2)
+    expect(joined.filter((c) => c.includes('worktree add --detach --force')).length).toBe(1)
   })
 
   test('the guard that stays GREEN under the mutation is not a guard → not proved', async () => {
@@ -267,6 +275,9 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
       run_host: async (cmd) => {
         if (cmd.includes('rev-parse')) return res(0, HEAD)
         if (cmd.includes('worktree')) return res(0)
+        // The host git ops of the re-provision seam answer normally — this row
+        // is about a NOMINATED command that hangs, not about git.
+        if (cmd.includes('status') || cmd.includes('reset') || cmd.includes('clean')) return res(0)
         // The guard never resolves.
         return new Promise<HostCommandResult>(() => {})
       },
@@ -362,47 +373,94 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
   })
 })
 
-describe('the restored-guard observation is of a tree no nominated command edited', () => {
+describe('the restored-guard observation is of a tree the nominated commands did not edit', () => {
   // THE FOURTEENTH ESCAPE, and the first that needed no argv trick at all. The
   // guard and the control are branch-authored code that RUNS between the
   // guard's RED and its GREEN, and restoring `claim.file` restores one file,
   // not the tree — so a committed unconditionally-red guard plus a control
   // whose module body writeFileSync's it green came back `proved: true` with
-  // nothing having tested the target. The answer is not to inspect what they
-  // wrote but to throw the tree away: the worktree is re-provisioned at the
-  // pinned commit before the restored guard runs, so that observation is of
-  // the commit BY CONSTRUCTION. The end-to-end forgeries live in
-  // mutation-prover-realgit.test.ts; these rows pin the mechanism.
-  test('the second `worktree add` sits BETWEEN the control run and the restored-guard run', async () => {
-    const { prover, host } = proverOver()
-    await prover.prove({ run: RUN, claim: CLAIM })
-    const joined = host.calls.map((c) => c.join(' '))
-    const controlIdx = joined.indexOf(CLAIM.control.join(' '))
-    const guardLast = joined.lastIndexOf(CLAIM.guard.join(' '))
-    const addIdxs = joined
-      .map((c, i) => (c.includes('worktree add --detach --force') ? i : -1))
-      .filter((i) => i >= 0)
-    // POSITIVE CONTROL on the extraction: an empty `addIdxs` would satisfy
-    // every ordering comparison below by vacuity.
-    expect(addIdxs.length).toBe(2)
-    expect(controlIdx).toBeGreaterThan(addIdxs[0] as number)
-    expect(addIdxs[1] as number).toBeGreaterThan(controlIdx)
-    expect(guardLast).toBeGreaterThan(addIdxs[1] as number)
+  // nothing having tested the target. The seam answers in three steps, each
+  // failing CLOSED: refuse a TRACKED edit by name, then re-provision
+  // (`reset --hard` to the pinned head plus `clean -fdx`) so untracked plants
+  // cannot reach the observation either, and only then observe the restored
+  // guard. The end-to-end forgeries live in mutation-prover-realgit.test.ts;
+  // these rows pin the mechanism.
+  const guardRunsIn = (host: { calls: string[][] }): number =>
+    host.calls.filter((c) => c.join(' ') === CLAIM.guard.join(' ')).length
+
+  test('a TRACKED edit is refused BY NAME — before the restored guard is ever spawned', async () => {
+    // THE REPRO, at unit scale. Note the default `statusPorcelain` is `''`:
+    // every other row in this file runs this same seam against a clean tree
+    // and still proves, which is the positive control against an arm that
+    // fires on everything. And the shape is RUNNER-AGNOSTIC — a control
+    // spelled `make check` reaches this identical porcelain read, so there is
+    // nothing a wrapper row would add at unit level.
+    const { prover, host } = proverOver({ statusPorcelain: ' M tests/g.test.ts\n' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('edited the proof worktree')
+    expect(evidence.reason).toContain('tests/g.test.ts')
+    // The refusal PRECEDES the second observation: the guard ran once, under
+    // the mutation, and nothing was measured against the dirty tree.
+    expect(guardRunsIn(host)).toBe(1)
   })
 
-  test('a re-provision that FAILS refuses — before the restored guard is ever spawned', async () => {
-    // FAIL CLOSED. If the tree cannot be put back to the commit, the only
-    // observation left to make is of a tree the nominated commands may have
-    // edited, which is the forgery itself. Refuse instead, and refuse EARLY:
-    // the guard is spawned exactly once, so nothing is measured against the
-    // dirty tree at all.
-    const { prover, host } = proverOver({ worktreeReAddFails: true })
+  test('UNTRACKED runner caches are tolerated, and the re-provision is ordered before the second guard run', async () => {
+    // An honest runner drops caches beside its tests. Refusing those would
+    // delete the nomination from any repo whose runner writes one, so they are
+    // tolerated in step (1) and NEUTRALISED in step (2) — which is why the
+    // ordering below is the load-bearing part, not the exit code.
+    const { prover, host } = proverOver({ statusPorcelain: '?? .pytest_cache/\n?? node_modules/\n' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(true)
+    const joined = host.calls.map((c) => c.join(' '))
+    const resetIdx = joined.findIndex((c) => c.includes('reset --hard'))
+    const cleanIdx = joined.findIndex((c) => c.includes('clean -fdx'))
+    // POSITIVE CONTROL on the extraction: a missing call is -1, which would
+    // satisfy every "less than" comparison below by vacuity.
+    expect([resetIdx >= 0, cleanIdx >= 0]).toEqual([true, true])
+    const secondGuardIdx = joined.lastIndexOf(CLAIM.guard.join(' '))
+    expect(secondGuardIdx).toBeGreaterThan(joined.indexOf(CLAIM.guard.join(' ')))
+    expect(resetIdx).toBeLessThan(secondGuardIdx)
+    expect(cleanIdx).toBeLessThan(secondGuardIdx)
+  })
+
+  test('a porcelain read that FAILS refuses — the tree may have been edited and we cannot tell', async () => {
+    const { prover } = proverOver({ statusFails: true })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('could not inspect the proof worktree')
+  })
+
+  test('a `reset --hard` that FAILS refuses', async () => {
+    const { prover } = proverOver({ resetFails: true })
     const evidence = await prover.prove({ run: RUN, claim: CLAIM })
     expect(evidence.proved).toBe(false)
     expect(evidence.observed).toBeNull()
     expect(evidence.reason).toContain('could not re-provision the proof worktree')
-    expect(host.calls.filter((c) => c.join(' ') === CLAIM.guard.join(' ')).length).toBe(1)
-    expect(host.calls.filter((c) => c.join(' ') === CLAIM.control.join(' ')).length).toBe(1)
+  })
+
+  test('a `clean -fdx` that FAILS refuses', async () => {
+    const { prover } = proverOver({ cleanFails: true })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('could not re-provision the proof worktree')
+  })
+
+  test('a thousand edited files are named WITHIN the budget, with the elision counted', async () => {
+    // The porcelain is bounded only by the tree, and this reason reaches a log
+    // line, a status post and a DB row. `namesWithinBudget` caps the names and
+    // COUNTS what it dropped.
+    const lines = Array.from({ length: 1000 }, (_, i) => ` M tests/support/generated/case-${i}.test.ts`)
+    const { prover } = proverOver({ statusPorcelain: `${lines.join('\n')}\n` })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason.length).toBeLessThan(4_100)
+    expect(evidence.reason).toContain('tests/support/generated/case-0.test.ts')
+    expect(evidence.reason).toContain('more')
   })
 })
 
