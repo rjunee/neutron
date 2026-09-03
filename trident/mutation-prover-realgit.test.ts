@@ -1581,8 +1581,6 @@ describe('the mutation-proof gate against real git', () => {
         proofWorktreePath(repo, {
           id: 'run-control-forgery',
           slug: 'control-forgery',
-          repo_path: repo,
-          branch: 'trident/control-forgery',
         }),
       ),
     ).toBe(false)
