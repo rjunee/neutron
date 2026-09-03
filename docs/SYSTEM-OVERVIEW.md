@@ -1,5 +1,35 @@
 # System Overview
 
+> **Orientation first (added 2026-08-31).** This file is ~8,900 lines (measured: `wc -l`).
+> At that size, reading it end to end costs more than the orientation it provides, and it
+> is due to be split into a short spine plus per-subsystem files. The split has NOT happened
+> yet; this preamble is the pointer, not the rewrite. Navigate by subsystem heading
+> (`grep '^## ' docs/SYSTEM-OVERVIEW.md`) and by the seven layers below, which name where
+> each kind of truth lives. The layer names come from a 2026-08-31 design note that lives
+> OUTSIDE this repo; its in-repo encoding is `docs/INVARIANTS.md` §12–§13, and nothing here
+> depends on reading the note.
+>
+> - **L0 — Substrate**: git, SQLite, the process table, GitHub. Raw reads; believe nothing
+>   without a probe. Deliberately has no document of its own.
+> - **L1 — Observers**: named probes producing graded facts. Not yet a real layer; the
+>   nearest existing things are `watchdog/detectors.ts` and `trident/liveness.ts` (see
+>   "Supervisor watchdog" and "Foundational Trident" below).
+> - **L2 — Ledger**: one authoritative record per entity. Today: `code_trident_runs`
+>   (`trident/store.ts`), the dispatch registry (`runtime/subagent/registry.ts`), the Work
+>   Board store (`work-board/`). Contract: `docs/INVARIANTS.md` §12 (the honesty contract).
+> - **L3 — Derivations**: judgements computed from the ledger, never stored. The one clean
+>   example is the Work Board's inline-activity deriver (see "Work Board" and "Activity
+>   Inspector" below; the inline-activity invariant in `docs/INVARIANTS.md` §9).
+> - **L4 — Actions**: the MCP tool surfaces the agent invokes (see "Native-MCP tool
+>   transport" below). Contract: `docs/INVARIANTS.md` §13 (the action contract).
+> - **L5 — Situation report**: the orient-in-one-call surface. DOES NOT EXIST YET — today
+>   orientation is assembled from many separate substrate reads; do not look for it here.
+> - **L6 — Agent**: the driving agent itself; its standing prompts live in `prompts/`.
+>
+> Status names in this file can mislead: `last_advanced_at`, `connected`, `finished`,
+> `REVIEW_NOT_RUN` and friends do not mean what they say. `GLOSSARY.md` ("Names whose plain
+> reading is false") decodes them — read it before trusting any status column named below.
+
 High-level map of how Neutron Open boots and where the major runtime
 pieces live. Keep this short; deep detail belongs in `docs/AS_BUILT.md` (and the
 archived history in `docs/research/AS-BUILT-archive-2026-07.md`) and the

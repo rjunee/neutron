@@ -7,6 +7,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { spawnCapture, type HostCommandResult } from './git-mode.ts'
 import type { FireOutcome, InnerLoopInput } from './inner-loop.ts'
 import { parseCheckpointFindings } from './checkpoint-findings.ts'
+import {
+  FIRE_PUBLISHED_REASON_MARKER,
+  FIRE_SETTLE_TIMEOUT_ERROR,
+  pickWorkflowOwned,
+} from './fire-evidence.ts'
 import { buildSimFirer, SIM_REVIEWED_HEAD, type SimPlan, buildSimMutationProofGate } from './inner-loop-sim.ts'
 import { interpretFailure } from './delivery.ts'
 import {
@@ -27,7 +32,7 @@ import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
 import { NexusStore } from '@neutronai/gateway/nexus/nexus-store.ts'
 import { emitTridentTerminalEvents } from '@neutronai/gateway/nexus/nexus-emit.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
-import { buildTridentDelivery, type OutboundSink } from './delivery.ts'
+import { buildTridentDelivery, composeTerminalDelivery, type OutboundSink } from './delivery.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
 
 /**
@@ -114,6 +119,11 @@ function buildHarness(opts: {
   latest_stage_event_at?: (run_id: string) => string | null
   probe_run_alive?: (run: TridentRun) => 'alive' | 'dead' | 'unknown' | Promise<'alive' | 'dead' | 'unknown'>
   gather_run_evidence?: import('./run-evidence.ts').RunEvidenceGatherer
+  gather_fire_evidence?: import('./fire-evidence.ts').FireEvidenceGatherer
+  probe_branch_holder?: (
+    repo_path: string,
+    branch: string,
+  ) => Promise<import('./fire-evidence-probes.ts').BranchHolderProbe | null>
   codex_home?: string | null
   resolve_codex_home?: (run: TridentRun) => string | null
   resolve_reflection_context?: (run: TridentRun) => string | null
@@ -144,7 +154,16 @@ function buildHarness(opts: {
   const host = async (cmd: string[]): Promise<HostCommandResult> => {
     hostCalls.push(cmd)
     const joined = cmd.join(' ')
-    if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+    // THE DEPTH PROBE IS STUBBABLE, and defaults to a COMPLETE checkout. The launch ancestry
+    // guard reads it to decide whether `merge-base --is-ancestor` exit 1 is a proven "no" or a
+    // shallow boundary lying — so a scenario must be able to say "this clone is shallow". The
+    // default stays 'false' because every pre-existing scenario means a complete history, and
+    // an empty-but-ok answer from a catch-all responder is not an override, on the same terms
+    // the gate's own probes use below.
+    if (joined.includes('rev-parse --is-shallow-repository')) {
+      const depth = opts.hostResponder?.(cmd)
+      return depth !== undefined && (!depth.ok || depth.stdout.trim() !== '') ? depth : ok('false')
+    }
     // `^{commit}` EXCLUDED ON PURPOSE. Two different probes both open with
     // `rev-parse --verify --quiet refs/heads/…`: the launch path's local-tip
     // check (`orchestrator.ts:3090`, no suffix) and #542's ref resolution
@@ -241,6 +260,8 @@ function buildHarness(opts: {
   if (opts.latest_stage_event_at !== undefined) o.latest_stage_event_at = opts.latest_stage_event_at
   if (opts.probe_run_alive !== undefined) o.probe_run_alive = opts.probe_run_alive
   if (opts.gather_run_evidence !== undefined) o.gather_run_evidence = opts.gather_run_evidence
+  if (opts.gather_fire_evidence !== undefined) o.gather_fire_evidence = opts.gather_fire_evidence
+  if (opts.probe_branch_holder !== undefined) o.probe_branch_holder = opts.probe_branch_holder
   if (opts.codex_home !== undefined) o.codex_home = opts.codex_home
   if (opts.resolve_codex_home !== undefined) o.resolve_codex_home = opts.resolve_codex_home
   if (opts.resolve_reflection_context !== undefined)
@@ -3374,6 +3395,327 @@ describe('orchestrator — fire did not settle → failed', () => {
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).toBe('failed')
   })
+
+  // THE SETTLE-TIMEOUT EVIDENCE GATE. A launcher turn that never settles is
+  // cancelled and the fire resolves `failed` — but the workflow it fired runs
+  // DETACHED and the cancel does not reach it. Measured: 8 of 33 runs in 7 days
+  // were written off on that inference, one of them while its workflow went on
+  // building for another six minutes, and twice over a row that already said
+  // `outer-published:…`. The gate consults POSITIVE evidence only, and ONLY for
+  // this one error string.
+  const TIMEOUT_FIRE: FireOutcome = { status: 'failed', error: FIRE_SETTLE_TIMEOUT_ERROR }
+  const PUBLISHED_SHA = '7'.repeat(40)
+  const PUBLISHED_CHECKPOINT = `outer-published:${PUBLISHED_SHA}:0:3`
+  const PLAIN_FIRE_FAILURE = `inner workflow fire failed: ${FIRE_SETTLE_TIMEOUT_ERROR}`
+
+  test('evidence the workflow LAUNCHED holds the lane instead of terminalizing it', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async () => ({
+        kind: 'launched',
+        detail: 'worktree on the run branch holds a live lock',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    expect(after.subagent_status).toBe('running')
+    expect(after.failure_reason).toBeNull()
+    expect(after.subagent_run_id).not.toBeNull()
+
+    // AND THE LANE IS HELD: a second tick must not invite a second workflow onto
+    // the branch the live one holds (the relaunch this card exists to stop).
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(1)
+    expect(isTerminalPhase(store.get(run.id)!.phase)).toBe(false)
+  })
+
+  test('a row that already says outer-published is recorded as built-and-published, not as a failed fire', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      // The leftover-branch probe must resolve for the launch to reach the fire.
+      local_branch_tip: PUBLISHED_SHA,
+      gather_fire_evidence: async () => ({
+        kind: 'published',
+        checkpoint: PUBLISHED_CHECKPOINT,
+        detail: 'row already published',
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // `phaseForCheckpoint` leaves outer-loop markers alone, so the row stays launchable.
+    await store.update(run.id, { inner_checkpoint: PUBLISHED_CHECKPOINT })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    // Terminal — the work is FINISHED — but the row must not read as a failed
+    // fire, and must not read as a rejection either.
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toContain(FIRE_PUBLISHED_REASON_MARKER)
+    expect(after.failure_reason).toContain('review not run')
+    expect(after.failure_reason).not.toContain('fire failed')
+    // `failedRun`'s own normalization owns this: an outer-published checkpoint
+    // carries no argus provenance, so the verdict cannot be a rejection.
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
+    // Preserved for the disposition classifier and the resume seed.
+    expect(after.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
+  })
+
+  // ARGUS r5 (nit): the trimmed checkpoint used to travel in `observed`, which is
+  // ALSO the CAS token — so `inner_checkpoint IS <trimmed>` never matched the
+  // stored untrimmed value and the column kept its whitespace. The trim now
+  // travels in `checkpoint` and is written onto the row, while the CAS still
+  // compares what is really stored.
+  test('the TRIMMED checkpoint actually lands over an untrimmed stored column', async () => {
+    const messy = `  ${PUBLISHED_CHECKPOINT} \n`
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      local_branch_tip: PUBLISHED_SHA,
+      gather_fire_evidence: async (input) => ({
+        kind: 'published',
+        checkpoint: PUBLISHED_CHECKPOINT,
+        detail: 'row already published',
+        // The CAS token is the RAW column, exactly as the classifier reports it.
+        observed: pickWorkflowOwned(store.get(input.run.id)!),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { inner_checkpoint: messy })
+
+    await h.loop.runOnce()
+
+    expect(store.get(run.id)?.inner_checkpoint).toBe(PUBLISHED_CHECKPOINT)
+  })
+
+  test('NO evidence keeps today\'s failure byte-identical', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async () => ({ kind: 'none', detail: 'nothing' }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
+
+  test('an UNWIRED seam keeps today\'s failure byte-identical', async () => {
+    const h = buildHarness({ plan: () => ({ fire: TIMEOUT_FIRE }) })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
+
+  test('a NON-timeout fire error never consults the seam', async () => {
+    let consulted = 0
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'failed', error: 'boom' } }),
+      gather_fire_evidence: () => {
+        consulted += 1
+        throw new Error('the seam must never be consulted for a non-timeout error')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    expect(consulted).toBe(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(store.get(run.id)?.failure_reason).toBe('inner workflow fire failed: boom')
+  })
+
+  // BLOCKER (round 1): the held lane returned the row PINNED BEFORE THE FIRE, and
+  // `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly — so the
+  // tick's own save wrote the workflow's progress back to its pre-fire value,
+  // destroying the very delta that proved the lane was live. The evidence now
+  // carries what the gatherer actually READ and the orchestrator applies it.
+  test('a workflow-owned column the detached workflow wrote SURVIVES the tick that spares the lane', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        // The detached workflow checkpoints WHILE the launcher is wedged — the
+        // real sequence this gate exists for. The gatherer re-reads the row, so
+        // it observes the new value; the orchestrator still holds the PINNED one.
+        await store.update(input.run.id, { inner_checkpoint: 'forge-done' })
+        const fresh = store.get(input.run.id)!
+        return {
+          kind: 'launched',
+          detail: 'run row moved since the fire (inner_checkpoint)',
+          observed: pickWorkflowOwned(fresh),
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    // THE ASSERTION THAT MATTERS: the workflow's checkpoint is still there.
+    expect(after.inner_checkpoint).toBe('forge-done')
+    // MAJOR (round 2): and so is the PHASE that checkpoint implies. `phase` is
+    // not a workflow-owned column, but `checkpoint.sh` derives it from
+    // `inner_checkpoint` at the inner workflow's write choke point — so carrying
+    // the checkpoint while restoring the PINNED phase left the row saying
+    // `forge-init` and `forge-done` at once, and reverted a run that had already
+    // reached review. `saveIfActive` applies no derivation, so the tick must.
+    expect(after.phase).toBe('argus')
+  })
+
+  // The mirror of the case above: a checkpoint that implies NOTHING (an
+  // outer-loop marker, a name the table has never seen) must leave the phase
+  // exactly as the tick set it, never guess one.
+  test('a carried checkpoint that implies no phase leaves the pinned phase alone', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        await store.update(input.run.id, { inner_checkpoint: 'a-checkpoint-nobody-mapped' })
+        return {
+          kind: 'launched',
+          detail: 'run row moved since the fire (inner_checkpoint)',
+          observed: pickWorkflowOwned(store.get(input.run.id)!),
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    const before = store.get(run.id)!.phase
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.inner_checkpoint).toBe('a-checkpoint-nobody-mapped')
+    expect(after.phase).toBe(before)
+    expect(isTerminalPhase(after.phase)).toBe(false)
+  })
+
+  // ARGUS r4 (minor): the held-lane save spread the seen row VERBATIM, and a
+  // `REQUEST_CHANGES` with no findings — a shape `checkpoint.sh` can write and
+  // crash recovery preserves — is exactly what `saveIfActive` REFUSES. The throw
+  // is swallowed by the tick's per-run catch, `subagent_run_id` stays NULL, and
+  // the next tick re-enters the launch site: a second lane at the same branch,
+  // which is the whole thing this seam exists to prevent.
+  test('a findings-free REQUEST_CHANGES on the row cannot make the lane-holding save throw', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => ({
+        kind: 'launched',
+        detail: 'live lock on the branch',
+        observed: pickWorkflowOwned(store.get(input.run.id)!),
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // The rejected shape, written the way the checkpoint seam can write it.
+    await db.run(
+      `UPDATE code_trident_runs SET inner_verdict = 'REQUEST_CHANGES', inner_checkpoint_findings = NULL WHERE id = ?`,
+      [run.id],
+    )
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    // THE LANE IS HELD: not terminal, and carrying a dispatch id, so harvest and
+    // the stall guard own it rather than a fresh fire.
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    expect(after.subagent_run_id).not.toBeNull()
+    // And the unacceptable verdict was normalized, not persisted.
+    expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
+  })
+
+  test('the held row carries NO launcher generation (never a minted or inherited one)', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async () => ({ kind: 'launched', detail: 'live lock on the branch' }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    // A PRIOR round's generation, exactly as `persistRefireReset` leaves it.
+    await store.update(run.id, { workflow_run_id: 'generation-from-a-previous-round' })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.subagent_status).toBe('running')
+    // A stale generation under `running` is what the tick's liveness probe would
+    // latch DEAD, reaping the live lane this hold exists to protect. Null is what
+    // crash recovery itself writes here, and for the same reason.
+    expect(after.workflow_run_id).toBeNull()
+  })
+
+  // ARGUS r4 (BLOCKER): carrying `observed` forward NARROWS the clobber window —
+  // it does not close it. The gatherer's last re-read and the tick's
+  // `saveIfActive` are two statements, and the detached workflow writes between
+  // them. The step now hands the store the values it READ, and the store writes
+  // those two columns only while they still hold them.
+  test('a checkpoint that lands BETWEEN the gatherer and the save survives the spared lane', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        await store.update(input.run.id, { inner_checkpoint: 'forge-done' })
+        const observed = pickWorkflowOwned(store.get(input.run.id)!)
+        // …and THEN the workflow moves again, after the gatherer has answered and
+        // before the tick's save. Simulated here because the real gap IS those two
+        // statements.
+        await store.update(input.run.id, { inner_checkpoint: 'argus-approved' })
+        return { kind: 'launched', detail: 'run row moved since the fire (inner_checkpoint)', observed }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    // WITHOUT THE CAS this reads 'forge-done' — the save regresses the row past
+    // the workflow's newest write, which is the misreporting-write class the card
+    // exists to remove.
+    expect(after.inner_checkpoint).toBe('argus-approved')
+  })
+
+  test('a verdict that lands between the gatherer and the save is not stamped over by the published arm', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: async (input) => {
+        const observed = pickWorkflowOwned(store.get(input.run.id)!)
+        // The review lands its verdict in the gap.
+        await store.update(input.run.id, { inner_verdict: 'APPROVE' })
+        return { kind: 'published', detail: 'published', checkpoint: PUBLISHED_CHECKPOINT, observed }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await store.update(run.id, { inner_checkpoint: PUBLISHED_CHECKPOINT })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    // The published arm normally demotes the verdict to REVIEW_NOT_RUN. It must
+    // not do so over a verdict that arrived after it looked.
+    expect(after.inner_verdict).toBe('APPROVE')
+  })
+
+  test('a THROWING gatherer cannot spare the run and cannot crash the launch', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: TIMEOUT_FIRE }),
+      gather_fire_evidence: () => {
+        throw new Error('probe host unavailable')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
 })
 
 describe('orchestrator — durable pre-build stage stamps', () => {
@@ -4424,6 +4766,74 @@ describe('orchestrator — orphan recovery', () => {
     expect(h.inputs[0]!.resume_findings ?? null).toBeNull()
   })
 
+  // BLOCKER (round 1): the settle-timeout hold lives in the in-memory `fired` set,
+  // which a restart loses BY DESIGN — after which the default `redispatch` policy
+  // would clear the slot and fire a SECOND workflow over a lane that may still be
+  // building the branch. The filesystem survived the restart even though the set
+  // did not, so orphan recovery asks it.
+  test('an orphan whose branch is held by a LIVE worktree lock is waited on, never redispatched', async () => {
+    let probed = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' } }),
+      probe_branch_holder: async (_repo, branch) => {
+        probed += 1
+        return {
+          worktree_basename: `wf_live_${branch.slice(-3)}`,
+          lock_reason: 'claude agent wf_live (pid 4242 start 99)',
+          pid: 4242,
+          pid_live: true,
+          mtime_ms: 0,
+        }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/held' })
+    await store.update(run.id, { subagent_run_id: 'STALE-FROM-A-PRIOR-PROCESS', subagent_status: 'running' })
+
+    await h.loop.runOnce()
+
+    expect(probed).toBe(1)
+    // NO second lane, and the row stays non-terminal (which also keeps
+    // board-dispatch's own branch-liveness refusal armed against it).
+    expect(h.inputs).toHaveLength(0)
+    const after = store.get(run.id)!
+    expect(isTerminalPhase(after.phase)).toBe(false)
+    expect(after.subagent_run_id).toBe('STALE-FROM-A-PRIOR-PROCESS')
+  })
+
+  test('an orphan whose branch holder is NOT live redispatches exactly as before', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' } }),
+      probe_branch_holder: async () => ({
+        worktree_basename: 'wf_dead',
+        lock_reason: 'claude agent wf_dead (pid 9 start 1)',
+        pid: 9,
+        pid_live: false,
+        mtime_ms: 0,
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/free' })
+    await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a THROWING branch-holder probe is not evidence — the orphan redispatches', async () => {
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE' } }),
+      probe_branch_holder: async () => {
+        throw new Error('worktree list unavailable')
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/blind' })
+    await store.update(run.id, { subagent_run_id: 'STALE', subagent_status: 'running' })
+
+    await h.loop.runOnce()
+
+    expect(h.inputs).toHaveLength(1)
+  })
+
   test("'wait' policy leaves the orphan untouched (no fire, no advance)", async () => {
     const h = buildHarness({ plan: () => ({ result: { verdict: 'APPROVE' } }), on_orphaned_session: 'wait' })
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
@@ -5298,8 +5708,13 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(store.listNonTerminal()[0]?.base_behind).toBe(16)
     const calls = h.hostCalls.map((c) => c.join(' '))
     expect(calls.some((c) => c.includes('ls-remote --heads origin refs/heads/feat-x'))).toBe(false)
-    expect(calls.some((c) => c.includes('fetch --no-tags origin main'))).toBe(true)
-    expect(calls.findIndex((c) => c.includes('fetch --no-tags origin main')))
+    // THE DESTINATION REF IS NAMED, not left to `remote.origin.fetch` (Argus finding,
+    // reproduced on git 2.43): with a narrowed configured refspec, `fetch --no-tags origin main`
+    // exits 0, moves FETCH_HEAD, and leaves refs/remotes/origin/main exactly where it was — the
+    // ref this very test then rev-parses for `base_sha` and pins the build to.
+    const BASE_REFSPEC = 'fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main'
+    expect(calls.some((c) => c.includes(BASE_REFSPEC))).toBe(true)
+    expect(calls.findIndex((c) => c.includes(BASE_REFSPEC)))
       .toBeLessThan(calls.findIndex((c) => c.includes('rev-parse --verify refs/remotes/origin/main')))
     expect(calls.some((c) => c.includes('rev-parse --verify --quiet refs/heads/trident/add-thing'))).toBe(true)
   })
@@ -5317,6 +5732,19 @@ describe('orchestrator — the resume live head is read in code, never relayed b
           return { ok: false, stdout: '', stderr: '', exit_code: 1 }
         }
         if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+        // The remedy resolves its own evidence: git enumerates the repo's own checkout and
+        // NOTHING holds the branch, and origin carries the very same tip — the one shape where
+        // a delete is genuinely safe. The listing is spelled in git's real `-z` shape (every
+        // attribute NUL-terminated, an empty attribute closing the record) and really does
+        // name the shared checkout: an EMPTY listing is a thing real git never produces, and
+        // the guard now reads that silence as UNKNOWN rather than as "nobody holds it", so a
+        // positive control resting on it would be a control for an impossible world.
+        if (joined.includes('worktree list --porcelain')) {
+          return ok(['worktree /repo', `HEAD ${BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0')
+        }
+        if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) {
+          return ok(TIP)
+        }
         return ok()
       },
     })
@@ -5329,6 +5757,386 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(final.failure_reason).toContain('already carries 3 commit(s) not on origin/')
     expect(final.failure_reason).toContain("refusing to build on another lane's work")
     expect(final.failure_reason).toContain('branch -D')
+    expect(final.failure_reason).toContain('branch -D -- trident/add-thing')
+    // The printed remedy re-establishes BOTH perishable premises at the moment it runs — the
+    // local ref is still the evidenced sha, and origin still carries it — before it deletes.
+    expect(final.failure_reason).toContain('fetch --no-tags --no-recurse-submodules origin +refs/heads/trident/add-thing')
+    expect(final.failure_reason).toContain(`merge-base --is-ancestor ${TIP} refs/remotes/origin/trident/add-thing`)
+    // The delete git RE-CHECKS, never a low-level ref delete: this reason is read minutes to
+    // hours after it is composed, and `update-ref -d` would blow past the
+    // checked-out-elsewhere refusal that is the only thing protecting a lane that took the
+    // branch in between.
+    expect(final.failure_reason).not.toContain('update-ref -d')
+    expect(final.failure_reason).toContain(TIP)
+  })
+
+  test('a SHALLOW checkout cannot turn a true ancestor into a proven divergence', async () => {
+    // THE BLOCKER. `merge-base --is-ancestor B C` exits 1 past a shallow boundary for a B that
+    // IS an ancestor of C — the parent commits simply are not in the object store (reproduced on
+    // git 2.43 with a depth-1 clone and a true parent). This checkout may arrive shallow:
+    // `healShallowCheckout` documents that shape in production and runs only on the REPLAY path,
+    // never before this guard. Reading exit 1 as divergence therefore printed "already carries N
+    // commit(s) not on origin/main — it was not cut from origin/main", a positive claim about
+    // another lane's work that nothing established, in the one message class this change exists
+    // to make evidence-honest. Shallow => UNKNOWN, and UNKNOWN authorises nothing.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const scenario = (depth: HostCommandResult) =>
+      buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        local_branch_tip: TIP,
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --is-shallow-repository')) return depth
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+          }
+          if (joined.includes(`rev-list --count ${BASE}..${TIP}`)) return ok('3')
+          if (joined.includes('worktree list --porcelain')) {
+            return ok(['worktree /repo', `HEAD ${BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0')
+          }
+          if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) return ok(TIP)
+          return ok()
+        },
+      })
+
+    const shallow = scenario(ok('true'))
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(shallow)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    // Still REFUSED — fail-closed, nothing fired. Only the CLAIM changes.
+    expect(shallow.inputs).toHaveLength(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(reason).toContain('UNKNOWN')
+    expect(reason).toContain('SHALLOW')
+    // The claim the shallow boundary did not license is gone...
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('it was not cut from')
+    // ...and so is every destructive instruction (docs/INVARIANTS.md §12 invariant 122).
+    expect(reason).not.toContain('branch -D')
+    // The reader is told the read that settles it, rather than being left with "exited 1".
+    expect(reason).toContain('--unshallow')
+
+    // AN UNREADABLE DEPTH IS UNKNOWN TOO — fail-closed in the same direction, and it says so
+    // rather than borrowing the shallow wording it did not measure.
+    const blind = scenario({ ok: false, stdout: '', stderr: 'fatal: not a repository', exit_code: 128 })
+    const run2 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(blind)
+    const reason2 = store.get(run2.id)?.failure_reason ?? ''
+    expect(blind.inputs).toHaveLength(0)
+    expect(reason2).toContain('UNKNOWN')
+    expect(reason2).toContain('the depth of this checkout could not be read')
+    expect(reason2).not.toContain('already carries')
+    expect(reason2).not.toContain('branch -D')
+
+    // POSITIVE CONTROL: the identical exit 1 in a checkout PROVEN complete is still the
+    // wrong-base refusal, remedy and all. Without this, "shallow => UNKNOWN" could be satisfied
+    // by an implementation that stopped answering "no" at all and never refused a real
+    // wrong-base branch again.
+    const complete = scenario(ok('false'))
+    const run3 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(complete)
+    const reason3 = store.get(run3.id)?.failure_reason ?? ''
+    expect(complete.inputs).toHaveLength(0)
+    expect(reason3).toContain('already carries 3 commit(s) not on origin/')
+    expect(reason3).toContain('branch -D -- trident/add-thing')
+
+    // AND THE STEP SURVIVES DELIVERY (Argus blocker). Everything above asserts the PERSISTED
+    // reason, which nobody reads: `composeTerminalDelivery` renders `summary` + `input_needed`
+    // and drops the reason entirely. Both depth refusals match the pre-launch prefix and carry
+    // the not-started clause, so both used to flatten to "Reply to retry the build" — and a
+    // retry re-runs the identical probe over the identical truncated history and re-refuses,
+    // deterministically, because nothing on the launch path deepens the checkout
+    // (`healShallowCheckout` runs only on the replay path). The one step that breaks that loop
+    // has to reach the person being told to act.
+    const delivered = (r: string): string => composeTerminalDelivery(store.get(r)!)?.text ?? ''
+    for (const [name, id] of [
+      ['shallow', run.id],
+      ['unreadable depth', run2.id],
+    ] as const) {
+      const text = delivered(id)
+      expect(`${name}: ${text}`).toContain('--unshallow')
+      expect(`${name}: ${text}`).toContain('did not start this build')
+      // The retry is still offered — it is just no longer the FIRST thing, and it is no longer
+      // the ONLY thing.
+      expect(`${name}: ${text}`).toContain('retry')
+      // UNKNOWN authorises nothing irreversible, in the delivered text as in the reason.
+      expect(`${name}: ${text}`).not.toContain('branch -D')
+    }
+    // POSITIVE CONTROL ON THE DELIVERY TOO: the proven-complete run is a wrong-base refusal, a
+    // different class entirely, and must not inherit an unshallow step it has no use for.
+    expect(delivered(run3.id)).not.toContain('--unshallow')
+  })
+
+  // THE TOCTOU BLOCKER, in three cases. The exit-1 read and the depth read are two separate
+  // `git` invocations, and the guard used to pair them: exit 1 first, depth afterwards. A
+  // checkout unshallowed BETWEEN them therefore pairs the STALE exit 1 — the one a TRUE ancestor
+  // produces past a shallow boundary — with a now-complete depth answer, and the pair reads as
+  // proven divergence: the false wrong-base refusal and its safe-delete chain, on a correctly
+  // based branch. That race is not hypothetical here, because the refusal's own detail line
+  // tells the operator to run `git fetch --unshallow origin` — exactly the event that closes the
+  // window. So the "no" is re-established AFTER completeness is proven, and these cases pin the
+  // TRANSITION the shallow triple above (all static states) could not reach. Split into three
+  // tests because the first case FIRES: a live run keeps its `(project_slug, slug)`, and a
+  // second `runOnce` in the same test would re-process it.
+  const TOCTOU_BASE = 'b'.repeat(40)
+  const TOCTOU_TIP = 'c'.repeat(40)
+  /** Every read but `merge-base --is-ancestor`, which each case answers for itself. */
+  const toctouResponder =
+    (ancestor: () => HostCommandResult) =>
+    (cmd: string[]): HostCommandResult => {
+      const joined = cmd.join(' ')
+      // The depth read lands AFTER the unshallow: this checkout really is complete when asked.
+      if (joined.includes('rev-parse --is-shallow-repository')) return ok('false')
+      if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(TOCTOU_BASE)
+      if (joined.includes(`merge-base --is-ancestor ${TOCTOU_TIP} ${TOCTOU_BASE}`)) return ancestor()
+      if (joined.includes(`rev-list --count ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
+      if (joined.includes('worktree list --porcelain')) {
+        return ok(
+          ['worktree /repo', `HEAD ${TOCTOU_BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0',
+        )
+      }
+      if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) return ok(TOCTOU_TIP)
+      return ok()
+    }
+
+  test('an unshallow landing between the two reads cannot become a proven divergence', async () => {
+    let reads = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponder(() => {
+        reads += 1
+        // Read 1: taken while the parent commits were still missing — exit 1 on a TRUE ancestor.
+        // Read 2: taken after they arrived, and it finds the link.
+        return reads === 1 ? { ok: false, stdout: '', stderr: '', exit_code: 1 } : ok()
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    // The proven-complete read is the one the verdict rests on, so the branch is CONTAINED: the
+    // build fires and no refusal is composed at all.
+    expect(reads).toBe(2)
+    expect(h.inputs).toHaveLength(1)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('branch -D')
+  })
+
+  test('POSITIVE CONTROL: exit 1 at BOTH reads of a complete checkout is still the wrong-base refusal', async () => {
+    // Without this, "re-read before answering no" could be satisfied by an implementation that
+    // stopped answering "no" at all and never refused a real wrong-base branch again.
+    let reads = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponder(() => {
+        reads += 1
+        return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reads).toBe(2)
+    expect(reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(reason).toContain('branch -D -- trident/add-thing')
+  })
+
+  // THE REVERSE TRANSITION, which the three cases above could not reach. The re-read they pin
+  // was justified by "deepening is one-way — nothing re-truncates a checkout in place", and the
+  // depth probe was MEMOISED on that premise: one "complete" answer licensed every later exit 1
+  // in the same guard pass. The premise is false. `git fetch --depth=1` truncates a COMPLETE
+  // checkout in place (git 2.43: `--is-shallow-repository` flips false → true and `merge-base
+  // --is-ancestor` starts exiting 1 on a genuine ancestor), so a truncation landing across the
+  // confirming read paired a STALE "complete" with an exit 1 that means nothing — the false
+  // wrong-base refusal and its safe-delete chain, on a correctly based branch. The depth probe
+  // is no longer memoised and the confirming read is BRACKETED: complete before it AND after it,
+  // or the verdict is UNKNOWN.
+  /** Like `toctouResponder`, but the depth answer is the case's to control per read. */
+  const toctouResponderDepth =
+    (ancestor: () => HostCommandResult, depth: () => HostCommandResult) =>
+    (cmd: string[]): HostCommandResult => {
+      const joined = cmd.join(' ')
+      if (joined.includes('rev-parse --is-shallow-repository')) return depth()
+      if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(TOCTOU_BASE)
+      if (joined.includes(`merge-base --is-ancestor ${TOCTOU_TIP} ${TOCTOU_BASE}`)) return ancestor()
+      if (joined.includes(`rev-list --count ${TOCTOU_BASE}..${TOCTOU_TIP}`)) return ok('3')
+      if (joined.includes('worktree list --porcelain')) {
+        return ok(
+          ['worktree /repo', `HEAD ${TOCTOU_BASE}`, 'branch refs/heads/main'].map((f) => `${f}\0`).join('') + '\0',
+        )
+      }
+      if (joined.includes('rev-parse --verify --quiet refs/remotes/origin/trident/add-thing')) return ok(TOCTOU_TIP)
+      return ok()
+    }
+
+  test('a checkout TRUNCATED between the two reads cannot become a proven divergence either', async () => {
+    const order: string[] = []
+    let depths = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponderDepth(
+        () => {
+          order.push('ancestry')
+          // Exit 1 at BOTH reads — indistinguishable, at the probe, from a real divergence.
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        },
+        () => {
+          depths += 1
+          order.push('depth')
+          // Read 1: the checkout really is complete. Read 2: a `fetch --depth=1` landed in
+          // between and truncated it, so the exit 1 the verdict would rest on means nothing.
+          return depths === 1 ? ok('false') : ok('true')
+        },
+      ),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+
+    // The bracket: depth is read once BEFORE the confirming ancestry read and once AFTER it, so
+    // the second depth answer cannot be inherited from before the read it licenses.
+    expect(order).toEqual(['ancestry', 'depth', 'ancestry', 'depth'])
+    // Still REFUSED — fail-closed, nothing fired. Only the CLAIM changes.
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)?.phase).toBe('failed')
+    expect(reason).toContain('UNKNOWN')
+    // The detail quotes the depth actually measured around that read, not the stale one.
+    expect(reason).toContain('SHALLOW')
+    expect(reason).toContain('--unshallow')
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('it was not cut from')
+    expect(reason).not.toContain('branch -D')
+  })
+
+  test('POSITIVE CONTROL: complete on BOTH sides of the confirming read is still the wrong-base refusal', async () => {
+    // The bracket must not be satisfiable by an implementation that stopped answering "no".
+    let depths = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponderDepth(
+        () => ({ ok: false, stdout: '', stderr: '', exit_code: 1 }),
+        () => {
+          depths += 1
+          return ok('false')
+        },
+      ),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(depths).toBe(2)
+    expect(reason).toContain('already carries 3 commit(s) not on origin/')
+    expect(reason).toContain('branch -D -- trident/add-thing')
+  })
+
+  test('a CLOSING depth read that cannot answer is UNKNOWN, not a "no" borrowed from the opening one', async () => {
+    let depths = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponderDepth(
+        () => ({ ok: false, stdout: '', stderr: '', exit_code: 1 }),
+        () => {
+          depths += 1
+          return depths === 1 ? ok('false') : { ok: false, stdout: '', stderr: 'fatal: not a repository', exit_code: 128 }
+        },
+      ),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reason).toContain('UNKNOWN')
+    expect(reason).toContain('the depth of this checkout could not be read')
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('branch -D')
+  })
+
+  test('a re-read that ERRORS is UNKNOWN, not a "no" borrowed from the first read', async () => {
+    let reads = 0
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TOCTOU_TIP,
+      hostResponder: toctouResponder(() => {
+        reads += 1
+        return reads === 1
+          ? { ok: false, stdout: '', stderr: '', exit_code: 1 }
+          : { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reason).toContain('UNKNOWN')
+    // The detail quotes the read the verdict actually rests on — the second one.
+    expect(reason).toContain('exited 128')
+    expect(reason).not.toContain('already carries')
+    expect(reason).not.toContain('branch -D')
+  })
+
+  test('exit 0 stays definitive, so a shallow checkout costs a contained branch nothing', async () => {
+    // Truncation can only HIDE ancestry, never invent it: `--is-ancestor` exiting 0 found the
+    // link, and that is positive proof at any depth. So the depth probe is lazy — the common
+    // shape (a branch already contained in the base) never pays for it, and never stalls on it.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --is-shallow-repository')) return ok('true')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) return ok()
+        return ok()
+      },
+    })
+    await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    expect(h.inputs).toHaveLength(1)
+    expect(h.hostCalls.some((c) => c.join(' ').includes('rev-parse --is-shallow-repository'))).toBe(false)
+  })
+
+  test("the launch base fetch stays inside this repo's own .git — no submodule recursion", async () => {
+    // The refusal composed on this path, and `delivery.ts`'s LAUNCH_PATH_FETCH beside it, both
+    // tell the reader the launcher's writes live under this repo's `.git`. A fetch recurses into
+    // submodules whenever `fetch.recurseSubmodules` says so (its default is `on-demand`, and a
+    // repo may set `true`), and a recursed fetch writes inside the SUBMODULE's git dir — git's
+    // OWN write, which no hook caveat covers, and which falsifies the boundary the message
+    // asserts. One flag; this pins that it is passed, and that the sentence quotes the argv that
+    // actually ran.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+    const fetched = h.hostCalls.find((c) => c.includes('fetch'))
+    expect(fetched).toBeDefined()
+    expect(fetched).toContain('--no-recurse-submodules')
+    expect(fetched?.indexOf('--no-recurse-submodules')).toBeLessThan(fetched?.indexOf('origin') ?? -1)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(reason).toContain('--no-recurse-submodules')
+    expect(reason).toContain("under this repo's own .git")
   })
 
   test('an ancestor-only local branch leftover proceeds', async () => {
@@ -5375,6 +6183,453 @@ describe('orchestrator — the resume live head is read in code, never relayed b
     expect(h.hostCalls.some((c) => c.includes('fetch'))).toBe(false)
     expect(store.get(run.id)?.base_sha).toBe(BASE)
     expect(store.get(run.id)?.phase).not.toBe('failed')
+  })
+
+  test('an ancestry probe that ERRORED refuses as UNKNOWN, and claims no divergence it never measured', async () => {
+    // `merge-base --is-ancestor` has THREE exits — 0 yes, 1 no, anything else an ERROR (128 on
+    // a corrupt or missing object). The guard used to read only `.ok`, so exit 128 flowed into
+    // the SAME composed refusal as a meaningful exit 1 and asserted, in the guard's own voice,
+    // that the branch "already carries N commit(s) not on origin/main — it was not cut from
+    // origin/main". That is a positive claim about divergence derived from a probe that
+    // answered nothing, in the one message class this change exists to make evidence-honest.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const errored = (exit_code: number, timed_out?: boolean) =>
+      buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        local_branch_tip: TIP,
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            // `timed_out` is an OPTIONAL property of HostCommandResult, and this repo compiles
+            // with `exactOptionalPropertyTypes` — so "present and undefined" is NOT the same
+            // type as "absent", and spreading `boolean | undefined` in is a TS2322. Omit the
+            // key when there is no kill to report, which is also the shape `spawnCapture`
+            // actually produces.
+            return {
+              ok: false,
+              stdout: '',
+              stderr: 'fatal: bad object',
+              exit_code,
+              ...(timed_out === undefined ? {} : { timed_out }),
+            }
+          }
+          return ok()
+        },
+      })
+
+    const h = errored(128)
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    // FAIL-CLOSED: the build is still not started. UNKNOWN refuses; it does not proceed.
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('UNKNOWN')
+    expect(final.failure_reason).toContain('exited 128')
+    expect(final.failure_reason).toContain('trident/add-thing')
+    // ...and it refuses as what it IS, not as the divergence refusal.
+    expect(final.failure_reason).not.toContain('already carries')
+    expect(final.failure_reason).not.toContain("refusing to build on another lane's work")
+    // UNKNOWN authorises nothing irreversible (docs/INVARIANTS.md §12 invariant 122).
+    expect(final.failure_reason).not.toContain('branch -D')
+    expect(final.failure_reason).not.toContain('worktree remove')
+    // The composer is never even reached, so no evidence-gathering command was spent on it.
+    expect(h.hostCalls.some((c) => c.join(' ').includes('worktree list'))).toBe(false)
+
+    // THE SEAM, NOT JUST THE STRING (Argus blocker). A refusal is only as honest as what
+    // delivery makes of it, and this one QUOTES git — `git merge-base --is-ancestor exited 128`.
+    // `interpretFailure`'s merge-mechanics arm is a bare `includes('git ')`, so the reason was
+    // delivered as "The build finished but a git step failed while landing the branch": a
+    // completed build and a merge attempt, both asserted about a launch its own text says never
+    // happened. Asserting on `failure_reason` alone could not see that.
+    const delivered = interpretFailure(final)
+    expect(delivered.klass).toBe('infra')
+    expect(delivered.summary).toContain('did not start this build')
+    expect(delivered.summary).not.toContain('The build finished')
+    expect(delivered.summary).not.toContain('landing the branch')
+    expect(delivered.input_needed).not.toContain('branch -D')
+
+    // A KILLED probe is the same non-answer wearing git's meaningful exit code: `spawnCapture`
+    // reports the kill in `timed_out`, and exit 1 alone cannot tell the two apart.
+    const killed = errored(1, true)
+    const run2 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(killed)
+    expect(killed.inputs).toHaveLength(0)
+    const final2 = store.get(run2.id)!
+    expect(final2.failure_reason).toContain('killed by its watchdog')
+    expect(final2.failure_reason).not.toContain('already carries')
+    expect(final2.failure_reason).not.toContain('branch -D')
+    // The watchdog variant carries no `git ` token at all, so it missed the merge-mechanics arm
+    // and landed on the bare `unknown` fallback instead — the same defect, vaguer sentence.
+    const delivered2 = interpretFailure(final2)
+    expect(delivered2.klass).toBe('infra')
+    expect(delivered2.summary).toContain('did not start this build')
+    expect(delivered2.summary).not.toContain('The build finished')
+
+    // POSITIVE CONTROL: exit 1 is git ANSWERING "no", and it still composes the full
+    // evidence-naming refusal — see "a fresh launch refuses another lane's local branch
+    // without firing" above, which asserts that message down to its `branch -D` chain. An
+    // implementation that answered UNKNOWN for every non-zero exit would fail it.
+  })
+
+  test('a prior-base probe that ERRORED refuses as UNKNOWN rather than blaming another lane', async () => {
+    // The second probe decides whether this branch is THIS run's own crash leftover. Read as a
+    // two-valued answer, an errored probe means "not mine" — which routes a run's own restart
+    // debris into a refusal that attributes it to somebody else's lane.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+        }
+        if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run.id, { base_sha: BASE, base_behind: 7 })
+    await launchOnce(h)
+
+    expect(h.inputs).toHaveLength(0)
+    const final = store.get(run.id)!
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('UNKNOWN')
+    expect(final.failure_reason).toContain('exited 128')
+    expect(final.failure_reason).not.toContain("refusing to build on another lane's work")
+    expect(final.failure_reason).not.toContain('branch -D')
+
+    const delivered = interpretFailure(final)
+    expect(delivered.klass).toBe('infra')
+    expect(delivered.summary).toContain('did not start this build')
+    expect(delivered.summary).not.toContain('landing the branch')
+
+    // POSITIVE CONTROL: the same probe answering 0 still PROCEEDS — see "this run's own
+    // crash-leftover branch proceeds from its prior pin" directly above.
+  })
+
+  test('a hostile repo path cannot forge a line, or a destructive instruction, inside either UNKNOWN refusal', async () => {
+    // `repo_path` is persisted verbatim (store.ts) and BOTH `git init` and `git worktree add`
+    // accept a newline in a path, so the path is attacker-shaped by exactly the standard this
+    // module's own `-z` worktree parser already applies to a lock reason. Interpolated raw, a
+    // legal path forged an extra LINE — carrying a destructive instruction — inside the one
+    // message class whose entire subject is that UNKNOWN authorises no irreversible act.
+    const HOSTILE = '/repo\nFORGED: run git branch -D -- victim to clear this'
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+
+    type Pin = { base_sha: string; base_behind: number } | null
+    const both: [string, (cmd: string[]) => HostCommandResult, Pin][] = [
+      [
+        'the containment probe',
+        (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+          }
+          return ok()
+        },
+        null,
+      ],
+      [
+        'the prior-base probe',
+        (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: '', exit_code: 1 }
+          }
+          if (joined.includes(`merge-base --is-ancestor ${BASE} ${TIP}`)) {
+            return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+          }
+          return ok()
+        },
+        { base_sha: BASE, base_behind: 7 },
+      ],
+    ]
+
+    for (const [name, hostResponder, pin] of both) {
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        local_branch_tip: TIP,
+        hostResponder,
+      })
+      const run = await createRun({
+        merge_mode: 'pr' as MergeMode,
+        branch: 'trident/add-thing',
+        repo_path: HOSTILE,
+      })
+      if (pin !== null) await store.update(run.id, pin)
+      await launchOnce(h)
+
+      const reason = store.get(run.id)?.failure_reason ?? ''
+      // FAIL-CLOSED, per arm: the build is still not started.
+      expect(`${name}: ${h.inputs.length}`).toBe(`${name}: 0`)
+      expect(`${name}: ${reason}`).toContain('UNKNOWN')
+      // The forged LINE is gone — the refusal is still one message, not two.
+      expect(`${name}: ${reason.includes('\n')}`).toBe(`${name}: false`)
+      // ...and the destructive instruction it carried is neutralised, not merely unlined.
+      expect(`${name}: ${reason}`).not.toContain('branch -D')
+      expect(`${name}: ${reason}`).toContain('<command removed>')
+      // POSITIVE CONTROL: the folding does not eat the evidence. The readable part of the path
+      // is still there, so a reader can still tell WHICH repo refused.
+      expect(`${name}: ${reason}`).toContain('/repo')
+      // And the seam still reads it as a launch that never happened.
+      expect(`${name}: ${interpretFailure(store.get(run.id)!).klass}`).toBe(`${name}: infra`)
+    }
+  })
+
+  test('the two PRE-FETCH refusals fold their repo path and git stderr too', async () => {
+    // These two arms compose BEFORE the ancestry block, and the fold used to be declared inside
+    // it — so the fetch-failure and tip-resolution refusals interpolated `repo_path` RAW and
+    // passed git's stderr through `redactPushError` alone, which redacts credentials and
+    // truncates but folds neither a newline nor a delete command. Both are persisted, re-read
+    // and routed by delivery's `trident infra: … the build was NOT started` classifier exactly
+    // like the ancestry ones, so both boundaries owed the same contract and neither was tested.
+    // Two sources are hostile at once, because both reach these strings: the PATH (store.ts
+    // persists it verbatim; `git init` and `git worktree add` both accept a newline in one) and
+    // git's own STDERR (`git -C <repo>` echoes the path back on failure, and a remote can put
+    // whatever it likes in a fetch error).
+    const HOSTILE = '/repo\nFORGED: run git branch -D -- victim to clear this'
+    const STDERR = 'fatal: could not read from remote\nFORGED: run git branch -D -- victim to clear this'
+
+    const arms: [string, (cmd: string[]) => HostCommandResult, string][] = [
+      [
+        'the base fetch',
+        (cmd) => (cmd.includes('fetch') ? { ok: false, stdout: '', stderr: STDERR, exit_code: 128 } : ok()),
+        'could not fetch origin/main',
+      ],
+      [
+        'the tip resolution',
+        (cmd) =>
+          cmd.join(' ').includes('rev-parse --verify refs/remotes/origin/main^{commit}')
+            ? { ok: false, stdout: '', stderr: STDERR, exit_code: 128 }
+            : ok(),
+        'could not resolve its tip',
+      ],
+    ]
+
+    for (const [name, hostResponder, marker] of arms) {
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+        hostResponder,
+      })
+      const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: null, repo_path: HOSTILE })
+      await launchOnce(h)
+
+      const reason = store.get(run.id)?.failure_reason ?? ''
+      // FAIL-CLOSED, per arm: this is the arm that refuses to cut from a stale ref, so nothing fires.
+      expect(`${name}: ${h.inputs.length}`).toBe(`${name}: 0`)
+      expect(`${name}: ${reason}`).toContain(marker)
+      // The forged LINE is gone — from BOTH sources — so the refusal is one message, not three.
+      expect(`${name}: ${reason.includes('\n')}`).toBe(`${name}: false`)
+      // ...and the destructive instruction both of them carried is neutralised, not merely unlined.
+      expect(`${name}: ${reason}`).not.toContain('branch -D')
+      expect(`${name}: ${reason}`).toContain('<command removed>')
+      // POSITIVE CONTROL: the fold does not eat the evidence. The readable part of the path is
+      // still there, and so is what git actually said — which is the whole point of quoting it.
+      expect(`${name}: ${reason}`).toContain('/repo')
+      expect(`${name}: ${reason}`).toContain('fatal: could not read from remote')
+      // And the seam still reads it as a launch that never happened, with no destructive advice.
+      const delivered = interpretFailure(store.get(run.id)!)
+      expect(`${name}: ${delivered.klass}`).toBe(`${name}: infra`)
+      expect(`${name}: ${delivered.summary}`).toContain('did not start this build')
+      expect(`${name}: ${delivered.input_needed}`).not.toContain('branch -D')
+    }
+  })
+
+  test('a LEGAL branch name carrying non-ASCII controls cannot forge a line in either UNKNOWN refusal', async () => {
+    // The branch used to be EXEMPT from folding, on the premise that "git's own ref rules have
+    // already excluded control characters". That is true of ASCII controls and false of
+    // everything else this guard folds. Reproduced in a scratch repo on git 2.43: `git branch`
+    // ACCEPTED, and `rev-parse --verify` RESOLVED, both of the names below — a U+2028 line
+    // separator several renderers break on, and a U+202E bidi override that reorders what is
+    // DISPLAYED without changing a byte. The separators inside the payload are U+00A0, which git
+    // does not reject either. So a legal branch name could draw what looks like a new line of the
+    // guard's own message, carrying the one instruction this message class must never carry.
+    const NBSP = ' '
+    const FORGED = `trident/add-thing FORGED:${NBSP}run${NBSP}git${NBSP}branch${NBSP}-D${NBSP}--${NBSP}victim`
+    const BIDI = 'trident/add-‮thing'
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+
+    for (const hostile of [FORGED, BIDI]) {
+      const h = buildHarness({
+        plan: () => ({ result: { verdict: 'APPROVE', branch: hostile } }),
+        local_branch_tip: TIP,
+        hostResponder: (cmd) => {
+          const joined = cmd.join(' ')
+          if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+          if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+            return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+          }
+          return ok()
+        },
+      })
+      const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: hostile })
+      await launchOnce(h)
+
+      const reason = store.get(run.id)?.failure_reason ?? ''
+      expect(`${hostile}: ${h.inputs.length}`).toBe(`${hostile}: 0`)
+      expect(reason).toContain('UNKNOWN')
+      // The forged LINE is gone, and so is the bidi override that reorders the rendering.
+      expect(reason).not.toContain(' ')
+      expect(reason).not.toContain('‮')
+      // ...and the destructive instruction the payload carried is neutralised, not merely
+      // unlined — in BOTH spellings, since U+00A0 separators are what the payload actually uses
+      // and `\s` in the option-window rule covers them.
+      expect(reason).not.toContain('branch -D')
+      expect(reason).not.toContain(`branch${NBSP}-D`)
+      // AND THE FOLD KEEPS A NAME FIELD TO ONE TOKEN (Argus blocker). Folding those codepoints
+      // to an ASCII SPACE is what neutralised the payload before, and the space is exactly what
+      // `delivery.ts` anchors its wrong-base classifier on (`[^ \n]+`) — so the fold spelled the
+      // banned instruction out of a name in one message class while breaking the classifier in
+      // the other. The whole payload now sits inside ONE whitespace-delimited token, which is
+      // asserted here rather than the substitute character, so the spelling stays free.
+      if (hostile === FORGED) {
+        const tokens = reason.split(/\s/).filter((t) => t.includes('victim'))
+        expect(tokens.length).toBeGreaterThan(0)
+        for (const t of tokens) expect(t).toContain('trident/add-')
+      }
+      // POSITIVE CONTROL: the readable half of the branch name survives, so the refusal still
+      // says WHICH branch it refused. An implementation that simply dropped the field would
+      // pass every assertion above and tell the reader nothing.
+      expect(reason).toContain('trident/add-')
+    }
+  })
+
+  test('a LEGAL base name carrying non-ASCII controls cannot forge a line in the UNKNOWN refusals either', async () => {
+    // The refusals said "every field this refusal quotes is folded" while interpolating `base`
+    // RAW — it arrives from `detectBaseBranch`/`opts.base_branch`, and git accepts U+2028 and
+    // U+202E in it exactly as it does in the build branch. So the forged line was still
+    // available, through the other name, in the one message class whose subject is that UNKNOWN
+    // authorises nothing.
+    const NBSP = '\u00a0'
+    const HOSTILE_BASE = `main\u2028FORGED:${NBSP}run${NBSP}git${NBSP}branch${NBSP}-D${NBSP}--${NBSP}victim`
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      base_branch: HOSTILE_BASE,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(h)
+
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    expect(h.inputs).toHaveLength(0)
+    expect(reason).toContain('UNKNOWN')
+    expect(reason.includes('\n')).toBe(false)
+    expect(reason).not.toContain('branch -D')
+    expect(reason).not.toContain(`branch${NBSP}-D`)
+    const tokens = reason.split(/\s/).filter((t) => t.includes('victim'))
+    expect(tokens.length).toBeGreaterThan(0)
+    // POSITIVE CONTROL: the readable half of the base survives, so the refusal still says which
+    // base it measured against.
+    for (const t of tokens) expect(t).toContain('main')
+  })
+
+  test('the UNKNOWN refusal counts the fetch it already made instead of claiming it wrote nothing', async () => {
+    // The refusal asserted "no branch, worktree, commit or file was changed or deleted" — true
+    // as far as it goes — immediately after this same path ran the base fetch,
+    // which force-updates the tracking ref, appends that ref's reflog, rewrites FETCH_HEAD and
+    // writes whatever objects it downloaded. `delivery.ts` names that exact set for the
+    // composer's own fetch and calls undercounting your own writes the overclaiming this refusal
+    // exists to stop; the refusal itself did not. Non-destructive is the reassurance owed —
+    // "wrote nothing" is a different claim, and it was not the true one.
+    const BASE = 'b'.repeat(40)
+    const TIP = 'c'.repeat(40)
+
+    // FRESH PR BUILD: the fetch ran, so the writes it made are named.
+    const fresh = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes('rev-parse --verify refs/remotes/origin/main^{commit}')) return ok(BASE)
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await launchOnce(fresh)
+    const reason = store.get(run.id)?.failure_reason ?? ''
+    // The sentence quotes the argv that actually ran, refspec included — a refusal that named
+    // a shorthand fetch while the code ran a different one is the same defect in miniature.
+    expect(
+      fresh.hostCalls.some((c) =>
+        c.join(' ').includes('fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main'),
+      ),
+    ).toBe(true)
+    expect(reason).toContain('no branch, worktree, commit or file in the tree was changed or deleted')
+    expect(reason).toContain('fetch --no-tags --no-recurse-submodules origin +refs/heads/main:refs/remotes/origin/main')
+    expect(reason).toContain('refs/remotes/origin/main')
+    expect(reason).toContain('FETCH_HEAD')
+    // ...AND THE REF UPDATE IS NAMED AS THE CONDITIONAL IT IS (Argus finding). A fetch whose
+    // tracking ref already sits at origin's tip runs no ref transaction: repeating the identical
+    // fetch against an unchanged remote leaves that ref's reflog at one line. Asserting the
+    // refresh and the append flatly reported, in the no-op case, writes that did not happen —
+    // overcounting, which is the same defect as the undercount this sentence was written to fix.
+    expect(reason).toContain('if origin had moved that ref')
+    expect(reason).toContain("that ref's reflog")
+    // ...WHILE THE CONFIGURED BOOKKEEPING IS NOT CONDITIONAL (Argus finding). It used to ride
+    // inside that same "if origin had moved that ref" list, which asserted in the NO-OP case a
+    // boundary the config falsifies: reproduced on git 2.43 with `fetch.writeCommitGraph=true`
+    // and a tracking ref already at origin's tip, the ref did not move (reflog stayed at one
+    // line) and the commit-graph files appeared anyway. It belongs on FETCH_HEAD's side, where
+    // `delivery.ts` already puts it — so it is named BEFORE the conditional opens.
+    expect(reason).toContain('bookkeeping')
+    expect(reason.indexOf('bookkeeping')).toBeLessThan(reason.indexOf('if origin had moved that ref'))
+    // AND THE CAVEAT NAMES CONFIGURED CODE, NOT HOOKS ALONE (Argus blocker). An `ext::` remote
+    // helper is spawned BY the fetch and was reproduced writing into the working tree during the
+    // exact fetch form this path runs, so a hook-only caveat left the same hole one config key
+    // along. Shared verbatim with `delivery.ts` through `CONFIGURED_CODE_CAVEAT`.
+    expect(reason).toContain('code this repo configures git to run is code of its own')
+    expect(reason).toContain('ext:: remote helper or a credential helper is spawned by the fetch itself')
+
+    // POSITIVE CONTROL, and the OVERcounting half: a run that already carries a base pin makes
+    // no fetch on this path, so naming one would report a write that never happened. An
+    // implementation that hard-codes the fetch sentence fails here.
+    const pinned = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'trident/add-thing' } }),
+      local_branch_tip: TIP,
+      hostResponder: (cmd) => {
+        const joined = cmd.join(' ')
+        if (joined.includes(`merge-base --is-ancestor ${TIP} ${BASE}`)) {
+          return { ok: false, stdout: '', stderr: 'fatal: bad object', exit_code: 128 }
+        }
+        return ok()
+      },
+    })
+    const run2 = await createRun({ merge_mode: 'pr' as MergeMode, branch: 'trident/add-thing' })
+    await store.update(run2.id, { base_sha: BASE, base_behind: 7 })
+    await launchOnce(pinned)
+    const reason2 = store.get(run2.id)?.failure_reason ?? ''
+    expect(pinned.hostCalls.some((c) => c.join(' ').includes('fetch'))).toBe(false)
+    expect(reason2).toContain('no branch, worktree, commit or file in the tree was changed or deleted')
+    expect(reason2).not.toContain('FETCH_HEAD')
+    // The no-fetch arm measures git's writes too, and carries the same caveat: a hook or helper
+    // this repo configures is not bounded by a sentence about what the launcher did.
+    expect(reason2).toContain('deleted by git itself')
+    expect(reason2).toContain('code this repo configures git to run is code of its own')
   })
 
   test('a checkpointed resume does not fetch or pin a base', async () => {

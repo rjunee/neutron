@@ -38,11 +38,13 @@
 
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
+import { isPublishedUnreviewedReason } from './fire-evidence.ts'
 import {
   TRIDENT_SALVAGE_MARKER,
   TRIDENT_SNAPSHOT_FAILURE_MARKER,
   TRIDENT_STASH_PARKED_MARKER,
 } from './orchestrator.ts'
+import { CONFIGURED_CODE_CAVEAT } from './wrong-base-remedy.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import type { TridentRun } from './store.ts'
 import type { TridentTerminalHook } from './tick.ts'
@@ -101,7 +103,33 @@ export type FailureClass =
    * from the `failure_reason` string, and the only one composed with 🚧 instead of ❌.
    */
   | 'infra-blocked'
+  /**
+   * THE WORK WAS BUILT AND PUSHED; ONLY THE REVIEW NEVER RAN. A launcher settle
+   * timeout landed on a row that already carried an `outer-published:<sha>:0:<round>`
+   * checkpoint (`fire-evidence.ts`), so the branch is on origin and the PR exists at
+   * that sha. Recorded under phase `failed` because there is no other terminal phase
+   * for "not merged", but it is NOT a failure and must not wear ❌ — the second class
+   * (with `infra-blocked`) composed under its own glyph.
+   *
+   * WHERE THIS LIVES, AND WHY IT IS NOT `trident/run-disposition.ts` (Argus r8
+   * minor). The card names that module as the state's home, on the strength of a
+   * SIBLING card introducing it at the write site. That module does not exist on
+   * this branch, and inventing an empty one to hold a single union member would
+   * have made the two cards conflict over a file neither had landed. So the
+   * state is spelled HERE, as one more `FailureClass` over the existing columns —
+   * no new column, no backfill, no second NAME for "built and published, review
+   * not run". When the sibling lands `run-disposition.ts`, fold this member into
+   * it; this note is the cross-reference that says so.
+   */
+  | 'published-unreviewed'
   | 'underspecified'
+  /**
+   * THE BUILD NEVER STARTED — the wrong-base launch guard refused because the branch is
+   * another lane's. Its own class because the ONE thing that must not be said about it is
+   * "reply to retry": the refusal's whole content is that re-dispatching now lands on work
+   * somebody else owns.
+   */
+  | 'branch-held'
   | 'unknown'
 
 export interface FailureInterpretation {
@@ -125,6 +153,276 @@ function isAuthoredConflictQuestion(reason: string): boolean {
     r.includes('needs your call') ||
     (r.includes('conflict') && !r.includes('failed:'))
   )
+}
+
+/**
+ * `composeWrongBaseRefusal`'s prefix, anchored — the launch guard's refusal and nothing that
+ * merely quotes it. Returns the EVIDENCE SENTENCE that follows the prefix (which arm fired), or
+ * null when this reason is not that refusal. `ahead_count` renders `?` when the count could not
+ * be read (orchestrator.ts), hence the alternation.
+ *
+ * THE NAME FIELDS ARE `[^ \n]+`, NOT `\S+`, AND THE DIFFERENCE IS THE WHOLE CLASSIFIER (Argus
+ * blocker). What git actually forbids in a ref name is the ASCII SPACE (and control characters,
+ * `~^:?*[`, ...) — it does NOT forbid other Unicode whitespace: `git check-ref-format --branch
+ * $'trident/x\xc2\xa0stalled'` exits 0 on this host's git. JavaScript's `\s` INCLUDES U+00A0,
+ * so `\S` refused to match that legal branch name, the anchor failed, and the refusal fell
+ * through to the retry-advice classifiers below — where a name containing `stalled` (or
+ * `git `, `rebase`, `checkout`) was answered with "Reply to retry the build", the one advice
+ * this class exists to forbid, restored by nothing more than somebody's choice of branch name.
+ * A class excluding exactly the two characters git's own rules exclude keeps the property the
+ * anchor rests on — the field cannot swallow the prose around it, because that prose starts
+ * with a space — without inheriting a definition of whitespace git does not share.
+ */
+const WRONG_BASE_PREFIX =
+  /^branch [^ \n]+ already carries (?:\d+|\?) commit\(s\) not on origin\/[^ \n]+ — it was not cut from origin\/[^ \n]+; refusing to build on another lane's work\. /
+
+function wrongBaseGuardEvidence(reason: string): string | null {
+  const m = WRONG_BASE_PREFIX.exec(reason)
+  return m === null ? null : reason.slice(m[0].length)
+}
+
+/**
+ * THE PRE-LAUNCH REFUSALS, whose defining property is that no build ran. Authored in exactly one
+ * place — `orchestrator.ts`'s launch path, which prefixes every one of them `trident infra: ` and
+ * ends each with the clause below — and read in exactly this one. Anchored at position 0 for the
+ * reason `WRONG_BASE_PREFIX` is: these reasons interpolate a repo path and a fragment of git's
+ * stderr, and an unanchored match over attacker-shaped text lets a quotation of one refusal
+ * reclassify an unrelated failure.
+ */
+const PRE_LAUNCH_PREFIX = /^trident infra: /
+const BUILD_NOT_STARTED = 'the build was NOT started'
+
+/**
+ * THE ONE PRE-LAUNCH REFUSAL WHOSE REMEDY IS NOT "RETRY" (Argus blocker). The ancestry guard's
+ * depth arms refuse because `merge-base --is-ancestor` exited 1 in a history git cannot see past:
+ * the checkout is SHALLOW, or its depth could not be read at all. Both are UNKNOWN, both refuse
+ * correctly — and both are DETERMINISTIC in the shape the operator is left holding. Nothing on
+ * the launch path deepens that checkout (`healShallowCheckout` runs only on the replay path), so
+ * a retry re-runs the identical probe against the identical truncated history and re-refuses,
+ * forever. Delivered as the generic `retry` line, the only step that breaks that loop — the one
+ * the refusal's own evidence names — never reached the person told to act.
+ *
+ * MATCHED BY THE AUTHORED CLAUSE, not by the word "shallow". `orchestrator.ts`'s `probeDetail`
+ * writes this sentence at its two depth arms and nowhere else; the word "shallow" alone appears
+ * in git stderr, in branch names and in repo paths, all of which are interpolated into reasons on
+ * this same path. The clause is also read ONLY INSIDE the anchored pre-launch arm below, so it
+ * can never pull a post-launch failure out of the class it belongs to.
+ *
+ * A FALSE POSITIVE HERE IS SAFE BY CONSTRUCTION, which is why an `includes()` is enough: the
+ * worst it can do is add one additive, reversible step (`git fetch --unshallow origin`, which
+ * only downloads history) to a refusal that did not need it. No arm of this branch authorises an
+ * irreversible act — invariant 121, the same rule the composer obeys.
+ */
+const DEPTH_PROBE_CLAUSE =
+  'is a proven "not an ancestor" only in a COMPLETE history'
+const SHALLOW_CONFIRMED = 'says this checkout is SHALLOW'
+
+/**
+ * The reassurance actually owed, and NOT ONE WORD MORE. This used to end "— the guard only READ
+ * state", which contradicted the very next sentence on the fetching arm: a fetch WRITES (a
+ * tracking ref, FETCH_HEAD, objects), so the pair asserted read-only and then described writes,
+ * in the one message whose subject is not claiming things nobody established (Argus finding).
+ * Whether the arm that fired only read is now said by `wrongBaseWrites`, which knows.
+ *
+ * AND "FILE" IS SCOPED TO THE TREE (Argus finding). Unqualified, this sentence said no file was
+ * changed and the very next sentence on the fetching arm named FETCH_HEAD — a file — as one of
+ * that arm's writes, so the pair contradicted itself again one clause further along. The
+ * reassurance actually owed is about the WORKING TREE and the refs in it; git's own bookkeeping
+ * under `.git/` is what the per-arm sentence exists to enumerate.
+ *
+ * AND IT IS ATTRIBUTED TO GIT (Argus blocker). Unattributed, this was an ABSOLUTE about the
+ * whole path, and a `reference-transaction` hook falsifies it: the hook fires INSIDE the very
+ * ref update the fetch below makes and may write anywhere, which a reviewer demonstrated on the
+ * exact fetch form this path uses (exit 0, two files created in the working-tree root). A round
+ * ago that threat was answered by scoping `LAUNCH_PATH_FETCH` alone — which left this sentence,
+ * the one every arm OPENS with, still promising away something no sentence here can bound. What
+ * is measured is what git itself writes; the hook is named once, in `HOOK_CAVEAT`, and covers
+ * every write sentence in the message rather than one of them.
+ */
+const NO_DESTRUCTIVE_WRITE =
+  'No branch, worktree, commit or file in the tree was changed or deleted by git itself on this path.'
+
+/**
+ * THE ONE THING NONE OF THE WRITE SENTENCES CAN BOUND, said once and covering all of them. Every
+ * sentence above and below enumerates GIT's own writes; a repo may configure git to run arbitrary
+ * local code inside those operations. Naming it here — after the enumeration, before the next
+ * step — is what makes the enumeration's scope true, and it is the honest form of the absolute it
+ * replaces: this message says what was measured, not what cannot be promised.
+ *
+ * AND THE CLASS IS "CONFIGURED CODE", NOT "HOOKS" (Argus blocker). This caveat named hooks alone,
+ * which left the identical hole open through the remote and credential configuration: an `ext::`
+ * remote helper is spawned BY the fetch, and a reviewer reproduced one writing into the WORKING
+ * TREE during the exact fetch form these guards run. The wording, and that reproduction, now live
+ * once in `CONFIGURED_CODE_CAVEAT` (`wrong-base-remedy.ts`), shared with the launch guard's own
+ * `noWrites` so the two cannot drift apart again.
+ */
+const HOOK_CAVEAT = `All of that measures what GIT itself writes: ${CONFIGURED_CODE_CAVEAT}.`
+
+/**
+ * THE GUARD IS NOT THE ONLY THING THAT RAN ON THIS PATH (Argus blocker). The per-arm sentences
+ * account for the WRONG-BASE GUARD's own writes, and on the held arms they say it "made no
+ * network call at all" — true of the guard, and read by the owner as true of the refusal. It is
+ * not: a fresh PR launch fetches origin's base ref in `orchestrator.ts` BEFORE the guard is ever
+ * called, which moves origin's base pointer and rewrites git's own bookkeeping. So the scope is
+ * stated, and that write is attributed to the step that made it.
+ *
+ * NOT ENUMERATED HERE, deliberately. This module reads a reason STRING and cannot know whether
+ * the fetching arm ran (only a fresh PR build fetches), and enumerating a write that may not have
+ * happened is the overcounting the per-arm conditional above exists to prevent. The launch path
+ * counts its own writes at its own site, exactly (`noWrites` in `orchestrator.ts`).
+ *
+ * AND THE SENTENCE IS CONDITIONAL IN ITS OWN WORDS, because it is appended UNCONDITIONALLY
+ * (Argus finding, raised as a blocker and weakened on verification). Only `wrongBaseWrites` is
+ * arm-conditional; this clause rides along on the local-merge and already-pinned paths too,
+ * where `orchestrator.ts`'s `freshBuild && merge_mode === 'pr'` gate means NO launcher fetch
+ * ran. The old phrasing — "a fresh PR launch refreshes origin's base ref before this guard
+ * runs" — was generic rather than false, but a reader on those paths reads it as a fetch that
+ * happened. So it now says WHEN it applies and names the other case, which costs a clause and
+ * removes the last reading in which this message reports a write nobody made. Conditioning the
+ * concatenation instead would require this module to know which launch path ran, which is
+ * exactly what the paragraph above says it cannot.
+ *
+ * THE ".git" IN IT IS THIS REPO'S OWN, and that is a property of the launcher's command, not of
+ * fetch in general: `git fetch` recurses into submodules under `fetch.recurseSubmodules` and
+ * then writes inside a submodule's git dir. `orchestrator.ts` passes `--no-recurse-submodules`
+ * so this sentence is true; the two move together (Argus blocker).
+ *
+ * AND THE CLAIM IS SCOPED TO WHAT THE FETCH ITSELF DOES (Argus minor). "never the tree" and
+ * "nothing outside .git" were absolutes about a fetch, and a fetch runs LOCAL CODE if this repo
+ * configures it to: a `reference-transaction` hook fires inside the very ref update this
+ * sentence describes and may write anywhere it likes, which a reviewer demonstrated on the
+ * exact fetch form the launcher uses. A hook is arbitrary local code, so the honest fix is to
+ * say what is measured — git's own writes — rather than to promise away something no sentence
+ * here can bound. The reassurance actually owed is unchanged: nothing this path does on its own
+ * touches the tree. THE CAVEAT ITSELF NOW LIVES IN `HOOK_CAVEAT`, once, because it was never
+ * this sentence's alone to carry: it falsifies the opening reassurance and the failed-fetch
+ * arm's absolute in exactly the same way (Argus blocker).
+ */
+const LAUNCH_PATH_FETCH =
+  "That accounts for the guard itself. Separately, IF this refusal came from a fresh PR launch, the launcher refreshed origin's base ref before this guard ran; that write belongs to the launcher, is counted exactly where it happens, and moves only origin's base pointer and git's own bookkeeping under this repo's .git — git's own writes on that fetch touch nothing in the tree, and it recurses into no submodule. A launch that does not fetch — a local-merge build, or a re-entry whose base was already pinned — made no such write at all."
+
+/**
+ * THE COMPOSER'S ARM OPENINGS, named once because two things now read them: the write
+ * attribution below and the next-step clause at the call site. They are
+ * `composeWrongBaseRefusal`'s own sentences, in `wrong-base-remedy.ts`, and must move with it.
+ */
+const HELD_ARM = 'The wrong-base launch guard found the branch checked out in'
+const HELD_ARM_MID_OPERATION = 'The wrong-base launch guard found no worktree with'
+const UNHELD_ARM = 'The wrong-base launch guard found no worktree holding the branch'
+
+/** Does the evidence say a worktree is standing on the branch? Held is not the same as UNKNOWN. */
+function wrongBaseIsHeld(evidence: string): boolean {
+  return evidence.startsWith(HELD_ARM) || evidence.startsWith(HELD_ARM_MID_OPERATION)
+}
+
+/**
+ * THE NEXT STEP, PER ARM — because "re-dispatch once the branch is free" was appended to ALL of
+ * them (Argus finding), and on the arms where NO worktree holds the branch it is the wrong
+ * instruction twice over: the branch is already free, so the clause reads as "re-dispatch now",
+ * and re-dispatching now is the ONE action this class must not suggest. Those arms' composed
+ * remedy is a verified delete (published) or a salvage (unpublished) — a step that must happen
+ * BEFORE any re-dispatch, and that a tail promising the branch is merely waiting on somebody
+ * else quietly contradicts.
+ *
+ * THREE ANSWERS, NOT TWO, and the third is the point of the card: held, unheld, and "the holder
+ * was never established". An UNKNOWN holder is not an unheld branch — telling its reader no
+ * worktree holds this branch would assert exactly the fact the arm exists to say it could not
+ * measure — so it gets its own tail, and that tail authorises nothing.
+ */
+function wrongBaseNextStep(evidence: string): string {
+  const found = "The full evidence and the safe next step are in the run's failure reason"
+  if (wrongBaseIsHeld(evidence)) {
+    return `${found}; re-dispatch once the branch is free.`
+  }
+  if (evidence.startsWith(UNHELD_ARM)) {
+    return `${found} — no worktree holds this branch, so nothing here becomes safe by waiting: take that step first, and re-dispatch only after it.`
+  }
+  return `${found}; the holder was never established, so do not re-dispatch until it is.`
+}
+
+/** What the guard actually wrote, per arm; see the call site for why this is not one sentence. */
+function wrongBaseWrites(evidence: string): string {
+  if (evidence.startsWith(HELD_ARM)) {
+    return 'The guard itself only READ state: it made no network call at all, because the branch has a holder and that settles the question locally.'
+  }
+  // THE REBASE/BISECT-HOLDER ARM IS A HELD ARM WEARING THE UNHELD ARM'S OPENING (Argus finding).
+  // Its sentence begins "found no worktree with <branch> CHECKED OUT, but worktree ... has a
+  // REBASE in progress" — so a prefix test for "found no worktree" matched it and reported a
+  // fetch, which that arm RETURNS BEFORE MAKING. That is the exact overcounting the paragraph
+  // at the call site says this conditional exists to prevent. The fetching arms all open "found
+  // no worktree HOLDING THE BRANCH", so the discriminator is that whole phrase, not its prefix.
+  if (evidence.startsWith(HELD_ARM_MID_OPERATION)) {
+    return 'The guard itself only READ state: it made no network call at all, because a worktree mid-rebase or mid-bisect is standing on the branch and that settles the question locally.'
+  }
+  // THE FAILED-FETCH ARMS WEAR THE FETCHING ARM'S OPENING TOO (Argus blocker). Three of the
+  // composer's unheld arms are reached BECAUSE the fetch did not deliver a readable
+  // origin/<branch> — "this repo has no reachable 'origin' remote", "could not read
+  // origin/<b> (…)", and "origin has no <b> at all" (the fetch exited on `couldn't find remote
+  // ref`, so it updated nothing) — yet all three open with the "found no worktree holding the branch" phrase
+  // as the arm that fetched successfully, so the prefix test below credited them with a
+  // refreshed tracking ref, a reflog append and downloaded objects that a fetch exiting 128
+  // never made. Reproduced in a scratch repo: with no `origin` configured, `git fetch --no-tags
+  // origin +refs/heads/<b>:refs/remotes/origin/<b>` exits 128 and `rev-parse --verify
+  // refs/remotes/origin/<b>` still fails afterwards — the tracking ref was never written.
+  // Asserting writes that did not happen is exactly the overcounting the paragraph at the call
+  // site says this conditional exists to prevent, so these arms get their own attribution.
+  //
+  // ONE ARM, NOT THREE, and it says UNKNOWN rather than "nothing" (the honest answer for each).
+  // The "could not read" arm also covers a fetch that SUCCEEDED and whose tracking ref then
+  // failed to resolve, so "the fetch wrote nothing" would be a fresh false claim of the same
+  // class; the no-origin arm cannot establish where inside git's own bookkeeping the failed
+  // attempt stopped either. What IS established is the CEILING, and it is the same one: the
+  // only write this guard can make is a fetch of this one ref, and everything such a fetch can
+  // touch lives under .git.
+  if (
+    evidence.startsWith(`${UNHELD_ARM}, but this repo has no reachable 'origin' remote`) ||
+    evidence.startsWith(`${UNHELD_ARM}, but could not read origin/`) ||
+    evidence.startsWith(`${UNHELD_ARM}, and origin has no `)
+  ) {
+    return "The guard's only possible write is a fetch of this branch's own ref, to establish whether the commits are published; that fetch did not yield a readable origin ref and may have failed before writing anything, so whether it refreshed the origin tracking ref (and that ref's reflog), FETCH_HEAD, or any objects is itself UNKNOWN. Whatever it did write lives under .git, and the guard makes no other write either way."
+  }
+  if (evidence.startsWith(UNHELD_ARM)) {
+    // THE REFLOG IS ONE OF THE WRITES (Argus finding). `git fetch --no-tags origin
+    // +refs/heads/<b>:refs/remotes/origin/<b>` also APPENDS to
+    // `.git/logs/refs/remotes/origin/<b>` (reproduced in a scratch repo), so "the tracking
+    // ref, FETCH_HEAD and the objects, and nothing else" was an undercount — the exact defect
+    // the comment at the call site says this sentence exists to avoid. Naming it costs three
+    // words and keeps the enumeration true.
+    //
+    // AND THE LIST IS BOUNDED BY WHAT IT NAMES, NOT BY "NOTHING ELSE" (Argus finding). A fetch
+    // also runs whatever bookkeeping its own configuration asks for — `fetch.writeCommitGraph`
+    // writes `.git/objects/info/commit-graphs/*`, `gc.auto` can fire maintenance — so a closed
+    // "and nothing else" was falsifiable by a config this guard does not read. What is actually
+    // established is the CLASS: everything a fetch of one ref can touch lives under `.git`, and
+    // none of it is a branch, a worktree, a commit or a file in the tree.
+    //
+    // AND THE REF UPDATE IS CONDITIONAL, WHICH THE REFLOG CLAUSE ABOVE MADE UNCONDITIONAL (Argus
+    // finding). A fetch whose tracking ref is ALREADY at origin's tip performs no ref
+    // transaction at all: repeating the identical fetch against an unchanged remote leaves
+    // `git reflog show refs/remotes/origin/<b>` at one line — no update, no append. So a
+    // sentence that GUARANTEES a refresh and a reflog append asserts, in the no-op case, writes
+    // that did not happen: the same overcounting the failed-fetch arm above exists to prevent,
+    // one arm along. FETCH_HEAD is the one write that IS unconditional (this fetch does not
+    // pass `--no-write-fetch-head`), so the conditional is spelled per item rather than over
+    // the whole list.
+    return "Its one write is a fetch of this branch's own ref, to establish whether the commits are published: that refreshes the origin tracking ref (appending to that ref's reflog) if origin has moved it, rewrites FETCH_HEAD, and writes any objects it downloads, plus whatever bookkeeping that fetch's own configuration adds under .git (fetch.writeCommitGraph writes a commit-graph, for one) — a fetch that finds the tracking ref already at origin's tip updates no ref and appends nothing to that reflog, and git's own writes on that fetch go nowhere outside .git."
+  }
+  // THE THROW ARM CAN FIRE ON EITHER SIDE OF THE FETCH (Argus finding). The composer's outer
+  // catch wraps its WHOLE body — enumeration, fetch, and the composition after it — so a throw
+  // from a post-fetch step landed on the fall-through below and told the reader the guard
+  // "refused before it could establish the holder", asserting a fetch did NOT happen when it
+  // may well have. Which side it threw on is precisely what is not established, so say that
+  // rather than pick one; the bound that IS established is that a fetch of this branch's own
+  // ref is the only write the guard can make at all.
+  if (
+    evidence.startsWith(
+      "The wrong-base launch guard could not resolve the branch's holder or its publication because remedy resolution threw",
+    )
+  ) {
+    return "The guard's only possible write is a fetch of this branch's own ref; resolution threw, and it can throw on either side of that fetch, so whether that one fetch was made is itself UNKNOWN, and the guard makes no other write either way."
+  }
+  // The remaining arms refuse BEFORE the holder is established, which is upstream of the fetch.
+  return 'The guard itself only READ state: it refused before it could establish the holder, which is upstream of the one write it can make — a fetch of this branch\'s own ref.'
 }
 
 /**
@@ -242,6 +540,109 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     }
   }
 
+  // THE LAUNCH GUARD REFUSED — no build ran, nothing was merged, and the reason already
+  // carries the resolved evidence and remedy. Retrying is the ONE action this class must not
+  // suggest: the guard refused precisely because re-dispatching now would build on another
+  // lane's branch, so the delivery would contradict the refusal it is delivering.
+  //
+  // CHECKED FIRST OF THE STRING BRANCHES, and that placement is load-bearing. This reason
+  // EMBEDS a BRANCH NAME, a worktree path and a quoted lock reason — attacker-shaped data by
+  // the same standard the composing module already applies to them. `git check-ref-format
+  // --branch stalled` exits 0, so a branch legally named `stalled` (or one containing
+  // `exhausted`, `rebase`, `checkout`, `unmerged`, `missing`) fell through to the hang, review
+  // or merge-mechanics arms below and was answered with "Reply to retry the build" — the exact
+  // advice this class forbids, restored by nothing more than someone's choice of branch name.
+  // A LOCK REASON is quoted into the message verbatim and may contain SPACES, so the
+  // multi-word tokens below are forgeable too — and so was THIS one. An unanchored
+  // `includes()` over the whole reason matches the phrase WHEREVER it appears, and
+  // `orchestrator.ts` interpolates raw workflow error text into failure reasons: an error that
+  // merely QUOTES a previous refusal (or a lock reason that contains the sentence) was
+  // classified as a launch refusal, and a real launch failure lost its retry advice. So the
+  // reason is matched against the composer's WHOLE PREFIX, anchored at position 0 — a shape no
+  // interpolated field can produce, because a branch name cannot contain a space and every
+  // attacker-shaped field in that prefix (branch, base, count) is space-free. THE TWO HALVES
+  // MUST STILL MOVE TOGETHER: this pattern is `composeWrongBaseRefusal`'s prefix, in
+  // `wrong-base-remedy.ts`, and nothing else.
+  const wrongBaseRest = wrongBaseGuardEvidence(reason)
+  if (wrongBaseRest !== null) {
+    return {
+      klass: 'branch-held',
+      // NOT "another lane's commits": the composer deliberately retracted that attribution
+      // (wrong-base-remedy.ts, ALIVE arm — the args carry the refusing run's id but not its own
+      // worktree path, and the card's second measured instance was held by the SAME card's
+      // relocked tree), and a summary that re-asserts what the evidence beneath it withdrew is
+      // the two layers disagreeing about what was established. What IS established is the
+      // refusal's own premise: the branch was not cut from the base and carries commits the
+      // guard did not put there. The composer's PREFIX is untouched — it is the classifier
+      // token above, and the two must move together.
+      summary:
+        'I did not start this build: the branch it would use already carries commits that were not cut from the base, so it is not this run\'s to build on.',
+      // The write is named EXACTLY, because "the single write" was not: the fetch that
+      // establishes publication (`+refs/heads/<b>:refs/remotes/origin/<b>`) force-updates that
+      // tracking ref AND appends that ref's reflog AND rewrites FETCH_HEAD AND writes whatever
+      // objects it downloads (all verified on a scratch repo: FETCH_HEAD recreated and
+      // `.git/logs/refs/remotes/origin/<b>` appended by that exact command). None of them is a
+      // branch, a worktree, a commit or a file in the tree — which is the reassurance actually
+      // owed — but a delivery that undercounts its own writes is the overclaiming this refusal
+      // exists to stop.
+      //
+      // AND IT IS CONDITIONAL ON THE ARM THAT FIRED, because OVERcounting is the same defect in
+      // the other direction. The held arms make no network call at all (the composer says so:
+      // "HELD: no network call in this arm"), so telling their reader a fetch happened reports a
+      // write that did not — in the one message whose subject is not claiming things nobody
+      // established. Which arm fired is read from the evidence sentence the composer puts
+      // immediately after its prefix, so a quoted lock reason further along cannot forge it.
+      input_needed: `${NO_DESTRUCTIVE_WRITE} ${wrongBaseWrites(wrongBaseRest)} ${LAUNCH_PATH_FETCH} ${HOOK_CAVEAT} ${wrongBaseNextStep(wrongBaseRest)}`,
+    }
+  }
+
+  // THE PRE-LAUNCH CHECKS REFUSED, AND NO BUILD EVER RAN. Sibling of the branch above and
+  // checked in the same place, for the same reason: these reasons QUOTE git — the probe's exit
+  // code, its stderr, the repo path — and every keyword branch below is a bare `includes()`
+  // over that quotation. `git merge-base --is-ancestor exited 128` contains `git `, so the
+  // ancestry-UNKNOWN refusal landed on the merge-mechanics arm and was delivered as "The build
+  // finished but a git step failed while landing the branch" — a completed build and a merge
+  // attempt, both asserted about a run whose own reason says, in words, that the build was NOT
+  // started (Argus blocker). The watchdog-kill variant carries no `git ` token at all and fell
+  // through to the bare `unknown` fallback, which is the same defect wearing a vaguer sentence.
+  //
+  // MATCHED BY AN ANCHORED PREFIX PLUS THE NOT-STARTED CLAUSE, not by a keyword. `^trident
+  // infra: ` is a shape no interpolated field can produce — it is authored at position 0 by
+  // `orchestrator.ts` and nowhere else — so a lock reason, a branch name or a fragment of git
+  // stderr that merely QUOTES a previous refusal cannot route a real, post-launch failure here
+  // and strip it of the retry advice it is owed. Both halves must move together: the clause is
+  // authored verbatim at every one of these sites in `orchestrator.ts`.
+  if (PRE_LAUNCH_PREFIX.test(reason) && reason.includes(BUILD_NOT_STARTED)) {
+    // ONE SUB-SHAPE CARRIES ITS OWN STEP OUT (see `DEPTH_PROBE_CLAUSE`). The depth arms of the
+    // ancestry guard refuse on a history git cannot see past, and nothing on this path deepens
+    // it, so the bare retry line is advice that is KNOWN in advance to reproduce the refusal. The
+    // step is named here, in the delivered text, because the delivered text is all the operator
+    // sees — the persisted reason that carries the same evidence is never rendered.
+    if (reason.includes(DEPTH_PROBE_CLAUSE)) {
+      const depth = reason.includes(SHALLOW_CONFIRMED)
+        ? 'this checkout is shallow, so the commits the check needs are simply absent from it'
+        : 'the depth of this checkout could not be read, so the check cannot tell an unrelated branch from one whose parents are merely missing'
+      return {
+        klass: 'infra',
+        summary: `I did not start this build: the check that compares the branch against its base could not reach a verdict — ${depth}. No build ran and nothing was merged.`,
+        // Retry is still the destination, but it is second: retrying FIRST re-runs the same probe
+        // over the same truncated history and lands on this same refusal.
+        input_needed:
+          'Complete the history in the build checkout first — `git fetch --unshallow origin` (already-complete checkouts are unaffected) — then reply to retry. Retrying without that step re-runs the same check against the same truncated history and stops here again.',
+      }
+    }
+    return {
+      klass: 'infra',
+      // Says the one thing the misclassification denied: nothing ran, so nothing landed.
+      summary:
+        'I did not start this build: a check that runs before the build could not complete, so no build ran and nothing was merged.',
+      // Retry IS the right advice here, unlike the refusal above — these are probe failures, not
+      // a claim that another lane owns the branch, and the reason itself records that no branch,
+      // worktree, commit or file was touched.
+      input_needed: retry,
+    }
+  }
+
   // #361 — a toolless CC subprocess (empty `--tools` grant) is a PURELY INTERNAL
   // misconfiguration; classify it clearly-internal and NEVER leak the raw
   // "re-run with file/shell tools enabled" stderr. Checked FIRST so a stray
@@ -252,6 +653,29 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
       klass: 'infra',
       summary: 'The build hit an internal configuration error and could not finish.',
       input_needed: retry,
+    }
+  }
+
+  // THE WORK WAS BUILT AND PUSHED — ONLY THE REVIEW NEVER RAN. The launcher's
+  // settle timeout fired over a row that already carried an `outer-published:…`
+  // checkpoint (`fire-evidence.ts`), so the branch is on origin and the PR exists
+  // at that sha. CHECKED EARLY and by the marker `publishedFailureReason` authors,
+  // because the generic tail would otherwise offer `retry` — inviting exactly the
+  // rebuild the rest of this seam exists to prevent, one line under a summary that
+  // says the work is already done. THE TWO HALVES MUST MOVE TOGETHER: the
+  // predicate is exported from `fire-evidence.ts` and imported here rather than
+  // retyped — and it ANCHORS on the head `publishedFailureReason` writes rather
+  // than looking for the marker anywhere in the string, so substrate text that
+  // merely QUOTES the token (this repo builds itself, and the crash-recovery
+  // reason below embeds substrate output verbatim) cannot claim a failed build
+  // was published.
+  if (isPublishedUnreviewedReason(r)) {
+    return {
+      klass: 'published-unreviewed',
+      summary:
+        'This build finished and pushed its work — the review round never ran, so I did not merge it.',
+      input_needed:
+        'Check the PR at its pushed commit and send it for review. Do not rebuild it: the work is already published.',
     }
   }
 
@@ -486,6 +910,15 @@ export function composeTerminalDelivery(run: TridentRun): ComposedDelivery | nul
       if (interp.klass === 'infra-blocked') {
         return {
           text: `🚧 ${title} — build deferred (infrastructure), not rejected.\n${interp.summary}\n${interp.input_needed}${trail}`,
+        }
+      }
+      // A FINISHED, PUSHED BUILD IS NOT A FAILURE EITHER. The words already said
+      // "this build finished and pushed its work"; leading them with ❌ told the
+      // owner the opposite of the sentence underneath. Same carve-out shape as
+      // `infra-blocked` above — every other class keeps the ❌ line byte-identical.
+      if (interp.klass === 'published-unreviewed') {
+        return {
+          text: `📦 ${title} — built and pushed; the review never ran, so it is not merged.\n${interp.summary}\n${interp.input_needed}${trail}`,
         }
       }
       return { text: `❌ ${title} — ${interp.summary}\n${interp.input_needed}${trail}` }

@@ -202,6 +202,39 @@ describe('stage attribution pure reader', () => {
     expect(windows[1]?.label).toBe('run-orphan#1 round=2 ralph_round=3')
   })
 
+  // ARGUS r5 (minor): the settle-timeout HOLD path stamps `fire-unobserved-launch`
+  // INSTEAD OF `fire-settled` (the launcher never confirmed, so claiming it
+  // settled would be a lie) — and with no entry in the pair table every held lane
+  // read as `unattributed(fire-settled)` on BOTH fire segments, losing exactly
+  // the runs that seam exists to rescue from the ledger.
+  test('a HELD lane attributes both fire segments off `fire-unobserved-launch`', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-held', 'launch-start', 0),
+      event('run-held', 'fire-dispatched', 100),
+      event('run-held', 'fire-unobserved-launch', 180_100, 'worktree wf_x holds the branch'),
+      event('run-held', 'plan-start', 183_100),
+    ])
+    const result = computeSegments(fireWindow!)
+
+    expect(result.segments[0]?.durationMs).toBe(180_000)
+    expect(result.segments[0]?.status).toBeNull()
+    expect(result.segments[1]?.durationMs).toBe(3_000)
+    expect(result.segments[1]?.status).toBeNull()
+  })
+
+  test('a lane with NEITHER fire terminator is still unattributed, not zero', () => {
+    const [fireWindow] = groupIntoFireWindows([
+      event('run-blind', 'launch-start', 0),
+      event('run-blind', 'fire-dispatched', 100),
+      event('run-blind', 'plan-start', 3_100),
+    ])
+    const result = computeSegments(fireWindow!)
+
+    expect(result.segments[0]?.durationMs).toBeNull()
+    expect(result.segments[0]?.status).toBe('unattributed(fire-settled)')
+    expect(result.segments[1]?.status).toBe('unattributed(fire-settled)')
+  })
+
   test('a killed Codex attempt pairs the remaining end with the retry start', () => {
     const [fireWindow] = groupIntoFireWindows([
       event('run-retry', 'launch-start', 0),

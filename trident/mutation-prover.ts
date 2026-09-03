@@ -568,11 +568,15 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       headSha = input.head_sha.trim().toLowerCase()
       if (!HEX40.test(headSha)) return refuse(run.id, claim, 'the pinned head sha is not a commit sha')
     } else {
-      const head = await deps.run_host(['git', '-C', repo, 'rev-parse', run.branch], repo)
-      headSha = head.stdout.trim().toLowerCase()
-      if (!head.ok || !HEX40.test(headSha)) {
-        return refuse(run.id, claim, `could not resolve the head of ${run.branch}`)
-      }
+      // THE SAME RESOLVER THE GATE USES — not a second, bare-name `rev-parse`.
+      // The primitive that lived here read `run.branch` unqualified and without
+      // `--end-of-options`, so a tag or a leading-`-` name answered for the
+      // branch. Unreachable from the sole production caller (it always pins
+      // `head_sha`), which is exactly why it had to go: an unreachable copy of a
+      // fixed bug is the copy that comes back.
+      const resolved = await resolveMergeHeadSha(deps.run_host, repo, run.branch, undefined)
+      if (resolved === null) return refuse(run.id, claim, `could not resolve the head of ${run.branch}`)
+      headSha = resolved
     }
 
     // DETACHED at the head sha, never at the branch name: the branch may still
@@ -1096,7 +1100,12 @@ export interface MutationGateInput {
 export function isPlainBranchName(branch: string): boolean {
   if (branch.startsWith('-')) return false // explicit: an option, never a name
   if (branch.includes(':')) return false // explicit: a refspec, never a name
-  if (!/^[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(branch)) return false
+  // `_` is legal ANYWHERE in a ref name, first character included — verified:
+  // `git check-ref-format --branch _feature` exits 0 and echoes the name. The
+  // allowlist excluded it, so the gate refused an otherwise-valid build before
+  // git could judge it (review round 3). `_` is inert to a shell we never use
+  // and to git's own option parsing, so admitting it widens nothing else.
+  if (!/^[A-Za-z0-9_][A-Za-z0-9_./-]*$/.test(branch)) return false
   return (
     !branch.includes('..') &&
     !branch.includes('//') &&
@@ -1129,11 +1138,18 @@ export async function branchNameRejection(
     )
   }
   const check = await run_host(['git', '-C', repo_path, 'check-ref-format', '--branch', branch], repo_path)
-  if (!check.ok) {
-    const detail = check.stderr.trim().slice(0, 120)
-    return `git check-ref-format --branch rejects it${detail.length > 0 ? `: ${detail}` : ''}`
+  if (check.ok) return null
+  const detail = check.stderr.trim().slice(0, 120)
+  // WHY THE TWO REASONS ARE NOT ONE. `reason` is the durable audit trail an
+  // operator reads months later, and "git rejects this name" sends them to fix
+  // the name while "git never ran" sends them to fix the host. A spawn failure
+  // (`spawnCapture` reports exit_code -1 when the child never started) and our
+  // own watchdog kill are the second thing, not the first — git never judged
+  // the name at all. Both still REFUSE: unverified is not verified.
+  if (check.timed_out === true || check.exit_code < 0) {
+    return `git check-ref-format --branch could not be RUN, so the name is unverified${detail.length > 0 ? `: ${detail}` : ''}`
   }
-  return null
+  return `git check-ref-format --branch rejects it${detail.length > 0 ? `: ${detail}` : ''}`
 }
 
 /**
@@ -1142,10 +1158,11 @@ export async function branchNameRejection(
  * branch — is routinely cleaned up before this gate runs (#482 refused an
  * APPROVED build exactly this way); the commit itself is still in the object
  * store and reachable through the remote-tracking ref. Resolution order:
- *   1. the local ref, as a bare name — byte-identical to the pre-existing
- *      behaviour whenever the worktree is live;
- *   2. `refs/remotes/origin/<branch>`, and ONLY after a fetch that SUCCEEDED
- *      with an explicit forced refspec (see below);
+ *   1. `refs/heads/<branch>` — fully qualified, never the bare name, so a tag
+ *      or a sha-shaped name cannot answer for the branch the merge will take;
+ *   2. `refs/remotes/origin/<branch>`, and ONLY when that ref is not SYMBOLIC
+ *      (a fetch writes through one, creating a local branch) and ONLY after a
+ *      fetch that SUCCEEDED with an explicit forced refspec (see below);
  *   3. the caller's `expected_head` — accepted ONLY as a 40-hex sha, never as
  *      a name, and ONLY when `cat-file -e <sha>^{commit}` proves the object
  *      exists in this repo.
@@ -1175,11 +1192,27 @@ export async function resolveMergeHeadSha(
   // never tidied into a usable one.
   if (branch !== null && !isPlainBranchName(branch)) return null
 
+  // FULLY QUALIFIED, never the bare name. `git rev-parse <name>` walks its
+  // disambiguation order, and a TAG beats a branch: with refs/heads/release=A
+  // and refs/tags/release=B, `rev-parse --verify release` returns B — and a
+  // branch NAMED a 40-hex sha loses to the raw object outright. The merge takes
+  // refs/heads/<branch>, so that is the ref the proof must bind to. `null` (a
+  // legacy row with no branch) keeps the HEAD path it always had.
+  //
   // `--verify --quiet` is not cosmetic: PLAIN `rev-parse` echoes
   // `--end-of-options` itself as the first output line and, on a name it cannot
   // resolve, echoes the name too. `--verify` prints one sha or nothing.
   const local = await run_host(
-    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', branch ?? 'HEAD'],
+    [
+      'git',
+      '-C',
+      repo_path,
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      '--end-of-options',
+      branch === null ? 'HEAD' : `refs/heads/${branch}`,
+    ],
     repo_path,
   )
   const localSha = local.stdout.trim().toLowerCase()
@@ -1189,51 +1222,69 @@ export async function resolveMergeHeadSha(
   if (local.ok && HEX40.test(localSha)) return localSha
 
   if (branch !== null) {
-    // EXPLICIT, FORCED REFSPEC — never `git fetch origin <branch>`. That short
-    // form's contract is FETCH_HEAD; whether it also advances
-    // `refs/remotes/origin/<branch>` depends on the remote's configured fetch
-    // refspec, so on a --no-tags/mirror/partial clone — or a remote with no
-    // fetch refspec at all — a STALE tracking ref survives a "successful" fetch
-    // and this resolver would pin a commit the review never saw, refusing an
-    // approved build forever on the caller-pin check. `merge.ts` documents the
-    // same trap for the same reason. `+` forces the update so a force-pushed
-    // branch does not fail the fetch and thereby hold forever; `--no-tags`
-    // matches every other fetch in trident — this runs in the SHARED repo and
-    // tag auto-following would drag tags into it.
-    const fetched = await run_host(
-      [
-        'git',
-        '-C',
-        repo_path,
-        'fetch',
-        '--no-tags',
-        '--end-of-options',
-        'origin',
-        `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
-      ],
+    // THE DESTINATION MUST BE A REAL REF, NOT A POINTER TO ONE. `git fetch`
+    // writes THROUGH a symbolic ref: with
+    // `refs/remotes/origin/<b> -> refs/heads/injected` already planted,
+    // `fetch … +refs/heads/<b>:refs/remotes/origin/<b>` creates
+    // refs/heads/injected at the remote tip (reproduced on git 2.43.0). That
+    // creates a LOCAL branch — the one thing this resolver exists to avoid,
+    // because a local branch carrying commits not on origin/main trips the
+    // wrong-base guard on the next dispatch — and it makes the ref we then read
+    // a ref we did not write. So a symbolic destination DISQUALIFIES the
+    // remote-tracking step: no fetch, no read. That is not a refusal, it is one
+    // resolution path declining; `expected_head` below is object-verified and a
+    // strictly better answer than a ref that points somewhere else.
+    const symbolic = await run_host(
+      ['git', '-C', repo_path, 'symbolic-ref', '--quiet', '--end-of-options', `refs/remotes/origin/${branch}`],
       repo_path,
     )
-    // A FAILED fetch leaves the tracking ref at whatever it happened to be, so
-    // "fetch succeeded" has to MEAN "that ref is current" or reading it is a
-    // guess. Skipping it is not a refusal: `expected_head` below is the head the
-    // review actually looked at, and it is object-verified — a strictly better
-    // answer than an unrefreshed ref.
-    if (fetched.ok) {
-      const remote = await run_host(
+    if (!symbolic.ok) {
+      // EXPLICIT, FORCED REFSPEC — never `git fetch origin <branch>`. That short
+      // form's contract is FETCH_HEAD; whether it also advances
+      // `refs/remotes/origin/<branch>` depends on the remote's configured fetch
+      // refspec, so on a --no-tags/mirror/partial clone — or a remote with no
+      // fetch refspec at all — a STALE tracking ref survives a "successful" fetch
+      // and this resolver would pin a commit the review never saw, refusing an
+      // approved build forever on the caller-pin check. `merge.ts` documents the
+      // same trap for the same reason. `+` forces the update so a force-pushed
+      // branch does not fail the fetch and thereby hold forever; `--no-tags`
+      // matches every other fetch in trident — this runs in the SHARED repo and
+      // tag auto-following would drag tags into it.
+      const fetched = await run_host(
         [
           'git',
           '-C',
           repo_path,
-          'rev-parse',
-          '--verify',
-          '--quiet',
+          'fetch',
+          '--no-tags',
           '--end-of-options',
-          `refs/remotes/origin/${branch}`,
+          'origin',
+          `+refs/heads/${branch}:refs/remotes/origin/${branch}`,
         ],
         repo_path,
       )
-      const remoteSha = remote.stdout.trim().toLowerCase()
-      if (remote.ok && HEX40.test(remoteSha)) return remoteSha
+      // A FAILED fetch leaves the tracking ref at whatever it happened to be, so
+      // "fetch succeeded" has to MEAN "that ref is current" or reading it is a
+      // guess. Skipping it is not a refusal: `expected_head` below is the head the
+      // review actually looked at, and it is object-verified — a strictly better
+      // answer than an unrefreshed ref.
+      if (fetched.ok) {
+        const remote = await run_host(
+          [
+            'git',
+            '-C',
+            repo_path,
+            'rev-parse',
+            '--verify',
+            '--quiet',
+            '--end-of-options',
+            `refs/remotes/origin/${branch}`,
+          ],
+          repo_path,
+        )
+        const remoteSha = remote.stdout.trim().toLowerCase()
+        if (remote.ok && HEX40.test(remoteSha)) return remoteSha
+      }
     }
   }
 

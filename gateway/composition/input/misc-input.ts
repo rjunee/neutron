@@ -106,6 +106,16 @@ export interface MiscCompositionInput {
      */
     on_terminal_wake?: (run: import('@neutronai/trident/store.ts').TridentRun) => Promise<void>
     /**
+     * DISPATCH-HOLD SELF-DRAIN — the same `buildDispatchHoldSweep` function the
+     * terminal chain calls, wired ALSO onto the tick's own cadence
+     * (`TridentTickLoop.drain_dispatch_holds`). The terminal observer is the
+     * right trigger for a blocker card or a file claim, both owned by a run; it
+     * is not a trigger at all for the `branch_live` hold a live WORKTREE LOCK
+     * creates, whose holder is a bare pid that emits no terminal event. Absent →
+     * the loop drains on terminal events only, exactly as before.
+     */
+    drain_dispatch_holds?: () => Promise<void>
+    /**
      * M1 UX REDESIGN — the LIVE-PROGRESS observer (see
      * `trident/tick.ts` `TridentTransitionHook`). Fired once per tick for every
      * run whose observable progress advanced (a checkpoint crossing

@@ -75,10 +75,11 @@ import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
-import { hasArgusProvenance } from './checkpoint-phase.ts'
+import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
+import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import {
   runMutationProofGate,
   type MutationGateInput,
@@ -116,6 +117,13 @@ import {
   type RunEvidenceGatherer,
   type RunHangEvidence,
 } from './run-evidence.ts'
+import {
+  FIRE_SETTLE_TIMEOUT_ERROR,
+  publishedFailureReason,
+  type FireEvidenceGatherer,
+  type FireTimeoutEvidence,
+} from './fire-evidence.ts'
+import type { BranchHolderProbe } from './fire-evidence-probes.ts'
 
 const log = createLogger('trident')
 
@@ -504,6 +512,49 @@ export interface BuildTridentOrchestratorOptions {
    * same decisions, same disclosure strings.
    */
   gather_run_evidence?: RunEvidenceGatherer
+  /**
+   * THE SETTLE-TIMEOUT EVIDENCE GATE (see `fire-evidence.ts`). Consulted ONLY
+   * when a fire fails with EXACTLY `FIRE_SETTLE_TIMEOUT_ERROR` — the launcher
+   * turn was cancelled, but the workflow it fired runs DETACHED and the cancel
+   * never reached it, so "the launcher never settled" is not "the workflow never
+   * started". Every other fire error keeps its path untouched.
+   *
+   * POSITIVE EVIDENCE ONLY. `launched` holds the lane; `published` terminalizes
+   * honestly as built-and-published/review-not-run; `none`, a THROW, and an
+   * omitted seam all keep today's plain `failed` — omitted → BYTE-IDENTICAL to
+   * before this seam existed, same phase, same reason string, same stamps.
+   */
+  gather_fire_evidence?: FireEvidenceGatherer
+  /**
+   * BRANCH-LIVENESS PROBE for ORPHAN RECOVERY. Answers "is a linked worktree,
+   * held by a LIVE lock pid, sitting on this run's branch right now?" — the same
+   * question `board-dispatch.ts` asks before creating a run, through the same
+   * `probeBranchHolder`.
+   *
+   * WHY ORPHAN RECOVERY NEEDS IT. Hold ownership for a launched-but-unobserved
+   * lane lives in the in-memory `fired` set, which a restart loses BY DESIGN.
+   * After a restart every prior-process dispatch is an orphan, and the default
+   * `redispatch` policy clears the subagent slot and fires a SECOND workflow —
+   * over a first one that may still be building the branch. That is precisely the
+   * two-lanes-on-one-branch outcome the settle-timeout hold exists to prevent, so
+   * the hold cannot be allowed to evaporate on restart.
+   *
+   * POSITIVE EVIDENCE ONLY, and only ever to WAIT: null (nothing holds it, or the
+   * look failed), a non-live holder, a throw, and an omitted seam all redispatch
+   * exactly as before.
+   *
+   * WAITING IS BOUNDED, and by ONE of the two bounds — the 90-minute no-advance
+   * reaper, which runs BEFORE this point in `step()` and which a waiting lane
+   * cannot outrun: waiting returns `changed: false`, so `last_advanced_at` never
+   * moves. (Argus r6 nit, CORRECTED in r8: the r6 note said the 2 h in-flight
+   * ceiling "sits AFTER the orphan block". It does not — `overCeiling` is
+   * computed inside the hang-watchdog block (1b), i.e. BEFORE orphan recovery
+   * (2), on the SAME `elapsedSinceAdvance` clock as the reaper. The substantive
+   * point survives and is why only ONE bound is cited: a run that reaches the
+   * ceiling has already reached the 90-minute reaper, so the ceiling can never
+   * be the bound that actually ends a wait.)
+   */
+  probe_branch_holder?: (repo_path: string, branch: string) => Promise<BranchHolderProbe | null>
   /**
    * What to do with an ORPHANED in-flight run on a tick — one whose
    * `subagent_run_id` is persisted but which THIS process never fired (the
@@ -2122,6 +2173,8 @@ export function buildTridentOrchestrator(
   const latestStageEventAt = opts.latest_stage_event_at ?? null
   const probeRunAlive = opts.probe_run_alive ?? null
   const gatherRunEvidence = opts.gather_run_evidence ?? null
+  const gatherFireEvidence = opts.gather_fire_evidence ?? null
+  const probeBranchHolderFor = opts.probe_branch_holder ?? null
   const beginCrashRecovery = opts.begin_crash_recovery
   const maxCrashRecoveries = opts.max_crash_recoveries ?? DEFAULT_MAX_CRASH_RECOVERIES
   const beginInfraRetry = opts.begin_infra_retry
@@ -3228,17 +3281,77 @@ export function buildTridentOrchestrator(
     const freshBuild = freshLaunch && priorBaseSha === null
     let base_sha: string | null = priorBaseSha
     let base_behind: number | null = null
+    // Whether the base fetch below actually RAN. The UNKNOWN refusals downstream count their
+    // own writes, and a fetch is not write-free (see `noWrites` there) — but only this arm
+    // performs one, so a flat claim either over- or under-counts depending on the path taken.
+    let fetchedBase = false
+    // WHAT THE REFUSALS BELOW QUOTE, AND WHAT THE FETCH ARGV IS, ARE THE SAME STRING.
+    //
+    // AN EXPLICIT DESTINATION REFSPEC (Argus finding, reproduced on git 2.43). `git fetch
+    // --no-tags origin <base>` updates FETCH_HEAD and only INCIDENTALLY
+    // refs/remotes/origin/<base>: under a narrowed `remote.origin.fetch` it exits 0 while that
+    // tracking ref does NOT move — and this path then rev-parses that ref for `base_sha`, pins
+    // it, and cuts the build branch from it, while the refusal downstream states as fact that
+    // the fetch wrote it. A stale base is the very thing the retry above exists to avoid, and a
+    // false write-accounting sentence is the overclaiming this message class exists to stop.
+    // Naming the destination closes both. `wrong-base-remedy.ts` already fetches its own branch
+    // this way, for this reason.
+    const baseRefspec = `+refs/heads/${base}:refs/remotes/origin/${base}`
+    // AND THE BASE IS FOLDED WHEREVER A REFUSAL QUOTES IT (Argus finding). It arrives from
+    // `detectBaseBranch`/`opts.base_branch`, and git accepts U+2028 and U+202E in a branch name
+    // exactly as it does for the build branch — so a base name could forge a line inside these
+    // pre-launch refusals the same way. `foldRefName`, not `foldEvidence`: a name field stays
+    // one token, because folding a forgery codepoint to an ASCII space is what broke the
+    // wrong-base classifier's anchor in `delivery.ts`.
+    const baseProse = foldRefName(base)
+    // AND THE REPO PATH IS FOLDED FOR EVERY PRE-LAUNCH REFUSAL, not only the ancestry ones
+    // (Argus blocker, reproduced by two reviewers). This binding used to be declared INSIDE the
+    // ancestry block below, so the two refusals composed before it — the fetch failure and the
+    // tip-resolution failure — interpolated `launchRun.repo_path` RAW and passed git's stderr
+    // through `redactPushError` alone, which redacts credentials and truncates but folds neither
+    // a newline nor a delete command. Both messages are persisted, re-read, and routed by
+    // `delivery.ts`'s PRE_LAUNCH_PREFIX classifier exactly like the ancestry ones, so a legal
+    // path — `git init` and `git worktree add` both accept a newline, and store.ts persists it
+    // verbatim — or a hostile fetch stderr could forge a line carrying `git branch -D -- victim`
+    // inside the very message class this change exists to make evidence-honest. One binding,
+    // declared once, above every path that can refuse.
+    const repoProse = foldEvidence(launchRun.repo_path)
+    // Git's own words about a failure, credential-redacted FIRST and then folded — the same
+    // order the ancestry arms' `probeDetail` uses. `foldEvidence` also carries the 300-character
+    // bound the hand-rolled `.slice(-300)` used to carry, and MARKS its truncation.
+    const gitDetail = (text: string): string => foldEvidence(redactPushError(text).trim())
     if (freshBuild && launchRun.merge_mode === 'pr') {
-      const fetchCmd = ['git', '-C', launchRun.repo_path, 'fetch', '--no-tags', 'origin', base]
+      fetchedBase = true
+      // `--no-recurse-submodules` IS PART OF THE WRITE BOUNDARY THIS PATH ASSERTS (Argus
+      // blocker). `git fetch` recurses into submodules whenever `fetch.recurseSubmodules` says
+      // so — the config default is `on-demand`, and a repo may set `true` outright — and a
+      // recursed fetch writes inside the SUBMODULE's git dir, e.g. `<repo>/sub/.git/refs/
+      // remotes/origin/main`. Reproduced on a populated old-form submodule with
+      // `fetch.recurseSubmodules=true`: this exact command moved that ref. That is git's OWN
+      // write, so the hook caveat does not cover it, and it falsifies the sentence this refusal
+      // and `delivery.ts`'s LAUNCH_PATH_FETCH both print — that the only writes are origin's
+      // base pointer and git's bookkeeping under `.git` (singular, this repo's). The flag is
+      // free here: nothing on the launch path reads a submodule, only `refs/heads/<base>` is
+      // wanted, and the explicit refspec above already says so.
+      const fetchCmd = [
+        'git',
+        '-C',
+        launchRun.repo_path,
+        'fetch',
+        '--no-tags',
+        '--no-recurse-submodules',
+        'origin',
+        baseRefspec,
+      ]
       let fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
       if (!fetched.ok) {
         await (opts.sleep ?? realSleep)(1000)
         fetched = await opts.run_host(fetchCmd, launchRun.repo_path)
       }
       if (!fetched.ok) {
-        const detail = redactPushError(fetched.stderr).trim().slice(-300)
+        const detail = gitDetail(fetched.stderr)
         return {
-          run: failedRun(launchRun, `trident infra: could not fetch origin/${base} in ${launchRun.repo_path} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
+          run: failedRun(launchRun, `trident infra: could not fetch origin/${baseProse} in ${repoProse} before cutting the build branch — refusing to branch from the stale local ref; the build was NOT started: ${detail}`, false),
           changed: true,
           waiting: false,
           note: `${launchRun.phase} → failed (base fetch failed — no fire)`,
@@ -3251,9 +3364,9 @@ export function buildTridentOrchestrator(
       )
       const oid = resolved.stdout.trim().toLowerCase()
       if (!resolved.ok || !/^[0-9a-f]{40}$/.test(oid)) {
-        const detail = redactPushError(resolved.stderr || resolved.stdout).trim().slice(-300)
+        const detail = gitDetail(resolved.stderr || resolved.stdout)
         return {
-          run: failedRun(launchRun, `trident infra: fetched origin/${base} but could not resolve its tip in ${launchRun.repo_path}; the build was NOT started: ${detail}`, false),
+          run: failedRun(launchRun, `trident infra: fetched origin/${baseProse} but could not resolve its tip in ${repoProse}; the build was NOT started: ${detail}`, false),
           changed: true,
           waiting: false,
           note: `${launchRun.phase} → failed (base resolve failed — no fire)`,
@@ -3291,26 +3404,253 @@ export function buildTridentOrchestrator(
       // will cut it from pinnedRun.base_sha. Once git resolves a concrete tip,
       // however, only ancestry can prove that this lane owns what is already there.
       if (branchTipResult.ok && /^[0-9a-f]{40}$/.test(branchTip)) {
-        const containedInBase = await opts.run_host(
-          ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', branchTip, base_sha],
-          launchRun.repo_path,
-        )
-        let ownCrashLeftover = false
-        if (!containedInBase.ok && priorBaseSha !== null) {
-          const descendsFromPriorBase = await opts.run_host(
-            ['git', '-C', launchRun.repo_path, 'merge-base', '--is-ancestor', priorBaseSha, branchTip],
+        // `merge-base --is-ancestor` answers with THREE exits, not two: 0 yes, 1 no, and
+        // ANYTHING ELSE an error (128 on a corrupt or missing object, 124 when a watchdog
+        // killed it, non-zero when the spawn itself failed). Reading "not ok" as "proven
+        // divergence" turns a probe FAILURE into the positive claim the refusal below then
+        // prints — "already carries N commit(s) not on origin/<base> — it was not cut from
+        // origin/<base>" — evidence nothing established, in the one message class this whole
+        // change exists to make evidence-honest (Argus blocker). The composer's inner
+        // publication probe already distinguishes the three (`ancestryUnknown` in
+        // wrong-base-remedy.ts); the OUTER guard now does too. UNKNOWN refuses — fail-closed,
+        // the build is not started — but it refuses as what it is, and names no destructive
+        // act (docs/INVARIANTS.md §12 invariant 122).
+        //
+        // AND EXIT 1 IS ONLY A "NO" IN A COMPLETE HISTORY (Argus blocker). Past a shallow
+        // boundary the parent commits do not exist locally, so `merge-base --is-ancestor B C`
+        // exits 1 for a B that IS an ancestor of C — reproduced on git 2.43 with a depth-1
+        // clone and a true parent. This checkout MAY be shallow: `healShallowCheckout` above
+        // documents that shape arriving in production ("install.sh used to clone at depth 1,
+        // and hand-made clones still can") and it runs only on the REPLAY path, never before
+        // this guard. So a shallow repo turned a true ancestor into the refusal "already
+        // carries N commit(s) not on origin/<base> — it was not cut from origin/<base>": a
+        // false positive, in the exact message class this change exists to make evidence-honest.
+        // Exit 0 stays definitive — finding the ancestry is positive proof, and truncation can
+        // only hide ancestry, never invent it. Exit 1 is downgraded to UNKNOWN unless the
+        // checkout is PROVEN complete, by the same `rev-parse --is-shallow-repository` probe
+        // `healShallowCheckout` uses; an unreadable depth is itself UNKNOWN, which is
+        // fail-closed and authorises nothing.
+        //
+        // Probed LAZILY: a contained branch (the overwhelmingly common shape) never needs the
+        // answer, and never pays for it.
+        //
+        // AND NOT MEMOISED (Argus blocker). An earlier draft cached the first answer for the
+        // whole guard pass, on the premise that deepening is one-way. It is not: `git fetch
+        // --depth=1` re-truncates a COMPLETE checkout in place, reproduced on git 2.43, where
+        // `rev-parse --is-shallow-repository` flips false → true and `merge-base --is-ancestor`
+        // starts exiting 1 on a genuine ancestor. Under the cache, a depth read taken while the
+        // checkout was complete authorised BOTH later exit-1 reads — including reads taken after
+        // a truncation — and the pair was published as proven divergence: the false wrong-base
+        // refusal and its safe-delete chain on a correctly based branch, the exact outcome this
+        // change exists to remove. `lastDepth` therefore records only the MOST RECENT answer, for
+        // the detail line to quote, and every caller re-reads.
+        let lastDepth: 'yes' | 'no' | 'unknown' | null = null
+        const checkoutIsShallow = async (): Promise<'yes' | 'no' | 'unknown'> => {
+          const probe = await opts.run_host(
+            ['git', '-C', launchRun.repo_path, 'rev-parse', '--is-shallow-repository'],
             launchRun.repo_path,
           )
-          ownCrashLeftover = descendsFromPriorBase.ok
+          const answer = probe.stdout.trim()
+          lastDepth = !probe.ok ? 'unknown' : answer === 'true' ? 'yes' : answer === 'false' ? 'no' : 'unknown'
+          return lastDepth
         }
-        if (!containedInBase.ok && !ownCrashLeftover) {
+        // AND THE TWO READS MUST DESCRIBE ONE HISTORY (Argus blocker). The exit-1 read and the
+        // depth read are separate `git` invocations, so a checkout unshallowed BETWEEN them
+        // pairs a STALE exit 1 — the one a TRUE ancestor produces past a shallow boundary — with
+        // a now-complete depth answer, and the pair reads as proven divergence: the false
+        // wrong-base refusal and its safe-delete chain, on a correctly based branch, which is the
+        // exact outcome this change exists to remove. The race is not hypothetical here: the
+        // refusal's own `probeDetail` tells the operator to run `git fetch --unshallow origin`,
+        // which is precisely the event that closes the window, and an earlier comment asserting
+        // "the depth cannot change under a single guard pass" enforced nothing.
+        //
+        // So "no" now rests on an exit 1 observed AFTER completeness was proven: the probe is
+        // RE-RUN once the depth answers complete, and only a second exit 1 answers "no". A re-run
+        // that exits 0 — the unshallow landed the missing parents between the reads — answers
+        // "yes", and any other exit is UNKNOWN. The probe is spawned HERE rather than by the
+        // caller so the re-run is the identical argv, and the RESULT that the detail line quotes
+        // is the one the verdict actually rests on.
+        //
+        // AND THE RACE RUNS BOTH WAYS (Argus blocker). The re-read alone was justified by
+        // "deepening is one-way — nothing re-truncates a checkout in place", which is false:
+        // `git fetch --depth=1` truncates a complete checkout, and after it a TRUE ancestor exits
+        // 1 again. One depth read taken BEFORE the confirming read therefore could not speak for
+        // the history the confirming read saw. So the confirming read is BRACKETED: depth is read
+        // once before it and once AFTER it, both non-cached, and "no" requires the checkout to
+        // have measured complete on both sides of the read the verdict rests on. A truncation
+        // landing anywhere across that read makes the closing probe answer "yes" (or fail), and
+        // the verdict degrades to UNKNOWN, which authorises nothing. What remains is not a lock —
+        // a truncate AND a re-deepen both completing inside the bracket would still be missed —
+        // but that is a two-step adversarial sequence, where the shape actually observed in this
+        // repo (a single depth-limited fetch, which LEAVES the checkout shallow) is caught.
+        const ancestry = async (
+          argv: string[],
+        ): Promise<{ verdict: 'yes' | 'no' | 'unknown'; res: HostCommandResult }> => {
+          const res = await opts.run_host(argv, launchRun.repo_path)
+          if (res.ok) return { verdict: 'yes', res }
+          if (res.exit_code !== 1 || res.timed_out === true) return { verdict: 'unknown', res }
+          if ((await checkoutIsShallow()) !== 'no') return { verdict: 'unknown', res }
+          const confirm = await opts.run_host(argv, launchRun.repo_path)
+          if (confirm.ok) return { verdict: 'yes', res: confirm }
+          if (confirm.exit_code !== 1 || confirm.timed_out === true) return { verdict: 'unknown', res: confirm }
+          // The closing half of the bracket: the depth that licenses reading THIS exit 1 as
+          // divergence is read after it, not inherited from before it.
+          if ((await checkoutIsShallow()) !== 'no') return { verdict: 'unknown', res: confirm }
+          return { verdict: 'no', res: confirm }
+        }
+        // EVERY FIELD THIS REFUSAL QUOTES IS FOLDED, on the same terms the remedy composer
+        // already folds its own (Argus blocker). `repo_path` is persisted verbatim by store.ts
+        // and both `git init` and `git worktree add` accept a newline in a path, so a legal path
+        // — `/repo\nFORGED: run git branch -D -- victim` — otherwise forged a destructive line
+        // inside the one message class whose whole subject is that UNKNOWN authorises nothing.
+        // git's stderr is folded for the same reason and not a weaker one: `git -C <repo>` echoes
+        // the path back on failure, so the raw path reaches this string by that route too.
+        // `foldEvidence` also carries the bound the `.slice(-300)` used to carry, and MARKS its
+        // truncation. Both folds now live ABOVE the fetch (`repoProse`, `gitDetail`), because the
+        // two refusals composed before this block owed the identical contract and did not have it.
+        //
+        // AND THE BRANCH NAME IS FOLDED TOO (Argus blocker). An earlier draft exempted it on the
+        // premise that "git's own ref rules have already excluded control characters" — true of
+        // ASCII controls and FALSE of everything else `defang` folds. Reproduced on git 2.43:
+        // `git branch` accepted, and `rev-parse --verify` resolved, both
+        // `feat<U+2028>FORGED<U+00A0>run<U+00A0>git<U+00A0>branch<U+00A0>-D<U+00A0>victim` and
+        // `feat<U+202E>evil` — a line separator several renderers break on, and a bidi override
+        // that reorders what is DISPLAYED without changing a byte. The remedy composer folds
+        // exactly those codepoints and names them as forgery vectors, so exempting the branch
+        // here made this seam contradict the threat model of the module it exists to guard.
+        // Only the shas stay raw, and they are `^[0-9a-f]{40}$`-tested above.
+        // NAME FIELDS ARE FOLDED AS NAMES (Argus blocker/finding). `foldEvidence` folds a
+        // forgery codepoint to an ASCII SPACE, and the ASCII space is the one character git's
+        // ref rules forbid — the character `delivery.ts` anchors its wrong-base classifier on.
+        // `foldRefName` folds a name to a single token instead, so the fold cannot put a space
+        // inside a field the reader (and the classifier) reads as one name.
+        //
+        // AND THE BASE IS ONE OF THEM. The refusals below said "every field this refusal quotes
+        // is folded" while interpolating `base` RAW — it arrives from `detectBaseBranch` or
+        // `opts.base_branch` and git accepts U+2028 and U+202E in a branch name exactly as it
+        // does for `launchRun.branch`, so the same forged line was available through the base.
+        const branchProse = foldRefName(launchRun.branch)
+        // AND THE BOUNDARY IS "THIS REPO'S OWN .git", which is only true because the fetch above
+        // passes `--no-recurse-submodules` (Argus blocker): without it a repo configuring
+        // `fetch.recurseSubmodules` makes that same command write inside a SUBMODULE's git dir,
+        // which is neither this `.git` nor a hook's doing.
+        //
+        // WHAT THIS PATH WROTE, COUNTED EXACTLY. The base fetch above is not
+        // write-free: it force-updates that tracking ref, appends the ref's reflog, rewrites
+        // FETCH_HEAD and writes whatever objects it downloaded (delivery.ts names the same set
+        // for the composer's own fetch). None of them is a branch, a worktree, a commit or a file
+        // in the tree — which is the reassurance actually owed — but a refusal that undercounts
+        // its own writes is the overclaiming this message class exists to stop. Conditional,
+        // because OVERcounting is the same defect: only a fresh PR build fetches at all.
+        //
+        // THE LIST IS OPEN AT ITS TAIL, AND SAYS SO (Argus finding). A fetch also runs whatever
+        // bookkeeping its own configuration asks for — `fetch.writeCommitGraph` writes
+        // `.git/objects/info/commit-graphs/*`, `gc.auto` can fire maintenance — so naming four
+        // items and closing the list was falsifiable by a config this path does not read. What
+        // IS established is the class: everything that fetch can touch lives under `.git`, and
+        // "file" in the clause below means a file in the TREE, which is the reassurance owed.
+        //
+        // AND THAT BOOKKEEPING IS UNCONDITIONAL (Argus finding). It used to ride inside the
+        // "if origin had moved that ref" list, which asserted in the NO-OP case a boundary the
+        // config falsifies: reproduced on git 2.43 with `fetch.writeCommitGraph=true` and a
+        // tracking ref already at origin's tip — the ref did not move (reflog stayed at one
+        // line) and the commit-graph files went 0 → 2 anyway. `delivery.ts` already phrases the
+        // same enumeration correctly, so the split below matches it: FETCH_HEAD and the
+        // configured bookkeeping are unconditional, the ref, its reflog and the objects are not.
+        //
+        // AND THE REF UPDATE IS CONDITIONAL (Argus finding, same one `delivery.ts` carries for
+        // the composer's own fetch). A fetch whose tracking ref already sits at origin's tip
+        // makes no ref transaction: repeating the identical fetch against an unchanged remote
+        // leaves that ref's reflog at one line. Naming the refresh and the append flatly
+        // asserted, in the no-op case, writes that did not happen — overcounting, which this
+        // sentence exists to avoid in both directions. FETCH_HEAD is the unconditional one.
+        const noWrites = fetchedBase
+          ? `the build was NOT started; no branch, worktree, commit or file in the tree was changed or deleted by git itself, and the only writes on this path are the ones the earlier git fetch --no-tags --no-recurse-submodules origin ${foldRefName(baseRefspec)} made under this repo's own .git — FETCH_HEAD and whatever bookkeeping that fetch's own configuration adds on top, plus — if origin had moved that ref — refs/remotes/origin/${baseProse}, that ref's reflog and the objects it downloaded; ${CONFIGURED_CODE_CAVEAT}`
+          : `the build was NOT started, and no branch, worktree, commit or file in the tree was changed or deleted by git itself; ${CONFIGURED_CODE_CAVEAT}`
+        // The DETAIL names the shallow case as the shallow case. An exit-1 UNKNOWN reported as
+        // "exited 1: no stderr" reads as a probe that malfunctioned; what actually happened is
+        // that git answered honestly about a history it cannot see past, and the operator's next
+        // step (`git fetch --unshallow`) follows only from being told so.
+        const probeDetail = (res: HostCommandResult): string => {
+          if (res.timed_out === true) return 'the ancestry probe was killed by its watchdog'
+          if (res.exit_code === 1 && lastDepth !== 'no') {
+            return lastDepth === 'yes'
+              ? 'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and git rev-parse --is-shallow-repository says this checkout is SHALLOW, where the parent commits are absent and exit 1 is also what a TRUE ancestor produces (git fetch --unshallow origin makes the probe answerable)'
+              : 'git merge-base --is-ancestor exited 1, which is a proven "not an ancestor" only in a COMPLETE history — and the depth of this checkout could not be read (git rev-parse --is-shallow-repository neither answered true nor false), so exit 1 cannot be read as divergence'
+          }
+          return `git merge-base --is-ancestor exited ${res.exit_code}: ${
+            gitDetail(res.stderr || res.stdout) || 'no stderr'
+          }`
+        }
+        const containedInBase = await ancestry([
+          'git',
+          '-C',
+          launchRun.repo_path,
+          'merge-base',
+          '--is-ancestor',
+          branchTip,
+          base_sha,
+        ])
+        const contained = containedInBase.verdict
+        if (contained === 'unknown') {
+          return {
+            run: failedRun(
+              pinnedRun,
+              `trident infra: could not establish whether branch ${branchProse} at ${branchTip} is contained in origin/${baseProse} at ${base_sha} in ${repoProse} (${probeDetail(containedInBase.res)}) — ancestry is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+              false,
+            ),
+            changed: true,
+            waiting: false,
+            note: `${launchRun.phase} → failed (ancestry probe UNKNOWN — no fire)`,
+          }
+        }
+        let ownCrashLeftover = false
+        if (contained === 'no' && priorBaseSha !== null) {
+          const descendsFromPriorBase = await ancestry([
+            'git',
+            '-C',
+            launchRun.repo_path,
+            'merge-base',
+            '--is-ancestor',
+            priorBaseSha,
+            branchTip,
+          ])
+          const descends = descendsFromPriorBase.verdict
+          // Same three exits, same rule. A failed probe here would otherwise read as "this is
+          // NOT this run's own crash leftover", which routes a run's own restart debris into a
+          // refusal that blames another lane for it.
+          if (descends === 'unknown') {
+            return {
+              run: failedRun(
+                pinnedRun,
+                `trident infra: branch ${branchProse} at ${branchTip} is not contained in origin/${baseProse} at ${base_sha}, but whether it descends from this run's own prior base ${priorBaseSha} — the shape its own crash leaves behind — could NOT be established in ${repoProse} (${probeDetail(descendsFromPriorBase.res)}); that is UNKNOWN, and UNKNOWN authorises nothing; ${noWrites}.`,
+                false,
+              ),
+              changed: true,
+              waiting: false,
+              note: `${launchRun.phase} → failed (prior-base ancestry probe UNKNOWN — no fire)`,
+            }
+          }
+          ownCrashLeftover = descends === 'yes'
+        }
+        if (contained === 'no' && !ownCrashLeftover) {
           const ahead = await opts.run_host(
             ['git', '-C', launchRun.repo_path, 'rev-list', '--count', `${base_sha}..${branchTip}`],
             launchRun.repo_path,
           )
           const rawAheadCount = ahead.stdout.trim()
           const aheadCount = /^\d+$/.test(rawAheadCount) ? rawAheadCount : '?'
-          const reason = `branch ${launchRun.branch} already carries ${aheadCount} commit(s) not on origin/${base} — it was not cut from origin/${base}; refusing to build on another lane's work. Verify or delete the branch (git -C ${launchRun.repo_path} branch -D ${launchRun.branch}), then re-dispatch.`
+          const reason = await composeWrongBaseRefusal(
+            {
+              repo: launchRun.repo_path,
+              branch: launchRun.branch,
+              base,
+              branch_tip: branchTip,
+              ahead_count: aheadCount,
+              run_id: launchRun.id,
+            },
+            { run_host: opts.run_host },
+          )
           return {
             run: failedRun(pinnedRun, reason, false),
             changed: true,
@@ -3395,6 +3735,13 @@ export function buildTridentOrchestrator(
     // FIRE the workflow. The launching turn settles in seconds; the build runs
     // detached in the background and persists its own result to the DB. Tracked
     // in `inflight` only so tests/shutdown can drain the (fast) fire turn.
+    // WHEN the fire went out, on the INJECTED clock (never `Date.now()`): the
+    // evidence gatherer compares artifact/lock timestamps against it, and the
+    // tests must be able to pin it. Through `nowMs()`, NOT a bare `Date.parse` —
+    // an unparseable injected clock would otherwise yield NaN, and every
+    // `mtime >= NaN - skew` comparison is false, silently disabling the
+    // fresh-worktree evidence with no way to tell that from "nothing was found".
+    const fireStartedAtMs = nowMs()
     stamp('fire-dispatched')
     const firePromise = fireWorkflow({
       run: pinnedRun,
@@ -3462,6 +3809,173 @@ export function buildTridentOrchestrator(
     }
 
     if (outcome.status !== 'fired') {
+      // A SETTLE TIMEOUT IS NOT PROOF THE WORKFLOW NEVER STARTED. The launcher
+      // turn is cancelled on timeout; the workflow it may already have fired
+      // runs DETACHED and that cancel does not reach it. Measured: 8 of 33 runs
+      // in 7 days died here, one while its workflow kept building for another
+      // six minutes, and twice over a row that already said `outer-published:…`.
+      // So for THIS error string only, consult positive evidence first.
+      if (outcome.error === FIRE_SETTLE_TIMEOUT_ERROR && gatherFireEvidence !== null) {
+        // A THROWING gatherer must never crash the launch AND must never spare
+        // the run: no evidence is no evidence (positive-only).
+        let evidence: FireTimeoutEvidence = { kind: 'none', detail: 'evidence gatherer threw' }
+        try {
+          evidence = await gatherFireEvidence({ run: pinnedRun, fire_started_at_ms: fireStartedAtMs })
+        } catch (err) {
+          // LOG IT — silence here is indistinguishable from "looked and found
+          // nothing", which is exactly how a gatherer that throws on EVERY call
+          // would hide behind the positive-only rule forever. The sibling
+          // liveness probe logs `liveness_probe_failed` for the same reason.
+          log.error('fire_evidence_probe_failed', {
+            run: run.id,
+            slug: run.slug,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
+        }
+        // WHAT THE GATHERER ACTUALLY SAW IN THE TWO WORKFLOW-OWNED COLUMNS —
+        // the CAS token for the save. `observed` narrows the clobber window to
+        // the gap between the gatherer's last re-read and the tick's
+        // `saveIfActive`; it cannot close it, because those are two statements.
+        // Handing the seen values down makes the store write those two columns
+        // only while they still hold what we read, so a checkpoint the detached
+        // workflow lands INSIDE that gap survives the save that spares its lane.
+        // Absent `observed` the pinned row is what we read, and it is the token.
+        const seenRow = { ...pinnedRun, ...(evidence.kind === 'none' ? {} : (evidence.observed ?? {})) }
+        const workflow_columns_seen = {
+          inner_checkpoint: seenRow.inner_checkpoint,
+          inner_verdict: seenRow.inner_verdict,
+        }
+        if (evidence.kind === 'launched') {
+          // HOLD THE LANE. A deliberate mirror of the `fired` return MINUS the
+          // `fire-settled` stamp — the launcher never confirmed. The minted `id`
+          // is the dispatch id exactly as on the fired path, so harvest, the
+          // stall guard and orphan recovery all engage from here.
+          stamp('fire-unobserved-launch', evidence.detail.slice(0, 200))
+          fired.add(run.id)
+          return {
+            run: {
+              // THE FRESH WORKFLOW-OWNED COLUMNS, NOT THE PINNED ONES (`seenRow`
+              // is `pinnedRun` with the gatherer's `observed` spread over it).
+              // `pinnedRun` is the row as it looked BEFORE the fire, and
+              // `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly
+              // — so saving the pinned snapshot would write the detached
+              // workflow's own progress back to its pre-fire value, destroying
+              // the very delta that proved the lane was live. The residual gap
+              // between that read and the save is closed by the CAS below
+              // (`workflow_columns_seen`), not by this spread.
+              ...seenRow,
+              // …EXCEPT A REJECTION THE STORE WILL NOT ACCEPT (Argus r4 minor).
+              // `saveIfActive` THROWS `TridentEmptyFindingsRejectionError` on a
+              // `REQUEST_CHANGES` with no findings on the incoming row and none
+              // on the stored one — a shape `checkpoint.sh` can write and crash
+              // recovery preserves. Spreading `seenRow` verbatim carried it into
+              // the one save whose whole job is to HOLD the lane, and the tick's
+              // per-run catch swallows the throw: `subagent_run_id` stays NULL,
+              // so the next tick re-enters the launch site and fires a SECOND
+              // lane at the branch — the exact outcome this seam exists to
+              // prevent. Downgrade it exactly as `failedRun` does (an empty
+              // finding set is an approval or an infrastructure failure, never a
+              // rejection); the CAS still guards the column, and a real review
+              // that lands findings re-writes the verdict on its next checkpoint.
+              ...(seenRow.inner_verdict === 'REQUEST_CHANGES' &&
+              parseCheckpointFindings(seenRow.inner_checkpoint_findings).length === 0
+                ? { inner_verdict: 'REVIEW_NOT_RUN' as const }
+                : {}),
+              // AND THE PHASE THAT CHECKPOINT IMPLIES. `phase` is NOT a
+              // workflow-owned column — the tick owns it — but `checkpoint.sh`
+              // derives it from `inner_checkpoint` at the inner workflow's write
+              // choke point (and `TridentRunStore.update` mirrors that table), so
+              // carrying the checkpoint forward while keeping the PINNED phase
+              // saves an incoherent row: `argus` reverted to `forge-init` while
+              // `inner_checkpoint` still says `forge-done`. `saveIfActive`
+              // assigns `phase` plainly and applies no derivation of its own, so
+              // the derivation has to happen HERE. `null` from the table means
+              // the checkpoint implies nothing — the pinned phase stands.
+              // Derived from `evidence.observed`, never from the pinned
+              // checkpoint: absent an observation there is no checkpoint to
+              // derive from at all and the pinned phase stands.
+              //
+              // AND THE OBSERVATION IS NOT ALWAYS A CHECKPOINT MOVE (Argus r4
+              // nit — the earlier wording said "what the gatherer OBSERVED" as
+              // if it always were). `classifyFireTimeoutRow` sets `observed` when
+              // ANY workflow-owned column moved, so a delta on `inner_result`
+              // alone carries whatever `inner_checkpoint` the row already had —
+              // possibly a prior round's. That is harmless rather than exact:
+              // `phaseForCheckpoint` is the same mapping `checkpoint.sh` and
+              // `TridentRunStore.update` apply, so the phase this derives is the
+              // one the row would already be wearing for that checkpoint.
+              //
+              // ONE RESIDUAL WINDOW, STATED PLAINLY (Argus r5): `phase` is not a
+              // workflow-owned column, so it is written PLAINLY while
+              // `inner_checkpoint` is CAS-guarded. If the detached workflow lands
+              // a NEWER checkpoint between the gatherer's re-read and this save,
+              // the CAS keeps that newer checkpoint and the phase beside it is
+              // derived from the older one. That is the same one-statement gap
+              // the CAS narrows but cannot close; it is bounded and self-heals on
+              // the workflow's next checkpoint write, which derives both columns
+              // together. Widening the CAS to cover `phase` would make the save
+              // all-or-nothing over a column the TICK owns — a worse trade: a
+              // lost swap would then drop the lane-holding write entirely.
+              phase:
+                phaseForCheckpoint(evidence.observed?.inner_checkpoint ?? null) ?? pinnedRun.phase,
+              subagent_run_id: id,
+              subagent_status: 'running',
+              // NO LAUNCHER GENERATION — deliberately null, never `id`. This row
+              // has no confirmed launcher: minting one would make
+              // `latchLauncherCrashed` (which matches WHERE workflow_run_id = ?)
+              // key on a generation no pool will ever report, and CARRYING a
+              // previous round's key would point the tick's liveness probe at a
+              // dead generation and latch a live lane as crashed
+              // (`persistRefireReset` never clears this column). Null is what
+              // crash recovery itself writes here, for the same reason: the
+              // generation is unknown. The 90-min no-advance reaper and the 2 h
+              // ceiling still bound this lane.
+              workflow_run_id: null,
+              last_advanced_at: now(),
+            },
+            changed: true,
+            waiting: true,
+            note: `fire launcher unobserved (settle timeout) but the workflow shows life — ${evidence.detail}; holding the lane, no relaunch`,
+            workflow_columns_seen,
+          }
+        }
+        if (evidence.kind === 'published') {
+          // THE WORK IS FINISHED. Terminal, but recorded HONESTLY: built and
+          // published, review not run. The verdict is NOT set by hand —
+          // `failedRun` normalizes it, and with no argus provenance on the row
+          // that normalization yields REVIEW_NOT_RUN.
+          //
+          // "CAN ONLY BECOME" WAS TOO STRONG (Argus r4 nit). `failedRun` passes
+          // an existing `inner_verdict === 'APPROVE'` through unchanged, so an
+          // APPROVE already on the row would survive here. It is not reachable on
+          // this path — `persistRefireReset` NULLs `inner_verdict` before a
+          // re-fire — but that is a property of the caller, not of `failedRun`,
+          // and the comment should not claim the callee enforces it.
+          return {
+            // Same rule as the held lane: terminalize over what the gatherer
+            // actually READ, never over the pre-fire snapshot.
+            // THE TRIMMED CHECKPOINT IS WHAT LANDS, and it is written here rather
+            // than carried in `observed` — that field is the CAS TOKEN and must
+            // stay byte-equal to the stored column or the swap silently no-ops
+            // (`store.ts` compares `inner_checkpoint IS ?`). Writing it here is
+            // what makes the row and the failure_reason quote the same string.
+            run: failedRun(
+              { ...seenRow, inner_checkpoint: evidence.checkpoint },
+              publishedFailureReason(evidence.checkpoint),
+              false,
+            ),
+            changed: true,
+            waiting: false,
+            note: `${run.phase} → failed (launcher timeout over already-published work — review not run)`,
+            // The verdict demotion to REVIEW_NOT_RUN is a REAL write here (it is
+            // what stops a stale REQUEST_CHANGES being stamped over finished
+            // work), so it is CAS'd rather than skipped: it lands while the
+            // verdict is still the one we read, and yields to a newer one.
+            workflow_columns_seen,
+          }
+        }
+        // `none` falls through to the unchanged path below.
+      }
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
       return {
@@ -4477,6 +4991,38 @@ export function buildTridentOrchestrator(
       }
       if (on_orphaned === 'wait' || redispatched.has(run.id)) {
         return { run, changed: false, waiting: true, note: `waiting on orphaned inner-loop dispatch ${orphanId}` }
+      }
+      // NEVER REDISPATCH OVER A LIVE HOLDER. `fired` is in-memory, so after a
+      // restart a lane that is genuinely still building looks exactly like a dead
+      // orphan — and redispatching it puts a SECOND workflow on the branch the
+      // first one is writing. Ask the filesystem, which survives the restart the
+      // set did not. Positive evidence only: anything short of a live lock pid
+      // falls through and redispatches exactly as before.
+      if (probeBranchHolderFor !== null && run.branch !== null) {
+        let holder: BranchHolderProbe | null = null
+        try {
+          holder = await probeBranchHolderFor(run.repo_path, run.branch)
+        } catch (err) {
+          holder = null
+          log.error('orphan_branch_holder_probe_failed', {
+            run: run.id,
+            slug: run.slug,
+            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+          })
+        }
+        if (holder !== null && holder.pid_live) {
+          // WAIT, do not reap and do not re-fire: the run row stays non-terminal
+          // (which also keeps `board-dispatch`'s own branch-liveness refusal
+          // armed), and the 90-min reaper above still bounds it.
+          return {
+            run,
+            changed: false,
+            waiting: true,
+            note:
+              `orphaned inner-loop dispatch ${orphanId}, but worktree ${holder.worktree_basename} still holds ` +
+              `the branch under a live lock (pid ${holder.pid}) — waiting rather than firing a second lane`,
+          }
+        }
       }
       // redispatch (default): clear the slot so the launch path re-fires a FRESH
       // workflow that resumes from the persisted checkpoint.
