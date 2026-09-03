@@ -3883,6 +3883,17 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
     ['gbrain-memory/__tests__/foo.test.ts', 'test'],
     ['gbrain-memory/__tests__/memory-swap-seam.depcruise.test.ts', 'test'],
     ['src/__tests__/limit.ts', 'test'], // DIRECT child of __tests__
+    // A NON-TEST HELPER directly under __tests__/ is a DECLARED TEST by the
+    // direct-child rule — DELIBERATELY, and this row is the boundary that may
+    // not move silently. This repository has 13 such support libraries
+    // (app/__tests__/reachability-inventory.ts,
+    // gbrain-memory/__tests__/boot-pglite-brain.ts,
+    // runtime/__tests__/stub-platform.ts, …), so a diff of ONLY such helpers
+    // buys the no-production-file exemption below — pinned at the gate with its
+    // load-bearing negative. Reclassifying those 13 is the standing follow-up
+    // card's work (see the Deferred paragraph in IMPLEMENTATION_PLAN.md), not a
+    // fix round's.
+    ['gbrain-memory/__tests__/helper.ts', 'test'],
     ['a/__tests__/support/helper.ts', 'production'], // nested below __tests__/<subdir>: matches neither declaration; the tautology check, not the path, is the defense
     ['src/foo_test.go', 'test'],
     ['app/bar.spec.tsx', 'test'],
@@ -3941,6 +3952,7 @@ describe('a mutation target is classified by what DECLARES it a test', () => {
   test('the declaration predicate is the basename or a DIRECT __tests__ parent', () => {
     expect(isDeclaredTestFile('tests/support/scrub-instance-env.test.ts')).toBe(true)
     expect(isDeclaredTestFile('src/__tests__/limit.ts')).toBe(true)
+    expect(isDeclaredTestFile('gbrain-memory/__tests__/helper.ts')).toBe(true)
     expect(isDeclaredTestFile('tests/support/scrub-instance-env.ts')).toBe(false)
     expect(isDeclaredTestFile('a/__tests__/support/helper.ts')).toBe(false)
   })
@@ -4018,6 +4030,10 @@ describe('diffHasNoLegalMutationTarget — the exemption predicate, both its arm
     // convention. Putting `rs` back into TEST_BASENAME turns this line green
     // for `true`, which is the exemption being bought with a suffix.
     expect(diffHasNoLegalMutationTarget(['src/pricing_test.rs', 'docs/x.md'])).toBe(false)
+    // The direct-__tests__/-child helpers: an ALL-HELPER diff is exempt — the
+    // deliberate design JOB 3 pins — and one production file beside them ends it.
+    expect(diffHasNoLegalMutationTarget(['gbrain-memory/__tests__/helper.ts', 'runtime/__tests__/stub-platform.ts', 'docs/x.md'])).toBe(true)
+    expect(diffHasNoLegalMutationTarget(['gbrain-memory/__tests__/helper.ts', 'runtime/__tests__/stub-platform.ts', 'docs/x.md', 'src/limit.ts'])).toBe(false)
   })
 })
 
@@ -5021,6 +5037,48 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     const withClaim = await runMutationProofGate({ run: RUN, claim: CLAIM, base_branch: 'main', run_host: host })
     expect(withClaim.exempt).toBe(true)
     expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+  })
+
+  test('a diff of only direct-__tests__/-child HELPERS plus prose is exempt — the pinned deliberate design', async () => {
+    // None of these files has a test suffix; the direct-child rule alone
+    // declares them tests, so the exemption is bought by directory position.
+    // That is today's DELIBERATE boundary (13 real support libraries sit
+    // there); reclassifying them is the standing follow-up card's work.
+    const calls: string[][] = []
+    const host = async (cmd: string[]): Promise<HostCommandResult> => {
+      calls.push(cmd)
+      if (cmd.includes('--name-status')) {
+        return diffRes(nameStatus('gbrain-memory/__tests__/helper.ts\0runtime/__tests__/stub-platform.ts\0docs/notes.md\0'))
+      }
+      if (cmd.includes('rev-parse')) return res(0, HEAD)
+      return res(0)
+    }
+    const out = await runMutationProofGate({ run: RUN, claim: null, base_branch: 'main', run_host: host })
+    expect(out.ok).toBe(true)
+    expect(out.exempt).toBe(true)
+    expect(out.reason).toContain('no production file in this diff — nothing to mutate')
+    // NOT the prose-only exemption — and the two contains-assertions below are
+    // the positive control that keeps this not-contains from passing on an
+    // empty or generic reason.
+    expect(out.reason).not.toContain('prose-only')
+    expect(out.reason).toContain('gbrain-memory/__tests__/helper.ts')
+    expect(out.reason).toContain('docs/notes.md')
+    expect(calls.some((c) => c.includes('worktree'))).toBe(false)
+  })
+
+  test('…and ONE production file beside those helpers still REFUSES a claimless run — the exemption does not widen', async () => {
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: null,
+      base_branch: 'main',
+      ...gateDeps('gbrain-memory/__tests__/helper.ts\0runtime/__tests__/stub-platform.ts\0src/limit.ts\0'),
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('nominated no mutation')
+    // The refusal names the legal target that existed and was not nominated.
+    expect(out.reason).toContain('src/limit.ts')
+    expect(out.evidence).toBeNull()
   })
 
   test('the exemption reason names EVERY file that bought it — no truncation, no filtering', async () => {
