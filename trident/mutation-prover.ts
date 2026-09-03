@@ -139,6 +139,18 @@ const TEST_COMMAND_SHAPES: ReadonlyArray<{
   { program: 'yarn', shape: 'yarn test … / yarn run test…', ok: isPackageScriptTest },
   { program: 'make', shape: 'make test…', ok: (a) => typeof a[1] === 'string' && a[1].startsWith('test') },
   {
+    // BOTH PYTHON SPELLINGS ARE DEAD IN A CONVENTIONAL PYTHON REPO, and that
+    // aggregate is stated here because no single arm states it: the runner
+    // provenance arms in `proveInWorktree` read the tree, and the standard
+    // layout trips them twice over — a root `pyproject.toml` refuses `-m pytest`
+    // (`pytestConfigShadow` matches its basename at any depth) and a
+    // `tests/__init__.py` refuses `-m unittest` (`pythonPackageShadow`). There
+    // is no third python spelling, so such a repo must nominate `go`, `cargo`,
+    // `bun` or `node --test` instead, and a python-only one has no nominatable
+    // guard at all. It fails CLOSED — an over-refusal, never a forged proof —
+    // and it is latent here, where every runner is bun. Relieving it means
+    // scoping those arms to branch-authored files the way `bunConfigCandidates`
+    // is scoped; that is a follow-up card, not a silent widening.
     program: 'python3',
     shape: 'python3 -m pytest|unittest …',
     ok: (a) => a[1] === '-m' && (a[2] === 'pytest' || a[2] === 'unittest'),
@@ -383,6 +395,18 @@ export interface ProveInput {
    * commit. Omitted (direct callers/tests) → resolve the branch, as before.
    */
   head_sha?: string
+  /**
+   * The paths THIS BRANCH changes, as `runMutationProofGate` already read them
+   * from git for the diff-binding. Runner provenance needs them: a config file
+   * the branch itself wrote decides which code a `bun test` guard loads with
+   * nothing on the argv to show for it (`bunConfigCandidates`), while the same
+   * file inherited from the base branch is merged, reviewed code and refusing
+   * it would leave a bun-only repository with no nominatable guard at all.
+   * Omitted (direct callers/tests) → no branch-authored config is known, and
+   * the config arm has nothing to refuse; the gate, which is the only path a
+   * merge can take, always supplies it (pinned by its own test).
+   */
+  changed_files?: readonly string[]
 }
 
 /**
@@ -1150,12 +1174,24 @@ export function pythonImportShadow(argv: readonly string[], topLevelNames: reado
  * whole reason this can exist where a name rule could not: every python repo
  * has `src/` and `tests/` at its root, so refusing top-level directories by
  * name would delete `python3 -m` from `TEST_COMMAND_SHAPES` by another route.
- * What is refused is a top-level directory DIRECTLY containing `__init__.py` or
- * `__main__.py` — a REGULAR package, the only shape that puts branch-authored
- * code on the import path with nothing on the argv to show for it. A namespace
- * package (a directory with neither) shadows a name but EXECUTES NOTHING on
- * import, so it cannot make a guard pass when restored and fail when mutated,
- * which is what a forged proof needs.
+ * What is refused is a top-level directory DIRECTLY containing an `__init__` or
+ * `__main__` MODULE — a REGULAR package, whose body executes on import with
+ * nothing on the argv to show for it. A namespace package (a directory with
+ * neither) shadows a name but EXECUTES NOTHING on import, so it cannot make a
+ * guard pass when restored and fail when mutated, which is what a forged proof
+ * needs.
+ *
+ * THE MARKER IS NOT SPELLED `.py` ONLY, and an earlier wording of this block
+ * that said `__init__.py`/`__main__.py` was "the only shape" was FALSE — a
+ * review seat forged a full `proved: true` through it one file extension away:
+ * commit `argparse/__init__.pyc` with no `.py` source beside it and python
+ * imports the directory as a regular package all the same
+ * (`SourcelessFileLoader`), so the arm looked straight past it. The suffixes are
+ * the sibling's — `py`, `pyc`, `so` (an extension module is an `__init__` too) —
+ * kept identical to `pythonImportShadow`'s on purpose: the two arms are the file
+ * and directory halves of ONE question, and a suffix that is branch-authored
+ * code in one is branch-authored code in the other. Windows-only spellings
+ * (`.pyw`, `.pyd`) stay out for the reason the sibling states.
  *
  * THE RECURSIVE LISTING ALREADY IN HAND ANSWERS IT — the marker is matched as a
  * path of exactly two segments, so `src/pkg/__init__.py` a directory down is
@@ -1164,7 +1200,7 @@ export function pythonImportShadow(argv: readonly string[], topLevelNames: reado
  * deleting the marker (unittest and pytest both discover namespace-package test
  * directories) or by nominating `go`, `cargo`, `bun`, `node`.
  */
-const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\/(?:__init__|__main__)\.py$/
+const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\/(?:__init__|__main__)\.(?:py|pyc|so)$/
 
 export function pythonPackageShadow(argv: readonly string[], paths: readonly string[]): string | null {
   if (argv[0] !== 'python3' || argv[1] !== '-m') return null
@@ -1204,6 +1240,77 @@ export function pytestConfigShadow(argv: readonly string[], paths: readonly stri
     const base = p.split('/').pop() ?? p
     if (PYTEST_CONFIG_BASENAME.test(base)) return p
   }
+  return null
+}
+
+/**
+ * THE CONFIG BUN READS WITH NOTHING ON THE ARGV — the same escape as
+ * `pytestConfigShadow`, one runner over, and the runner this repository
+ * actually uses. Two review seats reproduced it independently on bun 1.3.13:
+ * commit a root `bunfig.toml` whose `[test] preload` names the mutated file (or
+ * a file that imports it), nominate an unrelated `bun test tests/other.test.ts`
+ * as the guard, and the gate returned `ok: true, proved: true` with nothing
+ * having asserted the target. `bun test` reads `bunfig.toml` from its working
+ * directory, and bun resolves bare specifiers through a `tsconfig.json`
+ * `paths`/`baseUrl` map, so both files can point an unrelated test straight at
+ * the mutated one with NOTHING on the command line to show for it.
+ *
+ * IT IS SCOPED TO THE FILES THE BRANCH ITSELF CHANGED, and that narrowing is
+ * the whole reason this arm can exist at all. `pytestConfigShadow`'s tree-wide
+ * reading is affordable because a python repo need not hold a `conftest.py`;
+ * a `bunfig.toml` is different — THIS repository ships one at its root, with a
+ * `[test] preload`, and every other bun repository worth the name does too. A
+ * tree-wide refusal would therefore delete `bun test` from
+ * `TEST_COMMAND_SHAPES` for the only runner this repo has, leaving no
+ * nominatable guard at all: the exact defect this card exists to fix, arriving
+ * by the door marked "security". The forgery vector is BRANCH-AUTHORED code,
+ * and a config that main already carried is main's, reviewed like any other
+ * merged file — the same premise the whole gate rests on. What a branch adds or
+ * edits is in the diff, so a diff-scoped read sees every config the branch
+ * could have written, and a rename arrives as an addition.
+ *
+ * REFUSED ON THE KEY, NOT THE FILENAME. A branch that touches `bunfig.toml` to
+ * add a `[loader]` mapping, or `tsconfig.json` to change `strict`, has written
+ * no load hook and keeps its bun nomination; a `preload =` or a `"paths":` is
+ * refused whatever it points at, because following where it points means
+ * resolving a module graph, which is the thing this seam exists not to trust.
+ * The text is read from the PINNED checkout, never from the agent, and a
+ * candidate that is absent there (the branch DELETED it) loads nothing and is
+ * skipped.
+ *
+ * IT FAILS CLOSED and is spellable around: land the config change on its own,
+ * or nominate a runner that does not read these files (`go`, `cargo`,
+ * `python3 -m unittest`, `node --test`).
+ */
+/**
+ * THE EXTENDED SPELLING IS IN, because `extends` makes it the same file. This
+ * repo's root `tsconfig.json` is four lines over a `tsconfig.base.json` that
+ * holds the real map, so a rule matching the exact basename would refuse the
+ * wrapper and wave the file that actually decides resolution straight through.
+ * Any `tsconfig`/`jsconfig` with an infix (`tsconfig.base.json`,
+ * `tsconfig.build.json`) is therefore a candidate; an arbitrarily-named
+ * `extends` target is reachable only through a root config the branch would
+ * have to change too, which is refused on its own.
+ */
+const BUN_LOAD_CONFIG_BASENAME = /^(?:bunfig\.toml|(?:ts|js)config(?:\.[\w-]+)*\.json)$/
+
+/** The branch-changed files a `bun test` nomination would have loaded config out of. */
+export function bunConfigCandidates(argv: readonly string[], changedPaths: readonly string[]): string[] {
+  if (argv[0] !== 'bun') return []
+  return changedPaths.filter((p) => BUN_LOAD_CONFIG_BASENAME.test(p.split('/').pop() ?? p))
+}
+
+/** The load-hook key that makes such a file decide which code the runner loads. */
+export function bunConfigLoadHook(path: string, text: string): string | null {
+  const base = path.split('/').pop() ?? path
+  if (base === 'bunfig.toml') return /(^|\n)[ \t]*preload[ \t]*=/.test(text) ? 'preload' : null
+  // ANYWHERE IN THE TEXT for the JSON pair: a tsconfig is routinely written on
+  // one line, and a key rule anchored to the line start read `{ "compilerOptions":
+  // { "baseUrl": "." } }` as hookless. Matching the quoted key anywhere
+  // over-refuses a tsconfig that merely mentions `"paths":` in a comment, which
+  // is the direction this seam errs in everywhere else.
+  if (/"paths"[ \t]*:/.test(text)) return 'compilerOptions.paths'
+  if (/"baseUrl"[ \t]*:/.test(text)) return 'compilerOptions.baseUrl'
   return null
 }
 
@@ -2267,7 +2374,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
 
     try {
       // ONE deadline for the whole proof, started once the worktree exists.
-      return await proveInWorktree(run.id, claim, wt, headSha, now() + budgetMs)
+      return await proveInWorktree(run.id, claim, wt, headSha, now() + budgetMs, input.changed_files ?? [])
     } finally {
       await deps.run_host(['git', '-C', repo, 'worktree', 'remove', '--force', wt], repo)
       await deps.run_host(['git', '-C', repo, 'worktree', 'prune'], repo)
@@ -2415,6 +2522,7 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     wt: string,
     headSha: string,
     deadline: number,
+    changedFiles: readonly string[],
   ): Promise<MutationEvidence> {
     const target = join(wt, claim.file)
 
@@ -2501,6 +2609,34 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
             run_id,
             claim,
             `claim.${which} python3 -m ${argv[2]} would run BRANCH-SUPPLIED code, not the installed runner: -m puts this tree's own top level first on sys.path, and ${pkg} makes its directory an importable package whose body executes on import — neither the runner the argv names nor any module it imports is safe from it; delete ${pkg} (both runners discover a namespace-package directory without it) or nominate a runner that does not search this tree`,
+          )
+        }
+      }
+    }
+
+    // THE SAME QUESTION FOR BUN, asked of the files the BRANCH wrote rather
+    // than of the whole tree. `bun test` reads `bunfig.toml` out of its working
+    // directory and resolves bare specifiers through `tsconfig.json`, so a
+    // branch-authored `preload`/`paths` puts the mutated file into an unrelated
+    // test's process with nothing on the argv to show for it — two seats forged
+    // a full `proved: true` that way. The diff comes from git via the gate, the
+    // text from the pinned checkout, and a candidate absent there was deleted by
+    // this branch and loads nothing. See `bunConfigCandidates` for why this arm
+    // is diff-scoped where the pytest one is tree-wide.
+    for (const [which, argv] of nominated) {
+      for (const candidate of bunConfigCandidates(argv, changedFiles)) {
+        let text: string
+        try {
+          text = await fs.read(join(wt, candidate))
+        } catch {
+          continue
+        }
+        const key = bunConfigLoadHook(candidate, text)
+        if (key !== null) {
+          return refuse(
+            run_id,
+            claim,
+            `claim.${which} bun test would load BRANCH-SUPPLIED code with nothing on the argv to show for it: this branch writes ${candidate}, whose ${key} decides which files the runner loads for every test it runs — a runner whose behaviour the branch changes with no flag is not evidence of a test runner; land ${candidate} on its own or nominate a runner that does not read it`,
           )
         }
       }
@@ -2696,6 +2832,22 @@ export function evaluate(o: MutationObservations): { proved: boolean; reason: st
       reason: 'the guard produced byte-identical output RED and GREEN — those cannot be two different runs',
     }
   }
+  // WHAT `proved: true` MEANS, AND WHAT IT DOES NOT — the standing limit of a
+  // mutation proof, recorded here because a review seat reproduced it and the
+  // honest answer is that it is not closable at this seam. The oracle observes
+  // three EXIT CODES; it cannot see whether the guard ASSERTED anything. A
+  // guard that merely imports the mutated file — `import '../src/lib.ts';
+  // test('x', () => {})` — goes red under a syntax-breaking mutation and green
+  // when restored, which is the accepted shape exactly. Distinguishing
+  // load-coverage from behaviour means reading the guard's source and deciding
+  // what an assertion IS, per framework, and a gate that guessed wrong would
+  // refuse honest proofs instead of forged ones. So the mitigations are the ones
+  // already here and they are all structural: the guard may not run the mutated
+  // file (`guardRunsTheMutatedFile`), it may not be the control, its runner may
+  // not be branch-supplied (the shadow arms above), and the argv it really ran
+  // is written into the reason below, onto the run row, for the reviewer who
+  // reads the diff. This is a documented limit of mutation proofs, not a
+  // property this branch removed.
   return {
     proved: true,
     // THE AUDIT LINE. The orchestrator writes this onto the run row, and it is
@@ -3338,8 +3490,19 @@ function asReason(path: string): string {
  *  string. Chosen so that every diff this gate has ever seen names every file
  *  and nothing is elided in practice; it exists for the thousand-file rename,
  *  which is bounded only by git and would otherwise reach a log line, a status
- *  post and a DB row whole. */
-const REASON_NAME_BUDGET = 4000
+ *  post and a DB row whole.
+ *
+ *  IT SITS BELOW `orchestrator.ts`'s `STAGE_REASON_CEILING` (4,000) ON PURPOSE.
+ *  At 4,000 the two were equal, so the one line this cap exists for — the
+ *  thousand-file diff, whose reason measured 4,092 characters ending `… +903
+ *  more)` — was cut by the stage-row truncation at 4,065, mid-name, taking the
+ *  elision COUNT with it: the reader lost both the last name and the fact that
+ *  anything had been elided, which is the exact failure `namesWithinBudget` was
+ *  written to prevent. The prefix around the list ("no production file in this
+ *  diff — nothing to mutate: all N changed files are…") plus the `, … +N more`
+ *  suffix is comfortably under 400 characters, so a 3,600 name budget keeps the
+ *  WHOLE reason, elision count included, inside the durable row. */
+const REASON_NAME_BUDGET = 3_600
 
 /** As many of `paths` as fit the budget, in order, with the elision COUNTED
  *  rather than implied — a list that silently stops is worse than no list. The
@@ -3611,7 +3774,15 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
       ...(input.proof_budget_ms !== undefined ? { proof_budget_ms: input.proof_budget_ms } : {}),
     })
   // PROVE THE PINNED COMMIT — the same one the file list above came from.
-  const evidence = await prover.prove({ run: input.run, claim: input.claim, head_sha: pinnedSha })
+  // `changed_files` is the SAME git-derived list that bound the proof to this PR
+  // two checks above. Runner provenance needs it: a config file this branch
+  // wrote decides which code a `bun test` guard loads (`bunConfigCandidates`).
+  const evidence = await prover.prove({
+    run: input.run,
+    claim: input.claim,
+    head_sha: pinnedSha,
+    changed_files: files,
+  })
 
   // THE HEAD THE MERGE WILL TAKE, re-read AFTER the proof. A proof is bound to
   // one commit; if the branch moved while it ran, the commit that would merge is

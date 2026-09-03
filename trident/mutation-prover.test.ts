@@ -20,6 +20,8 @@ import {
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
   proofWorktreePath,
+  bunConfigCandidates,
+  bunConfigLoadHook,
   pythonImportShadow,
   pythonModuleShadow,
   pythonPackageShadow,
@@ -446,7 +448,7 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     expect(host.calls.every((c) => c[0] !== 'python3')).toBe(true)
   })
 
-  const PACKAGES = ['tests/__init__.py', 'argparse/__init__.py', '_pytest/__main__.py']
+  const PACKAGES = ['tests/__init__.py', 'argparse/__init__.py', '_pytest/__main__.py', 'argparse/__init__.pyc', 'unittest/__init__.so']
   for (const entry of PACKAGES) {
     test(`a top-level package ${entry} executes on import → refused`, async () => {
       const { prover } = proverOver({ treePaths: ['src/limit.py', entry] })
@@ -458,6 +460,11 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
   }
 
   test('pythonPackageShadow — the predicate itself, both directions', () => {
+    // THE `.pyc` ROW IS THE ESCAPE ITSELF, not a completeness flourish: a review
+    // seat forged a full `proved: true` through this arm by committing
+    // `argparse/__init__.pyc` with no `.py` beside it, because python imports a
+    // directory holding only bytecode as a regular package all the same. The
+    // marker matched source only, so the arm looked straight past it.
     for (const entry of PACKAGES) {
       expect([entry, pythonPackageShadow(PY_GUARD, ['src/limit.py', entry])]).toEqual([entry, entry])
     }
@@ -472,8 +479,13 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
       'src/pkg/__init__.py',
       'tests/support/__main__.py',
       '__init__.py',
-      'tests/__init__.pyc',
       'tests/my__init__.py',
+      // WINDOWS-ONLY SPELLINGS STAY OUT, matching the sibling arm this shares
+      // its suffix list with: no host this prover runs on imports them.
+      'tests/__init__.pyw',
+      'tests/__init__.pyd',
+      // Not a module at all — the marker is the module, not the stem.
+      'tests/__init__.txt',
     ]) {
       expect([entry, pythonPackageShadow(PY_GUARD, [entry])]).toEqual([entry, null])
     }
@@ -524,6 +536,115 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     for (const entry of ['tests/conftest_helpers.py', 'docs/pyproject.toml.md', 'setup.py', 'pytest.json']) {
       expect([entry, pytestConfigShadow(PY_GUARD, [entry])]).toEqual([entry, null])
     }
+  })
+
+  // ── THE CONFIG BUN READS WITH NOTHING ON THE ARGV ────────────────────────
+  //
+  // The same escape as the pytest one, one runner over — and the runner this
+  // repository actually uses, so the NARROWING matters as much as the refusal:
+  // a tree-wide reading would refuse EVERY `bun test` nomination in any repo
+  // that ships a `bunfig.toml` (this one does, with a `[test] preload`), which
+  // is the "no legal nomination exists" defect this whole card is about.
+  const BUN_WT = proofWorktreePath('/repo', RUN)
+  const BUNFIG_WITH_PRELOAD = '[test]\npreload = ["./tests/support/scrub.ts"]\n'
+  const TSCONFIG_WITH_PATHS = '{\n  "compilerOptions": {\n    "paths": { "@x/*": ["./src/*"] }\n  }\n}\n'
+
+  function bunFs(files: Record<string, string>) {
+    return memFs({ [join(BUN_WT, CLAIM.file)]: SRC_BEFORE, ...files })
+  }
+
+  test('a bunfig.toml THIS BRANCH writes preloads code into every bun test → refused', async () => {
+    // THE REPRO, as two seats ran it: commit a root bunfig whose `[test]
+    // preload` names the mutated file (or one that imports it), nominate an
+    // unrelated `bun test` as the guard, and the guard reddens under the
+    // mutation with nothing having asserted the target.
+    const { prover, host } = proverOver({}, bunFs({ [join(BUN_WT, 'bunfig.toml')]: BUNFIG_WITH_PRELOAD }))
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'bunfig.toml'] })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('bunfig.toml')
+    expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+    expect(evidence.reason).toContain('preload')
+    // Nothing ran: the refusal is decided before a byte is mutated.
+    expect(host.calls.every((c) => c[0] !== 'bun')).toBe(true)
+  })
+
+  test('a tsconfig.json THIS BRANCH writes can point a bare import at the mutated file → refused', async () => {
+    const { prover } = proverOver({}, bunFs({ [join(BUN_WT, 'tsconfig.json')]: TSCONFIG_WITH_PATHS }))
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'tsconfig.json'] })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('tsconfig.json')
+    expect(evidence.reason).toContain('compilerOptions.paths')
+  })
+
+  test("THE NARROWING IS REAL: the repo's OWN bunfig, untouched by the diff, still leaves bun nominatable", async () => {
+    // THE LOAD-BEARING POSITIVE CONTROL. `bunfig.toml` is on disk in the proof
+    // worktree with a `preload` in it — the identical file the refusal above
+    // fires on — and the ONLY difference is that this branch did not write it.
+    // Refusing it would delete `bun test` from the shapes for a bun-only repo
+    // and leave no nominatable guard at all.
+    const { prover } = proverOver({}, bunFs({ [join(BUN_WT, 'bunfig.toml')]: BUNFIG_WITH_PRELOAD }))
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts'] })
+    expect(evidence.reason).not.toContain('bunfig.toml')
+    expect(evidence.proved).toBe(true)
+  })
+
+  test('a branch-authored config with NO load hook keeps its nomination — the KEY is what is refused', async () => {
+    const { prover } = proverOver(
+      {},
+      bunFs({
+        [join(BUN_WT, 'bunfig.toml')]: '[loader]\n".png" = "file"\n',
+        [join(BUN_WT, 'tsconfig.json')]: '{\n  "compilerOptions": { "strict": true }\n}\n',
+      }),
+    )
+    const evidence = await prover.prove({
+      run: RUN,
+      claim: CLAIM,
+      changed_files: ['src/limit.ts', 'bunfig.toml', 'tsconfig.json'],
+    })
+    expect(evidence.proved).toBe(true)
+  })
+
+  test('a config the branch DELETED loads nothing — absent at the pinned head, not refused', async () => {
+    const { prover } = proverOver({}, bunFs({}))
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'bunfig.toml'] })
+    expect(evidence.proved).toBe(true)
+  })
+
+  test('bunConfigCandidates / bunConfigLoadHook — the predicates themselves, both directions', () => {
+    const changed = [
+      'src/limit.ts',
+      'bunfig.toml',
+      'landing/tsconfig.json',
+      'app/jsconfig.json',
+      // THE EXTENDED SPELLING: this repo's root tsconfig is a four-line wrapper
+      // over the base file that holds the real map, so an exact-basename rule
+      // would refuse the wrapper and wave the deciding file through.
+      'tsconfig.base.json',
+      'README.md',
+    ]
+    expect(bunConfigCandidates(CLAIM.guard, changed)).toEqual([
+      'bunfig.toml',
+      'landing/tsconfig.json',
+      'app/jsconfig.json',
+      'tsconfig.base.json',
+    ])
+    // Not a bun nomination at all, and not a config name.
+    expect(bunConfigCandidates(['go', 'test', './...'], changed)).toEqual([])
+    expect(
+      bunConfigCandidates(CLAIM.guard, ['docs/tsconfig.json.md', 'src/bunfig.toml.ts', 'tsconfigx.json', 'package.json']),
+    ).toEqual([])
+    // The KEY, per file kind.
+    expect(bunConfigLoadHook('bunfig.toml', BUNFIG_WITH_PRELOAD)).toBe('preload')
+    expect(bunConfigLoadHook('bunfig.toml', '[loader]\n".png" = "file"\n')).toBeNull()
+    // …and a bunfig is not read for a tsconfig key, nor the other way round.
+    expect(bunConfigLoadHook('bunfig.toml', TSCONFIG_WITH_PATHS)).toBeNull()
+    expect(bunConfigLoadHook('landing/tsconfig.json', TSCONFIG_WITH_PATHS)).toBe('compilerOptions.paths')
+    expect(bunConfigLoadHook('tsconfig.json', '{ "compilerOptions": { "baseUrl": "." } }')).toBe(
+      'compilerOptions.baseUrl',
+    )
+    expect(bunConfigLoadHook('tsconfig.json', '{ "compilerOptions": { "strict": true } }')).toBeNull()
+    expect(bunConfigLoadHook('tsconfig.json', BUNFIG_WITH_PRELOAD)).toBeNull()
   })
 
   test('THE LISTING IS RECURSIVE — a conftest.py a directory down is still seen', async () => {
@@ -3986,6 +4107,49 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     // The line that survives this process names WHICH commands were run.
     expect(out.reason).toContain('bun test src/limit.test.ts')
     expect(out.reason).toContain('bun test src/other.test.ts')
+  })
+
+  test('THE GATE HANDS THE PROVER THE DIFF — a bunfig this branch wrote refuses the bun guard end to end', async () => {
+    // THE WIRING, pinned from the outside. The config arm can only fire on files
+    // the BRANCH wrote, and the only place that list exists is the gate, which
+    // already read it from git to bind the proof to this PR. If `prove` stops
+    // being handed it, the arm silently sees an empty diff and every forged
+    // bunfig passes again — nothing else in this file would notice.
+    const fs = memFs({
+      [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE,
+      [join(proofWorktreePath('/repo', RUN), 'bunfig.toml')]: '[test]\npreload = ["./src/limit.ts"]\n',
+    })
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      ...gateDeps('src/limit.ts\0bunfig.toml\0'),
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('bunfig.toml')
+    expect(out.reason).toContain('BRANCH-SUPPLIED')
+  })
+
+  test('…and the SAME bunfig outside the diff still opens the gate — the positive control on that wiring', async () => {
+    // Byte-identical worktree, byte-identical claim: only the git-derived file
+    // list differs. Without this row the assertion above would pass just as
+    // happily on a gate that refused every bun nomination outright.
+    const fs = memFs({
+      [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE,
+      [join(proofWorktreePath('/repo', RUN), 'bunfig.toml')]: '[test]\npreload = ["./src/limit.ts"]\n',
+    })
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      ...gateDeps('src/limit.ts\0'),
+      fs,
+    })
+    expect(out.reason).not.toContain('bunfig.toml')
+    expect(out.ok).toBe(true)
+    expect(out.evidence?.proved).toBe(true)
   })
 
   test('the nominated file must be one THIS PR changes — otherwise it certifies nothing', async () => {

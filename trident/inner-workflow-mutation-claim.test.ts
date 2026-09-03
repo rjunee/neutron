@@ -380,6 +380,42 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     expect(PROVER_SRC).toContain('pythonImportShadow')
     expect(PROVER_SRC).toContain('pytestConfigShadow')
 
+    // …AND THE DIRECTORY HALF OF THE SAME ESCAPE, which the branch enforced and
+    // then forgot to tell anyone about: `pythonPackageShadow` refuses a top-level
+    // directory holding an `__init__`/`__main__` module, and the schema said
+    // nothing about it — so the very escape hatch the config sentence offers
+    // ("nominate python3 -m unittest, which reads neither") walks a build into a
+    // refusal, after the whole review has run, in any repo with a
+    // `tests/__init__.py`. Two-sided for the same reason as its siblings: an
+    // entry in the REPOSITORY is invisible to every name loop above.
+    for (const d of described) {
+      expect(['python package shadow', d.includes('REGULAR PACKAGE')]).toEqual(['python package shadow', true])
+      expect(['python package shadow', d.includes('tests/__init__.py')]).toEqual(['python package shadow', true])
+    }
+    expect(PROVER_SRC).toContain('pythonPackageShadow')
+    // THE COMPILED SPELLINGS ARE THE ESCAPE ITSELF — a seat forged a full
+    // `proved: true` through an `argparse/__init__.pyc` while the marker matched
+    // source only, so the suffix class is pinned as a literal here: narrowing it
+    // back to `.py` reopens that hole and reddens this line.
+    expect(PROVER_SRC).toContain('const TOP_LEVEL_PACKAGE_MARKER = /^[^/]+\\/(?:__init__|__main__)\\.(?:py|pyc|so)$/')
+
+    // …AND THE SAME QUESTION ASKED OF BUN, the runner this repository actually
+    // uses: a `bunfig.toml` `preload` or a `tsconfig.json` `paths` the BRANCH
+    // wrote decides which code every `bun test` loads with nothing on the argv
+    // to show for it. The schema must say so, and must say the narrowing too —
+    // a build that read only "bunfig is refused" would think a repo shipping one
+    // has no bun nomination at all, which is the opposite of what is enforced.
+    for (const d of described) {
+      expect(['bun config shadow', d.includes('bunfig.toml')]).toEqual(['bun config shadow', true])
+      expect(['bun config shadow', d.includes('tsconfig.json')]).toEqual(['bun config shadow', true])
+      expect(['bun config shadow', d.includes('only what your diff writes is refused')]).toEqual([
+        'bun config shadow',
+        true,
+      ])
+    }
+    expect(PROVER_SRC).toContain('bunConfigCandidates')
+    expect(PROVER_SRC).toContain('bunConfigLoadHook')
+
     // …AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
     // OPTION, invisible to every loop above for the same reason. Node forwards a
     // `--test` written after an entry script straight to that BRANCH-AUTHORED
@@ -398,6 +434,41 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // reasons use, so this test fails if either shape is quietly re-allowed.
     expect(PROVER_SRC).toContain('whose script body the branch wrote')
     expect(PROVER_SRC).toContain('whose body the branch wrote')
+  })
+
+  test("the schema's CONTROL description says what the prover really enforces of it", async () => {
+    // THE ASYMMETRY THIS CLOSES. The schema described `control` as nothing but
+    // "argv that MUST stay GREEN under the mutation", while `validateClaim`
+    // holds it to the guard's whole rulebook — a test-invocation shape, no
+    // general shell, worktree-relative arguments, and DISTINCT from the guard.
+    // So a schema-compliant `["sh","-c","echo ok"]` earned a refusal after the
+    // entire review had run, with nothing anywhere saying what to write instead.
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined })
+    const described = captured
+      .filter((c) => String(c.label).startsWith('forge:'))
+      .map(
+        (c) =>
+          (
+            c.schema as { properties?: { mutationClaim?: { properties?: { control?: { description?: string } } } } }
+          )?.properties?.mutationClaim?.properties?.control?.description ?? '',
+      )
+    // POSITIVE CONTROL on the extraction: a renamed field would otherwise make
+    // every assertion below pass on ''.
+    expect(described.length).toBeGreaterThan(1)
+    for (const d of described) expect(d).toContain('MUST stay GREEN')
+
+    for (const d of described) {
+      expect(['a real test invocation', d.includes('REAL test invocation')]).toEqual(['a real test invocation', true])
+      expect(['distinct from the guard', d.includes('DISTINCT from the guard')]).toEqual([
+        'distinct from the guard',
+        true,
+      ])
+      expect(['no general shell', d.includes('sh -c')]).toEqual(['no general shell', true])
+    }
+    // …and each of those is really enforced on the prover side, so a two-sided
+    // deletion cannot quietly re-admit the shape.
+    expect(PROVER_SRC).toContain("validateArgv(claim.control, 'control')")
+    expect(PROVER_SRC).toContain('one command cannot be both the RED and the GREEN')
   })
 
   test('NO Forge schema has a field for a mutation RESULT — only for a nomination', async () => {

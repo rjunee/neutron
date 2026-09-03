@@ -220,6 +220,51 @@ async function seedCollectibleLib(opts: { decoys?: boolean } = {}): Promise<stri
   return repo
 }
 
+/**
+ * A repo whose branch adds `src/limit.ts`, the separate test that asserts it, an
+ * unrelated control — and a `bunfig.toml` whose `[test] preload` loads code into
+ * EVERY bun test process with nothing on any argv to show for it. Two review
+ * seats forged a `proved: true` through exactly this on bun 1.3.13.
+ *
+ * `where` decides WHO wrote the config, which is the only thing the arm reads:
+ * `branch` is the forgery (the config is in this branch's diff), `main` is the
+ * ordinary repository that merely ships a bunfig — this one does — and must keep
+ * its bun nomination. The `main` variant preloads a harmless file, because a
+ * preload of the MUTATED file reddens the control too and would fail the proof
+ * for a different reason than the one under test.
+ */
+async function seedBunfigRepo(where: 'branch' | 'main'): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), `mutation-prover-realgit-bunfig-${where}-`))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  mkdirSync(join(repo, 'tests', 'support'), { recursive: true })
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  writeFileSync(join(repo, 'tests', 'support', 'noop.ts'), 'export const NOOP = true\n')
+  if (where === 'main') writeFileSync(join(repo, 'bunfig.toml'), '[test]\npreload = ["./tests/support/noop.ts"]\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
+
+  await git(repo, 'switch', '-q', '-c', 'trident/bunfig-forgery')
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  writeFileSync(
+    join(repo, 'src', 'limit.ts'),
+    'export function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n',
+  )
+  writeFileSync(
+    join(repo, 'tests', 'limit.test.ts'),
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n  expect(clamp(2, 3)).toBe(2)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'tests', 'other-control.test.ts'),
+    "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated module', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  if (where === 'branch') writeFileSync(join(repo, 'bunfig.toml'), '[test]\npreload = ["./src/limit.ts"]\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its separate test and the config')
+  return repo
+}
+
 /** A repo whose branch carries `seed(repo)`'s changes on top of main — for the
  *  tests that are about what `changedFilesOnBranch` READS out of real git,
  *  rather than about running a proof. */
@@ -303,6 +348,62 @@ describe('the mutation-proof gate against real git', () => {
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('check-ref-format')
   })
+
+  test('a bunfig.toml THIS BRANCH wrote is refused against REAL git, before anything runs', async () => {
+    // THE ELEVENTH ESCAPE OF THE FAMILY, reproduced against real git: the argv
+    // says `bun test <one file>` and the tree says every bun process also loads
+    // whatever `[test] preload` names. Two seats forged `ok:true, proved:true`
+    // through it. The refusal has to land at the CLAIM, before a byte is
+    // mutated, which is what the untouched worktree below asserts.
+    const repo = await seedBunfigRepo('branch')
+    const out = await runMutationProofGate({
+      run: { id: 'run-bunfig', slug: 'bunfig-forgery', repo_path: repo, branch: 'trident/bunfig-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('bunfig.toml')
+    expect(out.reason).toContain('BRANCH-SUPPLIED')
+    expect(out.evidence?.observed ?? null).toBeNull()
+  })
+
+  test("…and a bunfig.toml the BASE branch already carried still proves — the arm reads the diff, not the tree", async () => {
+    // THE POSITIVE CONTROL, and the reason this arm is diff-scoped at all. This
+    // repository ships a root `bunfig.toml` with a `[test] preload`, and so does
+    // every bun repo worth the name; refusing on the TREE would delete `bun
+    // test` from the nominatable shapes here and leave no legal guard at all —
+    // the exact defect this card exists to fix. Same config, same claim, same
+    // real bun: only the authorship differs.
+    const repo = await seedBunfigRepo('main')
+    const out = await runMutationProofGate({
+      run: { id: 'run-bunfig-ok', slug: 'bunfig-inherited', repo_path: repo, branch: 'trident/bunfig-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/limit.test.ts'],
+        control: ['bun', 'test', 'tests/other-control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.reason).not.toContain('bunfig.toml')
+    expect(out.ok).toBe(true)
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+    expect(obs.guard_restored.exit_code).toBe(0)
+  }, 120_000)
 
   test('a support LIBRARY under tests/ proves red-then-green against REAL git and bun', async () => {
     // THE #489 CLASS, end to end. `tests/support/clamp.ts` declares no test
