@@ -547,6 +547,20 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
   // is the "no legal nomination exists" defect this whole card is about.
   const BUN_WT = proofWorktreePath('/repo', RUN)
   const BUNFIG_WITH_PRELOAD = '[test]\npreload = ["./tests/support/scrub.ts"]\n'
+  // ONE KEY, AND THE SPELLINGS A TOML PARSER READS AS IDENTICAL. A review seat
+  // ran each of these end to end against the bare-key defence that shipped and
+  // got `ok: true, proved: true` out of every one but the first.
+  const BUNFIG_PRELOAD_SPELLINGS: Record<string, string> = {
+    bare: '[test]\npreload = ["./src/limit.ts"]\n',
+    quoted: '[test]\n"preload" = ["./src/limit.ts"]\n',
+    'single-quoted': "[test]\n'preload' = ['./src/limit.ts']\n",
+    dotted: 'test.preload = ["./src/limit.ts"]\n',
+    'dotted with a quoted leaf': 'test."preload" = ["./src/limit.ts"]\n',
+    'inline table': 'test = { preload = ["./src/limit.ts"] }\n',
+    'tab-indented, unspaced': '[test]\n\tpreload=["./src/limit.ts"]\n',
+    'unicode-escaped key': '[test]\n"p\\u0072eload" = ["./src/limit.ts"]\n',
+  }
+  const PACKAGE_JSON_WITH_IMPORTS = '{\n  "imports": { "#lib": "./src/limit.ts" }\n}\n'
   const TSCONFIG_WITH_PATHS = '{\n  "compilerOptions": {\n    "paths": { "@x/*": ["./src/*"] }\n  }\n}\n'
 
   function bunFs(files: Record<string, string>) {
@@ -567,6 +581,53 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     expect(evidence.reason).toContain('preload')
     // Nothing ran: the refusal is decided before a byte is mutated.
     expect(host.calls.every((c) => c[0] !== 'bun')).toBe(true)
+  })
+
+  test('EVERY SPELLING of the preload key is the same key — the bare-key rule saw one of eight', () => {
+    for (const [spelling, body] of Object.entries(BUNFIG_PRELOAD_SPELLINGS)) {
+      expect([spelling, bunConfigLoadHook('bunfig.toml', body)]).toEqual([spelling, 'preload'])
+    }
+    // THE POSITIVE CONTROL on that table: it must not be passing because the
+    // rule refuses every bunfig outright. A key that merely CONTAINS the word
+    // is a different key, and `[loader]` is the branch-authored config that
+    // decides nothing about which code loads.
+    for (const body of ['[loader]\n".png" = "file"\n', '[test]\nmypreload = ["./x.ts"]\n', '[test]\npreloader = 1\n']) {
+      expect([body, bunConfigLoadHook('bunfig.toml', body)]).toEqual([body, null])
+    }
+  })
+
+  test('each preload spelling refuses the bun guard END TO END, not just in the predicate', async () => {
+    for (const [spelling, body] of Object.entries(BUNFIG_PRELOAD_SPELLINGS)) {
+      const { prover } = proverOver({}, bunFs({ [join(BUN_WT, 'bunfig.toml')]: body }))
+      const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'bunfig.toml'] })
+      expect([spelling, evidence.proved]).toEqual([spelling, false])
+      expect(evidence.reason).toContain('BRANCH-SUPPLIED')
+    }
+  })
+
+  test('a package.json THIS BRANCH writes can redirect a bare specifier inside MAIN\'s guard file → refused', async () => {
+    // THE SECOND SEAT'S REPRO. `imports` is a resolution map like a tsconfig's
+    // `paths`, and this basename was excluded from the candidates entirely, so
+    // a branch could point `#lib` inside a guard file main already carried
+    // straight at the mutated module with nothing on the argv to show for it.
+    const { prover, host } = proverOver({}, bunFs({ [join(BUN_WT, 'package.json')]: PACKAGE_JSON_WITH_IMPORTS }))
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'package.json'] })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.reason).toContain('package.json')
+    expect(evidence.reason).toContain('imports')
+    expect(host.calls.every((c) => c[0] !== 'bun')).toBe(true)
+  })
+
+  test('a package.json with no resolution map keeps its bun nomination — the control on that arm', async () => {
+    // Without this row the assertion above would pass just as happily on a gate
+    // that refused a bun guard for every dependency bump in the diff.
+    const { prover } = proverOver(
+      {},
+      bunFs({ [join(BUN_WT, 'package.json')]: '{\n  "name": "x",\n  "dependencies": { "zod": "^3" }\n}\n' }),
+    )
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM, changed_files: ['src/limit.ts', 'package.json'] })
+    expect(evidence.reason).not.toContain('package.json')
+    expect(evidence.proved).toBe(true)
   })
 
   test('a tsconfig.json THIS BRANCH writes can point a bare import at the mutated file → refused', async () => {
@@ -632,8 +693,21 @@ describe('a worktree that can SHADOW the -m module is not a test runner', () => 
     // Not a bun nomination at all, and not a config name.
     expect(bunConfigCandidates(['go', 'test', './...'], changed)).toEqual([])
     expect(
-      bunConfigCandidates(CLAIM.guard, ['docs/tsconfig.json.md', 'src/bunfig.toml.ts', 'tsconfigx.json', 'package.json']),
+      bunConfigCandidates(CLAIM.guard, ['docs/tsconfig.json.md', 'src/bunfig.toml.ts', 'tsconfigx.json', 'package-lock.json']),
     ).toEqual([])
+    // A RESOLUTION MAP LIVES HERE TOO: package.json's `imports`/`exports` point
+    // a bare specifier in an unrelated test at the mutated file, and a seat
+    // forged `proved: true` through one while this basename was excluded.
+    expect(bunConfigCandidates(CLAIM.guard, ['package.json', 'landing/package.json'])).toEqual([
+      'package.json',
+      'landing/package.json',
+    ])
+    expect(bunConfigLoadHook('package.json', '{ "imports": { "#lib": "./src/limit.ts" } }')).toBe('imports')
+    expect(bunConfigLoadHook('package.json', '{ "exports": { ".": "./src/limit.ts" } }')).toBe('exports')
+    // …and the ordinary manifest edit keeps its nomination — the POSITIVE
+    // CONTROL on the arm above, without which refusing every package.json
+    // outright would pass it.
+    expect(bunConfigLoadHook('package.json', '{ "name": "x", "dependencies": { "zod": "^3" } }')).toBeNull()
     // The KEY, per file kind.
     expect(bunConfigLoadHook('bunfig.toml', BUNFIG_WITH_PRELOAD)).toBe('preload')
     expect(bunConfigLoadHook('bunfig.toml', '[loader]\n".png" = "file"\n')).toBeNull()
@@ -4130,6 +4204,50 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     expect(out.exempt).toBe(false)
     expect(out.reason).toContain('bunfig.toml')
     expect(out.reason).toContain('BRANCH-SUPPLIED')
+  })
+
+  test('THE QUOTED AND DOTTED SPELLINGS TOO — the seat forged proved:true through the gate with these', async () => {
+    // Run through `runMutationProofGate` itself, because that is the surface the
+    // repro used: bare was refused, `"preload"`, `'preload'` and `test.preload`
+    // all came back ok:true / proved:true.
+    for (const body of [
+      '[test]\n"preload" = ["./src/limit.ts"]\n',
+      "[test]\n'preload' = ['./src/limit.ts']\n",
+      'test.preload = ["./src/limit.ts"]\n',
+      'test = { preload = ["./src/limit.ts"] }\n',
+    ]) {
+      const fs = memFs({
+        [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE,
+        [join(proofWorktreePath('/repo', RUN), 'bunfig.toml')]: body,
+      })
+      const out = await runMutationProofGate({
+        run: RUN,
+        claim: CLAIM,
+        base_branch: 'main',
+        ...gateDeps('src/limit.ts\0bunfig.toml\0'),
+        fs,
+      })
+      expect([body, out.ok]).toEqual([body, false])
+      expect(out.reason).toContain('bunfig.toml')
+    }
+  })
+
+  test('AND THE package.json IMPORTS MAP — the other seat forged proved:true through this one', async () => {
+    const fs = memFs({
+      [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE,
+      [join(proofWorktreePath('/repo', RUN), 'package.json')]: '{ "imports": { "#lib": "./src/limit.ts" } }',
+    })
+    const out = await runMutationProofGate({
+      run: RUN,
+      claim: CLAIM,
+      base_branch: 'main',
+      ...gateDeps('src/limit.ts\0package.json\0'),
+      fs,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.reason).toContain('package.json')
+    expect(out.reason).toContain('imports')
   })
 
   test('…and the SAME bunfig outside the diff still opens the gate — the positive control on that wiring', async () => {

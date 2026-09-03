@@ -592,11 +592,18 @@ const TICK_NOTE_CEILING = 240
  *  wide and reaching it through a whole orchestrator tick would take a reason
  *  built to land an astral character on code unit 240 by accident. */
 export function truncateNote(reason: string): string {
-  if (reason.length <= TICK_NOTE_CEILING) return reason
-  // CUT ON A CHARACTER, NOT ON A CODE UNIT. `slice` counts UTF-16 units, so a
-  // cut landing between the halves of a surrogate pair leaves a LONE surrogate
-  // at the end of a string that goes on to a UI and a DB. Drop the orphan.
-  const head = reason.slice(0, TICK_NOTE_CEILING)
+  return truncateWithPointer(reason, TICK_NOTE_CEILING)
+}
+
+/** The cut both ceilings make. They differ in the number and in nothing else,
+ *  and two byte-identical bodies is one place for a fix to land and be missed.
+ *
+ *  CUT ON A CHARACTER, NOT ON A CODE UNIT. `slice` counts UTF-16 units, so a cut
+ *  landing between the halves of a surrogate pair leaves a LONE surrogate at the
+ *  end of a string that goes on to a UI and a DB. Drop the orphan. */
+function truncateWithPointer(reason: string, ceiling: number): string {
+  if (reason.length <= ceiling) return reason
+  const head = reason.slice(0, ceiling)
   const last = head.charCodeAt(head.length - 1)
   const whole = last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
   return `${whole}… (${reason.length} chars; full reason in the mutation_proof_exempt log line)`
@@ -620,11 +627,7 @@ export function truncateNote(reason: string): string {
 const STAGE_REASON_CEILING = 4_000
 
 export function truncateStageReason(reason: string): string {
-  if (reason.length <= STAGE_REASON_CEILING) return reason
-  const head = reason.slice(0, STAGE_REASON_CEILING)
-  const last = head.charCodeAt(head.length - 1)
-  const whole = last >= 0xd800 && last <= 0xdbff ? head.slice(0, -1) : head
-  return `${whole}… (${reason.length} chars; full reason in the mutation_proof_exempt log line)`
+  return truncateWithPointer(reason, STAGE_REASON_CEILING)
 }
 
 export interface StrandedReconcileOptions {

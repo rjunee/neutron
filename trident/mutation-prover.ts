@@ -150,7 +150,17 @@ const TEST_COMMAND_SHAPES: ReadonlyArray<{
     // guard at all. It fails CLOSED — an over-refusal, never a forged proof —
     // and it is latent here, where every runner is bun. Relieving it means
     // scoping those arms to branch-authored files the way `bunConfigCandidates`
-    // is scoped; that is a follow-up card, not a silent widening.
+    // is scoped — a silent widening is exactly what must not happen here, so it
+    // is carried as a NAMED follow-up card rather than a comment that ages out:
+    //
+    //   "trident: diff-scope the python runner-provenance arms so `python3 -m`
+    //    is nominatable in a conventional python repo"
+    //
+    // recorded under Deferred in IMPLEMENTATION_PLAN.md with the two arms it has
+    // to move (`pytestConfigShadow`, `pythonPackageShadow`) and the reason the
+    // bun scoping is sound. Until that card lands, the entry below is REACHABLE
+    // ONLY in a repo whose root carries no pytest ini file and whose test
+    // directories carry no `__init__`, which is not the conventional layout.
     program: 'python3',
     shape: 'python3 -m pytest|unittest …',
     ok: (a) => a[1] === '-m' && (a[2] === 'pytest' || a[2] === 'unittest'),
@@ -1283,16 +1293,42 @@ export function pytestConfigShadow(argv: readonly string[], paths: readonly stri
  * `python3 -m unittest`, `node --test`).
  */
 /**
- * THE EXTENDED SPELLING IS IN, because `extends` makes it the same file. This
- * repo's root `tsconfig.json` is four lines over a `tsconfig.base.json` that
- * holds the real map, so a rule matching the exact basename would refuse the
- * wrapper and wave the file that actually decides resolution straight through.
- * Any `tsconfig`/`jsconfig` with an infix (`tsconfig.base.json`,
- * `tsconfig.build.json`) is therefore a candidate; an arbitrarily-named
- * `extends` target is reachable only through a root config the branch would
- * have to change too, which is refused on its own.
+ * THE INFIX SPELLING IS IN, because the file that holds the map is routinely
+ * not the one named `tsconfig.json`. This repo's root config is four lines over
+ * a `tsconfig.base.json` that carries the real `paths`, so a rule matching the
+ * exact basename would wave the deciding file straight through. Any
+ * `tsconfig`/`jsconfig` with an infix (`tsconfig.base.json`,
+ * `tsconfig.build.json`) is therefore a candidate IN ITS OWN RIGHT.
+ *
+ * NOT BECAUSE `extends` CARRIES THE MAP OVER — an earlier wording of this block
+ * said so in both directions and was wrong twice, measured on bun 1.3.13: bun
+ * does NOT follow a tsconfig `extends` chain for `paths` (a bare specifier
+ * mapped only in the extended file resolves to "Cannot find module"), and a
+ * root config that gains ONLY an `extends` line holds no `paths`/`baseUrl` key
+ * of its own, so `bunConfigLoadHook` returns null for it and it is not refused
+ * on its own. The refusal lands on whichever file actually spells the key,
+ * which is exactly why the infix names have to be candidates themselves.
+ *
+ * PACKAGE.JSON IS IN for the same reason a tsconfig is: its `imports` (`#x`)
+ * and `exports` maps decide which file a bare specifier in an unrelated test
+ * means, and a review seat forged `proved: true` through a branch-rewritten
+ * `imports` map redirecting a specifier inside MAIN's guard file — a redirection
+ * with nothing whatever on the argv to show for it. It is refused ON THOSE KEYS
+ * only, so the ordinary package.json edit (a dependency bump, a script) keeps
+ * its bun nomination.
+ *
+ * ITS OVER-REFUSAL IS THE WIDEST ON THIS SEAM and is stated rather than hidden:
+ * a manifest is edited far more often than a bunfig, and a monorepo's workspace
+ * packages routinely carry an `exports` map, so a PR that adds a dependency to
+ * one of them in the same commit as its code loses `bun test` — in a bun-only
+ * repo, its only nomination. That is an over-refusal, never a forged proof, and
+ * the escape hatch is the same one the whole arm offers: land the manifest
+ * change on its own commit. Narrowing it to manifests that could actually
+ * redirect toward the target means reasoning about where a map POINTS, which is
+ * the thing this seam exists not to do; if the cost is felt in practice it is a
+ * follow-up card, recorded under Deferred in IMPLEMENTATION_PLAN.md.
  */
-const BUN_LOAD_CONFIG_BASENAME = /^(?:bunfig\.toml|(?:ts|js)config(?:\.[\w-]+)*\.json)$/
+const BUN_LOAD_CONFIG_BASENAME = /^(?:bunfig\.toml|package\.json|(?:ts|js)config(?:\.[\w-]+)*\.json)$/
 
 /** The branch-changed files a `bun test` nomination would have loaded config out of. */
 export function bunConfigCandidates(argv: readonly string[], changedPaths: readonly string[]): string[] {
@@ -1300,10 +1336,47 @@ export function bunConfigCandidates(argv: readonly string[], changedPaths: reado
   return changedPaths.filter((p) => BUN_LOAD_CONFIG_BASENAME.test(p.split('/').pop() ?? p))
 }
 
+/**
+ * ONE KEY, FOUR SPELLINGS, AND THE PARSER TAKES ALL OF THEM. A line-anchored
+ * bare-key rule (`/(^|\n)[ \t]*preload[ \t]*=/`) was the whole bunfig defence
+ * and a review seat walked straight past it: `"preload" = [...]`, `'preload' =
+ * [...]`, `test.preload = [...]` and the inline table `test = { preload = [...] }`
+ * are the SAME key to a TOML parser, and all four returned `ok: true, proved:
+ * true` end to end while the bare spelling was correctly refused. This is the
+ * defect this round closed for pytest one runner over: the defence matched one
+ * spelling of a key the runner accepts in several.
+ *
+ * SO IT IS READ ANYWHERE IN THE TEXT, quoted or not, dotted or not — the same
+ * unanchored reading the JSON pair below already uses, and for the same reason.
+ * It over-refuses a bunfig that merely writes `preload =` inside a comment,
+ * which is the direction this seam errs in everywhere else, and the branch that
+ * hits it lands its config change on its own commit.
+ *
+ * ESCAPES ARE DECODED FIRST because a TOML basic-string key may spell itself in
+ * `\u`: `"preload"` is the key `preload` to the parser and is not the
+ * substring `preload` to a regex.
+ */
+const TOML_PRELOAD_KEY = /(?:^|[^A-Za-z0-9_-])["']?preload["']?[ \t]*=/
+
+function decodeTomlEscapes(text: string): string {
+  return text.replace(/\\u([0-9a-fA-F]{4})|\\U([0-9a-fA-F]{8})/g, (whole, short: string, long: string) => {
+    const code = Number.parseInt(short ?? long, 16)
+    return code <= 0x10ffff ? String.fromCodePoint(code) : whole
+  })
+}
+
 /** The load-hook key that makes such a file decide which code the runner loads. */
 export function bunConfigLoadHook(path: string, text: string): string | null {
   const base = path.split('/').pop() ?? path
-  if (base === 'bunfig.toml') return /(^|\n)[ \t]*preload[ \t]*=/.test(text) ? 'preload' : null
+  if (base === 'bunfig.toml') return TOML_PRELOAD_KEY.test(decodeTomlEscapes(text)) ? 'preload' : null
+  // A RESOLUTION MAP, NOT A MANIFEST. `imports`/`exports` are the two
+  // package.json keys that decide which FILE a specifier means; everything else
+  // in the file (deps, scripts, version) redirects nothing, and refusing on the
+  // basename alone would cost a bun-only repo its nomination on every bump.
+  if (base === 'package.json') {
+    if (/"imports"[ \t]*:/.test(text)) return 'imports'
+    return /"exports"[ \t]*:/.test(text) ? 'exports' : null
+  }
   // ANYWHERE IN THE TEXT for the JSON pair: a tsconfig is routinely written on
   // one line, and a key rule anchored to the line start read `{ "compilerOptions":
   // { "baseUrl": "." } }` as hookless. Matching the quoted key anywhere

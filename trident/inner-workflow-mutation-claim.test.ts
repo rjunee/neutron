@@ -412,9 +412,24 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
         'bun config shadow',
         true,
       ])
+      // THE SPELLINGS AND THE SECOND MAP, pinned literally because two seats
+      // forged a full `proved: true` past the first wording of this arm: the
+      // defence matched ONE spelling of `preload` while the parser accepts four,
+      // and it did not consider package.json at all, though its `imports` map
+      // redirects a bare specifier inside a guard file main already carried.
+      // A build told only about a bare `preload =` would read the quoted and
+      // dotted spellings as permitted, which they are not.
+      expect(['bun config spellings', d.includes('test.preload')]).toEqual(['bun config spellings', true])
+      expect(['bun config spellings', d.includes('inline table')]).toEqual(['bun config spellings', true])
+      expect(['bun package map', d.includes('package.json `imports`/`exports`')]).toEqual(['bun package map', true])
     }
     expect(PROVER_SRC).toContain('bunConfigCandidates')
     expect(PROVER_SRC).toContain('bunConfigLoadHook')
+    // Two-sided, like every other entry in this test: the prover must really
+    // read the key unanchored and really consider the manifest, or the sentence
+    // above is a promise nothing keeps.
+    expect(PROVER_SRC).toContain('const TOML_PRELOAD_KEY = ')
+    expect(PROVER_SRC).toContain("base === 'package.json'")
 
     // …AND `node <script> --test <unrelated>` IS THE SAME WRAPPER WITHOUT THE
     // OPTION, invisible to every loop above for the same reason. Node forwards a
