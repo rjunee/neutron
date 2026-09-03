@@ -181,6 +181,8 @@ export interface ClaudeCodeSubstrateOptions {
    *     surface a notify-only alert (no keystroke, no auto-retry). */
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
   onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  /** Eviction guard — see `PersistentReplSubstrateOptions.hostsLiveWork`. */
+  hostsLiveWork?: (childGeneration: string) => number
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Notice-family DI seam (row #16) — fired ONCE (edge) when the model-update
@@ -450,6 +452,7 @@ export function createClaudeCodeSubstrateAuto(options: ClaudeCodeSubstrateOption
   // wire user-facing delivery instead of the stderr-only fallback (Codex PR #67).
   if (options.onDeadTurnNotice !== undefined) p.onDeadTurnNotice = options.onDeadTurnNotice
   if (options.onChildCrash !== undefined) p.onChildCrash = options.onChildCrash
+  if (options.hostsLiveWork !== undefined) p.hostsLiveWork = options.hostsLiveWork
   if (options.onSizeAlert !== undefined) p.onSizeAlert = options.onSizeAlert
   if (options.onRateLimitBanner !== undefined) p.onRateLimitBanner = options.onRateLimitBanner
   if (options.onModelUpdate !== undefined) p.onModelUpdate = options.onModelUpdate

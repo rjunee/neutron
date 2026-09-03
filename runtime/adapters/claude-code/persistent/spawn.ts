@@ -787,6 +787,42 @@ function resolveResumeDirective(
   return undefined
 }
 
+/** The eviction guard's answer, fail-safe to 0 (an unwired or throwing counter
+ *  evicts exactly as before — the guard can only ever SPARE a child). */
+function countHostedLiveWork(options: PersistentReplSubstrateOptions, childGeneration: string): number {
+  if (options.hostsLiveWork === undefined) return 0
+  try {
+    const n = options.hostsLiveWork(childGeneration)
+    return Number.isFinite(n) && n > 0 ? Math.trunc(n) : 0
+  } catch (err) {
+    process.stderr.write(`[repl] hostsLiveWork threw for generation=${childGeneration.slice(0, 8)}: ${String(err)}\n`)
+    return 0
+  }
+}
+
+/** Deliver an eviction to the durable crash sink with the EVICTED generation.
+ *  Mirrors the supervision watchdog's `onChildCrash` call for a pid-dead child;
+ *  this is the edge that watchdog structurally cannot observe. */
+async function notifyEvictedChild(
+  options: PersistentReplSubstrateOptions,
+  sessionKey: string,
+  childGeneration: string,
+  reason: string,
+): Promise<void> {
+  if (options.onChildCrash === undefined) return
+  try {
+    await options.onChildCrash({
+      sessionKey,
+      generationKey: childGeneration,
+      detail: `pooled child evicted (${reason}) — every in-process workload it hosted died with it`,
+    })
+  } catch (err) {
+    process.stderr.write(
+      `[repl] onChildCrash sink threw on eviction generation=${childGeneration.slice(0, 8)}: ${String(err)}\n`,
+    )
+  }
+}
+
 export async function getOrSpawnSession(
   sessionKey: string,
   options: PersistentReplSubstrateOptions,
@@ -883,10 +919,35 @@ export async function getOrSpawnSession(
       // observable in prod.
       if (freshSurface && freshBridge && freshCredential && !session.poisoned) return session
       if (session.poisoned) {
-        process.stderr.write(
-          `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,
-        )
+        // THE EVICTION GUARD (2026-09-03 root cause, 33% of trident run deaths).
+        // Terminating this child SIGKILLs every in-process workload it hosts — for
+        // the trident launcher that is every other run's Argus panel, arbiter and
+        // terminal/cleanup steps (only the codex forge build is detached). Ask the
+        // owner of that work before killing it: while the child hosts live work the
+        // poison is CLEARED and the child kept warm — the abandoned turn drains on
+        // its own, the driver lock serialises the next turn behind it. The
+        // abandon-poison semantics for chat/synthesis substrates are untouched:
+        // they wire no `hostsLiveWork`, so they answer 0 and evict as before.
+        const hosted = countHostedLiveWork(options, session.childGeneration)
+        if (hosted > 0) {
+          session.poisoned = false
+          process.stderr.write(
+            `[repl] poison eviction DEFERRED session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} hosts ${hosted} live workflows (abandoned turn left to drain; terminating the child would kill them)\n`,
+          )
+          if (freshSurface && freshBridge && freshCredential) return session
+        } else {
+          process.stderr.write(
+            `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,
+          )
+        }
       }
+      const evictionReason = session.poisoned
+        ? 'abandon-poison'
+        : !freshSurface
+          ? 'tool-surface mismatch'
+          : !freshBridge
+            ? 'tool-bridge mismatch'
+            : 'credential rotation'
       // Evict, then AWAIT the old child's exit before falling through to spawn so a
       // supervised `--resume` replacement (same sessionId) never co-owns the session
       // transcript with the dying child (the Argus-r3 one-owner invariant). The
@@ -895,6 +956,13 @@ export async function getOrSpawnSession(
       pool.delete(sessionKey)
       if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
       await terminateChild(session.child)
+      // LATCH THE DEATH. An eviction is a child exit the supervision watchdog can
+      // never see: the registry is repointed at the replacement child before its
+      // next tick, so the dead generation's owner learned nothing until the 90-min
+      // hang watchdog reaped the corpse (~170 min later, measured). Tell the durable
+      // sink NOW, with the EVICTED generation, so crash recovery runs on the next
+      // tick. Best-effort: a sink failure must never block the respawn.
+      await notifyEvictedChild(options, sessionKey, session.childGeneration, evictionReason)
     } else {
       pool.delete(sessionKey)
     }

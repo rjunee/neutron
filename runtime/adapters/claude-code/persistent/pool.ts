@@ -224,6 +224,19 @@ async function deliverRecoveredReply(
     )
   }
 }
+/**
+ * The POISON-TIME log line. Until 2026-09-03 the only trace of an abandon-poison
+ * was the `[repl] evicting abandon-poisoned …` line at the NEXT dispatch — minutes
+ * to hours later, on a different turn — which is why correlating an eviction with
+ * the turn that caused it took a full investigation. Stamp who poisoned the
+ * session, which turn, and when, at the moment it happens.
+ */
+export function logAbandonPoison(session: ReplSession, by: string, turnId: string): void {
+  process.stderr.write(
+    `[repl] abandon-poison session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} by=${by} turn=${turnId} at=${new Date().toISOString()}\n`,
+  )
+}
+
 /** The module-level warm-pool key for a substrate's options. The SINGLE
  *  definition of the key shape — used by the substrate itself, the supervised-
  *  options registry, and the pending-respawns drain, so none can drift. Every
@@ -675,7 +688,10 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
           // still be running it (a late reply will arrive after we've moved on).
           // Mark the warm session so the NEXT dispatch respawns a clean REPL rather
           // than landing on the busy/desynced one (the cascade fix).
-          if (!ephemeral && session !== undefined) session.poisoned = true
+          if (!ephemeral && session !== undefined) {
+            session.poisoned = true
+            logAbandonPoison(session, `turn-timeout:${reason}`, turn.turnId)
+          }
           // O3 — stamp the typed class so the composer's ladder classifies on
           // `code` before its `persistent-repl: turn timeout` regex fallback.
           channel.push({ kind: 'error', message: 'persistent-repl: turn timeout', retryable: true, code: 'turn_timeout' })
@@ -701,7 +717,10 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
         const failAuthInvalid = (): void => {
           if (turn.settled) return
           turn.settled = true
-          if (!ephemeral && session !== undefined) session.poisoned = true
+          if (!ephemeral && session !== undefined) {
+            session.poisoned = true
+            logAbandonPoison(session, 'auth-invalid', turn.turnId)
+          }
           channel.push({
             kind: 'error',
             message: 'persistent-repl: auth token invalid — reconnect required',
@@ -836,7 +855,10 @@ export function createPersistentReplSubstrate(options: PersistentReplSubstrateOp
             // session (stale-reply debt strips its turn_id → never delivers). Mark
             // the session so the next dispatch respawns a clean REPL. Skip for an
             // ephemeral one-shot (it is disposed after its single turn anyway).
-            if (!ephemeral && session !== undefined) session.poisoned = true
+            if (!ephemeral && session !== undefined) {
+              session.poisoned = true
+              logAbandonPoison(session, 'cancel', t.turnId)
+            }
             t.settled = true
             t.settle()
             if (session !== undefined) session.activeTurn = undefined

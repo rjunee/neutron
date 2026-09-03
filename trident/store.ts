@@ -842,6 +842,28 @@ export class TridentRunStore {
   }
 
   /**
+   * How many runs are LIVE inside the launcher child with this generation key —
+   * the persistent pool's eviction guard (`hostsLiveWork`). Every non-terminal
+   * run whose fire settled on that generation carries it as `workflow_run_id` with
+   * `subagent_status = 'running'`; its Argus panel / arbiter / terminal steps run
+   * as in-process subagents of that very child, so evicting the child while this
+   * is > 0 kills them. Synchronous and indexed on purpose: it sits on the dispatch
+   * path of every fire.
+   */
+  countRunningByLauncher(session_key: string): number {
+    const row = this.db
+      .prepare<{ n: number }, [string]>(
+        `SELECT count(*) AS n
+           FROM code_trident_runs
+          WHERE workflow_run_id = ?
+            AND subagent_status = 'running'
+            AND phase NOT IN ${TERMINAL_PHASE_SQL}`,
+      )
+      .get(session_key)
+    return row === null ? 0 : Number(row.n)
+  }
+
+  /**
    * Atomically CLAIM a crashed run for recovery: clear the crash latch, release the
    * sub-agent slot, null the (tombstoned) launcher generation so `launch()`'s
    * `?? workflow_run_id` fallback can never re-adopt a dead generation, and spend one

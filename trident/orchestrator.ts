@@ -107,7 +107,12 @@ import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunStore, TridentRunUpdate } from './store.ts'
-import { DEAD_LAUNCHER_OVERRIDE_MS, DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+import {
+  DEAD_LAUNCHER_OVERRIDE_MS,
+  DEFAULT_MAX_INFLIGHT_MS,
+  DEFAULT_SETTLE_TIMEOUT_MS,
+  NO_ADVANCE_HANG_MS,
+} from './liveness.ts'
 import {
   decideHang,
   describeRunEvidence,
@@ -145,6 +150,12 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
+  /** The stage ledger READ, in ledger order — consulted ONLY for a run whose fire
+   *  came back `unconfirmed` (the launcher turn overran the settle budget and was
+   *  left draining). A `fire-settled` or `plan-start` stamped after the
+   *  `fire-unconfirmed` event confirms the fire without waiting for the turn.
+   *  Omitted → only the late settle can confirm; absence never fails a run early. */
+  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview
@@ -2132,6 +2143,31 @@ export function buildTridentOrchestrator(
   // each individual process still bounds launch faults and cannot retry forever.
   const launchFaults = new Map<string, { count: number; last: string }>()
   const MAX_LAUNCH_FAULTS = 3
+  // UNCONFIRMED FIRES — runs whose launcher turn overran the settle budget and was
+  // LEFT DRAINING (never cancelled: cancelling abandon-poisons the shared launcher
+  // REPL, whose eviction SIGKILLs every in-process inner workflow the child hosts —
+  // 33% of all run deaths, measured). The run is parked `running` in the DB like a
+  // confirmed fire; this map carries the confirmation deadline (one further
+  // budget), the late settle when it lands, and whether the workflow's own
+  // `plan-start` already proved the fire. In-memory on purpose, like `fired`: a
+  // restart orphans the row and the existing orphan policy takes it from there.
+  const listStageEvents = opts.list_stage_events ?? null
+  interface UnconfirmedFire {
+    deadline_ms: number
+    budget_ms: number
+    late: FireOutcome | null
+    /** Set once the workflow's own stage event proved the fire; a late `fired`
+     *  settle instead DELETES the record (nothing left to confirm). */
+    confirmed_by: 'stage-event' | null
+  }
+  const unconfirmedFires = new Map<string, UnconfirmedFire>()
+  const stampFor = (run_id: string, stage: string, meta?: string | null): void => {
+    try {
+      opts.record_stage?.(run_id, stage, meta ?? null)
+    } catch {
+      // A stamp must never fail a tick.
+    }
+  }
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
@@ -3452,6 +3488,63 @@ export function buildTridentOrchestrator(
       inflight.delete(tracked)
     }
 
+    if (outcome.status === 'unconfirmed') {
+      // The launching turn was still RUNNING at the settle budget. It was NOT
+      // cancelled and this is NOT a failure: a launcher turn that crossed an
+      // autocompact takes 4-5 min to settle and its workflow fires regardless
+      // (run 6948da2d was written off at 09:50:04; its workflow fired at
+      // 09:51:52). Park the run `running` exactly like a confirmed fire — same
+      // dispatch id, same slot — and confirm it from either the late settle or the
+      // workflow's own `plan-start` within ONE MORE budget (`stepCore` §1c). Never
+      // relaunch here: that puts a second lane on the same card.
+      const budget = outcome.budget_ms ?? DEFAULT_SETTLE_TIMEOUT_MS
+      stamp(
+        'fire-unconfirmed',
+        `elapsed_ms=${outcome.elapsed_ms ?? budget} cancelled=${outcome.turn_cancelled === true} budget_ms=${budget}`,
+      )
+      fired.add(run.id)
+      const pending: UnconfirmedFire = {
+        deadline_ms: nowMs() + budget,
+        budget_ms: budget,
+        late: null,
+        confirmed_by: null,
+      }
+      unconfirmedFires.set(run.id, pending)
+      if (outcome.settled !== undefined) {
+        outcome.settled.then(
+          (late) => {
+            pending.late = late
+            if (late.status === 'fired') {
+              stampFor(run.id, 'fire-settled', `late (settled after the ${Math.round(budget / 1000)} s budget)`)
+            } else {
+              stampFor(run.id, 'fire-drained', `launcher turn ended ${late.status}: ${late.error ?? 'unknown'}`)
+            }
+          },
+          () => {
+            pending.late = { status: 'failed', error: 'fire stream error' }
+          },
+        )
+      }
+      const next: TridentRun = {
+        ...pinnedRun,
+        subagent_run_id: id,
+        subagent_status: 'running',
+        // The launcher generation is only known once the turn settles; until then
+        // the row carries the observability id (a stale generation from a prior
+        // launch is never re-adopted here either — it was nulled by the claim).
+        workflow_run_id: pinnedRun.workflow_run_id ?? id,
+        last_advanced_at: now(),
+      }
+      return {
+        run: next,
+        changed: true,
+        waiting: true,
+        note:
+          `fired inner workflow ${id} — UNCONFIRMED: launcher turn still draining after ` +
+          `${Math.round((outcome.elapsed_ms ?? budget) / 1000)} s (not cancelled); confirming within ${Math.round(budget / 60_000)} min`,
+      }
+    }
+
     if (outcome.status !== 'fired') {
       // The launching turn never settled cleanly — the workflow was NOT fired.
       // Fail loudly (recoverable: a re-run re-fires). paused ≠ finished.
@@ -3997,6 +4090,7 @@ export function buildTridentOrchestrator(
       redispatched.delete(run.id)
       infraRetryNotBefore.delete(run.id)
       launchFaults.delete(run.id)
+      unconfirmedFires.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -4176,6 +4270,100 @@ export function buildTridentOrchestrator(
           waiting: false,
           note: `${run.phase} → failed (terminal result garbled)`,
         }
+      }
+    }
+
+    // (1c) UNCONFIRMED FIRE — the launcher turn overran the settle budget and was
+    //     LEFT DRAINING (`launch()`; never cancelled, see `unconfirmedFires`). The
+    //     run is parked `running` like any fire; this decides whether the fire is
+    //     real. Sits BEFORE the hang watchdog so the decision is made in at most two
+    //     settle budgets (~16 min), not 90. Three evidence sources, in order:
+    //       • the late settle itself (`fired` + the launcher generation, adopted
+    //         onto the row so crash ownership and the eviction guard see it);
+    //       • the workflow's own `plan-start` / `fire-settled` stage event stamped
+    //         AFTER this launch's `fire-unconfirmed` (an earlier round's stamp is
+    //         not this fire's evidence);
+    //       • nothing within one more budget → the fire never happened; fail with
+    //         the original reason. NEVER relaunch from here — a settle-timeout on a
+    //         live launch is exactly how a second lane lands on the same card.
+    //     Harvest (§1) still runs first: a fast workflow that already wrote its
+    //     result is harvested, not re-litigated.
+    const pendingFire = unconfirmedFires.get(run.id)
+    if (pendingFire !== undefined && run.subagent_run_id !== null && run.subagent_status === 'running') {
+      const late = pendingFire.late
+      if (late !== null && late.status === 'fired') {
+        unconfirmedFires.delete(run.id)
+        const generation = late.launcher_session_key
+        return {
+          run: {
+            ...run,
+            ...(generation !== undefined ? { workflow_run_id: generation } : {}),
+            last_advanced_at: now(),
+          },
+          changed: true,
+          waiting: true,
+          note:
+            `fire confirmed — launcher turn settled after the budget` +
+            `${generation !== undefined ? ` (launcher generation ${generation.slice(0, 8)} adopted)` : ''}`,
+        }
+      }
+      if (pendingFire.confirmed_by === null && listStageEvents !== null) {
+        let events: ReadonlyArray<{ stage: string; at: string }> = []
+        try {
+          events = listStageEvents(run.id)
+        } catch {
+          events = []
+        }
+        let sinceUnconfirmed = false
+        let proved = false
+        for (const ev of events) {
+          if (ev.stage === 'fire-unconfirmed') {
+            sinceUnconfirmed = true
+            proved = false
+            continue
+          }
+          if (sinceUnconfirmed && (ev.stage === 'plan-start' || ev.stage === 'fire-settled')) proved = true
+        }
+        if (proved) pendingFire.confirmed_by = 'stage-event'
+      }
+      if (pendingFire.confirmed_by === 'stage-event') {
+        // Proved by the workflow itself. The record is kept only so a late settle
+        // can still adopt the launcher generation; it is dropped at the deadline
+        // and the run then flows through the ordinary in-flight branches.
+        if (nowMs() >= pendingFire.deadline_ms) unconfirmedFires.delete(run.id)
+        return {
+          run,
+          changed: false,
+          waiting: true,
+          note: `fire confirmed by the workflow's own stage event; waiting on inner-loop dispatch ${run.subagent_run_id}`,
+        }
+      }
+      if (nowMs() < pendingFire.deadline_ms) {
+        const leftS = Math.max(0, Math.round((pendingFire.deadline_ms - nowMs()) / 1000))
+        return {
+          run,
+          changed: false,
+          waiting: true,
+          note: `fire unconfirmed — launcher turn still draining (not cancelled); ${leftS} s left to confirm`,
+        }
+      }
+      unconfirmedFires.delete(run.id)
+      fired.delete(run.id)
+      const lateNote =
+        late === null
+          ? 'launcher turn still not settled after two budgets'
+          : `launcher turn later ended ${late.status}: ${late.error ?? 'unknown'}`
+      const windowMin = Math.round((2 * pendingFire.budget_ms) / 60_000)
+      return {
+        run: failedRun(
+          run,
+          `inner workflow fire failed: fire turn did not settle within the budget (turn left running, not cancelled; ` +
+            `${lateNote}; no plan-start observed within ${windowMin} min)`,
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${run.phase} → failed (fire never confirmed)`,
       }
     }
 

@@ -637,6 +637,11 @@ export function buildCoreModules(
           // "no evidence" and reaps exactly as before, so gating the wire-up would
           // be how this fix ships green, tested, and inert in production.
           latest_stage_event_at: (run_id) => store.latestStageEventAt(run_id),
+          // The stage-ledger READ behind an UNCONFIRMED fire (orchestrator §1c): a
+          // launcher turn that overran its settle budget is left draining, and the
+          // workflow's own `plan-start` stamp is what proves the fire happened
+          // without waiting on the turn. Read only for runs in that state.
+          list_stage_events: (run_id) => store.stageEvents(run_id),
           // THE THREE RUN-SCOPED PROBES the watchdog must consult before it may
           // declare a hang: a live process for the run, fresh mtime on the run's
           // own artifacts, recent movement on its branch ref.

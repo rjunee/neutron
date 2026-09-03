@@ -118,6 +118,7 @@ function buildHarness(opts: {
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_active_runs?: () => number
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
+  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   fix_leak_findings?: import('./leak-preflight.ts').LeakPreflightFixer
   fold_as_built?: (
@@ -246,6 +247,7 @@ function buildHarness(opts: {
     o.resolve_reflection_context = opts.resolve_reflection_context
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
   if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
+  if (opts.list_stage_events !== undefined) o.list_stage_events = opts.list_stage_events
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   if (opts.fix_leak_findings !== undefined) o.fix_leak_findings = opts.fix_leak_findings
   // Keep unrelated orchestrator tests hermetic: production defaults to the real
@@ -3291,6 +3293,165 @@ describe('orchestrator — fire did not settle → failed', () => {
     const run = await createRun({ merge_mode: 'pr' as MergeMode })
     await h.loop.runOnce()
     expect(store.get(run.id)?.phase).toBe('failed')
+  })
+})
+
+/**
+ * UNCONFIRMED FIRES (2026-09-03 root cause: abandon-poison eviction of the shared
+ * launcher REPL killed every in-process inner workflow — 33% of run deaths). A
+ * launcher turn that overruns the settle budget is no longer cancelled; the fire
+ * seam reports `unconfirmed` and the orchestrator waits ONE MORE budget for either
+ * the late settle or the workflow's own `plan-start` before failing the run. It
+ * never relaunches from that state (a second lane on the same card).
+ */
+describe('orchestrator — an UNCONFIRMED fire (launcher turn left draining past the settle budget)', () => {
+  const UNCONFIRMED_ERROR = 'fire turn did not settle within the budget (turn left running, not cancelled)'
+  const unconfirmed = (settled: Promise<FireOutcome>, budget_ms = 1000): FireOutcome => ({
+    status: 'unconfirmed',
+    error: UNCONFIRMED_ERROR,
+    elapsed_ms: budget_ms,
+    budget_ms,
+    turn_cancelled: false,
+    settled,
+  })
+
+  test('parks the run RUNNING (not failed, not relaunched), stamps fire-unconfirmed, and confirms on the late settle by adopting the launcher generation', async () => {
+    let settle!: (o: FireOutcome) => void
+    const settled = new Promise<FireOutcome>((resolve) => {
+      settle = resolve
+    })
+    const stamped: Array<{ stage: string; meta: string | null | undefined }> = []
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(settled) }),
+      now: () => new Date(t).toISOString(),
+      record_stage: (_run_id, stage, meta) => stamped.push({ stage, meta }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    let after = store.get(run.id)!
+    // Red mutation: the old branch failed the run here with 'fire did not settle'.
+    expect(after.phase).not.toBe('failed')
+    expect(after.subagent_status).toBe('running')
+    expect(after.subagent_run_id).not.toBeNull()
+    expect(stamped.map((s) => s.stage)).toEqual(['launch-start', 'fire-dispatched', 'fire-unconfirmed'])
+    expect(stamped[2]!.meta).toContain('elapsed_ms=1000')
+    expect(stamped[2]!.meta).toContain('cancelled=false')
+    expect(stamped[2]!.meta).toContain('budget_ms=1000')
+
+    // Inside the confirmation window: still waiting, and NO second fire.
+    t = 500
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(h.inputs).toHaveLength(1)
+
+    // The launcher turn settles late (an autocompact-crossing settle measured 4m33s / 5m03s).
+    settle({ status: 'fired', error: null, launcher_session_key: 'generation-late' })
+    await settled
+    await Promise.resolve()
+    t = 900
+    await h.loop.runOnce()
+    after = store.get(run.id)!
+    // The crash-ownership token is the real launcher generation now, not the observability id.
+    expect(after.workflow_run_id).toBe('generation-late')
+    expect(after.subagent_status).toBe('running')
+    expect(stamped.map((s) => s.stage)).toContain('fire-settled')
+
+    // Well past the deadline nothing fails a confirmed fire, and still one lane.
+    t = 5_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test("the workflow's own plan-start (stamped AFTER fire-unconfirmed) confirms the fire without the turn ever settling", async () => {
+    const ledger: Array<{ stage: string; at: string }> = []
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(new Promise<FireOutcome>(() => {})) }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    // The inner workflow stamps plan-start out of process (checkpoint.sh) — the
+    // launcher turn is STILL draining.
+    ledger.push({ stage: 'plan-start', at: now() })
+
+    t = 5_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a plan-start from BEFORE this launch is not evidence: with nothing after fire-unconfirmed the run fails at the deadline, with the original reason and no second lane', async () => {
+    const ledger: Array<{ stage: string; at: string }> = [{ stage: 'plan-start', at: new Date(0).toISOString() }]
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(new Promise<FireOutcome>(() => {})) }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+
+    // One tick short of the deadline (launch at t=0, budget 1000): still waiting.
+    t = 999
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+
+    t = 1_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toContain('inner workflow fire failed')
+    expect(after.failure_reason).toContain('did not settle within the budget')
+    expect(after.failure_reason).toContain('not cancelled')
+    // `delivery.ts` routes 'exhausted' into the review-unresolved class — never say it here.
+    expect(after.failure_reason ?? '').not.toContain('exhausted')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a late FAILED settle does not fail the run early (plan-start may still land) but is carried in the deadline reason', async () => {
+    let settle!: (o: FireOutcome) => void
+    const settled = new Promise<FireOutcome>((resolve) => {
+      settle = resolve
+    })
+    const stamped: string[] = []
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(settled) }),
+      now: () => new Date(t).toISOString(),
+      record_stage: (_run_id, stage) => stamped.push(stage),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    settle({ status: 'failed', error: 'fire turn closed without a completion event' })
+    await settled
+    await Promise.resolve()
+    t = 500
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(stamped).toContain('fire-drained')
+
+    t = 1_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toContain('launcher turn later ended failed: fire turn closed without a completion event')
+    expect(h.inputs).toHaveLength(1)
   })
 })
 

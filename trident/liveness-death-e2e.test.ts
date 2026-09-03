@@ -378,10 +378,25 @@ describe('a hung crash-recovery fire cannot wedge the lanes behind it', () => {
     expect(laneB.crash_recoveries).toBe(1)
     expect(laneB.subagent_status).not.toBe('crashed')
 
-    const laneA = store.get('lane-a')!
+    // Lane A's launcher turn overran the 50 ms settle budget. It is NOT cancelled
+    // and NOT failed yet (2026-09-03 root cause: cancelling abandon-poisoned the
+    // shared launcher and its eviction killed every hosted workflow): the run is
+    // parked running as an UNCONFIRMED fire for one more budget.
+    let laneA = store.get('lane-a')!
+    expect(laneA.phase).not.toBe('failed')
+    expect(laneA.subagent_status).toBe('running')
+    expect(laneA.crash_recoveries).toBe(1)
+
+    // One more budget with neither a late settle nor a plan-start → the fire never
+    // happened, and the run fails with the ORIGINAL reason, in the fire path, not
+    // 90 minutes later in the hang watchdog. Still no second lane on the card.
+    await Bun.sleep(120)
+    expect((await loop.runOnce()).skipped_due_to_overlap).toBe(false)
+    laneA = store.get('lane-a')!
     expect(laneA.phase).toBe('failed')
     expect(laneA.failure_reason).toContain('inner workflow fire failed')
     expect(laneA.failure_reason).toContain('did not settle within the budget')
+    expect(laneA.failure_reason).toContain('not cancelled')
     expect(laneA.failure_reason ?? '').not.toContain('exhausted')
     expect(laneA.crash_recoveries).toBe(1)
     expect(laneA.branch).toBe('trident/existing-a')

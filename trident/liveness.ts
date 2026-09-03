@@ -141,9 +141,16 @@ export const LIVENESS_PROBE_INTERVAL_MS = 15_000
 
 /**
  * Launching turn settle timeout. How long the LAUNCHING turn may take to settle
- * (fire + reply). Default 3 min — generous for a cold-spawn fire turn; NOT the
- * build budget. A cold REPL spawn can take ~100s, so the settle budget sits
- * comfortably above that.
- * Default: 3 minutes.
+ * (fire + reply) before the fire is reported UNCONFIRMED; NOT the build budget,
+ * and NOT a kill switch — the turn is never cancelled at this deadline (see
+ * `inner-loop.ts` `FireOutcome.status`).
+ *
+ * WHY 8 MINUTES (was 3). A cold REPL spawn takes ~100 s, but a launcher turn that
+ * crosses an AUTOCOMPACT on the shared warm launcher measured 4m33s and 5m03s to
+ * settle — healthy turns that the 3-minute budget wrote off as "fire failed"
+ * (run 6948da2d: written off at 09:50:04, its workflow fired at 09:51:52). The
+ * orchestrator waits one further budget for confirmation, so a genuinely dead
+ * launch is still decided in ~16 min, far inside the 90-min hang watchdog.
+ * Default: 8 minutes.
  */
-export const DEFAULT_SETTLE_TIMEOUT_MS = 3 * 60_000
+export const DEFAULT_SETTLE_TIMEOUT_MS = 8 * 60_000
