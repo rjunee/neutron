@@ -171,17 +171,18 @@ async function seedProductionLib(): Promise<string> {
 }
 
 /**
- * A repo whose branch adds `src/limit.ts` plus six test files: the honest pair
- * (a real test of the library, and an unrelated control), the files that exist
- * to forge a proof by WRITING rather than by loading — a guard that fails
- * unconditionally and never imports the target, a control whose MODULE BODY
- * rewrites that guard into a passing stub before declaring a passing test of
- * its own, and the one-actor variant: a guard that rewrites ITSELF green on its
- * first (red) run — and one honest-but-messy control that drops an UNTRACKED
- * artefact beside the tests, the way a real runner drops a cache.
+ * A repo whose branch adds `src/limit.ts` plus the files a forgery by WRITING
+ * needs: the honest pair (a real test of the library, and an unrelated
+ * control); a guard that fails unconditionally and never imports the target; a
+ * control whose MODULE BODY rewrites that guard into a passing stub before
+ * declaring a passing test of its own; the SAME write spelled as a `make`
+ * goal, because a wrapper is a deliberately legal CONTROL; the one-actor
+ * variant, a guard that rewrites ITSELF green on its first (red) run; and one
+ * honest-but-messy control that drops an UNTRACKED artefact beside the tests,
+ * the way a real runner drops a cache.
  *
  * The honest guard `tests/limit.test.ts` also asserts that artefact is ABSENT,
- * which is what makes `git clean -fdx` load-bearing rather than decorative.
+ * which is what makes the re-provision load-bearing rather than decorative.
  */
 async function seedControlForgeryRepo(): Promise<string> {
   const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-control-forgery-'))
@@ -207,10 +208,9 @@ async function seedControlForgeryRepo(): Promise<string> {
     join(repo, 'tests', 'other-control.test.ts'),
     "import { expect, test } from 'bun:test'\n\ntest('the control is unrelated to the mutated module', () => {\n  expect(1 + 1).toBe(2)\n})\n",
   )
-  // AN HONEST CONTROL THAT LITTERS. Its write is UNTRACKED, so the porcelain
-  // check tolerates it — a runner cache must not cost a repo its nomination —
-  // and `git clean -fdx` is what stops it reaching the restored guard, which
-  // asserts the file is not there.
+  // AN HONEST CONTROL THAT LITTERS. Its write is UNTRACKED — a runner cache,
+  // which must never cost a repo its nomination — and the re-provision is what
+  // stops it reaching the restored guard, which asserts the file is not there.
   writeFileSync(
     join(repo, 'tests', 'cache-writer-control.test.ts'),
     "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nwriteFileSync('planted-helper.txt', 'planted\\n')\n\ntest('the control passes, having dropped an untracked artefact', () => {\n  expect(1 + 1).toBe(2)\n})\n",
@@ -234,6 +234,21 @@ async function seedControlForgeryRepo(): Promise<string> {
   writeFileSync(
     join(repo, 'tests', 'self-forging-guard.test.ts'),
     "import { writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\nwriteFileSync(\n  'tests/self-forging-guard.test.ts',\n  \"import { expect, test } from 'bun:test'\\n\\ntest('rewritten', () => {\\n  expect(1).toBe(1)\\n})\\n\",\n)\n\ntest('this guard is red until it has rewritten itself', () => {\n  expect(1).toBe(2)\n})\n",
+  )
+  // THE SAME FORGERY SPELLED AS A WRAPPER. `make …` is refused as a GUARD and
+  // stays a LEGAL CONTROL, so this is the shape the schema itself invites — the
+  // recipe writes the guard green and exits 0, and the seam has to hold for it
+  // exactly as it does for a test file's module body. The recipe line is
+  // TAB-indented, which is the only indentation make accepts.
+  writeFileSync(
+    join(repo, 'Makefile'),
+    'testcontrol:\n\tcp tests/rewritten-guard.txt tests/g.test.ts\n',
+  )
+  // The bytes the recipe copies over the guard: a passing test, so the guard's
+  // second run would be GREEN if anything the control wrote survived.
+  writeFileSync(
+    join(repo, 'tests', 'rewritten-guard.txt'),
+    "import { expect, test } from 'bun:test'\n\ntest('rewritten', () => {\n  expect(1).toBe(1)\n})\n",
   )
   await git(repo, 'add', '-A')
   await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its tests, and the files that write to the tree while they run')
@@ -1516,7 +1531,7 @@ describe('the mutation-proof gate against real git', () => {
     expect(nominated.reason).toContain('does not exist at')
   }, 60_000)
 
-  test("a control that REWRITES THE GUARD'S TEST FILE is REFUSED, and the reason names the file", async () => {
+  test("a control whose MODULE BODY rewrites the guard's test file cannot forge the proof", async () => {
     // THE FOURTEENTH ESCAPE, end to end, exactly as a review seat ran it at
     // this branch's head: the guard never imports the target and fails
     // unconditionally, so it is RED under the mutation for free; the control is
@@ -1526,9 +1541,14 @@ describe('the mutation-proof gate against real git', () => {
     // about the argv is wrong — and it came back red, green, green with nothing
     // having tested `src/limit.ts`.
     //
-    // VERIFY-BY-REVERT, done once and restored: with the porcelain/re-provision
-    // seam commented out this expectation was verified to FAIL — ok:true, and
-    // `evidence.proved` true — which is the forgery itself.
+    // The forgery is not detected; it is made UNREACHABLE. The restored guard
+    // is observed in a worktree re-provisioned at the same pinned sha, so the
+    // rewritten `tests/g.test.ts` dies with the tree it was written into and
+    // the guard is red again — which is not a proof.
+    //
+    // EXPECTATION VERIFIED TO FAIL — proved:true — with the re-provision
+    // stubbed (`const fresh = true` in place of `await reprovision()`), then
+    // restored. That failing run IS the forgery.
     const repo = await seedControlForgeryRepo()
     const out = await runMutationProofGate({
       run: { id: 'run-control-forgery', slug: 'control-forgery', repo_path: repo, branch: 'trident/control-forgery' },
@@ -1544,11 +1564,17 @@ describe('the mutation-proof gate against real git', () => {
     })
     expect(out.ok).toBe(false)
     expect(out.exempt).toBe(false)
-    expect(out.evidence?.proved ?? null).not.toBe(true)
-    // NAMED, not merely refused: the build has to be able to see which of its
-    // two nominated commands wrote into the tree.
-    expect(out.reason).toContain('edited the proof worktree')
-    expect(out.reason).toContain('tests/g.test.ts')
+    expect(out.evidence?.proved ?? null).toBe(false)
+    expect(out.reason).toContain('did not return to GREEN after the restore')
+    // POSITIVE CONTROLS that the forgery MECHANICS really executed rather than
+    // this being an early refusal that never reached the tree: the guard was
+    // genuinely RED under the mutation, and the forging control ran GREEN —
+    // i.e. the write happened, and only the fresh tree stopped it counting.
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
     // The proof worktree is still removed by the outer `finally`.
     expect(
       existsSync(
@@ -1562,13 +1588,46 @@ describe('the mutation-proof gate against real git', () => {
     ).toBe(false)
   }, 120_000)
 
+  test('…and the same write spelled as a `make` GOAL — a deliberately legal control — cannot either', async () => {
+    // A WRAPPER IS A LEGAL CONTROL, on purpose: the guard-side wrapper refusal
+    // exists because a script body can LOAD the mutated file, which only a
+    // guard can profit from. So the recipe here is the schema's own invitation,
+    // and the seam has to hold for it with no argv inspection whatsoever — the
+    // recipe copies a passing stub over the guard's committed file and exits 0.
+    //
+    // EXPECTATION VERIFIED TO FAIL — proved:true — with the re-provision
+    // stubbed (`const fresh = true`), then restored.
+    const repo = await seedControlForgeryRepo()
+    const out = await runMutationProofGate({
+      run: { id: 'run-make-forgery', slug: 'make-forgery', repo_path: repo, branch: 'trident/control-forgery' },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/g.test.ts'],
+        control: ['make', 'testcontrol'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect(out.ok).toBe(false)
+    expect(out.exempt).toBe(false)
+    expect(out.evidence?.proved ?? null).toBe(false)
+    expect(out.reason).toContain('did not return to GREEN after the restore')
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
+  }, 120_000)
+
   test('…and a GUARD that rewrites ITSELF green between its two runs is refused at the same seam', async () => {
     // THE ONE-ACTOR VARIANT. The control is honest and inert; the forgery is
     // entirely inside the guard, whose module body rewrites its own file before
     // failing. Only the guard's SECOND run would have read the rewritten copy —
     // which is why no inspection of the CONTROL, however thorough, could have
-    // caught it, and why the seam asks the TREE rather than asking who wrote
-    // what.
+    // caught it, and why the seam replaces the TREE rather than asking who
+    // wrote what.
     const repo = await seedControlForgeryRepo()
     const out = await runMutationProofGate({
       run: { id: 'run-self-forging', slug: 'self-forging', repo_path: repo, branch: 'trident/control-forgery' },
@@ -1584,9 +1643,13 @@ describe('the mutation-proof gate against real git', () => {
     })
     expect(out.ok).toBe(false)
     expect(out.exempt).toBe(false)
-    expect(out.evidence?.proved ?? null).not.toBe(true)
-    expect(out.reason).toContain('edited the proof worktree')
-    expect(out.reason).toContain('tests/self-forging-guard.test.ts')
+    expect(out.evidence?.proved ?? null).toBe(false)
+    expect(out.reason).toContain('did not return to GREEN after the restore')
+    const obs = out.evidence?.observed
+    expect(obs ?? null).not.toBeNull()
+    if (!obs) throw new Error('unreachable')
+    expect(obs.guard_mutated.exit_code).not.toBe(0)
+    expect(obs.control_mutated.exit_code).toBe(0)
   }, 120_000)
 
   test('…while an HONEST pair still proves red-then-green THROUGH the re-provision', async () => {
@@ -1622,13 +1685,13 @@ describe('the mutation-proof gate against real git', () => {
     expect(obs.guard_restored.exit_code).toBe(0)
   }, 120_000)
 
-  test('…and an UNTRACKED plant is tolerated by the porcelain check and DELETED before the restored guard runs', async () => {
-    // THE `clean -fdx` ROW, load-bearing in both directions. The control writes
-    // `planted-helper.txt`, which is untracked — so step (1) must NOT refuse it,
-    // or every repo whose runner drops a cache loses its nomination. And the
-    // guard, which runs LAST on the re-provisioned tree, asserts that file is
-    // ABSENT: deleting the `clean -fdx` call reddens the restored guard and
-    // this row with it (verified once by deleting that call, then restored).
+  test('…and an UNTRACKED plant costs an honest pair nothing, because it dies with the tree', async () => {
+    // THE OVER-REFUSAL GUARD, load-bearing in both directions. The control
+    // writes `planted-helper.txt` — a runner cache, the commonest honest write
+    // there is — and the proof must NOT be refused for it, or every repo whose
+    // runner drops a cache loses its nomination. And the honest guard, which
+    // runs LAST on the re-provisioned tree, asserts that file is ABSENT, so the
+    // row also proves the fresh tree really is fresh.
     const repo = await seedControlForgeryRepo()
     const out = await runMutationProofGate({
       run: { id: 'run-untracked-plant', slug: 'untracked-plant', repo_path: repo, branch: 'trident/control-forgery' },
