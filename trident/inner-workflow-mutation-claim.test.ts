@@ -564,17 +564,17 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // body rewrote the guard's own test file made the restored guard green
       // with nothing having tested the target. A build told only "a wrapper is
       // a legal control" would write exactly that shape.
-      expect(['a control may not write into the tree', d.includes('MAY NOT WRITE INTO THE WORKTREE')]).toEqual([
-        'a control may not write into the tree',
+      expect(['the control is not unobserved', d.includes('status --porcelain --ignored')]).toEqual([
+        'the control is not unobserved',
         true,
       ])
-      expect(['and the proof refuses it', d.includes('REFUSES OUTRIGHT')]).toEqual(['and the proof refuses it', true])
+      expect(d).not.toContain('merely has to stay green')
     }
-    // Two-sided: the fence really exists on the prover side, in the words its
-    // refusal uses, so the sentence cannot drift into a promise the gate does
-    // not keep.
-    expect(PROVER_SRC).toContain('the worktree changed underneath the proof')
-    expect(PROVER_SRC).toContain('function shapeDrift(')
+    // Two-sided: the fence really exists on the prover side, in the argv it
+    // spends and the words its refusal uses, so the sentence cannot drift into
+    // a promise the gate does not keep.
+    expect(PROVER_SRC).toContain("'status', '--porcelain', '--ignored'")
+    expect(PROVER_SRC).toContain('no longer matches')
     // Two-sided: the prover really refuses the wrapper for the GUARD only, so
     // the sentence above cannot drift into a permission the gate does not give.
     expect(PROVER_SRC).toContain('function guardRunsTheMutatedFile(')

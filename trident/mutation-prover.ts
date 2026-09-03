@@ -2594,46 +2594,6 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     return { ...e, proof_token: createHmac('sha256', key).update(canonicalPayload(e)).digest('hex') }
   }
 
-  /**
-   * WHAT GIT SAYS THE WORKTREE LOOKS LIKE, as a sorted set of porcelain lines.
-   *
-   * The proof's whole logic is "one file changed, and only one": the guard reds
-   * under the mutation and greens once the mutation is gone. Between those two
-   * observations the CONTROL runs — branch-authored code, by construction — and
-   * until this fence existed the only thing re-checked afterwards was
-   * `claim.file`'s own digest. So a control whose module body rewrote the
-   * GUARD'S TEST FILE into a passing one forged `proved: true` end to end:
-   * guard red (mutated), control green, guard green (restored) — with nothing
-   * having tested the target. `make …` and any test file are deliberately legal
-   * controls, and a test file's module body runs on load, so the shape was
-   * reachable with no shell and no hook.
-   *
-   * The proof worktree is a FRESH detached checkout of `headSha`, so this is
-   * near-empty on the way in; comparing the two snapshots rather than demanding
-   * emptiness is what keeps an injected `run_host` (which answers `git status`
-   * with whatever a test wired) from changing behaviour: two identical answers,
-   * however unhelpful, describe a tree that did not move. Untracked-but-ignored
-   * paths (`node_modules/`, caches) are not reported by `--porcelain`, so an
-   * honest test run's own scratch does not trip it.
-   */
-  async function worktreeShape(wt: string): Promise<string[]> {
-    const res = await deps.run_host(['git', '-C', wt, 'status', '--porcelain'], wt)
-    if (!res.ok) return [`git status unavailable (exit ${res.exit_code})`]
-    return res.stdout
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0)
-      .sort()
-  }
-
-  /** Every line present in exactly one of the two snapshots, sorted. */
-  function shapeDrift(before: readonly string[], after: readonly string[]): string[] {
-    const b = new Set(before)
-    const a = new Set(after)
-    const drift = [...before.filter((l) => !a.has(l)), ...after.filter((l) => !b.has(l))]
-    return [...new Set(drift)].sort()
-  }
-
   function refuse(run_id: string, claim: MutationClaim, reason: string): MutationEvidence {
     return sign({
       schema: MUTATION_PROOF_SCHEMA,
@@ -3136,12 +3096,6 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
       return refuse(run_id, claim, `mutating ${claim.file} did not change its bytes — the mutation did not apply`)
     }
 
-    // THE TREE AS IT STANDS BEFORE A SINGLE BYTE MOVES. Read here, and again
-    // below before the restored guard runs: everything between the two is the
-    // window in which the guard's red and its green are supposed to differ by
-    // the mutation ALONE — see `worktreeShape`.
-    const shapeBefore = await worktreeShape(wt)
-
     try {
       await fs.write(target, mutated)
     } catch (err) {
@@ -3168,19 +3122,59 @@ export function createMutationProver(deps: MutationProverDeps): MutationProver {
     }
     const restoredSha = sha256(restored)
 
-    // AND THE TREE AS IT STANDS NOW, before the restored guard is asked
-    // anything. A guard that greens because the control REWROTE it is not an
-    // observation of the mutation being gone, and the digest check above cannot
-    // see it: it looks at `claim.file` and at nothing else.
-    const drift = shapeDrift(shapeBefore, await worktreeShape(wt))
-    if (drift.length > 0) {
-      const named = drift.slice(0, 5).join(', ')
-      const rest = drift.length > 5 ? `, +${drift.length - 5} more` : ''
-      return refuse(
-        run_id,
-        claim,
-        `the worktree changed underneath the proof (${named}${rest}) — only ${claim.file} may change while a proof runs, so a control that writes into the tree cannot be told from one that proved anything: run the guard and the control against the tree as it is`,
-      )
+    // THE TREE THE SECOND OBSERVATION IS OF. The guard and the control are
+    // branch-authored code that EXECUTED between the guard's RED and its
+    // GREEN, and restoring `claim.file` restores one file, not the tree. A
+    // control whose module body rewrites the guard's own test file turns
+    // red-then-green into a forgery with two honest exit codes — reproduced
+    // by review at this head: an unconditionally-red guard plus a control
+    // that writeFileSync's it green came back proved:true. So before the
+    // restored-guard observation, ask git — never the nominated commands —
+    // whether the worktree still IS the provisioned tree. `--ignored` is
+    // load-bearing: a fresh `worktree add` materialises only tracked files,
+    // so the tree was born with no ignored entries either, and node_modules
+    // poison written into the worktree would hide behind a .gitignore.
+    // Every arm fails CLOSED: a status that could not run, ran out of proof
+    // budget, or printed ANYTHING refuses. The ONE legal skip is an
+    // already-exhausted budget, where `observe` below returns timed_out
+    // without spawning and `evaluate` refuses a timed-out guard_restored —
+    // proved:true is unreachable on that path, and the budget stays the
+    // budget (`tick.ts` is single-flight; an unbounded await here would be
+    // a stall a hostile control could manufacture by dirtying the tree).
+    const statusBudget = deadline - now()
+    if (statusBudget > 0) {
+      const ceiling = after(statusBudget)
+      let status: HostCommandResult | 'timeout'
+      try {
+        status = await Promise.race([
+          deps.run_host(['git', '-C', wt, 'status', '--porcelain', '--ignored'], wt),
+          ceiling.promise,
+        ])
+      } finally {
+        ceiling.cancel()
+      }
+      if (status === 'timeout' || !status.ok) {
+        return refuse(
+          run_id,
+          claim,
+          'could not verify the proof worktree after the mutated observations (git status ' +
+            `${status === 'timeout' ? 'ran out of proof budget' : 'failed'}) — refusing rather than observing a tree the nominated commands may have edited`,
+        )
+      }
+      const dirt = status.stdout
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0)
+      if (dirt.length > 0) {
+        return refuse(
+          run_id,
+          claim,
+          `the proof worktree no longer matches ${headSha.slice(0, 8)} after the mutated observations (${namesWithinBudget(dirt)}) — ` +
+            "the guard and control are branch-authored code executing between the guard's RED and its GREEN, and a restored-guard " +
+            'observation of a tree they edited would prove what they wrote, not what the commit does; nominate a guard and control ' +
+            'that leave the worktree exactly as provisioned',
+        )
+      }
     }
 
     const guardRestored = await observe(claim.guard, wt, deadline)

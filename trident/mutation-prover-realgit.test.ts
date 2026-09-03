@@ -218,6 +218,44 @@ async function seedForgingControlRepo(): Promise<string> {
 }
 
 /**
+ * THE OTHER HALF OF THE FENCE, and the row that makes `--ignored` load-bearing:
+ * an HONEST guard over `src/limit.ts`, and a control whose module body writes
+ * into a path `.gitignore` hides. `git status --porcelain` alone reports
+ * nothing for it, so without `--ignored` this pair proves red-then-green while
+ * branch-authored bytes (here a file; in the general case `node_modules/…`)
+ * were written into the tree the restored guard then ran against.
+ */
+async function seedIgnoredWritingControlRepo(): Promise<string> {
+  const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-ignored-control-'))
+  created.push(root)
+  const repo = join(root, 'repo')
+  await spawnCapture(['git', 'init', '-q', '--initial-branch=main', repo], root)
+  writeFileSync(join(repo, 'README.md'), 'seed\n')
+  writeFileSync(join(repo, '.gitignore'), 'scratch/\n')
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'seed')
+
+  await git(repo, 'switch', '-q', '-c', 'trident/ignored-writing-control')
+  mkdirSync(join(repo, 'src'), { recursive: true })
+  mkdirSync(join(repo, 'tests'), { recursive: true })
+  writeFileSync(
+    join(repo, 'src', 'limit.ts'),
+    'export function clamp(n: number, max: number): number {\n  return n > max ? max : n\n}\n',
+  )
+  writeFileSync(
+    join(repo, 'tests', 'g.test.ts'),
+    "import { expect, test } from 'bun:test'\n\nimport { clamp } from '../src/limit.ts'\n\ntest('clamp holds the ceiling', () => {\n  expect(clamp(5, 3)).toBe(3)\n})\n",
+  )
+  writeFileSync(
+    join(repo, 'tests', 'control.test.ts'),
+    "import { mkdirSync, writeFileSync } from 'node:fs'\n\nimport { expect, test } from 'bun:test'\n\n// Module body: this runs on LOAD, and `scratch/` is gitignored.\nmkdirSync('scratch', { recursive: true })\nwriteFileSync('scratch/poison.txt', 'x\\n')\n\ntest('the control stays green', () => {\n  expect(1 + 1).toBe(2)\n})\n",
+  )
+  await git(repo, 'add', '-A')
+  await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the module, its honest test, and a control that writes ignored scratch')
+  return repo
+}
+
+/**
  * A repo whose branch adds a LIBRARY whose NAME a runner collects but no
  * convention declares a test — `src/thing_test.ts` — plus the separate test
  * that asserts it and an unrelated control. This is the shape a bare substring
@@ -1516,7 +1554,8 @@ describe('the mutation-proof gate against real git', () => {
       run_host: spawnCapture,
     })
     expect([forged.ok, forged.evidence?.proved ?? null]).toEqual([false, false])
-    expect(forged.reason).toContain('the worktree changed underneath the proof')
+    expect(forged.exempt).toBe(false)
+    expect(forged.reason).toContain('no longer matches')
     expect(forged.reason).toContain('tests/tautology.test.ts')
 
     // POSITIVE CONTROL on the same repository: an honest guard over the same
@@ -1535,7 +1574,37 @@ describe('the mutation-proof gate against real git', () => {
       run_host: spawnCapture,
     })
     expect([honest.ok, honest.evidence?.proved ?? null]).toEqual([true, true])
-    expect(honest.reason).not.toContain('the worktree changed underneath the proof')
+    expect(honest.reason).not.toContain('no longer matches')
+  }, 120_000)
+
+  test('…and a control that writes into a GITIGNORED path is refused too — `--ignored` is load-bearing', async () => {
+    // DELETE `--ignored` FROM THE ARGV AND THIS ROW PROVES RED-THEN-GREEN.
+    // That is the row's whole job: a fresh `worktree add` materialises only
+    // tracked files, so the proof tree was born with no ignored entries either,
+    // and anything ignored that exists afterwards was written by the guard or
+    // the control while the proof was running. The guard here is HONEST — the
+    // refusal is about what the control put in the tree, not about the claim.
+    const repo = await seedIgnoredWritingControlRepo()
+    const out = await runMutationProofGate({
+      run: {
+        id: 'run-ignored-control',
+        slug: 'ignored-control',
+        repo_path: repo,
+        branch: 'trident/ignored-writing-control',
+      },
+      claim: {
+        file: 'src/limit.ts',
+        find: 'n > max ? max : n',
+        replace: 'n',
+        guard: ['bun', 'test', 'tests/g.test.ts'],
+        control: ['bun', 'test', 'tests/control.test.ts'],
+      },
+      base_branch: 'main',
+      run_host: spawnCapture,
+    })
+    expect([out.ok, out.exempt]).toEqual([false, false])
+    expect(out.reason).toContain('no longer matches')
+    expect(out.reason).toContain('scratch')
   }, 120_000)
 
   test('an expected_head that names a TREE is refused — only the `^{commit}` peel says so', async () => {

@@ -140,13 +140,10 @@ interface HostScript {
   /** file text `git show <merge-base>:<path>` reports — what the BASE carried.
    *  A path absent here reads as "the base did not have this file". */
   baseFiles?: Record<string, string>
-  /** `git status --porcelain` for the FIRST snapshot, taken before the mutation
-   *  is written. Absent → a clean worktree, which is what a fresh detached
-   *  checkout of the head actually is. */
-  statusBefore?: string
-  /** …and for the SECOND, taken after the control ran and before the restored
-   *  guard runs. Absent → identical to the first: a tree that did not move. */
-  statusAfterControl?: string
+  /** stdout for `git status --porcelain --ignored` after the restore (default: a clean tree). */
+  statusOut?: string
+  /** the status read fails — the pristine-tree check must fail CLOSED. */
+  statusFails?: boolean
 }
 
 function scriptedHost(s: HostScript = {}): {
@@ -155,17 +152,12 @@ function scriptedHost(s: HostScript = {}): {
 } {
   const calls: string[][] = []
   let guardRuns = 0
-  let statusRuns = 0
   return {
     calls,
     async run(cmd) {
       calls.push(cmd)
       if (cmd.includes('rev-parse')) return s.headUnresolvable === true ? res(1) : res(0, `${HEAD}\n`)
-      if (cmd.includes('status')) {
-        statusRuns += 1
-        const before = s.statusBefore ?? ''
-        return res(0, statusRuns === 1 ? before : (s.statusAfterControl ?? before))
-      }
+      if (cmd.includes('status')) return s.statusFails === true ? res(1) : res(0, s.statusOut ?? '')
       if (cmd.includes('worktree')) {
         if (cmd.includes('add')) return s.worktreeAddFails === true ? res(1) : res(0)
         return res(0)
@@ -226,31 +218,19 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     const joined = host.calls.map((c) => c.join(' '))
     expect(joined.some((c) => c.includes(`worktree add --detach --force ${proofWorktreePath('/repo', RUN)} ${HEAD}`))).toBe(true)
     expect(joined.filter((c) => c.includes('worktree remove')).length).toBe(2)
-  })
 
-  test('a control that WRITES INTO THE TREE between the guard\'s red and its green is refused', async () => {
-    // THE FORGERY THIS FENCES. The control is branch-authored code that runs
-    // BETWEEN the two guard observations, and the only thing re-checked
-    // afterwards was `claim.file`'s digest — so a control whose module body
-    // rewrote the GUARD'S OWN TEST FILE into a passing one produced red,
-    // green, green with nothing having tested the target. A test file is a
-    // legal control and its module body runs on load, so no shell and no load
-    // hook were needed. Here the second `git status` reports that file dirty.
-    const { prover } = proverOver({ statusAfterControl: ' M tests/guard.test.ts\n' })
-    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
-    expect(evidence.proved).toBe(false)
-    expect(evidence.reason).toContain('the worktree changed underneath the proof')
-    // It NAMES what moved, so the next build is not left guessing.
-    expect(evidence.reason).toContain('tests/guard.test.ts')
-    expect(evidence.observed).toBeNull()
-
-    // POSITIVE CONTROL, on the same seed: with the tree standing still the very
-    // same claim proves. Without this row, deleting the fence's `if` would leave
-    // the assertions above the only thing this file says about drift, and a
-    // fence that refused EVERY proof would pass them.
-    const still = await proverOver().prover.prove({ run: RUN, claim: CLAIM })
-    expect(still.proved).toBe(true)
-    expect(still.reason).not.toContain('the worktree changed underneath the proof')
+    // THE PRISTINE-TREE READ SITS BETWEEN THE TWO GUARD OBSERVATIONS. This is
+    // the positive control for the fence: delete the production check and only
+    // these lines notice, because every refusal row below would still refuse
+    // for the reason the fence names.
+    const statusIdx = host.calls.findIndex((c) => c.includes('status') && c.includes('--porcelain') && c.includes('--ignored'))
+    const guardIdxs = host.calls.map((c, i) => (c.join(' ') === CLAIM.guard.join(' ') ? i : -1)).filter((i) => i >= 0)
+    const controlIdx = host.calls.findIndex((c) => c.join(' ') === CLAIM.control.join(' '))
+    expect(statusIdx).toBeGreaterThan(-1)
+    expect(guardIdxs.length).toBe(2)
+    expect(statusIdx).toBeGreaterThan(controlIdx)
+    expect(statusIdx).toBeGreaterThan(guardIdxs[0] as number)
+    expect(statusIdx).toBeLessThan(guardIdxs[1] as number)
   })
 
   test('the guard that stays GREEN under the mutation is not a guard → not proved', async () => {
@@ -289,9 +269,8 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
       run_host: async (cmd) => {
         if (cmd.includes('rev-parse')) return res(0, HEAD)
         if (cmd.includes('worktree')) return res(0)
-        // …and `git status` is the drift fence's own read of the worktree, not
-        // a command the claim nominated: it answers, so the ONLY thing hanging
-        // here is the guard.
+        // The fake host learns the pristine-tree command exactly as it learned
+        // ls-tree; a hang HERE is the budget-refusal path, not this test's subject.
         if (cmd.includes('status')) return res(0)
         // The guard never resolves.
         return new Promise<HostCommandResult>(() => {})
@@ -385,6 +364,71 @@ describe('the prover RUNS the mutation and reports what it saw', () => {
     const prover = createMutationProver({ run_host: host.run, fs })
     await prover.prove({ run: RUN, claim: CLAIM })
     expect(fs.files[path]).toBe(SRC_BEFORE)
+  })
+})
+
+describe('the restored-guard observation is of a tree no nominated command edited', () => {
+  // THE FOURTEENTH ESCAPE, and the first that needed no argv trick at all. The
+  // guard and the control are branch-authored code that RUNS between the
+  // guard's RED and its GREEN, and restoring `claim.file` restores one file,
+  // not the tree — so a committed unconditionally-red guard plus a control
+  // whose module body writeFileSync's it green came back `proved: true` with
+  // nothing having tested the target. The fence asks GIT, never the nominated
+  // commands, whether the worktree is still the tree it was provisioned as.
+  test('THE REPRO SHAPE: a rewritten tracked file is caught by git, not believed', async () => {
+    const { prover, host } = proverOver({ statusOut: 'M src/limit.test.ts' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('no longer matches')
+    expect(evidence.reason).toContain('src/limit.test.ts')
+    // Refused BEFORE the second observation: the guard was spawned exactly once.
+    expect(host.calls.filter((c) => c.join(' ') === CLAIM.guard.join(' ')).length).toBe(1)
+  })
+
+  test('an UNTRACKED file is an edit too', async () => {
+    // A control does not have to overwrite the guard to forge the green: a new
+    // file the runner collects, or one an existing import resolves to, is the
+    // same move spelled with `??` instead of ` M`.
+    const { prover } = proverOver({ statusOut: '?? tests/forged.test.ts' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('no longer matches')
+    expect(evidence.reason).toContain('tests/forged.test.ts')
+  })
+
+  test('an IGNORED path is an edit too — node_modules poison does not hide behind .gitignore', async () => {
+    // WHY `--ignored` IS ON THE ARGV. A fresh `worktree add` materialises only
+    // tracked files, so the tree was born with no ignored entries either;
+    // without the flag a control could write `node_modules/…` and git would
+    // report a clean tree while the restored guard resolved branch-written code.
+    const { prover } = proverOver({ statusOut: '!! node_modules/' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('no longer matches')
+    expect(evidence.reason).toContain('node_modules/')
+  })
+
+  test('a status that cannot be read fails CLOSED', async () => {
+    // An unanswerable question is not a clean answer: a proof whose tree cannot
+    // be verified is refused, never waved through.
+    const { prover } = proverOver({ statusFails: true })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(false)
+    expect(evidence.observed).toBeNull()
+    expect(evidence.reason).toContain('could not verify')
+  })
+
+  test('POSITIVE CONTROL: a clean tree proceeds to the restored observation and proves', async () => {
+    // Without this row a fence that refused EVERY proof would satisfy all four
+    // rows above.
+    const { prover, host } = proverOver({ statusOut: '' })
+    const evidence = await prover.prove({ run: RUN, claim: CLAIM })
+    expect(evidence.proved).toBe(true)
+    expect(evidence.reason).not.toContain('no longer matches')
+    expect(host.calls.filter((c) => c.join(' ') === CLAIM.guard.join(' ')).length).toBe(2)
   })
 })
 
