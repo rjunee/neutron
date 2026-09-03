@@ -80,6 +80,7 @@ import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
+import { readCommittedMutationClaim } from './mutation-claim-artifact.ts'
 import {
   runMutationProofGate,
   type MutationGateInput,
@@ -4360,12 +4361,33 @@ export function buildTridentOrchestrator(
       // pins the branch tip. Those are two independent answers to "which commit
       // is this about", and nothing compared them before: a tip that moved past
       // the reviewed commit gave a proof of B while the merge took A.
+
+      // THE COMMITTED-NOMINATION FALLBACK. On the codex route the schema field
+      // is filled by the bridge, which never sees the build's reasoning; and in
+      // pr mode the workflow process ends at every publish handoff, so the
+      // in-result claim arrives null even when the build nominated. The build
+      // therefore COMMITS its nomination to `.trident/mutation-claim.json`, and
+      // this reads it back AT THE REVIEWED OID — the very commit the gate pins —
+      // ONLY when the in-result claim is null (`??` short-circuits: a
+      // schema-supplied claim is never shadowed, and no read even happens). The
+      // artifact stays branch-controlled, UNTRUSTED input: the reader decodes
+      // shape only, and the gate below validates and actually RUNS it on the
+      // same terms as an agent-supplied claim. Every absence or failure reads
+      // as null — which the gate already refuses — so the fallback can never
+      // turn a missing nomination into a pass.
+      const expectedHead = reviewedHeadOid(run)
+      const claim =
+        result.mutation_claim ??
+        (await readCommittedMutationClaim(opts.run_host, run.repo_path, {
+          expected_head: expectedHead,
+          branch,
+        }))
       const proof = await proveMutation({
         run: { ...run, branch },
-        claim: result.mutation_claim,
+        claim,
         base_branch: await resolveBase(run),
         run_host: opts.run_host,
-        expected_head: reviewedHeadOid(run),
+        expected_head: expectedHead,
       })
       if (!proof.ok) {
         // `inner_verdict` / `inner_checkpoint` are left EXACTLY as the review left

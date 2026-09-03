@@ -18,6 +18,7 @@ import { describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 
+import { MUTATION_CLAIM_ARTIFACT_PATH } from './mutation-claim-artifact.ts'
 import { parseMutationClaim } from './mutation-prover.ts'
 
 const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.meta.url)), 'utf8')
@@ -25,6 +26,7 @@ const SRC = readFileSync(fileURLToPath(new URL('./inner-workflow.mjs', import.me
 interface Captured {
   label: string | undefined
   schema: Record<string, unknown> | undefined
+  prompt: string
 }
 
 const BUILD_CLAIM = {
@@ -45,11 +47,11 @@ async function runWorkflow(opts: { fixRoundClaim: unknown }): Promise<{
   let synthCount = 0
 
   const agent = async (
-    _prompt: string,
+    prompt: string,
     o?: { label?: string; schema?: Record<string, unknown> },
   ): Promise<unknown> => {
     const label = o?.label
-    captured.push({ label, schema: o?.schema })
+    captured.push({ label, schema: o?.schema, prompt })
     const forgeResult = {
       prNumber: null,
       branch: 'trident/test-run',
@@ -166,5 +168,25 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
   test('a fix round that nominates nothing leaves the previous nomination standing', async () => {
     const { result } = await runWorkflow({ fixRoundClaim: undefined })
     expect(parseMutationClaim(result.mutationClaim)).toEqual(BUILD_CLAIM)
+  })
+
+  test('the BUILD CONTRACT asks for the committed nomination — path, exactly-once, and the prose opt-out', async () => {
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined })
+    const forge = captured.filter((c) => String(c.label).startsWith('forge:'))
+    // POSITIVE CONTROLS: build + at least one fix round, so the loop below can
+    // never pass on an empty filter or an empty brief.
+    expect(forge.length).toBeGreaterThan(1)
+    expect(forge.map((c) => c.label)).toContain('forge:build')
+    expect(forge.some((c) => String(c.label).startsWith('forge:fix-round-'))).toBe(true)
+    for (const call of forge) {
+      const brief = call.prompt
+      expect(brief.length).toBeGreaterThan(0)
+      expect(brief).toContain(MUTATION_CLAIM_ARTIFACT_PATH)
+      expect(brief).toContain('EXACTLY ONCE')
+      expect(brief).toContain('do NOT write the file at all')
+      // The ask sits ABOVE the numbered CONTRACT, with the other standing blocks.
+      expect(brief.indexOf('\nCONTRACT\n')).toBeGreaterThan(-1)
+      expect(brief.indexOf(MUTATION_CLAIM_ARTIFACT_PATH)).toBeLessThan(brief.indexOf('\nCONTRACT\n'))
+    }
   })
 })

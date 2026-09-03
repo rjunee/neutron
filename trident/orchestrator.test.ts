@@ -25,6 +25,11 @@ import {
   RESUME_HEAD_RETRY_DELAYS_MS,
   sweepStrandedFailures,
 } from './orchestrator.ts'
+import {
+  parseMutationClaim,
+  type MutationGateInput,
+  type MutationGateOutcome,
+} from './mutation-prover.ts'
 import { MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
@@ -2413,6 +2418,115 @@ describe('orchestrator — APPROVE → done → merge (server-gated)', () => {
     expect(final.worktree).toBe(runWorktreePath('/repo', final))
     expect(joined.some((c) => c.includes(`worktree add --detach --force ${final.worktree}`))).toBe(true)
     expect(joined.some((c) => c === `git -C ${final.worktree} rebase main`)).toBe(true)
+  })
+})
+
+describe('orchestrator — the committed mutation nomination reaches the gate', () => {
+  const ARTIFACT_CLAIM = {
+    file: 'trident/limit.ts',
+    find: 'n < LIMIT',
+    replace: 'true',
+    guard: ['bun', 'test', 'trident/limit.test.ts'],
+    control: ['bun', 'test', 'trident/other.test.ts'],
+  }
+  const SHOW_ARTIFACT = `git -C /repo show ${SIM_REVIEWED_HEAD}:.trident/mutation-claim.json`
+
+  /** Records every claim the gate was handed; mirrors the REAL gate's null
+   *  refusal (mutation-prover.ts's "nominated no mutation" reason) so a null
+   *  claim terminates exactly as production does. */
+  function claimSpyGate(seen: unknown[]) {
+    return async (input: MutationGateInput): Promise<MutationGateOutcome> => {
+      seen.push(input.claim ?? null)
+      if (input.claim === null || input.claim === undefined) {
+        return {
+          ok: false,
+          reason: 'mutation proof required but the build nominated no mutation to run',
+          exempt: false,
+          evidence: null,
+        }
+      }
+      return { ok: true, reason: 'spy accepted the nominated claim', exempt: false, evidence: null }
+    }
+  }
+
+  test('a null in-result claim falls back to the COMMITTED nomination at the reviewed OID — and the gate receives it', async () => {
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: claimSpyGate(seen),
+      // No `mutationClaim` key in the sim result → `mutation_claim` parses to
+      // null, which is exactly what a codex-routed build reports today.
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      // A REAL cleanup would provision a worktree at a `/repo` that does not exist.
+      merge_deps: {},
+      hostResponder: (cmd) =>
+        cmd.join(' ') === SHOW_ARTIFACT ? ok(JSON.stringify(ARTIFACT_CLAIM)) : ok(),
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(seen).toHaveLength(1)
+    // Positive control: the deep-equal below cannot pass on an empty extraction.
+    expect(seen[0]).not.toBeNull()
+    expect(seen[0]).toEqual(parseMutationClaim(ARTIFACT_CLAIM))
+    // Bound to the REVIEWED OID (the commit the gate pins), never the branch
+    // tip — the whole argv, because this is the injection surface.
+    expect(h.hostCalls).toContainEqual([
+      'git',
+      '-C',
+      '/repo',
+      'show',
+      `${SIM_REVIEWED_HEAD}:.trident/mutation-claim.json`,
+    ])
+  })
+
+  test('no committed nomination still means NULL — and a required proof still refuses', async () => {
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: claimSpyGate(seen),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: (cmd) =>
+        cmd.join(' ').includes(':.trident/mutation-claim.json')
+          ? { ok: false, stdout: '', stderr: 'fatal: path does not exist', exit_code: 128 }
+          : ok(),
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(final.failure_reason).toContain('nominated no mutation to run')
+    // The refusal is a MISSING PROOF, not a reviewer's finding (existing invariant).
+    expect(final.inner_verdict).toBe('APPROVE')
+    expect(seen).toEqual([null])
+    // The artifact WAS looked for — the assertion above is not vacuous.
+    expect(h.hostCalls.some((c) => c.join(' ').includes(':.trident/mutation-claim.json'))).toBe(true)
+  })
+
+  test('a schema-supplied claim WINS — the artifact is never even read', async () => {
+    // Differs from the primed artifact, so an inverted precedence fails the deep-equal.
+    const IN_RESULT_CLAIM = { ...ARTIFACT_CLAIM, find: 'n <= LIMIT' }
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: claimSpyGate(seen),
+      plan: () => ({
+        result: { verdict: 'APPROVE', branch: 'feat-x', mutationClaim: IN_RESULT_CLAIM },
+      }),
+      merge_deps: {},
+      // The artifact is primed with a DIFFERENT claim — the trap for an
+      // inverted or double-read implementation.
+      hostResponder: (cmd) =>
+        cmd.join(' ') === SHOW_ARTIFACT ? ok(JSON.stringify(ARTIFACT_CLAIM)) : ok(),
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('done')
+    expect(seen).toEqual([parseMutationClaim(IN_RESULT_CLAIM)])
+    // Positive control against a null-vs-null equality.
+    expect(seen[0]).not.toBeNull()
+    // The `??` short-circuit IS the no-shadowing guarantee.
+    expect(h.hostCalls.some((c) => c.join(' ').includes('.trident/mutation-claim.json'))).toBe(false)
   })
 })
 

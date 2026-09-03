@@ -59,6 +59,11 @@ export interface SimResult {
    *  when the test sets it (the workflow writes it on the publish handoff), so the
    *  absent-field default keeps every other test on the unsuffixed checkpoint. */
   deviatedFromSpec?: boolean
+  /** The build's mutation NOMINATION carried in the result JSON. Emitted
+   *  only when the test sets it (mirrors the .mjs, which reports what Forge
+   *  supplied), so the absent-field default decodes to
+   *  `mutation_claim: null` — the shape every pre-existing test exercises. */
+  mutationClaim?: unknown
 }
 
 /** The stand-in reviewed head OID a simulated workflow records (#545). Real
@@ -90,6 +95,7 @@ export function simResultJson(sim: SimResult): string {
     // absent-field default (no findings recorded).
     ...(sim.findings !== undefined ? { findings: sim.findings } : {}),
     ...(sim.deviatedFromSpec !== undefined ? { deviatedFromSpec: sim.deviatedFromSpec } : {}),
+    ...(sim.mutationClaim !== undefined ? { mutationClaim: sim.mutationClaim } : {}),
     // #545 — production ALWAYS records the reviewed head, so the default models
     // that; an explicit null models the workflow that failed to (and the pr-mode
     // merge must then refuse rather than merge an unpinned head).

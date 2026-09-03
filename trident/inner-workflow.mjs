@@ -1310,6 +1310,15 @@ function forgeBuildContract(reenter, artifactCheckpointName, suiteScope = 'full-
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${memberMode ? 'member' : mergeMode}.
 ${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrategy}\n`}
+MUTATION NOMINATION — the post-APPROVE merge gate READS this; a missing or stale nomination BLOCKS your merge.
+Before your final commit, write ONE JSON object to \`.trident/mutation-claim.json\` at the worktree root and COMMIT it with your work. Fields: file, find, replace, guard, control, optional rationale.
+- file: a repo-relative path (no leading \`/\`, no \`..\`) that THIS branch's diff against ${baseBranch} changes, and PRODUCTION code — never a test file, never documentation.
+- find: a string occurring EXACTLY ONCE in that file; replace: a DIFFERENT string; applied, the edit must break real behaviour.
+- guard and control: two DIFFERENT argv ARRAYS (JSON arrays of strings — NEVER shell strings), each a plain test invocation such as \`["bun","test","path/to.test.ts"]\`. Under the mutation the guard must go RED while the control STAYS GREEN; the gate actually RUNS both and refuses fakes.
+- Nominate nothing ONLY when your branch's ENTIRE diff is documentation — then do NOT write the file at all.
+- A fix round that moves or deletes the nominated line MUST update the committed file so find still occurs exactly once.
+Where you report via a schema, set mutationClaim to the SAME object (or null when you wrote no file).
+
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
