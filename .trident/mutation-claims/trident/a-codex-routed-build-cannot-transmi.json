@@ -1,8 +1,8 @@
 {
-  "file": "trident/mutation-claim-artifact.ts",
-  "find": "32 * 1024",
-  "replace": "0",
+  "file": "trident/mutation-prover.ts",
+  "find": "if (isMutationClaimArtifact(claim.file)) {",
+  "replace": "if (false && isMutationClaimArtifact(claim.file)) {",
   "guard": ["bun", "test", "trident/mutation-claim-artifact.test.ts"],
   "control": ["bun", "test", "trident/mutation-prover.test.ts"],
-  "rationale": "Zeroing the artifact byte-cap makes every non-empty committed nomination decode to null: the reader suite's non-null reads and its at-cap boundary control go red, while the prover suite never imports the constant and stays green."
+  "rationale": "This round's blocker fix: a committed nomination may no longer nominate ITSELF. Disabling that one branch in validateClaim lets a self-nomination through against a colluding diff, which reddens the self-nomination case in the reader suite (verified: 24 pass / 1 fail mutated, 25 pass / 0 fail restored); mutation-prover.test.ts never nominates that path and stays green (73 pass / 0 fail under the same mutation)."
 }
