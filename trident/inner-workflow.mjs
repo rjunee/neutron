@@ -981,9 +981,11 @@ const CODEX_FORGE_SCHEMA = {
     // the build COMMITS its nomination to `.trident/mutation-claims/<branch>.json`
     // and the gate reads that blob back out of git at the reviewed commit
     // (`trident/mutation-claim-artifact.ts`). `codexBuildPrompt` therefore tells
-    // the bridge to report null and never to invent one: a fabricated object
-    // WOULD be honoured (the gate prefers the in-result claim) and would shadow
-    // the real committed nomination.
+    // the bridge to report null and never to invent one — and because a fabricated
+    // object would otherwise be HONOURED (the gate prefers the in-result claim) and
+    // would shadow the real committed nomination, that instruction is not the guard:
+    // `forgeAgent` OVERWRITES this field with null on the way out of the cli route,
+    // so whatever the bridge puts here never reaches the gate.
     ...FORGE_SCHEMA.properties,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
     trailerComplete: { type: 'boolean' },
@@ -2031,7 +2033,22 @@ async function forgeAgent(opts, tag, brief, slot) {
       `${opts.label} committed on branch '${reportedBranch}' but the run builds '${forgeBranch}'. Refusing to continue: the reviewers would read a diff that merging '${forgeBranch}' does not land, and in local mode the branch holding that work is deleted after the merge.`,
     )
   }
-  return res
+  // THE BRIDGE'S `mutationClaim` IS DISCARDED IN CODE, not merely discouraged in
+  // prose. `codexBuildPrompt` tells the bridge to report null and never to invent
+  // one, but an instruction to an LLM is not a guarantee: the field rides in the
+  // `FORGE_SCHEMA` spread as type ['object','null'], so a fabricated object is
+  // SCHEMA-VALID on this route, and downstream (`mutationClaim = forge.mutationClaim`)
+  // it would be preferred over the committed artifact at the gate — shadowing the
+  // real nomination with one nobody measured. The bridge copies the wrapper's
+  // six-line trailer and never sees the build's reasoning, so null is the only
+  // honest value it can hold; forcing it here makes that a property of the ROUTE
+  // rather than of the prompt, on round 1 and every fix round alike (both call
+  // sites come through this one function). Normalising — rather than narrowing the
+  // schema to `{type:'null'}` — is deliberate and fail-safe: a bridge that
+  // fabricates loses the fabrication instead of failing schema validation and
+  // killing the run, and the committed artifact, which the gate reads out of git
+  // at the reviewed commit, answers for this route either way.
+  return { ...res, mutationClaim: null }
 }
 
 // Argus review rubric (from prompts/argus.md): APPROVE / REQUEST_CHANGES /

@@ -1,8 +1,8 @@
 {
-  "file": "trident/mutation-prover.ts",
-  "find": "return [local, remote]",
-  "replace": "return [remote]",
-  "guard": ["bun", "test", "trident/mutation-prover.test.ts"],
-  "control": ["bun", "test", "trident/mutation-claim-artifact.test.ts"],
-  "rationale": "This round's blocker fix: on DIVERGED local/origin bases the resolver returns BOTH tips and the branch diff becomes their intersection, so no file outside the branch's real delta can be certified whichever base the merge lands on. Collapsing back to one tip restores the merge-mode-blind hole: the diverged-base and intersection cases go red (verified 77 pass / 3 fail mutated, 80 pass / 0 fail restored) while the reader suite, whose two base refs resolve to one sha so the divergence branch is never taken, stays green (30 pass / 0 fail under the same mutation)."
+  "file": "trident/inner-workflow.mjs",
+  "find": "return { ...res, mutationClaim: null }",
+  "replace": "return res",
+  "guard": ["bun", "test", "trident/inner-workflow-mutation-claim.test.ts"],
+  "control": ["bun", "test", "trident/mutation-prover.test.ts"],
+  "rationale": "This round's blocker fix, and the last round that touched the code owns the nomination. On the codex route the bridge fills a schema whose mutationClaim rides in as type ['object','null'], so a fabricated object is schema-valid and, being preferred over the committed artifact at the gate, would shadow the real nomination. forgeAgent now discards it in code rather than by instruction. Restoring the bare `return res` reopens exactly that hole: the two adversarial-bridge cases (build round and fix round) go red (verified 9 pass / 2 fail mutated, 11 pass / 0 fail restored) while the prover suite, which never runs the workflow body, stays green."
 }

@@ -1018,8 +1018,16 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
     if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
     const base = segments[segments.length - 1] ?? ''
     if (EXECUTABLE_PROSE_FILES.includes(base)) return false
-    // THE BUILD'S OWN NOMINATION IS INERT. `.json` is not a prose suffix, so a
-    // documentation-only branch that also wrote `.trident/mutation-claims/<b>.json`
+    // A NOMINATION BLOB IS INERT — ANY of them under `.trident/mutation-claims/`,
+    // not only the one whose path spells THIS branch. `isMutationClaimArtifact`
+    // tests the directory prefix and the `.json` suffix and nothing else, because
+    // this function is not told which branch it is judging and threading one in
+    // would change its signature and both call sites for no behaviour: the reader
+    // only ever reads the per-branch path, and `validateClaim` refuses every
+    // spelling under this directory as a mutation TARGET, so a stray sibling blob
+    // can buy a branch an exemption but never a provable claim. `.json` is not a
+    // prose suffix, so before this a documentation-only branch that also wrote
+    // `.trident/mutation-claims/<b>.json`
     // destroyed its own exemption and became unmergeable — it owed a proof and
     // had no legal target to nominate. The file is the gate's bookkeeping, not
     // code the harness runs, so it neither earns nor forfeits an exemption.

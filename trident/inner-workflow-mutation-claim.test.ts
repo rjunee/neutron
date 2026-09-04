@@ -37,6 +37,19 @@ const BUILD_CLAIM = {
   control: ['bun', 'test', 'trident/other.test.ts'],
 }
 const FIX_CLAIM = { ...BUILD_CLAIM, find: 'n <= LIMIT', rationale: 'round 2 moved the line' }
+/**
+ * What a codex BRIDGE would report if it ignored its instruction and invented the
+ * field it cannot measure. Structurally valid on purpose — `parseMutationClaim`
+ * accepts it (asserted as a control below), so any null the codex route produces
+ * for it is the ROUTE discarding it, not the decoder refusing it.
+ */
+const BRIDGE_FABRICATION = {
+  file: 'trident/fabricated.ts',
+  find: 'invented by the bridge',
+  replace: 'still invented',
+  guard: ['bun', 'test', 'trident/fabricated.test.ts'],
+  control: ['bun', 'test', 'trident/other.test.ts'],
+}
 
 /**
  * Markdown the gate does NOT exempt (`isProseOnlyChange` returns false for each),
@@ -60,7 +73,7 @@ function artifactPathFor(branch: string): string {
 }
 
 /** Run the real workflow body; return every captured agent call + its result. */
-async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean }): Promise<{
+async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean; bridgeClaim?: unknown }): Promise<{
   captured: Captured[]
   result: Record<string, unknown>
 }> {
@@ -88,13 +101,14 @@ async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean }): P
     if (String(label).startsWith('head-probe-round-')) return { head: 'a'.repeat(40) }
     // The codex BRIDGE fills CODEX_FORGE_SCHEMA from the wrapper's trailer; it
     // reports mutationClaim null, which is the whole reason the committed
-    // artifact exists.
+    // artifact exists. `bridgeClaim` is the ADVERSARIAL case: a bridge that
+    // ignores its instruction and fabricates the field anyway.
     const codexBridge = opts.codex === true
       ? { codexStatus: 'connected', trailerComplete: true, wrapperExitCode: 0, preservedWork: false, wrapperErrTail: '' }
       : {}
     if (label === 'forge:build') {
       return opts.codex === true
-        ? { ...forgeResult, ...codexBridge, mutationClaim: null }
+        ? { ...forgeResult, ...codexBridge, mutationClaim: opts.bridgeClaim === undefined ? null : opts.bridgeClaim }
         : { ...forgeResult, mutationClaim: BUILD_CLAIM }
     }
     if (String(label).startsWith('forge:fix-round-')) {
@@ -333,6 +347,35 @@ describe('the codex route carries the nomination ask, and never fabricates the f
       // ...and the field really is required on this route (positive control).
       expect(call.schema?.required).toContain('mutationClaim')
     }
+  })
+
+  test('an ADVERSARIAL bridge that fabricates a nomination is overruled IN CODE — build round', async () => {
+    // The instruction the test above asserts is prose aimed at an LLM, and prose
+    // is not a guard: `mutationClaim` rides in the `FORGE_SCHEMA` spread as type
+    // ['object','null'], so this object is SCHEMA-VALID on the codex route. If it
+    // survived, the gate would prefer it over the nomination the build actually
+    // COMMITTED and would prove a mutation nobody measured.
+    const { result } = await runWorkflow({ fixRoundClaim: undefined, codex: true, bridgeClaim: BRIDGE_FABRICATION })
+    expect(parseMutationClaim(result.mutationClaim)).toBeNull()
+    // POSITIVE CONTROL — the fabricated object is a perfectly decodable claim, so
+    // the null above is the ROUTE discarding it and not a claim the decoder
+    // rejected on its own shape.
+    expect(parseMutationClaim(BRIDGE_FABRICATION)).toEqual(BRIDGE_FABRICATION)
+    // ...and a SECOND control: the very same object handed to the CLAUDE route is
+    // carried all the way to the terminal result. The discard is route-specific.
+    const claude = await runWorkflow({ fixRoundClaim: BRIDGE_FABRICATION })
+    expect(parseMutationClaim(claude.result.mutationClaim)).toEqual(BRIDGE_FABRICATION)
+  })
+
+  test('an ADVERSARIAL bridge that fabricates a nomination is overruled IN CODE — fix rounds too', async () => {
+    // Fix rounds go through the same `forgeAgent`, and the fix-round assignment
+    // (`if (fix && fix.mutationClaim) mutationClaim = fix.mutationClaim`) is a
+    // SECOND door onto the same value — a normalisation that covered only round 1
+    // would leave it open.
+    const { captured, result } = await runWorkflow({ fixRoundClaim: BRIDGE_FABRICATION, codex: true })
+    // POSITIVE CONTROL: a fix round really ran, so the null is not an unrun loop.
+    expect(captured.some((c) => String(c.label).startsWith('forge:fix-round-'))).toBe(true)
+    expect(parseMutationClaim(result.mutationClaim)).toBeNull()
   })
 
   test('a codex-routed build reports a NULL nomination — the gap the artifact closes', async () => {
