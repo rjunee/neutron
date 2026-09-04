@@ -263,7 +263,7 @@ async function readAtRevision(
     // (the host buffers the whole child output first, and trims it), so the cap
     // is applied to git's own record of the blob.
     const sized = await run_host(['git', '-C', repo_path, 'cat-file', '-s', at], repo_path)
-    if (!sized.ok) return { claim: null, note: `no committed nomination at ${at}` }
+    if (!sized.ok) return { claim: null, note: `no committed nomination: nothing at ${at} to size` }
     const size = Number.parseInt(sized.stdout.trim(), 10)
     if (!Number.isFinite(size)) {
       return { claim: null, note: `no committed nomination: unreadable object size for ${at}` }
@@ -276,13 +276,24 @@ async function readAtRevision(
     }
 
     const res = await run_host(['git', '-C', repo_path, 'show', at], repo_path)
-    if (!res.ok) return { claim: null, note: `no committed nomination at ${at}` }
-    const claim = parseMutationClaim(JSON.parse(res.stdout))
+    if (!res.ok) return { claim: null, note: `no committed nomination: git could not show ${at}` }
+    // DECODED IN ITS OWN try, so invariant (c) — "each null says WHICH failure it
+    // was" — actually holds here. Sharing the outer catch made a malformed body
+    // (`{nope`) and a host that THROWS produce the byte-identical note, which is
+    // the one distinction an operator reading a refusal most needs: the first is
+    // the build's file to fix, the second is the machine's.
+    let decoded: unknown
+    try {
+      decoded = JSON.parse(res.stdout)
+    } catch {
+      return { claim: null, note: `committed nomination at ${at} is not valid JSON` }
+    }
+    const claim = parseMutationClaim(decoded)
     if (claim === null) {
       return { claim: null, note: `committed nomination at ${at} is not a well-formed nomination` }
     }
     return { claim, note: `committed nomination read from ${at}` }
   } catch {
-    return { claim: null, note: `committed nomination at ${at} could not be read` }
+    return { claim: null, note: `committed nomination at ${at} could not be read: the git host threw` }
   }
 }

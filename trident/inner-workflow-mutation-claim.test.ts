@@ -530,4 +530,41 @@ describe('THE MEMBER SEAM — the nomination path is scoped per wave member', ()
     // above matching one constant.
     expect(paths[0]).not.toBe(paths[1])
   })
+
+  test('WRITER AND READER AGREE on the production dispatch, and fail CLOSED when they cannot', async () => {
+    // The suffix is a writer-side rule; the READER derives its path from the
+    // branch the run reports (`result.branch`, which the orchestrator passes to
+    // `readCommittedMutationClaim`). So the two can only agree when the caller
+    // already suffixed the member branch — which `waveChildSlug` does — and the
+    // divergent case must be a REFUSAL, never a sibling member's nomination.
+    const production = await runWorkflow({
+      fixRoundClaim: undefined,
+      member: { taskId: 'T1', memberBranch: 'trident/lane--wT1' },
+    })
+    const writerPath = (brief: string): string => {
+      const m = /\.trident\/mutation-claims\/\S+?\.json/.exec(brief)
+      if (m === null) throw new Error('the brief named no nomination path')
+      return m[0]
+    }
+    const built = (r: typeof production): string =>
+      writerPath(String(r.captured.find((c) => c.label === 'forge:build')?.prompt))
+    // AGREEMENT: what the build is told to write is exactly what the reader
+    // derives from the branch this run reports out.
+    expect(built(production)).toBe(artifactPathFor(String(production.result.branch)))
+
+    // DIVERGENCE, on a caller that threaded an UNSUFFIXED member branch: the
+    // writer scopes per member, the reader does not — so the reader looks for a
+    // file that is not there and the gate refuses. That is the correct failure;
+    // the alternative (one shared path) is a later member's gate satisfied by an
+    // earlier member's nomination.
+    const divergent = await runWorkflow({
+      fixRoundClaim: undefined,
+      member: { taskId: 'T9', memberBranch: 'trident/lane' },
+    })
+    expect(built(divergent)).not.toBe(artifactPathFor(String(divergent.result.branch)))
+    // POSITIVE CONTROLS: both runs really built, and both really named a path —
+    // otherwise the comparison above is two throws or two empty strings.
+    expect([production.result.built, divergent.result.built]).toEqual([true, true])
+    expect(built(divergent)).toContain('--wT9')
+  })
 })

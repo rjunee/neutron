@@ -169,6 +169,39 @@ describe('readCommittedMutationClaim', () => {
     expect((await readCommittedMutationClaim(host.run, REPO, SOURCE)).claim).toBeNull()
   })
 
+  test('EACH null says WHICH failure it was — the four late failures do not collapse into one note', async () => {
+    // Invariant (c) is the reason this reader carries a note at all: the card it
+    // exists for records that ONE undifferentiated refusal was misdiagnosed for
+    // days. A malformed body is the build's file to fix; a host that throws is
+    // the machine's. Sharing one catch made those two byte-identical.
+    const throwsOnShow: RunHostCommand = async (cmd) => {
+      if (cmd.includes('show')) throw new Error('spawn failed')
+      if (cmd.includes('diff')) return ok(`${PATH}\n`)
+      if (cmd.includes('cat-file')) return ok('10')
+      return ok(`${REF_OID}\n`)
+    }
+    const notes = {
+      malformed: (await readCommittedMutationClaim(makeHost({ body: '{nope', size: '5' }).run, REPO, SOURCE)).note,
+      wrongShape: (await readCommittedMutationClaim(makeHost({ body: '{"a":1}' }).run, REPO, SOURCE)).note,
+      sizeFailed: (await readCommittedMutationClaim(makeHost({ size: fail(128) }).run, REPO, SOURCE)).note,
+      showFailed: (await readCommittedMutationClaim(makeHost({ body: fail(128) }).run, REPO, SOURCE)).note,
+      hostThrew: (await readCommittedMutationClaim(throwsOnShow, REPO, SOURCE)).note,
+    }
+    // POSITIVE CONTROL: every one of them really is a null read, so the notes
+    // below are notes about failures and not about a happy path.
+    for (const host of [makeHost({ body: '{nope', size: '5' }), makeHost({ size: fail(128) })]) {
+      expect((await readCommittedMutationClaim(host.run, REPO, SOURCE)).claim).toBeNull()
+    }
+    expect((await readCommittedMutationClaim(throwsOnShow, REPO, SOURCE)).claim).toBeNull()
+    // …and a successful read says something different again, so "distinct" is
+    // not satisfied by five spellings of the same refusal.
+    const read = (await readCommittedMutationClaim(makeHost({}).run, REPO, SOURCE)).note
+    const all = [...Object.values(notes), read]
+    expect(new Set(all).size).toBe(all.length)
+    expect(notes.malformed).toContain('not valid JSON')
+    expect(notes.hostThrew).toContain('the git host threw')
+  })
+
   test('valid JSON of the wrong shape is null — and the decode is what rejects it', async () => {
     const wrong = JSON.parse(BODY) as Record<string, unknown>
     wrong.guard = 'bun test trident/limit.test.ts' // a shell string, never an argv
@@ -538,13 +571,17 @@ describe('the nomination file itself is neither a target nor a behaviour change'
    * what makes the diff-binding check useless here and this rejection necessary.
    */
   const SELF_NOMINATIONS = [PATH, `./${PATH}`, `${MUTATION_CLAIM_ARTIFACT_DIR}/other-branch.json`]
+  /** The `.json` suffix test is CASE-SENSITIVE, so this spelling is an ordinary file. */
+  const UPPERCASE_SPELLING = `${MUTATION_CLAIM_ARTIFACT_DIR}/${BRANCH}.JSON`
   const collusiveHost: RunHostCommand = async (cmd) => {
     if (cmd.includes('rev-parse')) return ok(`${OID}\n`)
     if (cmd.includes('diff') && cmd.includes('--name-only')) {
       // Two harness-driving markdown paths ride along so the contract's "these
       // are legal targets" promise can be tested where it holds and where it
       // does not — the diff-binding check must not be what refuses either.
-      return ok(`${SELF_NOMINATIONS.join('\n')}\ntrident/limit.ts\nskills/tests/SKILL.md\nskills/trident/SKILL.md\n`)
+      return ok(
+        `${SELF_NOMINATIONS.join('\n')}\n${UPPERCASE_SPELLING}\ntrident/limit.ts\nskills/tests/SKILL.md\nskills/trident/SKILL.md\n`,
+      )
     }
     return ok('')
   }
@@ -628,6 +665,27 @@ describe('the nomination file itself is neither a target nor a behaviour change'
     // brief promises — proof-required and nominable.
     expect(isProseOnlyChange(['skills/trident/SKILL.md'])).toBe(false)
     expect((await gate('skills/trident/SKILL.md')).ran.length).toBeGreaterThan(0)
+  })
+
+  test('AN UPPERCASE `.JSON` SPELLING IS AN ORDINARY FILE ON BOTH SIDES — the comment, executed', async () => {
+    // `isMutationClaimArtifact` matches the suffix CASE-SENSITIVELY, and the two
+    // rules it drives are the two halves asserted here. Until now that behaviour
+    // lived only in a code comment, so it could drift silently in either
+    // direction: an accidental `.toLowerCase()` would make `.JSON` inert (a free
+    // exemption for a branch that parks anything in that directory), and a
+    // widened suffix test would make it un-nominatable.
+    //  (1) NOT INERT — it does not buy a docs-only diff its exemption…
+    expect(isProseOnlyChange(['docs/a.md', UPPERCASE_SPELLING])).toBe(false)
+    expect(isProseOnlyChange(['docs/a.md', PATH])).toBe(true) // control: the lowercase one does
+    //  (2) …and NOT self-nomination — it stays a legal target, exactly like any
+    //      other co-committed non-test data file in the branch diff. The
+    //      self-nomination rule is that narrow on purpose.
+    const out = await gate(UPPERCASE_SPELLING)
+    expect(out.reason).not.toContain('cannot nominate itself')
+    expect(out.ran.length).toBeGreaterThan(0) // it reached the prover and RAN
+    // Control: the same path in lowercase, same diff, is refused before any run.
+    const lower = await gate(PATH)
+    expect({ ok: lower.ok, ran: lower.ran.length }).toEqual({ ok: false, ran: 0 })
   })
 
   test('the dispensation is NOT reachable by climbing out of the directory', () => {
