@@ -1669,6 +1669,53 @@ describe('update() derives the phase from the checkpoint', () => {
   })
 })
 
+/**
+ * `countRunningByLauncher` — the persistent pool's EVICTION GUARD (`hostsLiveWork`,
+ * 2026-09-03 root cause). Before evicting an abandon-poisoned warm launcher the
+ * pool asks how many runs are live INSIDE that child generation; > 0 defers the
+ * eviction, because the Argus panel / arbiter / terminal steps run as in-process
+ * subagents of that very child and die with it.
+ */
+describe('countRunningByLauncher — live runs hosted by one launcher generation', () => {
+  test('counts only RUNNING, non-terminal rows carrying that exact generation', async () => {
+    const store = new TridentRunStore(db)
+    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 'a' })
+    const b = await store.create({ slug: 'b', project_slug: 't1', repo_path: '/r', task: 'b' })
+    const c = await store.create({ slug: 'c', project_slug: 't1', repo_path: '/r', task: 'c' })
+    const done = await store.create({ slug: 'done', project_slug: 't1', repo_path: '/r', task: 'd' })
+    const terminal = await store.create({ slug: 'terminal', project_slug: 't1', repo_path: '/r', task: 'e' })
+    await store.update(a.id, { subagent_status: 'running', subagent_run_id: 'wf-a', workflow_run_id: 'gen-1' })
+    await store.update(b.id, { subagent_status: 'running', subagent_run_id: 'wf-b', workflow_run_id: 'gen-1' })
+    await store.update(c.id, { subagent_status: 'running', subagent_run_id: 'wf-c', workflow_run_id: 'gen-2' })
+    // A finished workflow on gen-1 is not live work.
+    await store.update(done.id, { subagent_status: 'completed', subagent_run_id: 'wf-d', workflow_run_id: 'gen-1' })
+    // A terminal run that never released its slot is not live work either.
+    await store.update(terminal.id, {
+      phase: 'failed',
+      subagent_status: 'running',
+      subagent_run_id: 'wf-e',
+      workflow_run_id: 'gen-1',
+    })
+
+    expect(store.countRunningByLauncher('gen-1')).toBe(2)
+    expect(store.countRunningByLauncher('gen-2')).toBe(1)
+    expect(store.countRunningByLauncher('gen-never')).toBe(0)
+    // Mutation killed: matching on repo_path (or a prefix) instead of the exact
+    // generation would count gen-2's run against gen-1.
+    expect(store.countRunningByLauncher('gen')).toBe(0)
+  })
+
+  test('a generation whose runs were latched crashed hosts nothing (crashed ≠ running)', async () => {
+    const store = new TridentRunStore(db)
+    const a = await store.create({ slug: 'a', project_slug: 't1', repo_path: '/r', task: 'a' })
+    await store.update(a.id, { subagent_status: 'running', subagent_run_id: 'wf-a', workflow_run_id: 'gen-1' })
+    expect(store.countRunningByLauncher('gen-1')).toBe(1)
+
+    await store.crashRunningByLauncher('gen-1', 'pooled child evicted (abandon-poison)')
+    expect(store.countRunningByLauncher('gen-1')).toBe(0)
+  })
+})
+
 // ---------------------------------------------------------------------------
 // ARGUS r7 (BLOCKER) — the branch half of the admission transaction.
 //

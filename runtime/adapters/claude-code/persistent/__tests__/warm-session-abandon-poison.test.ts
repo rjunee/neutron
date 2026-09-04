@@ -277,3 +277,32 @@ describe('warm reused session — an abandoned/runaway turn must not poison the 
     expect(spawns).toBe(1)
   })
 })
+
+describe('abandon-poison is logged AT POISON TIME (2026-09-03)', () => {
+  it('a caller cancel writes a `[repl] abandon-poison` line naming the session, generation, cause, turn and time', async () => {
+    // Until this line existed the only trace of a poison was the eviction line at
+    // the NEXT dispatch — minutes to hours later, on a different turn — which is
+    // why correlating an eviction with the turn that caused it took a full
+    // investigation.
+    const { host, messagesSeen } = makeWedgeThenHealthyHost()
+    const sub = createPersistentReplSubstrate(opts(host, { turnTimeoutMs: 30_000 }))
+    const lines: string[] = []
+    const original = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
+      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const h1 = sub.start(spec('turn-1'))
+      await waitUntil(() => messagesSeen() >= 1)
+      await h1.cancel()
+    } finally {
+      process.stderr.write = original
+    }
+    const poison = lines.filter((l) => l.startsWith('[repl] abandon-poison '))
+    expect(poison).toHaveLength(1)
+    expect(poison[0]).toMatch(
+      /^\[repl\] abandon-poison session=[0-9a-f]{8} generation=[0-9a-f]{8} by=cancel turn=\S+ at=\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z\n$/,
+    )
+  })
+})

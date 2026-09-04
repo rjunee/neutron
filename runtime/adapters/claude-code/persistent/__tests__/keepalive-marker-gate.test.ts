@@ -45,7 +45,7 @@ describe('pool.ts liveness keepalive', () => {
     // would make a just-injected turn look like it had done nothing.
     const idx = src.indexOf('const initialDelivery = injectMessage(session.channelPort, spec.prompt, turn.turnId)')
     expect(idx).toBeGreaterThan(-1)
-    const push = /channel\.push\(\{\s*kind:\s*'status',[^}]*\}\)/.exec(src.slice(idx, idx + 800))
+    const push = /channel\.push\(\{\s*kind:\s*'status',[^}]*\}\)/.exec(src.slice(idx, idx + 1600))
     expect(push).not.toBeNull()
     expect(push![0]).not.toContain('keepalive')
   })

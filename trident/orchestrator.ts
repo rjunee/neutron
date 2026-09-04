@@ -74,6 +74,7 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, isAbsolute, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
 import { executeBoundReview } from './review-run.ts'
@@ -110,7 +111,12 @@ import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
 import { isTerminalPhase, type AdvanceOutcome } from './state-machine.ts'
 import { buildTestStrategyDetail, readHostBudget } from './test-strategy.ts'
 import type { TridentRun, TridentRunStore, TridentRunUpdate } from './store.ts'
-import { DEAD_LAUNCHER_OVERRIDE_MS, DEFAULT_MAX_INFLIGHT_MS, NO_ADVANCE_HANG_MS } from './liveness.ts'
+import {
+  DEAD_LAUNCHER_OVERRIDE_MS,
+  DEFAULT_MAX_INFLIGHT_MS,
+  DEFAULT_SETTLE_TIMEOUT_MS,
+  NO_ADVANCE_HANG_MS,
+} from './liveness.ts'
 import {
   decideHang,
   describeRunEvidence,
@@ -155,6 +161,12 @@ export interface BuildTridentOrchestratorOptions {
   run_host: RunHostCommand
   /** Best-effort pre-build stage stamp (latency instrumentation, 2026-08-18 card). Appends one row to the append-only code_trident_stage_events ledger. Must never throw and never fail a launch; omitted → no-op. */
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
+  /** The stage ledger READ, in ledger order — consulted ONLY for a run whose fire
+   *  came back `unconfirmed` (the launcher turn overran the settle budget and was
+   *  left draining). A `fire-settled` or `plan-start` stamped after the
+   *  `fire-unconfirmed` event confirms the fire without waiting for the turn.
+   *  Omitted → only the late settle can confirm; absence never fails a run early. */
+  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
   /** Review-only executor seam. Production uses `executeBoundReview`; tests may
    *  inject a recording executor without running a live review panel. */
   execute_bound_review?: typeof executeBoundReview
@@ -2196,6 +2208,47 @@ export function buildTridentOrchestrator(
   // each individual process still bounds launch faults and cannot retry forever.
   const launchFaults = new Map<string, { count: number; last: string }>()
   const MAX_LAUNCH_FAULTS = 3
+  // UNCONFIRMED FIRES — runs whose launcher turn overran the settle budget and was
+  // LEFT DRAINING (never cancelled: cancelling abandon-poisons the shared launcher
+  // REPL, whose eviction SIGKILLs every in-process inner workflow the child hosts —
+  // 33% of all run deaths, measured). The run is parked `running` in the DB like a
+  // confirmed fire; this map carries the confirmation deadline (one further
+  // budget), the late settle when it lands, and whether the workflow's own
+  // `plan-start` already proved the fire. In-memory on purpose, like `fired`: a
+  // restart orphans the row and the existing orphan policy takes it from there.
+  const listStageEvents = opts.list_stage_events ?? null
+  interface UnconfirmedFire {
+    /** The dispatch id minted for this launch (`subagent_run_id`). */
+    dispatch_id: string
+    /** When the confirmation window closes: one further budget after the fire came back unconfirmed. */
+    deadline_ms: number
+    budget_ms: number
+    /** When the fire went out — the fire-evidence gatherer's reference point. */
+    fire_started_at_ms: number
+    /** The launcher generation hosting this run, once known: from the fire's
+     *  inject-time status (`FireOutcome.launcher_session_key` / `launcher`) or
+     *  from the late settle. Adopted onto the row by §1c on the next tick, so the
+     *  pool's eviction guard and the crash latch see the run for its whole life —
+     *  never only while this in-memory record exists. */
+    generation: string | null
+    /** Whether the launcher turn is known to have INJECTED into a child: `false`
+     *  = it was still queued behind the driver lock (or the stream ended without
+     *  injecting), `null` = not yet known. Decides what the deadline cancel does. */
+    injected: boolean | null
+    late: FireOutcome | null
+    /** Set once the workflow's own stage event proved the fire. */
+    confirmed_by: 'stage-event' | null
+    /** Abandon the still-draining launcher turn (see `FireOutcome.cancel`). */
+    cancel: (() => Promise<void>) | null
+  }
+  const unconfirmedFires = new Map<string, UnconfirmedFire>()
+  const stampFor = (run_id: string, stage: string, meta?: string | null): void => {
+    try {
+      opts.record_stage?.(run_id, stage, meta ?? null)
+    } catch {
+      // A stamp must never fail a tick.
+    }
+  }
   // In-flight FIRE turns (tests + graceful shutdown drain). Each settles in
   // seconds; the build itself runs detached and is NOT tracked here.
   const inflight = new Set<Promise<void>>()
@@ -3067,6 +3120,191 @@ export function buildTridentOrchestrator(
     }
   }
 
+  /**
+   * THE FIRE-EVIDENCE GATE (#498), shared by the two places a settle timeout
+   * can be adjudicated: the launch site when the fire came back `failed` with
+   * `FIRE_SETTLE_TIMEOUT_ERROR`, and §1c's deadline when a fire parked as
+   * `unconfirmed` ran out its second budget without a stage event or a late
+   * settle. Consults POSITIVE evidence only: `launched` holds the lane,
+   * `published` terminalizes honestly, `none` returns null and the caller fails
+   * the run its own way. `launcher_generation` is written to the row when known
+   * (the unconfirmed path learns it at inject time); null otherwise — never the
+   * dispatch id and never a carried key (see the comment at the write).
+   */
+  async function decideSettleTimeoutByEvidence(args: {
+    pinnedRun: TridentRun
+    dispatch_id: string
+    fire_started_at_ms: number
+    launcher_generation: string | null
+    stamp: (stage: string, meta?: string) => void
+  }): Promise<AdvanceOutcome | null> {
+    if (gatherFireEvidence === null) return null
+    const pinnedRun = args.pinnedRun
+    // A THROWING gatherer must never crash the launch AND must never spare
+    // the run: no evidence is no evidence (positive-only).
+    let evidence: FireTimeoutEvidence = { kind: 'none', detail: 'evidence gatherer threw' }
+    try {
+      evidence = await gatherFireEvidence({ run: pinnedRun, fire_started_at_ms: args.fire_started_at_ms })
+    } catch (err) {
+      // LOG IT — silence here is indistinguishable from "looked and found
+      // nothing", which is exactly how a gatherer that throws on EVERY call
+      // would hide behind the positive-only rule forever. The sibling
+      // liveness probe logs `liveness_probe_failed` for the same reason.
+      log.error('fire_evidence_probe_failed', {
+        run: pinnedRun.id,
+        slug: pinnedRun.slug,
+        error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+      })
+    }
+    // WHAT THE GATHERER ACTUALLY SAW IN THE TWO WORKFLOW-OWNED COLUMNS —
+    // the CAS token for the save. `observed` narrows the clobber window to
+    // the gap between the gatherer's last re-read and the tick's
+    // `saveIfActive`; it cannot close it, because those are two statements.
+    // Handing the seen values down makes the store write those two columns
+    // only while they still hold what we read, so a checkpoint the detached
+    // workflow lands INSIDE that gap survives the save that spares its lane.
+    // Absent `observed` the pinned row is what we read, and it is the token.
+    const seenRow = { ...pinnedRun, ...(evidence.kind === 'none' ? {} : (evidence.observed ?? {})) }
+    const workflow_columns_seen = {
+      inner_checkpoint: seenRow.inner_checkpoint,
+      inner_verdict: seenRow.inner_verdict,
+    }
+    if (evidence.kind === 'launched') {
+      // HOLD THE LANE. A deliberate mirror of the `fired` return MINUS the
+      // `fire-settled` stamp — the launcher never confirmed. The minted `id`
+      // is the dispatch id exactly as on the fired path, so harvest, the
+      // stall guard and orphan recovery all engage from here.
+      args.stamp('fire-unobserved-launch', evidence.detail.slice(0, 200))
+      fired.add(pinnedRun.id)
+      return {
+        run: {
+          // THE FRESH WORKFLOW-OWNED COLUMNS, NOT THE PINNED ONES (`seenRow`
+          // is `pinnedRun` with the gatherer's `observed` spread over it).
+          // `pinnedRun` is the row as it looked BEFORE the fire, and
+          // `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly
+          // — so saving the pinned snapshot would write the detached
+          // workflow's own progress back to its pre-fire value, destroying
+          // the very delta that proved the lane was live. The residual gap
+          // between that read and the save is closed by the CAS below
+          // (`workflow_columns_seen`), not by this spread.
+          ...seenRow,
+          // …EXCEPT A REJECTION THE STORE WILL NOT ACCEPT (Argus r4 minor).
+          // `saveIfActive` THROWS `TridentEmptyFindingsRejectionError` on a
+          // `REQUEST_CHANGES` with no findings on the incoming row and none
+          // on the stored one — a shape `checkpoint.sh` can write and crash
+          // recovery preserves. Spreading `seenRow` verbatim carried it into
+          // the one save whose whole job is to HOLD the lane, and the tick's
+          // per-run catch swallows the throw: `subagent_run_id` stays NULL,
+          // so the next tick re-enters the launch site and fires a SECOND
+          // lane at the branch — the exact outcome this seam exists to
+          // prevent. Downgrade it exactly as `failedRun` does (an empty
+          // finding set is an approval or an infrastructure failure, never a
+          // rejection); the CAS still guards the column, and a real review
+          // that lands findings re-writes the verdict on its next checkpoint.
+          ...(seenRow.inner_verdict === 'REQUEST_CHANGES' &&
+          parseCheckpointFindings(seenRow.inner_checkpoint_findings).length === 0
+            ? { inner_verdict: 'REVIEW_NOT_RUN' as const }
+            : {}),
+          // AND THE PHASE THAT CHECKPOINT IMPLIES. `phase` is NOT a
+          // workflow-owned column — the tick owns it — but `checkpoint.sh`
+          // derives it from `inner_checkpoint` at the inner workflow's write
+          // choke point (and `TridentRunStore.update` mirrors that table), so
+          // carrying the checkpoint forward while keeping the PINNED phase
+          // saves an incoherent row: `argus` reverted to `forge-init` while
+          // `inner_checkpoint` still says `forge-done`. `saveIfActive`
+          // assigns `phase` plainly and applies no derivation of its own, so
+          // the derivation has to happen HERE. `null` from the table means
+          // the checkpoint implies nothing — the pinned phase stands.
+          // Derived from `evidence.observed`, never from the pinned
+          // checkpoint: absent an observation there is no checkpoint to
+          // derive from at all and the pinned phase stands.
+          //
+          // AND THE OBSERVATION IS NOT ALWAYS A CHECKPOINT MOVE (Argus r4
+          // nit — the earlier wording said "what the gatherer OBSERVED" as
+          // if it always were). `classifyFireTimeoutRow` sets `observed` when
+          // ANY workflow-owned column moved, so a delta on `inner_result`
+          // alone carries whatever `inner_checkpoint` the row already had —
+          // possibly a prior round's. That is harmless rather than exact:
+          // `phaseForCheckpoint` is the same mapping `checkpoint.sh` and
+          // `TridentRunStore.update` apply, so the phase this derives is the
+          // one the row would already be wearing for that checkpoint.
+          //
+          // ONE RESIDUAL WINDOW, STATED PLAINLY (Argus r5): `phase` is not a
+          // workflow-owned column, so it is written PLAINLY while
+          // `inner_checkpoint` is CAS-guarded. If the detached workflow lands
+          // a NEWER checkpoint between the gatherer's re-read and this save,
+          // the CAS keeps that newer checkpoint and the phase beside it is
+          // derived from the older one. That is the same one-statement gap
+          // the CAS narrows but cannot close; it is bounded and self-heals on
+          // the workflow's next checkpoint write, which derives both columns
+          // together. Widening the CAS to cover `phase` would make the save
+          // all-or-nothing over a column the TICK owns — a worse trade: a
+          // lost swap would then drop the lane-holding write entirely.
+          phase:
+            phaseForCheckpoint(evidence.observed?.inner_checkpoint ?? null) ?? pinnedRun.phase,
+          subagent_run_id: args.dispatch_id,
+          subagent_status: 'running',
+          // THE LAUNCHER GENERATION ONLY IF IT IS KNOWN — else null, never
+          // the dispatch id and never a carried key. This row's launcher was
+          // not confirmed by a settle: minting an id would make
+          // `latchLauncherCrashed` (which matches WHERE workflow_run_id = ?)
+          // key on a generation no pool will ever report, and CARRYING a
+          // previous round's key would point the tick's liveness probe at a
+          // dead generation and latch a live lane as crashed
+          // (`persistRefireReset` never clears this column). Null is what
+          // crash recovery itself writes here, for the same reason: the
+          // generation is unknown. When the launcher DID inject before the
+          // budget (the unconfirmed path learns the generation at inject
+          // time), that generation is real positive evidence and goes on the
+          // row so the eviction guard and the crash latch see the lane. The
+          // 90-min no-advance reaper and the 2 h ceiling still bound it.
+          workflow_run_id: args.launcher_generation,
+          last_advanced_at: now(),
+        },
+        changed: true,
+        waiting: true,
+        note: `fire launcher unobserved (settle timeout) but the workflow shows life — ${evidence.detail}; holding the lane, no relaunch`,
+        workflow_columns_seen,
+      }
+    }
+    if (evidence.kind === 'published') {
+      // THE WORK IS FINISHED. Terminal, but recorded HONESTLY: built and
+      // published, review not run. The verdict is NOT set by hand —
+      // `failedRun` normalizes it, and with no argus provenance on the row
+      // that normalization yields REVIEW_NOT_RUN.
+      //
+      // "CAN ONLY BECOME" WAS TOO STRONG (Argus r4 nit). `failedRun` passes
+      // an existing `inner_verdict === 'APPROVE'` through unchanged, so an
+      // APPROVE already on the row would survive here. It is not reachable on
+      // this path — `persistRefireReset` NULLs `inner_verdict` before a
+      // re-fire — but that is a property of the caller, not of `failedRun`,
+      // and the comment should not claim the callee enforces it.
+      return {
+        // Same rule as the held lane: terminalize over what the gatherer
+        // actually READ, never over the pre-fire snapshot.
+        // THE TRIMMED CHECKPOINT IS WHAT LANDS, and it is written here rather
+        // than carried in `observed` — that field is the CAS TOKEN and must
+        // stay byte-equal to the stored column or the swap silently no-ops
+        // (`store.ts` compares `inner_checkpoint IS ?`). Writing it here is
+        // what makes the row and the failure_reason quote the same string.
+        run: failedRun(
+          { ...seenRow, inner_checkpoint: evidence.checkpoint },
+          publishedFailureReason(evidence.checkpoint),
+          false,
+        ),
+        changed: true,
+        waiting: false,
+        note: `${pinnedRun.phase} → failed (launcher timeout over already-published work — review not run)`,
+        // The verdict demotion to REVIEW_NOT_RUN is a REAL write here (it is
+        // what stops a stale REQUEST_CHANGES being stamped over finished
+        // work), so it is CAS'd rather than skipped: it lands while the
+        // verdict is still the one we read, and yields to a newer one.
+        workflow_columns_seen,
+      }
+    }
+    return null
+  }
+
   /** Fire the inner workflow on the warm substrate; the launching turn settles
    *  immediately and the workflow runs detached. Persists the tracking id on a
    *  clean fire. Folds any existing PR + the last checkpoint into the args for
@@ -3810,6 +4048,97 @@ export function buildTridentOrchestrator(
       inflight.delete(tracked)
     }
 
+    if (outcome.status === 'unconfirmed') {
+      // The launching turn was still RUNNING at the settle budget. It was NOT
+      // cancelled and this is NOT a failure: a launcher turn that crossed an
+      // autocompact takes 4-5 min to settle and its workflow fires regardless
+      // (run 6948da2d was written off at 09:50:04; its workflow fired at
+      // 09:51:52). Park the run `running` exactly like a confirmed fire — same
+      // dispatch id, same slot — and confirm it from either the late settle or the
+      // workflow's own `plan-start` within ONE MORE budget (`stepCore` §1c). Never
+      // relaunch here: that puts a second lane on the same card.
+      const budget = outcome.budget_ms ?? DEFAULT_SETTLE_TIMEOUT_MS
+      const knownGeneration = outcome.launcher_session_key ?? null
+      stamp(
+        'fire-unconfirmed',
+        `elapsed_ms=${outcome.elapsed_ms ?? budget} cancelled=${outcome.turn_cancelled === true} budget_ms=${budget} ` +
+          `injected=${knownGeneration !== null} generation=${knownGeneration === null ? 'unknown' : knownGeneration.slice(0, 8)}`,
+      )
+      fired.add(run.id)
+      const pending: UnconfirmedFire = {
+        dispatch_id: id,
+        deadline_ms: nowMs() + budget,
+        budget_ms: budget,
+        fire_started_at_ms: fireStartedAtMs,
+        generation: knownGeneration,
+        injected: knownGeneration !== null ? true : null,
+        late: null,
+        confirmed_by: null,
+        cancel: outcome.cancel ?? null,
+      }
+      unconfirmedFires.set(run.id, pending)
+      // The generation lands on the RECORD from whichever arrives first — the
+      // inject-time status or the late settle — and §1c writes it onto the row on
+      // the next tick. Neither callback writes the store: every row write stays
+      // inside the tick, so a callback can never race the tick's own save.
+      if (outcome.launcher !== undefined) {
+        outcome.launcher.then(
+          (generation) => {
+            if (generation !== null) {
+              if (pending.generation === null) pending.generation = generation
+              pending.injected = true
+            } else if (pending.injected === null) {
+              pending.injected = false
+            }
+          },
+          () => {},
+        )
+      }
+      if (outcome.settled !== undefined) {
+        outcome.settled.then(
+          (late) => {
+            pending.late = late
+            if (late.status === 'fired') {
+              if (pending.generation === null && late.launcher_session_key !== undefined) {
+                pending.generation = late.launcher_session_key
+              }
+              pending.injected = true
+              stampFor(run.id, 'fire-settled', `late (settled after the ${Math.round(budget / 1000)} s budget)`)
+            } else {
+              stampFor(run.id, 'fire-drained', `launcher turn ended ${late.status}: ${late.error ?? 'unknown'}`)
+            }
+          },
+          () => {
+            pending.late = { status: 'failed', error: 'fire stream error' }
+          },
+        )
+      }
+      const next: TridentRun = {
+        ...pinnedRun,
+        subagent_run_id: id,
+        subagent_status: 'running',
+        // THE LAUNCHER GENERATION, when the turn had injected by the budget; else
+        // NULL — never the dispatch id (a key no pool will ever report) and never
+        // `pinnedRun.workflow_run_id` (a previous round's generation, which
+        // `persistRefireReset` does not clear: carrying it would point the
+        // liveness probe at a dead child and latch a live lane as crashed). A
+        // null here is exactly the held-lane row's; §1c adopts the generation the
+        // moment the record learns it.
+        workflow_run_id: knownGeneration,
+        last_advanced_at: now(),
+      }
+      return {
+        run: next,
+        changed: true,
+        waiting: true,
+        note:
+          `fired inner workflow ${id} — UNCONFIRMED: launcher turn still draining after ` +
+          `${Math.round((outcome.elapsed_ms ?? budget) / 1000)} s (not cancelled; ` +
+          `${knownGeneration === null ? 'not yet injected' : `injected into launcher ${knownGeneration.slice(0, 8)}`}); ` +
+          `confirming within ${Math.round(budget / 60_000)} min`,
+      }
+    }
+
     if (outcome.status !== 'fired') {
       // A SETTLE TIMEOUT IS NOT PROOF THE WORKFLOW NEVER STARTED. The launcher
       // turn is cancelled on timeout; the workflow it may already have fired
@@ -3817,165 +4146,15 @@ export function buildTridentOrchestrator(
       // in 7 days died here, one while its workflow kept building for another
       // six minutes, and twice over a row that already said `outer-published:…`.
       // So for THIS error string only, consult positive evidence first.
-      if (outcome.error === FIRE_SETTLE_TIMEOUT_ERROR && gatherFireEvidence !== null) {
-        // A THROWING gatherer must never crash the launch AND must never spare
-        // the run: no evidence is no evidence (positive-only).
-        let evidence: FireTimeoutEvidence = { kind: 'none', detail: 'evidence gatherer threw' }
-        try {
-          evidence = await gatherFireEvidence({ run: pinnedRun, fire_started_at_ms: fireStartedAtMs })
-        } catch (err) {
-          // LOG IT — silence here is indistinguishable from "looked and found
-          // nothing", which is exactly how a gatherer that throws on EVERY call
-          // would hide behind the positive-only rule forever. The sibling
-          // liveness probe logs `liveness_probe_failed` for the same reason.
-          log.error('fire_evidence_probe_failed', {
-            run: run.id,
-            slug: run.slug,
-            error: err instanceof Error ? (err.stack ?? err.message) : String(err),
-          })
-        }
-        // WHAT THE GATHERER ACTUALLY SAW IN THE TWO WORKFLOW-OWNED COLUMNS —
-        // the CAS token for the save. `observed` narrows the clobber window to
-        // the gap between the gatherer's last re-read and the tick's
-        // `saveIfActive`; it cannot close it, because those are two statements.
-        // Handing the seen values down makes the store write those two columns
-        // only while they still hold what we read, so a checkpoint the detached
-        // workflow lands INSIDE that gap survives the save that spares its lane.
-        // Absent `observed` the pinned row is what we read, and it is the token.
-        const seenRow = { ...pinnedRun, ...(evidence.kind === 'none' ? {} : (evidence.observed ?? {})) }
-        const workflow_columns_seen = {
-          inner_checkpoint: seenRow.inner_checkpoint,
-          inner_verdict: seenRow.inner_verdict,
-        }
-        if (evidence.kind === 'launched') {
-          // HOLD THE LANE. A deliberate mirror of the `fired` return MINUS the
-          // `fire-settled` stamp — the launcher never confirmed. The minted `id`
-          // is the dispatch id exactly as on the fired path, so harvest, the
-          // stall guard and orphan recovery all engage from here.
-          stamp('fire-unobserved-launch', evidence.detail.slice(0, 200))
-          fired.add(run.id)
-          return {
-            run: {
-              // THE FRESH WORKFLOW-OWNED COLUMNS, NOT THE PINNED ONES (`seenRow`
-              // is `pinnedRun` with the gatherer's `observed` spread over it).
-              // `pinnedRun` is the row as it looked BEFORE the fire, and
-              // `saveIfActive` assigns `inner_checkpoint`/`inner_verdict` plainly
-              // — so saving the pinned snapshot would write the detached
-              // workflow's own progress back to its pre-fire value, destroying
-              // the very delta that proved the lane was live. The residual gap
-              // between that read and the save is closed by the CAS below
-              // (`workflow_columns_seen`), not by this spread.
-              ...seenRow,
-              // …EXCEPT A REJECTION THE STORE WILL NOT ACCEPT (Argus r4 minor).
-              // `saveIfActive` THROWS `TridentEmptyFindingsRejectionError` on a
-              // `REQUEST_CHANGES` with no findings on the incoming row and none
-              // on the stored one — a shape `checkpoint.sh` can write and crash
-              // recovery preserves. Spreading `seenRow` verbatim carried it into
-              // the one save whose whole job is to HOLD the lane, and the tick's
-              // per-run catch swallows the throw: `subagent_run_id` stays NULL,
-              // so the next tick re-enters the launch site and fires a SECOND
-              // lane at the branch — the exact outcome this seam exists to
-              // prevent. Downgrade it exactly as `failedRun` does (an empty
-              // finding set is an approval or an infrastructure failure, never a
-              // rejection); the CAS still guards the column, and a real review
-              // that lands findings re-writes the verdict on its next checkpoint.
-              ...(seenRow.inner_verdict === 'REQUEST_CHANGES' &&
-              parseCheckpointFindings(seenRow.inner_checkpoint_findings).length === 0
-                ? { inner_verdict: 'REVIEW_NOT_RUN' as const }
-                : {}),
-              // AND THE PHASE THAT CHECKPOINT IMPLIES. `phase` is NOT a
-              // workflow-owned column — the tick owns it — but `checkpoint.sh`
-              // derives it from `inner_checkpoint` at the inner workflow's write
-              // choke point (and `TridentRunStore.update` mirrors that table), so
-              // carrying the checkpoint forward while keeping the PINNED phase
-              // saves an incoherent row: `argus` reverted to `forge-init` while
-              // `inner_checkpoint` still says `forge-done`. `saveIfActive`
-              // assigns `phase` plainly and applies no derivation of its own, so
-              // the derivation has to happen HERE. `null` from the table means
-              // the checkpoint implies nothing — the pinned phase stands.
-              // Derived from `evidence.observed`, never from the pinned
-              // checkpoint: absent an observation there is no checkpoint to
-              // derive from at all and the pinned phase stands.
-              //
-              // AND THE OBSERVATION IS NOT ALWAYS A CHECKPOINT MOVE (Argus r4
-              // nit — the earlier wording said "what the gatherer OBSERVED" as
-              // if it always were). `classifyFireTimeoutRow` sets `observed` when
-              // ANY workflow-owned column moved, so a delta on `inner_result`
-              // alone carries whatever `inner_checkpoint` the row already had —
-              // possibly a prior round's. That is harmless rather than exact:
-              // `phaseForCheckpoint` is the same mapping `checkpoint.sh` and
-              // `TridentRunStore.update` apply, so the phase this derives is the
-              // one the row would already be wearing for that checkpoint.
-              //
-              // ONE RESIDUAL WINDOW, STATED PLAINLY (Argus r5): `phase` is not a
-              // workflow-owned column, so it is written PLAINLY while
-              // `inner_checkpoint` is CAS-guarded. If the detached workflow lands
-              // a NEWER checkpoint between the gatherer's re-read and this save,
-              // the CAS keeps that newer checkpoint and the phase beside it is
-              // derived from the older one. That is the same one-statement gap
-              // the CAS narrows but cannot close; it is bounded and self-heals on
-              // the workflow's next checkpoint write, which derives both columns
-              // together. Widening the CAS to cover `phase` would make the save
-              // all-or-nothing over a column the TICK owns — a worse trade: a
-              // lost swap would then drop the lane-holding write entirely.
-              phase:
-                phaseForCheckpoint(evidence.observed?.inner_checkpoint ?? null) ?? pinnedRun.phase,
-              subagent_run_id: id,
-              subagent_status: 'running',
-              // NO LAUNCHER GENERATION — deliberately null, never `id`. This row
-              // has no confirmed launcher: minting one would make
-              // `latchLauncherCrashed` (which matches WHERE workflow_run_id = ?)
-              // key on a generation no pool will ever report, and CARRYING a
-              // previous round's key would point the tick's liveness probe at a
-              // dead generation and latch a live lane as crashed
-              // (`persistRefireReset` never clears this column). Null is what
-              // crash recovery itself writes here, for the same reason: the
-              // generation is unknown. The 90-min no-advance reaper and the 2 h
-              // ceiling still bound this lane.
-              workflow_run_id: null,
-              last_advanced_at: now(),
-            },
-            changed: true,
-            waiting: true,
-            note: `fire launcher unobserved (settle timeout) but the workflow shows life — ${evidence.detail}; holding the lane, no relaunch`,
-            workflow_columns_seen,
-          }
-        }
-        if (evidence.kind === 'published') {
-          // THE WORK IS FINISHED. Terminal, but recorded HONESTLY: built and
-          // published, review not run. The verdict is NOT set by hand —
-          // `failedRun` normalizes it, and with no argus provenance on the row
-          // that normalization yields REVIEW_NOT_RUN.
-          //
-          // "CAN ONLY BECOME" WAS TOO STRONG (Argus r4 nit). `failedRun` passes
-          // an existing `inner_verdict === 'APPROVE'` through unchanged, so an
-          // APPROVE already on the row would survive here. It is not reachable on
-          // this path — `persistRefireReset` NULLs `inner_verdict` before a
-          // re-fire — but that is a property of the caller, not of `failedRun`,
-          // and the comment should not claim the callee enforces it.
-          return {
-            // Same rule as the held lane: terminalize over what the gatherer
-            // actually READ, never over the pre-fire snapshot.
-            // THE TRIMMED CHECKPOINT IS WHAT LANDS, and it is written here rather
-            // than carried in `observed` — that field is the CAS TOKEN and must
-            // stay byte-equal to the stored column or the swap silently no-ops
-            // (`store.ts` compares `inner_checkpoint IS ?`). Writing it here is
-            // what makes the row and the failure_reason quote the same string.
-            run: failedRun(
-              { ...seenRow, inner_checkpoint: evidence.checkpoint },
-              publishedFailureReason(evidence.checkpoint),
-              false,
-            ),
-            changed: true,
-            waiting: false,
-            note: `${run.phase} → failed (launcher timeout over already-published work — review not run)`,
-            // The verdict demotion to REVIEW_NOT_RUN is a REAL write here (it is
-            // what stops a stale REQUEST_CHANGES being stamped over finished
-            // work), so it is CAS'd rather than skipped: it lands while the
-            // verdict is still the one we read, and yields to a newer one.
-            workflow_columns_seen,
-          }
-        }
+      if (outcome.error === FIRE_SETTLE_TIMEOUT_ERROR) {
+        const decided = await decideSettleTimeoutByEvidence({
+          pinnedRun,
+          dispatch_id: id,
+          fire_started_at_ms: fireStartedAtMs,
+          launcher_generation: null,
+          stamp,
+        })
+        if (decided !== null) return decided
         // `none` falls through to the unchanged path below.
       }
       // The launching turn never settled cleanly — the workflow was NOT fired.
@@ -4567,6 +4746,7 @@ export function buildTridentOrchestrator(
       redispatched.delete(run.id)
       infraRetryNotBefore.delete(run.id)
       launchFaults.delete(run.id)
+      unconfirmedFires.delete(run.id)
       return { run, changed: false, waiting: false, note: `no-op (already ${run.phase})` }
     }
 
@@ -4651,6 +4831,40 @@ export function buildTridentOrchestrator(
             changed: true,
             waiting: false,
             note: `PR #${mergedPr} already merged — adopted after launcher crash → done (no relaunch)`,
+          }
+        }
+        // (1a-crash GATE) A LIVE PROCESS FOR THIS RUN DEFERS THE RELAUNCH. The
+        //     crash latch fires on EVERY eviction of the hosting child, but the
+        //     codex forge build is DETACHED (`nohup setsid`) and survives that
+        //     child: relaunching now puts a second build on the same branch while
+        //     the orphan is still writing to it. Same evidence the hang watchdog
+        //     consults (§1b-0): a process whose argv carries this run's id is
+        //     positive proof the build is alive, so wait for it to exit. Bounded by
+        //     the 2 h ceiling below on the SAME clock (`elapsedSinceAdvance`) —
+        //     never open-ended — and a DEFER never re-stamps that clock. Absence
+        //     or `unknown` is not evidence and falls through to the relaunch.
+        if (gatherRunEvidence !== null && elapsedSinceAdvance(run) <= maxInflightMs) {
+          let crashEvidence: RunHangEvidence
+          try {
+            crashEvidence = await gatherRunEvidence(run, noAdvanceHangMs)
+          } catch (err) {
+            crashEvidence = unknownRunEvidence(err instanceof Error ? err.message : String(err))
+            log.error('crash_relaunch_evidence_failed', {
+              run: run.id,
+              slug: run.slug,
+              error: err instanceof Error ? (err.stack ?? err.message) : String(err),
+            })
+          }
+          if (crashEvidence.process.observed === 'activity') {
+            const leftMin = Math.max(0, Math.round((maxInflightMs - elapsedSinceAdvance(run)) / 60_000))
+            return {
+              run,
+              changed: false,
+              waiting: true,
+              note:
+                `launcher crashed but a process for this run is still alive (${crashEvidence.process.detail}) — ` +
+                `deferring the relaunch until it exits (${leftMin} min to the in-flight ceiling)`,
+            }
           }
         }
         if (run.crash_recoveries >= maxCrashRecoveries) {
@@ -4745,6 +4959,179 @@ export function buildTridentOrchestrator(
           changed: true,
           waiting: false,
           note: `${run.phase} → failed (terminal result garbled)`,
+        }
+      }
+    }
+
+    // (1c) UNCONFIRMED FIRE — the launcher turn overran the settle budget and was
+    //     LEFT DRAINING (`launch()`; never cancelled there, see `unconfirmedFires`).
+    //     The run is parked `running` like any fire; this decides whether the fire
+    //     is real. Sits BEFORE the hang watchdog so the decision is made in at most
+    //     two settle budgets (~16 min), not 90. Evidence, in order:
+    //       • the late settle itself (`fired`);
+    //       • the workflow's own `plan-start` / `fire-settled` stage event stamped
+    //         AFTER this launch's `fire-dispatched` — the LAST dispatch stamp, not
+    //         `fire-unconfirmed`: the workflow's `plan-start` lands seconds after
+    //         the Workflow call, i.e. BEFORE the launcher's budget ran out and the
+    //         `fire-unconfirmed` stamp went down, so anchoring on the latter would
+    //         discard this launch's own proof and fail a live run. An earlier
+    //         round's stamp is not this fire's evidence: the scan resets on every
+    //         `fire-dispatched` and keeps only what follows the last one;
+    //       • nothing within one more budget → the same positive-evidence gate the
+    //         `failed` fire path runs (#498: a settle timeout is not proof the
+    //         workflow never started), then fail with the original reason and
+    //         CANCEL the launcher turn so a queued Workflow call cannot go out on
+    //         a row already marked failed (a ghost lane). NEVER relaunch from here
+    //         — a settle-timeout on a live launch is exactly how a second lane
+    //         lands on the same card.
+    //     THE LAUNCHER GENERATION is adopted onto the row the moment the record
+    //     learns it — from the fire's inject-time status, the late settle, or
+    //     either arriving while the stage event is what confirmed the fire — so
+    //     `countRunningByLauncher` (the eviction guard) and `crashRunningByLauncher`
+    //     (the crash latch) see this run for as long as it is hosted, not only
+    //     while this in-memory record exists.
+    //     Harvest (§1) still runs first: a fast workflow that already wrote its
+    //     result is harvested, not re-litigated.
+    const pendingFire = unconfirmedFires.get(run.id)
+    if (pendingFire !== undefined && run.subagent_run_id !== null && run.subagent_status === 'running') {
+      const late = pendingFire.late
+      const generation = pendingFire.generation
+      const adoption: Partial<TridentRun> =
+        generation !== null && run.workflow_run_id !== generation ? { workflow_run_id: generation } : {}
+      const adoptionNote =
+        'workflow_run_id' in adoption && generation !== null
+          ? ` (launcher generation ${generation.slice(0, 8)} adopted)`
+          : ''
+      if (late !== null && late.status === 'fired') {
+        unconfirmedFires.delete(run.id)
+        return {
+          run: { ...run, ...adoption, last_advanced_at: now() },
+          changed: true,
+          waiting: true,
+          note: `fire confirmed — launcher turn settled after the budget${adoptionNote}`,
+        }
+      }
+      if (pendingFire.confirmed_by === null && listStageEvents !== null) {
+        let events: ReadonlyArray<{ stage: string; at: string }> = []
+        try {
+          events = listStageEvents(run.id)
+        } catch {
+          events = []
+        }
+        let sinceDispatch = false
+        let proved = false
+        for (const ev of events) {
+          if (ev.stage === 'fire-dispatched') {
+            sinceDispatch = true
+            proved = false
+            continue
+          }
+          if (sinceDispatch && (ev.stage === 'plan-start' || ev.stage === 'fire-settled')) proved = true
+        }
+        if (proved) {
+          pendingFire.confirmed_by = 'stage-event'
+          stampFor(run.id, 'fire-confirmed', "by the workflow's own stage event after fire-dispatched")
+        }
+      }
+      if (pendingFire.confirmed_by === 'stage-event') {
+        // Proved by the workflow itself. The record outlives the deadline: it is
+        // kept until the launcher generation is on the row (an inject-time status
+        // or a late settle — after the deadline included — still brings it) or the
+        // turn has drained with nothing to learn; the terminal no-op drops it
+        // otherwise. Either way the run FALLS THROUGH to the ordinary in-flight
+        // branches below — it is a confirmed fire like any other, and returning
+        // early here would shadow the hang watchdog for the rest of the window.
+        if ('workflow_run_id' in adoption) {
+          unconfirmedFires.delete(run.id)
+          return {
+            run: { ...run, ...adoption, last_advanced_at: now() },
+            changed: true,
+            waiting: true,
+            note: `fire confirmed by the workflow's own stage event${adoptionNote}`,
+          }
+        }
+        if (late !== null || run.workflow_run_id !== null) unconfirmedFires.delete(run.id)
+      } else if (nowMs() < pendingFire.deadline_ms) {
+        if ('workflow_run_id' in adoption) {
+          // The turn INJECTED (the pool reported its generation) but the workflow
+          // has not stamped yet. Put the generation on the row now: from here on
+          // the eviction guard counts this run and an eviction of that child
+          // latches it `crashed` instead of leaving it to the 90-min reaper.
+          return {
+            run: { ...run, ...adoption, last_advanced_at: now() },
+            changed: true,
+            waiting: true,
+            note: `fire unconfirmed — launcher turn injected, still draining${adoptionNote}`,
+          }
+        }
+        const leftS = Math.max(0, Math.round((pendingFire.deadline_ms - nowMs()) / 1000))
+        return {
+          run,
+          changed: false,
+          waiting: true,
+          note:
+            `fire unconfirmed — launcher turn still draining (not cancelled; ` +
+            `${pendingFire.injected === false ? 'never injected' : pendingFire.injected === true ? 'injected' : 'inject not yet reported'}); ` +
+            `${leftS} s left to confirm`,
+        }
+      } else {
+        // THE DEADLINE. Two budgets, no settle, no stage event.
+        unconfirmedFires.delete(run.id)
+        // (1c-i) THE #498 GATE FIRST. Exactly what the `failed` fire path consults:
+        //     the workflow may have launched and be writing checkpoints without ever
+        //     stamping `plan-start` (or with the ledger unreadable), or may already
+        //     have published. Positive evidence holds or terminalizes the lane; only
+        //     `none` reaches the failure below.
+        const decided = await decideSettleTimeoutByEvidence({
+          pinnedRun: run,
+          dispatch_id: pendingFire.dispatch_id,
+          fire_started_at_ms: pendingFire.fire_started_at_ms,
+          launcher_generation: generation,
+          stamp: (stage, meta) => stampFor(run.id, stage, meta),
+        })
+        if (decided !== null) return decided
+        fired.delete(run.id)
+        // (1c-ii) CANCEL THE TURN. A turn that never injected is still QUEUED behind
+        //     the driver lock — its Workflow call has not gone out, and withdrawing
+        //     it is poison-free (the driver returns before any inject). Left armed,
+        //     it would fire a ghost Workflow on a row this tick marks failed. A turn
+        //     that DID inject is abandoned the ordinary way: the pool's eviction
+        //     guard keeps that child alive while it hosts other live runs, and the
+        //     hung turn drains under the driver lock.
+        const injected = pendingFire.injected === true
+        if (pendingFire.cancel !== null) {
+          const cancel = pendingFire.cancel
+          fireAndForget('orchestrator.unconfirmed_fire_cancel', cancel(), (err: unknown) => {
+            log.error('unconfirmed_fire_cancel_failed', {
+              run: run.id,
+              slug: run.slug,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
+          stampFor(
+            run.id,
+            'fire-cancelled',
+            injected
+              ? 'injected turn abandoned at the confirmation deadline'
+              : 'queued turn withdrawn at the confirmation deadline (never injected; poison-free)',
+          )
+        }
+        const lateNote =
+          late === null
+            ? 'launcher turn still not settled after two budgets'
+            : `launcher turn later ended ${late.status}: ${late.error ?? 'unknown'}`
+        const windowMin = Math.round((2 * pendingFire.budget_ms) / 60_000)
+        return {
+          run: failedRun(
+            { ...run, ...adoption },
+            `inner workflow fire failed: ${FIRE_SETTLE_TIMEOUT_ERROR} (${lateNote}; ` +
+              `${injected ? 'the turn had injected' : 'the turn never injected'}; ` +
+              `no plan-start observed within ${windowMin} min; launcher turn cancelled at the deadline)`,
+            false,
+          ),
+          changed: true,
+          waiting: false,
+          note: `${run.phase} → failed (fire never confirmed)`,
         }
       }
     }

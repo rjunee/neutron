@@ -172,6 +172,58 @@ describe('trident external liveness composition wiring', () => {
  * These drive the REAL composed orchestrator and assert the probe was CONSULTED and
  * ACTED ON, rather than asserting a seam that production may never pass.
  */
+// F7 (review): `list_stage_events: (run_id) => store.stageEvents(run_id)` is the
+// composition line that lets §1c read the workflow's own `plan-start` for an
+// UNCONFIRMED fire. Unpinned, it could be dropped and every unconfirmed fire
+// would fail at its deadline with the workflow alive.
+describe('trident unconfirmed-fire wiring — the composed orchestrator reads the stage ledger', () => {
+  test("a fire parked UNCONFIRMED is confirmed by the workflow's own plan-start row in code_trident_stage_events", async () => {
+    const mods = buildCoreModules({
+      ...baseInput(),
+      trident: {
+        // Budget 0: the confirmation deadline is already due on the next tick, so
+        // without the ledger read the second tick FAILS the run.
+        fire_inner_workflow: async () => ({
+          status: 'unconfirmed',
+          error: 'fire turn did not settle within the budget (turn left running, not cancelled)',
+          elapsed_ms: 0,
+          budget_ms: 0,
+          turn_cancelled: false,
+          settled: new Promise(() => {}),
+          launcher: new Promise(() => {}),
+        }),
+        run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
+        delivery_sink: { send: async () => '' },
+      },
+    })
+    const instance = await mods.tridentModule.init(fakeCtx)
+    try {
+      await instance.loop.stop()
+      const store = new TridentRunStore(db)
+      const id = runId()
+      await store.create({ id, slug: id, project_slug: 'alice', repo_path: await makeRepo(), task: 'build' })
+
+      await instance.loop.runOnce()
+      let row = store.get(id)!
+      expect(row.subagent_status).toBe('running')
+      expect(row.subagent_run_id).not.toBeNull()
+      expect(store.stageEvents(id).map((e) => e.stage)).toContain('fire-unconfirmed')
+
+      // The detached workflow stamps plan-start OUT OF PROCESS, straight into the ledger.
+      await store.recordStageEvent(id, 'plan-start')
+
+      await instance.loop.runOnce()
+      row = store.get(id)!
+      // Red mutation: unwiring `list_stage_events` fails the run here at the deadline.
+      expect(row.phase).not.toBe('failed')
+      expect(row.subagent_status).toBe('running')
+      expect(store.stageEvents(id).map((e) => e.stage)).toContain('fire-confirmed')
+    } finally {
+      await mods.tridentModule.shutdown!(instance)
+    }
+  })
+})
+
 describe('trident hang-watchdog wiring — the composed orchestrator consults the launcher probe', () => {
   /** Age a run's advancement clock past the 90-minute hang threshold, in SQL — the
    *  store deliberately re-stamps `last_advanced_at` on every save. Returns the stamp

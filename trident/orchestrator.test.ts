@@ -136,6 +136,9 @@ function buildHarness(opts: {
   resolve_reflection_context?: (run: TridentRun) => string | null
   resolve_active_runs?: () => number
   record_stage?: (run_id: string, stage: string, meta?: string | null) => void
+  list_stage_events?: (run_id: string) => ReadonlyArray<{ stage: string; at: string }>
+  /** Wire the store's crash-recovery claim so the §1a-crash branch is reachable. */
+  begin_crash_recovery?: boolean
   resolve_conflict?: import('./merge.ts').MergeConflictResolver
   fix_leak_findings?: import('./leak-preflight.ts').LeakPreflightFixer
   fold_as_built?: (
@@ -275,6 +278,8 @@ function buildHarness(opts: {
     o.resolve_reflection_context = opts.resolve_reflection_context
   if (opts.resolve_active_runs !== undefined) o.resolve_active_runs = opts.resolve_active_runs
   if (opts.record_stage !== undefined) o.record_stage = opts.record_stage
+  if (opts.list_stage_events !== undefined) o.list_stage_events = opts.list_stage_events
+  if (opts.begin_crash_recovery === true) o.begin_crash_recovery = (id) => store.beginCrashRecovery(id)
   if (opts.resolve_conflict !== undefined) o.resolve_conflict = opts.resolve_conflict
   if (opts.fix_leak_findings !== undefined) o.fix_leak_findings = opts.fix_leak_findings
   // Keep unrelated orchestrator tests hermetic: production defaults to the real
@@ -4007,6 +4012,480 @@ describe('orchestrator — fire did not settle → failed', () => {
     const after = store.get(run.id)!
     expect(after.phase).toBe('failed')
     expect(after.failure_reason).toBe(PLAIN_FIRE_FAILURE)
+  })
+})
+
+/**
+ * UNCONFIRMED FIRES (2026-09-03 root cause: abandon-poison eviction of the shared
+ * launcher REPL killed every in-process inner workflow — 33% of run deaths). A
+ * launcher turn that overruns the settle budget is no longer cancelled; the fire
+ * seam reports `unconfirmed` and the orchestrator waits ONE MORE budget for either
+ * the late settle or the workflow's own `plan-start` before failing the run. It
+ * never relaunches from that state (a second lane on the same card).
+ */
+describe('orchestrator — an UNCONFIRMED fire (launcher turn left draining past the settle budget)', () => {
+  const UNCONFIRMED_ERROR = 'fire turn did not settle within the budget (turn left running, not cancelled)'
+  const unconfirmed = (settled: Promise<FireOutcome>, budget_ms = 1000): FireOutcome => ({
+    status: 'unconfirmed',
+    error: UNCONFIRMED_ERROR,
+    elapsed_ms: budget_ms,
+    budget_ms,
+    turn_cancelled: false,
+    settled,
+  })
+
+  test('parks the run RUNNING (not failed, not relaunched), stamps fire-unconfirmed, and confirms on the late settle by adopting the launcher generation', async () => {
+    let settle!: (o: FireOutcome) => void
+    const settled = new Promise<FireOutcome>((resolve) => {
+      settle = resolve
+    })
+    const stamped: Array<{ stage: string; meta: string | null | undefined }> = []
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(settled) }),
+      now: () => new Date(t).toISOString(),
+      record_stage: (_run_id, stage, meta) => stamped.push({ stage, meta }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    let after = store.get(run.id)!
+    // Red mutation: the old branch failed the run here with 'fire did not settle'.
+    expect(after.phase).not.toBe('failed')
+    expect(after.subagent_status).toBe('running')
+    expect(after.subagent_run_id).not.toBeNull()
+    expect(stamped.map((s) => s.stage)).toEqual(['launch-start', 'fire-dispatched', 'fire-unconfirmed'])
+    expect(stamped[2]!.meta).toContain('elapsed_ms=1000')
+    expect(stamped[2]!.meta).toContain('cancelled=false')
+    expect(stamped[2]!.meta).toContain('budget_ms=1000')
+
+    // Inside the confirmation window: still waiting, and NO second fire.
+    t = 500
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(h.inputs).toHaveLength(1)
+
+    // The launcher turn settles late (an autocompact-crossing settle measured 4m33s / 5m03s).
+    settle({ status: 'fired', error: null, launcher_session_key: 'generation-late' })
+    await settled
+    await Promise.resolve()
+    t = 900
+    await h.loop.runOnce()
+    after = store.get(run.id)!
+    // The crash-ownership token is the real launcher generation now, not the observability id.
+    expect(after.workflow_run_id).toBe('generation-late')
+    expect(after.subagent_status).toBe('running')
+    expect(stamped.map((s) => s.stage)).toContain('fire-settled')
+
+    // Well past the deadline nothing fails a confirmed fire, and still one lane.
+    t = 5_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test("the workflow's own plan-start (stamped AFTER fire-unconfirmed) confirms the fire without the turn ever settling", async () => {
+    const ledger: Array<{ stage: string; at: string }> = []
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(new Promise<FireOutcome>(() => {})) }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    // The inner workflow stamps plan-start out of process (checkpoint.sh) — the
+    // launcher turn is STILL draining.
+    ledger.push({ stage: 'plan-start', at: now() })
+
+    t = 5_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a plan-start from BEFORE this launch is not evidence: with nothing after fire-dispatched the run fails at the deadline, with the original reason, the turn cancelled, and no second lane', async () => {
+    const ledger: Array<{ stage: string; at: string }> = [{ stage: 'plan-start', at: new Date(0).toISOString() }]
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(new Promise<FireOutcome>(() => {})) }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+
+    // One tick short of the deadline (launch at t=0, budget 1000): still waiting.
+    t = 999
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+
+    t = 1_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toContain('inner workflow fire failed')
+    expect(after.failure_reason).toContain('did not settle within the budget')
+    expect(after.failure_reason).toContain('the turn never injected')
+    expect(after.failure_reason).toContain('launcher turn cancelled at the deadline')
+    // Never the dispatch id and never a stale generation: a row with no known
+    // launcher carries NULL, exactly like the #498 held-lane row.
+    expect(after.workflow_run_id).toBeNull()
+    // `delivery.ts` routes 'exhausted' into the review-unresolved class — never say it here.
+    expect(after.failure_reason ?? '').not.toContain('exhausted')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  // F1 (review): the workflow's `plan-start` lands SECONDS after the Workflow
+  // call — before the launcher's 8-minute budget runs out — so it precedes this
+  // launch's `fire-unconfirmed` stamp. Anchoring the scan on `fire-unconfirmed`
+  // discarded the run's own proof and failed a live run at the deadline.
+  test("a plan-start stamped BETWEEN fire-dispatched and fire-unconfirmed (the real ordering) confirms the fire — the scan anchors on this launch's fire-dispatched", async () => {
+    const ledger: Array<{ stage: string; at: string }> = [{ stage: 'plan-start', at: new Date(0).toISOString() }]
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(new Promise<FireOutcome>(() => {})) }),
+      now,
+      record_stage: (_run_id, stage) => {
+        ledger.push({ stage, at: now() })
+        // The detached workflow stamps plan-start while the launcher turn is still
+        // inside its budget — i.e. right after the dispatch, before `fire-unconfirmed`.
+        if (stage === 'fire-dispatched') ledger.push({ stage: 'plan-start', at: now() })
+      },
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(ledger.map((e) => e.stage)).toEqual([
+      'plan-start',
+      'launch-start',
+      'fire-dispatched',
+      'plan-start',
+      'fire-unconfirmed',
+    ])
+
+    // Red mutation: anchoring on `fire-unconfirmed` sees nothing after it and fails here.
+    t = 5_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).not.toBe('failed')
+    expect(after.subagent_status).toBe('running')
+    expect(ledger.map((e) => e.stage)).toContain('fire-confirmed')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  // F2/F4/F6 (review): the generation is the eviction guard's and the crash
+  // latch's key (`countRunningByLauncher` / `crashRunningByLauncher` match
+  // WHERE workflow_run_id = ?). It must reach the row whenever it is learned —
+  // not only via a late settle that lands while the in-memory record exists.
+  test('a stage-event-confirmed fire STILL adopts the generation from a settle that lands AFTER the deadline', async () => {
+    let settle!: (o: FireOutcome) => void
+    const settled = new Promise<FireOutcome>((resolve) => {
+      settle = resolve
+    })
+    const ledger: Array<{ stage: string; at: string }> = []
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(settled) }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    ledger.push({ stage: 'plan-start', at: now() })
+    t = 500
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+    expect(store.get(run.id)!.workflow_run_id).toBeNull()
+
+    // Past the deadline: confirmed, so still running — and the generation is still unknown.
+    t = 5_000
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(store.get(run.id)!.workflow_run_id).toBeNull()
+
+    settle({ status: 'fired', error: null, launcher_session_key: 'generation-late' })
+    await settled
+    await Promise.resolve()
+    t = 5_500
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    // Red mutation: dropping the record at the deadline leaves this null forever.
+    expect(after.workflow_run_id).toBe('generation-late')
+    expect(after.subagent_status).toBe('running')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a turn that INJECTED before the budget carries its generation on the unconfirmed outcome, and the row wears it from the first save', async () => {
+    const h = buildHarness({
+      plan: () => ({
+        fire: {
+          ...unconfirmed(new Promise<FireOutcome>(() => {})),
+          launcher_session_key: 'generation-inject',
+        },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.subagent_status).toBe('running')
+    // Red mutation: writing the dispatch id here makes the eviction guard and the
+    // crash latch blind to this run until (unless) the turn settles.
+    expect(after.workflow_run_id).toBe('generation-inject')
+    expect(after.subagent_run_id).not.toBe('generation-inject')
+  })
+
+  test('a generation learned from the `launcher` promise BETWEEN ticks (inject after the budget) is adopted on the next tick, before any confirmation', async () => {
+    let inject!: (g: string | null) => void
+    const launcher = new Promise<string | null>((resolve) => {
+      inject = resolve
+    })
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: { ...unconfirmed(new Promise<FireOutcome>(() => {})), launcher } }),
+      now: () => new Date(t).toISOString(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.workflow_run_id).toBeNull()
+
+    inject('generation-inject-late')
+    await launcher
+    await Promise.resolve()
+    t = 500
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.workflow_run_id).toBe('generation-inject-late')
+    expect(after.subagent_status).toBe('running')
+    expect(after.phase).not.toBe('failed')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  // F3 (review): a launcher turn that never injected is still QUEUED behind the
+  // driver lock; failing the row while leaving it armed lets a ghost Workflow go
+  // out later on a run already marked failed.
+  test('the deadline CANCELS the still-queued launcher turn (never before), stamps it, and says so in the reason', async () => {
+    let cancels = 0
+    const ledger: Array<{ stage: string; at: string }> = []
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const h = buildHarness({
+      plan: () => ({
+        fire: {
+          ...unconfirmed(new Promise<FireOutcome>(() => {})),
+          launcher: new Promise<string | null>(() => {}),
+          cancel: async () => {
+            cancels += 1
+          },
+        },
+      }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    t = 999
+    await h.loop.runOnce()
+    expect(cancels).toBe(0)
+
+    t = 1_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    // Red mutation: leaving the turn armed keeps this at 0.
+    expect(cancels).toBe(1)
+    expect(ledger.map((e) => e.stage)).toContain('fire-cancelled')
+    expect(after.failure_reason).toContain('launcher turn cancelled at the deadline')
+    expect(h.inputs).toHaveLength(1)
+
+    // Idempotent: the record is gone, nothing cancels twice.
+    t = 2_000
+    await h.loop.runOnce()
+    expect(cancels).toBe(1)
+  })
+
+  test('the deadline runs the #498 fire-evidence gate FIRST: a workflow that shows life holds the lane instead of failing', async () => {
+    const seen: number[] = []
+    let t = 0
+    const now = (): string => new Date(t).toISOString()
+    const ledger: Array<{ stage: string; at: string }> = []
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(new Promise<FireOutcome>(() => {})) }),
+      now,
+      record_stage: (_run_id, stage) => ledger.push({ stage, at: now() }),
+      list_stage_events: () => ledger,
+      gather_fire_evidence: async (input) => {
+        seen.push(input.fire_started_at_ms)
+        return { kind: 'launched', detail: 'checkpoint moved after the fire' }
+      },
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    t = 1_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).not.toBe('failed')
+    expect(after.subagent_status).toBe('running')
+    expect(seen).toEqual([0])
+    expect(ledger.map((e) => e.stage)).toContain('fire-unobserved-launch')
+    expect(h.inputs).toHaveLength(1)
+  })
+
+  test('a late FAILED settle does not fail the run early (plan-start may still land) but is carried in the deadline reason', async () => {
+    let settle!: (o: FireOutcome) => void
+    const settled = new Promise<FireOutcome>((resolve) => {
+      settle = resolve
+    })
+    const stamped: string[] = []
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: unconfirmed(settled) }),
+      now: () => new Date(t).toISOString(),
+      record_stage: (_run_id, stage) => stamped.push(stage),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    await h.loop.runOnce()
+
+    settle({ status: 'failed', error: 'fire turn closed without a completion event' })
+    await settled
+    await Promise.resolve()
+    t = 500
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.phase).not.toBe('failed')
+    expect(stamped).toContain('fire-drained')
+
+    t = 1_000
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).toBe('failed')
+    expect(after.failure_reason).toContain('launcher turn later ended failed: fire turn closed without a completion event')
+    expect(h.inputs).toHaveLength(1)
+  })
+})
+
+// F5 (review): every eviction latches `crashed`, but the codex forge build is
+// DETACHED and survives the evicted child. Relaunching on the latch alone puts a
+// second build on the same branch while the orphan still writes to it.
+describe('orchestrator — §1a-crash relaunch is gated on live-process run evidence', () => {
+  const crashed = async (): Promise<TridentRun> => {
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+    return (await store.update(run.id, {
+      subagent_run_id: 'wf-crashed-1',
+      subagent_status: 'crashed',
+      workflow_run_id: 'generation-evicted',
+      failure_reason: 'pooled child evicted (abandon-poison)',
+    }))!
+  }
+
+  test('a process carrying this run id DEFERS the relaunch (no lane, latch kept, clock untouched); once it is gone the relaunch proceeds', async () => {
+    let alive = true
+    let probes = 0
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      begin_crash_recovery: true,
+      gather_run_evidence: async () => {
+        probes += 1
+        return {
+          process: alive
+            ? { observed: 'activity', age_ms: 0, detail: 'codex-build.sh argv carries the run id' }
+            : { observed: 'nothing', detail: 'no process' },
+          artifacts: { observed: 'nothing', detail: 'none' },
+          ref: { observed: 'unknown', detail: 'not probed' },
+        }
+      },
+    })
+    const run = await crashed()
+    const stampBefore = store.get(run.id)!.last_advanced_at
+
+    await h.loop.runOnce()
+    let after = store.get(run.id)!
+    expect(probes).toBe(1)
+    // Red mutation: relaunching on the latch alone fires a second build here.
+    expect(h.inputs).toHaveLength(0)
+    expect(after.subagent_status).toBe('crashed')
+    expect(after.crash_recoveries).toBe(0)
+    expect(after.last_advanced_at).toBe(stampBefore)
+
+    alive = false
+    await h.loop.runOnce()
+    after = store.get(run.id)!
+    expect(h.inputs).toHaveLength(1)
+    expect(after.subagent_status).toBe('running')
+    expect(after.crash_recoveries).toBe(1)
+  })
+
+  test('absent or UNKNOWN process evidence is not evidence: the relaunch proceeds as before', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      begin_crash_recovery: true,
+      gather_run_evidence: async () => ({
+        process: { observed: 'unknown', detail: 'ps unavailable' },
+        artifacts: { observed: 'nothing', detail: 'none' },
+        ref: { observed: 'nothing', detail: 'none' },
+      }),
+    })
+    const run = await crashed()
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+  })
+
+  test('a throwing gatherer is logged and falls through to the relaunch', async () => {
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      begin_crash_recovery: true,
+      gather_run_evidence: async () => {
+        throw new Error('probe host unavailable')
+      },
+    })
+    const run = await crashed()
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(1)
+    expect(store.get(run.id)!.subagent_status).toBe('running')
+  })
+
+  test('the deferral is bounded by the in-flight ceiling: past it a live process no longer holds the relaunch', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: { status: 'fired', error: null } }),
+      begin_crash_recovery: true,
+      max_inflight_ms: 60_000,
+      now: () => new Date(t).toISOString(),
+      gather_run_evidence: async () => ({
+        process: { observed: 'activity', age_ms: 0, detail: 'still alive' },
+        artifacts: { observed: 'nothing', detail: 'none' },
+        ref: { observed: 'nothing', detail: 'none' },
+      }),
+    })
+    const run = await crashed()
+    t = 60_000
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(0)
+    expect(store.get(run.id)!.subagent_status).toBe('crashed')
+
+    t = 60_001
+    await h.loop.runOnce()
+    expect(h.inputs).toHaveLength(1)
   })
 })
 
