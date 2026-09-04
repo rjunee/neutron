@@ -10,14 +10,26 @@
  *
  * Four invariants govern this reader:
  *
- * (a) THE PATH IS PER-BRANCH, and the blob must be IN THIS BRANCH'S DIFF. A
- *     fixed tracked path inherits: once one branch merges it, every later branch
- *     starts life already holding that file, and "this build nominated nothing"
- *     silently becomes "reuse whatever the last PR nominated". Both halves are
- *     load-bearing — the per-branch path (mirroring `.trident/plans/<branch>.md`)
- *     also stops concurrent lanes colliding on one file, and the diff-membership
- *     check still catches the case a branch NAME is reused after its predecessor
+ * (a) THE PATH IS PER-BRANCH, and the blob must be IN THIS BRANCH'S DIFF —
+ *     AGAINST EVERY COMMIT THE BASE NAMES HERE. A fixed tracked path inherits:
+ *     once one branch merges it, every later branch starts life already holding
+ *     that file, and "this build nominated nothing" silently becomes "reuse
+ *     whatever the last PR nominated". Both halves are load-bearing — the
+ *     per-branch path (mirroring `.trident/plans/<branch>.md`) also stops
+ *     concurrent lanes colliding on one file, and the diff-membership check
+ *     still catches the case a branch NAME is reused after its predecessor
  *     merged. A blob the branch did not touch reads as null.
+ *
+ *     THE MEMBERSHIP CHECK IS ONLY AS HONEST AS ITS BASE, which is why the base
+ *     is resolved to commits here rather than handed to git as a name. A local
+ *     `main` sitting BEHIND `origin/main` puts the predecessor's merge INSIDE
+ *     `main...<head>`, so a reused branch name reads the inherited blob as its
+ *     own nomination and the gate fails OPEN (reproduced against real git).
+ *     Both spellings of the base — `refs/remotes/origin/<base>` and
+ *     `refs/heads/<base>` — are therefore resolved, and the artifact must be in
+ *     the diff against EACH commit they name: a blob this branch really wrote is
+ *     in both diffs, while one inherited from either base is missing from that
+ *     base's own. Neither ref resolving is a null, not a waiver.
  *
  *     WHAT (a) DOES NOT CATCH, stated so nobody reads it as more than it is: a
  *     nomination going STALE WITHIN ONE BRANCH. A fix round, or a later lane
@@ -186,8 +198,8 @@ async function pinRevision(
     // `^{commit}` is a suffix on an operand that already passed `isPlainBranchName`
     // and carries a `refs/` prefix, so it is still a ref PATH and never an option
     // — and `--end-of-options` says so to git as well. (`git diff`'s range form
-    // takes no such marker, which is why `changedFilesOnBranch` has to reject a
-    // hostile base by NAME instead.)
+    // takes no such marker; this reader never puts a NAME on that range at all,
+    // because the base goes through here first and reaches the diff as an OID.)
     const res = await run_host(
       ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`],
       repo_path,
@@ -200,6 +212,30 @@ async function pinRevision(
   }
 }
 
+/**
+ * Every commit the base names in THIS repository — `origin/<base>` and the local
+ * `<base>` — as OIDs, deduplicated, in that order.
+ *
+ * A LOCAL BRANCH REF IS NOT AUTHORITATIVE and is not asked to be: it is whatever
+ * this checkout last set it to, and on a gate host it is routinely behind the
+ * remote. Reading `origin/<base>` too, and requiring the artifact in the diff
+ * against BOTH, is what stops a stale local base widening the range far enough
+ * to swallow a predecessor's merged nomination. Order matters only to which
+ * refusal note gets written; every entry is used.
+ */
+async function resolveBaseCommits(
+  run_host: RunHostCommand,
+  repo_path: string,
+  base: string,
+): Promise<string[]> {
+  const oids: string[] = []
+  for (const ref of [`refs/remotes/origin/${base}`, `refs/heads/${base}`]) {
+    const oid = await pinRevision(run_host, repo_path, ref)
+    if (oid !== null && !oids.includes(oid)) oids.push(oid)
+  }
+  return oids
+}
+
 async function readAtRevision(
   run_host: RunHostCommand,
   repo_path: string,
@@ -209,14 +245,22 @@ async function readAtRevision(
 ): Promise<CommittedMutationClaimRead> {
   const at = `${revision}:${path}`
   try {
-    // (1) THE BLOB MUST BE PART OF THIS BRANCH'S OWN DIFF. A tracked file that
-    // merely came along from the base is not a nomination this build made.
-    const changed = await changedFilesOnBranch(run_host, repo_path, base, revision)
-    if (changed === null) {
-      return { claim: null, note: `no committed nomination: could not read the diff ${base}...${revision}` }
+    // (1) THE BLOB MUST BE PART OF THIS BRANCH'S OWN DIFF, against every commit
+    // the base names. A tracked file that merely came along from the base is not
+    // a nomination this build made — and a base ref that has fallen behind the
+    // remote is exactly how such a file gets into the range.
+    const bases = await resolveBaseCommits(run_host, repo_path, base)
+    if (bases.length === 0) {
+      return { claim: null, note: `no committed nomination: base ${base} names no commit here` }
     }
-    if (!changed.includes(path)) {
-      return { claim: null, note: `no committed nomination: ${path} is not in the diff ${base}...${revision}` }
+    for (const from of bases) {
+      const changed = await changedFilesOnBranch(run_host, repo_path, from, revision)
+      if (changed === null) {
+        return { claim: null, note: `no committed nomination: could not read the diff ${from}...${revision}` }
+      }
+      if (!changed.includes(path)) {
+        return { claim: null, note: `no committed nomination: ${path} is not in the diff ${from}...${revision}` }
+      }
     }
 
     // (2) SIZE THE OBJECT BEFORE ITS BODY CROSSES THE PROCESS BOUNDARY. Checking

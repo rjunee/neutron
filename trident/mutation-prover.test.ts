@@ -836,11 +836,15 @@ describe('the prose-only exemption FAILS CLOSED', () => {
  * `--output=<path>` is read as an OPTION and git WRITES that path. The base
  * reaches this function from an operator flag or from `origin/HEAD` via
  * `detectBaseBranch`, and a ref of that spelling passes `check-ref-format` — so
- * the filter belongs at this consumer, not at the source.
+ * the refusal belongs at this consumer, not at the source.
+ *
+ * The refusal is exactly that and no wider: an ALLOWLIST here refuses revisions
+ * git accepts (`HEAD~1`, `release@v1`) and would make every non-exempt merge in
+ * such a repo refuse forever. Everything that is not an option is git's to judge.
  */
 describe('changedFilesOnBranch refuses a base git could read as an option', () => {
-  test('a hostile base never reaches git, and the refusal means "require the proof"', async () => {
-    for (const unsafe of ['--output=/tmp/leak', '-x', 'x:refs/heads/y', 'a/../b', 'a//b', 'main.lock', '', '   ']) {
+  test('an option-shaped base never reaches git, and the refusal means "require the proof"', async () => {
+    for (const unsafe of ['--output=/tmp/leak', '-x', '--', '', '   ']) {
       const calls: string[][] = []
       const run: RunHostCommand = async (cmd) => {
         calls.push([...cmd])
@@ -855,10 +859,9 @@ describe('changedFilesOnBranch refuses a base git could read as an option', () =
       expect({ unsafe, calls: calls.length }).toEqual({ unsafe, calls: 0 })
     }
 
-    // POSITIVE CONTROL: a plain name — a slash-bearing one, which the allowlist
-    // must still admit — DOES reach git, as the left side of the range. Without
-    // this the loop above would pass on a reader that had stopped calling git
-    // at all.
+    // POSITIVE CONTROL: a plain name — a slash-bearing one — DOES reach git, as
+    // the left side of the range. Without this the loop above would pass on a
+    // reader that had stopped calling git at all.
     const calls: string[][] = []
     const run: RunHostCommand = async (cmd) => {
       calls.push([...cmd])
@@ -866,6 +869,32 @@ describe('changedFilesOnBranch refuses a base git could read as an option', () =
     }
     expect(await changedFilesOnBranch(run, '/repo', 'origin/main', 'feat-x')).toEqual(['src/a.ts'])
     expect(calls).toEqual([['git', '-C', '/repo', 'diff', '--name-only', 'origin/main...feat-x']])
+  })
+
+  test('A BASE GIT ACCEPTS IS GIT’S TO JUDGE — the filter does not outlaw legal revisions', async () => {
+    // THE REGRESSION THIS PINS: an ASCII allowlist rejected `release@v1` (a name
+    // `git check-ref-format --branch` accepts, so a real default branch) and
+    // `HEAD~1` (what an operator flag passes), and a rejected base reads as
+    // "branch diff could not be read" — i.e. EVERY non-exempt merge in such a
+    // repo refused, permanently.
+    for (const legal of ['release@v1', 'HEAD~1', 'main', 'origin/main', 'feature/a.b', '  main  ']) {
+      const calls: string[][] = []
+      const run: RunHostCommand = async (cmd) => {
+        calls.push([...cmd])
+        return res(0, 'src/a.ts\n')
+      }
+      expect({ legal, files: await changedFilesOnBranch(run, '/repo', legal, 'feat-x') }).toEqual({
+        legal,
+        files: ['src/a.ts'],
+      })
+      expect({ legal, operand: calls[0]?.at(-1) }).toEqual({ legal, operand: `${legal.trim()}...feat-x` })
+    }
+
+    // CONTROL, the other way: git's own "no" is still a null. A base this filter
+    // now admits but git cannot resolve fails the diff, and the gate REQUIRES
+    // the proof — the delegation never turns a bad base into a pass.
+    const rejecting: RunHostCommand = async () => res(128, '')
+    expect(await changedFilesOnBranch(rejecting, '/repo', 'no-such-base', 'feat-x')).toBeNull()
   })
 })
 

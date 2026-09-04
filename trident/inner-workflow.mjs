@@ -333,10 +333,18 @@ const forgeBranch = memberMode ? pinnedMemberBranch : branch || `trident/${slug}
 // WHERE THE BUILD COMMITS ITS MUTATION NOMINATION. PER-BRANCH on purpose, exactly
 // as `.trident/plans/<branch>.md` is: a single fixed tracked path is inherited by
 // every branch cut after the first one merges — "this build nominated nothing"
-// would silently become "reuse the last PR's nomination" — and it makes every
-// concurrent lane rewrite one file, which is an add/add conflict for all but the
-// first to land. `trident/mutation-claim-artifact.ts` derives the same path from
-// the same branch name and reads the blob back out of git at the reviewed commit.
+// would silently become "reuse the last PR's nomination" — and it keeps
+// concurrent LANES off one file, which would otherwise be an add/add conflict for
+// all but the first to land. `trident/mutation-claim-artifact.ts` derives the
+// same path from the same branch name and reads the blob back out of git at the
+// reviewed commit.
+//
+// WHAT "PER-BRANCH" DOES NOT SEPARATE: members of ONE wave. They share the pinned
+// lane branch, so they share this file, and a later member's gate can be
+// satisfied by an earlier member's nomination — the same within-branch staleness
+// a fix round has (`mutation-claim-artifact.ts` invariant (a)), bounded the same
+// way: the gate RUNS the mutation, so a nomination that no longer describes the
+// code fails to redden its guard.
 const mutationClaimArtifactPath = `.trident/mutation-claims/${forgeBranch}.json`
 
 // RB2 (b) — `reflectionGuidance` (destructured above, threaded READY-TO-APPEND by

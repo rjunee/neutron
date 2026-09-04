@@ -1064,19 +1064,26 @@ export async function changedFilesOnBranch(
   ref: string | null,
 ): Promise<string[] | null> {
   if (ref === null || ref.trim().length === 0) return null
-  // THE BASE IS A NAME THIS FUNCTION HANDS STRAIGHT TO GIT, so it is filtered
-  // HERE, at the consumer, rather than trusted from wherever it came. The range
-  // form admits no end-of-options marker: a base beginning with "-" arrives as
-  // an OPTION, and `git diff --name-only "--output=<path>...<ref>"` exits 0 and
-  // CREATES a file the base named — the whole operand, range suffix included, is
-  // taken as the output path (reproduced on git 2.43.0 in
-  // `mutation-prover-realgit.test.ts`). The name is operator-supplied or
-  // derived from `origin/HEAD` (`detectBaseBranch`), and a ref of that spelling
-  // passes `git check-ref-format`, so its source cannot be assumed clean.
-  // Refusing reads as "the diff could not be read", which makes the gate
-  // REQUIRE the proof — this can never turn into a pass.
-  if (!isPlainBranchName(base_branch.trim())) return null
-  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${ref}`], repo_path)
+  const base = base_branch.trim()
+  // THE ONE THING THE BASE MAY NOT BE: an OPTION. The range form admits no
+  // `--end-of-options` marker, so `git diff --name-only "--output=<path>...<ref>"`
+  // exits 0 and CREATES the file the base named — the whole operand, range
+  // suffix included, is taken as the output path (reproduced on git 2.43.0 in
+  // `mutation-prover-realgit.test.ts`). The base is operator-supplied or derived
+  // from `origin/HEAD` (`detectBaseBranch`), and a ref of that spelling passes
+  // `git check-ref-format`, so its source cannot be assumed clean. Argv is an
+  // array here — there is no shell — so a leading `-` is the whole vector.
+  //
+  // DELIBERATELY NOT AN ALLOWLIST. Everything else is left to git, which is the
+  // interpreter that receives it: this function's other callers pass revisions
+  // git accepts and a name allowlist does not (`HEAD~1` from an operator flag,
+  // and default branches like `release@v1`, which `check-ref-format --branch`
+  // accepts). Refusing those here would make every non-exempt merge in such a
+  // repo refuse with "branch diff could not be read", forever. A base git cannot
+  // resolve simply fails the diff, which reads as "could not be read" and makes
+  // the gate REQUIRE the proof — never a pass.
+  if (base.length === 0 || base.startsWith('-')) return null
+  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base}...${ref}`], repo_path)
   if (!res.ok) return null
   const files = res.stdout
     .split(/\r?\n/)

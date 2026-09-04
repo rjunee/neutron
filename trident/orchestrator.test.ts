@@ -2434,10 +2434,20 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
   // The PER-BRANCH artifact path, derived by the production helper from the branch
   // the sim plan resolves — never spelled out here, so a layout change reddens.
   const ARTIFACT_PATH = mutationClaimArtifactPath('feat-x') as string
-  // The diff-membership leg, at the REVIEWED oid: the nomination only counts as
-  // this build's if it is in the branch's own diff. The base is the base BRANCH
-  // NAME the run resolves, exactly as `git diff` has always taken it.
-  const DIFF_ARTIFACT = `git -C /repo diff --name-only main...${SIM_REVIEWED_HEAD}`
+  // THE BASE OF THE MEMBERSHIP DIFF IS RESOLVED, BOTH SPELLINGS OF IT. Diff
+  // membership is only as honest as the base it is measured from: a local `main`
+  // that has fallen behind `origin/main` puts a predecessor's merge inside the
+  // range, so a reused branch name would inherit its nomination. The reader pins
+  // both refs and requires the blob in the diff against every commit they name.
+  const BASE_PIN_ORIGIN = 'git -C /repo rev-parse --verify --quiet --end-of-options refs/remotes/origin/main^{commit}'
+  const BASE_PIN_LOCAL = 'git -C /repo rev-parse --verify --quiet --end-of-options refs/heads/main^{commit}'
+  const SIM_BASE_OID = 'b'.repeat(40)
+  /** Both spellings agree, so one diff — the ordinary case. */
+  const basePins = (j: string): HostCommandResult | null =>
+    j === BASE_PIN_ORIGIN || j === BASE_PIN_LOCAL ? ok(SIM_BASE_OID) : null
+  // The diff-membership leg, at the REVIEWED oid and against the RESOLVED base:
+  // the nomination only counts as this build's if it is in the branch's own diff.
+  const DIFF_ARTIFACT = `git -C /repo diff --name-only ${SIM_BASE_OID}...${SIM_REVIEWED_HEAD}`
   const SIZE_ARTIFACT = `git -C /repo cat-file -s ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
   const SHOW_ARTIFACT = `git -C /repo show ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
 
@@ -2445,6 +2455,8 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
   function serveArtifact(body: string): (cmd: string[]) => HostCommandResult {
     return (cmd) => {
       const j = cmd.join(' ')
+      const pin = basePins(j)
+      if (pin !== null) return pin
       if (j === DIFF_ARTIFACT) return ok(`${ARTIFACT_PATH}\ntrident/limit.ts\n`)
       if (j === SIZE_ARTIFACT) return ok(String(Buffer.byteLength(body, 'utf8')))
       if (j === SHOW_ARTIFACT) return ok(body)
@@ -2511,6 +2523,8 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       merge_deps: {},
       hostResponder: (cmd) => {
         const j = cmd.join(' ')
+        const pin = basePins(j)
+        if (pin !== null) return pin
         // The blob EXISTS and is perfectly well-formed at the reviewed commit...
         if (j === SIZE_ARTIFACT) return ok(String(Buffer.byteLength(JSON.stringify(ARTIFACT_CLAIM), 'utf8')))
         if (j === SHOW_ARTIFACT) return ok(JSON.stringify(ARTIFACT_CLAIM))
@@ -2542,6 +2556,71 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     expect(seenOk[0]).not.toBeNull()
   })
 
+  test('A STALE LOCAL BASE CANNOT SMUGGLE AN INHERITED NOMINATION PAST THE PRODUCTION CALL SITE', async () => {
+    // The sibling of the case above, and the one a single-base reader gets
+    // wrong: the blob IS in the range when the range is measured from a local
+    // base that has fallen behind the remote, because the predecessor's merge is
+    // inside it. Trident branch names are deterministic slugs and merged
+    // nomination blobs stay on the base forever, so reuse is routine — and this
+    // is how round 1's mutation came to certify round 2's work.
+    const STALE_LOCAL = 'c'.repeat(40) // behind: the predecessor's merge is IN the range
+    const FRESH_ORIGIN = 'd'.repeat(40) // the real base: the blob is base-side of it
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: claimSpyGate(seen),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: (cmd) => {
+        const j = cmd.join(' ')
+        if (j === BASE_PIN_LOCAL) return ok(STALE_LOCAL)
+        if (j === BASE_PIN_ORIGIN) return ok(FRESH_ORIGIN)
+        // Well-formed and readable — only membership decides this case.
+        if (j === SIZE_ARTIFACT) return ok(String(Buffer.byteLength(JSON.stringify(ARTIFACT_CLAIM), 'utf8')))
+        if (j === SHOW_ARTIFACT) return ok(JSON.stringify(ARTIFACT_CLAIM))
+        if (j === `git -C /repo diff --name-only ${STALE_LOCAL}...${SIM_REVIEWED_HEAD}`) {
+          return ok(`${ARTIFACT_PATH}\ntrident/limit.ts\n`)
+        }
+        if (j === `git -C /repo diff --name-only ${FRESH_ORIGIN}...${SIM_REVIEWED_HEAD}`) {
+          return ok('trident/limit.ts\n')
+        }
+        return ok()
+      },
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    expect(seen).toEqual([null])
+    expect(final.failure_reason).toContain('is not in the diff')
+    // The fresh base really was consulted at the production call site — without
+    // this the assertion above would pass on a reader that never asked.
+    expect(h.hostCalls.map((c) => c.join(' '))).toContain(
+      `git -C /repo diff --name-only ${FRESH_ORIGIN}...${SIM_REVIEWED_HEAD}`,
+    )
+
+    // POSITIVE CONTROL: the SAME two divergent bases, the only difference being
+    // that this build really wrote the file — in BOTH ranges — so it reaches the
+    // gate and the run merges.
+    const seenOk: unknown[] = []
+    const h2 = buildHarness({
+      prove_mutation: claimSpyGate(seenOk),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: (cmd) => {
+        const j = cmd.join(' ')
+        if (j === BASE_PIN_LOCAL) return ok(STALE_LOCAL)
+        if (j === BASE_PIN_ORIGIN) return ok(FRESH_ORIGIN)
+        if (j === SIZE_ARTIFACT) return ok(String(Buffer.byteLength(JSON.stringify(ARTIFACT_CLAIM), 'utf8')))
+        if (j === SHOW_ARTIFACT) return ok(JSON.stringify(ARTIFACT_CLAIM))
+        if (j.startsWith('git -C /repo diff --name-only ')) return ok(`${ARTIFACT_PATH}\ntrident/limit.ts\n`)
+        return ok()
+      },
+    })
+    const run2 = await createRun()
+    expect((await runToTerminal(h2, run2.id)).phase).toBe('done')
+    expect(seenOk[0]).toEqual(parseMutationClaim(ARTIFACT_CLAIM))
+  })
+
   test('no committed nomination still means NULL — and a required proof still refuses', async () => {
     const seen: unknown[] = []
     const h = buildHarness({
@@ -2552,6 +2631,8 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       // does not contain the artifact, and nothing serves its blob.
       hostResponder: (cmd) => {
         const j = cmd.join(' ')
+        const pin = basePins(j)
+        if (pin !== null) return pin
         if (j === DIFF_ARTIFACT) return ok('trident/limit.ts\n')
         if (j.includes(ARTIFACT_PATH)) return { ok: false, stdout: '', stderr: 'fatal: path does not exist', exit_code: 128 }
         return ok()
@@ -2603,6 +2684,8 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     // NO artifact in the diff, so the read really is consulted and really is empty.
     const noArtifact = (cmd: string[]): HostCommandResult => {
       const j = cmd.join(' ')
+      const pin = basePins(j)
+      if (pin !== null) return pin
       if (j === DIFF_ARTIFACT) return ok('trident/limit.ts\n')
       return ok()
     }
