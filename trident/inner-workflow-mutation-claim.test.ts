@@ -336,6 +336,13 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // has neither an exemption nor a nominable target. Pinned as behaviour in
       // trident/mutation-claim-artifact.test.ts against the real gate.
       expect(brief).toContain('reads as a test file to the gate and is refused')
+      // ...and the denylist warning next to it says WHICH names actually forfeit
+      // the exemption. It read "a branch NAME carrying a `skills` … path
+      // segment", which no ordinary lane name can trip: the artifact path's LAST
+      // segment is the branch name plus `.json`, so only a MID-path segment
+      // reaches the denylist. Pinned against the production predicate in
+      // trident/mutation-claim-artifact.test.ts.
+      expect(brief).toContain('ANYWHERE BUT LAST')
       // The ask sits ABOVE the numbered CONTRACT, with the other standing blocks.
       expect(brief.indexOf('\nCONTRACT\n')).toBeGreaterThan(-1)
       expect(brief.indexOf(artifactPath)).toBeLessThan(brief.indexOf('\nCONTRACT\n'))

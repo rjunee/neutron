@@ -4410,7 +4410,11 @@ export function buildTridentOrchestrator(
         // with one they point the reader at the wrong failure.
         // BOUNDED, because `failure_reason` is stored verbatim and the note
         // quotes branch-supplied names: 300 characters is room for both legs of
-        // a two-ref read and no room for a flood.
+        // a two-ref read and no room for a flood. The SHAPE of those names is
+        // the reader's job and it does it at the source — every name a note
+        // quotes is `foldRefName`-folded there, the same guard this file applies
+        // wherever a refusal quotes the base, so the reason cannot carry a
+        // forged line even though it is later replayed to a model verbatim.
         const reason =
           committed !== null && committed.claim === null && proof.reason === NO_NOMINATION_REFUSAL
             ? `${proof.reason} — ${committed.note.slice(0, 300)}`

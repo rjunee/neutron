@@ -15,22 +15,35 @@
  *     starts life already holding that file, and "this build nominated nothing"
  *     silently becomes "reuse whatever the last PR nominated". Both halves are
  *     load-bearing — the per-branch path (mirroring `.trident/plans/<branch>.md`)
- *     also stops concurrent lanes colliding on one file, and the diff-membership
- *     check still catches the case a branch NAME is reused after its predecessor
- *     merged. A blob the branch did not touch reads as null.
+ *     also stops concurrent lanes colliding on one file. A blob the branch did
+ *     not touch reads as null.
  *
- *     THE MEMBERSHIP READ RESOLVES THE BASE AS A NAME, and is only as honest as
- *     the local ref that name finds: a base ref fallen behind its remote widens
- *     the range, and a REUSED branch name cut after its predecessor merged can
- *     then read the inherited blob as its own nomination. Rounds 9-10 pinned the
- *     base to close that and review REVERTED the pinning: trident's local merge
- *     path advances the local base ref and leaves the origin spelling STALE, so
- *     the union of both readings destroyed the prose exemption in local
- *     git-mode, and embedding a documented base like `HEAD~1` inside a remote
- *     ref path silently reinterpreted it. The stale-base read is therefore a
- *     RECORDED LIMITATION for its own card, bounded by the rules that hold on
- *     every round: the target must be production code in the branch diff, and
- *     the gate RUNS the mutation.
+ *     THE MEMBERSHIP READ RESOLVES THE BASE AS A NAME, and is therefore only as
+ *     honest as the local ref that name finds — WHICH IS WHERE THE BOUNDARY
+ *     LEAKS, stated plainly because an earlier draft of this docblock claimed
+ *     the check "catches the case a branch NAME is reused after its predecessor
+ *     merged" and review REPRODUCED the case it does not catch: local `main` one
+ *     commit behind `origin/main`, a branch name reused after its predecessor
+ *     merged, the predecessor's committed nomination and the file it names both
+ *     still inside `main...<head>` because the local base has not caught up. The
+ *     inherited blob is then read as this branch's nomination, `claim.file` is
+ *     in that same widened diff, and the gate can PROVE the predecessor's
+ *     mutation while this branch's own work goes unproved. Rounds 9-10 pinned
+ *     the base to close exactly this and review VETOED the pinning twice:
+ *     trident's local merge path advances the local base ref and leaves the
+ *     origin spelling STALE, so the union of both readings destroyed the prose
+ *     exemption in local git-mode (documentation-only branches permanently
+ *     unmergeable, reproduced A/B), and embedding a documented base like
+ *     `HEAD~1` inside a remote ref path silently reinterpreted it. So the
+ *     stale-base read stays a RECORDED LIMITATION for its own card rather than
+ *     being closed here by the mechanism that was vetoed — and it is NOT a
+ *     regression this channel introduced: the pre-change gate already read the
+ *     base as a bare name for both the exemption and the `claim.file` binding.
+ *     What bounds it meanwhile: the inherited nomination must name PRODUCTION
+ *     code that is in that diff, it cannot name a nomination blob (the gate
+ *     refuses those as targets), and the gate RUNS the mutation — so the claim
+ *     it certifies is a real, executed proof about a real file, just not
+ *     necessarily about the commit this run added.
  *
  *     WHAT (a) DOES NOT CATCH, stated so nobody reads it as more than it is: a
  *     nomination going STALE WITHIN ONE BRANCH. A fix round, or a later lane
@@ -77,7 +90,11 @@
  *     NOT held to that allowlist: it is never a path segment here, git is the
  *     interpreter that receives it, and a name-shaped rule in this module alone
  *     would refuse legal bases (`release@v1`, `HEAD~1`) that the diff reader
- *     accepts on purpose — a fail-closed refusal, but a permanent one. A
+ *     accepts on purpose — a fail-closed refusal, but a permanent one. It is
+ *     instead FOLDED (`foldRefName`) wherever a NOTE quotes it: the notes are
+ *     persisted into a `failure_reason` that is later replayed to a model
+ *     verbatim, and git accepts a name carrying U+2028 or U+202E, so a raw base
+ *     would be a forged line in that prose. A
  *     `refs/...` operand is
  *     then PINNED to an OID before the read's three legs run, so a ref that
  *     moves mid-read cannot have one leg describe a different commit than
@@ -92,6 +109,7 @@ import {
   type MutationClaim,
 } from './mutation-prover.ts'
 import type { RunHostCommand } from './merge.ts'
+import { foldRefName } from './wrong-base-remedy.ts'
 
 /**
  * Directory the per-branch nominations live under — one file per branch.
@@ -157,7 +175,7 @@ export async function readCommittedMutationClaim(
     // and this note is appended to a `failure_reason` that is stored verbatim.
     return {
       claim: null,
-      note: `no committed nomination: ${JSON.stringify(branch.slice(0, 80))} is not a plain branch name`,
+      note: `no committed nomination: ${JSON.stringify(foldRefName(branch.slice(0, 80)))} is not a plain branch name`,
     }
   }
   // AN EMPTY BASE IS THE ONLY BASE REFUSED HERE. A base git accepts is git's to
@@ -172,6 +190,18 @@ export async function readCommittedMutationClaim(
   if (base.length === 0) {
     return { claim: null, note: 'no committed nomination: no base branch to measure this branch\'s diff against' }
   }
+  // THE BASE IS FOLDED WHEREVER A NOTE QUOTES IT — never where git receives it.
+  // This note is appended verbatim to a persisted `failure_reason`, which is fed
+  // back to a model as "Failure reason (verbatim)" (`terminal-build-wake.ts`),
+  // and the base is branch/operator-supplied: git accepts a name carrying
+  // U+2028 or U+202E (`check-ref-format --branch` exits 0 on it), so a raw base
+  // could put a forged LINE into that prose. `foldRefName` is the repo's own
+  // answer to exactly this forgery (Argus finding on the wrong-base refusal,
+  // `orchestrator.ts` folds the base the same way where a refusal quotes it) and
+  // it folds a name to ONE TOKEN, so the fold itself cannot introduce a space
+  // either. The RAW `base` is what still reaches `changedFilesOnBranch`; folding
+  // that operand would change which diff is read.
+  const baseProse = foldRefName(base)
 
   const oid = typeof source.expected_head === 'string' ? source.expected_head.trim().toLowerCase() : ''
   // The `refs/heads/` and `refs/remotes/` prefixes are load-bearing: with
@@ -189,12 +219,22 @@ export async function readCommittedMutationClaim(
     // OID makes all three legs describe the same commit — the same reason
     // `runMutationProofGate` pins its sha before reading anything off it.
     const pinned = await pinRevision(run_host, repo_path, revision)
-    if (pinned === null) {
+    if (pinned.oid === null) {
       // THE ONLY REASON TO TRY THE NEXT REF: this one names no commit here. The
       // fallback exists because the worktree holding the local branch is
       // routinely cleaned before the gate runs — an ABSENT ref, not an absent
       // nomination.
-      notes.push(`no committed nomination: ${revision} does not resolve to a commit`)
+      //
+      // AND A THROWING HOST SAYS SO IN ITS OWN WORDS. Collapsing the two made
+      // the pin leg contradict invariant (c) at the one place it matters most:
+      // a machine that could not run git at all was reported as a branch whose
+      // ref does not exist, which sends the reader of the refusal to the
+      // build's git history instead of to the host.
+      notes.push(
+        pinned.why === 'host-threw'
+          ? `no committed nomination: the git host threw resolving ${revision}`
+          : `no committed nomination: ${revision} does not resolve to a commit`,
+      )
       continue
     }
     // THE FIRST REF THAT RESOLVES IS THE ANSWER, claim or no claim. Continuing
@@ -203,11 +243,20 @@ export async function readCommittedMutationClaim(
     // a nomination, would be answered by a STALE `origin/<branch>` commit's
     // artifact — a nomination for work that is not the work the gate proves.
     // Absence at the commit we are reading is the honest null.
-    const read = await readAtRevision(run_host, repo_path, pinned, path, base)
+    const read = await readAtRevision(run_host, repo_path, pinned.oid, path, base, baseProse)
     return { claim: read.claim, note: [...notes, read.note].join('; ') }
   }
   return { claim: null, note: notes.join('; ') }
 }
+
+/**
+ * What the pin leg found: the commit a revision names, or WHY it names none.
+ *
+ * The two nulls are kept apart because invariant (c) promises each null says
+ * which failure it was, and these two send an operator to different places: an
+ * absent ref is the branch's story, a throwing host is the machine's.
+ */
+type PinnedRevision = { oid: string } | { oid: null; why: 'absent' | 'host-threw' }
 
 /**
  * The commit a revision names, as a 40-hex OID, or null when it names none.
@@ -219,8 +268,8 @@ async function pinRevision(
   run_host: RunHostCommand,
   repo_path: string,
   revision: string,
-): Promise<string | null> {
-  if (FULL_OID.test(revision)) return revision
+): Promise<PinnedRevision> {
+  if (FULL_OID.test(revision)) return { oid: revision }
   try {
     // `^{commit}` is a suffix on an operand that already passed `isPlainBranchName`
     // and carries a `refs/` prefix, so it is still a ref PATH and never an option
@@ -231,11 +280,11 @@ async function pinRevision(
       ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`],
       repo_path,
     )
-    if (!res.ok) return null
+    if (!res.ok) return { oid: null, why: 'absent' }
     const oid = res.stdout.trim().toLowerCase()
-    return FULL_OID.test(oid) ? oid : null
+    return FULL_OID.test(oid) ? { oid } : { oid: null, why: 'absent' }
   } catch {
-    return null
+    return { oid: null, why: 'host-threw' }
   }
 }
 
@@ -245,6 +294,7 @@ async function readAtRevision(
   revision: string,
   path: string,
   base: string,
+  baseProse: string,
 ): Promise<CommittedMutationClaimRead> {
   const at = `${revision}:${path}`
   try {
@@ -252,10 +302,18 @@ async function readAtRevision(
     // merely came along from the base is not a nomination this build made.
     const changed = await changedFilesOnBranch(run_host, repo_path, base, revision)
     if (changed === null) {
-      return { claim: null, note: `no committed nomination: could not read the diff ${base}...${revision}` }
+      // BOTH READINGS, because the diff reader collapses them: it answers null
+      // for a diff it could not read AND for a diff that is EMPTY (its last
+      // line, `files.length === 0 ? null : files`). Saying only "could not read"
+      // sent an operator hunting a git failure for a branch that simply changes
+      // nothing — the exact note ambiguity invariant (c) exists to remove.
+      return {
+        claim: null,
+        note: `no committed nomination: the diff ${baseProse}...${revision} is empty or could not be read`,
+      }
     }
     if (!changed.includes(path)) {
-      return { claim: null, note: `no committed nomination: ${path} is not in the diff ${base}...${revision}` }
+      return { claim: null, note: `no committed nomination: ${path} is not in the diff ${baseProse}...${revision}` }
     }
 
     // (2) SIZE THE OBJECT BEFORE ITS BODY CROSSES THE PROCESS BOUNDARY. Checking

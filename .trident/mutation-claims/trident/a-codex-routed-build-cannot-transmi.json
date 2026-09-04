@@ -1,8 +1,8 @@
 {
   "file": "trident/mutation-claim-artifact.ts",
-  "find": "32 * 1024",
-  "replace": "0",
+  "find": "foldRefName(base)",
+  "replace": "base",
   "guard": ["bun", "test", "trident/mutation-claim-artifact.test.ts"],
   "control": ["bun", "test", "trident/mutation-prover.test.ts"],
-  "rationale": "Round 11 reverted the rounds-9/10 base-resolution rewiring per review, which deleted round 10's find string, so the nomination re-points at the channel's own byte cap. Zeroing the cap makes the reader refuse every committed nomination as oversized: the cap-boundary and realgit round-trip tests in the guard go red, while the prover suite, which never reads the committed artifact, stays green."
+  "rationale": "Round 13's load-bearing change is that an untrusted base name is FOLDED wherever a reader note quotes it, because those notes are persisted into a failure_reason that is later replayed to a model verbatim. Removing the fold lets a base carrying U+2028/U+202E forge a line in that prose: the hostile-base test in the guard suite goes red, while the prover suite, which never composes a reader note, stays green."
 }
