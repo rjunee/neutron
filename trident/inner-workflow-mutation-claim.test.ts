@@ -45,6 +45,20 @@ const FIX_CLAIM = { ...BUILD_CLAIM, find: 'n <= LIMIT', rationale: 'round 2 move
  */
 const EXECUTABLE_PROSE = ['SPEC.md', 'IMPLEMENTATION_PLAN.md', 'CLAUDE.md', 'AGENTS.md', 'SKILL.md']
 
+/**
+ * The READER'S OWN path derivation, narrowed to a string.
+ *
+ * The production helper returns null for a branch name it will not hand to git,
+ * and `string | null` is not a needle. Throwing rather than defaulting is the
+ * point: an empty-string default would make every `toContain` below pass
+ * vacuously, which is the exact silent-pass this suite is written against.
+ */
+function artifactPathFor(branch: string): string {
+  const path = mutationClaimArtifactPath(branch)
+  if (path === null) throw new Error(`mutationClaimArtifactPath(${branch}) derived no path`)
+  return path
+}
+
 /** Run the real workflow body; return every captured agent call + its result. */
 async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean }): Promise<{
   captured: Captured[]
@@ -210,7 +224,7 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
     // The path the READER derives, from the branch this workflow builds. Computed
     // by the production helper rather than written out, so the two halves of the
     // channel cannot drift apart: change the layout on one side and this reddens.
-    const artifactPath = mutationClaimArtifactPath('trident/test-run')
+    const artifactPath = artifactPathFor('trident/test-run')
     expect(artifactPath).toBe('.trident/mutation-claims/trident/test-run.json')
     for (const call of forge) {
       const brief = call.prompt
@@ -272,36 +286,47 @@ describe('the codex route carries the nomination ask, and never fabricates the f
     return out
   }
 
-  test('the wrapper brief a codex build actually executes contains the nomination block', async () => {
+  test('the wrapper brief a codex build actually executes contains the nomination block — build AND fix rounds', async () => {
     const { captured } = await runWorkflow({ fixRoundClaim: undefined, codex: true })
-    const build = captured.find((c) => c.label === 'forge:build')
-    expect(build).toBeDefined()
-    // POSITIVE CONTROL that this really is the codex route and not the Claude
-    // one: only the bridge prompt names the wrapper script and its schema.
-    expect(build?.prompt).toContain('codex-build.sh')
-    expect(build?.schema?.required).toContain('codexStatus')
+    const forge = captured.filter((c) => String(c.label).startsWith('forge:'))
+    // POSITIVE CONTROLS: a build AND at least one fix round, so the loop cannot
+    // pass on an empty filter — fix rounds go through the same bridge seam
+    // (`codexBuildPrompt`) and a round that dropped the ask would leave the gate
+    // reading whatever the FIRST round committed.
+    expect(forge.map((c) => c.label)).toContain('forge:build')
+    expect(forge.some((c) => String(c.label).startsWith('forge:fix-round-'))).toBe(true)
 
-    const brief = decodeTransport(String(build?.prompt))
-    // POSITIVE CONTROL against an empty decode passing every assertion below.
-    expect(brief.length).toBeGreaterThan(0)
-    expect(brief).toContain('build the feature')
+    const artifactPath = artifactPathFor('trident/test-run')
+    for (const call of forge) {
+      // POSITIVE CONTROL that this really is the codex route and not the Claude
+      // one: only the bridge prompt names the wrapper script and its schema.
+      expect(call.prompt).toContain('codex-build.sh')
+      expect(call.schema?.required).toContain('codexStatus')
 
-    const artifactPath = mutationClaimArtifactPath('trident/test-run')
-    expect(brief).toContain(artifactPath)
-    expect(brief).toContain('COMMIT it with your work')
-    expect(brief).toContain('EXACTLY ONCE')
+      const brief = decodeTransport(call.prompt)
+      // POSITIVE CONTROL against an empty decode passing every assertion below.
+      expect(brief.length).toBeGreaterThan(0)
+      expect(brief).toContain('CONTRACT')
+
+      expect(brief).toContain(artifactPath)
+      expect(brief).toContain('COMMIT it with your work')
+      expect(brief).toContain('EXACTLY ONCE')
+    }
   })
 
-  test('the BRIDGE is told to report mutationClaim null and never to invent one', async () => {
+  test('the BRIDGE is told to report mutationClaim null and never to invent one — on every round', async () => {
     const { captured } = await runWorkflow({ fixRoundClaim: undefined, codex: true })
-    const build = captured.find((c) => c.label === 'forge:build')
-    // The bridge cannot see the build's reasoning, and the schema REQUIRES the
-    // field — so without this instruction a fabricated object would short-circuit
-    // the committed-artifact read at the gate and shadow the real nomination.
-    expect(build?.prompt).toContain('mutationClaim is ALWAYS null on this route')
-    expect(build?.prompt).toContain('NEVER fabricate one')
-    // ...and the field really is required on this route (positive control).
-    expect(build?.schema?.required).toContain('mutationClaim')
+    const forge = captured.filter((c) => String(c.label).startsWith('forge:'))
+    expect(forge.some((c) => String(c.label).startsWith('forge:fix-round-'))).toBe(true)
+    for (const call of forge) {
+      // The bridge cannot see the build's reasoning, and the schema REQUIRES the
+      // field — so without this instruction a fabricated object would short-circuit
+      // the committed-artifact read at the gate and shadow the real nomination.
+      expect(call.prompt).toContain('mutationClaim is ALWAYS null on this route')
+      expect(call.prompt).toContain('NEVER fabricate one')
+      // ...and the field really is required on this route (positive control).
+      expect(call.schema?.required).toContain('mutationClaim')
+    }
   })
 
   test('a codex-routed build reports a NULL nomination — the gap the artifact closes', async () => {

@@ -36,14 +36,30 @@
  * (d) Every git operand is SANITIZED BEFORE it may touch git: the branch must
  *     pass `isPlainBranchName` (it is both the path segment and the ref), the
  *     base must too, and a revision is either a 40-hex OID or a full
- *     `refs/...` path — else no command is run at all.
+ *     `refs/...` path — else no command is run at all. A `refs/...` operand is
+ *     then PINNED to an OID before the read's three legs run, so a ref that
+ *     moves mid-read cannot have one leg describe a different commit than
+ *     another (the byte cap in particular must size the object it then reads).
  */
 
-import { changedFilesOnBranch, isPlainBranchName, parseMutationClaim, type MutationClaim } from './mutation-prover.ts'
+import {
+  changedFilesOnBranch,
+  isPlainBranchName,
+  MUTATION_CLAIM_ARTIFACT_DIR,
+  parseMutationClaim,
+  type MutationClaim,
+} from './mutation-prover.ts'
 import type { RunHostCommand } from './merge.ts'
 
-/** Directory the per-branch nominations live under — one file per branch. */
-export const MUTATION_CLAIM_ARTIFACT_DIR = '.trident/mutation-claims'
+/**
+ * Directory the per-branch nominations live under — one file per branch.
+ *
+ * DEFINED IN THE GATE and re-exported here: `validateClaim` must refuse a
+ * nomination that names a file under this directory (a nomination cannot
+ * nominate itself) and `isProseOnlyChange` must treat one as inert. Two
+ * literals would let the writer's path drift away from the rules that police it.
+ */
+export { MUTATION_CLAIM_ARTIFACT_DIR }
 
 /** Byte cap on the blob — branch-controlled input must not flood the harvester. */
 export const MUTATION_CLAIM_ARTIFACT_MAX_BYTES = 32 * 1024
@@ -75,8 +91,9 @@ export interface CommittedMutationClaimRead {
  * very commit the gate proves against); falls back to the local branch ref and
  * then its origin remote-tracking ref, because the worktree holding the local
  * branch is routinely cleaned before the gate runs (the same reason
- * `resolveMergeHeadSha` carries that fallback). Returns a null claim for
- * everything else, and never throws.
+ * `resolveMergeHeadSha` carries that fallback). Either fallback ref is RESOLVED
+ * TO AN OID FIRST, so the three legs of the read cannot describe three different
+ * commits. Returns a null claim for everything else, and never throws.
  */
 export async function readCommittedMutationClaim(
   run_host: RunHostCommand,
@@ -101,11 +118,50 @@ export async function readCommittedMutationClaim(
 
   const notes: string[] = []
   for (const revision of revisions) {
-    const read = await readAtRevision(run_host, repo_path, revision, path, base)
+    // PIN THE REF TO AN OID BEFORE ANY OF THE THREE LEGS RUN. A ref is mutable,
+    // and `readAtRevision` resolves its operand independently three times (diff,
+    // cat-file -s, git show): a ref that moves between the SIZE and the SHOW is
+    // sized as the small blob and read as whatever landed, which is the byte cap
+    // measuring one object and bounding another. Resolving once and passing the
+    // OID makes all three legs describe the same commit — the same reason
+    // `runMutationProofGate` pins its sha before reading anything off it.
+    const pinned = await pinRevision(run_host, repo_path, revision)
+    if (pinned === null) {
+      notes.push(`no committed nomination: ${revision} does not resolve to a commit`)
+      continue
+    }
+    const read = await readAtRevision(run_host, repo_path, pinned, path, base)
     if (read.claim !== null) return read
     notes.push(read.note)
   }
   return { claim: null, note: notes.join('; ') }
+}
+
+/**
+ * The commit a revision names, as a 40-hex OID, or null when it names none.
+ *
+ * A revision that is ALREADY an OID is returned untouched — no command at all —
+ * so the pinned-head path stays a three-command read.
+ */
+async function pinRevision(
+  run_host: RunHostCommand,
+  repo_path: string,
+  revision: string,
+): Promise<string | null> {
+  if (FULL_OID.test(revision)) return revision
+  try {
+    // `^{commit}` is a suffix on an operand that already passed `isPlainBranchName`
+    // and carries a `refs/` prefix, so it is still a ref PATH and never an option.
+    const res = await run_host(
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `${revision}^{commit}`],
+      repo_path,
+    )
+    if (!res.ok) return null
+    const oid = res.stdout.trim().toLowerCase()
+    return FULL_OID.test(oid) ? oid : null
+  } catch {
+    return null
+  }
 }
 
 async function readAtRevision(
@@ -132,7 +188,7 @@ async function readAtRevision(
     // (the host buffers the whole child output first, and trims it), so the cap
     // is applied to git's own record of the blob.
     const sized = await run_host(['git', '-C', repo_path, 'cat-file', '-s', at], repo_path)
-    if (!sized.ok) return { claim: null, note: `no committed nomination committed at ${at}` }
+    if (!sized.ok) return { claim: null, note: `no committed nomination at ${at}` }
     const size = Number.parseInt(sized.stdout.trim(), 10)
     if (!Number.isFinite(size)) {
       return { claim: null, note: `no committed nomination: unreadable object size for ${at}` }
@@ -145,7 +201,7 @@ async function readAtRevision(
     }
 
     const res = await run_host(['git', '-C', repo_path, 'show', at], repo_path)
-    if (!res.ok) return { claim: null, note: `no committed nomination committed at ${at}` }
+    if (!res.ok) return { claim: null, note: `no committed nomination at ${at}` }
     const claim = parseMutationClaim(JSON.parse(res.stdout))
     if (claim === null) {
       return { claim: null, note: `committed nomination at ${at} is not a well-formed nomination` }

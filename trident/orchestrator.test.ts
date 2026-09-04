@@ -2586,6 +2586,56 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     // NOT READ AT ALL is the no-shadowing guarantee — not merely "not preferred".
     expect(h.hostCalls.some((c) => c.join(' ').includes(ARTIFACT_PATH))).toBe(false)
   })
+
+  test('the reader note is appended ONLY to the refusal it explains', async () => {
+    // The gate refuses for reasons that have nothing to do with a nomination: a
+    // rejected branch name, an unresolvable head, a tip that moved. Suffixing
+    // those with "no committed nomination" points the reader at the wrong
+    // failure — the exact misdiagnosis this channel was built to end.
+    const OTHER_REFUSAL = 'mutation proof rejected: the branch moved while the prose-only exemption was being decided'
+    // NO artifact in the diff, so the read really is consulted and really is empty.
+    const noArtifact = (cmd: string[]): HostCommandResult => {
+      const j = cmd.join(' ')
+      if (j === DIFF_ARTIFACT) return ok('trident/limit.ts\n')
+      return ok()
+    }
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: async (input: MutationGateInput): Promise<MutationGateOutcome> => {
+        seen.push(input.claim ?? null)
+        return { ok: false, reason: OTHER_REFUSAL, exempt: false, evidence: null }
+      },
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: noArtifact,
+    })
+    const run = await createRun()
+
+    const final = await runToTerminal(h, run.id)
+    expect(final.phase).toBe('failed')
+    // The read HAPPENED and came back empty — without this the assertion below
+    // would pass on an implementation that never consulted the artifact at all.
+    expect(seen).toEqual([null])
+    expect(h.hostCalls.map((c) => c.join(' '))).toContain(DIFF_ARTIFACT)
+    expect(final.failure_reason).toBe(OTHER_REFUSAL)
+    expect(final.failure_reason).not.toContain('no committed nomination')
+
+    // POSITIVE CONTROL: the SAME empty read, on the refusal the note explains,
+    // DOES carry it — so the assertion above pins the scoping, not the note's
+    // removal.
+    const seenNull: unknown[] = []
+    const h2 = buildHarness({
+      prove_mutation: claimSpyGate(seenNull),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: noArtifact,
+    })
+    const run2 = await createRun()
+    const final2 = await runToTerminal(h2, run2.id)
+    expect(seenNull).toEqual([null])
+    expect(final2.failure_reason).toContain('nominated no mutation to run')
+    expect(final2.failure_reason).toContain('no committed nomination')
+  })
 })
 
 describe('orchestrator — post-merge as-built fold (one-writer T2)', () => {

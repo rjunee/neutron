@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { HostCommandResult } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
-import { parseMutationClaim, runMutationProofGate } from './mutation-prover.ts'
+import { isProseOnlyChange, parseMutationClaim, runMutationProofGate } from './mutation-prover.ts'
 import {
   MUTATION_CLAIM_ARTIFACT_DIR,
   MUTATION_CLAIM_ARTIFACT_MAX_BYTES,
@@ -49,9 +49,13 @@ function fail(exit_code: number): HostCommandResult {
   return { ok: false, stdout: '', stderr: 'fatal: path does not exist', exit_code }
 }
 
+/** The OID a mutable ref is pinned to before the read's three legs run. */
+const REF_OID = 'b'.repeat(40)
+
 /**
- * A scripted host that RECORDS every argv, and answers the three commands the
- * reader issues: the branch diff, the object size, the blob body.
+ * A scripted host that RECORDS every argv, and answers the four commands the
+ * reader issues: the ref pin (only for a ref operand), the branch diff, the
+ * object size, the blob body.
  *
  * `diff` defaults to a listing that INCLUDES the artifact and `size` to the real
  * byte length of `body`, so each test overrides exactly the leg it is about.
@@ -60,6 +64,7 @@ function makeHost(opts: {
   body?: string | HostCommandResult
   diff?: string | HostCommandResult
   size?: string | HostCommandResult
+  pin?: string | HostCommandResult
   throws?: boolean
 }): { run: RunHostCommand; calls: string[][] } {
   const calls: string[][] = []
@@ -69,6 +74,7 @@ function makeHost(opts: {
   const run: RunHostCommand = async (cmd) => {
     calls.push([...cmd])
     if (opts.throws === true) throw new Error('spawn failed')
+    if (cmd.includes('rev-parse')) return answer(opts.pin, `${REF_OID}\n`)
     if (cmd.includes('diff')) return answer(opts.diff, `${PATH}\ntrident/limit.ts\n`)
     if (cmd.includes('cat-file')) {
       return answer(opts.size, String(Buffer.byteLength(typeof body === 'string' ? body : '', 'utf8')))
@@ -217,7 +223,15 @@ describe('readCommittedMutationClaim', () => {
     })
 
     expect(read.claim).toEqual(parseMutationClaim(JSON.parse(BODY)))
-    expect(host.calls[0]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE}...refs/heads/${BRANCH}`])
+    expect(host.calls[0]).toEqual([
+      'git',
+      '-C',
+      REPO,
+      'rev-parse',
+      '--verify',
+      '--quiet',
+      `refs/heads/${BRANCH}^{commit}`,
+    ])
 
     // The local ref is routinely gone by the time the gate runs (the worktree
     // holding it is cleaned), which is why `resolveMergeHeadSha` carries the same
@@ -227,6 +241,7 @@ describe('readCommittedMutationClaim', () => {
       noLocal.push([...cmd])
       const j = cmd.join(' ')
       if (j.includes('refs/heads/')) return fail(128)
+      if (cmd.includes('rev-parse')) return ok(`${REF_OID}\n`)
       if (cmd.includes('diff')) return ok(`${PATH}\n`)
       if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
       return ok(BODY)
@@ -238,6 +253,73 @@ describe('readCommittedMutationClaim', () => {
     })
     expect(viaOrigin.claim).not.toBeNull()
     expect(noLocal.some((c) => c.join(' ').includes(`refs/remotes/origin/${BRANCH}`))).toBe(true)
+  })
+
+  test('A MUTABLE REF IS PINNED TO AN OID BEFORE ANY LEG RUNS — no ref reaches diff, cat-file or show', async () => {
+    // THE TOCTOU THIS CLOSES: with the ref itself as the operand, git resolves it
+    // independently for the diff, for `cat-file -s` and for `git show`. A ref that
+    // moves between the SIZE and the SHOW means the cap sized one object and the
+    // reader read another — the byte bound describing a blob it did not fetch.
+    const host = makeHost({})
+
+    const read = await readCommittedMutationClaim(host.run, REPO, {
+      expected_head: null,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+
+    expect(read.claim).not.toBeNull() // positive control: the read really happened
+    expect(host.calls).toEqual([
+      ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}^{commit}`],
+      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${REF_OID}`],
+      ['git', '-C', REPO, 'cat-file', '-s', `${REF_OID}:${PATH}`],
+      ['git', '-C', REPO, 'show', `${REF_OID}:${PATH}`],
+    ])
+    // Said the other way, because the argv equality above would survive a rename:
+    // NOTHING after the pin names a ref.
+    expect(host.calls.slice(1).some((c) => c.some((a) => a.includes('refs/')))).toBe(false)
+  })
+
+  test('a ref that resolves to nothing is null, and the OID path issues no pin at all', async () => {
+    const unresolvable = makeHost({ pin: fail(128) })
+    const read = await readCommittedMutationClaim(unresolvable.run, REPO, {
+      expected_head: null,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+    expect(read.claim).toBeNull()
+    expect(read.note).toContain('does not resolve to a commit')
+    // Both refs were tried and neither leaked into a body read.
+    expect(unresolvable.calls.every((c) => c.includes('rev-parse'))).toBe(true)
+    expect(unresolvable.calls).toHaveLength(2)
+
+    // CONTROL: a pinned `expected_head` is already an OID, so it costs no pin —
+    // the three-command read is unchanged.
+    const pinned = makeHost({})
+    expect((await readCommittedMutationClaim(pinned.run, REPO, SOURCE)).claim).not.toBeNull()
+    expect(pinned.calls.some((c) => c.includes('rev-parse'))).toBe(false)
+  })
+
+  test('a pin that answers with something that is not an OID is refused, not passed through', async () => {
+    // git printing a warning, an abbreviated sha, or the ref name back at us is
+    // not a commit — substituting it would put an unpinned operand back on the
+    // three legs by another door.
+    for (const nonsense of ['not-a-sha', 'a'.repeat(39), `refs/heads/${BRANCH}`, '']) {
+      const host = makeHost({ pin: nonsense })
+      const read = await readCommittedMutationClaim(host.run, REPO, {
+        expected_head: null,
+        branch: BRANCH,
+        base_branch: BASE,
+      })
+      expect({ nonsense, claim: read.claim }).toEqual({ nonsense, claim: null })
+      expect({ nonsense, legs: host.calls.length }).toEqual({ nonsense, legs: 2 })
+    }
+    // Positive control: a real OID from the same seam DOES resolve.
+    const good = makeHost({ pin: REF_OID })
+    expect(
+      (await readCommittedMutationClaim(good.run, REPO, { expected_head: null, branch: BRANCH, base_branch: BASE }))
+        .claim,
+    ).not.toBeNull()
   })
 
   test('an unsafe branch or base never reaches git', async () => {
@@ -270,7 +352,8 @@ describe('readCommittedMutationClaim', () => {
     const read = await readCommittedMutationClaim(host.run, REPO, { ...SOURCE, expected_head: 'abc' })
     expect(read.claim).not.toBeNull()
     expect(host.calls.every((c) => !c.some((a) => a.includes('abc:')))).toBe(true)
-    expect(host.calls[0]?.at(-1)).toBe(`${BASE}...refs/heads/${BRANCH}`)
+    expect(host.calls[0]?.at(-1)).toBe(`refs/heads/${BRANCH}^{commit}`)
+    expect(host.calls[1]?.at(-1)).toBe(`${BASE}...${REF_OID}`)
   })
 
   test('an uppercase, padded expected_head is trimmed and lowercased before use', async () => {
@@ -351,5 +434,86 @@ describe('agent-route parity at the REAL gate — the fallback adds no trust', (
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('repo-relative')
     expect(ran).toHaveLength(0)
+  })
+})
+
+describe('the nomination file itself is neither a target nor a behaviour change', () => {
+  /**
+   * A gate host whose diff COLLUDES: it lists every spelling of the nomination
+   * file alongside a production file. That is not far-fetched — the nomination
+   * really is in the branch diff on every branch that writes one — and it is
+   * what makes the diff-binding check useless here and this rejection necessary.
+   */
+  const SELF_NOMINATIONS = [PATH, `./${PATH}`, `${MUTATION_CLAIM_ARTIFACT_DIR}/other-branch.json`]
+  const collusiveHost: RunHostCommand = async (cmd) => {
+    if (cmd.includes('rev-parse')) return ok(`${OID}\n`)
+    if (cmd.includes('diff') && cmd.includes('--name-only')) {
+      return ok(`${SELF_NOMINATIONS.join('\n')}\ntrident/limit.ts\n`)
+    }
+    return ok('')
+  }
+
+  /**
+   * The REAL gate and the REAL prover, with only the filesystem and the guard
+   * runner stubbed. `validateClaim` lives INSIDE `prove`, so a stubbed prover
+   * would stub out the very rejection under test; what says the nomination was
+   * refused before anything executed is that NO guard argv ever ran.
+   */
+  async function gate(file: string): Promise<{ reason: string; ok: boolean; ran: string[][] }> {
+    const ran: string[][] = []
+    const out = await runMutationProofGate({
+      run: { id: 'run-1', slug: 'x', repo_path: REPO, branch: BRANCH },
+      claim: {
+        file,
+        find: '"file"',
+        replace: '"FILE"',
+        guard: ['bun', 'test', 'trident/limit.test.ts'],
+        control: ['bun', 'test', 'trident/other.test.ts'],
+      },
+      base_branch: BASE,
+      expected_head: OID,
+      run_host: collusiveHost,
+      fs: { read: async () => '{"file": 1}', write: async () => {} },
+      run_guard: async (argv) => {
+        ran.push([...argv])
+        return ok('')
+      },
+    })
+    return { reason: out.reason, ok: out.ok, ran }
+  }
+
+  test('A NOMINATION CANNOT NOMINATE ITSELF — refused before the prover, even on a colluding diff', async () => {
+    // THE BYPASS THIS CLOSES: the committed nomination is in the branch diff BY
+    // CONSTRUCTION on every branch that nominates, so the gate's diff-binding
+    // check cannot catch it. One boilerplate self-nomination plus a test that
+    // reads that JSON proves red-then-green while the production change it was
+    // supposed to guard ships unproved.
+    for (const file of SELF_NOMINATIONS) {
+      const out = await gate(file)
+      expect({ file, ok: out.ok, ran: out.ran.length }).toEqual({ file, ok: false, ran: 0 })
+      expect(out.reason).toContain('cannot nominate itself')
+    }
+  })
+
+  test('POSITIVE CONTROL: a production file in that same diff is validated through and RUN', async () => {
+    // Without this the case above would pass on a gate that refuses everything.
+    const out = await gate('trident/limit.ts')
+    expect(out.ran.length).toBeGreaterThan(0)
+    expect(out.reason).not.toContain('cannot nominate itself')
+  })
+
+  test('a documentation-only diff KEEPS its exemption when the build also wrote a nomination', () => {
+    // `.json` is not a prose suffix, so before this the nomination file made a
+    // docs-only branch proof-REQUIRED — and such a branch has no legal target to
+    // nominate, i.e. it was permanently unmergeable. The file is the gate's own
+    // bookkeeping, not code the harness runs.
+    expect(isProseOnlyChange(['docs/a.md'])).toBe(true) // control: the exemption exists
+    expect(isProseOnlyChange(['docs/a.md', PATH])).toBe(true)
+    expect(isProseOnlyChange([PATH])).toBe(true)
+    // ...and it is still ONLY documentation that is exempt (control).
+    expect(isProseOnlyChange(['docs/a.md', PATH, 'trident/limit.ts'])).toBe(false)
+    // ...and only the nomination ITSELF gets the dispensation. A branch that
+    // parks source in that directory is not writing bookkeeping.
+    expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/sneaky.ts`])).toBe(false)
   })
 })

@@ -82,6 +82,7 @@ import { reviewedHeadOid } from './merge.ts'
 import { CONFIGURED_CODE_CAVEAT, composeWrongBaseRefusal, foldEvidence, foldRefName } from './wrong-base-remedy.ts'
 import { readCommittedMutationClaim } from './mutation-claim-artifact.ts'
 import {
+  NO_NOMINATION_REFUSAL,
   runMutationProofGate,
   type MutationGateInput,
   type MutationGateOutcome,
@@ -4403,10 +4404,14 @@ export function buildTridentOrchestrator(
         // was the same sentence for a build that genuinely nominated nothing, a
         // wrong path, an oversized blob and a malformed one — an ambiguity this
         // card's own history records as misdiagnosed for days as an agent
-        // omission. The note says which, and only when the artifact channel was
-        // actually consulted and came back empty.
+        // omission. The note says which, and ONLY on the refusal it explains:
+        // the gate also refuses a rejected branch name, an unresolvable head and
+        // a tip that moved, and none of those is a missing nomination — suffixed
+        // with one they point the reader at the wrong failure.
         const reason =
-          committed !== null && committed.claim === null ? `${proof.reason} — ${committed.note}` : proof.reason
+          committed !== null && committed.claim === null && proof.reason === NO_NOMINATION_REFUSAL
+            ? `${proof.reason} — ${committed.note}`
+            : proof.reason
         const blocked: TridentRun = { ...failedRun(run, reason, true), pr, branch }
         return { run: blocked, changed: true, waiting: false, note: 'APPROVE blocked (mutation prover) → failed' }
       }

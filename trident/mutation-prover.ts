@@ -138,6 +138,46 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
 const TEST_FILE = /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rs)$/
 
 /**
+ * WHERE A BUILD COMMITS ITS NOMINATION — `.trident/mutation-claims/<branch>.json`.
+ *
+ * Declared HERE, in the gate, and re-exported by the reader that owns the
+ * channel (`mutation-claim-artifact.ts`), because the two rules that keep the
+ * channel honest are both enforced in THIS file and neither may drift from the
+ * path: a nomination may never nominate ITSELF (`validateClaim`), and a
+ * nomination written onto an otherwise-documentation diff may not destroy that
+ * diff's prose exemption (`isProseOnlyChange`).
+ */
+export const MUTATION_CLAIM_ARTIFACT_DIR = '.trident/mutation-claims'
+
+/**
+ * THE ONE REFUSAL the committed-nomination reader's note explains: no claim
+ * arrived, by either channel. Exported so the orchestrator can append that note
+ * to THIS refusal and to no other — a branch-name rejection or a moved tip is
+ * not a missing nomination, and suffixing those with "no committed nomination"
+ * points the reader at the wrong failure.
+ */
+export const NO_NOMINATION_REFUSAL = 'mutation proof required but the build nominated no mutation to run'
+
+/**
+ * Is this path a committed nomination — the gate's own INPUT rather than code?
+ *
+ * Compared SEGMENT BY SEGMENT with `.` segments dropped, so `./.trident/…` is
+ * the same path as `.trident/…`; a `startsWith` prefix test reads those two as
+ * different files and the difference is exactly what a nomination would exploit.
+ * The `.json` suffix is required too: only the nomination itself gets these two
+ * dispensations, not anything a branch chooses to park in that directory.
+ */
+function isMutationClaimArtifact(path: string): boolean {
+  const segments = path
+    .trim()
+    .split('/')
+    .filter((segment) => segment.length > 0 && segment !== '.')
+  const dir = MUTATION_CLAIM_ARTIFACT_DIR.split('/')
+  if (segments.length <= dir.length || !dir.every((d, i) => segments[i] === d)) return false
+  return (segments[segments.length - 1] ?? '').endsWith('.json')
+}
+
+/**
  * The UNTRUSTED nomination: which production behaviour to break, and which
  * commands prove it. Echoed verbatim into `MutationEvidence.claimed`; never
  * read when deciding `proved`.
@@ -363,6 +403,15 @@ function validateClaim(claim: MutationClaim | null | undefined): string | null {
   // the schema says a PRODUCTION file and this is where that is enforced.
   if (TEST_FILE.test(claim.file)) {
     return `claim.file ${claim.file} is a test file — the mutation must break PRODUCTION behaviour`
+  }
+  // NOR MAY A NOMINATION NOMINATE ITSELF. The committed nomination is the gate's
+  // own input, and on every branch that nominates it is in the diff BY
+  // CONSTRUCTION — so the diff-binding check below cannot catch it. Without this
+  // line one boilerplate self-nomination plus a test that reads that JSON proves
+  // red-then-green while the production change it was supposed to guard ships
+  // unproved.
+  if (isMutationClaimArtifact(claim.file)) {
+    return `claim.file ${claim.file} is a committed nomination — a nomination cannot nominate itself`
   }
   // Nor does mutating documentation prove anything: nothing executes it, so a
   // guard that reddens on it is reading bytes rather than exercising behaviour.
@@ -958,6 +1007,12 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
     if (typeof raw !== 'string') return false
     const path = raw.trim()
     if (path.length === 0) return false
+    // THE BUILD'S OWN NOMINATION IS INERT. `.json` is not a prose suffix, so a
+    // documentation-only branch that also wrote `.trident/mutation-claims/<b>.json`
+    // destroyed its own exemption and became unmergeable — it owed a proof and
+    // had no legal target to nominate. The file is the gate's bookkeeping, not
+    // code the harness runs, so it neither earns nor forfeits an exemption.
+    if (isMutationClaimArtifact(path)) return true
     const segments = path.split('/')
     if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
     const base = segments[segments.length - 1] ?? ''
@@ -1400,12 +1455,7 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   }
 
   if (input.claim === null || input.claim === undefined) {
-    return {
-      ok: false,
-      reason: 'mutation proof required but the build nominated no mutation to run',
-      exempt: false,
-      evidence: null,
-    }
+    return { ok: false, reason: NO_NOMINATION_REFUSAL, exempt: false, evidence: null }
   }
 
   // BIND THE PROOF TO THIS PR. Without this the gate certifies nothing about the
