@@ -19,6 +19,18 @@
  *     check still catches the case a branch NAME is reused after its predecessor
  *     merged. A blob the branch did not touch reads as null.
  *
+ *     WHAT (a) DOES NOT CATCH, stated so nobody reads it as more than it is: a
+ *     nomination going STALE WITHIN ONE BRANCH. A fix round, or a later lane
+ *     member on the same pinned branch, that changes code without rewriting the
+ *     file is proved against the EARLIER round's nomination — the blob is in
+ *     that branch's own diff by construction, so no diff-membership test can
+ *     see the staleness. This is the same exposure the agent route has always
+ *     had (a build may nominate whatever it likes), it is not a regression, and
+ *     it is bounded by the rules that DO hold on every round: the target must
+ *     be production code in the branch diff, and the gate RUNS the mutation, so
+ *     a nomination that has gone stale fails to redden its guard and refuses.
+ *     The contract therefore tells each round to re-write the file.
+ *
  * (b) The artifact is BRANCH-CONTROLLED, UNTRUSTED input. It is shape-decoded
  *     here by `parseMutationClaim` and NOTHING more — exactly as permissive as
  *     the agent route's decode (`mutation_claim: parseMutationClaim(...)`), so a
@@ -173,9 +185,9 @@ async function pinRevision(
   try {
     // `^{commit}` is a suffix on an operand that already passed `isPlainBranchName`
     // and carries a `refs/` prefix, so it is still a ref PATH and never an option
-    // — and `--end-of-options` says so to git as well, exactly as the base side's
-    // `pinBaseRef` does. Two spellings of one hardening rule is how one of them
-    // rots.
+    // — and `--end-of-options` says so to git as well. (`git diff`'s range form
+    // takes no such marker, which is why `changedFilesOnBranch` has to reject a
+    // hostile base by NAME instead.)
     const res = await run_host(
       ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`],
       repo_path,

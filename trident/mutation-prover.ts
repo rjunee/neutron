@@ -1048,88 +1048,6 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
 }
 
 /**
- * The commit(s) the branch diff is taken FROM, pinned — origin's ref for the
- * base when the local one trails it, and BOTH when the two have diverged.
- *
- * THE BASE WAS THE ONE UNPINNED OPERAND IN THIS GATE. Every branch-side ref is
- * resolved to an OID before it decides anything (`resolveMergeHeadSha`, the
- * reviewed `expected_head`, the reader's own `pinRevision`), but the base
- * arrived as a bare NAME and `git diff <name>...<ref>` resolves it against the
- * LOCAL ref — which in a long-lived shared checkout routinely trails
- * `origin/<name>` by many merges. A trailing base drags the three-dot MERGE-BASE
- * backwards, so "the branch diff" swells to include every commit merged into the
- * base since: measured in this repo, 170 files where the branch changed 13. Both
- * rules that ride on this diff then read too permissively — `claim.file` counts
- * as "in the branch diff" when the branch never touched it, and a committed
- * nomination counts as "this build's" when it arrived from a merged predecessor
- * of the same name, which is exactly the inheritance the per-branch path plus
- * diff-membership check exists to stop.
- *
- * Resolution picks THE TIP THAT CONTAINS THE OTHER — a stale ref is an ancestor
- * of the fresh one, and the descendant's merge-base with the branch is the later
- * one, so the containment rule always yields the NARROWER diff. Nothing is
- * FETCHED here: this runs in the shared repo, where a fetch carries the
- * symbolic-ref and configured-refspec traps `resolveMergeHeadSha` documents at
- * length, and a tracking ref that is itself behind is already handled by the
- * containment rule. Anything unresolvable falls back to the bare name — the
- * long-standing behaviour — because a base that exists only locally must still
- * work.
- *
- * WHEN THE TWO HAVE DIVERGED, BOTH ARE RETURNED, and the caller INTERSECTS the
- * diffs. Picking one was merge-mode-blind: pr mode lands the branch on
- * `origin/<base>`, local mode merges into the LOCAL `<base>` (`merge.ts`
- * checks out `opts.base_branch ?? detectBaseBranch` in the local checkout), so
- * whichever tip this function picked, the other mode read a diff carrying
- * commits the branch never made — files reachable from the base-only side of the
- * divergence counted as "in the branch diff" and could be certified. A file the
- * BRANCH changed is in both diffs; a file that arrived from either base's own
- * commits is in at most one. The intersection is therefore the branch's real
- * delta under either merge target, and it is narrower than both — this cannot
- * admit a file that picking a single tip would have refused.
- */
-export async function resolveBaseRevisions(
-  run_host: RunHostCommand,
-  repo_path: string,
-  base_branch: string,
-): Promise<string[]> {
-  const base = base_branch.trim()
-  // A name git could read as an option or a refspec never reaches git here, and
-  // an operand that is already a sha (or anything else the caller pinned) is
-  // left exactly as it came: there is nothing to resolve.
-  if (base.length === 0 || !isPlainBranchName(base)) return [base_branch]
-  const local = await pinBaseRef(run_host, repo_path, `refs/heads/${base}`)
-  const remote = await pinBaseRef(run_host, repo_path, `refs/remotes/origin/${base}`)
-  if (remote === null) return [local ?? base_branch]
-  if (local === null || local === remote) return [remote]
-  // `merge-base --is-ancestor` answers by EXIT CODE, so `.ok` is the whole
-  // answer; a run that could not happen at all is not a containment proof, and
-  // falls through to the diverged case — the strictest of the three.
-  const localBehind = await run_host(
-    ['git', '-C', repo_path, 'merge-base', '--is-ancestor', '--end-of-options', local, remote],
-    repo_path,
-  )
-  if (localBehind.ok) return [remote]
-  const remoteBehind = await run_host(
-    ['git', '-C', repo_path, 'merge-base', '--is-ancestor', '--end-of-options', remote, local],
-    repo_path,
-  )
-  if (remoteBehind.ok) return [local]
-  return [local, remote]
-}
-
-/** One base ref as a 40-hex OID, or null when it does not resolve to a commit. */
-async function pinBaseRef(run_host: RunHostCommand, repo_path: string, ref: string): Promise<string | null> {
-  const res = await run_host(
-    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`],
-    repo_path,
-  )
-  const oid = res.stdout.trim().toLowerCase()
-  // `.ok` is load-bearing for the same reason it is in `resolveMergeHeadSha`: a
-  // failing rev-parse can still print, and on a sha-shaped name that print is hex.
-  return res.ok && HEX40.test(oid) ? oid : null
-}
-
-/**
  * The files this branch changes against `base`, per git — NEVER per an agent's
  * account of them. Returns null when the diff could not be read, which
  * `isProseOnlyChange` treats as "require the proof".
@@ -1137,8 +1055,7 @@ async function pinBaseRef(run_host: RunHostCommand, repo_path: string, ref: stri
  * `ref` should be a PINNED commit sha wherever the answer is going to be used to
  * decide something (the gate passes one): given a branch NAME this re-resolves
  * the ref, and a branch that moves between two such resolutions yields a file
- * list for a commit nobody is proving. The BASE side is pinned here, by
- * `resolveBaseRevisions`, for the mirror-image reason.
+ * list for a commit nobody is proving.
  */
 export async function changedFilesOnBranch(
   run_host: RunHostCommand,
@@ -1147,22 +1064,25 @@ export async function changedFilesOnBranch(
   ref: string | null,
 ): Promise<string[] | null> {
   if (ref === null || ref.trim().length === 0) return null
-  // One base normally; TWO when local and origin have diverged, in which case a
-  // file counts as the branch's only if BOTH diffs list it — see
-  // `resolveBaseRevisions`. Any leg that could not run at all is null, exactly as
-  // a single unreadable diff always was.
-  const bases = await resolveBaseRevisions(run_host, repo_path, base_branch)
-  let files: string[] | null = null
-  for (const base of bases) {
-    const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base}...${ref}`], repo_path)
-    if (!res.ok) return null
-    const listed = res.stdout
-      .split(/\r?\n/)
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-    files = files === null ? listed : files.filter((f) => listed.includes(f))
-  }
-  return files === null || files.length === 0 ? null : files
+  // THE BASE IS A NAME THIS FUNCTION HANDS STRAIGHT TO GIT, so it is filtered
+  // HERE, at the consumer, rather than trusted from wherever it came. The range
+  // form admits no end-of-options marker: a base beginning with "-" arrives as
+  // an OPTION, and `git diff --name-only "--output=<path>...<ref>"` exits 0 and
+  // CREATES a file the base named — the whole operand, range suffix included, is
+  // taken as the output path (reproduced on git 2.43.0 in
+  // `mutation-prover-realgit.test.ts`). The name is operator-supplied or
+  // derived from `origin/HEAD` (`detectBaseBranch`), and a ref of that spelling
+  // passes `git check-ref-format`, so its source cannot be assumed clean.
+  // Refusing reads as "the diff could not be read", which makes the gate
+  // REQUIRE the proof — this can never turn into a pass.
+  if (!isPlainBranchName(base_branch.trim())) return null
+  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${ref}`], repo_path)
+  if (!res.ok) return null
+  const files = res.stdout
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+  return files.length === 0 ? null : files
 }
 
 /**

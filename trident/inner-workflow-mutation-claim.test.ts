@@ -59,6 +59,41 @@ const BRIDGE_FABRICATION = {
 const EXECUTABLE_PROSE = ['SPEC.md', 'IMPLEMENTATION_PLAN.md', 'CLAUDE.md', 'AGENTS.md', 'SKILL.md']
 
 /**
+ * THE GATE'S OWN RUNNER ALLOWLIST, read out of the production source.
+ *
+ * `TEST_COMMAND_SHAPES` is module-private, so the alternative is transcribing it
+ * here — and a transcription drifts silently. A runner the gate accepts but the
+ * contract never names costs a build a whole round (it learns the rule from a
+ * post-APPROVE refusal), which is the one-round-per-lesson loop this card exists
+ * to end; a runner REMOVED from the gate while the contract still advertises it
+ * is worse. Extracting the programs makes either drift red here.
+ */
+const ALLOWLISTED_RUNNERS = ((): string[] => {
+  const src = readFileSync(fileURLToPath(new URL('./mutation-prover.ts', import.meta.url)), 'utf8')
+  const from = src.indexOf('const TEST_COMMAND_SHAPES')
+  const to = src.indexOf('function isPackageScriptTest(argv')
+  return [...src.slice(from, to).matchAll(/program: '([^']+)'/g)].map((m) => String(m[1]))
+})()
+
+/**
+ * How the contract must SPELL each allowlisted runner: the program NEXT TO its
+ * test verb. A bare program name would be satisfied by prose — the brief already
+ * contains the words "go" and "make" — so the spelling is what is asserted, and a
+ * runner added to the gate has no entry here and reddens rather than passing.
+ */
+const RUNNER_SPELLING: Record<string, string> = {
+  bun: 'bun test',
+  node: 'node --test',
+  npm: 'npm|pnpm|yarn test',
+  pnpm: 'npm|pnpm|yarn test',
+  yarn: 'npm|pnpm|yarn test',
+  make: 'make test',
+  python3: 'python3 -m pytest',
+  go: 'go test',
+  cargo: 'cargo test',
+}
+
+/**
  * The READER'S OWN path derivation, narrowed to a string.
  *
  * The production helper returns null for a branch name it will not hand to git,
@@ -282,7 +317,43 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       expect(brief.indexOf(artifactPath)).toBeLessThan(brief.indexOf('\nCONTRACT\n'))
     }
   })
+
+  test('the contract NAMES the runner shapes the gate allows, the ones it refuses, and the blob cap', async () => {
+    const { captured } = await runWorkflow({ fixRoundClaim: undefined })
+    const forge = captured.filter((c) => String(c.label).startsWith('forge:'))
+    // POSITIVE CONTROLS on both extractions: briefs really were captured, and
+    // the allowlist really was read out of the gate. An empty match set would
+    // make the loop below pass against any brief at all.
+    expect(forge.length).toBeGreaterThan(1)
+    expect(ALLOWLISTED_RUNNERS).toContain('bun')
+    expect(ALLOWLISTED_RUNNERS.length).toBeGreaterThan(5)
+    // ...and a runner the gate does NOT allow, so "named" is not something every
+    // word in the brief satisfies.
+    expect(ALLOWLISTED_RUNNERS).not.toContain('npx')
+    // Every allowlisted program has a documented spelling — a runner added to
+    // the gate reddens HERE rather than being discovered by a refused build.
+    expect(ALLOWLISTED_RUNNERS.filter((r) => RUNNER_SPELLING[r] === undefined)).toEqual([])
+
+    for (const call of forge) {
+      const brief = call.prompt
+      for (const runner of ALLOWLISTED_RUNNERS) {
+        const spelling = RUNNER_SPELLING[runner] ?? runner
+        expect({ label: call.label, runner, named: brief.includes(spelling) }).toEqual({
+          label: call.label,
+          runner,
+          named: true,
+        })
+      }
+      // The rule itself, and one refused shape named BEFORE it costs a round.
+      expect(brief).toContain('ALLOWLISTED')
+      expect(brief).toContain('npx vitest')
+      // The cap that silently nulls an oversized nomination is a number the
+      // build can see rather than discover.
+      expect(brief).toContain('32 KiB')
+    }
+  })
 })
+
 
 /**
  * THE CODEX ROUTE — the one the card is about.

@@ -2434,11 +2434,10 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
   // The PER-BRANCH artifact path, derived by the production helper from the branch
   // the sim plan resolves — never spelled out here, so a layout change reddens.
   const ARTIFACT_PATH = mutationClaimArtifactPath('feat-x') as string
-  // THE BASE SIDE IS PINNED TOO. `changedFilesOnBranch` resolves the base NAME to
-  // a commit before diffing — a bare `main` resolves against the LOCAL ref, which
-  // in a long-lived checkout trails origin and widens the diff to files the branch
-  // never touched. The harness's refs all resolve to `NO_DRIFT_SHA`.
-  const DIFF_ARTIFACT = `git -C /repo diff --name-only ${NO_DRIFT_SHA}...${SIM_REVIEWED_HEAD}`
+  // The diff-membership leg, at the REVIEWED oid: the nomination only counts as
+  // this build's if it is in the branch's own diff. The base is the base BRANCH
+  // NAME the run resolves, exactly as `git diff` has always taken it.
+  const DIFF_ARTIFACT = `git -C /repo diff --name-only main...${SIM_REVIEWED_HEAD}`
   const SIZE_ARTIFACT = `git -C /repo cat-file -s ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
   const SHOW_ARTIFACT = `git -C /repo show ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
 

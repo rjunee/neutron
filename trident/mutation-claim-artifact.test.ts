@@ -1,6 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
+import { spawnCapture } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
 import { isProseOnlyChange, parseMutationClaim, runMutationProofGate } from './mutation-prover.ts'
 import {
@@ -53,22 +57,9 @@ function fail(exit_code: number): HostCommandResult {
 const REF_OID = 'b'.repeat(40)
 
 /**
- * The OID the BASE name pins to — DISTINCT from the branch's, and from the
- * reviewed head, so an argv that still carries the bare base name (or the wrong
- * pin) is visible in the recorded calls rather than passing by coincidence.
- */
-const BASE_OID = 'c'.repeat(40)
-
-/** The two refs the base is resolved from, in the order the resolver reads them. */
-const BASE_PINS = [
-  ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${BASE}^{commit}`],
-  ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/remotes/origin/${BASE}^{commit}`],
-]
-
-/**
  * A scripted host that RECORDS every argv, and answers the commands the reader
- * issues: the ref pin (only for a ref operand), the BASE pin, the branch diff,
- * the object size, the blob body.
+ * issues: the ref pin (only for a ref operand), the branch diff, the object
+ * size, the blob body.
  *
  * `diff` defaults to a listing that INCLUDES the artifact and `size` to the real
  * byte length of `body`, so each test overrides exactly the leg it is about.
@@ -78,7 +69,6 @@ function makeHost(opts: {
   diff?: string | HostCommandResult
   size?: string | HostCommandResult
   pin?: string | HostCommandResult
-  basePin?: string | HostCommandResult
   throws?: boolean
 }): { run: RunHostCommand; calls: string[][] } {
   const calls: string[][] = []
@@ -88,12 +78,6 @@ function makeHost(opts: {
   const run: RunHostCommand = async (cmd) => {
     calls.push([...cmd])
     if (opts.throws === true) throw new Error('spawn failed')
-    // The BASE is pinned too, and to its OWN oid: the branch side and the base
-    // side are separate operands and a test that answered both from one stub
-    // could not tell a correct diff from one taken against the wrong revision.
-    if (cmd.includes('rev-parse') && (cmd.at(-1) ?? '').endsWith(`/${BASE}^{commit}`)) {
-      return answer(opts.basePin, `${BASE_OID}\n`)
-    }
     if (cmd.includes('rev-parse')) return answer(opts.pin, `${REF_OID}\n`)
     if (cmd.includes('diff')) return answer(opts.diff, `${PATH}\ntrident/limit.ts\n`)
     if (cmd.includes('cat-file')) {
@@ -136,8 +120,7 @@ describe('readCommittedMutationClaim', () => {
     // from git's object record BEFORE the body is ever asked for — the ordering
     // is what makes the cap bound the read rather than describe it afterwards.
     expect(host.calls).toEqual([
-      ...BASE_PINS,
-      ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${OID}`],
+      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`],
       ['git', '-C', REPO, 'cat-file', '-s', `${OID}:${PATH}`],
       ['git', '-C', REPO, 'show', `${OID}:${PATH}`],
     ])
@@ -153,7 +136,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).toBeNull()
     expect(read.note).toContain('is not in the diff')
     // Refused on the DIFF leg — no body was ever fetched.
-    expect(host.calls).toEqual([...BASE_PINS, ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${OID}`]])
+    expect(host.calls).toEqual([['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`]])
   })
 
   test('AN INHERITED, UNTOUCHED ARTIFACT IS NOT A NOMINATION', async () => {
@@ -289,15 +272,14 @@ describe('readCommittedMutationClaim', () => {
     const ORIGIN_HEAD = '8'.repeat(40)
     const listing: Record<string, string> = {
       // The local tip changed code and nominated NOTHING.
-      [`${BASE_OID}...${LOCAL_HEAD}`]: 'trident/limit.ts\n',
+      [`${BASE}...${LOCAL_HEAD}`]: 'trident/limit.ts\n',
       // The stale origin tip still carries the artifact.
-      [`${BASE_OID}...${ORIGIN_HEAD}`]: `${PATH}\ntrident/limit.ts\n`,
+      [`${BASE}...${ORIGIN_HEAD}`]: `${PATH}\ntrident/limit.ts\n`,
     }
     const calls: string[][] = []
     const twoTips: RunHostCommand = async (cmd) => {
       calls.push([...cmd])
       const operand = cmd.at(-1) ?? ''
-      if (cmd.includes('rev-parse') && operand.endsWith(`/${BASE}^{commit}`)) return ok(`${BASE_OID}\n`)
       if (cmd.includes('rev-parse')) return ok(`${operand.startsWith('refs/remotes/') ? ORIGIN_HEAD : LOCAL_HEAD}\n`)
       if (cmd.includes('diff')) return ok(listing[operand] ?? '')
       if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
@@ -357,8 +339,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).not.toBeNull() // positive control: the read really happened
     expect(host.calls).toEqual([
       ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${BRANCH}^{commit}`],
-      ...BASE_PINS,
-      ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${REF_OID}`],
+      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${REF_OID}`],
       ['git', '-C', REPO, 'cat-file', '-s', `${REF_OID}:${PATH}`],
       ['git', '-C', REPO, 'show', `${REF_OID}:${PATH}`],
     ])
@@ -368,51 +349,6 @@ describe('readCommittedMutationClaim', () => {
     expect(host.calls.filter((c) => !c.includes('rev-parse')).some((c) => c.some((a) => a.includes('refs/')))).toBe(
       false,
     )
-  })
-
-  test('A STALE LOCAL BASE CANNOT RESURRECT AN INHERITED NOMINATION', async () => {
-    // THE HOLE THIS CLOSES, reproduced in this repo: local `main` trailed
-    // `origin/main` by 19 merges, so `git diff main...<branch>` listed 170 files
-    // where the branch changed 13 — including files merged in the meantime. A
-    // branch NAME reused after its predecessor merged would then find the OLD
-    // nomination "in its own diff" and prove the OLD mutation, while the change
-    // that actually shipped went unproved. That is invariant (a) defeated by the
-    // one operand that was never pinned.
-    const STALE = 'd'.repeat(40)
-    const FRESH = 'e'.repeat(40)
-    const calls: string[][] = []
-    const drifted: RunHostCommand = async (cmd) => {
-      calls.push([...cmd])
-      if (cmd.includes('rev-parse')) {
-        return ok(`${(cmd.at(-1) ?? '').startsWith('refs/remotes/') ? FRESH : STALE}\n`)
-      }
-      if (cmd.includes('merge-base')) return cmd.at(-2) === STALE && cmd.at(-1) === FRESH ? ok('') : fail(1)
-      if (cmd.includes('diff')) {
-        // The STALE base's over-wide diff carries the predecessor's nomination;
-        // the true one carries only what this branch changed.
-        return ok(cmd.at(-1) === `${STALE}...${OID}` ? `${PATH}\ntrident/limit.ts\n` : 'trident/limit.ts\n')
-      }
-      if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
-      return ok(BODY)
-    }
-
-    const read = await readCommittedMutationClaim(drifted, REPO, SOURCE)
-
-    expect(read.claim).toBeNull()
-    expect(read.note).toContain('is not in the diff')
-    // Proved by the argv, not only by the outcome: the diff was taken from
-    // origin's tip, and the stale name never reached it.
-    expect(calls.some((c) => c.at(-1) === `${FRESH}...${OID}`)).toBe(true)
-    expect(calls.some((c) => c.at(-1) === `${STALE}...${OID}` || c.at(-1) === `${BASE}...${OID}`)).toBe(false)
-    // No body was fetched at all — the refusal happened on the diff leg.
-    expect(calls.some((c) => c.includes('show'))).toBe(false)
-
-    // POSITIVE CONTROL, same host shape: a nomination THIS branch really wrote
-    // is in origin's diff too, and reads back. Without this the assertion above
-    // would pass on a reader that returns null unconditionally.
-    const own: RunHostCommand = async (cmd) =>
-      cmd.includes('diff') ? ok(`${PATH}\ntrident/limit.ts\n`) : await drifted(cmd, REPO)
-    expect((await readCommittedMutationClaim(own, REPO, SOURCE)).claim).not.toBeNull()
   })
 
   test('a ref that resolves to nothing is null, and the OID path issues no pin at all', async () => {
@@ -432,9 +368,10 @@ describe('readCommittedMutationClaim', () => {
     // the three-command read is unchanged.
     const pinned = makeHost({})
     expect((await readCommittedMutationClaim(pinned.run, REPO, SOURCE)).claim).not.toBeNull()
-    // No pin OF THE BRANCH: `expected_head` is already an OID. The two base pins
-    // are the base side's own business and name the base, never the branch.
-    expect(pinned.calls.filter((c) => c.includes('rev-parse'))).toEqual(BASE_PINS)
+    // NO PIN AT ALL: `expected_head` is already an OID, so the read is exactly
+    // the three legs that touch the blob.
+    expect(pinned.calls.filter((c) => c.includes('rev-parse'))).toEqual([])
+    expect(pinned.calls).toHaveLength(3)
   })
 
   test('a pin that answers with something that is not an OID is refused, not passed through', async () => {
@@ -490,7 +427,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).not.toBeNull()
     expect(host.calls.every((c) => !c.some((a) => a.includes('abc:')))).toBe(true)
     expect(host.calls[0]?.at(-1)).toBe(`refs/heads/${BRANCH}^{commit}`)
-    expect(host.calls.at(-3)?.at(-1)).toBe(`${BASE_OID}...${REF_OID}`)
+    expect(host.calls.at(-3)?.at(-1)).toBe(`${BASE}...${REF_OID}`)
   })
 
   test('an uppercase, padded expected_head is trimmed and lowercased before use', async () => {
@@ -502,7 +439,7 @@ describe('readCommittedMutationClaim', () => {
     })
 
     expect(read.claim).not.toBeNull()
-    expect(host.calls[2]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${'a'.repeat(40)}`])
+    expect(host.calls[0]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${'a'.repeat(40)}`])
   })
 
   test('a host that throws resolves null rather than rejecting', async () => {
@@ -692,5 +629,99 @@ describe('the nomination file itself is neither a target nor a behaviour change'
     // slugs are `[a-z0-9-]`.
     expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/trident/x.json`])).toBe(true) // control
     expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/skills/x.json`])).toBe(false)
+  })
+})
+
+/**
+ * THE READER'S ARGV, AGAINST REAL GIT.
+ *
+ * Everything above drives a SCRIPTED host: it proves which commands the reader
+ * builds, never that those commands work. `git cat-file -s <oid>:<path>` and
+ * `git show <oid>:<path>` are the two legs that carry the blob across the
+ * process boundary this whole module exists for, and a mock answers them
+ * whatever shape they are in. So: a real repository, a real commit, and the
+ * production reader with the production `spawnCapture`.
+ */
+describe('readCommittedMutationClaim against real git', () => {
+  const created: string[] = []
+  afterAll(() => {
+    for (const dir of created) rmSync(dir, { recursive: true, force: true })
+  })
+
+  const ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
+
+  async function run(repo: string, ...args: string[]): Promise<string> {
+    const out = await spawnCapture(['git', '-C', repo, ...args], repo)
+    if (!out.ok) throw new Error(`git ${args.join(' ')} failed: ${out.stderr || out.stdout}`)
+    return out.stdout.trim()
+  }
+
+  /** A repo on `main` with `BRANCH` checked out, optionally carrying a blob at PATH. */
+  async function seed(label: string, blob: string | null): Promise<{ repo: string; head: string }> {
+    const root = mkdtempSync(join(tmpdir(), `mutation-claim-realgit-${label}-`))
+    created.push(root)
+    const repo = join(root, 'repo')
+    mkdirSync(repo)
+    await run(repo, 'init', '-q', '--initial-branch=main')
+    writeFileSync(join(repo, 'a.txt'), 'base\n')
+    await run(repo, 'add', '-A')
+    await run(repo, ...ID, 'commit', '-q', '-m', 'base')
+    await run(repo, 'switch', '-q', '-c', BRANCH)
+    // Production code the branch really changes, so a nomination here would have
+    // a legal target and the diff is never empty.
+    writeFileSync(join(repo, 'limit.ts'), 'export const LIMIT = 1\n')
+    if (blob !== null) {
+      mkdirSync(dirname(join(repo, PATH)), { recursive: true })
+      writeFileSync(join(repo, PATH), blob)
+    }
+    await run(repo, 'add', '-A')
+    await run(repo, ...ID, 'commit', '-q', '-m', 'the work')
+    return { repo, head: await run(repo, 'rev-parse', 'HEAD') }
+  }
+
+  test('a committed nomination survives the round trip through real cat-file and show', async () => {
+    const { repo, head } = await seed('present', BODY)
+
+    const read = await readCommittedMutationClaim(spawnCapture, repo, {
+      expected_head: head,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+
+    expect(read.claim).toEqual(parseMutationClaim(JSON.parse(BODY)))
+    expect(read.claim).not.toBeNull() // the decode is not vacuously equal to null
+    expect(read.note).toContain(`committed nomination read from ${head}:${PATH}`)
+  })
+
+  test('THE CONTROL: the same repo without the blob reads null, not a stale claim', async () => {
+    const { repo, head } = await seed('absent', null)
+
+    const read = await readCommittedMutationClaim(spawnCapture, repo, {
+      expected_head: head,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+
+    expect(read.claim).toBeNull()
+    expect(read.note).toContain('is not in the diff')
+  })
+
+  test('the byte cap is measured by real `cat-file -s`, on a blob that really is over it', async () => {
+    // A mock can report any size. This one commits an object git itself sizes
+    // over the cap, and the reader must refuse it before its body is shown.
+    const body = JSON.parse(BODY) as Record<string, unknown>
+    body.rationale = 'x'.repeat(MUTATION_CLAIM_ARTIFACT_MAX_BYTES + 1)
+    const { repo, head } = await seed('oversized', JSON.stringify(body))
+
+    const read = await readCommittedMutationClaim(spawnCapture, repo, {
+      expected_head: head,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+
+    expect(read.claim).toBeNull()
+    expect(read.note).toContain('over the')
+    // ...and the oversized body WOULD have decoded — only the size refused it.
+    expect(parseMutationClaim(body)).not.toBeNull()
   })
 })
