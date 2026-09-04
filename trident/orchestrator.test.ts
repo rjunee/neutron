@@ -2652,6 +2652,17 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
 
   test('a schema-supplied claim WINS — the artifact is never even read', async () => {
     // Differs from the primed artifact, so an inverted precedence fails the deep-equal.
+    //
+    // THIS IS ALSO THE COMPOSED CASE, named so the residual is not a surprise:
+    // the inner loop carries a nomination forward across fix rounds ("a fix
+    // round that nominates nothing leaves the previous nomination standing"), so
+    // the in-result claim reaching here may be an EARLIER round's while the blob
+    // on disk is this round's. The earlier one still wins — the agent route may
+    // never be shadowed by branch-controlled bytes — and the cost is bounded by
+    // the gate RUNNING the mutation: a carried-forward nomination whose line the
+    // fix round moved fails to redden its guard and refuses. A round that
+    // re-nominates must re-nominate through both channels, which is what the
+    // build contract asks for.
     const IN_RESULT_CLAIM = { ...ARTIFACT_CLAIM, find: 'n <= LIMIT' }
     const seen: unknown[] = []
     const h = buildHarness({

@@ -1023,9 +1023,13 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
     // tests the directory prefix and the `.json` suffix and nothing else, because
     // this function is not told which branch it is judging and threading one in
     // would change its signature and both call sites for no behaviour: the reader
-    // only ever reads the per-branch path, and `validateClaim` refuses every
-    // spelling under this directory as a mutation TARGET, so a stray sibling blob
-    // can buy a branch an exemption but never a provable claim. `.json` is not a
+    // only ever reads the per-branch path, and `validateClaim` refuses every path
+    // THIS predicate admits as a mutation TARGET, so a stray sibling blob can buy
+    // a branch an exemption but never a provable claim. The two rules are one
+    // predicate, so the sets cannot drift: a path it does not admit (`junk.JSON`,
+    // a suffix-less file) is neither inert prose here NOR self-nomination-refused
+    // there — it is ordinary, and refused for the ordinary reason that nothing
+    // executes it or that it is not in the branch's diff. `.json` is not a
     // prose suffix, so before this a documentation-only branch that also wrote
     // `.trident/mutation-claims/<b>.json`
     // destroyed its own exemption and became unmergeable — it owed a proof and
@@ -1090,6 +1094,104 @@ export async function changedFilesOnBranch(
     .map((l) => l.trim())
     .filter((l) => l.length > 0)
   return files.length === 0 ? null : files
+}
+
+/**
+ * Every commit the base names in THIS repository — `refs/remotes/origin/<base>`
+ * and `refs/heads/<base>` — as OIDs, deduplicated, in that order. Empty when the
+ * base is not spelled as a branch name here (an OID, `HEAD~1`, a tag): that is
+ * not an error, it is "there is nothing to pin", and the caller falls back to
+ * handing the name to git exactly as before.
+ *
+ * A LOCAL BRANCH REF IS NOT AUTHORITATIVE and is not asked to be: it is whatever
+ * this checkout last set it to, and on a gate host it is routinely behind the
+ * remote. Both spellings are resolved so that neither one alone decides what
+ * this branch changed.
+ *
+ * The `refs/` prefix and `--end-of-options` are what make an arbitrary base
+ * string safe HERE: the operand is a ref PATH, so it can never be read as an
+ * option or a refspec, and a base git cannot resolve simply yields no OID.
+ */
+export async function resolveBaseCommits(
+  run_host: RunHostCommand,
+  repo_path: string,
+  base_branch: string,
+): Promise<string[]> {
+  const base = base_branch.trim()
+  if (base.length === 0) return []
+  const oids: string[] = []
+  for (const ref of [`refs/remotes/origin/${base}`, `refs/heads/${base}`]) {
+    const res = await run_host(
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`],
+      repo_path,
+    )
+    if (!res.ok) continue
+    const oid = res.stdout.trim().toLowerCase()
+    if (HEX40.test(oid) && !oids.includes(oid)) oids.push(oid)
+  }
+  return oids
+}
+
+/** The branch diff read against EVERY commit the base names, from both ends. */
+export interface BranchDiffAgainstBases {
+  /**
+   * Changed against ANY base commit — the WIDEST reading. What the prose
+   * exemption must judge: a code file that only the stale range lists still
+   * forfeits the exemption, so a wrong base can never buy a merge without a
+   * proof.
+   */
+  any: string[] | null
+  /**
+   * Changed against EVERY base commit — the NARROWEST reading. What a nomination
+   * must be bound to: a file that only ONE range lists was not necessarily
+   * changed by this branch, and a stale local base is exactly how such a file
+   * gets into a range (the predecessor's merge sits inside `main...<head>` when
+   * local `main` is behind `origin/main`). Empty when the two ranges share
+   * nothing — no file can be bound, which the gate refuses.
+   */
+  every: string[] | null
+}
+
+/**
+ * THE BRANCH DIFF, MEASURED AGAINST EVERY COMMIT THE BASE NAMES.
+ *
+ * `git diff --name-only <base>...<ref>` resolves `<base>` as a NAME, and the
+ * local ref that name finds is whatever this checkout last set it to. The
+ * committed-nomination reader already refused to trust that ref for artifact
+ * membership; the gate's own diff binding ran on the bare name, so a stale local
+ * base could still lend a branch a file it never touched and a nomination
+ * pointing at that file passed the binding check — a diff-independent
+ * nomination, which is the one thing this binding exists to make impossible.
+ *
+ * Both readings are returned because the two consumers fail closed in OPPOSITE
+ * directions: the exemption must take the widest set (any code anywhere ⇒
+ * require the proof) and the binding must take the narrowest (in every range ⇒
+ * this branch really changed it). One list cannot serve both.
+ *
+ * When the base names no commit here (an OID, `HEAD~1`, a tag, a base this
+ * checkout simply does not have) the name is handed to git as before — a base
+ * git accepts is git's to judge — and both readings are that single diff.
+ * Any unreadable range nulls BOTH: "I could not tell" is never an exemption and
+ * never a binding.
+ */
+export async function branchDiffAgainstEveryBase(
+  run_host: RunHostCommand,
+  repo_path: string,
+  base_branch: string,
+  ref: string | null,
+): Promise<BranchDiffAgainstBases> {
+  const bases = await resolveBaseCommits(run_host, repo_path, base_branch)
+  const operands = bases.length > 0 ? bases : [base_branch]
+  let any: string[] | null = null
+  let every: string[] | null = null
+  for (const from of operands) {
+    const files = await changedFilesOnBranch(run_host, repo_path, from, ref)
+    if (files === null) return { any: null, every: null }
+    const widened: string[] = any ?? []
+    any = [...widened, ...files.filter((f) => !widened.includes(f))]
+    every = every === null ? [...files] : every.filter((f) => files.includes(f))
+  }
+  return { any, every }
 }
 
 /**
@@ -1482,7 +1584,12 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
     }
   }
 
-  const files = await changedFilesOnBranch(input.run_host, input.run.repo_path, input.base_branch, pinnedSha)
+  // MEASURED AGAINST EVERY COMMIT THE BASE NAMES, not against the bare name.
+  // `diff.any` (the widest set) decides the exemption and `diff.every` (the
+  // narrowest) binds the nomination — see `branchDiffAgainstEveryBase`, where the
+  // stale-local-base hole this closes is written out.
+  const diff = await branchDiffAgainstEveryBase(input.run_host, input.run.repo_path, input.base_branch, pinnedSha)
+  const files = diff.any
   if (isProseOnlyChange(files)) {
     // The exemption is bound to the pinned commit like any other outcome: if the
     // branch moved since the pin, THIS is no longer the diff that would merge.
@@ -1507,7 +1614,7 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   // touches proves red-then-green perfectly and says NOTHING about the diff — and
   // being diff-independent, one boilerplate nomination would satisfy the phase
   // forever. The proof must break a line THIS branch changed.
-  if (files === null) {
+  if (files === null || diff.every === null) {
     return {
       ok: false,
       reason: 'mutation proof required but the branch diff could not be read — a proof cannot be bound to it',
@@ -1515,11 +1622,17 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
       evidence: null,
     }
   }
-  if (!files.includes(input.claim.file)) {
+  // AGAINST EVERY BASE, not any of them. A file that only ONE range lists is a
+  // file the branch may never have touched: a local base sitting behind
+  // `origin/<base>` puts a predecessor's merged files inside `<base>...<head>`,
+  // and a nomination pointing at one of those proves red-then-green while saying
+  // nothing about this diff.
+  if (!diff.every.includes(input.claim.file)) {
     return {
       ok: false,
       reason:
-        `mutation proof rejected: the nominated file ${input.claim.file} is not in this branch's diff — ` +
+        `mutation proof rejected: the nominated file ${input.claim.file} is not in this branch's diff ` +
+        `against every commit ${input.base_branch} names — ` +
         'a mutation of a file the PR does not change certifies nothing about this merge',
       exempt: false,
       evidence: null,

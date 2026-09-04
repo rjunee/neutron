@@ -221,27 +221,42 @@ describe('readCommittedMutationClaim', () => {
     expect((await readCommittedMutationClaim(wrote.run, REPO, SOURCE)).claim).not.toBeNull()
   })
 
-  test('a base that names no commit at all is null — never a waiver of the membership check', async () => {
+  test('a base NEITHER ref spelling names is handed to git as a NAME — one base policy, not two', async () => {
+    // `release@v1`, `HEAD~1`, a base this checkout simply does not carry as a
+    // branch: `changedFilesOnBranch` leaves those to git on purpose, and so must
+    // this reader. Enforcing a name allowlist HERE — as it once did — made the
+    // two halves of one channel disagree, and an operator-supplied base of a
+    // legal name read every nomination as absent and blocked the merge forever.
     const host = makeHost({ pin: fail(128) })
     const read = await readCommittedMutationClaim(host.run, REPO, SOURCE)
-    expect(read.claim).toBeNull()
-    expect(read.note).toContain('names no commit here')
-    // Both spellings were tried, and the read stopped there.
-    expect(host.calls).toEqual(BASE_PINS)
+    expect(read.claim).not.toBeNull()
+    // Both spellings were pinned FIRST; only after neither named a commit is the
+    // name itself the operand.
+    expect(host.calls.slice(0, 2)).toEqual(BASE_PINS)
+    expect(host.calls[2]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`])
 
-    // POSITIVE CONTROL: with only ONE of the two resolving — the ordinary case
-    // on a host with no remote-tracking ref — the read proceeds.
+    // ...and when git cannot read THAT either, the read is null. Unreadable is
+    // never a waiver of the membership check.
+    const unreadable = makeHost({ pin: fail(128), diff: fail(128) })
+    const refused = await readCommittedMutationClaim(unreadable.run, REPO, SOURCE)
+    expect(refused.claim).toBeNull()
+    expect(refused.note).toContain('could not read the branch diff')
+
+    // POSITIVE CONTROL: with only ONE of the two spellings resolving — the
+    // ordinary case on a host with no remote-tracking ref — the read proceeds
+    // against that commit, without ever falling back to the name.
     const localOnly = makeHost({})
     const withRemoteGone: RunHostCommand = async (cmd) =>
       (cmd.at(-1) ?? '').startsWith('refs/remotes/') ? fail(128) : await localOnly.run(cmd, REPO)
     expect((await readCommittedMutationClaim(withRemoteGone, REPO, SOURCE)).claim).not.toBeNull()
+    expect(localOnly.calls.some((c) => (c.at(-1) ?? '').startsWith(`${BASE}...`))).toBe(false)
   })
 
   test('an unreadable diff is null — the fallback fails CLOSED', async () => {
     const host = makeHost({ diff: fail(128) })
     const read = await readCommittedMutationClaim(host.run, REPO, SOURCE)
     expect(read.claim).toBeNull()
-    expect(read.note).toContain('could not read the diff')
+    expect(read.note).toContain('could not read the branch diff')
   })
 
   test('a malformed JSON body is null', async () => {
@@ -485,7 +500,6 @@ describe('readCommittedMutationClaim', () => {
       { what: 'a branch that is a refspec', source: { expected_head: OID, branch: 'feat:refs/heads/x', base_branch: BASE } },
       { what: 'an empty branch', source: { expected_head: OID, branch: '', base_branch: BASE } },
       { what: 'a null branch', source: { expected_head: OID, branch: null, base_branch: BASE } },
-      { what: 'a base that is an option', source: { expected_head: OID, branch: BRANCH, base_branch: '--output=/x' } },
       { what: 'a missing base', source: { expected_head: OID, branch: BRANCH } },
       { what: 'nothing at all', source: {} },
     ]
@@ -502,6 +516,29 @@ describe('readCommittedMutationClaim', () => {
     // Positive control: the same shape WITH safe operands does run git.
     const control = makeHost({})
     expect((await readCommittedMutationClaim(control.run, REPO, SOURCE)).claim).not.toBeNull()
+  })
+
+  test('A BASE THAT IS AN OPTION reaches git only as a ref PATH, and never as a diff operand', async () => {
+    // The base is no longer held to the branch allowlist (a base git accepts is
+    // git's to judge), so this is what keeps a hostile one inert: every command
+    // it appears in prefixes it with `refs/…` and passes `--end-of-options`, so
+    // it is an operand git can only read as a ref; and when neither spelling
+    // resolves, `changedFilesOnBranch` refuses the bare name before the diff.
+    const host = makeHost({ pin: fail(128) })
+    const read = await readCommittedMutationClaim(host.run, REPO, {
+      expected_head: OID,
+      branch: BRANCH,
+      base_branch: '--output=/x',
+    })
+
+    expect(read.claim).toBeNull()
+    expect(host.calls).toEqual([
+      ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', 'refs/remotes/origin/--output=/x^{commit}'],
+      ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', 'refs/heads/--output=/x^{commit}'],
+    ])
+    // The diff NEVER ran: no argv carries the hostile string outside a ref path.
+    expect(host.calls.some((c) => c.includes('diff'))).toBe(false)
+    expect(host.calls.every((c) => (c.at(-1) ?? '').startsWith('refs/'))).toBe(true)
   })
 
   test('a short expected_head falls back to the branch refs rather than to a bare operand', async () => {
@@ -539,8 +576,9 @@ describe('readCommittedMutationClaim', () => {
       claim: null,
       note: expect.any(String),
     })
-    // Both base pins were attempted and both threw; nothing after them ran.
-    expect(host.calls).toHaveLength(2)
+    // The FIRST command threw and nothing after it ran — the reader's own
+    // try/catch is what turns that into a null instead of a rejection.
+    expect(host.calls).toHaveLength(1)
   })
 
   test('an absolute-path file SURVIVES the read — the gate does that rejecting', async () => {

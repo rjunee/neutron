@@ -21,15 +21,21 @@
  *     merged. A blob the branch did not touch reads as null.
  *
  *     THE MEMBERSHIP CHECK IS ONLY AS HONEST AS ITS BASE, which is why the base
- *     is resolved to commits here rather than handed to git as a name. A local
- *     `main` sitting BEHIND `origin/main` puts the predecessor's merge INSIDE
+ *     is resolved to commits rather than handed to git as a name. A local `main`
+ *     sitting BEHIND `origin/main` puts the predecessor's merge INSIDE
  *     `main...<head>`, so a reused branch name reads the inherited blob as its
  *     own nomination and the gate fails OPEN (reproduced against real git).
  *     Both spellings of the base — `refs/remotes/origin/<base>` and
  *     `refs/heads/<base>` — are therefore resolved, and the artifact must be in
  *     the diff against EACH commit they name: a blob this branch really wrote is
  *     in both diffs, while one inherited from either base is missing from that
- *     base's own. Neither ref resolving is a null, not a waiver.
+ *     base's own.
+ *
+ *     THAT RESOLUTION LIVES IN THE GATE (`branchDiffAgainstEveryBase`) and is
+ *     shared, not copied. The nomination and the file it nominates are two ends
+ *     of one channel, and while only this end pinned its base, a stale local ref
+ *     could still lend the branch a file it never changed for the gate's own
+ *     `claim.file` binding to accept. One function, one base policy, both ends.
  *
  *     WHAT (a) DOES NOT CATCH, stated so nobody reads it as more than it is: a
  *     nomination going STALE WITHIN ONE BRANCH. A fix round, or a later lane
@@ -42,6 +48,18 @@
  *     be production code in the branch diff, and the gate RUNS the mutation, so
  *     a nomination that has gone stale fails to redden its guard and refuses.
  *     The contract therefore tells each round to re-write the file.
+ *
+ *     AND THE PRECEDENCE IS THE OTHER HALF OF THAT: the in-result claim WINS,
+ *     and the artifact is not even read when one arrived (the agent route must
+ *     never be shadowed — `orchestrator.test.ts`, "a schema-supplied claim
+ *     WINS"). So on the AGENT route a fix round that rewrites the blob but
+ *     reports no claim of its own is still proved against the round the inner
+ *     loop is carrying forward (`inner-workflow.mjs`: "a fix round that
+ *     nominates nothing leaves the previous nomination standing"). A round that
+ *     re-nominates must re-nominate through BOTH, which is what the contract
+ *     asks for. On the codex route — the one this module exists for — the
+ *     in-result claim is structurally null every round, so the blob is always
+ *     the answer and there is nothing to shadow.
  *
  * (b) The artifact is BRANCH-CONTROLLED, UNTRUSTED input. It is shape-decoded
  *     here by `parseMutationClaim` and NOTHING more — exactly as permissive as
@@ -58,16 +76,21 @@
  *     misdiagnosed for days as an agent omission.
  *
  * (d) Every git operand is SANITIZED BEFORE it may touch git: the branch must
- *     pass `isPlainBranchName` (it is both the path segment and the ref), the
- *     base must too, and a revision is either a 40-hex OID or a full
- *     `refs/...` path — else no command is run at all. A `refs/...` operand is
+ *     pass `isPlainBranchName` (it is both the path segment and the ref), and a
+ *     revision is either a 40-hex OID or a full
+ *     `refs/...` path — else no command is run at all. The BASE is deliberately
+ *     NOT held to that allowlist: it is never a path segment here, git is the
+ *     interpreter that receives it, and a name-shaped rule in this module alone
+ *     would refuse legal bases (`release@v1`, `HEAD~1`) that the diff reader
+ *     accepts on purpose — a fail-closed refusal, but a permanent one. A
+ *     `refs/...` operand is
  *     then PINNED to an OID before the read's three legs run, so a ref that
  *     moves mid-read cannot have one leg describe a different commit than
  *     another (the byte cap in particular must size the object it then reads).
  */
 
 import {
-  changedFilesOnBranch,
+  branchDiffAgainstEveryBase,
   isPlainBranchName,
   MUTATION_CLAIM_ARTIFACT_DIR,
   parseMutationClaim,
@@ -138,12 +161,18 @@ export async function readCommittedMutationClaim(
       note: `no committed nomination: ${JSON.stringify(branch.slice(0, 80))} is not a plain branch name`,
     }
   }
+  // AN EMPTY BASE IS THE ONLY BASE REFUSED HERE. A base git accepts is git's to
+  // judge (`changedFilesOnBranch` says so in as many words, and its tests name
+  // `release@v1` and `HEAD~1`); an allowlist in THIS module would make the two
+  // halves of one channel enforce contradictory base policies, and an
+  // operator-supplied base of a legal name would read every nomination as absent
+  // and block every non-exempt merge in that repository forever. The membership
+  // read below goes through the gate's own base resolution, which pins the ref
+  // spellings and keeps a bare name away from anything that could read it as an
+  // option.
   const base = typeof source.base_branch === 'string' ? source.base_branch.trim() : ''
-  if (base.length === 0 || !isPlainBranchName(base)) {
-    return {
-      claim: null,
-      note: `no committed nomination: ${JSON.stringify(base.slice(0, 80))} is not a plain base branch name`,
-    }
+  if (base.length === 0) {
+    return { claim: null, note: 'no committed nomination: no base branch to measure this branch\'s diff against' }
   }
 
   const oid = typeof source.expected_head === 'string' ? source.expected_head.trim().toLowerCase() : ''
@@ -212,30 +241,6 @@ async function pinRevision(
   }
 }
 
-/**
- * Every commit the base names in THIS repository — `origin/<base>` and the local
- * `<base>` — as OIDs, deduplicated, in that order.
- *
- * A LOCAL BRANCH REF IS NOT AUTHORITATIVE and is not asked to be: it is whatever
- * this checkout last set it to, and on a gate host it is routinely behind the
- * remote. Reading `origin/<base>` too, and requiring the artifact in the diff
- * against BOTH, is what stops a stale local base widening the range far enough
- * to swallow a predecessor's merged nomination. Order matters only to which
- * refusal note gets written; every entry is used.
- */
-async function resolveBaseCommits(
-  run_host: RunHostCommand,
-  repo_path: string,
-  base: string,
-): Promise<string[]> {
-  const oids: string[] = []
-  for (const ref of [`refs/remotes/origin/${base}`, `refs/heads/${base}`]) {
-    const oid = await pinRevision(run_host, repo_path, ref)
-    if (oid !== null && !oids.includes(oid)) oids.push(oid)
-  }
-  return oids
-}
-
 async function readAtRevision(
   run_host: RunHostCommand,
   repo_path: string,
@@ -248,18 +253,17 @@ async function readAtRevision(
     // (1) THE BLOB MUST BE PART OF THIS BRANCH'S OWN DIFF, against every commit
     // the base names. A tracked file that merely came along from the base is not
     // a nomination this build made — and a base ref that has fallen behind the
-    // remote is exactly how such a file gets into the range.
-    const bases = await resolveBaseCommits(run_host, repo_path, base)
-    if (bases.length === 0) {
-      return { claim: null, note: `no committed nomination: base ${base} names no commit here` }
+    // remote is exactly how such a file gets into the range. THE GATE'S OWN
+    // BINDING USES THIS SAME FUNCTION, so the artifact and the file it nominates
+    // are judged against one base policy rather than two.
+    const diff = await branchDiffAgainstEveryBase(run_host, repo_path, base, revision)
+    if (diff.every === null) {
+      return { claim: null, note: `no committed nomination: could not read the branch diff against ${base}` }
     }
-    for (const from of bases) {
-      const changed = await changedFilesOnBranch(run_host, repo_path, from, revision)
-      if (changed === null) {
-        return { claim: null, note: `no committed nomination: could not read the diff ${from}...${revision}` }
-      }
-      if (!changed.includes(path)) {
-        return { claim: null, note: `no committed nomination: ${path} is not in the diff ${from}...${revision}` }
+    if (!diff.every.includes(path)) {
+      return {
+        claim: null,
+        note: `no committed nomination: ${path} is not in the diff against every commit ${base} names`,
       }
     }
 
