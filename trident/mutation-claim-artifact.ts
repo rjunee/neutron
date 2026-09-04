@@ -161,7 +161,11 @@ export interface CommittedMutationClaimRead {
  * names a commit is the one read, whether or not it carries a nomination. Read
  * ON past it and a local branch with no artifact would be answered by a stale
  * `origin/<branch>`, which is a nomination for a different commit than the one
- * being proved. Returns a null claim for everything else, and never throws.
+ * being proved. For the same reason the fallback needs a CONCLUSIVE answer that
+ * the ref is missing (`rev-parse --verify --quiet` exiting 1): a host that
+ * failed to answer at all — spawn failure, watchdog kill, unreadable repository
+ * — stops the read with a null claim rather than licensing the stale ref.
+ * Returns a null claim for everything else, and never throws.
  */
 export async function readCommittedMutationClaim(
   run_host: RunHostCommand,
@@ -220,21 +224,27 @@ export async function readCommittedMutationClaim(
     // `runMutationProofGate` pins its sha before reading anything off it.
     const pinned = await pinRevision(run_host, repo_path, revision)
     if (pinned.oid === null) {
+      if (pinned.why !== 'absent') {
+        // A HOST THAT DID NOT ANSWER IS NOT AN ABSENT REF, AND MUST NOT MOVE THE
+        // READ ONTO THE NEXT ONE. Collapsing every non-OK result into "absent"
+        // made an UNANSWERED question license the fallback: a local rev-parse
+        // that failed to spawn (`exit_code: -1`), or a repository git could not
+        // read at all, sent the reader on to `refs/remotes/origin/<branch>` and
+        // returned THAT commit's nomination — a nomination for whatever origin
+        // last held — while the note claimed the local ref did not resolve. The
+        // fallback exists for ONE situation, the one the comment below names:
+        // the worktree holding the local branch was cleaned, so the ref
+        // genuinely is not there. Anything else stops here with a null claim,
+        // which is what the gate already refuses, and says in its own words
+        // WHICH failure it was (invariant (c)).
+        notes.push(`no committed nomination: ${pinned.detail} resolving ${revision}, so no further ref was tried`)
+        return { claim: null, note: notes.join('; ') }
+      }
       // THE ONLY REASON TO TRY THE NEXT REF: this one names no commit here. The
       // fallback exists because the worktree holding the local branch is
       // routinely cleaned before the gate runs — an ABSENT ref, not an absent
       // nomination.
-      //
-      // AND A THROWING HOST SAYS SO IN ITS OWN WORDS. Collapsing the two made
-      // the pin leg contradict invariant (c) at the one place it matters most:
-      // a machine that could not run git at all was reported as a branch whose
-      // ref does not exist, which sends the reader of the refusal to the
-      // build's git history instead of to the host.
-      notes.push(
-        pinned.why === 'host-threw'
-          ? `no committed nomination: the git host threw resolving ${revision}`
-          : `no committed nomination: ${revision} does not resolve to a commit`,
-      )
+      notes.push(`no committed nomination: ${revision} does not resolve to a commit`)
       continue
     }
     // THE FIRST REF THAT RESOLVES IS THE ANSWER, claim or no claim. Continuing
@@ -252,11 +262,21 @@ export async function readCommittedMutationClaim(
 /**
  * What the pin leg found: the commit a revision names, or WHY it names none.
  *
- * The two nulls are kept apart because invariant (c) promises each null says
- * which failure it was, and these two send an operator to different places: an
- * absent ref is the branch's story, a throwing host is the machine's.
+ * The nulls are kept apart because invariant (c) promises each null says which
+ * failure it was, and they send an operator to different places: an absent ref
+ * is the branch's story, a throwing or failing host is the machine's.
+ *
+ * AND THE SPLIT IS LOAD-BEARING, not just descriptive — only `absent` may be
+ * followed by the next ref. `absent` is the one answer that MEANS "this
+ * revision names no commit HERE"; the other two mean the question was never
+ * answered, and an unanswered question that licensed the fallback would let a
+ * stale `origin/<branch>` commit supply the nomination.
  */
-type PinnedRevision = { oid: string } | { oid: null; why: 'absent' | 'host-threw' }
+type PinnedRevision =
+  | { oid: string }
+  | { oid: null; why: 'absent' }
+  /** `detail` reads as a clause: "<detail> resolving <revision>". */
+  | { oid: null; why: 'host-threw' | 'host-failed'; detail: string }
 
 /**
  * The commit a revision names, as a 40-hex OID, or null when it names none.
@@ -280,11 +300,30 @@ async function pinRevision(
       ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`],
       repo_path,
     )
-    if (!res.ok) return { oid: null, why: 'absent' }
-    const oid = res.stdout.trim().toLowerCase()
-    return FULL_OID.test(oid) ? { oid } : { oid: null, why: 'absent' }
+    if (res.ok) {
+      const oid = res.stdout.trim().toLowerCase()
+      if (FULL_OID.test(oid)) return { oid }
+      // EXIT ZERO AND NOT AN OBJECT ID is not "this ref names no commit":
+      // `--verify --quiet` prints an object id or nothing at all on success.
+      // Something else answered, so the question stands unanswered.
+      return { oid: null, why: 'host-failed', detail: 'git printed no object id' }
+    }
+    // THE ONE CONCLUSIVE "no such revision": `git rev-parse --verify --quiet`
+    // exits 1, silently, for a revision that names nothing (measured, git
+    // 2.43.0). Every other non-zero answer says the question was not ANSWERED —
+    // 128 for a repository git could not read at all, -1 for a spawn that never
+    // happened, a watchdog kill — and must not be reported, or acted on, as an
+    // absent ref.
+    if (res.exit_code === 1 && res.timed_out !== true && res.stdout.trim().length === 0) {
+      return { oid: null, why: 'absent' }
+    }
+    return {
+      oid: null,
+      why: 'host-failed',
+      detail: res.timed_out === true ? 'the git host timed out' : `the git host exited ${res.exit_code}`,
+    }
   } catch {
-    return { oid: null, why: 'host-threw' }
+    return { oid: null, why: 'host-threw', detail: 'the git host threw' }
   }
 }
 

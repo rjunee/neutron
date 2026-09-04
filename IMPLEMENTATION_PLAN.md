@@ -25,63 +25,71 @@ Resume state (branch `trident/a-codex-routed-build-cannot-transmi`, PR #500 OPEN
 
 - [x] 16. Round 14 — hold the head still and get the verdict: the code is round 13's, published, GREEN (17 of 17 checks), and NEVER reviewed (the last run's launch fire never settled — infrastructure, after publish; the inner verdict is REVIEW_NOT_RUN, not a rejection). Persist this regenerated body to the root plan AND to its drifted mirror (the mirror is still the round-12 body and still asserts the "never a provable claim" declaration round 13 withdrew as falsified), commit those two files as the round's ONLY change, and stop so the panel can land a verdict on the published work. Write code ONLY on a CONFIRMED blocker reproduced on this head; a major/minor/nit is recorded in CURRENT STATE and left alone.
 
+- [x] 17. Round 15 (one code blocker, one re-ratification): (a) the pin leg stops collapsing every non-OK host result into "absent". `git rev-parse --verify --quiet` exits 1 silently for a revision that names nothing, and that is now the ONLY answer that lets the read try `refs/remotes/origin/<branch>`; a spawn that never happened (`exit_code: -1`), a watchdog kill, an unreadable repository, or an exit-zero answer carrying no object id each stop the read with a null claim and a note naming the host. Review reproduced the collapse returning the REMOTE commit's nomination under a note claiming the local ref did not resolve. Pinned four ways plus the positive control that keeps the cleaned-worktree fallback. (b) The stale-base inheritance is RE-RATIFIED as a deferral against Codex's Verdict C reproduction, in CURRENT STATE below.
+
 ## PR BODY (authoritative — the publishing loop should carry this; the build lane may not run gh)
 
-Option A, refined: the nomination is a COMMITTED artifact, read back out of git at the gate call site. The build writes `.trident/mutation-claims/<branch>.json` — per branch, and per wave member in member mode — and commits it with its work; `trident/orchestrator.ts` calls `readCommittedMutationClaim` at the single `proveMutation` call site ONLY when the schema claim is null. Chosen over a loose worktree file and over Option B's seventh trailer line because in pr mode the workflow process ENDS at every publish handoff and re-enters with a null claim; a committed blob is the one channel that already crosses that boundary, and the reviewed OID binds the nomination to the very commit the gate pins. The nomination remains UNTRUSTED: same decode as the agent route, then the unchanged gate validates and actually RUNS it; TEST_COMMAND_SHAPES, the general-shell ban, the documentation rejection, the diff-membership requirement, the proof token/HMAC/evidence schema and prover_version are untouched. A missing artifact still decodes to null and a required proof still refuses. One declared widening: `isProseOnlyChange` treats ANY blob under `.trident/mutation-claims/` ending in `.json` as inert — including one written at ANOTHER lane's nomination path, since the predicate tests only the directory prefix and the `.json` suffix. The denylist refusals still run first and `validateClaim` refuses every path it admits as a TARGET, so a stray blob can buy a docs diff an exemption and can never itself be nominated. WHAT THAT DOES NOT BOUND, corrected here because an earlier draft of this paragraph said a stray blob could "never" yield a provable claim and review reproduced otherwise: where a branch NAME is reused after its predecessor merged and the LOCAL base ref is behind its remote, the predecessor's committed nomination AND the file it names are both still inside `<base>...<head>`, so the reader accepts the inherited nomination and the gate can RUN and prove the predecessor's mutation while this branch's own work goes unproved. That is the stale-base read — the same bare-name base resolution the gate already used before this PR for both the prose exemption and the `claim.file` binding, so it is not a widening this channel introduced — and the base pinning that closes it was VETOED twice by review (in local mode the origin spelling is the stale one, so the union reading destroyed the prose exemption and made documentation-only branches permanently unmergeable). It therefore stays a recorded limitation for its own card, and is now EXECUTABLE rather than prose: `mutation-claim-artifact.test.ts` pins both the inherited read and the bound that does hold (a nomination absent from the branch's diff is still null). Rounds 9-10 additionally pinned the gate's diff base to every commit the base names; round 11 REVERTED that per review — in local git-mode the origin ref spelling is the stale one, so the union reading destroyed the prose exemption, and embedding documented bases like HEAD~1 inside remote ref paths reinterpreted them — so the diff binding reads the base as a name exactly as before this PR, and the stale-base read is a recorded limitation for its own card. The agent route is unaffected: a schema-supplied claim wins and the reader is not invoked; on the codex route the bridge cannot fabricate a claim (discarded in code), so the committed blob is the answer. Two hunks in `trident/mutation-prover.ts` sit outside the card's four-item allowlist and are kept on purpose, named here rather than left to be discovered: the nomination blob's inert-prose dispensation, without which a documentation-only branch that wrote its nomination becomes permanently unmergeable, and round 8's fail-closed refusal of an option-shaped diff base, which both reviewers reproduced as a real `--output=` injection against git 2.43.0. Round 13 closes the two round-12 blockers without touching any vetoed behaviour: every branch/base NAME a reader note quotes is folded through the repo's own `foldRefName` before it lands in a persisted `failure_reason` (git accepts U+2028/U+202E in a base, that reason is replayed to a model verbatim, and this file already folds the same field wherever a wrong-base refusal quotes it) — the RAW base still reaches git, so no diff changes — and the "never a provable claim" declaration above is withdrawn and replaced with the reproduced case, its bound and its own-card follow-up. It also splits the pin leg's two nulls apart (an absent ref versus a host that throws) and stops reporting an EMPTY branch diff as an unreadable one. Round 12 adds no behaviour beyond splitting the reader's JSON decode into its own `try` — so a malformed nomination and a host that throws stop producing the same diagnostic — and correcting the contract sentence that claimed writing a nomination can never forfeit a docs-only exemption.
-# CURRENT STATE (2026-09-04, round 14) — REPLACE this section each round; keep this file under 20 KB
+Option A, refined: the nomination is a COMMITTED artifact, read back out of git at the gate call site. The build writes `.trident/mutation-claims/<branch>.json` — per branch, and per wave member in member mode — and commits it with its work; `trident/orchestrator.ts` calls `readCommittedMutationClaim` at the single `proveMutation` call site ONLY when the schema claim is null. Chosen over a loose worktree file and over Option B's seventh trailer line because in pr mode the workflow process ENDS at every publish handoff and re-enters with a null claim; a committed blob is the one channel that already crosses that boundary, and the reviewed OID binds the nomination to the very commit the gate pins. The nomination remains UNTRUSTED: same decode as the agent route, then the unchanged gate validates and actually RUNS it; TEST_COMMAND_SHAPES, the general-shell ban, the documentation rejection, the diff-membership requirement, the proof token/HMAC/evidence schema and prover_version are untouched. A missing artifact still decodes to null and a required proof still refuses. One declared widening: `isProseOnlyChange` treats ANY blob under `.trident/mutation-claims/` ending in `.json` as inert — including one written at ANOTHER lane's nomination path, since the predicate tests only the directory prefix and the `.json` suffix. The denylist refusals still run first and `validateClaim` refuses every path it admits as a TARGET, so a stray blob can buy a docs diff an exemption and can never itself be nominated. WHAT THAT DOES NOT BOUND, corrected here because an earlier draft of this paragraph said a stray blob could "never" yield a provable claim and review reproduced otherwise: where a branch NAME is reused after its predecessor merged and the LOCAL base ref is behind its remote, the predecessor's committed nomination AND the file it names are both still inside `<base>...<head>`, so the reader accepts the inherited nomination and the gate can RUN and prove the predecessor's mutation while this branch's own work goes unproved. That is the stale-base read — the same bare-name base resolution the gate already used before this PR for both the prose exemption and the `claim.file` binding, so it is not a widening this channel introduced — and the base pinning that closes it was VETOED twice by review (in local mode the origin spelling is the stale one, so the union reading destroyed the prose exemption and made documentation-only branches permanently unmergeable). It therefore stays a recorded limitation for its own card, and is now EXECUTABLE rather than prose: `mutation-claim-artifact.test.ts` pins both the inherited read and the bound that does hold (a nomination absent from the branch's diff is still null). Rounds 9-10 additionally pinned the gate's diff base to every commit the base names; round 11 REVERTED that per review — in local git-mode the origin ref spelling is the stale one, so the union reading destroyed the prose exemption, and embedding documented bases like HEAD~1 inside remote ref paths reinterpreted them — so the diff binding reads the base as a name exactly as before this PR, and the stale-base read is a recorded limitation for its own card. The agent route is unaffected: a schema-supplied claim wins and the reader is not invoked; on the codex route the bridge cannot fabricate a claim (discarded in code), so the committed blob is the answer. Two hunks in `trident/mutation-prover.ts` sit outside the card's four-item allowlist and are kept on purpose, named here rather than left to be discovered: the nomination blob's inert-prose dispensation, without which a documentation-only branch that wrote its nomination becomes permanently unmergeable, and round 8's fail-closed refusal of an option-shaped diff base, which both reviewers reproduced as a real `--output=` injection against git 2.43.0. Round 13 closes the two round-12 blockers without touching any vetoed behaviour: every branch/base NAME a reader note quotes is folded through the repo's own `foldRefName` before it lands in a persisted `failure_reason` (git accepts U+2028/U+202E in a base, that reason is replayed to a model verbatim, and this file already folds the same field wherever a wrong-base refusal quotes it) — the RAW base still reaches git, so no diff changes — and the "never a provable claim" declaration above is withdrawn and replaced with the reproduced case, its bound and its own-card follow-up. It also splits the pin leg's two nulls apart (an absent ref versus a host that throws) and stops reporting an EMPTY branch diff as an unreadable one. Round 12 adds no behaviour beyond splitting the reader's JSON decode into its own `try` — so a malformed nomination and a host that throws stop producing the same diagnostic — and correcting the contract sentence that claimed writing a nomination can never forfeit a docs-only exemption. Round 15 closes the panel's one code blocker: the pin leg no longer reads an UNANSWERED question as an absent ref. `git rev-parse --verify --quiet` exits 1 silently for a revision that names nothing (measured, git 2.43.0), and only that answer now lets the read move on to `refs/remotes/origin/<branch>`; a spawn that never happened, a watchdog kill, an unreadable repository, or an exit-zero answer carrying no object id each stop the read with a null claim — because falling back on an unanswered question returned the REMOTE commit's nomination while the note claimed the local ref did not resolve. The cleaned-worktree fallback is unchanged and pinned by a positive control. Nothing in `trident/mutation-prover.ts` changed this round.
+# CURRENT STATE (2026-09-04, round 15) — REPLACE this section each round; keep this file under 20 KB
 
-BUILT, PUBLISHED, GREEN — AND NEVER REVIEWED. Round 13's work is on origin: PR #500 is OPEN,
-MERGEABLE and CLEAN, all 17 checks pass, and the diff against the base is the recorded ~2,500
-lines across 13 files. The previous run did not fail on a finding — it PUBLISHED, then its next
-launch fire never settled ("fire turn did not settle within the budget"): infrastructure, after
-the work was already safe on origin. The inner verdict stands at REVIEW_NOT_RUN; no panel has seen
-this head. Rounds 12 and 13 were verdicts on EARLIER heads, and their findings are closed in tasks
-14 and 15 above.
+ROUND 15 IS THE PANEL'S FIRST VERDICT ON THIS CHANNEL, and it produced exactly one code blocker.
+Round 14 held the head still to get that verdict; this round closes the blocker and re-ratifies the
+one deferral the panel asked to be re-ratified. Nothing else changed — `trident/mutation-prover.ts`
+is byte-identical to round 13's, and no vetoed behaviour was reintroduced.
 
-THE ONLY JOB OF ROUND 14 is an Argus verdict on the published work, and then the merge gate:
+  1. THE PIN LEG'S FALLBACK NOW NEEDS A CONCLUSIVE ANSWER (blocker, fixed).
+     `pinRevision` mapped EVERY non-OK host result to "absent", and the caller then tried
+     `refs/remotes/origin/<branch>` for it. Review reproduced `{ok: false, exit_code: -1}` on the
+     local rev-parse with a healthy remote ref: the reader returned the REMOTE commit's nomination
+     while its note said the local ref did not resolve. Measured on git 2.43.0, `rev-parse --verify
+     --quiet` exits 1 with empty stdout for a revision that names nothing — that answer, and only
+     that answer, now continues to the next ref. A spawn failure, a watchdog kill, exit 128 on an
+     unreadable repository, and an exit-zero answer carrying no object id each end the read with a
+     null claim and a note naming the host. Four inconclusive shapes plus a positive control are
+     pinned in `mutation-claim-artifact.test.ts`.
 
-  1. WRITE NO CODE unless a reviewer raises a CONFIRMED blocker reproduced on THIS head. The only
-     two paths this round touches are the root IMPLEMENTATION_PLAN.md and the branch's plan mirror
-     under .trident/plans/ — the mirror is still the ROUND-12 body, so it still asserts the
-     "never a provable claim" declaration that round 13 withdrew as falsified; syncing it removes
-     the last copy of that overclaim from the tree. Nothing else changes: not a comment, not a
-     test, not a rename, and no PR-body edit from the build lane.
-  2. If the panel approves, the round is DONE. A major/minor/nit gets recorded here and left
-     alone: this PR unblocks seven other open PRs — all MERGEABLE and CLEAN, every one refused at
-     the deployed gate for a null nomination until this merges and deploys — and another
-     multi-thousand-line round costs more than any recorded finding.
-  3. Do NOT re-open the diagnosis. Do NOT re-litigate the suite red — proved failed-preexisting
-     (HEAD and merge-base both 143 pass / 22 fail across the same 14 files, empty diff of the
-     sorted failure-name sets) and settled. Do NOT touch trident/mutation-prover.ts beyond the
-     four permitted symbols.
-  4. A plan-only commit keeps the branch's own nomination valid: the committed artifact names a
-     find string that still occurs exactly once in trident/mutation-claim-artifact.ts, and this
-     round does not touch that file.
+  2. THE STALE-BASE INHERITANCE IS RE-RATIFIED AS A DEFERRAL, not closed (blocker, answered in the
+     record as the finding's own second option). Codex's Verdict C reproduced it against real git
+     and the real prover: local `main` behind `origin/main`, a branch NAME reused after its
+     predecessor merged, the inherited artifact naming `old.ts`, HEAD adding only
+     `new-unproved.ts` — the reader accepted the old claim and the gate returned ok because
+     membership is measured against the unresolved base NAME. The facts are undisputed and are
+     stated in the reader's docblock, in the PR body, and as an EXECUTABLE expectation
+     ("THE STALE-BASE INHERITANCE THIS READER DOES NOT CLOSE"). It stays deferred because the only
+     fix — binding artifact membership and proof membership to the resolved merge-base commit — is
+     the exact mechanism review VETOED twice (rounds 9 and 10): trident's local merge path advances
+     the local base ref and leaves the origin spelling stale, so the union reading destroyed the
+     prose exemption and made documentation-only branches permanently unmergeable (reproduced A/B),
+     and embedding a documented base like HEAD~1 inside a remote ref path silently reinterpreted
+     it. It is also NOT a regression this channel introduces: the pre-change gate already resolved
+     the base as a bare name for both the exemption and the `claim.file` binding. What bounds it:
+     the inherited nomination must name production code in that diff, it cannot name a nomination
+     blob, and the gate RUNS the mutation. Closing it belongs to a card that owns the gate's base
+     resolution — which this card's Do-not section forbids.
 
-WHAT `trident/mutation-prover.ts` ACTUALLY CONTAINS, stated precisely because round 11's commit
-message and this file previously claimed it was "restored wholesale to the round-9 state", which was
-not true. Measured, the file differs from that state only in COMMENTS, and against the base it
-carries six hunks — four of them the card's allowlist, two of them outside it and kept deliberately:
+  3. RECORDED AND LEFT ALONE (one major, two minors, three nits, none blocking): the two
+     `trident/mutation-prover.ts` hunks outside the four-symbol allowlist (kept deliberately,
+     disclosed in the PR body, both fail closed; conflict surface with PR #490);
+     `isMutationClaimArtifact` classifying absolute and trailing-slash spellings as the nomination
+     (unreachable — `validateClaim` refuses a leading slash and git never emits those spellings);
+     the byte-cap size parse accepting a negative or garbage-suffixed operand (the operand is git's
+     own `cat-file -s` output); the writer/reader member-path asymmetry (writer-side only, diverges
+     to a refusal, never to a sibling's nomination); nominations accumulating under
+     `.trident/mutation-claims/` with no post-merge pruning (mirrors `.trident/plans/`); and the
+     three-leg read running on branches the gate later exempts as prose-only (cost, not
+     correctness).
 
-  ALLOWLISTED — `MUTATION_CLAIM_ARTIFACT_DIR`, `NO_NOMINATION_REFUSAL`, `isMutationClaimArtifact`,
-  and the `validateClaim` refusal of a nomination that names the artifact itself.
+SUITE: settled and NOT re-opened — `failed-preexisting`, re-proved this round at HEAD and at the
+merge base with the same failing files and the same failure names. `bun test trident/` is green.
 
-  OUTSIDE THE ALLOWLIST, with the reason each stays:
-   1. `isProseOnlyChange` treats a nomination blob as inert. Without it a documentation-only branch
-      that also wrote its nomination destroys its own exemption, owes a proof, and has no legal
-      target — permanently unmergeable. The channel does not function without this hunk. It is
-      pinned by `mutation-claim-artifact.test.ts`, and `validateClaim` refuses every path this
-      predicate admits, so the two sets cannot drift.
-   2. `changedFilesOnBranch` refuses an option-shaped base before any command runs (review round 8).
-      Both reviewers independently reproduced the `--output=` injection on git 2.43.0; the guard is
-      fail-closed — a refused base reads as "diff could not be read", which REQUIRES the proof — and
-      a real-git repro pins it. Deleting a reproduced, fail-closed injection fix to satisfy a scope
-      list would trade a real defect for a bookkeeping one.
+`trident/mutation-prover.ts` is unchanged from round 13: four allowlisted hunks
+(`MUTATION_CLAIM_ARTIFACT_DIR`, `NO_NOMINATION_REFUSAL`, `isMutationClaimArtifact`, and
+`validateClaim` refusing a nomination that names the artifact itself) plus two kept deliberately —
+`isProseOnlyChange` treating a nomination blob as inert, without which a documentation-only branch
+that wrote its nomination is permanently unmergeable, and `changedFilesOnBranch` refusing an
+option-shaped base before any command runs, which both reviewers reproduced as a real `--output=`
+injection on git 2.43.0 and which fails closed.
 
-  Both were reviewed and CONFIRMED minor with their mitigations verified; the residual cost is
-  conflict surface with PR #490, which also edits this file.
-
-Round 14's diff is the two plan paths and NOTHING else. Do NOT touch `.github/workflows/`, the
-proof token/HMAC/evidence schema, `TEST_COMMAND_SHAPES`, or the gate's base/diff resolution. This
-PR still cannot pass the deployed gate itself (the fix deploys only after merge); that is expected
-and is not a reason to re-open anything mid-round.
+Do NOT touch `.github/workflows/`, the proof token/HMAC/evidence schema, `TEST_COMMAND_SHAPES`, or
+the gate's base/diff resolution. This PR still cannot pass the deployed gate itself (the fix deploys
+only after merge); that is expected and is not a reason to re-open anything mid-round.

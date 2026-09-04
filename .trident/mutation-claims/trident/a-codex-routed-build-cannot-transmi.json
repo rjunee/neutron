@@ -1,8 +1,8 @@
 {
   "file": "trident/mutation-claim-artifact.ts",
-  "find": "foldRefName(base)",
-  "replace": "base",
+  "find": "pinned.why !== 'absent'",
+  "replace": "false",
   "guard": ["bun", "test", "trident/mutation-claim-artifact.test.ts"],
   "control": ["bun", "test", "trident/mutation-prover.test.ts"],
-  "rationale": "Round 13's load-bearing change is that an untrusted base name is FOLDED wherever a reader note quotes it, because those notes are persisted into a failure_reason that is later replayed to a model verbatim. Removing the fold lets a base carrying U+2028/U+202E forge a line in that prose: the hostile-base test in the guard suite goes red, while the prover suite, which never composes a reader note, stays green."
+  "rationale": "Round 15's load-bearing change is that the ref fallback runs ONLY on a conclusive missing-ref answer: a host that never answered (spawn failure, watchdog kill, unreadable repository) must stop the read instead of licensing refs/remotes/origin/<branch>, whose commit's nomination is for different work. Neutering the guard restores the collapse review reproduced, and the boundary test that asserts origin is never even asked goes red; the prover suite, which never resolves a ref through this reader, stays green."
 }

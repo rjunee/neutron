@@ -250,9 +250,7 @@ describe('readCommittedMutationClaim', () => {
   test('A THROWING HOST ON THE PIN LEG SAYS SO, rather than blaming an absent ref', async () => {
     // `pinRevision` collapsed both into `null`, so a machine that could not run
     // git at all was reported as "refs/heads/<b> does not resolve to a commit" —
-    // pointing an operator at the branch's history instead of at the host. The
-    // fallback still runs (an absent ref is the case it exists for), so both
-    // legs are named.
+    // pointing an operator at the branch's history instead of at the host.
     const throwsOnPin: RunHostCommand = async (cmd) => {
       if (cmd.includes('rev-parse')) throw new Error('spawn failed')
       return ok('')
@@ -266,19 +264,84 @@ describe('readCommittedMutationClaim', () => {
     expect(threw.note).toContain('the git host threw resolving')
     expect(threw.note).not.toContain('does not resolve to a commit')
 
-    // CONTROL, the other reading of the same null: a host that answers, with no
-    // such ref, keeps the absent-ref wording.
-    const absent = makeHost({ pin: fail(128) })
+    // CONTROL, the other reading of the same null: a host that ANSWERS, with no
+    // such ref (`rev-parse --verify --quiet` exits 1, silently), keeps the
+    // absent-ref wording — and that one DOES try the next ref, so both legs are
+    // named.
+    const absent = makeHost({ pin: fail(1) })
     const absentRead = await readCommittedMutationClaim(absent.run, REPO, {
       expected_head: null,
       branch: BRANCH,
       base_branch: BASE,
     })
-    expect(absentRead.note).toContain('does not resolve to a commit')
+    expect(absentRead.note).toContain(`refs/heads/${BRANCH} does not resolve to a commit`)
+    expect(absentRead.note).toContain(`refs/remotes/origin/${BRANCH} does not resolve to a commit`)
     expect(absentRead.note).not.toContain('the git host threw')
     // POSITIVE CONTROL: a pin that RESOLVES reads the claim, so neither note is
     // what this reader says about every input.
     expect((await readCommittedMutationClaim(makeHost({}).run, REPO, SOURCE)).claim).not.toBeNull()
+  })
+
+  test('A PIN THE HOST NEVER ANSWERED DOES NOT LICENSE THE ORIGIN REF — the boundary the fallback turns on', async () => {
+    // The vulnerable shape, reproduced by review against the real reader: the
+    // LOCAL rev-parse comes back `{ok: false, exit_code: -1}` (the spawn never
+    // happened) while `refs/remotes/origin/<branch>` resolves to a perfectly
+    // good commit carrying a nomination. Collapsing every non-OK result into
+    // "absent" returned THAT commit's nomination — origin's, not this branch's
+    // — under a note claiming the local ref did not resolve. Only a CONCLUSIVE
+    // missing ref (exit 1, no stdout) may move the read on.
+    for (const inconclusive of [
+      { ok: false, stdout: '', stderr: 'spawn failed', exit_code: -1 },
+      { ok: false, stdout: '', stderr: 'fatal: not a git repository', exit_code: 128 },
+      { ok: false, stdout: '', stderr: 'killed', exit_code: 1, timed_out: true },
+      // Exit ZERO with something that is not an object id: `--verify --quiet`
+      // never does this, so the question is unanswered here too.
+      { ok: true, stdout: 'not-an-oid\n', stderr: '', exit_code: 0 },
+    ] satisfies HostCommandResult[]) {
+      const calls: string[][] = []
+      const mixed: RunHostCommand = async (cmd) => {
+        calls.push([...cmd])
+        if (cmd.includes('rev-parse')) {
+          return cmd.some((a) => a.includes('refs/remotes/origin/')) ? ok(`${REF_OID}\n`) : inconclusive
+        }
+        if (cmd.includes('diff')) return ok(`${PATH}\n`)
+        if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
+        return ok(BODY)
+      }
+
+      const read = await readCommittedMutationClaim(mixed, REPO, {
+        expected_head: null,
+        branch: BRANCH,
+        base_branch: BASE,
+      })
+
+      expect(read.claim).toBeNull()
+      expect(read.note).toContain('no further ref was tried')
+      expect(read.note).not.toContain('does not resolve to a commit')
+      // And the origin ref was never even ASKED — the abort is before it, not a
+      // read that ran and then discarded its answer.
+      expect(calls.filter((c) => c.some((a) => a.includes('refs/remotes/origin/')))).toEqual([])
+      expect(calls.filter((c) => c.includes('show'))).toEqual([])
+    }
+
+    // POSITIVE CONTROL, the case the fallback exists for and must keep: the
+    // local ref is CONCLUSIVELY absent (exit 1, silent) and origin resolves, so
+    // origin's nomination is read. Delete the fallback and this side goes red.
+    const cleaned: RunHostCommand = async (cmd) => {
+      if (cmd.includes('rev-parse')) {
+        return cmd.some((a) => a.includes('refs/remotes/origin/')) ? ok(`${REF_OID}\n`) : fail(1)
+      }
+      if (cmd.includes('diff')) return ok(`${PATH}\n`)
+      if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
+      return ok(BODY)
+    }
+    const fellBack = await readCommittedMutationClaim(cleaned, REPO, {
+      expected_head: null,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+    expect(fellBack.claim).not.toBeNull()
+    expect(fellBack.note).toContain(`refs/heads/${BRANCH} does not resolve to a commit`)
   })
 
   test('a malformed JSON body is null', async () => {
@@ -397,7 +460,8 @@ describe('readCommittedMutationClaim', () => {
     const remoteOnly: RunHostCommand = async (cmd) => {
       noLocal.push([...cmd])
       const j = cmd.join(' ')
-      if (j.includes('refs/heads/')) return fail(128)
+      // git's own answer for a ref that is not there: exit 1, no stdout.
+      if (j.includes('refs/heads/')) return fail(1)
       if (cmd.includes('rev-parse')) return ok(`${REF_OID}\n`)
       if (cmd.includes('diff')) return ok(`${PATH}\n`)
       if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
@@ -463,11 +527,12 @@ describe('readCommittedMutationClaim', () => {
         .claim,
     ).not.toBeNull()
 
-    // SECOND CONTROL: the fallback that DOES exist. With the local ref gone, the
-    // read moves to origin and finds the nomination there.
+    // SECOND CONTROL: the fallback that DOES exist. With the local ref gone —
+    // git answering exit 1, silently, which is the only CONCLUSIVE missing-ref
+    // result — the read moves to origin and finds the nomination there.
     const noLocalRef: RunHostCommand = async (cmd) =>
       cmd.includes('rev-parse') && (cmd.at(-1) ?? '').startsWith(`refs/heads/${BRANCH}`)
-        ? fail(128)
+        ? fail(1)
         : await twoTips(cmd, REPO)
     expect(
       (await readCommittedMutationClaim(noLocalRef, REPO, { expected_head: null, branch: BRANCH, base_branch: BASE }))
@@ -504,7 +569,9 @@ describe('readCommittedMutationClaim', () => {
   })
 
   test('a ref that resolves to nothing is null, and the OID path issues no pin at all', async () => {
-    const unresolvable = makeHost({ pin: fail(128) })
+    // Exit 1 with no stdout is git's CONCLUSIVE "no such revision" — the only
+    // answer that lets the read move on to the next ref.
+    const unresolvable = makeHost({ pin: fail(1) })
     const read = await readCommittedMutationClaim(unresolvable.run, REPO, {
       expected_head: null,
       branch: BRANCH,
@@ -529,7 +596,9 @@ describe('readCommittedMutationClaim', () => {
   test('a pin that answers with something that is not an OID is refused, not passed through', async () => {
     // git printing a warning, an abbreviated sha, or the ref name back at us is
     // not a commit — substituting it would put an unpinned operand back on the
-    // three legs by another door.
+    // three legs by another door. And it is not an ABSENT ref either: git exited
+    // ZERO here, so the question was answered by something other than
+    // `--verify --quiet`'s object id, and the origin ref is NOT then read.
     for (const nonsense of ['not-a-sha', 'a'.repeat(39), `refs/heads/${BRANCH}`, '']) {
       const host = makeHost({ pin: nonsense })
       const read = await readCommittedMutationClaim(host.run, REPO, {
@@ -538,7 +607,8 @@ describe('readCommittedMutationClaim', () => {
         base_branch: BASE,
       })
       expect({ nonsense, claim: read.claim }).toEqual({ nonsense, claim: null })
-      expect({ nonsense, legs: host.calls.length }).toEqual({ nonsense, legs: 2 })
+      expect({ nonsense, legs: host.calls.length }).toEqual({ nonsense, legs: 1 })
+      expect({ nonsense, tried: read.note.includes('no further ref was tried') }).toEqual({ nonsense, tried: true })
     }
     // Positive control: a real OID from the same seam DOES resolve.
     const good = makeHost({ pin: REF_OID })
