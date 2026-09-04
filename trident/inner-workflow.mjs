@@ -339,13 +339,24 @@ const forgeBranch = memberMode ? pinnedMemberBranch : branch || `trident/${slug}
 // same path from the same branch name and reads the blob back out of git at the
 // reviewed commit.
 //
-// WHAT "PER-BRANCH" DOES NOT SEPARATE: members of ONE wave. They share the pinned
-// lane branch, so they share this file, and a later member's gate can be
-// satisfied by an earlier member's nomination — the same within-branch staleness
-// a fix round has (`mutation-claim-artifact.ts` invariant (a)), bounded the same
-// way: the gate RUNS the mutation, so a nomination that no longer describes the
-// code fails to redden its guard.
-const mutationClaimArtifactPath = `.trident/mutation-claims/${forgeBranch}.json`
+// PER MEMBER TOO, enforced HERE rather than trusted from the caller: the launcher
+// cuts per-member branches (`waveChildSlug` appends `--w` + taskId), but this file
+// cannot tell whether its caller did — and members handed one shared lane branch
+// would share one nomination file, letting a later member's gate be satisfied by
+// an earlier member's nomination out of the shared diff while the later member
+// ships unproved code. Appending the member suffix ourselves when the branch does
+// not already carry it makes the path per-member by construction; on the
+// production dispatch the suffix is already there, so the path — and the reader's
+// derivation from the run's branch — is unchanged. What no path can separate is
+// fix rounds WITHIN one branch: a round that changes code without rewriting the
+// file is proved against the earlier round's nomination, bounded because the gate
+// RUNS the mutation and a stale one fails to redden its guard; the contract tells
+// each round to re-write the file.
+const nominationBranch =
+  memberMode && !pinnedMemberBranch.endsWith(`--w${pinnedMemberTaskId}`)
+    ? `${pinnedMemberBranch}--w${pinnedMemberTaskId}`
+    : forgeBranch
+const mutationClaimArtifactPath = `.trident/mutation-claims/${nominationBranch}.json`
 
 // RB2 (b) — `reflectionGuidance` (destructured above, threaded READY-TO-APPEND by
 // the launcher's testable `buildReflectionGuidance`) is APPENDED to the FORGE BUILDER
@@ -1342,7 +1353,7 @@ ${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrateg
 MUTATION NOMINATION — the post-APPROVE merge gate READS this; a missing or stale nomination BLOCKS your merge.
 Nominate nothing ONLY when your branch's ENTIRE diff is INERT documentation — \`.md\`/\`.mdx\`, LICENSE, NOTICE: then do NOT write the file at all and ignore the rest of this block — such a diff has no legal target to nominate (the gate exempts it instead, and it treats the nomination file itself as inert, so writing one neither helps nor forfeits that exemption).
 HARNESS-DRIVING markdown is NOT inert and gets NO exemption: \`SPEC.md\`, \`IMPLEMENTATION_PLAN.md\`, \`CLAUDE.md\`, \`AGENTS.md\`, \`SKILL.md\` by basename anywhere, and anything under \`skills/\`, \`prompts/\`, \`.claude/\`, \`agent-dispatch/\` or \`.github/\`. Those change what the next run DOES, so a branch that only edits them still owes a nomination — and they are themselves LEGAL targets, with ONE exception: a path carrying a \`test/\`, \`tests/\` or \`__tests__/\` segment reads as a test file to the gate and is refused, exemption or not. A diff made only of those (e.g. \`skills/tests/SKILL.md\` alone) can neither be exempted nor nominated; nominate a non-test file the change also needs, or say so in your report rather than shipping a diff that cannot merge.
-Otherwise, before your final commit, write ONE JSON object to \`${mutationClaimArtifactPath}\` (create the directory; the path carries YOUR branch name so nothing can inherit it from a merged branch and no two lanes collide over one file) and COMMIT it with your work. Fields: file, find, replace, guard, control, optional rationale (a couple of sentences — the WHOLE object must stay under 32 KiB or the gate reads it as no nomination at all).
+Otherwise, before your final commit, write ONE JSON object to \`${mutationClaimArtifactPath}\` (create the directory; the path carries YOUR branch name — suffixed per wave member in member mode — so no two lanes or members collide over one file, and the gate believes it only after checking the file is in YOUR branch's diff) and COMMIT it with your work. Fields: file, find, replace, guard, control, optional rationale (a couple of sentences — the WHOLE object must stay under 32 KiB or the gate reads it as no nomination at all).
 - file: a repo-relative path (no leading \`/\`, no \`..\`) that THIS branch's diff against ${baseBranch} changes, and PRODUCTION code — never a test file, never INERT documentation (the harness-driving markdown named above counts as production here), and never the nomination file itself: the gate refuses a nomination that nominates itself, since that file is in your diff by construction and breaking it proves nothing about your change.
 - find: a string occurring EXACTLY ONCE in that file; replace: a DIFFERENT string; applied, the edit must break real behaviour.
 - guard and control: two DIFFERENT argv ARRAYS (JSON arrays of strings — NEVER shell strings; no \`&&\`, \`|\`, \`;\`, redirection or \`bash -c\`), each on one of the gate's ALLOWLISTED test-runner shapes and NOTHING else: \`bun test …\`, \`node --test …\`, \`npm|pnpm|yarn test …\` (or \`… run test…\`), \`make test…\`, \`python3 -m pytest …\`, \`python3 -m unittest …\`, \`go test …\`, \`cargo test …\` — e.g. \`["bun","test","path/to.test.ts"]\`. Any other program or shape (\`npx vitest\`, a script path, a package manager doing anything but a test script) is REFUSED after APPROVE, which costs a whole round. Under the mutation the guard must go RED while the control STAYS GREEN; the gate actually RUNS both and refuses fakes.

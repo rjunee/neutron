@@ -4,12 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
-import {
-  branchDiffAgainstEveryBase,
-  changedFilesOnBranch,
-  resolveMergeHeadSha,
-  runMutationProofGate,
-} from './mutation-prover.ts'
+import { changedFilesOnBranch, resolveMergeHeadSha, runMutationProofGate } from './mutation-prover.ts'
 
 /**
  * THE FETCH CONTRACT AND THE HOSTILE NAME, against REAL git.
@@ -268,92 +263,6 @@ describe('the mutation-proof gate against real git', () => {
     // the refusal above is the NAME being rejected and not a reader that has
     // stopped working.
     expect(await changedFilesOnBranch(spawnCapture, work, 'main', feat)).toEqual(['feature.ts'])
-  })
-
-  test('A STALE LOCAL BASE CANNOT CARRY THE PROOF — real git, real clone, through the GATE', async () => {
-    // THE REPRODUCTION the mocked tests can only describe: `git diff
-    // --name-only main...<head>` resolves `main` as a NAME, and a gate host's
-    // local `main` is routinely BEHIND `origin/main`. The predecessor's merge
-    // then sits inside the range, so every file it merged is listed as this
-    // branch's own change — and the gate's binding ("the proof must break a line
-    // THIS branch changed") accepted a nomination pointing at one of them.
-    const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-stale-base-'))
-    created.push(root)
-    const upstream = join(root, 'upstream')
-    await spawnCapture(['git', 'init', '-q', '--initial-branch=main', upstream], root)
-    writeFileSync(join(upstream, 'a.txt'), 'base\n')
-    await git(upstream, 'add', '-A')
-    await git(upstream, ...GIT_ID, 'commit', '-q', '-m', 'base')
-    const beforeMerge = await git(upstream, 'rev-parse', 'HEAD')
-    // The predecessor merges a production file this branch will never touch.
-    writeFileSync(join(upstream, 'inherited.ts'), 'export const LIMIT = 10\n')
-    await git(upstream, 'add', '-A')
-    await git(upstream, ...GIT_ID, 'commit', '-q', '-m', 'the predecessor, merged')
-
-    const repo = join(root, 'repo')
-    const cloned = await spawnCapture(['git', 'clone', '-q', upstream, repo], root)
-    if (!cloned.ok) throw new Error(`clone failed: ${cloned.stderr || cloned.stdout}`)
-    await git(repo, 'switch', '-q', '-c', 'feat', 'refs/remotes/origin/main')
-    // The stale local base, behind the remote — the routine gate-host shape.
-    await git(repo, 'branch', '-f', 'main', beforeMerge)
-    writeFileSync(join(repo, 'feature.ts'), 'export const y = 2\n')
-    await git(repo, 'add', '-A')
-    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'the work')
-    const head = await git(repo, 'rev-parse', 'HEAD')
-
-    // THE VECTOR, on this machine's real git: measured from the stale base the
-    // predecessor's file is listed as this branch's own.
-    expect((await git(repo, 'diff', '--name-only', `main...${head}`)).split('\n').sort()).toEqual([
-      'feature.ts',
-      'inherited.ts',
-    ])
-    expect(await changedFilesOnBranch(spawnCapture, repo, 'main', head)).toContain('inherited.ts')
-
-    // THE FIX, read from both ends: the union still sees the inherited file (so
-    // the prose exemption cannot be talked past), the intersection does not (so
-    // no nomination can be bound to it).
-    const diff = await branchDiffAgainstEveryBase(spawnCapture, repo, 'main', head)
-    expect(diff.any?.slice().sort()).toEqual(['feature.ts', 'inherited.ts'])
-    expect(diff.every).toEqual(['feature.ts'])
-
-    const claim = {
-      find: 'LIMIT = 10',
-      replace: 'LIMIT = 0',
-      guard: ['bun', 'test', 'inherited.test.ts'],
-      control: ['bun', 'test', 'other.test.ts'],
-      rationale: 'a file this branch never changed',
-    }
-    const refused = await runMutationProofGate({
-      run: { id: 'run-stale', slug: 'stale-base', repo_path: repo, branch: 'feat' },
-      claim: { ...claim, file: 'inherited.ts' },
-      base_branch: 'main',
-      expected_head: head,
-      run_host: spawnCapture,
-      run_guard: async () => {
-        throw new Error('the guard must never run for a file the branch did not change')
-      },
-    })
-    expect(refused.ok).toBe(false)
-    expect(refused.reason).toContain("inherited.ts is not in this branch's diff")
-    expect(refused.evidence).toBeNull()
-
-    // POSITIVE CONTROL: the branch's OWN file, same repo, same stale base, gets
-    // PAST the binding — the refusal above is the base being resolved, not a
-    // gate that refuses everything. (It then fails on the mutation itself, which
-    // is the next check and not this one's business.)
-    const past = await runMutationProofGate({
-      run: { id: 'run-stale-2', slug: 'stale-base', repo_path: repo, branch: 'feat' },
-      claim: { ...claim, file: 'feature.ts', find: 'not-in-this-file' },
-      base_branch: 'main',
-      expected_head: head,
-      run_host: spawnCapture,
-      run_guard: async () => {
-        throw new Error('the guard must never run for a mutation that did not apply')
-      },
-    })
-    expect(past.ok).toBe(false)
-    expect(past.reason).not.toContain("is not in this branch's diff")
-    expect(past.reason).toContain('does not occur')
   })
 
   test('an expected_head that names a TREE is refused — only the `^{commit}` peel says so', async () => {

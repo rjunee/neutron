@@ -7,7 +7,6 @@ import { join } from 'node:path'
 import type { HostCommandResult } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
 import {
-  branchDiffAgainstEveryBase,
   canonicalPayload,
   changedFilesOnBranch,
   createMutationProver,
@@ -37,8 +36,6 @@ import {
  */
 
 const HEAD = 'a'.repeat(40)
-/** The commit the BASE resolves to — deliberately not `HEAD`, so a range shows both ends. */
-const BASE_OID = 'b'.repeat(40)
 const SRC_BEFORE = 'export const LIMIT = 10\nexport function under(n: number) { return n < LIMIT }\n'
 
 const CLAIM: MutationClaim = {
@@ -1018,18 +1015,15 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
           diffRanges.push(cmd[cmd.length - 1] ?? '')
           return res(0, 'src/limit.ts\n')
         }
-        // The base resolves to its own commit, the head to the pinned one — so
-        // the recorded range shows which operand each end carried.
-        if (cmd.includes('rev-parse')) return res(0, (cmd.at(-1) ?? '').includes('main') ? BASE_OID : HEAD)
+        if (cmd.includes('rev-parse')) return res(0, HEAD)
         return scripted.run(cmd, cwd)
       },
       run_guard: async (argv, cwd) => scripted.run(argv, cwd),
       fs,
     })
     expect(out.ok).toBe(true)
-    // The binding was read at the PINNED SHA, never at the mutable branch name —
-    // and at a PINNED BASE, never at the mutable local `main`.
-    expect(diffRanges).toEqual([`${BASE_OID}...${HEAD}`])
+    // The binding was read at the PINNED SHA, never at the mutable branch name.
+    expect(diffRanges).toEqual([`main...${HEAD}`])
     expect(out.evidence?.observed?.head_sha).toBe(HEAD)
   })
 
@@ -1641,202 +1635,5 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     })
     expect(out.ok).toBe(true)
     expect(out.exempt).toBe(true)
-  })
-})
-
-/**
- * THE BINDING'S OWN BASE — the hole a pinned READER left open in the GATE.
- *
- * `git diff --name-only <base>...<ref>` resolves `<base>` as a NAME, and a local
- * `main` on a gate host is routinely BEHIND `origin/main`: the predecessor's
- * merge then sits inside `main...<head>`, so every file it merged is listed as
- * this branch's own change. The committed-nomination reader already refused to
- * trust that ref for ARTIFACT membership — but the gate went on binding
- * `claim.file` through the bare name, so a nomination pointing at a file the
- * branch never touched satisfied "the proof must break a line THIS branch
- * changed". That is a diff-INDEPENDENT nomination, which is the one thing the
- * binding exists to make impossible.
- *
- * The two consumers of the diff fail closed in OPPOSITE directions, so both
- * readings are asserted here: the exemption takes the WIDEST set (any code
- * anywhere ⇒ require the proof) and the binding the NARROWEST (in every range ⇒
- * the branch really changed it).
- */
-describe('the branch diff is measured against EVERY commit the base names', () => {
-  const ORIGIN_BASE = 'b'.repeat(40)
-  const STALE_BASE = 'c'.repeat(40)
-
-  /**
-   * A host whose two base spellings name DIFFERENT commits, with a diff per
-   * range. `inherited.ts` is the predecessor's merged file: in the stale local
-   * range only. `src/limit.ts` is this branch's own work: in both.
-   */
-  function staleBaseHost(ranges: Record<string, string>, script: HostScript = {}): {
-    run: RunHostCommand
-    calls: string[][]
-  } {
-    const scripted = scriptedHost(script)
-    const calls: string[][] = []
-    return {
-      calls,
-      run: async (cmd, cwd) => {
-        calls.push([...cmd])
-        if (cmd.includes('rev-parse')) {
-          const operand = cmd[cmd.length - 1] ?? ''
-          if (operand === 'refs/remotes/origin/main^{commit}') return res(0, `${ORIGIN_BASE}\n`)
-          if (operand === 'refs/heads/main^{commit}') return res(0, `${STALE_BASE}\n`)
-          return scripted.run(cmd, cwd)
-        }
-        if (cmd.includes('--name-only')) {
-          const files = ranges[cmd[cmd.length - 1] ?? '']
-          return files === undefined ? res(1) : res(0, files)
-        }
-        return scripted.run(cmd, cwd)
-      },
-    }
-  }
-
-  const OWN = `${ORIGIN_BASE}...${HEAD}`
-  const STALE = `${STALE_BASE}...${HEAD}`
-
-  test('branchDiffAgainstEveryBase reads both ranges: `any` is the union, `every` the intersection', async () => {
-    const host = staleBaseHost({
-      [OWN]: 'src/limit.ts\n',
-      [STALE]: 'src/limit.ts\ninherited.ts\n',
-    })
-
-    const diff = await branchDiffAgainstEveryBase(host.run, '/repo', 'main', HEAD)
-
-    expect(diff).toEqual({ any: ['src/limit.ts', 'inherited.ts'], every: ['src/limit.ts'] })
-    // BOTH ranges were actually read — an answer from one of them is not an
-    // answer about the branch.
-    expect(host.calls.filter((c) => c.includes('--name-only')).map((c) => c[c.length - 1])).toEqual([OWN, STALE])
-  })
-
-  test('A FILE ONLY THE STALE BASE LISTS CANNOT CARRY THE PROOF — refused, and no guard ever runs', async () => {
-    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), 'inherited.ts')]: SRC_BEFORE })
-    const host = staleBaseHost({
-      [OWN]: 'src/limit.ts\n',
-      [STALE]: 'src/limit.ts\ninherited.ts\n',
-    })
-
-    const out = await runMutationProofGate({
-      run: RUN,
-      claim: { ...CLAIM, file: 'inherited.ts' },
-      base_branch: 'main',
-      run_host: host.run,
-      run_guard: async () => res(0),
-      fs,
-    })
-
-    expect(out.ok).toBe(false)
-    expect(out.reason).toContain('inherited.ts is not in this branch\'s diff')
-    expect(out.reason).toContain('against every commit main names')
-    expect(out.evidence).toBeNull()
-    // The refusal came BEFORE the proof: no worktree was provisioned for it.
-    expect(host.calls.some((c) => c.includes('worktree'))).toBe(false)
-  })
-
-  test('POSITIVE CONTROL: the branch\'s OWN file, in BOTH ranges, still opens the gate', async () => {
-    // Same host, same stale base, same everything — only the nominated file
-    // differs. Without this the refusal above would pass on a gate that had
-    // simply stopped reading diffs at all.
-    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
-    const scripted = scriptedHost()
-    const host = staleBaseHost({
-      [OWN]: 'src/limit.ts\n',
-      [STALE]: 'src/limit.ts\ninherited.ts\n',
-    })
-
-    const out = await runMutationProofGate({
-      run: RUN,
-      claim: CLAIM,
-      base_branch: 'main',
-      run_host: host.run,
-      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
-      fs,
-    })
-
-    expect(out.ok).toBe(true)
-    expect(out.evidence?.proved).toBe(true)
-  })
-
-  test('THE EXEMPTION TAKES THE WIDER SET: code in EITHER range forfeits the prose exemption', async () => {
-    // The other direction, and the reason one list cannot serve both consumers:
-    // narrowing the exemption's view to the intersection would let a branch whose
-    // code shows up in only one range merge as "documentation only".
-    const host = staleBaseHost({
-      [OWN]: 'README.md\ndocs/a.md\n',
-      [STALE]: 'README.md\ndocs/a.md\nsrc/sneaked.ts\n',
-    })
-
-    const out = await runMutationProofGate({
-      run: RUN,
-      claim: null,
-      base_branch: 'main',
-      run_host: host.run,
-    })
-
-    expect(out.exempt).toBe(false)
-    expect(out.ok).toBe(false)
-    expect(out.reason).toContain('nominated no mutation')
-
-    // POSITIVE CONTROL: with the code file in NEITHER range the same host does
-    // exempt, so the refusal above is the union widening the view and not a
-    // prose path that has stopped working.
-    const prose = staleBaseHost({ [OWN]: 'README.md\n', [STALE]: 'README.md\ndocs/a.md\n' })
-    const exempt = await runMutationProofGate({
-      run: RUN,
-      claim: null,
-      base_branch: 'main',
-      run_host: prose.run,
-    })
-    expect(exempt.exempt).toBe(true)
-    expect(exempt.ok).toBe(true)
-  })
-
-  test('an UNREADABLE range nulls both readings — never an exemption, never a binding', async () => {
-    const host = staleBaseHost({ [OWN]: 'src/limit.ts\n' }) // the stale range 500s
-
-    expect(await branchDiffAgainstEveryBase(host.run, '/repo', 'main', HEAD)).toEqual({ any: null, every: null })
-
-    const out = await runMutationProofGate({
-      run: RUN,
-      claim: CLAIM,
-      base_branch: 'main',
-      run_host: host.run,
-    })
-    expect(out.ok).toBe(false)
-    expect(out.reason).toContain('the branch diff could not be read')
-  })
-
-  test('a base NEITHER spelling names is handed to git as a NAME — the base policy is git\'s', async () => {
-    // `HEAD~1`, `release@v1`, a base this checkout does not carry as a branch:
-    // `changedFilesOnBranch` documents that those are git's to judge, and pinning
-    // must not quietly become an allowlist that refuses them forever.
-    const seen: string[] = []
-    const scripted = scriptedHost()
-    const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
-    const out = await runMutationProofGate({
-      run: RUN,
-      claim: CLAIM,
-      base_branch: 'release@v1',
-      run_host: async (cmd, cwd) => {
-        if (cmd.includes('rev-parse') && (cmd[cmd.length - 1] ?? '').startsWith('refs/') &&
-            (cmd[cmd.length - 1] ?? '').includes('release@v1')) {
-          return res(128)
-        }
-        if (cmd.includes('--name-only')) {
-          seen.push(cmd[cmd.length - 1] ?? '')
-          return res(0, 'src/limit.ts\n')
-        }
-        return scripted.run(cmd, cwd)
-      },
-      run_guard: async (argv, cwd) => scripted.run(argv, cwd),
-      fs,
-    })
-
-    expect(out.ok).toBe(true)
-    expect(seen).toEqual([`release@v1...${HEAD}`])
   })
 })

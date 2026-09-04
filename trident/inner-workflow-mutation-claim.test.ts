@@ -108,7 +108,13 @@ function artifactPathFor(branch: string): string {
 }
 
 /** Run the real workflow body; return every captured agent call + its result. */
-async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean; bridgeClaim?: unknown }): Promise<{
+async function runWorkflow(opts: {
+  fixRoundClaim: unknown
+  codex?: boolean
+  bridgeClaim?: unknown
+  /** Drives MEMBER MODE, which the production launcher supplies and this harness never did. */
+  member?: { taskId: string; memberBranch: string }
+}): Promise<{
   captured: Captured[]
   result: Record<string, unknown>
 }> {
@@ -128,6 +134,21 @@ async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean; brid
       worktreePath: '/wt',
       commitSha: 'abc',
       testsPassed: true,
+    }
+    // MEMBER MODE REFUSES TO RUN FORGE WITHOUT AN EXECUTION SPEC, so the pinned
+    // task has to come back from the planner — and `pinnedUncheckedTaskLine`
+    // matches lines of the form "- [ ] <taskId>: ...". Answered BEFORE the
+    // head-probe and catch-all branches, which would otherwise return '' and
+    // throw before forge:build is ever reached.
+    if (label === 'plan:fable' && opts.member !== undefined) {
+      const line = `- [ ] ${opts.member.taskId}: pinned member task`
+      return {
+        implementationPlan: line,
+        topTask: line,
+        executionSpec: 'do the pinned task',
+        complexity: 'mechanical',
+        remainingTasks: 0,
+      }
     }
     // THE BUILD-COMPLETION HEAD. Without it the run stops `infra-only` at
     // "could not read the head of refs/heads/… after forge:build", returns
@@ -182,6 +203,9 @@ async function runWorkflow(opts: { fixRoundClaim: unknown; codex?: boolean; brid
     dbPath: null,
     runId: null,
     resumeCheckpoint: null,
+    ...(opts.member === undefined
+      ? {}
+      : { pinnedTaskId: opts.member.taskId, memberBranch: opts.member.memberBranch }),
     codexHome: null,
     checkpointScript: null,
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
@@ -456,5 +480,54 @@ describe('the codex route carries the nomination ask, and never fabricates the f
     // above is the route's doing and not an inert harness.
     const claude = await runWorkflow({ fixRoundClaim: undefined })
     expect(parseMutationClaim(claude.result.mutationClaim)).toEqual(BUILD_CLAIM)
+  })
+})
+
+/**
+ * MEMBER MODE, driven through the same production body: `pinnedTaskId` +
+ * `memberBranch` are what the launcher threads for a wave member, and until now
+ * no test supplied them, so the nomination path was never exercised on the one
+ * route where two builds can share a branch. Member mode returns at the `built`
+ * checkpoint right after forge:build — there are no fix rounds and no review
+ * calls here, so only `plan:fable` and `forge:build` are asserted on.
+ */
+describe('THE MEMBER SEAM — the nomination path is scoped per wave member', () => {
+  test('the production dispatch shape: a member branch already carrying its suffix is used as-is', async () => {
+    const { captured, result } = await runWorkflow({
+      fixRoundClaim: undefined,
+      member: { taskId: 'T1', memberBranch: 'trident/lane--wT1' },
+    })
+    // POSITIVE CONTROLS: member mode really ran and really briefed the build.
+    expect(result.built).toBe(true)
+    expect(captured.map((c) => c.label)).toContain('plan:fable')
+    const build = captured.find((c) => c.label === 'forge:build')
+    expect(build?.prompt.length ?? 0).toBeGreaterThan(0)
+
+    const brief = String(build?.prompt)
+    expect(brief).toContain(artifactPathFor('trident/lane--wT1'))
+    // The suffix is appended ONLY when it is missing — the production dispatch
+    // must not grow a second one.
+    expect(brief).not.toContain('lane--wT1--wT1')
+  })
+
+  test('a shared lane branch cannot share one nomination file: the suffix is appended per member', async () => {
+    const paths: string[] = []
+    for (const taskId of ['T7', 'T8']) {
+      const { captured, result } = await runWorkflow({
+        fixRoundClaim: undefined,
+        member: { taskId, memberBranch: 'trident/lane' },
+      })
+      expect(result.built).toBe(true)
+      const brief = String(captured.find((c) => c.label === 'forge:build')?.prompt)
+      const expected = `.trident/mutation-claims/trident/lane--w${taskId}.json`
+      expect(brief).toContain(expected)
+      // The shared-lane path is what a later member would inherit an earlier
+      // member's nomination through.
+      expect(brief).not.toContain('.trident/mutation-claims/trident/lane.json')
+      paths.push(expected)
+    }
+    // The per-member point — and a positive control against both assertions
+    // above matching one constant.
+    expect(paths[0]).not.toBe(paths[1])
   })
 })

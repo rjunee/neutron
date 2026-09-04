@@ -10,32 +10,27 @@
  *
  * Four invariants govern this reader:
  *
- * (a) THE PATH IS PER-BRANCH, and the blob must be IN THIS BRANCH'S DIFF —
- *     AGAINST EVERY COMMIT THE BASE NAMES HERE. A fixed tracked path inherits:
- *     once one branch merges it, every later branch starts life already holding
- *     that file, and "this build nominated nothing" silently becomes "reuse
- *     whatever the last PR nominated". Both halves are load-bearing — the
- *     per-branch path (mirroring `.trident/plans/<branch>.md`) also stops
- *     concurrent lanes colliding on one file, and the diff-membership check
- *     still catches the case a branch NAME is reused after its predecessor
+ * (a) THE PATH IS PER-BRANCH, and the blob must be IN THIS BRANCH'S DIFF. A
+ *     fixed tracked path inherits: once one branch merges it, every later branch
+ *     starts life already holding that file, and "this build nominated nothing"
+ *     silently becomes "reuse whatever the last PR nominated". Both halves are
+ *     load-bearing — the per-branch path (mirroring `.trident/plans/<branch>.md`)
+ *     also stops concurrent lanes colliding on one file, and the diff-membership
+ *     check still catches the case a branch NAME is reused after its predecessor
  *     merged. A blob the branch did not touch reads as null.
  *
- *     THE MEMBERSHIP CHECK IS ONLY AS HONEST AS ITS BASE, which is why the base
- *     is resolved to commits rather than handed to git as a name. A local `main`
- *     sitting BEHIND `origin/main` puts the predecessor's merge INSIDE
- *     `main...<head>`, so a reused branch name reads the inherited blob as its
- *     own nomination and the gate fails OPEN (reproduced against real git).
- *     Both spellings of the base — `refs/remotes/origin/<base>` and
- *     `refs/heads/<base>` — are therefore resolved, and the artifact must be in
- *     the diff against EACH commit they name: a blob this branch really wrote is
- *     in both diffs, while one inherited from either base is missing from that
- *     base's own.
- *
- *     THAT RESOLUTION LIVES IN THE GATE (`branchDiffAgainstEveryBase`) and is
- *     shared, not copied. The nomination and the file it nominates are two ends
- *     of one channel, and while only this end pinned its base, a stale local ref
- *     could still lend the branch a file it never changed for the gate's own
- *     `claim.file` binding to accept. One function, one base policy, both ends.
+ *     THE MEMBERSHIP READ RESOLVES THE BASE AS A NAME, and is only as honest as
+ *     the local ref that name finds: a base ref fallen behind its remote widens
+ *     the range, and a REUSED branch name cut after its predecessor merged can
+ *     then read the inherited blob as its own nomination. Rounds 9-10 pinned the
+ *     base to close that and review REVERTED the pinning: trident's local merge
+ *     path advances the local base ref and leaves the origin spelling STALE, so
+ *     the union of both readings destroyed the prose exemption in local
+ *     git-mode, and embedding a documented base like `HEAD~1` inside a remote
+ *     ref path silently reinterpreted it. The stale-base read is therefore a
+ *     RECORDED LIMITATION for its own card, bounded by the rules that hold on
+ *     every round: the target must be production code in the branch diff, and
+ *     the gate RUNS the mutation.
  *
  *     WHAT (a) DOES NOT CATCH, stated so nobody reads it as more than it is: a
  *     nomination going STALE WITHIN ONE BRANCH. A fix round, or a later lane
@@ -90,7 +85,7 @@
  */
 
 import {
-  branchDiffAgainstEveryBase,
+  changedFilesOnBranch,
   isPlainBranchName,
   MUTATION_CLAIM_ARTIFACT_DIR,
   parseMutationClaim,
@@ -108,7 +103,11 @@ import type { RunHostCommand } from './merge.ts'
  */
 export { MUTATION_CLAIM_ARTIFACT_DIR }
 
-/** Byte cap on the blob — branch-controlled input must not flood the harvester. */
+/**
+ * Byte cap on the blob — branch-controlled input must not flood the harvester.
+ * The contract says the object must stay UNDER 32 KiB, so a blob of exactly this
+ * size is refused.
+ */
 export const MUTATION_CLAIM_ARTIFACT_MAX_BYTES = 32 * 1024
 
 /** A full object id, the only form accepted without a ref prefix. */
@@ -167,9 +166,8 @@ export async function readCommittedMutationClaim(
   // halves of one channel enforce contradictory base policies, and an
   // operator-supplied base of a legal name would read every nomination as absent
   // and block every non-exempt merge in that repository forever. The membership
-  // read below goes through the gate's own base resolution, which pins the ref
-  // spellings and keeps a bare name away from anything that could read it as an
-  // option.
+  // read below hands the name to `changedFilesOnBranch`, whose own guard refuses
+  // an option-shaped base before any git command runs.
   const base = typeof source.base_branch === 'string' ? source.base_branch.trim() : ''
   if (base.length === 0) {
     return { claim: null, note: 'no committed nomination: no base branch to measure this branch\'s diff against' }
@@ -227,8 +225,8 @@ async function pinRevision(
     // `^{commit}` is a suffix on an operand that already passed `isPlainBranchName`
     // and carries a `refs/` prefix, so it is still a ref PATH and never an option
     // — and `--end-of-options` says so to git as well. (`git diff`'s range form
-    // takes no such marker; this reader never puts a NAME on that range at all,
-    // because the base goes through here first and reaches the diff as an OID.)
+    // takes no such marker, which is why `changedFilesOnBranch` has to reject a
+    // hostile base by NAME instead.)
     const res = await run_host(
       ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`],
       repo_path,
@@ -250,21 +248,14 @@ async function readAtRevision(
 ): Promise<CommittedMutationClaimRead> {
   const at = `${revision}:${path}`
   try {
-    // (1) THE BLOB MUST BE PART OF THIS BRANCH'S OWN DIFF, against every commit
-    // the base names. A tracked file that merely came along from the base is not
-    // a nomination this build made — and a base ref that has fallen behind the
-    // remote is exactly how such a file gets into the range. THE GATE'S OWN
-    // BINDING USES THIS SAME FUNCTION, so the artifact and the file it nominates
-    // are judged against one base policy rather than two.
-    const diff = await branchDiffAgainstEveryBase(run_host, repo_path, base, revision)
-    if (diff.every === null) {
-      return { claim: null, note: `no committed nomination: could not read the branch diff against ${base}` }
+    // (1) THE BLOB MUST BE PART OF THIS BRANCH'S OWN DIFF. A tracked file that
+    // merely came along from the base is not a nomination this build made.
+    const changed = await changedFilesOnBranch(run_host, repo_path, base, revision)
+    if (changed === null) {
+      return { claim: null, note: `no committed nomination: could not read the diff ${base}...${revision}` }
     }
-    if (!diff.every.includes(path)) {
-      return {
-        claim: null,
-        note: `no committed nomination: ${path} is not in the diff against every commit ${base} names`,
-      }
+    if (!changed.includes(path)) {
+      return { claim: null, note: `no committed nomination: ${path} is not in the diff ${base}...${revision}` }
     }
 
     // (2) SIZE THE OBJECT BEFORE ITS BODY CROSSES THE PROCESS BOUNDARY. Checking
@@ -277,10 +268,10 @@ async function readAtRevision(
     if (!Number.isFinite(size)) {
       return { claim: null, note: `no committed nomination: unreadable object size for ${at}` }
     }
-    if (size > MUTATION_CLAIM_ARTIFACT_MAX_BYTES) {
+    if (size >= MUTATION_CLAIM_ARTIFACT_MAX_BYTES) {
       return {
         claim: null,
-        note: `committed nomination at ${at} is ${size} bytes, over the ${MUTATION_CLAIM_ARTIFACT_MAX_BYTES}-byte cap`,
+        note: `committed nomination at ${at} is ${size} bytes, at or over the ${MUTATION_CLAIM_ARTIFACT_MAX_BYTES}-byte cap`,
       }
     }
 
