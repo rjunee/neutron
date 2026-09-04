@@ -138,6 +138,62 @@ function isPackageScriptTest(argv: readonly string[]): boolean {
 const TEST_FILE = /(^|\/)(__tests__|tests?)\/|\.(test|spec)\.[cm]?[jt]sx?$|_test\.(go|py|rs)$/
 
 /**
+ * WHERE A BUILD COMMITS ITS NOMINATION — `.trident/mutation-claims/<branch>.json`.
+ *
+ * Declared HERE, in the gate, and re-exported by the reader that owns the
+ * channel (`mutation-claim-artifact.ts`), because the two rules that keep the
+ * channel honest are both enforced in THIS file and neither may drift from the
+ * path: a nomination may never nominate ITSELF (`validateClaim`), and a
+ * nomination written onto an otherwise-documentation diff may not destroy that
+ * diff's prose exemption (`isProseOnlyChange`).
+ */
+export const MUTATION_CLAIM_ARTIFACT_DIR = '.trident/mutation-claims'
+
+/**
+ * THE ONE REFUSAL the committed-nomination reader's note explains: no claim
+ * arrived, by either channel. Exported so the orchestrator can append that note
+ * to THIS refusal and to no other — a branch-name rejection or a moved tip is
+ * not a missing nomination, and suffixing those with "no committed nomination"
+ * points the reader at the wrong failure.
+ */
+export const NO_NOMINATION_REFUSAL = 'mutation proof required but the build nominated no mutation to run'
+
+/**
+ * Is this path a committed nomination — the gate's own INPUT rather than code?
+ *
+ * Compared SEGMENT BY SEGMENT with `.` segments dropped, so `./.trident/…` is
+ * the same path as `.trident/…`; a `startsWith` prefix test reads those two as
+ * different files and the difference is exactly what a nomination would exploit.
+ * The `.json` suffix is required too: only the nomination itself gets these two
+ * dispensations, not anything a branch chooses to park in that directory.
+ *
+ * A `..` segment is REFUSED rather than dropped. Dropping it would be the same
+ * spelling trick from the other side — `.trident/mutation-claims/../../src/a.json`
+ * would read as the nomination and be treated as inert — and CANONICALISING it
+ * would answer for a path this function cannot see the filesystem of. Only a
+ * literal, already-normal path is the nomination.
+ *
+ * The suffix is matched CASE-SENSITIVELY on purpose: the writer's path is
+ * lowercase by construction, so a `.JSON` spelling is never the nomination — it
+ * gets neither the inert-prose dispensation nor the self-nomination refusal. It
+ * is an ordinary data file and, like ANY co-committed non-test data file in the
+ * branch diff, it remains NOMINATABLE: the self-nomination rule closes only the
+ * narrow hole where a nomination names ITSELF (in the diff by construction), not
+ * the general one, which only the guard actually reddening under the mutation
+ * bounds.
+ */
+function isMutationClaimArtifact(path: string): boolean {
+  const segments = path
+    .trim()
+    .split('/')
+    .filter((segment) => segment.length > 0 && segment !== '.')
+  if (segments.includes('..')) return false
+  const dir = MUTATION_CLAIM_ARTIFACT_DIR.split('/')
+  if (segments.length <= dir.length || !dir.every((d, i) => segments[i] === d)) return false
+  return (segments[segments.length - 1] ?? '').endsWith('.json')
+}
+
+/**
  * The UNTRUSTED nomination: which production behaviour to break, and which
  * commands prove it. Echoed verbatim into `MutationEvidence.claimed`; never
  * read when deciding `proved`.
@@ -363,6 +419,15 @@ function validateClaim(claim: MutationClaim | null | undefined): string | null {
   // the schema says a PRODUCTION file and this is where that is enforced.
   if (TEST_FILE.test(claim.file)) {
     return `claim.file ${claim.file} is a test file — the mutation must break PRODUCTION behaviour`
+  }
+  // NOR MAY A NOMINATION NOMINATE ITSELF. The committed nomination is the gate's
+  // own input, and on every branch that nominates it is in the diff BY
+  // CONSTRUCTION — so the diff-binding check below cannot catch it. Without this
+  // line one boilerplate self-nomination plus a test that reads that JSON proves
+  // red-then-green while the production change it was supposed to guard ships
+  // unproved.
+  if (isMutationClaimArtifact(claim.file)) {
+    return `claim.file ${claim.file} is a committed nomination — a nomination cannot nominate itself`
   }
   // Nor does mutating documentation prove anything: nothing executes it, so a
   // guard that reddens on it is reading bytes rather than exercising behaviour.
@@ -962,6 +1027,34 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
     if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
     const base = segments[segments.length - 1] ?? ''
     if (EXECUTABLE_PROSE_FILES.includes(base)) return false
+    // A NOMINATION BLOB IS INERT — ANY of them under `.trident/mutation-claims/`,
+    // not only the one whose path spells THIS branch. `isMutationClaimArtifact`
+    // tests the directory prefix and the `.json` suffix and nothing else, because
+    // this function is not told which branch it is judging and threading one in
+    // would change its signature and both call sites for no behaviour: the reader
+    // only ever reads the per-branch path, and `validateClaim` refuses every path
+    // THIS predicate admits as a mutation TARGET — one predicate, so the two sets
+    // cannot drift. A path it does NOT admit (a `.JSON` spelling, a suffix-less
+    // file) is ordinary on both sides: not inert here — it forfeits a docs diff's
+    // exemption, fail-closed — and not refused there, so if it is in the branch
+    // diff it stays nominatable exactly like any other co-committed non-test data
+    // file; the self-nomination rule is that narrow on purpose. `.json` is not a
+    // prose suffix, so before this a documentation-only branch that also wrote
+    // `.trident/mutation-claims/<b>.json`
+    // destroyed its own exemption and became unmergeable — it owed a proof and
+    // had no legal target to nominate. The file is the gate's bookkeeping, not
+    // code the harness runs, so it neither earns nor forfeits an exemption.
+    //
+    // LAST, not first: the two REFUSALS above run on every path, this one
+    // included. The dispensation cannot be reached through a denylisted segment
+    // or an executable-prose basename, so a segment added to either list later
+    // polices this directory too, instead of being skipped by an escape hatch
+    // that ran before it. The cost is that a BRANCH NAME containing `skills`,
+    // `prompts`, `.claude`, `agent-dispatch` or `.github` as a path segment
+    // would put one in this path and forfeit the dispensation — accepted:
+    // trident slugs are `[a-z0-9-]`, and a documentation-only branch is told not
+    // to write the file at all.
+    if (isMutationClaimArtifact(path)) return true
     if (PROSE_EXACT.includes(base)) return true
     return PROSE_SUFFIXES.some((suffix) => base.endsWith(suffix))
   })
@@ -984,7 +1077,26 @@ export async function changedFilesOnBranch(
   ref: string | null,
 ): Promise<string[] | null> {
   if (ref === null || ref.trim().length === 0) return null
-  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${ref}`], repo_path)
+  const base = base_branch.trim()
+  // THE ONE THING THE BASE MAY NOT BE: an OPTION. The range form admits no
+  // `--end-of-options` marker, so `git diff --name-only "--output=<path>...<ref>"`
+  // exits 0 and CREATES the file the base named — the whole operand, range
+  // suffix included, is taken as the output path (reproduced on git 2.43.0 in
+  // `mutation-prover-realgit.test.ts`). The base is operator-supplied or derived
+  // from `origin/HEAD` (`detectBaseBranch`), and a ref of that spelling passes
+  // `git check-ref-format`, so its source cannot be assumed clean. Argv is an
+  // array here — there is no shell — so a leading `-` is the whole vector.
+  //
+  // DELIBERATELY NOT AN ALLOWLIST. Everything else is left to git, which is the
+  // interpreter that receives it: this function's other callers pass revisions
+  // git accepts and a name allowlist does not (`HEAD~1` from an operator flag,
+  // and default branches like `release@v1`, which `check-ref-format --branch`
+  // accepts). Refusing those here would make every non-exempt merge in such a
+  // repo refuse with "branch diff could not be read", forever. A base git cannot
+  // resolve simply fails the diff, which reads as "could not be read" and makes
+  // the gate REQUIRE the proof — never a pass.
+  if (base.length === 0 || base.startsWith('-')) return null
+  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base}...${ref}`], repo_path)
   if (!res.ok) return null
   const files = res.stdout
     .split(/\r?\n/)
@@ -1400,12 +1512,7 @@ export async function runMutationProofGate(input: MutationGateInput): Promise<Mu
   }
 
   if (input.claim === null || input.claim === undefined) {
-    return {
-      ok: false,
-      reason: 'mutation proof required but the build nominated no mutation to run',
-      exempt: false,
-      evidence: null,
-    }
+    return { ok: false, reason: NO_NOMINATION_REFUSAL, exempt: false, evidence: null }
   }
 
   // BIND THE PROOF TO THIS PR. Without this the gate certifies nothing about the

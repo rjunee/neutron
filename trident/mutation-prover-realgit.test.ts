@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
-import { resolveMergeHeadSha, runMutationProofGate } from './mutation-prover.ts'
+import { changedFilesOnBranch, resolveMergeHeadSha, runMutationProofGate } from './mutation-prover.ts'
 
 /**
  * THE FETCH CONTRACT AND THE HOSTILE NAME, against REAL git.
@@ -220,6 +220,49 @@ describe('the mutation-proof gate against real git', () => {
     })
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('check-ref-format')
+  })
+
+  test('A HOSTILE BASE WRITES A FILE THROUGH REAL git diff — and never reaches it from here', async () => {
+    // What a mock cannot show: `git diff --name-only <base>...<ref>` takes its
+    // range as a BARE OPERAND, so a base spelled `--output=<path>` is parsed as
+    // an option and git creates that path. The base arrives from an operator
+    // flag or from `origin/HEAD` (`detectBaseBranch`), and `check-ref-format`
+    // accepts a ref of that spelling — so this is reachable, and the filter has
+    // to live at the consumer.
+    const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-hostile-base-'))
+    created.push(root)
+    const work = join(root, 'work')
+    await spawnCapture(['git', 'init', '-q', '--initial-branch=main', work], root)
+    writeFileSync(join(work, 'a.txt'), 'base\n')
+    await git(work, 'add', '-A')
+    await git(work, ...GIT_ID, 'commit', '-q', '-m', 'base')
+    await git(work, 'switch', '-q', '-c', 'feat')
+    writeFileSync(join(work, 'feature.ts'), 'export const y = 2\n')
+    await git(work, 'add', '-A')
+    await git(work, ...GIT_ID, 'commit', '-q', '-m', 'the feature')
+    const feat = await git(work, 'rev-parse', 'HEAD')
+
+    // THE VECTOR, demonstrated on this machine's real git: the hostile base is
+    // interpolated into `<base>...<ref>` and the WHOLE operand is parsed as
+    // `--output=<file>`, so git exits 0 and creates a file whose name the base
+    // chose. Nothing about the range survives as a revision.
+    const demo = join(root, 'written-by-raw-git')
+    const demoWritten = `${demo}...${feat}`
+    expect(existsSync(demoWritten)).toBe(false)
+    const raw = await spawnCapture(['git', '-C', work, 'diff', '--name-only', `--output=${demo}...${feat}`], work)
+    expect({ ok: raw.ok, wrote: existsSync(demoWritten) }).toEqual({ ok: true, wrote: true })
+
+    // THE GATE'S READER refuses the same name: no file anywhere, and null —
+    // which the gate turns into "require the proof", never into a pass.
+    const target = join(root, 'written-through-the-gate')
+    expect(await changedFilesOnBranch(spawnCapture, work, `--output=${target}`, feat)).toBeNull()
+    expect(existsSync(target)).toBe(false)
+    expect(existsSync(`${target}...${feat}`)).toBe(false)
+
+    // POSITIVE CONTROL: the ordinary base still reads the branch's own file, so
+    // the refusal above is the NAME being rejected and not a reader that has
+    // stopped working.
+    expect(await changedFilesOnBranch(spawnCapture, work, 'main', feat)).toEqual(['feature.ts'])
   })
 
   test('an expected_head that names a TREE is refused — only the `^{commit}` peel says so', async () => {

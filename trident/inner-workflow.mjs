@@ -330,6 +330,45 @@ const resuming = memberMode || resumeCheckpoint !== null || prNumber !== null
 // back to `trident/<slug>` when the caller didn't thread an existing branch.
 const forgeBranch = memberMode ? pinnedMemberBranch : branch || `trident/${slug}`
 
+// WHERE THE BUILD COMMITS ITS MUTATION NOMINATION. PER-BRANCH on purpose, exactly
+// as `.trident/plans/<branch>.md` is: a single fixed tracked path is inherited by
+// every branch cut after the first one merges — "this build nominated nothing"
+// would silently become "reuse the last PR's nomination" — and it keeps
+// concurrent LANES off one file, which would otherwise be an add/add conflict for
+// all but the first to land. `trident/mutation-claim-artifact.ts` derives the
+// same path from the same branch name and reads the blob back out of git at the
+// reviewed commit.
+//
+// PER MEMBER TOO, enforced HERE rather than trusted from the caller: the launcher
+// cuts per-member branches (`waveChildSlug` appends `--w` + taskId), but this file
+// cannot tell whether its caller did — and members handed one shared lane branch
+// would share one nomination file, letting a later member's gate be satisfied by
+// an earlier member's nomination out of the shared diff while the later member
+// ships unproved code. Appending the member suffix ourselves when the branch does
+// not already carry it makes the path per-member by construction; on the
+// production dispatch the suffix is already there, so the path — and the reader's
+// derivation from the run's branch — is unchanged.
+//
+// THE SUFFIX IS A WRITER-SIDE RULE ONLY, and that asymmetry is deliberate rather
+// than overlooked: the reader derives the path from the branch the run REPORTS
+// (`result.branch`, i.e. `forgeBranch`), so a caller that threaded an UNSUFFIXED
+// member branch makes the two spellings disagree and the gate finds no nomination
+// — a refusal, never an earlier member's nomination read as this one's. Both
+// orderings are pinned by `inner-workflow-mutation-claim.test.ts` ("THE MEMBER
+// SEAM"), writer path against reader derivation. Production never diverges
+// (`waveChildSlug` suffixes before this file sees the name); if it ever must,
+// the fix is to report the nomination branch out, on its own card.
+// What no path can separate is
+// fix rounds WITHIN one branch: a round that changes code without rewriting the
+// file is proved against the earlier round's nomination, bounded because the gate
+// RUNS the mutation and a stale one fails to redden its guard; the contract tells
+// each round to re-write the file.
+const nominationBranch =
+  memberMode && !pinnedMemberBranch.endsWith(`--w${pinnedMemberTaskId}`)
+    ? `${pinnedMemberBranch}--w${pinnedMemberTaskId}`
+    : forgeBranch
+const mutationClaimArtifactPath = `.trident/mutation-claims/${nominationBranch}.json`
+
 // RB2 (b) — `reflectionGuidance` (destructured above, threaded READY-TO-APPEND by
 // the launcher's testable `buildReflectionGuidance`) is APPENDED to the FORGE BUILDER
 // path ONLY: forge:build (round 1) and every forge:fix-round-* . Owner corrections
@@ -965,6 +1004,18 @@ const CODEX_FORGE_SCHEMA = {
     // (`PLAN_REFRESH_EVERY`) is what bounds the drift on this route. Carrying the
     // signal out of a codex build needs a seventh trailer line from the wrapper,
     // which is a change to `trident/codex-build.sh` and its own card.
+    //
+    // `mutationClaim` IS in `required` (it rides in the spread), and on THIS route
+    // the honest answer is always null for the same reason: the bridge measures
+    // the wrapper's trailer, not the build's reasoning. It is not inert though —
+    // the build COMMITS its nomination to `.trident/mutation-claims/<branch>.json`
+    // and the gate reads that blob back out of git at the reviewed commit
+    // (`trident/mutation-claim-artifact.ts`). `codexBuildPrompt` therefore tells
+    // the bridge to report null and never to invent one — and because a fabricated
+    // object would otherwise be HONOURED (the gate prefers the in-result claim) and
+    // would shadow the real committed nomination, that instruction is not the guard:
+    // `forgeAgent` OVERWRITES this field with null on the way out of the cli route,
+    // so whatever the bridge puts here never reaches the gate.
     ...FORGE_SCHEMA.properties,
     codexStatus: { type: 'string', enum: ['connected', 'not_connected', 'deferred'] },
     trailerComplete: { type: 'boolean' },
@@ -1310,6 +1361,17 @@ function forgeBuildContract(reenter, artifactCheckpointName, suiteScope = 'full-
 
 You are in a FRESH isolated git worktree (your cwd). Repo of record: ${repoPath}. Base branch: ${baseBranch}. Git-mode: ${memberMode ? 'member' : mergeMode}.
 ${NO_PATTERN_KILL_RULE}${scopedTestStrategy === '' ? '' : `\n${scopedTestStrategy}\n`}
+MUTATION NOMINATION — the post-APPROVE merge gate READS this; a missing or stale nomination BLOCKS your merge.
+Nominate nothing ONLY when your branch's ENTIRE diff is INERT documentation — \`.md\`/\`.mdx\`, LICENSE, NOTICE: then do NOT write the file at all and ignore the rest of this block — such a diff has no legal target to nominate (the gate exempts it instead; it reads a nomination blob as inert too — but that dispensation runs AFTER the gate's denylist, so a branch NAME carrying a \`skills\`, \`prompts\`, \`.claude\`, \`agent-dispatch\` or \`.github\` path segment ANYWHERE BUT LAST — the last segment gains the \`.json\` suffix, so only a name like \`trident/skills/x\` trips it — would forfeit the exemption, which is the other reason not to write one here).
+HARNESS-DRIVING markdown is NOT inert and gets NO exemption: \`SPEC.md\`, \`IMPLEMENTATION_PLAN.md\`, \`CLAUDE.md\`, \`AGENTS.md\`, \`SKILL.md\` by basename anywhere, and anything under \`skills/\`, \`prompts/\`, \`.claude/\`, \`agent-dispatch/\` or \`.github/\`. Those change what the next run DOES, so a branch that only edits them still owes a nomination — and they are themselves LEGAL targets, with ONE exception: a path carrying a \`test/\`, \`tests/\` or \`__tests__/\` segment reads as a test file to the gate and is refused, exemption or not. A diff made only of those (e.g. \`skills/tests/SKILL.md\` alone) can neither be exempted nor nominated; nominate a non-test file the change also needs, or say so in your report rather than shipping a diff that cannot merge.
+Otherwise, before your final commit, write ONE JSON object to \`${mutationClaimArtifactPath}\` (create the directory; the path carries YOUR branch name — suffixed per wave member in member mode — so no two lanes or members collide over one file, and the gate believes it only after checking the file is in YOUR branch's diff) and COMMIT it with your work. Fields: file, find, replace, guard, control, optional rationale (a couple of sentences — the WHOLE object must stay under 32 KiB or the gate reads it as no nomination at all).
+- file: a repo-relative path (no leading \`/\`, no \`..\`) that THIS branch's diff against ${baseBranch} changes, and PRODUCTION code — never a test file, never INERT documentation (the harness-driving markdown named above counts as production here), and never the nomination file itself: the gate refuses a nomination that nominates itself, since that file is in your diff by construction and breaking it proves nothing about your change.
+- find: a string occurring EXACTLY ONCE in that file; replace: a DIFFERENT string; applied, the edit must break real behaviour.
+- guard and control: two DIFFERENT argv ARRAYS (JSON arrays of strings — NEVER shell strings; no \`&&\`, \`|\`, \`;\`, redirection or \`bash -c\`), each on one of the gate's ALLOWLISTED test-runner shapes and NOTHING else: \`bun test …\`, \`node --test …\`, \`npm|pnpm|yarn test …\` (or \`… run test…\`), \`make test…\`, \`python3 -m pytest …\`, \`python3 -m unittest …\`, \`go test …\`, \`cargo test …\` — e.g. \`["bun","test","path/to.test.ts"]\`. Any other program or shape (\`npx vitest\`, a script path, a package manager doing anything but a test script) is REFUSED after APPROVE, which costs a whole round. Under the mutation the guard must go RED while the control STAYS GREEN; the gate actually RUNS both and refuses fakes.
+- The gate reads the file out of THIS branch's diff, so it must be part of your commit — an uncommitted file is no nomination at all.
+- A fix round that moves or deletes the nominated line MUST update the committed file so find still occurs exactly once.
+Where you report via a schema, set mutationClaim to the SAME object (or null when you wrote no file).
+
 CONTRACT
 1. ${forgeStep1(reenter)}
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
@@ -1827,11 +1889,12 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
+  mutationClaim is ALWAYS null on this route, and that is CORRECT — the build COMMITS its nomination to a file inside the branch and the merge gate reads it back out of git at the reviewed commit. You never see it and cannot measure it, so report mutationClaim as null and NEVER fabricate one; a fabricated object would shadow the real committed nomination and block the merge.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires), 'deferred' when the transcript explicitly reports that instructed intermediate-task outcome, or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → THE COPY ABOVE, NOT THE BUILD. The assembled brief file did not match the byte count and checksum in the command — a chunk was dropped, duplicated, reordered or reworded on its way to disk; no tokens were spent and nothing was built. ${corruptInstructions}, copying each block character for character this time — do not re-wrap long lines, do not strip trailing spaces, do not "fix" formatting or indentation, and do not try to repair only the piece you think was wrong. Exactly ONE retry: if the second pass reports CODEX_BUILD_BRIEF_CORRUPT again, stop and report codexStatus='deferred'. Say so plainly rather than proceeding — building against an approximation of the brief is the exact outcome this check exists to prevent.${partMissingInstructions}
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
-For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
+For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, mutationClaim as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values. The run stops on those statuses and says why; do NOT dress a failed lane up as a partial build.
 ${wrapperErrTailInstruction(errFile)}
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER exit silently — if the command itself could not run, return codexStatus='deferred', trailerComplete=false, wrapperExitCode=null, and report whether the current worktree has preserved work.`
 }
@@ -1863,6 +1926,7 @@ Do NOT launch anything. Do NOT build, edit, or rerun anything. Read ${trailerFil
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one: an empty value stops the run, a wrong one ships code nobody reviewed.
+  mutationClaim is ALWAYS null on this route, and that is CORRECT — the build COMMITS its nomination to a file inside the branch and the merge gate reads it back out of git at the reviewed commit. You never see it and cannot measure it, so report mutationClaim as null and NEVER fabricate one; a fabricated object would shadow the real committed nomination and block the merge.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires), 'deferred' when the transcript explicitly reports that instructed intermediate-task outcome, or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 ${wrapperErrTailInstruction(errFile)}
 Return via the schema.`
@@ -1888,11 +1952,12 @@ Read the CODEX_EXIT code, then map it to your result (read ${outFile} and ${errF
     diffFile     = the value after NEUTRON_CODEX_BUILD_DIFF=
     worktreePath = the value after NEUTRON_CODEX_BUILD_WORKTREE=
   Report an EMPTY STRING for any trailer value that is empty. NEVER substitute a sha, a branch or a PR number you read anywhere else, and never invent one.
+  mutationClaim is ALWAYS null on this route, and that is CORRECT — the build COMMITS its nomination to a file inside the branch and the merge gate reads it back out of git at the reviewed commit. You never see it and cannot measure it, so report mutationClaim as null and NEVER fabricate one; a fabricated object would shadow the real committed nomination and block the merge.
   testsPassed is the ONE field that is the build's own claim — true only if the transcript states the tests were run and passed; false otherwise, including when they were never run. Copy suiteOutcome from the transcript the same way: 'passed', 'failed-new', 'failed-preexisting' (ONLY if the transcript shows the base-branch comparison the TEST EXECUTION block requires), 'deferred' when the transcript explicitly reports that instructed intermediate-task outcome, or 'not-run' when the transcript does not say the full suite completed. When the transcript earns 'failed-preexisting', copy its base-branch-comparison lines (named failures + base-branch result) into suiteEvidence; if the transcript shows no comparison, report 'failed-new' and leave suiteEvidence absent.
 - EXIT 10 or 11 → codexStatus='not_connected' (no codex credential, or no codex CLI). NO BUILD HAPPENED.
 - EXIT 3 with CODEX_BUILD_BRIEF_CORRUPT in ${errFile} → codexStatus='deferred'. Do not rewrite the brief or relaunch the wrapper from this wait bridge.
 - EXIT 3 or 5 (any other reason) → codexStatus='deferred' (codex was configured but the build could not run or did not complete — the tail of ${errFile} says which).
-For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values.
+For 'not_connected' and 'deferred' alike: report branch, commitSha, diffFile and worktreePath as the empty string, prNumber as null, mutationClaim as null, testsPassed as false and suiteOutcome as 'not-run', even if the trailer shows values.
 ${wrapperErrTailInstruction(errFile)}
 For every completed trailer set trailerComplete=true, copy its wrapperExitCode, and set preservedWork=false. Return via the schema. NEVER EXIT SILENTLY.`
 }
@@ -1998,7 +2063,22 @@ async function forgeAgent(opts, tag, brief, slot) {
       `${opts.label} committed on branch '${reportedBranch}' but the run builds '${forgeBranch}'. Refusing to continue: the reviewers would read a diff that merging '${forgeBranch}' does not land, and in local mode the branch holding that work is deleted after the merge.`,
     )
   }
-  return res
+  // THE BRIDGE'S `mutationClaim` IS DISCARDED IN CODE, not merely discouraged in
+  // prose. `codexBuildPrompt` tells the bridge to report null and never to invent
+  // one, but an instruction to an LLM is not a guarantee: the field rides in the
+  // `FORGE_SCHEMA` spread as type ['object','null'], so a fabricated object is
+  // SCHEMA-VALID on this route, and downstream (`mutationClaim = forge.mutationClaim`)
+  // it would be preferred over the committed artifact at the gate — shadowing the
+  // real nomination with one nobody measured. The bridge copies the wrapper's
+  // six-line trailer and never sees the build's reasoning, so null is the only
+  // honest value it can hold; forcing it here makes that a property of the ROUTE
+  // rather than of the prompt, on round 1 and every fix round alike (both call
+  // sites come through this one function). Normalising — rather than narrowing the
+  // schema to `{type:'null'}` — is deliberate and fail-safe: a bridge that
+  // fabricates loses the fabrication instead of failing schema validation and
+  // killing the run, and the committed artifact, which the gate reads out of git
+  // at the reviewed commit, answers for this route either way.
+  return { ...res, mutationClaim: null }
 }
 
 // Argus review rubric (from prompts/argus.md): APPROVE / REQUEST_CHANGES /
