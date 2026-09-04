@@ -93,7 +93,11 @@ export interface CommittedMutationClaimRead {
  * branch is routinely cleaned before the gate runs (the same reason
  * `resolveMergeHeadSha` carries that fallback). Either fallback ref is RESOLVED
  * TO AN OID FIRST, so the three legs of the read cannot describe three different
- * commits. Returns a null claim for everything else, and never throws.
+ * commits — and the fallback is over REF EXISTENCE ONLY: the first revision that
+ * names a commit is the one read, whether or not it carries a nomination. Read
+ * ON past it and a local branch with no artifact would be answered by a stale
+ * `origin/<branch>`, which is a nomination for a different commit than the one
+ * being proved. Returns a null claim for everything else, and never throws.
  */
 export async function readCommittedMutationClaim(
   run_host: RunHostCommand,
@@ -103,11 +107,19 @@ export async function readCommittedMutationClaim(
   const branch = typeof source.branch === 'string' ? source.branch.trim() : ''
   const path = mutationClaimArtifactPath(branch)
   if (path === null) {
-    return { claim: null, note: `no committed nomination: ${JSON.stringify(branch)} is not a plain branch name` }
+    // SLICED, like the gate's own branch rejection: the name is model-supplied
+    // and this note is appended to a `failure_reason` that is stored verbatim.
+    return {
+      claim: null,
+      note: `no committed nomination: ${JSON.stringify(branch.slice(0, 80))} is not a plain branch name`,
+    }
   }
   const base = typeof source.base_branch === 'string' ? source.base_branch.trim() : ''
   if (base.length === 0 || !isPlainBranchName(base)) {
-    return { claim: null, note: `no committed nomination: ${JSON.stringify(base)} is not a plain base branch name` }
+    return {
+      claim: null,
+      note: `no committed nomination: ${JSON.stringify(base.slice(0, 80))} is not a plain base branch name`,
+    }
   }
 
   const oid = typeof source.expected_head === 'string' ? source.expected_head.trim().toLowerCase() : ''
@@ -127,12 +139,21 @@ export async function readCommittedMutationClaim(
     // `runMutationProofGate` pins its sha before reading anything off it.
     const pinned = await pinRevision(run_host, repo_path, revision)
     if (pinned === null) {
+      // THE ONLY REASON TO TRY THE NEXT REF: this one names no commit here. The
+      // fallback exists because the worktree holding the local branch is
+      // routinely cleaned before the gate runs — an ABSENT ref, not an absent
+      // nomination.
       notes.push(`no committed nomination: ${revision} does not resolve to a commit`)
       continue
     }
+    // THE FIRST REF THAT RESOLVES IS THE ANSWER, claim or no claim. Continuing
+    // past a resolved commit that carries no artifact breaks the binding this
+    // reader exists for: a local branch that has been reset, or rebuilt without
+    // a nomination, would be answered by a STALE `origin/<branch>` commit's
+    // artifact — a nomination for work that is not the work the gate proves.
+    // Absence at the commit we are reading is the honest null.
     const read = await readAtRevision(run_host, repo_path, pinned, path, base)
-    if (read.claim !== null) return read
-    notes.push(read.note)
+    return { claim: read.claim, note: [...notes, read.note].join('; ') }
   }
   return { claim: null, note: notes.join('; ') }
 }
@@ -151,9 +172,12 @@ async function pinRevision(
   if (FULL_OID.test(revision)) return revision
   try {
     // `^{commit}` is a suffix on an operand that already passed `isPlainBranchName`
-    // and carries a `refs/` prefix, so it is still a ref PATH and never an option.
+    // and carries a `refs/` prefix, so it is still a ref PATH and never an option
+    // — and `--end-of-options` says so to git as well, exactly as the base side's
+    // `pinBaseRef` does. Two spellings of one hardening rule is how one of them
+    // rots.
     const res = await run_host(
-      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', `${revision}^{commit}`],
+      ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${revision}^{commit}`],
       repo_path,
     )
     if (!res.ok) return null

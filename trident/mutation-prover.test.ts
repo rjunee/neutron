@@ -15,7 +15,7 @@ import {
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
   proofWorktreePath,
-  resolveBaseRevision,
+  resolveBaseRevisions,
   resolveMergeHeadSha,
   runMutationProofGate,
   spawnGuardCommand,
@@ -841,7 +841,7 @@ describe('the prose-only exemption FAILS CLOSED', () => {
  * branch never touched it, and a committed nomination counts as this build's
  * when it came from a merged predecessor of the same name.
  */
-describe('resolveBaseRevision — the base is a pinned commit, not a mutable local name', () => {
+describe('resolveBaseRevisions — the base is a pinned commit, not a mutable local name', () => {
   const LOCAL = 'a'.repeat(40)
   const REMOTE = 'b'.repeat(40)
 
@@ -872,22 +872,32 @@ describe('resolveBaseRevision — the base is a pinned commit, not a mutable loc
   test('A STALE LOCAL BASE LOSES TO ORIGIN — the diff is taken from the tip that CONTAINS the other', async () => {
     // The reproduced condition: local `main` is an ancestor of `origin/main`.
     const stale = host({ ancestor: [[LOCAL, REMOTE]] })
-    expect(await resolveBaseRevision(stale.run, '/repo', 'main')).toBe(REMOTE)
+    expect(await resolveBaseRevisions(stale.run, '/repo', 'main')).toEqual([REMOTE])
 
     // CONTROL, the other way round: a local base AHEAD of origin is the one that
     // contains it, and it wins. Without the containment rule one of these two
     // cases returns the ref that is behind.
     const ahead = host({ ancestor: [[REMOTE, LOCAL]] })
-    expect(await resolveBaseRevision(ahead.run, '/repo', 'main')).toBe(LOCAL)
+    expect(await resolveBaseRevisions(ahead.run, '/repo', 'main')).toEqual([LOCAL])
+  })
 
-    // DIVERGED — neither contains the other: origin is the tip the merge lands on.
+  test('DIVERGED BASES YIELD BOTH TIPS — picking one was blind to which the merge lands on', async () => {
+    // pr mode lands the branch on `origin/<base>`; local mode merges into the
+    // LOCAL `<base>`. With the tips diverged, EITHER single choice hands the
+    // other mode a diff carrying commits the branch never made — and a file on
+    // that base-only side then counts as "in the branch diff" and can be
+    // certified. Both tips come back so the caller can intersect the two diffs.
     const diverged = host({ ancestor: [] })
-    expect(await resolveBaseRevision(diverged.run, '/repo', 'main')).toBe(REMOTE)
+    expect(await resolveBaseRevisions(diverged.run, '/repo', 'main')).toEqual([LOCAL, REMOTE])
+
+    // CONTROL: an answerable containment question still collapses to ONE tip, so
+    // this is not a resolver that has simply started returning both every time.
+    expect((await resolveBaseRevisions(host({ ancestor: [[LOCAL, REMOTE]] }).run, '/repo', 'main')).length).toBe(1)
   })
 
   test('the pins are fully-qualified refs, and a base git cannot resolve stays the bare name', async () => {
     const both = host({ ancestor: [[LOCAL, REMOTE]] })
-    await resolveBaseRevision(both.run, '/repo', 'main')
+    await resolveBaseRevisions(both.run, '/repo', 'main')
     expect(both.calls.slice(0, 2)).toEqual([
       ['git', '-C', '/repo', 'rev-parse', '--verify', '--quiet', '--end-of-options', 'refs/heads/main^{commit}'],
       [
@@ -904,25 +914,27 @@ describe('resolveBaseRevision — the base is a pinned commit, not a mutable loc
 
     // Only one side resolves — use it rather than refusing: a base that exists
     // only locally (or only on origin) must still work.
-    expect(await resolveBaseRevision(host({ remote: res(128) }).run, '/repo', 'main')).toBe(LOCAL)
-    expect(await resolveBaseRevision(host({ local: res(128) }).run, '/repo', 'main')).toBe(REMOTE)
+    expect(await resolveBaseRevisions(host({ remote: res(128) }).run, '/repo', 'main')).toEqual([LOCAL])
+    expect(await resolveBaseRevisions(host({ local: res(128) }).run, '/repo', 'main')).toEqual([REMOTE])
     // Neither resolves: the long-standing bare-name behaviour, unchanged.
-    expect(await resolveBaseRevision(host({ local: res(128), remote: res(128) }).run, '/repo', 'main')).toBe('main')
-    // A print that is not 40 hex is not a commit — `.ok` and the shape both count.
-    expect(await resolveBaseRevision(host({ local: res(0, 'main\n'), remote: res(0, '') }).run, '/repo', 'main')).toBe(
+    expect(await resolveBaseRevisions(host({ local: res(128), remote: res(128) }).run, '/repo', 'main')).toEqual([
       'main',
-    )
+    ])
+    // A print that is not 40 hex is not a commit — `.ok` and the shape both count.
+    expect(
+      await resolveBaseRevisions(host({ local: res(0, 'main\n'), remote: res(0, '') }).run, '/repo', 'main'),
+    ).toEqual(['main'])
   })
 
   test('a base git could read as an option or a refspec never reaches git at all', async () => {
     for (const unsafe of ['--upload-pack=x', 'x:refs/heads/y', 'a/../b', '']) {
       const h = host({})
-      expect(await resolveBaseRevision(h.run, '/repo', unsafe)).toBe(unsafe)
+      expect(await resolveBaseRevisions(h.run, '/repo', unsafe)).toEqual([unsafe])
       expect({ unsafe, calls: h.calls.length }).toEqual({ unsafe, calls: 0 })
     }
     // Positive control: a plain name DOES run the pins.
     const safe = host({ ancestor: [[LOCAL, REMOTE]] })
-    await resolveBaseRevision(safe.run, '/repo', 'main')
+    await resolveBaseRevisions(safe.run, '/repo', 'main')
     expect(safe.calls.length).toBeGreaterThan(0)
   })
 
@@ -933,6 +945,69 @@ describe('resolveBaseRevision — the base is a pinned commit, not a mutable loc
     const diff = h.calls.find((c) => c.includes('diff'))
     expect(diff).toEqual(['git', '-C', '/repo', 'diff', '--name-only', `${REMOTE}...feat-x`])
     expect(diff?.some((a) => a === 'main...feat-x')).toBe(false)
+  })
+
+  test('ON DIVERGED BASES THE BRANCH DIFF IS THE INTERSECTION — no base-only file can be certified', async () => {
+    // THE HOLE THIS CLOSES: whichever single tip was picked, the OTHER merge mode
+    // (pr merges onto `origin/<base>`, local merges into the local `<base>`) was
+    // handed a diff carrying the picked tip's missing commits. A file changed
+    // ONLY on one base's side of the divergence then read as "in the branch
+    // diff", and `validateClaim`'s diff-membership rule — the one that stops a
+    // nomination pointing at code this branch never touched — accepted it.
+    const diffs: Record<string, string> = {
+      [`${LOCAL}...feat-x`]: 'src/a.ts\norigin-base-only.ts\n',
+      [`${REMOTE}...feat-x`]: 'src/a.ts\nlocal-base-only.ts\n',
+    }
+    const calls: string[][] = []
+    const run: RunHostCommand = async (cmd) => {
+      calls.push([...cmd])
+      if (cmd.includes('rev-parse')) {
+        return res(0, `${(cmd.at(-1) ?? '').startsWith('refs/remotes/') ? REMOTE : LOCAL}\n`)
+      }
+      if (cmd.includes('merge-base')) return res(1) // neither contains the other
+      return res(0, diffs[cmd.at(-1) ?? ''] ?? '')
+    }
+
+    const files = await changedFilesOnBranch(run, '/repo', 'main', 'feat-x')
+
+    expect(files).toEqual(['src/a.ts'])
+    // BOTH diffs really ran — the intersection is measured, not assumed.
+    expect(calls.filter((c) => c.includes('diff')).map((c) => c.at(-1))).toEqual([
+      `${LOCAL}...feat-x`,
+      `${REMOTE}...feat-x`,
+    ])
+
+    // POSITIVE CONTROL, same host but the tips CONTAIN one another: one diff, and
+    // its full listing survives — the filter is the divergence case only, not a
+    // reader that has started dropping files.
+    const contained: RunHostCommand = async (cmd) =>
+      cmd.includes('merge-base') && cmd.at(-2) === LOCAL && cmd.at(-1) === REMOTE ? res(0) : await run(cmd, '/repo')
+    expect(await changedFilesOnBranch(contained, '/repo', 'main', 'feat-x')).toEqual(['src/a.ts', 'local-base-only.ts'])
+  })
+
+  test('a diff leg that could not run is null, on either base', async () => {
+    for (const broken of [`${LOCAL}...feat-x`, `${REMOTE}...feat-x`]) {
+      const run: RunHostCommand = async (cmd) => {
+        if (cmd.includes('rev-parse')) {
+          return res(0, `${(cmd.at(-1) ?? '').startsWith('refs/remotes/') ? REMOTE : LOCAL}\n`)
+        }
+        if (cmd.includes('merge-base')) return res(1)
+        return cmd.at(-1) === broken ? res(128) : res(0, 'src/a.ts\n')
+      }
+      expect({ broken, files: await changedFilesOnBranch(run, '/repo', 'main', 'feat-x') }).toEqual({
+        broken,
+        files: null,
+      })
+    }
+    // Control: with both legs answering, the same seam returns the file.
+    const ok: RunHostCommand = async (cmd) => {
+      if (cmd.includes('rev-parse')) {
+        return res(0, `${(cmd.at(-1) ?? '').startsWith('refs/remotes/') ? REMOTE : LOCAL}\n`)
+      }
+      if (cmd.includes('merge-base')) return res(1)
+      return res(0, 'src/a.ts\n')
+    }
+    expect(await changedFilesOnBranch(ok, '/repo', 'main', 'feat-x')).toEqual(['src/a.ts'])
   })
 })
 

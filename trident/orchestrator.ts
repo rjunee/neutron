@@ -4408,9 +4408,12 @@ export function buildTridentOrchestrator(
         // the gate also refuses a rejected branch name, an unresolvable head and
         // a tip that moved, and none of those is a missing nomination — suffixed
         // with one they point the reader at the wrong failure.
+        // BOUNDED, because `failure_reason` is stored verbatim and the note
+        // quotes branch-supplied names: 300 characters is room for both legs of
+        // a two-ref read and no room for a flood.
         const reason =
           committed !== null && committed.claim === null && proof.reason === NO_NOMINATION_REFUSAL
-            ? `${proof.reason} — ${committed.note}`
+            ? `${proof.reason} — ${committed.note.slice(0, 300)}`
             : proof.reason
         const blocked: TridentRun = { ...failedRun(run, reason, true), pr, branch }
         return { run: blocked, changed: true, waiting: false, note: 'APPROVE blocked (mutation prover) → failed' }

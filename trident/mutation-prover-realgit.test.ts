@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { spawnCapture } from './git-mode.ts'
-import { resolveMergeHeadSha, runMutationProofGate } from './mutation-prover.ts'
+import { changedFilesOnBranch, resolveMergeHeadSha, runMutationProofGate } from './mutation-prover.ts'
 
 /**
  * THE FETCH CONTRACT AND THE HOSTILE NAME, against REAL git.
@@ -220,6 +220,68 @@ describe('the mutation-proof gate against real git', () => {
     })
     expect(out.ok).toBe(false)
     expect(out.reason).toContain('check-ref-format')
+  })
+
+  test('DIVERGED BASES, IN REAL GIT: the branch diff is the intersection, so no base-only file is certifiable', async () => {
+    // The condition a mocked host can build but not PROVE: local `main` and
+    // `origin/main` have each moved since they parted. pr mode lands the branch
+    // on origin's tip, local mode merges into the local one — so a resolver that
+    // picks EITHER hands the other mode a three-dot diff whose merge-base sits
+    // back at the fork, carrying commits the branch never made. This asserts
+    // what real git lists, and that the gate's own reader lists neither side's.
+    const root = mkdtempSync(join(tmpdir(), 'mutation-prover-realgit-diverged-'))
+    created.push(root)
+    const origin = join(root, 'origin.git')
+    const work = join(root, 'work')
+    await spawnCapture(['git', 'init', '--bare', '-q', '--initial-branch=main', origin], root)
+    await spawnCapture(['git', 'init', '-q', '--initial-branch=main', work], root)
+    const commit = async (file: string, body: string, message: string): Promise<string> => {
+      writeFileSync(join(work, file), body)
+      await git(work, 'add', '-A')
+      await git(work, ...GIT_ID, 'commit', '-q', '-m', message)
+      return await git(work, 'rev-parse', 'HEAD')
+    }
+
+    const forkPoint = await commit('a.txt', 'base\n', 'base')
+    await git(work, 'remote', 'add', 'origin', origin)
+    await git(work, 'push', '-q', 'origin', 'main')
+    await git(work, 'fetch', '-q', 'origin')
+    // Local `main` gains a commit origin never sees…
+    await commit('local-base-only.ts', 'export const x = 1\n', 'local base only')
+    // …and the branch is cut from THAT, as a local-mode build's branch is.
+    await git(work, 'switch', '-q', '-c', 'feat')
+    const feat = await commit('feature.ts', 'export const y = 2\n', 'the feature')
+    // …while origin's `main` advances differently from the same fork point.
+    await git(work, 'switch', '-q', '--detach', forkPoint)
+    await commit('origin-base-only.ts', 'export const z = 3\n', 'origin base only')
+    await git(work, 'push', '-q', '-f', 'origin', 'HEAD:main')
+    await git(work, 'fetch', '-q', 'origin')
+    await git(work, 'switch', '-q', 'feat')
+
+    const localMain = await git(work, 'rev-parse', 'refs/heads/main')
+    const originMain = await git(work, 'rev-parse', 'refs/remotes/origin/main')
+    expect(localMain).not.toBe(originMain) // the tips really did diverge
+    const listed = async (from: string): Promise<string[]> =>
+      (await git(work, 'diff', '--name-only', `${from}...${feat}`)).split('\n').filter((l) => l.length > 0).sort()
+    // THE HOLE, in real git: origin's tip drags the merge-base back to the fork,
+    // so a file only LOCAL `main` changed reads as one of the branch's own.
+    expect(await listed('refs/remotes/origin/main')).toEqual(['feature.ts', 'local-base-only.ts'])
+    expect(await listed('refs/heads/main')).toEqual(['feature.ts'])
+
+    // What the gate reads: only what the branch itself changed, under either
+    // merge target. `local-base-only.ts` can no longer be nominated, and neither
+    // can `origin-base-only.ts` — which is on the base git would list from the
+    // other side.
+    expect(await changedFilesOnBranch(spawnCapture, work, 'main', feat)).toEqual(['feature.ts'])
+
+    // POSITIVE CONTROL: a second file the BRANCH really changes IS listed, so
+    // this is not an intersection that has collapsed to one entry by accident.
+    await commit('feature-two.ts', 'export const w = 4\n', 'more of the feature')
+    const two = await git(work, 'rev-parse', 'HEAD')
+    expect((await changedFilesOnBranch(spawnCapture, work, 'main', two))?.sort()).toEqual([
+      'feature-two.ts',
+      'feature.ts',
+    ])
   })
 
   test('an expected_head that names a TREE is refused — only the `^{commit}` peel says so', async () => {

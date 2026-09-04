@@ -1040,8 +1040,8 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
 }
 
 /**
- * The commit the branch diff is taken FROM, pinned — origin's ref for the base
- * when the local one trails it.
+ * The commit(s) the branch diff is taken FROM, pinned — origin's ref for the
+ * base when the local one trails it, and BOTH when the two have diverged.
  *
  * THE BASE WAS THE ONE UNPINNED OPERAND IN THIS GATE. Every branch-side ref is
  * resolved to an OID before it decides anything (`resolveMergeHeadSha`, the
@@ -1058,41 +1058,55 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
  * diff-membership check exists to stop.
  *
  * Resolution picks THE TIP THAT CONTAINS THE OTHER — a stale ref is an ancestor
- * of the fresh one — and origin when the two have diverged, origin being the
- * shared truth the merge will actually land on. Nothing is FETCHED here: this
- * runs in the shared repo, where a fetch carries the symbolic-ref and
- * configured-refspec traps `resolveMergeHeadSha` documents at length, and a
- * tracking ref that is itself behind is already handled by the containment rule.
- * Anything unresolvable falls back to the bare name — the long-standing
- * behaviour — because a base that exists only locally must still work.
+ * of the fresh one, and the descendant's merge-base with the branch is the later
+ * one, so the containment rule always yields the NARROWER diff. Nothing is
+ * FETCHED here: this runs in the shared repo, where a fetch carries the
+ * symbolic-ref and configured-refspec traps `resolveMergeHeadSha` documents at
+ * length, and a tracking ref that is itself behind is already handled by the
+ * containment rule. Anything unresolvable falls back to the bare name — the
+ * long-standing behaviour — because a base that exists only locally must still
+ * work.
+ *
+ * WHEN THE TWO HAVE DIVERGED, BOTH ARE RETURNED, and the caller INTERSECTS the
+ * diffs. Picking one was merge-mode-blind: pr mode lands the branch on
+ * `origin/<base>`, local mode merges into the LOCAL `<base>` (`merge.ts`
+ * checks out `opts.base_branch ?? detectBaseBranch` in the local checkout), so
+ * whichever tip this function picked, the other mode read a diff carrying
+ * commits the branch never made — files reachable from the base-only side of the
+ * divergence counted as "in the branch diff" and could be certified. A file the
+ * BRANCH changed is in both diffs; a file that arrived from either base's own
+ * commits is in at most one. The intersection is therefore the branch's real
+ * delta under either merge target, and it is narrower than both — this cannot
+ * admit a file that picking a single tip would have refused.
  */
-export async function resolveBaseRevision(
+export async function resolveBaseRevisions(
   run_host: RunHostCommand,
   repo_path: string,
   base_branch: string,
-): Promise<string> {
+): Promise<string[]> {
   const base = base_branch.trim()
   // A name git could read as an option or a refspec never reaches git here, and
   // an operand that is already a sha (or anything else the caller pinned) is
   // left exactly as it came: there is nothing to resolve.
-  if (base.length === 0 || !isPlainBranchName(base)) return base_branch
+  if (base.length === 0 || !isPlainBranchName(base)) return [base_branch]
   const local = await pinBaseRef(run_host, repo_path, `refs/heads/${base}`)
   const remote = await pinBaseRef(run_host, repo_path, `refs/remotes/origin/${base}`)
-  if (remote === null) return local ?? base_branch
-  if (local === null || local === remote) return remote
+  if (remote === null) return [local ?? base_branch]
+  if (local === null || local === remote) return [remote]
   // `merge-base --is-ancestor` answers by EXIT CODE, so `.ok` is the whole
-  // answer; a run that could not happen at all is neither, and falls through to
-  // origin.
+  // answer; a run that could not happen at all is not a containment proof, and
+  // falls through to the diverged case — the strictest of the three.
   const localBehind = await run_host(
     ['git', '-C', repo_path, 'merge-base', '--is-ancestor', '--end-of-options', local, remote],
     repo_path,
   )
-  if (localBehind.ok) return remote
+  if (localBehind.ok) return [remote]
   const remoteBehind = await run_host(
     ['git', '-C', repo_path, 'merge-base', '--is-ancestor', '--end-of-options', remote, local],
     repo_path,
   )
-  return remoteBehind.ok ? local : remote
+  if (remoteBehind.ok) return [local]
+  return [local, remote]
 }
 
 /** One base ref as a 40-hex OID, or null when it does not resolve to a commit. */
@@ -1116,7 +1130,7 @@ async function pinBaseRef(run_host: RunHostCommand, repo_path: string, ref: stri
  * decide something (the gate passes one): given a branch NAME this re-resolves
  * the ref, and a branch that moves between two such resolutions yields a file
  * list for a commit nobody is proving. The BASE side is pinned here, by
- * `resolveBaseRevision`, for the mirror-image reason.
+ * `resolveBaseRevisions`, for the mirror-image reason.
  */
 export async function changedFilesOnBranch(
   run_host: RunHostCommand,
@@ -1125,14 +1139,22 @@ export async function changedFilesOnBranch(
   ref: string | null,
 ): Promise<string[] | null> {
   if (ref === null || ref.trim().length === 0) return null
-  const base = await resolveBaseRevision(run_host, repo_path, base_branch)
-  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base}...${ref}`], repo_path)
-  if (!res.ok) return null
-  const files = res.stdout
-    .split(/\r?\n/)
-    .map((l) => l.trim())
-    .filter((l) => l.length > 0)
-  return files.length === 0 ? null : files
+  // One base normally; TWO when local and origin have diverged, in which case a
+  // file counts as the branch's only if BOTH diffs list it — see
+  // `resolveBaseRevisions`. Any leg that could not run at all is null, exactly as
+  // a single unreadable diff always was.
+  const bases = await resolveBaseRevisions(run_host, repo_path, base_branch)
+  let files: string[] | null = null
+  for (const base of bases) {
+    const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base}...${ref}`], repo_path)
+    if (!res.ok) return null
+    const listed = res.stdout
+      .split(/\r?\n/)
+      .map((l) => l.trim())
+      .filter((l) => l.length > 0)
+    files = files === null ? listed : files.filter((f) => listed.includes(f))
+  }
+  return files === null || files.length === 0 ? null : files
 }
 
 /**

@@ -251,6 +251,7 @@ describe('readCommittedMutationClaim', () => {
       'rev-parse',
       '--verify',
       '--quiet',
+      '--end-of-options',
       `refs/heads/${BRANCH}^{commit}`,
     ])
 
@@ -276,6 +277,70 @@ describe('readCommittedMutationClaim', () => {
     expect(noLocal.some((c) => c.join(' ').includes(`refs/remotes/origin/${BRANCH}`))).toBe(true)
   })
 
+  test('A RESOLVED LOCAL REF ENDS THE READ — a stale origin commit cannot answer for it', async () => {
+    // THE BINDING THIS KEEPS: the nomination must describe the commit the gate
+    // proves. `refs/heads/<b>` and `refs/remotes/origin/<b>` are TWO COMMITS
+    // whenever the local branch has been reset, amended or rebuilt — so a local
+    // tip carrying no nomination, answered by origin's older artifact, hands the
+    // gate a nomination for work that is not on the branch. The fallback is over
+    // ref EXISTENCE (the worktree holding the local ref is routinely cleaned),
+    // never over an absent artifact.
+    const LOCAL_HEAD = '7'.repeat(40)
+    const ORIGIN_HEAD = '8'.repeat(40)
+    const listing: Record<string, string> = {
+      // The local tip changed code and nominated NOTHING.
+      [`${BASE_OID}...${LOCAL_HEAD}`]: 'trident/limit.ts\n',
+      // The stale origin tip still carries the artifact.
+      [`${BASE_OID}...${ORIGIN_HEAD}`]: `${PATH}\ntrident/limit.ts\n`,
+    }
+    const calls: string[][] = []
+    const twoTips: RunHostCommand = async (cmd) => {
+      calls.push([...cmd])
+      const operand = cmd.at(-1) ?? ''
+      if (cmd.includes('rev-parse') && operand.endsWith(`/${BASE}^{commit}`)) return ok(`${BASE_OID}\n`)
+      if (cmd.includes('rev-parse')) return ok(`${operand.startsWith('refs/remotes/') ? ORIGIN_HEAD : LOCAL_HEAD}\n`)
+      if (cmd.includes('diff')) return ok(listing[operand] ?? '')
+      if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
+      return ok(BODY)
+    }
+
+    const read = await readCommittedMutationClaim(twoTips, REPO, {
+      expected_head: null,
+      branch: BRANCH,
+      base_branch: BASE,
+    })
+
+    expect(read.claim).toBeNull()
+    expect(read.note).toContain('is not in the diff')
+    // Said by the argv too: origin's tip was never read FROM. The refusal is the
+    // local commit's own absence, not a failure to reach the other ref.
+    expect(calls.some((c) => !c.includes('rev-parse') && c.some((a) => a.includes(ORIGIN_HEAD)))).toBe(false)
+    expect(calls.some((c) => c.includes('show'))).toBe(false)
+
+    // POSITIVE CONTROL: the same host with the artifact ON THE LOCAL TIP reads
+    // back — so the assertion above is about the fallthrough, not about a reader
+    // that returns null whenever two tips differ.
+    const nominated: RunHostCommand = async (cmd) =>
+      cmd.includes('diff') && (cmd.at(-1) ?? '').includes(LOCAL_HEAD)
+        ? ok(`${PATH}\ntrident/limit.ts\n`)
+        : await twoTips(cmd, REPO)
+    expect(
+      (await readCommittedMutationClaim(nominated, REPO, { expected_head: null, branch: BRANCH, base_branch: BASE }))
+        .claim,
+    ).not.toBeNull()
+
+    // SECOND CONTROL: the fallback that DOES exist. With the local ref gone, the
+    // read moves to origin and finds the nomination there.
+    const noLocalRef: RunHostCommand = async (cmd) =>
+      cmd.includes('rev-parse') && (cmd.at(-1) ?? '').startsWith(`refs/heads/${BRANCH}`)
+        ? fail(128)
+        : await twoTips(cmd, REPO)
+    expect(
+      (await readCommittedMutationClaim(noLocalRef, REPO, { expected_head: null, branch: BRANCH, base_branch: BASE }))
+        .claim,
+    ).not.toBeNull()
+  })
+
   test('A MUTABLE REF IS PINNED TO AN OID BEFORE ANY LEG RUNS — no ref reaches diff, cat-file or show', async () => {
     // THE TOCTOU THIS CLOSES: with the ref itself as the operand, git resolves it
     // independently for the diff, for `cat-file -s` and for `git show`. A ref that
@@ -291,7 +356,7 @@ describe('readCommittedMutationClaim', () => {
 
     expect(read.claim).not.toBeNull() // positive control: the read really happened
     expect(host.calls).toEqual([
-      ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}^{commit}`],
+      ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${BRANCH}^{commit}`],
       ...BASE_PINS,
       ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${REF_OID}`],
       ['git', '-C', REPO, 'cat-file', '-s', `${REF_OID}:${PATH}`],
