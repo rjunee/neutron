@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import type { HostCommandResult } from './git-mode.ts'
+import type { RunHostCommand } from './merge.ts'
 import {
   canonicalPayload,
   changedFilesOnBranch,
@@ -14,6 +15,7 @@ import {
   MUTATION_PROVER_VERSION,
   parseMutationClaim,
   proofWorktreePath,
+  resolveBaseRevision,
   resolveMergeHeadSha,
   runMutationProofGate,
   spawnGuardCommand,
@@ -827,6 +829,113 @@ describe('the prose-only exemption FAILS CLOSED', () => {
   })
 })
 
+/**
+ * THE BASE SIDE OF THE DIFF, PINNED.
+ *
+ * The branch side of every comparison in this file is an OID by the time it
+ * decides anything; the base arrived as a bare NAME and git resolved it against
+ * the LOCAL ref. In a long-lived shared checkout that ref trails
+ * `origin/<name>`, and a trailing base drags the three-dot merge-base backwards
+ * — so the "branch diff" grows to include commits the branch never made. Two
+ * rules read too permissively then: `claim.file` counts as in-diff when the
+ * branch never touched it, and a committed nomination counts as this build's
+ * when it came from a merged predecessor of the same name.
+ */
+describe('resolveBaseRevision — the base is a pinned commit, not a mutable local name', () => {
+  const LOCAL = 'a'.repeat(40)
+  const REMOTE = 'b'.repeat(40)
+
+  /** Answers the two base pins and the ancestry question, and records the argv. */
+  function host(opts: {
+    local?: HostCommandResult
+    remote?: HostCommandResult
+    /** Which `merge-base --is-ancestor <a> <b>` pairs succeed. */
+    ancestor?: Array<[string, string]>
+  }): { run: RunHostCommand; calls: string[][] } {
+    const calls: string[][] = []
+    const run: RunHostCommand = async (cmd) => {
+      calls.push([...cmd])
+      if (cmd.includes('rev-parse')) {
+        const operand = cmd.at(-1) ?? ''
+        if (operand.startsWith('refs/remotes/')) return opts.remote ?? res(0, `${REMOTE}\n`)
+        return opts.local ?? res(0, `${LOCAL}\n`)
+      }
+      if (cmd.includes('merge-base')) {
+        const [a, b] = [cmd.at(-2), cmd.at(-1)]
+        return res((opts.ancestor ?? []).some(([x, y]) => x === a && y === b) ? 0 : 1)
+      }
+      return res(0, 'src/a.ts\n')
+    }
+    return { run, calls }
+  }
+
+  test('A STALE LOCAL BASE LOSES TO ORIGIN — the diff is taken from the tip that CONTAINS the other', async () => {
+    // The reproduced condition: local `main` is an ancestor of `origin/main`.
+    const stale = host({ ancestor: [[LOCAL, REMOTE]] })
+    expect(await resolveBaseRevision(stale.run, '/repo', 'main')).toBe(REMOTE)
+
+    // CONTROL, the other way round: a local base AHEAD of origin is the one that
+    // contains it, and it wins. Without the containment rule one of these two
+    // cases returns the ref that is behind.
+    const ahead = host({ ancestor: [[REMOTE, LOCAL]] })
+    expect(await resolveBaseRevision(ahead.run, '/repo', 'main')).toBe(LOCAL)
+
+    // DIVERGED — neither contains the other: origin is the tip the merge lands on.
+    const diverged = host({ ancestor: [] })
+    expect(await resolveBaseRevision(diverged.run, '/repo', 'main')).toBe(REMOTE)
+  })
+
+  test('the pins are fully-qualified refs, and a base git cannot resolve stays the bare name', async () => {
+    const both = host({ ancestor: [[LOCAL, REMOTE]] })
+    await resolveBaseRevision(both.run, '/repo', 'main')
+    expect(both.calls.slice(0, 2)).toEqual([
+      ['git', '-C', '/repo', 'rev-parse', '--verify', '--quiet', '--end-of-options', 'refs/heads/main^{commit}'],
+      [
+        'git',
+        '-C',
+        '/repo',
+        'rev-parse',
+        '--verify',
+        '--quiet',
+        '--end-of-options',
+        'refs/remotes/origin/main^{commit}',
+      ],
+    ])
+
+    // Only one side resolves — use it rather than refusing: a base that exists
+    // only locally (or only on origin) must still work.
+    expect(await resolveBaseRevision(host({ remote: res(128) }).run, '/repo', 'main')).toBe(LOCAL)
+    expect(await resolveBaseRevision(host({ local: res(128) }).run, '/repo', 'main')).toBe(REMOTE)
+    // Neither resolves: the long-standing bare-name behaviour, unchanged.
+    expect(await resolveBaseRevision(host({ local: res(128), remote: res(128) }).run, '/repo', 'main')).toBe('main')
+    // A print that is not 40 hex is not a commit — `.ok` and the shape both count.
+    expect(await resolveBaseRevision(host({ local: res(0, 'main\n'), remote: res(0, '') }).run, '/repo', 'main')).toBe(
+      'main',
+    )
+  })
+
+  test('a base git could read as an option or a refspec never reaches git at all', async () => {
+    for (const unsafe of ['--upload-pack=x', 'x:refs/heads/y', 'a/../b', '']) {
+      const h = host({})
+      expect(await resolveBaseRevision(h.run, '/repo', unsafe)).toBe(unsafe)
+      expect({ unsafe, calls: h.calls.length }).toEqual({ unsafe, calls: 0 })
+    }
+    // Positive control: a plain name DOES run the pins.
+    const safe = host({ ancestor: [[LOCAL, REMOTE]] })
+    await resolveBaseRevision(safe.run, '/repo', 'main')
+    expect(safe.calls.length).toBeGreaterThan(0)
+  })
+
+  test('changedFilesOnBranch DIFFS AGAINST THE PIN — the stale name never reaches the diff', async () => {
+    const h = host({ ancestor: [[LOCAL, REMOTE]] })
+    const files = await changedFilesOnBranch(h.run, '/repo', 'main', 'feat-x')
+    expect(files).toEqual(['src/a.ts']) // positive control: the diff really ran
+    const diff = h.calls.find((c) => c.includes('diff'))
+    expect(diff).toEqual(['git', '-C', '/repo', 'diff', '--name-only', `${REMOTE}...feat-x`])
+    expect(diff?.some((a) => a === 'main...feat-x')).toBe(false)
+  })
+})
+
 describe('runMutationProofGate — the phase between APPROVE and merge', () => {
   /**
    * The gate's PRODUCTION guard runner is the real killable spawner, so every
@@ -935,6 +1044,9 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
     const fs = memFs({ [join(proofWorktreePath('/repo', RUN), CLAIM.file)]: SRC_BEFORE })
     const diffRanges: string[] = []
     const scripted = scriptedHost()
+    // BOTH SIDES ARE PINNED, to different commits: the base name resolves to its
+    // own OID, so a range still carrying `main` on the left is visible here.
+    const BASE_SHA = 'c'.repeat(40)
     const out = await runMutationProofGate({
       run: RUN,
       claim: CLAIM,
@@ -944,15 +1056,18 @@ describe('runMutationProofGate — the phase between APPROVE and merge', () => {
           diffRanges.push(cmd[cmd.length - 1] ?? '')
           return res(0, 'src/limit.ts\n')
         }
-        if (cmd.includes('rev-parse')) return res(0, HEAD)
+        if (cmd.includes('rev-parse')) {
+          return res(0, (cmd.at(-1) ?? '').endsWith('/main^{commit}') ? BASE_SHA : HEAD)
+        }
         return scripted.run(cmd, cwd)
       },
       run_guard: async (argv, cwd) => scripted.run(argv, cwd),
       fs,
     })
     expect(out.ok).toBe(true)
-    // The binding was read at the PINNED SHA, never at the mutable branch name.
-    expect(diffRanges).toEqual([`main...${HEAD}`])
+    // The binding was read at the PINNED SHA on BOTH sides, never at a mutable
+    // branch name.
+    expect(diffRanges).toEqual([`${BASE_SHA}...${HEAD}`])
     expect(out.evidence?.observed?.head_sha).toBe(HEAD)
   })
 

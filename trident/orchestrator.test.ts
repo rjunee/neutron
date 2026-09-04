@@ -26,6 +26,7 @@ import {
   sweepStrandedFailures,
 } from './orchestrator.ts'
 import {
+  NO_NOMINATION_REFUSAL,
   parseMutationClaim,
   type MutationGateInput,
   type MutationGateOutcome,
@@ -2433,7 +2434,11 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
   // The PER-BRANCH artifact path, derived by the production helper from the branch
   // the sim plan resolves — never spelled out here, so a layout change reddens.
   const ARTIFACT_PATH = mutationClaimArtifactPath('feat-x') as string
-  const DIFF_ARTIFACT = `git -C /repo diff --name-only main...${SIM_REVIEWED_HEAD}`
+  // THE BASE SIDE IS PINNED TOO. `changedFilesOnBranch` resolves the base NAME to
+  // a commit before diffing — a bare `main` resolves against the LOCAL ref, which
+  // in a long-lived checkout trails origin and widens the diff to files the branch
+  // never touched. The harness's refs all resolve to `NO_DRIFT_SHA`.
+  const DIFF_ARTIFACT = `git -C /repo diff --name-only ${NO_DRIFT_SHA}...${SIM_REVIEWED_HEAD}`
   const SIZE_ARTIFACT = `git -C /repo cat-file -s ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
   const SHOW_ARTIFACT = `git -C /repo show ${SIM_REVIEWED_HEAD}:${ARTIFACT_PATH}`
 
@@ -2457,7 +2462,10 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       if (input.claim === null || input.claim === undefined) {
         return {
           ok: false,
-          reason: 'mutation proof required but the build nominated no mutation to run',
+          // The PRODUCTION constant, not a copy of its text: the orchestrator
+          // appends the reader's note to THIS refusal by exact match, so a
+          // literal here would let the two drift apart silently.
+          reason: NO_NOMINATION_REFUSAL,
           exempt: false,
           evidence: null,
         }

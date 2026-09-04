@@ -257,6 +257,12 @@ describe('inner-workflow.mjs NOMINATES the mutation (and can never report one)',
       // ...against an inert one, which really does earn the exemption (control).
       expect(isProseOnlyChange(['docs/notes.md'])).toBe(true)
       expect(brief).toContain('they are themselves LEGAL targets')
+      // ...and the ONE intersection where that promise would be false is named
+      // rather than left to be discovered by a refusal: a path with a `tests/`
+      // segment reads as a test file to the gate, so `skills/tests/SKILL.md`
+      // has neither an exemption nor a nominable target. Pinned as behaviour in
+      // trident/mutation-claim-artifact.test.ts against the real gate.
+      expect(brief).toContain('reads as a test file to the gate and is refused')
       // The ask sits ABOVE the numbered CONTRACT, with the other standing blocks.
       expect(brief.indexOf('\nCONTRACT\n')).toBeGreaterThan(-1)
       expect(brief.indexOf(artifactPath)).toBeLessThan(brief.indexOf('\nCONTRACT\n'))

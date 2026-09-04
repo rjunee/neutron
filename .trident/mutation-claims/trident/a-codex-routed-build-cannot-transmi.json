@@ -1,8 +1,8 @@
 {
   "file": "trident/mutation-prover.ts",
-  "find": "if (isMutationClaimArtifact(claim.file)) {",
-  "replace": "if (false && isMutationClaimArtifact(claim.file)) {",
+  "find": "if (localBehind.ok) return remote",
+  "replace": "if (localBehind.ok) return local",
   "guard": ["bun", "test", "trident/mutation-claim-artifact.test.ts"],
-  "control": ["bun", "test", "trident/mutation-prover.test.ts"],
-  "rationale": "This round's blocker fix: a committed nomination may no longer nominate ITSELF. Disabling that one branch in validateClaim lets a self-nomination through against a colluding diff, which reddens the self-nomination case in the reader suite (verified: 24 pass / 1 fail mutated, 25 pass / 0 fail restored); mutation-prover.test.ts never nominates that path and stays green (73 pass / 0 fail under the same mutation)."
+  "control": ["bun", "test", "trident/orchestrator.test.ts"],
+  "rationale": "This round's blocker fix: the base of the branch diff is now PINNED to the tip that CONTAINS the other, so a stale local base can no longer widen the diff and let a merged predecessor's nomination read as this build's. Returning the ref that is BEHIND restores the hole: the stale-base regression case in the reader suite goes red (verified 27 pass / 1 fail mutated, 28 pass / 0 fail restored) while orchestrator.test.ts, whose refs all resolve to one sha so the containment branch is never taken, stays green (238 pass / 0 fail under the same mutation)."
 }

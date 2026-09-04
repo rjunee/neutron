@@ -166,12 +166,19 @@ export const NO_NOMINATION_REFUSAL = 'mutation proof required but the build nomi
  * different files and the difference is exactly what a nomination would exploit.
  * The `.json` suffix is required too: only the nomination itself gets these two
  * dispensations, not anything a branch chooses to park in that directory.
+ *
+ * A `..` segment is REFUSED rather than dropped. Dropping it would be the same
+ * spelling trick from the other side — `.trident/mutation-claims/../../src/a.json`
+ * would read as the nomination and be treated as inert — and CANONICALISING it
+ * would answer for a path this function cannot see the filesystem of. Only a
+ * literal, already-normal path is the nomination.
  */
 function isMutationClaimArtifact(path: string): boolean {
   const segments = path
     .trim()
     .split('/')
     .filter((segment) => segment.length > 0 && segment !== '.')
+  if (segments.includes('..')) return false
   const dir = MUTATION_CLAIM_ARTIFACT_DIR.split('/')
   if (segments.length <= dir.length || !dir.every((d, i) => segments[i] === d)) return false
   return (segments[segments.length - 1] ?? '').endsWith('.json')
@@ -1007,19 +1014,97 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
     if (typeof raw !== 'string') return false
     const path = raw.trim()
     if (path.length === 0) return false
+    const segments = path.split('/')
+    if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
+    const base = segments[segments.length - 1] ?? ''
+    if (EXECUTABLE_PROSE_FILES.includes(base)) return false
     // THE BUILD'S OWN NOMINATION IS INERT. `.json` is not a prose suffix, so a
     // documentation-only branch that also wrote `.trident/mutation-claims/<b>.json`
     // destroyed its own exemption and became unmergeable — it owed a proof and
     // had no legal target to nominate. The file is the gate's bookkeeping, not
     // code the harness runs, so it neither earns nor forfeits an exemption.
+    //
+    // LAST, not first: the two REFUSALS above run on every path, this one
+    // included. The dispensation cannot be reached through a denylisted segment
+    // or an executable-prose basename, so a segment added to either list later
+    // polices this directory too, instead of being skipped by an escape hatch
+    // that ran before it. The cost is that a BRANCH NAME containing `skills`,
+    // `prompts`, `.claude`, `agent-dispatch` or `.github` as a path segment
+    // would put one in this path and forfeit the dispensation — accepted:
+    // trident slugs are `[a-z0-9-]`, and a documentation-only branch is told not
+    // to write the file at all.
     if (isMutationClaimArtifact(path)) return true
-    const segments = path.split('/')
-    if (segments.some((segment) => PROSE_DIR_DENYLIST.includes(segment))) return false
-    const base = segments[segments.length - 1] ?? ''
-    if (EXECUTABLE_PROSE_FILES.includes(base)) return false
     if (PROSE_EXACT.includes(base)) return true
     return PROSE_SUFFIXES.some((suffix) => base.endsWith(suffix))
   })
+}
+
+/**
+ * The commit the branch diff is taken FROM, pinned — origin's ref for the base
+ * when the local one trails it.
+ *
+ * THE BASE WAS THE ONE UNPINNED OPERAND IN THIS GATE. Every branch-side ref is
+ * resolved to an OID before it decides anything (`resolveMergeHeadSha`, the
+ * reviewed `expected_head`, the reader's own `pinRevision`), but the base
+ * arrived as a bare NAME and `git diff <name>...<ref>` resolves it against the
+ * LOCAL ref — which in a long-lived shared checkout routinely trails
+ * `origin/<name>` by many merges. A trailing base drags the three-dot MERGE-BASE
+ * backwards, so "the branch diff" swells to include every commit merged into the
+ * base since: measured in this repo, 170 files where the branch changed 13. Both
+ * rules that ride on this diff then read too permissively — `claim.file` counts
+ * as "in the branch diff" when the branch never touched it, and a committed
+ * nomination counts as "this build's" when it arrived from a merged predecessor
+ * of the same name, which is exactly the inheritance the per-branch path plus
+ * diff-membership check exists to stop.
+ *
+ * Resolution picks THE TIP THAT CONTAINS THE OTHER — a stale ref is an ancestor
+ * of the fresh one — and origin when the two have diverged, origin being the
+ * shared truth the merge will actually land on. Nothing is FETCHED here: this
+ * runs in the shared repo, where a fetch carries the symbolic-ref and
+ * configured-refspec traps `resolveMergeHeadSha` documents at length, and a
+ * tracking ref that is itself behind is already handled by the containment rule.
+ * Anything unresolvable falls back to the bare name — the long-standing
+ * behaviour — because a base that exists only locally must still work.
+ */
+export async function resolveBaseRevision(
+  run_host: RunHostCommand,
+  repo_path: string,
+  base_branch: string,
+): Promise<string> {
+  const base = base_branch.trim()
+  // A name git could read as an option or a refspec never reaches git here, and
+  // an operand that is already a sha (or anything else the caller pinned) is
+  // left exactly as it came: there is nothing to resolve.
+  if (base.length === 0 || !isPlainBranchName(base)) return base_branch
+  const local = await pinBaseRef(run_host, repo_path, `refs/heads/${base}`)
+  const remote = await pinBaseRef(run_host, repo_path, `refs/remotes/origin/${base}`)
+  if (remote === null) return local ?? base_branch
+  if (local === null || local === remote) return remote
+  // `merge-base --is-ancestor` answers by EXIT CODE, so `.ok` is the whole
+  // answer; a run that could not happen at all is neither, and falls through to
+  // origin.
+  const localBehind = await run_host(
+    ['git', '-C', repo_path, 'merge-base', '--is-ancestor', '--end-of-options', local, remote],
+    repo_path,
+  )
+  if (localBehind.ok) return remote
+  const remoteBehind = await run_host(
+    ['git', '-C', repo_path, 'merge-base', '--is-ancestor', '--end-of-options', remote, local],
+    repo_path,
+  )
+  return remoteBehind.ok ? local : remote
+}
+
+/** One base ref as a 40-hex OID, or null when it does not resolve to a commit. */
+async function pinBaseRef(run_host: RunHostCommand, repo_path: string, ref: string): Promise<string | null> {
+  const res = await run_host(
+    ['git', '-C', repo_path, 'rev-parse', '--verify', '--quiet', '--end-of-options', `${ref}^{commit}`],
+    repo_path,
+  )
+  const oid = res.stdout.trim().toLowerCase()
+  // `.ok` is load-bearing for the same reason it is in `resolveMergeHeadSha`: a
+  // failing rev-parse can still print, and on a sha-shaped name that print is hex.
+  return res.ok && HEX40.test(oid) ? oid : null
 }
 
 /**
@@ -1030,7 +1115,8 @@ export function isProseOnlyChange(files: readonly string[] | null | undefined): 
  * `ref` should be a PINNED commit sha wherever the answer is going to be used to
  * decide something (the gate passes one): given a branch NAME this re-resolves
  * the ref, and a branch that moves between two such resolutions yields a file
- * list for a commit nobody is proving.
+ * list for a commit nobody is proving. The BASE side is pinned here, by
+ * `resolveBaseRevision`, for the mirror-image reason.
  */
 export async function changedFilesOnBranch(
   run_host: RunHostCommand,
@@ -1039,7 +1125,8 @@ export async function changedFilesOnBranch(
   ref: string | null,
 ): Promise<string[] | null> {
   if (ref === null || ref.trim().length === 0) return null
-  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base_branch}...${ref}`], repo_path)
+  const base = await resolveBaseRevision(run_host, repo_path, base_branch)
+  const res = await run_host(['git', '-C', repo_path, 'diff', '--name-only', `${base}...${ref}`], repo_path)
   if (!res.ok) return null
   const files = res.stdout
     .split(/\r?\n/)

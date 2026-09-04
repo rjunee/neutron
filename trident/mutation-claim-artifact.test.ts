@@ -53,9 +53,22 @@ function fail(exit_code: number): HostCommandResult {
 const REF_OID = 'b'.repeat(40)
 
 /**
- * A scripted host that RECORDS every argv, and answers the four commands the
- * reader issues: the ref pin (only for a ref operand), the branch diff, the
- * object size, the blob body.
+ * The OID the BASE name pins to — DISTINCT from the branch's, and from the
+ * reviewed head, so an argv that still carries the bare base name (or the wrong
+ * pin) is visible in the recorded calls rather than passing by coincidence.
+ */
+const BASE_OID = 'c'.repeat(40)
+
+/** The two refs the base is resolved from, in the order the resolver reads them. */
+const BASE_PINS = [
+  ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${BASE}^{commit}`],
+  ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/remotes/origin/${BASE}^{commit}`],
+]
+
+/**
+ * A scripted host that RECORDS every argv, and answers the commands the reader
+ * issues: the ref pin (only for a ref operand), the BASE pin, the branch diff,
+ * the object size, the blob body.
  *
  * `diff` defaults to a listing that INCLUDES the artifact and `size` to the real
  * byte length of `body`, so each test overrides exactly the leg it is about.
@@ -65,6 +78,7 @@ function makeHost(opts: {
   diff?: string | HostCommandResult
   size?: string | HostCommandResult
   pin?: string | HostCommandResult
+  basePin?: string | HostCommandResult
   throws?: boolean
 }): { run: RunHostCommand; calls: string[][] } {
   const calls: string[][] = []
@@ -74,6 +88,12 @@ function makeHost(opts: {
   const run: RunHostCommand = async (cmd) => {
     calls.push([...cmd])
     if (opts.throws === true) throw new Error('spawn failed')
+    // The BASE is pinned too, and to its OWN oid: the branch side and the base
+    // side are separate operands and a test that answered both from one stub
+    // could not tell a correct diff from one taken against the wrong revision.
+    if (cmd.includes('rev-parse') && (cmd.at(-1) ?? '').endsWith(`/${BASE}^{commit}`)) {
+      return answer(opts.basePin, `${BASE_OID}\n`)
+    }
     if (cmd.includes('rev-parse')) return answer(opts.pin, `${REF_OID}\n`)
     if (cmd.includes('diff')) return answer(opts.diff, `${PATH}\ntrident/limit.ts\n`)
     if (cmd.includes('cat-file')) {
@@ -116,7 +136,8 @@ describe('readCommittedMutationClaim', () => {
     // from git's object record BEFORE the body is ever asked for — the ordering
     // is what makes the cap bound the read rather than describe it afterwards.
     expect(host.calls).toEqual([
-      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`],
+      ...BASE_PINS,
+      ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${OID}`],
       ['git', '-C', REPO, 'cat-file', '-s', `${OID}:${PATH}`],
       ['git', '-C', REPO, 'show', `${OID}:${PATH}`],
     ])
@@ -132,7 +153,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).toBeNull()
     expect(read.note).toContain('is not in the diff')
     // Refused on the DIFF leg — no body was ever fetched.
-    expect(host.calls).toEqual([['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`]])
+    expect(host.calls).toEqual([...BASE_PINS, ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${OID}`]])
   })
 
   test('AN INHERITED, UNTOUCHED ARTIFACT IS NOT A NOMINATION', async () => {
@@ -271,13 +292,62 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).not.toBeNull() // positive control: the read really happened
     expect(host.calls).toEqual([
       ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', `refs/heads/${BRANCH}^{commit}`],
-      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${REF_OID}`],
+      ...BASE_PINS,
+      ['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${REF_OID}`],
       ['git', '-C', REPO, 'cat-file', '-s', `${REF_OID}:${PATH}`],
       ['git', '-C', REPO, 'show', `${REF_OID}:${PATH}`],
     ])
     // Said the other way, because the argv equality above would survive a rename:
-    // NOTHING after the pin names a ref.
-    expect(host.calls.slice(1).some((c) => c.some((a) => a.includes('refs/')))).toBe(false)
+    // NOTHING but a pin names a ref — the three legs that read the blob carry
+    // OIDs only.
+    expect(host.calls.filter((c) => !c.includes('rev-parse')).some((c) => c.some((a) => a.includes('refs/')))).toBe(
+      false,
+    )
+  })
+
+  test('A STALE LOCAL BASE CANNOT RESURRECT AN INHERITED NOMINATION', async () => {
+    // THE HOLE THIS CLOSES, reproduced in this repo: local `main` trailed
+    // `origin/main` by 19 merges, so `git diff main...<branch>` listed 170 files
+    // where the branch changed 13 — including files merged in the meantime. A
+    // branch NAME reused after its predecessor merged would then find the OLD
+    // nomination "in its own diff" and prove the OLD mutation, while the change
+    // that actually shipped went unproved. That is invariant (a) defeated by the
+    // one operand that was never pinned.
+    const STALE = 'd'.repeat(40)
+    const FRESH = 'e'.repeat(40)
+    const calls: string[][] = []
+    const drifted: RunHostCommand = async (cmd) => {
+      calls.push([...cmd])
+      if (cmd.includes('rev-parse')) {
+        return ok(`${(cmd.at(-1) ?? '').startsWith('refs/remotes/') ? FRESH : STALE}\n`)
+      }
+      if (cmd.includes('merge-base')) return cmd.at(-2) === STALE && cmd.at(-1) === FRESH ? ok('') : fail(1)
+      if (cmd.includes('diff')) {
+        // The STALE base's over-wide diff carries the predecessor's nomination;
+        // the true one carries only what this branch changed.
+        return ok(cmd.at(-1) === `${STALE}...${OID}` ? `${PATH}\ntrident/limit.ts\n` : 'trident/limit.ts\n')
+      }
+      if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
+      return ok(BODY)
+    }
+
+    const read = await readCommittedMutationClaim(drifted, REPO, SOURCE)
+
+    expect(read.claim).toBeNull()
+    expect(read.note).toContain('is not in the diff')
+    // Proved by the argv, not only by the outcome: the diff was taken from
+    // origin's tip, and the stale name never reached it.
+    expect(calls.some((c) => c.at(-1) === `${FRESH}...${OID}`)).toBe(true)
+    expect(calls.some((c) => c.at(-1) === `${STALE}...${OID}` || c.at(-1) === `${BASE}...${OID}`)).toBe(false)
+    // No body was fetched at all — the refusal happened on the diff leg.
+    expect(calls.some((c) => c.includes('show'))).toBe(false)
+
+    // POSITIVE CONTROL, same host shape: a nomination THIS branch really wrote
+    // is in origin's diff too, and reads back. Without this the assertion above
+    // would pass on a reader that returns null unconditionally.
+    const own: RunHostCommand = async (cmd) =>
+      cmd.includes('diff') ? ok(`${PATH}\ntrident/limit.ts\n`) : await drifted(cmd, REPO)
+    expect((await readCommittedMutationClaim(own, REPO, SOURCE)).claim).not.toBeNull()
   })
 
   test('a ref that resolves to nothing is null, and the OID path issues no pin at all', async () => {
@@ -297,7 +367,9 @@ describe('readCommittedMutationClaim', () => {
     // the three-command read is unchanged.
     const pinned = makeHost({})
     expect((await readCommittedMutationClaim(pinned.run, REPO, SOURCE)).claim).not.toBeNull()
-    expect(pinned.calls.some((c) => c.includes('rev-parse'))).toBe(false)
+    // No pin OF THE BRANCH: `expected_head` is already an OID. The two base pins
+    // are the base side's own business and name the base, never the branch.
+    expect(pinned.calls.filter((c) => c.includes('rev-parse'))).toEqual(BASE_PINS)
   })
 
   test('a pin that answers with something that is not an OID is refused, not passed through', async () => {
@@ -353,7 +425,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).not.toBeNull()
     expect(host.calls.every((c) => !c.some((a) => a.includes('abc:')))).toBe(true)
     expect(host.calls[0]?.at(-1)).toBe(`refs/heads/${BRANCH}^{commit}`)
-    expect(host.calls[1]?.at(-1)).toBe(`${BASE}...${REF_OID}`)
+    expect(host.calls.at(-3)?.at(-1)).toBe(`${BASE_OID}...${REF_OID}`)
   })
 
   test('an uppercase, padded expected_head is trimmed and lowercased before use', async () => {
@@ -365,7 +437,7 @@ describe('readCommittedMutationClaim', () => {
     })
 
     expect(read.claim).not.toBeNull()
-    expect(host.calls[0]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${'a'.repeat(40)}`])
+    expect(host.calls[2]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE_OID}...${'a'.repeat(40)}`])
   })
 
   test('a host that throws resolves null rather than rejecting', async () => {
@@ -448,7 +520,10 @@ describe('the nomination file itself is neither a target nor a behaviour change'
   const collusiveHost: RunHostCommand = async (cmd) => {
     if (cmd.includes('rev-parse')) return ok(`${OID}\n`)
     if (cmd.includes('diff') && cmd.includes('--name-only')) {
-      return ok(`${SELF_NOMINATIONS.join('\n')}\ntrident/limit.ts\n`)
+      // Two harness-driving markdown paths ride along so the contract's "these
+      // are legal targets" promise can be tested where it holds and where it
+      // does not — the diff-binding check must not be what refuses either.
+      return ok(`${SELF_NOMINATIONS.join('\n')}\ntrident/limit.ts\nskills/tests/SKILL.md\nskills/trident/SKILL.md\n`)
     }
     return ok('')
   }
@@ -515,5 +590,42 @@ describe('the nomination file itself is neither a target nor a behaviour change'
     // ...and only the nomination ITSELF gets the dispensation. A branch that
     // parks source in that directory is not writing bookkeeping.
     expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/sneaky.ts`])).toBe(false)
+  })
+
+  test('the brief tells the truth about the ONE place a harness-driving path is NOT nominable', async () => {
+    // The contract says harness-driving markdown gets no exemption AND is itself
+    // a legal target. At `skills/tests/SKILL.md` both halves are true and the
+    // path is still refused — it carries a `tests/` segment, which the gate reads
+    // as a test file. A build sent at that target would be refused; the brief now
+    // names the exception instead of promising it.
+    const deadlocked = 'skills/tests/SKILL.md'
+    expect(isProseOnlyChange([deadlocked])).toBe(false) // no exemption…
+    const out = await gate(deadlocked)
+    expect({ ok: out.ok, ran: out.ran.length }).toEqual({ ok: false, ran: 0 }) // …and no proof either
+    expect(out.reason).toContain('test file')
+    // CONTROL: the same basename OUTSIDE a tests/ segment is exactly what the
+    // brief promises — proof-required and nominable.
+    expect(isProseOnlyChange(['skills/trident/SKILL.md'])).toBe(false)
+    expect((await gate('skills/trident/SKILL.md')).ran.length).toBeGreaterThan(0)
+  })
+
+  test('the dispensation is NOT reachable by climbing out of the directory', () => {
+    // `.` segments are dropped so `./x` and `x` are one path; `..` is REFUSED
+    // rather than dropped, because dropping it is the same spelling trick from
+    // the other side — `.trident/mutation-claims/../../src/a.json` would read as
+    // the gate's own bookkeeping and go inert.
+    expect(isProseOnlyChange([`./${PATH}`])).toBe(true) // control: `.` still normalises
+    expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/../../src/a.json`])).toBe(false)
+    expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/..`])).toBe(false)
+  })
+
+  test('the dispensation runs LAST, after the two refusals that police every path', () => {
+    // A denylisted segment or an executable-prose basename must not be skippable
+    // by an escape hatch that ran before it — so a segment added to either list
+    // later polices this directory too. The cost, accepted: a branch NAME
+    // carrying one of those segments forfeits the dispensation, and trident
+    // slugs are `[a-z0-9-]`.
+    expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/trident/x.json`])).toBe(true) // control
+    expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/skills/x.json`])).toBe(false)
   })
 })
