@@ -326,6 +326,53 @@ describe('TridentRunStore', () => {
     expect(after.inner_verdict).toBe('REVIEW_NOT_RUN')
   })
 
+  // ARGUS r10 (nit): `round = MAX(round, ?, ?)` took its third term from
+  // `checkpointRound(run.inner_checkpoint)` UNCONDITIONALLY — from a checkpoint
+  // the CAS above may refuse to store. The column then advanced on evidence the
+  // row never accepted: every other CAS-ed value honours the guard, and this one
+  // did not. Harmless in effect (MAX is monotone), inconsistent as a rule.
+  test('saveIfActive() does not advance round from a checkpoint the CAS refused to write', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-round', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'fix-round-2', round: 2 })
+    const seenRow = store.get(run.id)!
+    // The detached workflow moves the column AFTER the caller's read, so the CAS
+    // will decline the caller's checkpoint …
+    await store.update(run.id, { inner_checkpoint: 'argus-approved' })
+
+    expect(
+      await store.saveIfActive(
+        { ...seenRow, inner_checkpoint: 'fix-round-9', phase: 'argus' },
+        { workflow_columns_seen: { inner_checkpoint: seenRow.inner_checkpoint, inner_verdict: seenRow.inner_verdict } },
+      ),
+    ).toBe(true)
+
+    const after = store.get(run.id)!
+    // … so the checkpoint it names is not stored, and round 9 is not adopted
+    // from it either. The row keeps what it really has.
+    expect(after.inner_checkpoint).toBe('argus-approved')
+    expect(after.round).toBe(2)
+  })
+
+  test('saveIfActive() still advances round from a checkpoint the CAS DID write', async () => {
+    const store = new TridentRunStore(db)
+    const run = await store.create({ slug: 'cas-round-kept', project_slug: 't1', repo_path: '/r', task: 't' })
+    await store.update(run.id, { inner_checkpoint: 'fix-round-2', round: 2 })
+    const seen = store.get(run.id)!
+
+    // Nothing moved in between: the checkpoint lands, and so does its round.
+    expect(
+      await store.saveIfActive(
+        { ...seen, inner_checkpoint: 'fix-round-9' },
+        { workflow_columns_seen: { inner_checkpoint: seen.inner_checkpoint, inner_verdict: seen.inner_verdict } },
+      ),
+    ).toBe(true)
+
+    const after = store.get(run.id)!
+    expect(after.inner_checkpoint).toBe('fix-round-9')
+    expect(after.round).toBe(9)
+  })
+
   test('base pin columns round-trip through update, save, and saveIfActive', async () => {
     const store = new TridentRunStore(db)
     const run = await store.create({ slug: 'base-pin', project_slug: 't1', repo_path: '/r', task: 't' })

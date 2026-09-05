@@ -276,8 +276,22 @@ async function probeWorktreeEntry(
     if (Number.isInteger(parsed) && parsed > 1) pid = parsed
   }
 
+  // A THROWING LIVENESS SEAM IS NOT AN ANSWER (Argus r10, nit). The production
+  // `defaultProbePidAlive` catches everything, but this is an INJECTED dep and
+  // the docblocks above ("returns null when we could not look", "neither step
+  // may throw") promise this probe never throws — a promise the bare call broke
+  // for any other implementation. A throw is read as `unknown`, which the
+  // positive-only rule below already treats as "no evidence".
+  let liveness: 'alive' | 'dead' | 'unknown' = 'unknown'
+  if (pid !== null) {
+    try {
+      liveness = deps.probe_pid_alive(pid)
+    } catch {
+      liveness = 'unknown'
+    }
+  }
   let pid_live = false
-  if (pid !== null && deps.probe_pid_alive(pid) === 'alive') {
+  if (pid !== null && liveness === 'alive') {
     // 'dead' AND 'unknown' both leave this false: unknown is NOT evidence here,
     // which is the documented inversion of the run-evidence rule.
     pid_live = true

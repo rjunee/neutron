@@ -76,6 +76,7 @@ import { fileURLToPath } from 'node:url'
 import { createLogger } from '@neutronai/logger'
 import { foldStagedAsBuiltEntries, type FoldStagedAsBuiltEntriesResult } from './as-built-appender.ts'
 import { hasArgusProvenance, phaseForCheckpoint } from './checkpoint-phase.ts'
+import { checkpointRoundField } from './checkpoint-round.ts'
 import { executeBoundReview } from './review-run.ts'
 import { cleanupAfterMerge, type HostCommandResult, type MergeCleanupDeps } from './git-mode.ts'
 import { reviewedHeadOid } from './merge.ts'
@@ -4181,7 +4182,13 @@ export function buildTridentOrchestrator(
         // Forge's deviation across the process boundary so the resumed invocation
         // writes the `ralph-task-built-deviated` checkpoint and the NEXT iteration
         // full-plans; without it the string is byte-identical to the old format.
-        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${result.round}${result.deviated_from_spec ? ':deviated' : ''}`
+        // THE ROUND IS CLAMPED TO WHAT THE READERS ACCEPT (Argus r10, minor).
+        // `result.round` comes from `parseInnerResult`, i.e. from substrate JSON,
+        // and nothing there bounds it; `OUTER_PUBLISHED_CHECKPOINT` accepts at
+        // most nine digits. An unclamped absurd round therefore wrote a marker
+        // that the settle-timeout gate reads as NOT published — terminalizing,
+        // as `failed`, a run that had just pushed. See `checkpointRoundField`.
+        const checkpoint = `outer-published:${published.head}:${result.remaining_tasks ?? 0}:${checkpointRoundField(result.round)}${result.deviated_from_spec ? ':deviated' : ''}`
         const resetPatch: TridentRunUpdate = {
           inner_result: null,
           subagent_run_id: null,
