@@ -1,95 +1,99 @@
-# IMPLEMENTATION_PLAN — a codex-routed build cannot transmit a mutation nomination, so the merge gate refuses its PRs
+# IMPLEMENTATION_PLAN — a fire-turn settle timeout writes the run off as `failed` while the workflow it launched is still building (Plan card `fk…`)
 
-Card: on the codex route the schema field `mutationClaim` is filled by the BRIDGE, which never sees the build's reasoning; the wrapper trailer has no nomination line; the contracts never asked for one — so every codex-routed APPROVE reached the post-APPROVE mutation gate with a null claim and was refused. Fix: Option A — the build COMMITS its nomination to a per-branch artifact and the orchestrator reads it back out of git at the reviewed commit, ONLY when the in-result claim is null. The nomination stays untrusted; absence still means null.
+Card: `buildSubstrateWorkflowFire` (trident/inner-loop.ts) resolves `{status:'failed', error:'fire turn did not settle within the budget'}` on launcher-settle timeout, and the orchestrator (`orchestrator.ts` `outcome.status !== 'fired'` branch) unconditionally terminalized the run — but "not settled" does NOT imply "not fired". Measured: 8 of 33 runs in 7 days; the wake then invites a second lane onto a branch a live lane holds (stopped only by wrong-base-guard luck), and twice the timeout wrote `failed` over a run whose own row said `outer-published:*` (built, pushed, CI green). Fix in four layers: (1) never write plain `failed` on settle-timeout without checking positive evidence the workflow started — the run's own `inner_checkpoint` first, filesystem probes second; (2) a distinct launched-but-launcher-unobserved outcome that holds the lane instead of terminalizing, expressed over EXISTING columns only (no new column, no new phase); (3) the terminal-build wake must not tell an agent to relaunch for this failure shape — resolve the branch holder first; (4) dispatch must refuse on branch LIVENESS (live worktree lock / non-terminal run on the branch), not only on branch shape.
 
-Resume state (branch `trident/a-codex-routed-build-cannot-transmi`, PR #500 OPEN/MERGEABLE/CLEAN, 17/17 checks): the branch carries its squashed base commit plus the fix-round commits through round 13. Do NOT cite commit shas in this plan — the branch is replayed onto a moving base; `git log --oneline main..HEAD` is the only honest answer. Environment: a worktree WITHOUT its own `node_modules` fails trident/orchestrator.test.ts en masse ("table code_trident_runs has no column named claimed_paths" — workspace imports resolving into another checkout); `bun install --frozen-lockfile` in the worktree fixes it. Persist THIS body to the ROOT `IMPLEMENTATION_PLAN.md` and mirror it to `.trident/plans/trident/a-codex-routed-build-cannot-transmi.md`. Keep this file under 20 KB and NEVER include a literal dollar-brace template sequence — a launcher brief carrying one does not fire. Purity: never write the word for a per-customer isolated instance; say "absolute host filesystem paths".
+## Resume state (round 21, 2026-09-02 — Argus r10 fix round: two blockers, both fixed with red-first controls)
 
-## DESIGN DECISION (locked — do not re-litigate) — Option A, refined: the nomination is a COMMITTED artifact at `.trident/mutation-claims/<branch>.json`, read back out of git at the gate call site (`readCommittedMutationClaim`, invoked in `trident/orchestrator.ts` only when the schema claim is null). Chosen because in pr mode the workflow process ENDS at each publish handoff; a committed blob is the only channel that crosses that boundary. The suite-red question is SETTLED as failed-preexisting (recorded round 9; corroborated by reviewer A) — do not re-open it.
+Rounds 19–20 closed the r9 hold-write containment and the r10 `attempted: 'upsert' | 'delete'`
+reporting split. Round 21 (this one) answers Argus r10's second review: two BLOCKERS, one of them
+documentation.
 
-## Tasks
+- **BLOCKER, fixed — the cross-process branch race also arrives as `SQLITE_BUSY`.** The outer
+  catch in `board-dispatch.ts` classified the two-connection race by its ERROR TEXT and mapped
+  only `UNIQUE constraint failed: code_trident_runs.(project_slug|slug)` to the `branch_live`
+  refusal + hold. Codex's two-`ProjectDb` repro shows the same fact surfacing as
+  `BusyRetryExhaustedError: SQLITE_BUSY: exhausted 15 retries`, which that regex does not match —
+  so the loser returned `backend_error` (HTTP 500) and queued NOTHING: the card on the floor. The
+  classifier is now the STORE, not the string: on ANY failed insert the catch re-reads the live
+  holder (this repo's branch, or this project's slug — the index's other arm) and, when one is
+  visible, returns the same refusal, the same hold, and names the winner. Positive evidence only:
+  no visible holder is still `backend_error`. The re-read is skipped once the insert has WON, so a
+  post-create failure (`board.attachRun`, `holds.deleteByItem`) can never park a card behind its
+  own run. Controls in `board-dispatch.test.ts`: a real second `ProjectDb` on the same file lands
+  the competitor's row while this dispatch's write fails BUSY → `branch_live` + a real hold row
+  (red first: 46/1); the no-holder sibling stays `backend_error` and queues nothing; the
+  post-create throw stays `backend_error` with the run intact.
+- **BLOCKER, fixed (doc-only) — this resume state was stale at round 18.** It still nominated the
+  round-18 mutation target (`trident/fire-evidence.ts`) that the as-built superseded in round 20,
+  so a prover following the plan would run the wrong guard/control contract. The nomination below
+  is the round-20 one, re-verified at this head.
+- **Minor, fixed — the published round is bounded AT THE WRITER.** `OUTER_PUBLISHED_CHECKPOINT`
+  accepts `\d{1,9}`; the orchestrator interpolated `result.round` (substrate JSON, unbounded)
+  verbatim, so an absurd round wrote a marker the settle-timeout gate reads as NOT published —
+  terminalizing a run that had just pushed. New `checkpointRoundField` clamps it; the write site
+  calls it; boundary tests pin the clamp and that every clamped marker still parses as published.
+- **Minor, fixed — `queueDecision`'s two READS are contained**, the same escape class the r9 fix
+  closed for the hold WRITE. A throwing `board.get` falls back to the opening snapshot; a
+  throwing `store.get` counts the linked run as LIVE, which takes `queueHold`'s delete arm and can
+  therefore never CREATE a hold behind a card that may already have an owner. Control: a throwing
+  `store.get` still returns the typed `branch_live` refusal, queues nothing, and clears a stale
+  row (red first: 46/1).
+- **Nits, fixed at the line each concerns:** `probeBranchHolder`'s `probe_pid_alive` call is
+  wrapped, so the "returns null when we could not look" / "neither step may throw" docblocks are
+  true for an injected seam (a throw reads as `unknown` = no evidence); `saveIfActive`'s `round`
+  bind now honours the SAME compare-and-swap as the checkpoint it is derived from (a lost CAS
+  contributes 0), with a red-first control and its must-pass sibling.
+- **Not done, deliberately, and unchanged from rounds 19–20.** (a) The one-shot gather at the
+  timeout instant: the row is classified once, at t+0, while the card's own measurements put first
+  evidence 63–86 s later. Both reviewers who raised it recommended deferral, the downstream harms
+  are closed (terminal-build-wake keys on the reason string; the dispatch gate refuses on liveness
+  once the worktree exists), and closing it means holding the row open across ticks while the
+  negative control `6948da2d` must still terminalize — a change to the step state machine, not a
+  wrap. It stays a tracked follow-up. (b) The composed tick/drain test's call-count assertion: the
+  in-file docblock argues the deliberate split and both approving reviewers accepted it —
+  `open/__tests__/open-dispatch-hold-drain-wiring.test.ts` proves the PRODUCTION-composed drain
+  moves real hold state, and joining the halves would mean building the sweep inside the
+  composition test, which proves nothing about production.
+- **The mutation nomination is the ROUND-20 one, re-verified at this head.** File
+  `trident/board-dispatch.ts`; find `if (outcome.attempted === 'delete') {` (occurs EXACTLY ONCE
+  at this head — round 21 did not touch `queueFailureClause`); replace `if (false) {`; guard
+  `bun test trident/board-dispatch.test.ts`; control `bun test trident/liveness.test.ts`.
+- Standing, unchanged: never rebase; never merge main; the publisher owns origin; the Argus
+  round-5 STALE-BASE findings stay dead (its 23k-line review diff was taken against a ten-day-old
+  local main; that defect has its own card); the stray origin branch
+  `trident/resume-note-round-5-already-built-a` (empty, at old origin/main) is remote-owner
+  business. The salvage tag `trident-salvage/b5c5b38e-…` (`d56dc1d7`, +302/−688) stays UNADOPTED —
+  adopting it would delete the `trident/store.test.ts` "ARGUS r7 (BLOCKER)" regression block.
+- **A build in this worktree must `bun install` FIRST.** A fresh linked worktree has no
+  `node_modules`, so `@neutronai/*` resolves up to the SHARED checkout — whose `trident/store.ts`
+  and migrations belong to a different lineage, and the suite then fails with `no such column:
+  claimed_paths` / `no such table: code_trident_dispatch_holds` at BASE as well as at head. That is
+  a workspace-setup artifact, not a defect: 47/47 in `board-dispatch.test.ts` after `bun install`.
+- Known HOST-ENVIRONMENT suite failures OUTSIDE this branch's diff, identical at base `bee6dfd9`:
+  `tests/integration/install-gbrain.test.ts`, `tests/integration/install-codex.test.ts`,
+  `gateway/wiring/__tests__/build-gbrain-memory.test.ts`,
+  `gbrain-memory/__tests__/resolve-gbrain-command.test.ts`,
+  `tests/integration/github-credential-wired.open.test.ts` — a real gbrain/codex binary and an
+  ambient token exist on this box, which is exactly what those tests assert absent; plus
+  lane-composition flakes that pass on isolated re-run. Claiming `failed-preexisting` REQUIRES
+  `suiteEvidence` carrying the base-branch comparison AND the failing file NAMES.
 
-- [x] 1. Artifact reader module + unit suite (`trident/mutation-claim-artifact.ts` + test): per-branch path helper, 32 KiB cap sized via `git cat-file -s` before the body crosses the process boundary, decode is `parseMutationClaim` and nothing more (agent-route parity), every failure is null with a `note` saying which failure.
-- [x] 2. Gate call-site fallback + production-seam tests: `trident/orchestrator.ts` reads the committed artifact ONLY when `result.mutation_claim` is null, at the single `proveMutation` call site, at the reviewed OID; the reader's note is appended only to the gate's no-nomination refusal (`NO_NOMINATION_REFUSAL`, matched by strict equality). Seam tests prove: artifact reaches the spy gate and the run merges; missing artifact still refuses; a schema-supplied claim wins with no host command naming the artifact path.
-- [x] 3. The contract asks for the nomination: MUTATION NOMINATION block in `forgeBuildContract` (build + fix rounds; the codex route embeds the same brief), prose opt-out for inert-docs diffs, exactly-once find, allowlisted argv runners spelled out, 32 KiB cap named; prompt-seam tests extract the path via the production helper.
-- [x] 4. Review rounds 2-3: per-branch path (inheritance + lane collisions), `isProseOnlyChange` treats any blob under `.trident/mutation-claims/` as inert, replay-dropped content restored.
-- [x] 5. Review round 4: the TypeScript gate (null-narrowing helper in tests), the self-nomination bypass (`validateClaim` refuses a nomination naming the artifact itself via `isMutationClaimArtifact`), the mutable-ref read (refs pinned to OIDs before the read's three legs).
-- [x] 6. Review rounds 5-7: brief stops promising a target the gate refuses (harness-driving markdown rules); the codex route's null is guarded in CODE (`forgeAgent` discards a bridge-fabricated claim); `NO_NOMINATION_REFUSAL` exported so the orchestrator note lands on the right refusal only.
-- [x] 7. Review round 8: hostile base stops reaching git — `changedFilesOnBranch` refuses an option-shaped base (leading dash) before any command; deliberately NOT an allowlist (legal bases like release@v1 and HEAD~1 stay git's to judge); realgit repro of the option-injection kept.
-- [x] 8. Review round 9: reader-side base pinning added for artifact membership (both base ref spellings) — SUPERSEDED, see task 13.
-- [x] 9. Review round 10: base resolution moved into the gate (`branchDiffAgainstEveryBase`; exemption on the union, binding on the intersection) — VETOED twice by review: in local git-mode the ORIGIN spelling is the stale one, so the union destroyed the prose exemption (docs-only branches permanently unmergeable, reproduced A/B); and embedding documented bases like HEAD~1 inside remote ref paths silently reinterpreted them. Both vetoes live in code the card's Do-not section forbade touching.
-- [x] 10. Lesson recorded: an explicit negative constraint in the card does not reliably bind the build (happened twice). State constraints POSITIVELY: name the files and symbols a round may touch.
-- [x] 13. Round 11 — REVERT the rounds-9/10 base-resolution rewiring everywhere (prover AND reader; the artifact channel stays; the stale-base read becomes a recorded limitation for its own card), scope the nomination artifact PER WAVE MEMBER at the writer and test at the member seam, land the two truthfulness fixes (case-sensitive .json comments tell the truth; the byte cap refuses exactly 32768 to match "under 32 KiB"), and re-nominate the branch's own mutation claim (round 10's target line no longer exists after the revert).
-- [x] 14. Round 12 (review findings, no vetoed behaviour touched): (a) this plan's round-11 narrative corrected — `trident/mutation-prover.ts` was NOT "restored wholesale" and does NOT sit inside the card's four-item allowlist; what it actually holds, and why each extra hunk stays, is named in CURRENT STATE below. (b) `.JSON` case-sensitivity is EXECUTED rather than asserted in a comment: the uppercase spelling forfeits a docs diff's exemption and stays a legal target. (c) The reader's diagnostic notes stop collapsing — a malformed body, an unreadable size, a failed blob read and a host that THROWS are four distinct notes, which is what invariant (c) promised. (d) The writer/reader path asymmetry is pinned at the member seam BOTH ways: agreement on the production dispatch, and a fail-closed refusal (never a sibling's nomination) when a caller threads an unsuffixed member branch. (e) The build contract stops overclaiming that writing a nomination never forfeits a docs-only exemption.
+Rounds 1–20 (T1–T13 below) are recorded in this file's git history and in
+`.trident/as-built/trident/a-fire-turn-settle-timeout-writes-t.md`.
 
-- [x] 15. Round 13 (two blockers + one major, no vetoed behaviour touched): (a) the untrusted BASE stops flowing raw into the reader's notes — folded with `foldRefName` (the repo's own guard for this forgery) wherever a note quotes it, raw where git receives it, pinned at the unit level AND at the production seam that persists `failure_reason`; (b) the falsified "never a provable claim" declaration withdrawn — the reproduced stale-base inheritance is named in the PR body, in the reader's own docblock and in an executable test, with its bound and its own-card follow-up, and the vetoed base pinning is NOT reintroduced; (c) `pinRevision` stops reporting a throwing host as an absent ref; (d) an EMPTY branch diff is no longer described as an unreadable one; (e) the build contract's denylist warning says which names can actually forfeit the exemption (a segment anywhere but LAST).
+## Checklist (priority order)
 
-- [x] 16. Round 14 — hold the head still and get the verdict: the code is round 13's, published, GREEN (17 of 17 checks), and NEVER reviewed (the last run's launch fire never settled — infrastructure, after publish; the inner verdict is REVIEW_NOT_RUN, not a rejection). Persist this regenerated body to the root plan AND to its drifted mirror (the mirror is still the round-12 body and still asserts the "never a provable claim" declaration round 13 withdrew as falsified), commit those two files as the round's ONLY change, and stop so the panel can land a verdict on the published work. Write code ONLY on a CONFIRMED blocker reproduced on this head; a major/minor/nit is recorded in CURRENT STATE and left alone.
-
-- [x] 17. Round 15 (one code blocker, one re-ratification): (a) the pin leg stops collapsing every non-OK host result into "absent". `git rev-parse --verify --quiet` exits 1 silently for a revision that names nothing, and that is now the ONLY answer that lets the read try `refs/remotes/origin/<branch>`; a spawn that never happened (`exit_code: -1`), a watchdog kill, an unreadable repository, or an exit-zero answer carrying no object id each stop the read with a null claim and a note naming the host. Review reproduced the collapse returning the REMOTE commit's nomination under a note claiming the local ref did not resolve. Pinned four ways plus the positive control that keeps the cleaned-worktree fallback. (b) The stale-base inheritance is RE-RATIFIED as a deferral against Codex's Verdict C reproduction, in CURRENT STATE below.
-
-## PR BODY (authoritative — the publishing loop should carry this; the build lane may not run gh)
-
-Option A, refined: the nomination is a COMMITTED artifact, read back out of git at the gate call site. The build writes `.trident/mutation-claims/<branch>.json` — per branch, and per wave member in member mode — and commits it with its work; `trident/orchestrator.ts` calls `readCommittedMutationClaim` at the single `proveMutation` call site ONLY when the schema claim is null. Chosen over a loose worktree file and over Option B's seventh trailer line because in pr mode the workflow process ENDS at every publish handoff and re-enters with a null claim; a committed blob is the one channel that already crosses that boundary, and the reviewed OID binds the nomination to the very commit the gate pins. The nomination remains UNTRUSTED: same decode as the agent route, then the unchanged gate validates and actually RUNS it; TEST_COMMAND_SHAPES, the general-shell ban, the documentation rejection, the diff-membership requirement, the proof token/HMAC/evidence schema and prover_version are untouched. A missing artifact still decodes to null and a required proof still refuses. One declared widening: `isProseOnlyChange` treats ANY blob under `.trident/mutation-claims/` ending in `.json` as inert — including one written at ANOTHER lane's nomination path, since the predicate tests only the directory prefix and the `.json` suffix. The denylist refusals still run first and `validateClaim` refuses every path it admits as a TARGET, so a stray blob can buy a docs diff an exemption and can never itself be nominated. WHAT THAT DOES NOT BOUND, corrected here because an earlier draft of this paragraph said a stray blob could "never" yield a provable claim and review reproduced otherwise: where a branch NAME is reused after its predecessor merged and the LOCAL base ref is behind its remote, the predecessor's committed nomination AND the file it names are both still inside `<base>...<head>`, so the reader accepts the inherited nomination and the gate can RUN and prove the predecessor's mutation while this branch's own work goes unproved. That is the stale-base read — the same bare-name base resolution the gate already used before this PR for both the prose exemption and the `claim.file` binding, so it is not a widening this channel introduced — and the base pinning that closes it was VETOED twice by review (in local mode the origin spelling is the stale one, so the union reading destroyed the prose exemption and made documentation-only branches permanently unmergeable). It therefore stays a recorded limitation for its own card, and is now EXECUTABLE rather than prose: `mutation-claim-artifact.test.ts` pins both the inherited read and the bound that does hold (a nomination absent from the branch's diff is still null). Rounds 9-10 additionally pinned the gate's diff base to every commit the base names; round 11 REVERTED that per review — in local git-mode the origin ref spelling is the stale one, so the union reading destroyed the prose exemption, and embedding documented bases like HEAD~1 inside remote ref paths reinterpreted them — so the diff binding reads the base as a name exactly as before this PR, and the stale-base read is a recorded limitation for its own card. The agent route is unaffected: a schema-supplied claim wins and the reader is not invoked; on the codex route the bridge cannot fabricate a claim (discarded in code), so the committed blob is the answer. Two hunks in `trident/mutation-prover.ts` sit outside the card's four-item allowlist and are kept on purpose, named here rather than left to be discovered: the nomination blob's inert-prose dispensation, without which a documentation-only branch that wrote its nomination becomes permanently unmergeable, and round 8's fail-closed refusal of an option-shaped diff base, which both reviewers reproduced as a real `--output=` injection against git 2.43.0. Round 13 closes the two round-12 blockers without touching any vetoed behaviour: every branch/base NAME a reader note quotes is folded through the repo's own `foldRefName` before it lands in a persisted `failure_reason` (git accepts U+2028/U+202E in a base, that reason is replayed to a model verbatim, and this file already folds the same field wherever a wrong-base refusal quotes it) — the RAW base still reaches git, so no diff changes — and the "never a provable claim" declaration above is withdrawn and replaced with the reproduced case, its bound and its own-card follow-up. It also splits the pin leg's two nulls apart (an absent ref versus a host that throws) and stops reporting an EMPTY branch diff as an unreadable one. Round 12 adds no behaviour beyond splitting the reader's JSON decode into its own `try` — so a malformed nomination and a host that throws stop producing the same diagnostic — and correcting the contract sentence that claimed writing a nomination can never forfeit a docs-only exemption. Round 15 closes the panel's one code blocker: the pin leg no longer reads an UNANSWERED question as an absent ref. `git rev-parse --verify --quiet` exits 1 silently for a revision that names nothing (measured, git 2.43.0), and only that answer now lets the read move on to `refs/remotes/origin/<branch>`; a spawn that never happened, a watchdog kill, an unreadable repository, or an exit-zero answer carrying no object id each stop the read with a null claim — because falling back on an unanswered question returned the REMOTE commit's nomination while the note claimed the local ref did not resolve. The cleaned-worktree fallback is unchanged and pinned by a positive control. Nothing in `trident/mutation-prover.ts` changed this round.
-# CURRENT STATE (2026-09-04, round 15) — REPLACE this section each round; keep this file under 20 KB
-
-ROUND 15 IS THE PANEL'S FIRST VERDICT ON THIS CHANNEL, and it produced exactly one code blocker.
-Round 14 held the head still to get that verdict; this round closes the blocker and re-ratifies the
-one deferral the panel asked to be re-ratified. Nothing else changed — `trident/mutation-prover.ts`
-is byte-identical to round 13's, and no vetoed behaviour was reintroduced.
-
-  1. THE PIN LEG'S FALLBACK NOW NEEDS A CONCLUSIVE ANSWER (blocker, fixed).
-     `pinRevision` mapped EVERY non-OK host result to "absent", and the caller then tried
-     `refs/remotes/origin/<branch>` for it. Review reproduced `{ok: false, exit_code: -1}` on the
-     local rev-parse with a healthy remote ref: the reader returned the REMOTE commit's nomination
-     while its note said the local ref did not resolve. Measured on git 2.43.0, `rev-parse --verify
-     --quiet` exits 1 with empty stdout for a revision that names nothing — that answer, and only
-     that answer, now continues to the next ref. A spawn failure, a watchdog kill, exit 128 on an
-     unreadable repository, and an exit-zero answer carrying no object id each end the read with a
-     null claim and a note naming the host. Four inconclusive shapes plus a positive control are
-     pinned in `mutation-claim-artifact.test.ts`.
-
-  2. THE STALE-BASE INHERITANCE IS RE-RATIFIED AS A DEFERRAL, not closed (blocker, answered in the
-     record as the finding's own second option). Codex's Verdict C reproduced it against real git
-     and the real prover: local `main` behind `origin/main`, a branch NAME reused after its
-     predecessor merged, the inherited artifact naming `old.ts`, HEAD adding only
-     `new-unproved.ts` — the reader accepted the old claim and the gate returned ok because
-     membership is measured against the unresolved base NAME. The facts are undisputed and are
-     stated in the reader's docblock, in the PR body, and as an EXECUTABLE expectation
-     ("THE STALE-BASE INHERITANCE THIS READER DOES NOT CLOSE"). It stays deferred because the only
-     fix — binding artifact membership and proof membership to the resolved merge-base commit — is
-     the exact mechanism review VETOED twice (rounds 9 and 10): trident's local merge path advances
-     the local base ref and leaves the origin spelling stale, so the union reading destroyed the
-     prose exemption and made documentation-only branches permanently unmergeable (reproduced A/B),
-     and embedding a documented base like HEAD~1 inside a remote ref path silently reinterpreted
-     it. It is also NOT a regression this channel introduces: the pre-change gate already resolved
-     the base as a bare name for both the exemption and the `claim.file` binding. What bounds it:
-     the inherited nomination must name production code in that diff, it cannot name a nomination
-     blob, and the gate RUNS the mutation. Closing it belongs to a card that owns the gate's base
-     resolution — which this card's Do-not section forbids.
-
-  3. RECORDED AND LEFT ALONE (one major, two minors, three nits, none blocking): the two
-     `trident/mutation-prover.ts` hunks outside the four-symbol allowlist (kept deliberately,
-     disclosed in the PR body, both fail closed; conflict surface with PR #490);
-     `isMutationClaimArtifact` classifying absolute and trailing-slash spellings as the nomination
-     (unreachable — `validateClaim` refuses a leading slash and git never emits those spellings);
-     the byte-cap size parse accepting a negative or garbage-suffixed operand (the operand is git's
-     own `cat-file -s` output); the writer/reader member-path asymmetry (writer-side only, diverges
-     to a refusal, never to a sibling's nomination); nominations accumulating under
-     `.trident/mutation-claims/` with no post-merge pruning (mirrors `.trident/plans/`); and the
-     three-leg read running on branches the gate later exempts as prose-only (cost, not
-     correctness).
-
-SUITE: settled and NOT re-opened — `failed-preexisting`, re-proved this round at HEAD and at the
-merge base with the same failing files and the same failure names. `bun test trident/` is green.
-
-`trident/mutation-prover.ts` is unchanged from round 13: four allowlisted hunks
-(`MUTATION_CLAIM_ARTIFACT_DIR`, `NO_NOMINATION_REFUSAL`, `isMutationClaimArtifact`, and
-`validateClaim` refusing a nomination that names the artifact itself) plus two kept deliberately —
-`isProseOnlyChange` treating a nomination blob as inert, without which a documentation-only branch
-that wrote its nomination is permanently unmergeable, and `changedFilesOnBranch` refusing an
-option-shaped base before any command runs, which both reviewers reproduced as a real `--output=`
-injection on git 2.43.0 and which fails closed.
-
-Do NOT touch `.github/workflows/`, the proof token/HMAC/evidence schema, `TEST_COMMAND_SHAPES`, or
-the gate's base/diff resolution. This PR still cannot pass the deployed gate itself (the fix deploys
-only after merge); that is expected and is not a reason to re-open anything mid-round.
+- [x] **T1 — settle-timeout evidence gate at the orchestrator's fire-fail seam** (committed `91e85cd2`). Pure `trident/fire-evidence.ts` + tests; `inner-loop.ts` literals → shared constant; orchestrator's optional `gather_fire_evidence` seam consulted only on the settle-timeout error; red-first controls passed; unwired seam byte-identical.
+- [x] **T2 — production evidence gatherer** (committed `afb97906`). `trident/fire-evidence-probes.ts` (fresh-row re-read first, then the branch-holding linked worktree; live-lock pid with recycled-pid starttime check; positive-only; basenames + pids only) + exported `parseWorktreeList`/`probeBranchHolder`/`parseProcStartTime`, full unit suite.
+- [x] **T3 — wire the gatherer at the composition root** (committed `76a85ebb`). `build-core-modules.ts` passes `gather_fire_evidence` beside `gather_run_evidence`; composed wiring test proves A (live lock → lane held), B (`outer-published:*` row → published/review-not-run), C (no evidence → byte-identical `failed`); A and B recorded red first.
+- [x] **T4 — dispatch refuses on branch liveness (card req 4)** (committed `4483cd46`). `branch_live` gate in `trident/board-dispatch.ts` (after `already_landed`, and it queues); `defaultBranchHolderProbe` exported from fire-evidence-probes; `work-board-surface.ts` union widened; full red-first refusal suite in `board-dispatch.test.ts`.
+- [x] **T5 — the wake stops inviting a relaunch for this failure shape (card req 3)** (round 6). `buildTerminalBuildWakePrompt`: for the settle-timeout and published failure reasons, instruction 2 becomes resolve-the-branch-holder-first guidance; every other reason byte-identical, pinned verbatim. (Round 11: the prompt no longer promises a `work_board_start` resume that does not exist.)
+- [x] **T6 — record it** (round 6). `.trident/as-built/trident/a-fire-turn-settle-timeout-writes-t.md` entry (`docs/AS_BUILT.md` untouched, per the one-writer rule); plan + `.trident/plans` card doc truth-synced. Extended every subsequent round.
+- [x] **T8 — Argus round-5 findings** (rounds 10–11, `4b31f660` + `90e9a7d3`). Multi-entry branch-holder probe; drain floor; honest `branch_live` queue prose; hard-asserted refusal code; trimmed checkpoint at the write site with raw CAS token; duplicate plan doc removed.
+- [x] **T7 — land the salvaged typecheck fix** (round 9). `git merge --ff-only 726b92b2` (tag `trident-salvage/d567f33a-…`, parent `3f14fcd0`); no hand edits; CI `typecheck` SUCCESS on PR #498 since.
+- [x] **T10 — PR-cycle Argus r3/r4 findings** (rounds 12–13, `05faca77` + `cb913e03`). Single `queued` decision + `queueHold` across all three gates; marker token; source-scoped drain-wire pin; throw-proof lane-holding save.
+- [x] **T9 — verification-only settle round** (round 14, `fcd2f8e8`). Zero source changes; tip re-proven green locally; docs truth-synced so a valid review could run on the branch's real diff.
+- [x] **T12 — Argus r6/r7: the queue/no-queue decision and the branch race land at the write** (rounds 15–16, `43c648d9` + `d97e4bce`). `createIfClaimsAvailable` re-takes branch liveness inside the insert's transaction, reports `conflict: 'branch'` through the shared `refuseBranchLive`; drain wire proved by calling it; null-probe TOCTOU arm covered.
+- [x] **T13 — Argus r8 fix round** (round 18). Cross-project scope check in `queueDecision` + boundary test; `isPublishedUnreviewedReason` anchored on the producer's head, wired at both consumers, with five negative controls; six minors/nits fixed at the lines they concern; nomination re-verified unchanged.
+- [x] **T14 — Argus r10 fix round** (round 21). The insert-race is classified by the STORE, not by the error text, so a `SQLITE_BUSY` loser gets the `branch_live` refusal + hold instead of a 500 that queues nothing (two-`ProjectDb` boundary control, plus the no-holder and post-create-throw siblings); this resume state is brought forward to the round-20 mutation nomination; `checkpointRoundField` bounds the published round at the writer; `queueDecision`'s two reads are contained; two nits fixed at their own lines with red-first controls.
+- [x] **T11 — terminal nomination round: ZERO source changes; nominate the proven mutation.** Re-verify the find-string occurs exactly once in `trident/fire-evidence.ts` at HEAD; locally re-prove red-then-green in the worktree (apply `if (false) {` via the exact-substring replace, guard exits non-zero, control exits zero, restore, guard exits zero, porcelain clean); commit ONLY the truth-synced docs (this file + the byte-identical `.trident/plans/trident/a-fire-turn-settle-timeout-writes-t.md` copy + a dated round entry appended to `.trident/as-built/trident/a-fire-turn-settle-timeout-writes-t.md`; `docs/AS_BUILT.md` untouched); meet the terminal-task test obligations honestly (full suite — if only the known host-env failures appear, `suiteOutcome` `failed-preexisting` with EARNED `suiteEvidence`; `scripts/ci/typecheck-all.sh` with `trident/tsconfig.json` PASS; `scripts/ci/lint.sh`); and report `mutationClaim` in the forge structured output: file `trident/fire-evidence.ts`, find = the exactly-once outer-published guard line, replace `if (false) {`, guard `["bun","test","trident/fire-evidence.test.ts"]`, control `["bun","test","trident/liveness.test.ts"]`. A fix round that moves the target line MUST re-verify uniqueness and re-nominate with the corrected find; a fix round that does not touch it should nominate nothing (the build round's nomination stands automatically).

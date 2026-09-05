@@ -1316,6 +1316,19 @@ export class TridentRunStore {
         : 'inner_verdict = CASE WHEN inner_verdict IS ? THEN ? ELSE inner_verdict END'
     const checkpointBinds: (string | null)[] =
       seen === undefined ? [run.inner_checkpoint] : [seen.inner_checkpoint, run.inner_checkpoint]
+    // THE ROUND FOLLOWS THE CHECKPOINT IT IS DERIVED FROM (Argus r10, nit). The
+    // `round` column takes MAX(stored, caller's, the round named by the caller's
+    // inner_checkpoint) — but under the CAS the third term came from a checkpoint
+    // this statement may DECLINE to store. Harmless in effect (MAX is monotone and
+    // the next workflow checkpoint rewrites both), and inconsistent with the guard
+    // every other CAS-ed column honours: a lost CAS now contributes 0, so the
+    // column advances only on a checkpoint that was actually written. The CASE
+    // reads the PRE-UPDATE `inner_checkpoint`, exactly as `checkpointAssign` does.
+    const roundAssign = seen === undefined ? '?' : 'CASE WHEN inner_checkpoint IS ? THEN ? ELSE 0 END'
+    const roundBinds: (string | number | null)[] =
+      seen === undefined
+        ? [checkpointRound(run.inner_checkpoint) ?? 0]
+        : [seen.inner_checkpoint, checkpointRound(run.inner_checkpoint) ?? 0]
     const verdictBinds: (string | null)[] =
       seen === undefined ? [run.inner_verdict] : [seen.inner_verdict, run.inner_verdict]
     return this.db.transaction((tx) => {
@@ -1348,7 +1361,7 @@ export class TridentRunStore {
       }
       const res = tx.runSync(
         `UPDATE code_trident_runs
-            SET phase = ?, round = MAX(round, ?, ?), ralph_round = ?, branch = ?, pr = ?,
+            SET phase = ?, round = MAX(round, ?, ${roundAssign}), ralph_round = ?, branch = ?, pr = ?,
                 merge_mode = ?, subagent_run_id = ?, subagent_status = ?,
                 worktree = ?, failure_reason = ?, workflow_run_id = ?,
                 ${checkpointAssign}, ${verdictAssign}, harvested_at = ?,
@@ -1386,7 +1399,7 @@ export class TridentRunStore {
         [
           run.phase,
           run.round,
-          checkpointRound(run.inner_checkpoint) ?? 0,
+          ...roundBinds,
           run.ralph_round,
           run.branch,
           run.pr,
