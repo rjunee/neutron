@@ -2211,7 +2211,11 @@ describe('inner-workflow.mjs — an advisory-only rejection must not buy a fix r
     expect(out.blockKind).toBe('infra-only')
     // ...and the rejection is NOT laundered into an approval.
     expect(out.verdict).toBe('REQUEST_CHANGES')
-    // The finding still rides along, so `infraTerminalCause` can name the stop.
+    // The finding still rides along — it reaches the operator on the terminal result's
+    // `findings`. It does NOT become the stop's one-line CAUSE: `infraTerminalCause`
+    // excludes every finding this file has already declared non-blocking, so this stop
+    // measures '' and `classifyInnerFailure` calls it 'genuine' rather than auto-retrying
+    // it back into the same round.
     expect(out.findings.length).toBe(1)
   })
 

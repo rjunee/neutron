@@ -5321,8 +5321,12 @@ function reviewPreconditionDeferred(readiness) {
 const SUITE_FINDING_KIND = 'suite'
 // How much of ONE suite finding may reach a reviewer's prompt. Sized to the widest shape
 // `fullSuiteFindings` can produce (a 4000-char clamped transcription inside ~1000 chars of
-// the gate's own framing, plus the title) so the cap never truncates the gate's own text —
-// see `suiteFindingsPrompt`, which is the one reader.
+// the gate's own framing, plus the title) so the cap leaves the gate's own text intact on
+// every realistic finding — see `suiteFindingsPrompt`, which is the one reader. Not a
+// proof: `redactProbeText` GROWS the text it rewrites (each `scheme://user@` userinfo match
+// becomes `scheme://***@`), so a build-authored transcription contrived out of hundreds of
+// such fragments could still cross 6000. The cap is the backstop for exactly that, and
+// truncating an adversarial evidence blob is the direction we want.
 const SUITE_FINDING_PROMPT_MAX = 6000
 
 function fullSuiteFindings(report, dispatchedScope = 'full-suite') {
