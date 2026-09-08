@@ -3,7 +3,7 @@ import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, wr
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { seedMigratedDb } from '../tests/support/migrated-db.ts'
-import { ProjectDb } from '@neutronai/persistence/index.ts'
+import { BusyRetryExhaustedError, ProjectDb } from '@neutronai/persistence/index.ts'
 import { TridentRunStore } from './store.ts'
 import { DispatchHoldStore } from './dispatch-holds.ts'
 import {
@@ -1025,5 +1025,175 @@ describe('branch liveness refusal (branch_live)', () => {
     if (result.ok) return
     expect(result.code).toBe('branch_live')
     expect(result.message).toContain('wt-live-not-landed')
+  })
+
+  // ARGUS r10 (BLOCKER): the outer catch classified the two-process race by its
+  // ERROR TEXT, and only the `UNIQUE constraint failed` spelling was mapped to
+  // the refusal + hold. Two connections on one DB file also collide as
+  // `SQLITE_BUSY: exhausted 15 retries` (codex's two-`ProjectDb` repro), which
+  // that regex does not match — so the loser returned `backend_error`, the
+  // surface mapped it to HTTP 500, and NOTHING was queued: the card on the
+  // floor, which is the exact outcome the constraint arm exists to prevent. The
+  // classifier is now the STORE, not the string.
+  test('a cross-connection SQLITE_BUSY on the insert refuses branch_live and QUEUES the card', async () => {
+    const repoDir = makeCommittedRepo('repo-busy-race')
+    const holds = new DispatchHoldStore(db)
+    // A SECOND ProjectDb on the SAME file — the two-process boundary, for real.
+    const db2 = ProjectDb.open(join(tmp, 'project.db'))
+    const store2 = new TridentRunStore(db2)
+    let winnerId = ''
+    // The competitor lands its row on the OTHER connection while this dispatch
+    // is inside its insert, and this dispatch never gets the write lock. Gate
+    // (4b) therefore read a free branch — the row did not exist yet — and only
+    // the catch can still see the fact.
+    const racingStore = {
+      listNonTerminalByRepo: (path: string) => store.listNonTerminalByRepo(path),
+      get: (id: string) => store.get(id),
+      createIfClaimsAvailable: async () => {
+        winnerId = (
+          await store2.create({
+            slug: 'build-the-thing',
+            project_slug: 'proj-1',
+            repo_path: repoDir,
+            task: TASK,
+            merge_mode: 'local',
+            ralph: false,
+            branch: BRANCH,
+          })
+        ).id
+        throw new BusyRetryExhaustedError(15, new Error('SQLITE_BUSY: database is locked'))
+      },
+    } as unknown as TridentRunStore
+
+    try {
+      const result = await dispatchBoardBoundBuild(
+        { task: TASK, board_item_id: 'ready' },
+        livenessDeps(repoDir, { store: racingStore, holds }),
+      )
+
+      expect(result.ok).toBe(false)
+      if (result.ok) return
+      expect(result.code).toBe('branch_live')
+      // It names the run that won, on the other connection…
+      expect(result.message).toContain(winnerId.slice(0, 8))
+      expect(result.message).toContain(BRANCH)
+      // …says what actually failed here…
+      expect(result.message).toContain('SQLITE_BUSY')
+      expect(result.message).toContain('never delete the branch')
+      // …and the card is really queued, in the shape and in the store, bound to
+      // the holder whose terminal event releases it.
+      expect('hold' in result).toBe(true)
+      if (!('hold' in result)) return
+      expect(result.hold).toEqual({ kind: 'branch', branch: BRANCH, holding_run_id: winnerId })
+      expect(holds.getByItem('proj-1', 'ready')).not.toBeNull()
+    } finally {
+      db2.close()
+    }
+  })
+
+  // THE MUST-PASS SIBLING — positive evidence only, unchanged. A failing write
+  // with NOBODY holding the card is a genuine backend failure and must stay one:
+  // inventing a holder would park the card behind a run that does not exist.
+  test('a SQLITE_BUSY with no live holder anywhere is still backend_error, and queues nothing', async () => {
+    const repoDir = makeCommittedRepo('repo-busy-no-holder')
+    const holds = new DispatchHoldStore(db)
+    const bustedStore = {
+      listNonTerminalByRepo: (path: string) => store.listNonTerminalByRepo(path),
+      get: (id: string) => store.get(id),
+      createIfClaimsAvailable: async () => {
+        throw new BusyRetryExhaustedError(15, new Error('SQLITE_BUSY: database is locked'))
+      },
+    } as unknown as TridentRunStore
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { store: bustedStore, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('backend_error')
+    expect(result.message).toContain('SQLITE_BUSY')
+    expect(holds.getByItem('proj-1', 'ready')).toBeNull()
+  })
+
+  // THE OTHER SIDE OF THE SAME CHANGE: a failure AFTER the insert WON. The row
+  // the catch's re-read finds is then OUR OWN, and re-diagnosing it as "someone
+  // else holds this branch" would queue a hold behind a run this very call
+  // created — a card parked behind itself.
+  test('a failure AFTER the run was created is a backend_error, never a branch_live refusal against our own row', async () => {
+    const repoDir = makeCommittedRepo('repo-post-create-throw')
+    const holds = new DispatchHoldStore(db)
+    const throwingBoard: TridentBoardBinder = {
+      ...board,
+      attachRun: async () => {
+        throw new Error('database is locked')
+      },
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { board: throwingBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('backend_error')
+    // The run really was created — and it is not treated as its own competitor.
+    expect(store.listNonTerminalByRepo(repoDir)).toHaveLength(1)
+    expect(holds.getByItem('proj-1', 'ready')).toBeNull()
+  })
+
+  // ARGUS r10 (minor), the same escape class the r9 fix closed for the hold
+  // WRITE: `queueDecision`'s two DB READS (`board.get`, `store.get`) run outside
+  // every try/catch at the blocker gate and at this gate, so a store hiccup
+  // turned a typed refusal into a rejected promise at `code-command.ts` /
+  // `open/composer.ts`. A read that fails now degrades — and an UNREADABLE
+  // linked run counts as live, which takes the delete arm and can never CREATE a
+  // hold behind a card that may already have an owner.
+  test('a THROWING store.get in the queue decision still returns the typed refusal — never a rejected promise', async () => {
+    const repoDir = makeCommittedRepo('repo-decision-read-throws')
+    const holds = new DispatchHoldStore(db)
+    await holds.upsert({
+      project_slug: 'proj-1',
+      board_item_id: 'ready',
+      task: TASK,
+      hold_kind: 'blocker',
+      hold_reason: 'queued while the card had no live run of its own',
+      held_on_blocker_id: 'some-other-card',
+    })
+    addLockedWorktree(repoDir, 'wt-decision-read-throws', `claude agent test (pid ${process.pid})`)
+    const blindStore = {
+      listNonTerminalByRepo: (path: string) => store.listNonTerminalByRepo(path),
+      get: () => {
+        throw new Error('database is locked')
+      },
+      createIfClaimsAvailable: async () => {
+        throw new Error('the dispatch must never get this far')
+      },
+    } as unknown as TridentRunStore
+    const linkedBoard: TridentBoardBinder = {
+      ...board,
+      get: () => ({
+        id: 'ready',
+        title: 'wire the CSV export button to the new endpoint with tests',
+        design_doc_ref: null,
+        linked_run_id: 'a-run-id-nothing-can-read',
+      }),
+    }
+
+    const result = await dispatchBoardBoundBuild(
+      { task: TASK, board_item_id: 'ready' },
+      livenessDeps(repoDir, { store: blindStore, board: linkedBoard, holds }),
+    )
+
+    expect(result.ok).toBe(false)
+    if (result.ok) return
+    expect(result.code).toBe('branch_live')
+    expect(result.message).toContain('nothing stays queued')
+    // The unreadable run is treated as an OWNER, so the refusal writes nothing
+    // and clears what an earlier dispatch left.
+    expect('hold' in result).toBe(false)
+    expect(holds.getByItem('proj-1', 'ready')).toBeNull()
   })
 })

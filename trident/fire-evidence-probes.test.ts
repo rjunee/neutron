@@ -280,6 +280,25 @@ describe('the branch holder — a live lock is launch evidence', () => {
     expect((await gather({ run: run(), fire_started_at_ms: FIRE_AT })).kind).toBe('launched')
   })
 
+  // ARGUS r10 (nit): `deps.probe_pid_alive` was called OUTSIDE every try/catch,
+  // so a throwing seam escaped through `probeBranchHolder` and the gatherer —
+  // contradicting both docblocks ("returns null when we could not look",
+  // "neither step may throw"). Production's `defaultProbePidAlive` catches
+  // everything, so this was comment-vs-code drift rather than a live defect; the
+  // code now matches the promise, and a throw reads as the `unknown` this suite
+  // already pins as no evidence.
+  test('MUST STAY FAILED — a THROWING pid probe is not evidence, and does not escape', async () => {
+    const gather = buildFireEvidenceGatherer({
+      read_run: () => run(),
+      run_host: async () => okHost(porcelain(linkedBlock({ locked: LIVE_LOCK }))),
+      fs: makeFs(),
+      probe_pid_alive: () => {
+        throw new Error('boom')
+      },
+    })
+    expect((await gather({ run: run(), fire_started_at_ms: FIRE_AT })).kind).toBe('none')
+  })
+
   test('MUST STAY FAILED — a dead lock pid, and an UNKNOWN one, are both not evidence', async () => {
     for (const state of ['dead', 'unknown'] as const) {
       const gather = buildFireEvidenceGatherer({
