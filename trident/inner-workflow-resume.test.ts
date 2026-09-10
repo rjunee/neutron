@@ -69,6 +69,21 @@ const ADVISORY_ONLY_FINDINGS = [
   },
 ]
 
+/**
+ * The advisory the CI GATE ITSELF writes onto `argus-request-changes-round-N` when every
+ * red is also red at the base — `ciBlockerFindings`' second arm, title and marker
+ * included. This is the exact row a PR-mode round records, and therefore the exact input
+ * a resume of that row reads back.
+ */
+const RECORDED_CI_ADVISORY = [
+  {
+    severity: 'major',
+    advisory: true,
+    title: 'CI RED FOR PRE-EXISTING REASONS: test',
+    evidence: 'The `test` check is FAILURE on this PR — AND it is already failing at the base.',
+  },
+]
+
 interface RunOut {
   labels: string[]
   prompts: Array<{ label: string; prompt: string }>
@@ -104,6 +119,15 @@ interface ResumeOpts {
   /** The rendered TEST EXECUTION block. Omitted → '' (a launcher that derives none),
    *  which is the arming condition for the full-suite gate. */
   testStrategy?: string
+  /** PR MODE, with a PR number — the ONLY world in which CI exists. `probeCi` returns
+   *  `{status:'none'}` without spending a seat when `!isPr`, so a CI property asserted
+   *  in local mode is asserted about nothing. */
+  pr?: boolean
+  /** What `gh pr checks` reports for the PR, in PR mode. Defaults to green. */
+  ci?: 'red' | 'green'
+  /** What the SAME check reports AT THE BASE. 'red' → the PR's red is excused as
+   *  pre-existing (advisory), which is the finding this branch's economy is about. */
+  ciBase?: 'red' | 'green'
 }
 
 /** Drive the REAL inner-workflow body through a resume. */
@@ -127,6 +151,52 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
       return { head: FIX_SHA(round) }
     }
     if (label === 'resume-diff') return { bytes: opts.diffBytes ?? 4096 }
+    // ── THE PR-MODE PROBE SEATS ────────────────────────────────────────────────
+    // Dispatched only when `mergeMode` is 'pr' AND there is a PR, so these branches
+    // are dead for every local-mode case above. Fixture shapes copied from
+    // `__tests__/dying-reviewer-e2e.test.ts`, which drives the same seats.
+    if (label.startsWith('ci-probe-round-')) {
+      return {
+        raw: `[{"name":"test","state":"${opts.ci === 'red' ? 'FAILURE' : 'SUCCESS'}","link":"https://x/1"}]\n___EXIT=0`,
+        exit_code: 0,
+      }
+    }
+    if (label.startsWith('ci-base-probe-round-')) {
+      // Spent only when the PR is red; both halves of the base measurement, in the
+      // two-section shape `ciSection`/`mergeBaseCi` parse.
+      const state = opts.ciBase === 'red' ? 'FAILURE' : 'SUCCESS'
+      return {
+        raw: `___SECTION=RUNS\n[{"name":"test","state":"${state}"}]\n___SECTION=STATUSES\n[]\n___EXIT=0`,
+        exit_code: 0,
+      }
+    }
+    if (label.startsWith('required-checks-r')) {
+      return {
+        raw:
+          'gh: Not Found (HTTP 404)\n___PROT_EXIT=1\n' +
+          '___SECTION=BRANCH\n{"protected":false,"protectionEnabled":false}\n___BRANCH_EXIT=0\n' +
+          '___SECTION=RULES\n[]\n___RULES_EXIT=0\n' +
+          '___SECTION=RUNS\n{"n":1,"names":["test"]}\n___RUNS_EXIT=0\n' +
+          '___SECTION=STATUSES\n{"n":0,"names":[]}\n___STATUSES_EXIT=0\n___EXIT=0',
+        exit_code: 0,
+      }
+    }
+    if (label.startsWith('review-readiness-r')) {
+      return {
+        raw: JSON.stringify({
+          mergeable: 'MERGEABLE',
+          // COMPLETED whatever its conclusion: the readiness gate asks whether the
+          // checks have SETTLED, and a red-but-finished check is ready to review.
+          statusCheckRollup: [
+            { name: 'test', status: 'COMPLETED', conclusion: opts.ci === 'red' ? 'FAILURE' : 'SUCCESS' },
+          ],
+        }),
+        exit_code: 0,
+      }
+    }
+    if (label.startsWith('merge-probe-round-')) {
+      return { raw: '{"state":"OPEN","mergedAt":""}\n___EXIT=0', exit_code: 0 }
+    }
     if (label === 'plan:fable') {
       return {
         implementationPlan: '- [ ] task A',
@@ -185,9 +255,11 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     maxRounds: opts.maxRounds ?? 10,
     ralph: opts.ralph === true,
     // local mode keeps the panel to claude+adversarial+synthesis (no CI probe, no
-    // cross-model seats) — the resume decision is git-mode independent.
-    mergeMode: 'local',
-    prNumber: null,
+    // cross-model seats) — the resume decision is git-mode independent. `pr: true`
+    // switches to the mode where CI EXISTS, which is the only place a CI property can
+    // be measured at all (`probeCi` early-returns 'none' when `!isPr`).
+    mergeMode: opts.pr === true ? 'pr' : 'local',
+    prNumber: opts.pr === true ? 7 : null,
     branch: 'trident/resume-run',
     dbPath: '/tmp/does-not-exist.db',
     runId: 'run-resume-1',
@@ -364,6 +436,72 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     expect(out.result.reviewedHead).toBe(RECORDED)
     // And the stale lane text is nowhere in what this round dispatched.
     expect(out.prompts.every((pr) => !pr.prompt.includes('REVIEW SEAT DOWN'))).toBe(true)
+  })
+
+  /**
+   * THE SAME BOUNDARY, IN THE ONLY MODE WHERE CI EXISTS — and this is the half the two
+   * tests above CANNOT measure (round-3 review, confirmed by three panelists). They run in
+   * `mergeMode: 'local'`, where `probeCi` returns `{status:'none'}` without spending a seat,
+   * so "the CI red is re-probed and a red that went green is observed" was asserted about a
+   * probe that never ran. These two run in PR mode with a PR number, and they run IN
+   * SEQUENCE — the second consumes what the first recorded — because the livelock is a
+   * property of the SECOND run: once a round terminates 'advisory-only', a rerun on the same
+   * head could never observe that CI had gone green, and replayed the hold forever.
+   */
+  test('PR mode, CI still red at the PR and at the base → the hold holds, and it still buys NO Forge round', async () => {
+    const out = await runResume({
+      pr: true,
+      checkpoint: 'argus-request-changes-round-2',
+      recordedHead: RECORDED,
+      findings: RECORDED_CI_ADVISORY,
+      ci: 'red',
+      ciBase: 'red',
+      verdicts: ['APPROVE'],
+    })
+    // The seat that cannot exist in local mode ACTUALLY RAN — this round measured CI.
+    expect(out.labels).toContain('ci-probe-round-2')
+    expect(out.labels).toContain('ci-base-probe-round-2')
+    // The panel approved, and the red PR still holds the merge…
+    expect(out.result.verdict).toBe('REQUEST_CHANGES')
+    // …as an ADVISORY-ONLY hold: every red is red at the base, so there is no code work.
+    expect(out.result.blockKind).toBe('advisory-only')
+    // The economy 17c72201 bought is intact: no round is bought on a pre-existing red.
+    expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
+    // And the hold is RECORDED with the advisory, which is what the next run reads back.
+    expect(promptFor(out, 'checkpoint:argus-request-changes-round-2')).toContain(
+      'CI RED FOR PRE-EXISTING REASONS',
+    )
+  })
+
+  test('PR mode, the SAME recorded advisory on an UNCHANGED head, CI now GREEN → re-probed, and the run reaches a verdict', async () => {
+    const out = await runResume({
+      pr: true,
+      checkpoint: 'argus-request-changes-round-2',
+      recordedHead: RECORDED,
+      findings: RECORDED_CI_ADVISORY,
+      ci: 'green',
+      // ARMED, deliberately: `resumeSuiteFindings` is inert when the launcher derived no
+      // strategy, so the carry-forward filter below can only be measured with one set.
+      testStrategy: 'bun run test',
+      verdicts: ['APPROVE'],
+    })
+    // THE RE-PROBE, EXECUTED. Replaying the recorded hold returns before `reviewAndSynthesize`
+    // and therefore before `probeCi`, so this label is absent in the livelocked shape.
+    expect(out.labels).toContain('ci-probe-round-2')
+    // Nothing was rebuilt and no round was bought — the head never moved.
+    expect(built(out.labels)).toBe(false)
+    expect(out.labels.some((l) => l.startsWith('forge:'))).toBe(false)
+    // The panel re-ran, exactly once, and the run REACHES A VERDICT instead of replaying.
+    expect(out.labels.filter((l) => l === 'argus:claude')).toHaveLength(1)
+    expect(out.result.verdict).toBe('APPROVE')
+    expect(out.labels).toContain('checkpoint:argus-approved')
+    expect(out.result.reviewedHead).toBe(RECORDED)
+    // AND THE STALE ADVISORY IS NOT REPLAYED INTO THE PROMPTS. `resumeSuiteFindings` keeps
+    // only the SUITE gate's own entries off a fix-mode row, precisely because a CI advisory
+    // is re-measured here — carrying it forward would assert a red this round just watched
+    // turn green.
+    expect(promptFor(out, 'argus:claude')).not.toContain('CI RED FOR PRE-EXISTING REASONS')
+    expect(promptFor(out, 'argus:synthesis')).not.toContain('CI RED FOR PRE-EXISTING REASONS')
   })
 
   /**
