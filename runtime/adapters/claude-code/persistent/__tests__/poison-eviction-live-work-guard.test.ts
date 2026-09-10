@@ -12,16 +12,25 @@
  * watchdog reaped the corpse ~170 min later.
  *
  * THE GUARD. Before evicting a poisoned session, `getOrSpawnSession` consults
- * `options.hostsLiveWork(childGeneration)`. > 0 → the eviction is DEFERRED: the
- * poison is cleared, the child stays warm, the next turn lands on it. 0 (or the
- * option unwired, or a throw) → evict exactly as before, AND the `onChildCrash`
- * sink is told about the EVICTED generation so crash recovery runs on the next
- * tick instead of after the reaper.
+ * `options.hostsLiveWork(childGeneration)`. 0 (or the option unwired, or a throw)
+ * → evict exactly as before, AND the `onChildCrash` sink is told about the
+ * EVICTED generation so crash recovery runs on the next tick instead of after the
+ * reaper. > 0 → the child is QUARANTINED: unhooked from the pool so it serves no
+ * further turn, left RUNNING so its hosted workflows finish, and reaped once they
+ * do. This turn falls through to a clean, FRESH spawn.
  *
- * The fake host below: REPL incarnation #1 ignores its FIRST inject (the
- * abandoned/runaway turn) and answers every later one; incarnation #2+ answer
- * everything. So "which child served turn 2" is observable from `spawnCount()`
- * AND from the reply text.
+ * WHY QUARANTINE AND NOT REUSE (cross-model review blocker #2, 2026-09-04). The
+ * first cut cleared `session.poisoned` and returned the same child, which is what
+ * the poison exists to forbid — the abandoned turn is still running on that REPL
+ * and its stale-reply debt strips the next reply's turn_id. Its regression test
+ * could not see that, because the fake host answered turn 2 on the wedged child:
+ * a real desynced REPL does not. So the host below models the real thing —
+ * **incarnation #1 answers NOTHING, ever**. A test that expects the wedged child
+ * to serve the next turn cannot pass against it.
+ *
+ * "Which child served turn 2" is therefore observable from `spawnCount()`, from
+ * the reply text (`repl-<incarnation>:…`), and — new — from `childAlive(1)`,
+ * which separates *spared* from *reused*.
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
@@ -35,18 +44,32 @@ import {
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
 } from '../persistent-repl-substrate.ts'
+import { quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
+import { loadRegistry, patchRecord } from '../repl-registry.ts'
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
 afterEach(async () => {
   await shutdownAllPersistentRepls()
 })
 
-function makeWedgeOnceHost(): { host: PtyHost; spawnCount: () => number; messagesSeen: () => number } {
+function makeWedgeOnceHost(): {
+  host: PtyHost
+  spawnCount: () => number
+  messagesSeen: () => number
+  childAlive: (incarnation: number) => boolean
+  argvOf: (incarnation: number) => string[]
+} {
   let spawns = 0
   let messages = 0
+  const alive = new Map<number, () => boolean>()
+  const argvs = new Map<number, string[]>()
   const host: PtyHost = {
     spawn(argv: string[]): PtyChild {
       spawns += 1
       const incarnation = spawns
+      argvs.set(incarnation, [...argv])
       let messagesOnThisChild = 0
       const pid = 430000 + spawns
       const i = argv.indexOf('--session-id')
@@ -74,9 +97,12 @@ function makeWedgeOnceHost(): { host: PtyHost; spawnCount: () => number; message
             const body = (await req.json()) as { text: string; turn_id?: string }
             messages += 1
             messagesOnThisChild += 1
-            // Incarnation #1 wedges on its FIRST inject only (the abandoned turn);
-            // everything else is answered, tagged with the replying child.
-            if (!(incarnation === 1 && messagesOnThisChild === 1)) {
+            // Incarnation #1 is the WEDGED child: its first inject is the runaway
+            // turn and it never regains correlation, so it answers NOTHING — the
+            // behaviour a real abandon-poisoned REPL has. Everything from a later
+            // incarnation is answered, tagged with the replying child.
+            void messagesOnThisChild
+            if (incarnation !== 1) {
               // A real child answers AFTER the inject POST has returned; reply on
               // the next tick so the pool's post-inject status precedes the completion.
               setTimeout(() => {
@@ -92,6 +118,7 @@ function makeWedgeOnceHost(): { host: PtyHost; spawnCount: () => number; message
           return new Response('nf', { status: 404 })
         },
       })
+      alive.set(incarnation, () => !hasExited)
       void post('/channel-ready', { session_id: sid, channel_port: server.port, pid })
       void post('/channel-bound', { session_id: sid })
       return {
@@ -113,7 +140,13 @@ function makeWedgeOnceHost(): { host: PtyHost; spawnCount: () => number; message
       }
     },
   }
-  return { host, spawnCount: () => spawns, messagesSeen: () => messages }
+  return {
+    host,
+    spawnCount: () => spawns,
+    messagesSeen: () => messages,
+    childAlive: (incarnation) => alive.get(incarnation)?.() === true,
+    argvOf: (incarnation) => argvs.get(incarnation) ?? [],
+  }
 }
 
 function opts(host: PtyHost, extra: Partial<PersistentReplSubstrateOptions> = {}): PersistentReplSubstrateOptions {
@@ -216,43 +249,144 @@ describe('the post-inject `working` status names the child generation (the evict
   })
 })
 
-describe('abandon-poison eviction guard — a poisoned launcher hosting live work is NOT evicted', () => {
-  it('REGRESSION: with hostsLiveWork > 0 the next turn reuses the SAME child (no respawn), the poison is cleared, and the deferral is logged', async () => {
-    const { host, spawnCount, messagesSeen } = makeWedgeOnceHost()
+describe('abandon-poison eviction guard — a poisoned launcher hosting live work is QUARANTINED, not killed and not reused', () => {
+  it('REGRESSION: with hostsLiveWork > 0 the child is SPARED (still running) but NOT reused — the next turn gets a fresh child', async () => {
+    const { host, spawnCount, messagesSeen, childAlive } = makeWedgeOnceHost()
     const askedFor: string[] = []
+    const crashes: string[] = []
     const sub = createPersistentReplSubstrate(
       opts(host, {
         hostsLiveWork: (generation) => {
           askedFor.push(generation)
           return 3
         },
+        onChildCrash: (info) => {
+          crashes.push(info.generationKey)
+        },
       }),
     )
 
     await abandonFirstTurn(sub, messagesSeen)
     expect(spawnCount()).toBe(1)
+    expect(childAlive(1)).toBe(true)
 
     const { result: r2, lines } = await captureStderr(() => drain(sub.start(spec('turn-2'))))
-    // Red mutation: dropping the guard evicts REPL #1 here (spawnCount 2, reply from repl-2).
     expect(r2.errored).toBe(false)
-    expect(r2.text).toBe('repl-1:turn-2')
-    expect(spawnCount()).toBe(1)
+
+    // BOTH halves, and they are separate claims:
+    //  (a) SPARED — child #1 is still running, so the Argus panels, arbiter and
+    //      terminal steps it hosts are still running. Red mutation: delete the
+    //      `hosted > 0` branch and child #1 is SIGKILLed here.
+    expect(childAlive(1)).toBe(true)
+    //  (b) NOT REUSED — turn 2 is served by a FRESH child. Red mutation: restore
+    //      `session.poisoned = false; return session` and this reads `repl-1:…`
+    //      against a host that models the wedge honestly — i.e. it hangs and the
+    //      turn never completes.
+    expect(r2.text).toBe('repl-2:turn-2')
+    expect(spawnCount()).toBe(2)
+
     // The guard was asked about the exact child generation (a per-spawn UUID).
-    expect(askedFor).toHaveLength(1)
+    expect(askedFor.length).toBeGreaterThanOrEqual(1)
     expect(askedFor[0]).toMatch(/^[0-9a-f-]{36}$/)
-    const deferred = lines.filter((l) => l.includes('[repl] poison eviction DEFERRED'))
-    expect(deferred).toHaveLength(1)
-    expect(deferred[0]).toContain('hosts 3 live workflows')
-    expect(deferred[0]).toContain(`generation=${askedFor[0]!.slice(0, 8)}`)
+
+    const quarantines = lines.filter((l) => l.includes('[repl] QUARANTINED'))
+    expect(quarantines).toHaveLength(1)
+    expect(quarantines[0]).toContain('hosts 3 live workflows')
+    expect(quarantines[0]).toContain(`generation=${askedFor[0]!.slice(0, 8)}`)
     expect(lines.some((l) => l.includes('evicting abandon-poisoned'))).toBe(false)
 
-    // The poison was CLEARED, not merely skipped: turn 3 neither re-consults the
-    // guard nor logs a second deferral, and still lands on REPL #1.
+    // A spared child is NOT a dead child: nothing may report it crashed while its
+    // hosted workflows are still running, or crash recovery kills them by proxy.
+    expect(crashes).toEqual([])
+
+    // And it stays out of the pool: turn 3 also lands on the fresh child, with no
+    // second quarantine (there is nothing poisoned left to quarantine).
     const { result: r3, lines: lines3 } = await captureStderr(() => drain(sub.start(spec('turn-3'))))
-    expect(r3.text).toBe('repl-1:turn-3')
-    expect(spawnCount()).toBe(1)
-    expect(askedFor).toHaveLength(1)
-    expect(lines3.some((l) => l.includes('poison eviction DEFERRED'))).toBe(false)
+    expect(r3.text).toBe('repl-2:turn-3')
+    expect(spawnCount()).toBe(2)
+    expect(lines3.some((l) => l.includes('[repl] QUARANTINED'))).toBe(false)
+  })
+
+  /** A registry whose record for the live session is marked resumable — what a
+   *  real capture writes once the transcript JSONL lands. Without it every
+   *  respawn in this file is cold, and a `--resume` assertion proves nothing. */
+  async function resumableRegistry(
+    sub: ReturnType<typeof createPersistentReplSubstrate>,
+    registryPath: string,
+    messagesSeen: () => number,
+  ): Promise<void> {
+    await abandonFirstTurn(sub, messagesSeen)
+    const keys = Object.keys(loadRegistry(registryPath))
+    expect(keys).toHaveLength(1)
+    patchRecord(registryPath, keys[0]!, { has_session: true })
+  }
+
+  function registryPath(): string {
+    return join(mkdtempSync(join(tmpdir(), 'neutron-quarantine-')), 'repl-registry.json')
+  }
+
+  it('POSITIVE CONTROL: an ordinary eviction DOES --resume the dead child\'s transcript', async () => {
+    const { host, messagesSeen, argvOf } = makeWedgeOnceHost()
+    const path = registryPath()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { hostsLiveWork: () => 0, replRegistryPath: path }),
+    )
+    await resumableRegistry(sub, path, messagesSeen)
+    await drain(sub.start(spec('turn-2')))
+
+    // This is what makes the quarantine assertion below meaningful: the fixture
+    // resumes when nothing forbids it. Were this cold, `not.toContain('--resume')`
+    // would pass for the wrong reason.
+    expect(argvOf(2)).toContain('--resume')
+    expect(argvOf(2)[argvOf(2).indexOf('--resume') + 1]).toBe(
+      argvOf(1)[argvOf(1).indexOf('--session-id') + 1],
+    )
+  })
+
+  it('the replacement does NOT --resume the quarantined transcript (the one-owner invariant a live child cannot give us)', async () => {
+    const { host, messagesSeen, argvOf, childAlive } = makeWedgeOnceHost()
+    const path = registryPath()
+    const sub = createPersistentReplSubstrate(
+      opts(host, { hostsLiveWork: () => 2, replRegistryPath: path }),
+    )
+    await resumableRegistry(sub, path, messagesSeen)
+    await drain(sub.start(spec('turn-2')))
+
+    // Same registry state as the control, opposite outcome — because the first
+    // owner of that transcript is deliberately STILL ALIVE. Red mutation: drop
+    // `evictedForceFresh = true` from the quarantine branch and this resumes it.
+    expect(childAlive(1)).toBe(true)
+    expect(argvOf(2)).not.toContain('--resume')
+    expect(argvOf(2)).toContain('--session-id')
+    expect(argvOf(2)[argvOf(2).indexOf('--session-id') + 1]).not.toBe(
+      argvOf(1)[argvOf(1).indexOf('--session-id') + 1],
+    )
+  })
+
+  it('the quarantined child is reaped once its hosted work drains — and never before', async () => {
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    let hosted = 4
+    const sub = createPersistentReplSubstrate(opts(host, { hostsLiveWork: () => hosted }))
+
+    await abandonFirstTurn(sub, messagesSeen)
+    await drain(sub.start(spec('turn-2')))
+    expect(quarantinedChildCount()).toBe(1)
+
+    // Still hosting: a sweep must not touch it. Red mutation: drop the
+    // `countHostedLiveWork(...) > 0` continue and this kills live workflows — the
+    // exact 33%-of-deaths bug, moved into the reaper.
+    expect(await sweepQuarantinedChildren()).toBe(0)
+    expect(childAlive(1)).toBe(true)
+    expect(quarantinedChildCount()).toBe(1)
+
+    // Drained: now it is reaped, and only now.
+    hosted = 0
+    expect(await sweepQuarantinedChildren()).toBe(1)
+    expect(childAlive(1)).toBe(false)
+    expect(quarantinedChildCount()).toBe(0)
+
+    // Idempotent — a second sweep has nothing to do.
+    expect(await sweepQuarantinedChildren()).toBe(0)
   })
 
   it('control: with hostsLiveWork → 0 the poisoned child IS evicted, and onChildCrash is told the EVICTED generation', async () => {

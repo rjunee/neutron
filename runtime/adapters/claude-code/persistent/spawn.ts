@@ -800,6 +800,92 @@ function countHostedLiveWork(options: PersistentReplSubstrateOptions, childGener
   }
 }
 
+/** A poisoned child that still hosts in-process workloads, unhooked from the pool
+ *  but deliberately LEFT RUNNING. See the quarantine note in
+ *  {@link getOrSpawnSession}. */
+interface QuarantinedChild {
+  sessionKey: string
+  session: ReplSession
+  options: PersistentReplSubstrateOptions
+}
+
+/** Quarantined children by child generation. A generation in here serves NO
+ *  further turn (it is out of `pool`/`childByKey`) and is still alive. */
+const quarantinedChildren = new Map<string, QuarantinedChild>()
+
+/** Unhook a poisoned child that still hosts live work. It is removed from the
+ *  pool so nothing can route a turn to it, and it is NOT terminated — its hosted
+ *  workflows keep running until {@link sweepQuarantinedChildren} reaps it. */
+function quarantineChild(
+  sessionKey: string,
+  session: ReplSession,
+  options: PersistentReplSubstrateOptions,
+  hosted: number,
+): void {
+  pool.delete(sessionKey)
+  if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
+  quarantinedChildren.set(session.childGeneration, { sessionKey, session, options })
+  process.stderr.write(
+    `[repl] QUARANTINED abandon-poisoned session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} — unhooked from the pool (it will serve no further turn) but left RUNNING because it hosts ${hosted} live workflows; reaped once they finish\n`,
+  )
+  // A quarantined child is outside the pool, so the supervision watchdog can no
+  // longer report its death. If it dies while still hosting work, its hosted runs
+  // must learn NOW — otherwise they wait out the 90-minute hang watchdog, which is
+  // the ~170-minute lag this whole change exists to remove.
+  fireAndForget(
+    'persistent-repl.quarantine-exit',
+    session.child.exited.then(async () => {
+      if (quarantinedChildren.get(session.childGeneration) === undefined) return
+      quarantinedChildren.delete(session.childGeneration)
+      if (countHostedLiveWork(options, session.childGeneration) > 0) {
+        await notifyEvictedChild(options, sessionKey, session.childGeneration, 'quarantined child exited with live work')
+      }
+    }),
+  )
+}
+
+/** Terminate quarantined children whose hosted work has drained. Fired (not
+ *  awaited) from every {@link getOrSpawnSession} — the substrate's only regular
+ *  heartbeat — and exported so tests can drive it deterministically. A child that
+ *  still hosts work is never touched. Returns how many were reaped. */
+export async function sweepQuarantinedChildren(): Promise<number> {
+  let reaped = 0
+  for (const [generation, entry] of [...quarantinedChildren]) {
+    if (entry.session.hasChildExited()) {
+      quarantinedChildren.delete(generation)
+      continue
+    }
+    if (countHostedLiveWork(entry.options, generation) > 0) continue
+    quarantinedChildren.delete(generation)
+    process.stderr.write(
+      `[repl] reaping quarantined generation=${generation.slice(0, 8)} — its hosted workflows have finished\n`,
+    )
+    await terminateChild(entry.session.child)
+    reaped += 1
+  }
+  return reaped
+}
+
+/** Terminate EVERY quarantined child, hosted work or not. Called only from
+ *  `shutdownAllPersistentRepls` — at gateway teardown the hosted workflows are
+ *  going away regardless, and a quarantined child is outside the pool, so the
+ *  shutdown loop would otherwise orphan its process. */
+export async function shutdownQuarantinedChildren(): Promise<void> {
+  for (const [generation, entry] of [...quarantinedChildren]) {
+    quarantinedChildren.delete(generation)
+    try {
+      entry.session.child.kill()
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/** Test/diagnostic seam: how many children are quarantined right now. */
+export function quarantinedChildCount(): number {
+  return quarantinedChildren.size
+}
+
 /** Deliver an eviction to the durable crash sink with the EVICTED generation.
  *  Mirrors the supervision watchdog's `onChildCrash` call for a pid-dead child;
  *  this is the edge that watchdog structurally cannot observe. */
@@ -829,6 +915,11 @@ export async function getOrSpawnSession(
   spec: AgentSpec,
   forceResume?: ResumeDirective,
 ): Promise<ReplSession> {
+  // Heartbeat for the quarantine reaper. Dispatch is the substrate's only regular
+  // tick, and a quarantined child must not outlive its hosted work. FIRED, not
+  // awaited: adding an await here would reorder the synchronous prefix two
+  // concurrent dispatches rely on, and a reap is never on this turn's path.
+  fireAndForget('persistent-repl.quarantine-sweep', sweepQuarantinedChildren())
   const requestedToolSurface = spec.tools.map((t) => t.name).join(',')
   // P0-1 defense-in-depth (Codex r1 [P2]): the native-MCP tool bridge is a
   // SPAWN-time property of the REPL, exactly like the tool surface. Compute what
@@ -918,51 +1009,77 @@ export async function getOrSpawnSession(
       // like the freshness guards below. NOT silent — log so the eviction is
       // observable in prod.
       if (freshSurface && freshBridge && freshCredential && !session.poisoned) return session
+      // Set when the poisoned child was QUARANTINED rather than evicted: it stays
+      // alive (it hosts live work) and must not be terminated or reported dead.
+      let quarantined = false
       if (session.poisoned) {
-        // THE EVICTION GUARD (2026-09-03 root cause, 33% of trident run deaths).
+        // THE EVICTION GUARD (2026-09-03 root cause, 33% of trident run deaths),
+        // REWORKED after the cross-model review's blocker #2 (2026-09-04).
+        //
         // Terminating this child SIGKILLs every in-process workload it hosts — for
         // the trident launcher that is every other run's Argus panel, arbiter and
-        // terminal/cleanup steps (only the codex forge build is detached). Ask the
-        // owner of that work before killing it: while the child hosts live work the
-        // poison is CLEARED and the child kept warm — the abandoned turn drains on
-        // its own, the driver lock serialises the next turn behind it. The
-        // abandon-poison semantics for chat/synthesis substrates are untouched:
-        // they wire no `hostsLiveWork`, so they answer 0 and evict as before.
+        // terminal/cleanup steps (only the codex forge build is detached). So a
+        // child that hosts live work must NOT be killed here. That part stands.
+        //
+        // The first cut drew the wrong conclusion from it: it CLEARED
+        // `session.poisoned` and RETURNED that same child. Sparing a child and
+        // REUSING it are separate decisions and only the first one is safe — reuse
+        // is precisely what the poison exists to forbid. The abandoned turn is still
+        // executing on that REPL; its stale-reply debt strips the next reply's
+        // turn_id and the next turn never delivers, which is the cascade
+        // abandon-poison was introduced to stop. Clearing the flag also discarded
+        // the OTHER meanings of `poisoned` — resume-picker recovery and auth-invalid
+        // set it too, and each needs its respawn to actually happen.
+        //
+        // QUARANTINE takes both halves. The child is unhooked from the pool so no
+        // later turn can be routed to it, left RUNNING so its hosted workflows
+        // finish, and reaped by `sweepQuarantinedChildren()` once its hosted count
+        // reaches zero. `poisoned` is never cleared. This turn falls through to a
+        // clean spawn, exactly like every other eviction.
+        //
+        // Chat/synthesis substrates are untouched: they wire no `hostsLiveWork`, so
+        // they answer 0 and evict as before.
         const hosted = countHostedLiveWork(options, session.childGeneration)
         if (hosted > 0) {
-          session.poisoned = false
-          process.stderr.write(
-            `[repl] poison eviction DEFERRED session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} hosts ${hosted} live workflows (abandoned turn left to drain; terminating the child would kill them)\n`,
-          )
-          if (freshSurface && freshBridge && freshCredential) return session
+          quarantineChild(sessionKey, session, options, hosted)
+          quarantined = true
+          // The quarantined child keeps ownership of its session transcript for as
+          // long as it runs, so the replacement must NOT `--resume` the same id.
+          // Every other eviction buys the Argus-r3 one-owner invariant by awaiting
+          // the old child's exit first; a child we are deliberately keeping alive
+          // cannot give us that, so the replacement is FRESH instead.
+          evictedResume = undefined
+          evictedForceFresh = true
         } else {
           process.stderr.write(
             `[repl] evicting abandon-poisoned warm session=${session.sessionId.slice(0, 8)} generation=${session.childGeneration.slice(0, 8)} key-respawn (prior turn abandoned before reply; clean respawn for the next turn)\n`,
           )
         }
       }
-      const evictionReason = session.poisoned
-        ? 'abandon-poison'
-        : !freshSurface
-          ? 'tool-surface mismatch'
-          : !freshBridge
-            ? 'tool-bridge mismatch'
-            : 'credential rotation'
-      // Evict, then AWAIT the old child's exit before falling through to spawn so a
-      // supervised `--resume` replacement (same sessionId) never co-owns the session
-      // transcript with the dying child (the Argus-r3 one-owner invariant). The
-      // credential-freshness path fires on every token rotation (regularly), unlike
-      // the rarely-firing tool-surface mismatch, so honoring the await here matters.
-      pool.delete(sessionKey)
-      if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
-      await terminateChild(session.child)
-      // LATCH THE DEATH. An eviction is a child exit the supervision watchdog can
-      // never see: the registry is repointed at the replacement child before its
-      // next tick, so the dead generation's owner learned nothing until the 90-min
-      // hang watchdog reaped the corpse (~170 min later, measured). Tell the durable
-      // sink NOW, with the EVICTED generation, so crash recovery runs on the next
-      // tick. Best-effort: a sink failure must never block the respawn.
-      await notifyEvictedChild(options, sessionKey, session.childGeneration, evictionReason)
+      if (!quarantined) {
+        const evictionReason = session.poisoned
+          ? 'abandon-poison'
+          : !freshSurface
+            ? 'tool-surface mismatch'
+            : !freshBridge
+              ? 'tool-bridge mismatch'
+              : 'credential rotation'
+        // Evict, then AWAIT the old child's exit before falling through to spawn so a
+        // supervised `--resume` replacement (same sessionId) never co-owns the session
+        // transcript with the dying child (the Argus-r3 one-owner invariant). The
+        // credential-freshness path fires on every token rotation (regularly), unlike
+        // the rarely-firing tool-surface mismatch, so honoring the await here matters.
+        pool.delete(sessionKey)
+        if (childByKey.get(sessionKey) === session.child) childByKey.delete(sessionKey)
+        await terminateChild(session.child)
+        // LATCH THE DEATH. An eviction is a child exit the supervision watchdog can
+        // never see: the registry is repointed at the replacement child before its
+        // next tick, so the dead generation's owner learned nothing until the 90-min
+        // hang watchdog reaped the corpse (~170 min later, measured). Tell the durable
+        // sink NOW, with the EVICTED generation, so crash recovery runs on the next
+        // tick. Best-effort: a sink failure must never block the respawn.
+        await notifyEvictedChild(options, sessionKey, session.childGeneration, evictionReason)
+      }
     } else {
       pool.delete(sessionKey)
     }

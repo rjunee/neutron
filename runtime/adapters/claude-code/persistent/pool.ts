@@ -17,7 +17,7 @@ import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFA
 import type { ActiveTurn, PersistentReplSubstrateOptions, RecoveredReply } from './types.ts'
 import { ReplSession, terminateChild, unlinkSessionConfigs } from './repl-session.ts'
 import { AUTH_FAILURE_DETECTOR_ID } from './auth-failure-signature.ts'
-import { getOrSpawnSession, injectMessage, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
+import { getOrSpawnSession, injectMessage, shutdownQuarantinedChildren, spawnWithChannelWedgeRespawn, waitForReplIdle } from './spawn.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 const activeTurnRoutes = new Map<string, { session: ReplSession; turn: ActiveTurn }>()
@@ -902,6 +902,11 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
       // ignore
     }
   }
+  // Quarantined children are OUT of `pool` by construction (that is what makes
+  // them quarantined), so the loop above cannot see them. At teardown the hosted
+  // work they were being kept alive for is going away anyway — kill them, or the
+  // process is orphaned.
+  await shutdownQuarantinedChildren()
   // Terminate in-flight EPHEMERAL one-shots too (Argus r5 IMPORTANT): they are
   // never pooled, so the pool loop above misses them — a disposable child mid-turn
   // at shutdown would orphan its process + leak its temp configs.
