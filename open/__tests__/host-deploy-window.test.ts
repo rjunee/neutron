@@ -678,3 +678,169 @@ describe('the two token namespaces do not cross', () => {
     expect(h.dispatchCalls[0]!.sha).toBe(MOVED_SHA)
   })
 })
+
+// ─────────────────────────────────────────────────────────────────────────────
+/**
+ * A DEAD WINDOW PROMPT IS NOT A DEAD END.
+ *
+ * The single-deploy (`hdp:`) path has re-raised a replacement since 2026-08-15;
+ * the window (`hdw:`) path was never given the same treatment, so a tap five
+ * minutes late told the owner to "Ask again" and he had to retype the ask. He
+ * hit it twice in a row on 2026-09-08.
+ *
+ * The invariant every test here defends: a re-raise REPLACES THE OFFER and
+ * GRANTS NOTHING. No window opens, nothing deploys, and the owner still has to
+ * tap the fresh prompt.
+ *
+ * MUTATION-TESTED (each removed in turn, each of these goes RED):
+ *   - drop the `reraiseWindow` call at the TTL refusal        → "expired ... re-raises"
+ *   - drop the `reraiseWindow` call at the evicted refusal    → "evicted ... re-raises"
+ *   - drop the `pendingWindowForRef` dedupe                   → "does not mint a second"
+ *   - pass a literal instead of the dead row's `hours`        → "restates the SAME terms"
+ */
+describe('a tap on a dead window prompt re-raises instead of dead-ending', () => {
+  test('an EXPIRED window tap re-raises a fresh request, and opens nothing', async () => {
+    const h = harness()
+    await h.service.requestWindow({ hours: 4, topic_id: TOPIC })
+    await settle()
+    const dead = h.approveValue()
+
+    // Past the PROMPT's five-minute TTL — not the window's four hours.
+    nowMs += 6 * 60_000
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: dead,
+      topic_id: TOPIC,
+      prior_option_values: [dead],
+    })
+    await settle()
+
+    expect(out?.body).toContain('expired')
+    expect(out?.body).toContain('fresh')
+    // THE WHOLE POINT: he is not told to ask again.
+    expect(out?.body).not.toContain('Ask again')
+    // And the replacement is an OFFER, not a grant.
+    expect(h.service.windowStatus().open).toBe(false)
+    expect(h.dispatchCalls).toEqual([])
+    expect(windowRows().some((r) => r.status === 'pending')).toBe(true)
+  })
+
+  test('the re-raised request restates the SAME terms the dead one carried', async () => {
+    const h = harness()
+    await h.service.requestWindow({ hours: 9, topic_id: TOPIC })
+    await settle()
+    const dead = h.approveValue()
+    nowMs += 6 * 60_000
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: dead,
+      topic_id: TOPIC,
+      prior_option_values: [dead],
+    })
+    await settle()
+
+    // A replacement that silently changed the duration would have him approving
+    // terms he never chose.
+    expect(out?.body).toContain('9-hour')
+    const fresh = windowRows().find((r) => r.status === 'pending')
+    expect(fresh).toBeDefined()
+    const args = JSON.parse(fresh!.args_json) as { hours?: number; ref?: string }
+    expect(args.hours).toBe(9)
+    expect(args.ref).toBe('origin/main')
+  })
+
+  test('an EVICTED window tap (prompt aged out of the answer window) re-raises too', async () => {
+    const h = harness()
+    await h.service.requestWindow({ hours: 4, topic_id: TOPIC })
+    await settle()
+    const dead = h.approveValue()
+
+    // The prompt is gone from the answerable set — the OTHER way a tap dies.
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: dead,
+      topic_id: TOPIC,
+      prior_option_values: [],
+    })
+    await settle()
+
+    expect(out?.body).toContain('aged out')
+    expect(out?.body).toContain('fresh')
+    expect(out?.body).not.toContain('Ask again')
+    expect(h.service.windowStatus().open).toBe(false)
+    expect(h.dispatchCalls).toEqual([])
+  })
+
+  test('repeat taps on one dead button do not mint a second prompt', async () => {
+    const h = harness()
+    await h.service.requestWindow({ hours: 4, topic_id: TOPIC })
+    await settle()
+    const dead = h.approveValue()
+
+    const tap = () =>
+      h.service.handleOwnerButtonAnswer({
+        user_id: OWNER,
+        user_text: dead,
+        topic_id: TOPIC,
+        prior_option_values: [],
+      })
+
+    await tap()
+    await settle()
+    const after_first = windowRows().filter((r) => r.status === 'pending').length
+
+    const second = await tap()
+    await settle()
+
+    expect(second?.body).toContain('already waiting')
+    // Spamming a dead button must not spam him with prompts.
+    expect(windowRows().filter((r) => r.status === 'pending').length).toBe(after_first)
+  })
+
+  test('a NON-OWNER tap on a dead prompt re-raises nothing at all', async () => {
+    const h = harness()
+    await h.service.requestWindow({ hours: 4, topic_id: TOPIC })
+    await settle()
+    const dead = h.approveValue()
+    const before = windowRows().length
+    nowMs += 6 * 60_000
+
+    const out = await h.service.handleOwnerButtonAnswer({
+      user_id: AGENT,
+      user_text: dead,
+      topic_id: TOPIC,
+      prior_option_values: [dead],
+    })
+    await settle()
+
+    // The owner gate is upstream of the re-raise and stays that way: the agent
+    // must not be able to mint owner prompts by tapping expired buttons.
+    expect(out?.body).toContain('Only the owner')
+    expect(windowRows().length).toBe(before)
+    expect(h.service.windowStatus().open).toBe(false)
+  })
+
+  test('an ALREADY-DECIDED window tap re-raises nothing — that tap changed nothing on purpose', async () => {
+    const h = harness()
+    await h.service.requestWindow({ hours: 4, topic_id: TOPIC })
+    await settle()
+    const value = h.denyValue()
+    await answer(h, value)
+    await settle()
+    const before = windowRows().length
+
+    const again = await h.service.handleOwnerButtonAnswer({
+      user_id: OWNER,
+      user_text: value,
+      topic_id: TOPIC,
+      prior_option_values: [value],
+    })
+    await settle()
+
+    expect(again?.body).toContain('already')
+    // A settled decision is not a dead grant; replacing it would be noise.
+    expect(windowRows().length).toBe(before)
+  })
+})
