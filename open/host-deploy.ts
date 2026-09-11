@@ -193,21 +193,22 @@ export const HOST_DEPLOY_DETAIL_CAP = 400
 export const HOST_DEPLOY_MIN_SECRET_CHARS = PROJECT_CREDENTIAL_MIN_SECRET_CHARS
 
 /**
- * How long a pending host-deploy grant stays tappable. Mirrors
- * `APPROVAL_DEFAULT_TTL_MS` (`tools/approval.ts`), and is enforced from BOTH
- * ends:
+ * How long a DEPLOY-WINDOW OFFER (`hdw:`) stays tappable — and NOTHING ELSE
+ * (owner, 2026-09-11).
  *
- *   - {@link HostDeployService.sweepExpiredGrants}, driven by the composer's
- *     `host-deploy-approval-sweeper` loop, retires a dead grant WITHOUT a tap —
- *     so the row stops being `pending`, its still-rendered button is retired and
- *     the topic is told it expired. The sweep is HOST-DEPLOY-SCOPED on purpose
- *     and is NOT a caller of `ApprovalManager.expireStale()`: that global sweep
- *     would also expire pending RITUAL grants (`reminders/ritual-registration.ts`),
- *     which the owner may legitimately answer days later and which have no
- *     re-raise path.
- *   - the ANSWER-path age gate below, which stays as the backstop for a tap that
- *     races the tick (and for any box whose sweeper never armed). Checked against
- *     the row's own `requested_at`, so it holds whether or not anything sweeps.
+ * ⚠️ THIS IS NO LONGER THE LIFETIME OF A SINGLE-DEPLOY GRANT. `hdp:` grants have
+ * no lifetime: they are retired when the ref moves off the sha they were bound
+ * to, and never by the clock. Both the answer-path age gate and the sweep's age
+ * predicate were deleted; the reasoning is at their sites, and re-introducing
+ * either would restore the defect the owner reported (a five-minute window he
+ * could not win, because every tap of his lands late).
+ *
+ * It survives for the WINDOW half of this file, where it is the right shape: an
+ * offer to open a standing 72-hour permission is a question the owner is being
+ * asked NOW, and one answered hours later is answering a question he no longer
+ * has in front of him. A window offer is bound to no sha, so it has no
+ * staleness check to be governed by instead — the clock is genuinely all there
+ * is. Mirrors `APPROVAL_DEFAULT_TTL_MS` (`tools/approval.ts`).
  */
 export const HOST_DEPLOY_APPROVAL_TTL_MS = 5 * 60_000
 
@@ -661,8 +662,9 @@ export interface HostDeployServiceOptions {
   log?: (msg: string) => void
   default_ref?: string
   /**
-   * Injectable clock, used ONLY by the grant-age gate. Defaults to `Date.now`,
-   * matching `ApprovalManager`'s own `now` seam so a test can roll the clock past
+   * Injectable clock, used ONLY by the WINDOW-offer age gate — the single-deploy
+   * path reads no clock at all any more. Defaults to `Date.now`, matching
+   * `ApprovalManager`'s own `now` seam so a test can roll past
    * {@link HOST_DEPLOY_APPROVAL_TTL_MS} without sleeping.
    */
   now?: () => number
@@ -691,10 +693,12 @@ export interface HostDeployService {
     input: HostDeployOwnerAnswerInput,
   ): Promise<{ body: string } | null>
   /**
-   * Retire every host-deploy grant that is still `pending` past
-   * {@link HOST_DEPLOY_APPROVAL_TTL_MS} — WITHOUT a tap. Returns how many rows
-   * THIS call transitioned (claim-gated, so a concurrent tap and a tick can
-   * never both count the same row). Deploys NOTHING on any path.
+   * Retire every host-deploy grant whose `ref` no longer resolves to the sha the
+   * grant was bound to — WITHOUT a tap. AGE IS NOT A TRIGGER: a grant that still
+   * describes what would deploy keeps its button however long it has been on
+   * screen. Returns how many rows THIS call transitioned (claim-gated, so a
+   * concurrent tap and a tick can never both count the same row). Deploys NOTHING
+   * on any path.
    */
   sweepExpiredGrants(): Promise<number>
   /**
@@ -1487,38 +1491,32 @@ export function createHostDeployService(
       }
     }
 
-    // ── (b2) THE GRANT'S OWN AGE. `requested_at` is seconds since epoch. The
-    // production sweep is now `sweepExpiredGrants()`, driven by the composer's
-    // `host-deploy-approval-sweeper` loop — host-deploy-SCOPED on purpose, since a
-    // global `ApprovalManager.expireStale()` tick would also kill pending ritual
-    // grants that have no re-raise path. This gate REMAINS as the backstop: it
-    // catches the tap that races the tick (the sweep runs at most once a minute)
-    // and it holds on any box whose sweeper never armed. The row is expired as it
-    // is refused, so the same tap cannot be repeated into a race with the sweep.
+    // ── (b2) THERE IS NO AGE GATE, DELIBERATELY — A PENDING GRANT NEVER GOES
+    // STALE BY THE CLOCK ALONE (owner, 2026-09-11).
     //
-    // CLAIM-GATED, because the refusal now has a side effect (a fresh grant).
-    // `cancelPending` reports whether THIS call retired the pending row, so of two
-    // taps racing one dead grant exactly one re-raises; the loser reads the status
-    // the row actually settled at and raises nothing.
-    const age_ms = now() - row.requested_at * 1000
-    if (age_ms > HOST_DEPLOY_APPROVAL_TTL_MS) {
-      let claimed: boolean
-      try {
-        claimed = await approvals.cancelPending(id)
-      } catch {
-        claimed = false
-      }
-      if (!claimed) {
-        const settled = approvals.get(id)?.status ?? 'decided'
-        return { body: `That deploy request was already ${settled} — nothing was deployed.` }
-      }
-      return {
-        body:
-          `That deploy request is older than ${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} minutes, ` +
-          `so it has expired — nothing was deployed. ` +
-          (await reraise(ref, input.topic_id)),
-      }
-    }
+    // A five-minute gate lived here, and `requested_at` is still on the row, so
+    // the temptation to "just re-add the backstop" is real. Do not. The gate was
+    // a PROXY for the one property that actually matters — that the commit list
+    // the owner read is still exactly what would deploy — and gate (c) below
+    // enforces that property DIRECTLY, by re-resolving the ref at tap time and
+    // refusing the instant it disagrees with the sha the grant was bound to. A
+    // proxy that the real check subsumes is not a second layer of safety; it is
+    // only a second way to say no, and this one said no to the owner rather than
+    // to anything unsafe.
+    //
+    // WHAT IT COST. The owner reads on a delay, so every tap landed late and the
+    // refusal re-raised a replacement that was itself late by the time he reached
+    // it. On 2026-09-11 he tapped Approve three times, in sequence, and `126fc642`
+    // was still not deployed — each tap answered a prompt the clock had already
+    // killed, and the window was unwinnable by construction. The remedy is not a
+    // longer TTL: any finite one loses the same race whenever he is away from the
+    // screen for that long.
+    //
+    // SO: age refuses NOTHING here. An `:a` tap is stopped only by — not the owner
+    // (gate b), an unrecognised or foreign token (above), a row already decided
+    // (above), the ref having moved (gate c), the ref being unreadable (gate c),
+    // or the host already sitting on the approved sha (gate c2). Every one of
+    // those is a fact about the DEPLOY. None of them is a fact about the clock.
 
     if (ref === null || approved_sha === null) {
       await cancel(id)
@@ -1588,6 +1586,33 @@ export function createHostDeployService(
           // The fresh grant binds to the NEW sha, so the owner is one tap from the
           // deploy he asked for instead of one round trip from re-asking.
           (await reraise(ref, input.topic_id)),
+      }
+    }
+
+    // ── (c2) THE HOST MAY ALREADY BE THERE. Only reachable now that age refuses
+    // nothing: a grant can outlive the deploy it describes (a standing window
+    // covered it, or someone deployed the same sha another way), and the old age
+    // gate used to intercept every such tap before it got here. `request()`
+    // returns `up_to_date` rather than raising a prompt for exactly this case, so
+    // the tap path must reach the same conclusion or an Approve on a stale button
+    // would RESTART THE INSTANCE to install what is already installed.
+    //
+    // Fail-OPEN on an unreadable HEAD, unlike gate (c): `live_sha === approved_sha`
+    // has already proved the owner is approving the commit list he read, so the
+    // deploy is legitimate whether or not we can also prove it is redundant. A
+    // refusal here would block a valid deploy to avoid a wasted one.
+    let current_sha: string | null
+    try {
+      current_sha = await git.revParse('HEAD')
+    } catch {
+      current_sha = null
+    }
+    if (current_sha !== null && current_sha === approved_sha) {
+      await cancel(id)
+      return {
+        body:
+          `Nothing was deployed — the host is already at ${shortSha(approved_sha)}, which is what ` +
+          `this approval was for. ${ref} has not moved since, so there is nothing left to install.`,
       }
     }
 
@@ -1919,22 +1944,44 @@ export function createHostDeployService(
   }
 
   /**
-   * A DEAD GRANT IS SWEPT WITHOUT A TAP. Every host-deploy row still `pending`
-   * past {@link HOST_DEPLOY_APPROVAL_TTL_MS} is retired here: the row is expired,
-   * its still-rendered button prompt is retired, and the topic the prompt landed
-   * on is told — in an INERT sentence — that it expired and nothing was deployed.
+   * A GRANT IS SWEPT WHEN IT HAS STOPPED BEING TRUE — NEVER MERELY WHEN IT HAS
+   * GOT OLD (owner, 2026-09-11).
+   *
+   * This swept on AGE: every host-deploy row still `pending` past
+   * {@link HOST_DEPLOY_APPROVAL_TTL_MS} had its row expired, its rendered button
+   * retired and an "it expired" sentence posted. That is the mechanism that took
+   * the owner's Approve button off his screen five minutes after it appeared, and
+   * it took it away for a reason that had nothing to do with whether tapping it
+   * was still correct. He reads on a delay; the button was reliably gone before
+   * he got there, and the replacement was gone before he got to that.
+   *
+   * THE TRIGGER IS NOW STALENESS, WHICH IS WHAT THE ANSWER PATH ACTUALLY REFUSES
+   * ON: a grant is retired exactly when `ref` no longer resolves to the sha the
+   * grant was bound to, so the commit list on screen has stopped describing what
+   * a tap would install. A grant whose sha still stands is left alone HOWEVER OLD
+   * IT IS — its button keeps working, and gate (c) in `handleAnswer` re-proves the
+   * sha on the tap itself, so nothing rests on this loop having run.
+   *
+   * THIS LOOP IS THEREFORE HYGIENE, NOT AUTHORITY. Everything it does — retire the
+   * row, retire the button, say why — the answer path also does, correctly, on the
+   * tap that races it. Its only job is that a button which has stopped meaning
+   * anything does not sit on the owner's screen looking live.
+   *
+   * FAIL-OPEN ON AN UNREADABLE REF. A git error skips the row and keeps the
+   * button: this loop may not be the thing that destroys a valid approval because
+   * a `git` call flaked, and the tap path re-checks anyway.
    *
    * SCOPED TO HOST-DEPLOY ROWS, DELIBERATELY. `findByToolName(project_slug,
    * 'host-deploy')` is the whole scan; `ApprovalManager.expireStale()` is NOT
-   * called, and must not be, because a global 5-minute sweep would also expire
-   * every pending RITUAL grant — rows the owner may legitimately answer days
-   * later, with no re-raise path of their own.
+   * called, and must not be, because a global sweep would also expire every
+   * pending RITUAL grant — rows the owner may legitimately answer days later,
+   * with no re-raise path of their own.
    *
-   * CLAIM-GATED PER ROW. `cancelPending(id)` performs the identical
-   * pending→'expired' transition, atomically, and reports whether THIS call made
-   * it. A row a tap decided between the scan and the claim is skipped: not
-   * counted, no button retired, no notice posted. So the owner is told "it
-   * expired" exactly once, and never about a grant he just answered.
+   * CLAIM-GATED PER ROW. `cancelPending(id)` performs the pending→'expired'
+   * transition atomically and reports whether THIS call made it. A row a tap
+   * decided between the scan and the claim is skipped: not counted, no button
+   * retired, no notice posted. So the owner is told once, and never about a grant
+   * he just answered.
    *
    * IT NEVER DEPLOYS AND NEVER RE-RAISES. The sweep touches `dispatch` on no
    * path — a tick that could deploy would be an unattended deploy — and it does
@@ -1946,7 +1993,28 @@ export function createHostDeployService(
     let swept = 0
     for (const row of rows) {
       if (row.status !== 'pending') continue
-      if (now() - row.requested_at * 1000 <= HOST_DEPLOY_APPROVAL_TTL_MS) continue
+
+      const args = parseApprovalArgs(row.args_json)
+      const ref = typeof args.ref === 'string' ? args.ref : null
+      const target_sha = typeof args.target_sha === 'string' ? args.target_sha : null
+      const prompt_id = typeof args.prompt_id === 'string' ? args.prompt_id : null
+
+      // A row whose own terms cannot be read back can never be deployed either —
+      // `handleAnswer` refuses it at the same `null` check — so a button for it is
+      // already connected to nothing and retiring it takes away no capability.
+      if (ref !== null && target_sha !== null) {
+        let live_sha: string | null
+        try {
+          live_sha = await git.resolveTarget(ref)
+        } catch (err) {
+          // FAIL-OPEN. Keep the grant and the button; try again next tick.
+          log(`host-deploy sweep could not re-check ${ref} for ${row.id}: ${errText(err)}`)
+          continue
+        }
+        // STILL TRUE ⇒ STILL TAPPABLE. This is the branch the owner's complaint
+        // turns on: no clock reading appears in it.
+        if (live_sha !== null && live_sha === target_sha) continue
+      }
 
       let claimed: boolean
       try {
@@ -1956,14 +2024,10 @@ export function createHostDeployService(
         claimed = false
       }
       // The loser of a race with a tap says nothing at all: the tap already
-      // answered the owner, and a second "it expired" would contradict it.
+      // answered the owner, and a second notice would contradict it.
       if (!claimed) continue
       swept += 1
 
-      const args = parseApprovalArgs(row.args_json)
-      const ref = typeof args.ref === 'string' ? args.ref : null
-      const target_sha = typeof args.target_sha === 'string' ? args.target_sha : null
-      const prompt_id = typeof args.prompt_id === 'string' ? args.prompt_id : null
       // The grant's OWN topic — where its button is actually drawn. The install
       // fallback covers a row minted before the topic was recorded.
       const topic = row.topic_id ?? approval_topic_id
@@ -1983,9 +2047,9 @@ export function createHostDeployService(
         try {
           await post_notice(
             topic,
-            `The host-deploy approval${what} sat unanswered for over ` +
-              `${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} minutes and has expired — ` +
-              'nothing was deployed. Ask again for a fresh Approve/Deny prompt.',
+            `The host-deploy approval${what} no longer matches what ${ref ?? 'that ref'} points at, ` +
+              'so its commit list has stopped describing what a tap would install and the prompt ' +
+              'has been retired — nothing was deployed. Ask again for a current one.',
           )
         } catch (err) {
           log(`host-deploy sweep could not post the expiry notice on ${topic}: ${errText(err)}`)
