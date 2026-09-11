@@ -8,6 +8,7 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { STUB_PLATFORM } from '@neutronai/runtime/__tests__/stub-platform.ts'
 import { spawnCapture } from '@neutronai/trident/git-mode.ts'
 import { TridentRunStore } from '@neutronai/trident/store.ts'
+import type { FireOutcome } from '@neutronai/trident/inner-loop.ts'
 import type { CompositionInput } from '../composition.ts'
 import type { ModuleContext } from '../module-graph.ts'
 import { buildCoreModules } from './build-core-modules.ts'
@@ -189,8 +190,10 @@ describe('trident unconfirmed-fire wiring — the composed orchestrator reads th
           elapsed_ms: 0,
           budget_ms: 0,
           turn_cancelled: false,
-          settled: new Promise(() => {}),
-          launcher: new Promise(() => {}),
+          // Typed explicitly: a bare `new Promise(() => {})` infers `Promise<unknown>`,
+          // which is not assignable to `FireOutcome`'s `settled` / `launcher`.
+          settled: new Promise<FireOutcome>(() => {}),
+          launcher: new Promise<string | null>(() => {}),
         }),
         run_host: async () => ({ ok: true, stdout: '', stderr: '', exit_code: 0 }),
         delivery_sink: { send: async () => '' },
