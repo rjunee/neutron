@@ -690,3 +690,76 @@ state machine, not a wrap.
 which routes a failed DELETE back through the upsert sentence. Guard
 `bun test trident/board-dispatch.test.ts`, control `bun test trident/liveness.test.ts`. The
 find-string occurs exactly once.
+
+### Round 21 (2026-09-02) — Argus r10 review 2: the race is classified by the STORE, not by the error string
+
+**Blocker 1.** `dispatchBoardBoundBuild`'s outer catch mapped exactly one spelling of the
+two-process branch race — `UNIQUE constraint failed: code_trident_runs.(project_slug|slug)` — to
+the `branch_live` refusal and its hold. Two connections on one DB file also collide as
+`BusyRetryExhaustedError: SQLITE_BUSY: exhausted 15 retries` (codex's two-`ProjectDb` repro
+against `ProjectDb`'s deferred BEGIN), which that regex does not and should not match, so the
+loser returned `backend_error` → HTTP 500 with NOTHING queued. The in-code comment already called
+two gateway processes on one DB file "the SAME fact" deserving "the same refusal and the same
+hold"; the BUSY manifestation of that fact did not get it.
+
+**The fix.** The error text stopped being the classifier. On ANY failure inside the admission
+block the catch asks the store who holds this card NOW — a non-terminal row on this repo carrying
+the branch, or one this project already has under this slug (the unique index's other arm) — and
+when one is visible it returns the shared `refuseBranchLive`, naming the winner, so the hold is
+bound to the run whose terminal event releases it. Positive evidence only, unchanged: no visible
+holder (including the common BUSY case where the winner has not committed yet) is still a genuine
+`backend_error`. A new `createdRunId` guard skips the whole re-read once the insert has WON, so a
+failure in `board.attachRun` / `holds.deleteByItem` can never be re-diagnosed as a competitor and
+park a card behind its own run.
+
+**Controls (`trident/board-dispatch.test.ts`).** A REAL second `ProjectDb` on the same file lands
+the competitor's row while this dispatch's write fails BUSY: the refusal is `branch_live`, names
+the winner, says `SQLITE_BUSY`, and a real hold row exists bound to the holder — red first
+(46 pass / 1 fail) with the holder arm disabled. Two siblings must stay green: BUSY with no holder
+anywhere is `backend_error` and queues nothing, and a throw AFTER the run was created is
+`backend_error` with the run intact and no hold.
+
+**Blocker 2, documentation.** The operational plan's resume state was still the round-18 one and
+nominated `trident/fire-evidence.ts` — the target round 20 superseded — so a prover following the
+plan would run the wrong guard/control contract. Both copies (`IMPLEMENTATION_PLAN.md` and
+`.trident/plans/trident/…`) now carry the round-21 state and the round-20 nomination, re-verified
+at this head: `if (outcome.attempted === 'delete') {` occurs exactly once in `board-dispatch.ts`.
+
+**Also closed this round.**
+
+- The published round is bounded AT THE WRITER. `OUTER_PUBLISHED_CHECKPOINT` accepts `\d{1,9}`
+  while the orchestrator interpolated `result.round` — substrate JSON, unbounded — verbatim. The
+  old docblock's safety argument ("both consumers fall back to the ordinary recoverable answer")
+  predates this branch: under the settle-timeout gate, "not published" now feeds terminalization
+  of a run that DID publish. `checkpointRoundField` clamps to `[0, 999999999]` (and reads NaN /
+  ±Infinity / negatives as 0), the write site calls it, and the boundary tests pin that a marker
+  built from any of those inputs still parses as published.
+- `queueDecision`'s two DB READS are contained — the same escape class the r9 fix closed for the
+  hold WRITE, at the two gates that call it outside every try. A throwing `board.get` falls back
+  to the opening snapshot; a throwing `store.get` counts the linked run as LIVE, which takes
+  `queueHold`'s delete arm, so a failed read can never CREATE a hold behind a card that may
+  already have an owner.
+- `probeBranchHolder` wraps its `probe_pid_alive` call, so the "returns null when we could not
+  look" and "neither step may throw" docblocks are true for an injected seam as well as for
+  `defaultProbePidAlive`. A throw reads as `unknown` — no evidence — which the suite already pins.
+- `saveIfActive`'s `round` bind honours the SAME compare-and-swap as the checkpoint it is derived
+  from: a lost CAS contributes 0 instead of advancing the column from a checkpoint the statement
+  declined to store. Red-first control plus the must-pass sibling (a WON CAS still advances).
+
+**Not done, deliberately, and unchanged.** The one-shot gather at the timeout instant stays a
+tracked follow-up for the reasons round 20 recorded. So does the composed tick/drain split: the
+call-count half proves the composed tick calls the drain it was handed, and
+`open/__tests__/open-dispatch-hold-drain-wiring.test.ts` proves the PRODUCTION-composed drain moves
+real hold state; joining them means building the sweep inside the composition test, which proves
+nothing about production. Both approving reviewers accepted that argument as written.
+
+**The mutation nomination is UNCHANGED from round 20** — `trident/board-dispatch.ts`,
+`if (outcome.attempted === 'delete') {` → `if (false) {`, guard
+`bun test trident/board-dispatch.test.ts`, control `bun test trident/liveness.test.ts`. This
+round's edits to that file do not touch `queueFailureClause`; the find-string still occurs exactly
+once.
+
+**Workspace note for the next round.** A fresh linked worktree has no `node_modules`, so
+`@neutronai/*` resolves up to the shared checkout — a different lineage — and the suite fails with
+`no such column: claimed_paths` / `no such table: code_trident_dispatch_holds` at BASE as well as
+at head. Run `bun install` in the worktree first; it is a workspace-setup artifact, not a defect.

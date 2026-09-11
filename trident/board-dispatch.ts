@@ -542,8 +542,26 @@ export async function dispatchBoardBoundBuild(
   // A card that has VANISHED off the board mid-dispatch falls back to the
   // opening snapshot rather than inventing a liveness answer: the sweep already
   // drops holds whose card is gone, so this is not the place to decide that.
+  //
+  // AND ITS TWO READS ARE CONTAINED (Argus r10, minor — the same escape class
+  // the r9 fix closed for the hold WRITE). `deps.board.get` and `deps.store.get`
+  // are DB reads and can fail for the reasons that fix names (a locked file, a
+  // closed handle, a full disk), and two callers run this OUTSIDE every
+  // try/catch in this function — the declared-blockers gate, and the
+  // branch-liveness gate whose probe `try` has already closed. A throw there
+  // turned a typed refusal into a rejected promise at `code-command.ts` /
+  // `open/composer.ts`. So a read that fails degrades instead: the board falls
+  // back to the opening snapshot (the rule the vanished-card case already uses),
+  // and an UNREADABLE linked run counts as LIVE. That direction is the safe one
+  // — it takes `queueHold`'s delete arm, so a failed read can never CREATE a
+  // hold behind a card that may already have an owner, which is the r4 harm.
   const queueDecision = (): QueueDecision => {
-    const card = deps.board.get(deps.project_slug, board_item_id) ?? item
+    let card = item
+    try {
+      card = deps.board.get(deps.project_slug, board_item_id) ?? item
+    } catch {
+      card = item
+    }
     const linkedRunId = card.linked_run_id ?? null
     // SCOPE THE LOOKUP TO THIS PROJECT (Argus r8 BLOCKER), exactly as
     // `runProgressForItem` (`trident/run-progress.ts`) and
@@ -557,10 +575,18 @@ export async function dispatchBoardBoundBuild(
     // different project's board and never re-dispatches this card, so the card
     // wedges with nothing left to release it. A run that is not this project's
     // drives nothing here, so it is ignored and the card stays queueable.
-    const linkedRun = linkedRunId === null ? null : (deps.store.get(linkedRunId) ?? null)
+    let linkedRun: TridentRun | null = null
+    let unreadable = false
+    if (linkedRunId !== null) {
+      try {
+        linkedRun = deps.store.get(linkedRunId) ?? null
+      } catch {
+        unreadable = true // the card IS bound to something we could not read
+      }
+    }
     const linkedPhase =
       linkedRun !== null && linkedRun.project_slug === deps.project_slug ? linkedRun.phase : null
-    const linkedLive = linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase)
+    const linkedLive = unreadable || (linkedPhase !== null && !['done', 'failed', 'stopped'].includes(linkedPhase))
     // The clause that replaces "…it will dispatch automatically…" when nothing
     // was queued. Promising an automatic re-fire that cannot come is the thing
     // that made the surviving row dangerous rather than merely wrong.
@@ -942,6 +968,12 @@ export async function dispatchBoardBoundBuild(
     paths = deriveClaimedPaths({ task: input.task })
   }
 
+  // SET THE INSTANT THE INSERT WINS, and read in the catch below. A failure that
+  // happens AFTER the row exists (`board.attachRun`, `holds.deleteByItem`) must
+  // never be re-diagnosed as "something else holds this branch" — the live row
+  // the re-read would find is OUR OWN, and refusing on it would queue a hold
+  // behind a run this very call created.
+  let createdRunId: string | null = null
   try {
     const admission = await deps.store.createIfClaimsAvailable({
       slug,
@@ -1031,6 +1063,7 @@ export async function dispatchBoardBoundBuild(
       }
     }
     const run = admission.run
+    createdRunId = run.id
     // BIND: light the item up (fork ⑂ + in_progress) the instant the build starts.
     // The durable loop fires + harvests by runId; terminal-reconcile clears it.
     await deps.board.attachRun(deps.project_slug, item.id, run.id)
@@ -1048,7 +1081,43 @@ export async function dispatchBoardBoundBuild(
     // something live already owns this card's branch — so it gets the same
     // refusal and the same hold rather than a 500 that queues nothing. Any
     // other failure is still a genuine `backend_error`.
-    if (/UNIQUE constraint failed:\s*code_trident_runs\.(project_slug|slug)/i.test(detail)) {
+    //
+    // …AND THE SAME FACT ALSO ARRIVES AS `SQLITE_BUSY` (Argus r10 BLOCKER). Two
+    // connections on one DB file collide in TWO ways, not one: the loser may
+    // meet the unique index, or it may simply fail to take the write lock while
+    // the winner's transaction is open and surface as
+    // `BusyRetryExhaustedError: SQLITE_BUSY: exhausted 15 retries` — a message
+    // the regex above does not and should not match. Mapping only the first
+    // left the second returning `backend_error` (HTTP 500) with NOTHING queued,
+    // which is the exact card-on-the-floor outcome the constraint arm exists to
+    // prevent. So the error text is not the classifier: ASK THE STORE WHO HOLDS
+    // THIS CARD NOW. A live row on this repo carrying the branch — or this
+    // project's slug, the index's other arm — is the same fact and earns the
+    // same refusal and the same hold. POSITIVE EVIDENCE ONLY, unchanged: no
+    // visible holder (including the common BUSY case where the winner has not
+    // committed yet) is still a genuine `backend_error`.
+    const holder =
+      createdRunId !== null
+        ? null
+        : ((): TridentRun | null => {
+            try {
+              return (
+                deps.store
+                  .listNonTerminalByRepo(repo_path)
+                  .find(
+                    (candidate) =>
+                      candidate.branch === branch ||
+                      (candidate.project_slug === deps.project_slug && candidate.slug === slug),
+                  ) ?? null
+              )
+            } catch {
+              return null // a failed look is not a holder
+            }
+          })()
+    if (
+      createdRunId === null &&
+      (holder !== null || /UNIQUE constraint failed:\s*code_trident_runs\.(project_slug|slug)/i.test(detail))
+    ) {
       // BELT AND BRACES, kept from Argus r8. The hold write itself no longer
       // throws — `queueHold` contains it for EVERY gate now (Argus r9 BLOCKER,
       // which is what made the two unwrapped gates above safe) and reports the
@@ -1059,10 +1128,19 @@ export async function dispatchBoardBoundBuild(
       // rather than escaping as a rejected promise.
       try {
         return await refuseBranchLive(
-          `Refused: branch ${branch} is already being built by a live run that won the race for this card while ` +
-            'this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly if ' +
-            'it is truly dead — and never delete the branch under it.',
-          null,
+          holder !== null
+            ? `Refused: ${
+                holder.branch === branch
+                  ? `branch ${branch} is already being built`
+                  : `this card's slug ${slug} is already being built (on another repo path, branch ${holder.branch ?? 'none'})`
+              } by live run ${holder.id.slice(0, 8)} (${holder.slug}, phase ${holder.phase}) — it won the race for ` +
+              `this card while this dispatch was still checking, and this dispatch's own write then failed ` +
+              `(${detail}). Resolve that run first — watch it finish, or stop it explicitly if it is truly dead — ` +
+              'and never delete the branch under it.'
+            : `Refused: branch ${branch} is already being built by a live run that won the race for this card while ` +
+              'this dispatch was still checking. Resolve that run first — watch it finish, or stop it explicitly if ' +
+              'it is truly dead — and never delete the branch under it.',
+          holder?.id ?? null,
         )
       } catch (holdErr) {
         return {

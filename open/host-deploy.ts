@@ -82,6 +82,7 @@ import {
   windowApprovalOptions,
   windowExpiryMs,
   type HostDeployWindow,
+  type HostDeployWindowArgs,
 } from './host-deploy-window.ts'
 
 // ── Constants ────────────────────────────────────────────────────────────────
@@ -1140,6 +1141,77 @@ export function createHostDeployService(
   }
 
   /**
+   * The WINDOW twin of {@link reraise}. A dead window prompt is not a dead end
+   * either: mint a replacement offer on the topic the owner just tapped in and
+   * return the sentence that names it.
+   *
+   * OPENS NOTHING AND APPROVES NOTHING. `requestWindow()` returns a fresh
+   * `pending_approval` row with new `hdw:` tokens that needs its own owner tap,
+   * so a re-raise can never be the thing that stands a deploy down. The grant
+   * the owner tapped stays dead; this only spares him retyping the ask.
+   */
+  async function reraiseWindow(
+    ref: string | null,
+    hours: number | null,
+    topic_id: string,
+  ): Promise<string> {
+    if (ref === null || hours === null) return 'Ask again for a fresh one.'
+    let fresh: HostDeployWindowRequestResult
+    try {
+      fresh = await requestWindow({ ref, hours, topic_id })
+    } catch (err) {
+      return `A fresh window request could not be raised (${errText(err)}) — ask again.`
+    }
+    if (fresh.status === 'pending_approval') {
+      return (
+        `A fresh ${fresh.hours}-hour window request for ${fresh.ref} was just posted in ` +
+        'this chat — tap Approve on that one.'
+      )
+    }
+    return `A fresh window request could not be raised: ${fresh.reason}`
+  }
+
+  /**
+   * The stored terms behind an `hdw:` button value, or null when the value does
+   * not decode to a window grant OF THIS PROJECT. Read-only: it resolves a token
+   * so a refusal can restate what the owner was offered, and grants nothing.
+   */
+  function windowRowFor(value: string): HostDeployWindowArgs | null {
+    const token = value.slice(
+      HOST_DEPLOY_WINDOW_VALUE_PREFIX.length,
+      HOST_DEPLOY_WINDOW_VALUE_PREFIX.length + 22,
+    )
+    const id = tokenToUuid(token)
+    if (id === null) return null
+    const row = approvals.get(id)
+    if (
+      row === null ||
+      row.project_slug !== project_slug ||
+      row.tool_name !== HOST_DEPLOY_WINDOW_TOOL_NAME
+    ) {
+      return null
+    }
+    return parseWindowArgs(row.args_json)
+  }
+
+  /**
+   * Is a window grant for `ref` ALREADY waiting? The dedupe guard on the window
+   * re-raise, mirroring {@link pendingGrantForRef}: repeat taps on one dead
+   * button must point at the prompt already on screen rather than mint one per
+   * tap.
+   */
+  function pendingWindowForRef(ref: string | null): boolean {
+    if (ref === null) return false
+    return approvals
+      .findByToolName(project_slug, HOST_DEPLOY_WINDOW_TOOL_NAME)
+      .some((r) => {
+        if (r.status !== 'pending') return false
+        const r_ref = parseWindowArgs(r.args_json).ref
+        return typeof r_ref === 'string' && r_ref === ref
+      })
+  }
+
+  /**
    * Is a host-deploy grant for `ref` ALREADY waiting? The dedupe guard on the
    * re-raise: repeat taps on the same dead button must point at the prompt that
    * is already there rather than mint a new one per tap.
@@ -1173,10 +1245,20 @@ export function createHostDeployService(
       return { body: 'Only the owner can open a deploy window. Nothing was changed.' }
     }
     if (!input.prior_option_values.includes(value)) {
+      // The GATE HAS ALREADY REFUSED and nothing below can change that — this
+      // tap opens no window. Recovering the dead grant's terms here only lets
+      // the refusal carry a replacement offer instead of dead-ending; the
+      // replacement is itself a pending grant needing a fresh owner tap.
+      const aged = windowRowFor(value)
+      const aged_ref = typeof aged?.ref === 'string' ? aged.ref : null
+      const aged_hours = typeof aged?.hours === 'number' ? aged.hours : null
       return {
         body:
           'That deploy-window prompt has aged out of the answer window, so it can no longer be ' +
-          'answered — no window was opened. Ask again for a fresh one.',
+          'answered — no window was opened. ' +
+          (pendingWindowForRef(aged_ref)
+            ? 'A fresh window request is already waiting — tap Approve on the newest prompt.'
+            : await reraiseWindow(aged_ref, aged_hours, input.topic_id)),
       }
     }
     const token = value.slice(
@@ -1205,11 +1287,20 @@ export function createHostDeployService(
     // tappable, and a prompt answered hours later is answering a question the
     // owner no longer has in front of him.
     if (now() - row.requested_at * 1000 > HOST_DEPLOY_APPROVAL_TTL_MS) {
+      // Read the dead row's terms BEFORE cancelling it — cancellation is what
+      // makes the replacement legal to mint, but it is also what would lose the
+      // ref and duration a replacement has to restate.
+      const dead = parseWindowArgs(row.args_json)
+      const dead_ref = typeof dead.ref === 'string' ? dead.ref : null
+      const dead_hours = typeof dead.hours === 'number' ? dead.hours : null
       await cancel(id)
       return {
         body:
           `That deploy-window request is older than ${Math.round(HOST_DEPLOY_APPROVAL_TTL_MS / 60_000)} ` +
-          'minutes, so it has expired — no window was opened. Ask again.',
+          'minutes, so it has expired — no window was opened. ' +
+          (pendingWindowForRef(dead_ref)
+            ? 'A fresh window request is already waiting — tap Approve on the newest prompt.'
+            : await reraiseWindow(dead_ref, dead_hours, input.topic_id)),
       }
     }
 
