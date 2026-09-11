@@ -23,6 +23,19 @@
  * "describe capability, not internals" constraints. The rich, itemized approval
  * rendering with the affirmative-act binding is task 8's ButtonStore surface;
  * this notifier is only the "an approval is waiting" push.
+ *
+ * ANNOUNCE NOTHING BY DEFAULT (2026-09-11, owner-reported twice). Task 8 landed,
+ * and every production caller of `requestApproval` now emits its OWN code-rendered
+ * Approve/Deny prompt immediately after the row is persisted — `open/host-deploy.ts`
+ * and `reminders/ritual-registration.ts`. So this push stopped being the approval
+ * surface and became a second, UNACTIONABLE copy of it stacking up beneath the real
+ * one, in EVERY open project at once. It was never a safety net either: a message
+ * with no button cannot be acted on, so removing it removes no protection.
+ *
+ * `announce_tools` is therefore REQUIRED and OPT-IN — no default, so the caller has
+ * to decide rather than inherit. It is EMPTY in production and that is the correct
+ * value, not dead config: add a tool name here only if you introduce a `prompt-user`
+ * approval that renders NO button prompt of its own, and prefer giving it buttons.
  */
 
 import type { ApprovalNotifier, ApprovalRow } from '@neutronai/tools/approval.ts'
@@ -52,6 +65,12 @@ export interface ApprovalNotifierRegistry {
  */
 export function buildAppWsApprovalNotifier(deps: {
   registry: ApprovalNotifierRegistry
+  /**
+   * The tool names that still need the plain-text "an approval is waiting" push.
+   * REQUIRED, with no default: a tool absent from this set is not announced at
+   * all. Empty is the correct production value — see the header.
+   */
+  announce_tools: ReadonlySet<string>
   /** Grant lifetime in ms. A row past it is never announced. */
   ttl_ms?: number
   /** Injectable clock for tests. Defaults to `Date.now`. */
@@ -61,6 +80,10 @@ export function buildAppWsApprovalNotifier(deps: {
   return {
     notify: async (row: ApprovalRow): Promise<void> => {
       try {
+        // THE OPT-IN GATE, checked before anything else: a tool that renders its
+        // own Approve/Deny prompt must not also get a buttonless copy.
+        if (!deps.announce_tools.has(row.tool_name)) return
+
         // `requested_at` is SECONDS since epoch (the `tool_approvals` grammar).
         if (
           deps.ttl_ms !== undefined &&
@@ -92,7 +115,15 @@ export function buildAppWsApprovalNotifier(deps: {
           ts: Date.now(),
         }
 
-        for (const topic of registry.topics()) {
+        // SCOPED TO THE APPROVAL'S OWN TOPIC when it has one. Fanning out to
+        // every live topic put a neutron-open deploy prompt in every other
+        // project's chat — half of why these read as noise. A row with a null
+        // topic_id has no home to go to, so it still broadcasts.
+        const targets =
+          row.topic_id !== null && registry.topics().includes(row.topic_id)
+            ? [row.topic_id]
+            : registry.topics()
+        for (const topic of targets) {
           try {
             registry.send(topic, env)
           } catch {
