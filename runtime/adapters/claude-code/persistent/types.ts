@@ -199,6 +199,17 @@ export interface PersistentReplSubstrateOptions {
    *  exited. Runtime consumers use this durable failure edge to reap detached
    *  work owned by the dead child. */
   onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  /** THE EVICTION GUARD. Consulted by `getOrSpawnSession` BEFORE it evicts an
+   *  abandon-poisoned warm child: how many live, in-process workloads (trident
+   *  inner workflows — the Argus panel, the arbiter, the terminal/cleanup steps
+   *  all run as CC subagents INSIDE the launcher child; only the codex forge
+   *  build is detached) the child with this generation currently hosts. `> 0` →
+   *  the eviction is DEFERRED: the poison flag is cleared, the child stays warm,
+   *  the abandoned turn drains on its own. Terminating the child would SIGKILL
+   *  every one of those workflows, and nothing would record it (measured as 33%
+   *  of all trident run deaths). Omitted → 0 → evict exactly as before. Must be
+   *  cheap and synchronous (one indexed count); a throw is treated as 0. */
+  hostsLiveWork?: (childGeneration: string) => number
   /** Rate-limit / overload BANNER notice sink (master-table row #10). Fired on the
    *  rising edge when the output scanner sees a `temporary` (429/529/overload/502)
    *  or `usage-cap` (subscription window) banner in the ring — NOTIFY-ONLY, no

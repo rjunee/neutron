@@ -384,6 +384,10 @@ export interface BuildLlmCallSubstrateInput {
   onDeadTurnNotice?: (notice: DeadTurnNotice) => void | Promise<void>
   /** Durable-work failure sink for a pooled child exit detected by supervision. */
   onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  /** Eviction guard: live in-process workloads hosted by a child generation
+   *  (see `PersistentReplSubstrateOptions.hostsLiveWork`). Wired on the trident
+   *  fire substrate only. */
+  hostsLiveWork?: (childGeneration: string) => number
   onSizeAlert?: (info: { sessionKey: string; severity: SizeSeverity; sizeBytes: number }) => void
   onRateLimitBanner?: (notice: RateLimitBannerNotice) => void | Promise<void>
   /** Floor-clamp notice — an owner-facing spawn was resolved below the configured
@@ -883,6 +887,7 @@ export function buildLlmCallSubstrate(
         // conversational substrate (they keep the stderr-only default).
         if (input.onDeadTurnNotice !== undefined) opts.onDeadTurnNotice = input.onDeadTurnNotice
         if (input.onChildCrash !== undefined) opts.onChildCrash = input.onChildCrash
+        if (input.hostsLiveWork !== undefined) opts.hostsLiveWork = input.hostsLiveWork
         if (input.onSizeAlert !== undefined) opts.onSizeAlert = input.onSizeAlert
         if (input.onRateLimitBanner !== undefined) opts.onRateLimitBanner = input.onRateLimitBanner
         if (input.onModelFloorApplied !== undefined) {

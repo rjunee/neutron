@@ -576,6 +576,14 @@ export function wireSubstrates(ctx: OpenWiringContext): WiredSubstrates {
           `inner workflow child crashed: ${detail} (observed ${observed.toISOString()}; gateway process booted ${gatewayBooted.toISOString()})`,
         )
       },
+      // THE EVICTION GUARD. Before the pool evicts an abandon-poisoned warm
+      // launcher it asks how many runs are live INSIDE that child (their Argus
+      // panel, arbiter and terminal steps are in-process subagents; only the
+      // codex forge build is detached). > 0 → the eviction is deferred and the
+      // child stays warm. Measured: the eviction was 33% of all trident run
+      // deaths, and nothing recorded it until the 90-min watchdog reaped the
+      // corpse. Same generation key `onChildCrash` above is keyed on.
+      hostsLiveWork: (generationKey) => tridentRuns.countRunningByLauncher(generationKey),
       ...(substrateFactory !== undefined ? { substrateFactory } : {}),
     })
     if (built === null) throw new Error('cc-trident-fire: empty Anthropic credential pool')

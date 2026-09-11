@@ -64,14 +64,14 @@
  * An earlier cut read null `subagent_run_id` + null `subagent_status` past
  * `DEFAULT_SETTLE_TIMEOUT_MS` as proof no workflow exists, to decide the incident's
  * runs in minutes rather than hours. IT RACED THE LAUNCH IT WAS TRYING TO OUTLIVE.
- * Those columns are written only AFTER the fire settles
- * (`orchestrator.ts` post-settle write, ~:2137), and while the settle TIMER is 3 min
- * (`liveness.ts:115`) the cancellation that timer triggers is unbounded — the fire
- * keeps draining `handle.events` after `cancel()` (`inner-loop.ts` post-cancel drain, ~:789-794). So a
- * launch still genuinely in flight presents exactly the null/null row the rule
- * read as "never launched", and the wakeup would invite a second dispatch onto a
- * run whose launch is live. No finite bound on that window exists to read off the
- * row, so the row cannot prove the negative and the rule is gone. Such a run now
+ * Those columns are written only AFTER the launch tick returns — on a clean
+ * settle, or, since 2026-09-03, when the settle TIMER (`DEFAULT_SETTLE_TIMEOUT_MS`,
+ * 8 min) elapses and the fire is parked `running` as UNCONFIRMED (the launcher
+ * turn is left draining, never cancelled; `orchestrator.ts` §1c confirms it from
+ * the late settle or the workflow's own `plan-start`). Before that write, a launch
+ * still genuinely in flight presents exactly the null/null row the rule read as
+ * "never launched", and the wakeup would invite a second dispatch onto a run whose
+ * launch is live. The row cannot prove the negative and the rule is gone. Such a run now
  * falls to the same conservative timer as everything else — which means a launch
  * that stays unsettled past the stand-down threshold is itself eventually released.
  * That is a deliberate trade and not an oversight: a finite bound is wrong in one

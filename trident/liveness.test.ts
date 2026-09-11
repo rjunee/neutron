@@ -73,7 +73,12 @@ describe('liveness constants — ordering invariant', () => {
   })
 
   test('DEFAULT_SETTLE_TIMEOUT_MS (launching turn settle) is defined', () => {
-    // 3 minutes — generous for cold REPL spawn + Workflow fire + reply
-    expect(DEFAULT_SETTLE_TIMEOUT_MS).toBe(3 * 60_000)
+    // 8 minutes — a launcher turn that crosses an autocompact measured 4m33s and
+    // 5m03s to settle; the old 3-minute budget wrote those healthy fires off. Two
+    // budgets (the confirmation window) must still sit far inside the 90-min hang
+    // watchdog so a genuinely dead launch is decided by the fire path, not the reaper.
+    expect(DEFAULT_SETTLE_TIMEOUT_MS).toBe(8 * 60_000)
+    expect(DEFAULT_SETTLE_TIMEOUT_MS).toBeGreaterThan(5 * 60_000 + 3_000)
+    expect(2 * DEFAULT_SETTLE_TIMEOUT_MS).toBeLessThan(NO_ADVANCE_HANG_MS)
   })
 })

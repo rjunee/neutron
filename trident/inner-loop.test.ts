@@ -787,22 +787,23 @@ describe('buildSubstrateWorkflowFire — fire + settle on a warm substrate', () 
     expect(res.error).toContain('without a completion')
   })
 
-  test('a settle-timeout → failed + cancels the turn', async () => {
-    // The events iterator hangs forever; the settle timer fires + cancels.
+  // REGRESSION (2026-09-03 root cause). The settle-timeout used to `cancel()` the
+  // launcher turn, which abandon-poisoned the SHARED warm launcher session; the
+  // next fire on that key then evicted (SIGKILLed) the `claude` child hosting every
+  // other run's in-process Argus panel / arbiter / terminal steps — 33% of all
+  // trident run deaths. The budget is now a reporting deadline: the turn drains.
+  test('a settle-timeout → UNCONFIRMED; the turn is NOT cancelled, and its late completion resolves `settled` as fired with the launcher generation', async () => {
     let cancelled = false
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
     const substrate: Substrate = {
       start(): SessionHandle {
         return {
           events: (async function* () {
-            await new Promise<void>((resolve) => {
-              // resolve only when cancelled, so the for-await loop can end.
-              const iv = setInterval(() => {
-                if (cancelled) {
-                  clearInterval(iv)
-                  resolve()
-                }
-              }, 1)
-            })
+            await released
+            yield { ...completion, launcher_session_key: 'generation-late' } as Event
           })(),
           async respondToTool() {},
           async cancel() {
@@ -827,14 +828,27 @@ describe('buildSubstrateWorkflowFire — fire + settle on a warm substrate', () 
     expect(fireTimer).not.toBeNull()
     fireTimer!()
     const res = await p
-    expect(res.status).toBe('failed')
-    expect(res.error).toContain('did not settle')
-    expect(cancelled).toBe(true)
+    expect(res.status).toBe('unconfirmed')
+    expect(res.error).toContain('did not settle within the budget')
+    expect(res.error).toContain('not cancelled')
+    expect(res.turn_cancelled).toBe(false)
+    expect(res.budget_ms).toBe(5)
+    expect(res.elapsed_ms).toBeGreaterThanOrEqual(0)
+    // THE assertion: the turn was left running. Red mutation: restoring
+    // `handle.cancel()` in the settle-timeout callback flips this.
+    expect(cancelled).toBe(false)
+    expect(res.settled).toBeDefined()
+
+    // The turn drains on its own; the late settle is exposed for the orchestrator.
+    release()
+    const late = await res.settled!
+    expect(late).toEqual({ status: 'fired', error: null, launcher_session_key: 'generation-late' })
+    expect(cancelled).toBe(false)
   })
 
-  test('a fire stream that never yields and ignores cancel still settles failed at the budget', async () => {
+  test('a fire stream that never yields still resolves at the budget — as unconfirmed, with the turn left running', async () => {
     // Red mutation: reverting the unconditional race makes this hang until the
-    // test runner times out because cancel deliberately cannot end the stream.
+    // test runner times out, because nothing ever ends the stream.
     let cancelled = false
     const substrate: Substrate = {
       start(): SessionHandle {
@@ -852,11 +866,125 @@ describe('buildSubstrateWorkflowFire — fire + settle on a warm substrate', () 
     }
     const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
 
-    expect(await fire(fireInput({ settle_timeout_ms: 20 }))).toEqual({
-      status: 'failed',
-      error: 'fire turn did not settle within the budget',
-    })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    expect(res.error).toBe('fire turn did not settle within the budget (turn left running, not cancelled)')
+    expect(res.turn_cancelled).toBe(false)
+    expect(cancelled).toBe(false)
+    // Nothing injected: no generation on the outcome, and the caller can still
+    // withdraw the queued turn later (F3) — through the SAME handle.
+    expect(res.launcher_session_key).toBeUndefined()
+    expect(res.launcher).toBeDefined()
+    expect(res.cancel).toBeDefined()
+    await res.cancel!()
     expect(cancelled).toBe(true)
+  })
+
+  // F2/F4/F6 (review): the pool reports the child generation on the ONE
+  // post-inject `working` status. A turn that injected before the budget carries
+  // it on the unconfirmed outcome; one that injects later resolves `launcher`.
+  test('a `working` status carrying the pool generation BEFORE the budget → the unconfirmed outcome names it, and `launcher` resolves to it', async () => {
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            yield { kind: 'status', message: 'working', launcher_session_key: 'generation-inject' } as Event
+            await new Promise<void>(() => {})
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    // Red mutation: ignoring status events leaves this undefined and the row null.
+    expect(res.launcher_session_key).toBe('generation-inject')
+    expect(await res.launcher!).toBe('generation-inject')
+  })
+
+  test('a generation that arrives AFTER the budget resolves `launcher` (parked for the orchestrator), and a keepalive status without one is ignored', async () => {
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            yield { kind: 'status', message: 'still working', keepalive: true } as Event
+            await released
+            yield { kind: 'status', message: 'working', launcher_session_key: 'generation-after' } as Event
+            yield { ...completion, launcher_session_key: 'generation-after' } as Event
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    expect(res.launcher_session_key).toBeUndefined()
+    release()
+    expect(await res.launcher!).toBe('generation-after')
+    const late = await res.settled!
+    expect(late).toEqual({ status: 'fired', error: null, launcher_session_key: 'generation-after' })
+  })
+
+  test('a stream that ends WITHOUT ever injecting resolves `launcher` to null', async () => {
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            await released
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ build_substrate: () => substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 20 }))
+    expect(res.status).toBe('unconfirmed')
+    release()
+    expect(await res.launcher!).toBeNull()
+    expect((await res.settled!).status).toBe('failed')
+  })
+
+  test('a stream that ERRORS after the budget resolves `settled` as failed — it never rejects', async () => {
+    let release!: () => void
+    const released = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const substrate: Substrate = {
+      start(): SessionHandle {
+        return {
+          events: (async function* () {
+            await released
+            throw new Error('pty gone')
+          })(),
+          async respondToTool() {},
+          async cancel() {},
+          tool_resolution: 'internal',
+        } as SessionHandle
+      },
+    }
+    const fire = buildSubstrateWorkflowFire({ substrate })
+    const res = await fire(fireInput({ settle_timeout_ms: 5 }))
+    expect(res.status).toBe('unconfirmed')
+    release()
+    const late = await res.settled!
+    expect(late.status).toBe('failed')
+    expect(late.error).toContain('fire stream error')
   })
 
   test('a substrate whose start() throws → failed (crashed launcher)', async () => {

@@ -654,6 +654,44 @@ describe('wireSubstrates — instance ids + tool-bridge invariants', () => {
       rmSync(dir, { recursive: true, force: true })
     }
   })
+
+  test('cc-trident-fire-* wires the EVICTION GUARD: hostsLiveWork counts running runs by launcher generation, and nothing else gets it (2026-09-03)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-open-hosts-live-work-'))
+    const db = ProjectDb.open(join(dir, 'project.db'))
+    try {
+      applyMigrations(db.raw())
+      const runs = new TridentRunStore(db)
+      const a = await runs.create({ slug: 'a', project_slug: 'owner', repo_path: '/repo/x', task: 'a' })
+      const b = await runs.create({ slug: 'b', project_slug: 'owner', repo_path: '/repo/x', task: 'b' })
+      const other = await runs.create({ slug: 'o', project_slug: 'owner', repo_path: '/repo/x', task: 'o' })
+      await runs.update(a.id, { subagent_status: 'running', subagent_run_id: 'wf-a', workflow_run_id: 'gen-1' })
+      await runs.update(b.id, { subagent_status: 'running', subagent_run_id: 'wf-b', workflow_run_id: 'gen-1' })
+      await runs.update(other.id, { subagent_status: 'running', subagent_run_id: 'wf-o', workflow_run_id: 'gen-2' })
+
+      const { ctx, captured } = makeCtx({ db })
+      const w = wireSubstrates(ctx)
+      await drainEveryWiredSubstrate(w)
+      const fire = captured.filter((o) => o.substrate_instance_id.startsWith('cc-trident-fire-'))
+      expect(fire.length).toBeGreaterThan(0)
+      for (const o of fire) {
+        // Mutation killed: dropping the wiring leaves the guard undefined → the pool
+        // answers 0 and evicts the launcher with every hosted workflow inside it.
+        expect(typeof o.hostsLiveWork).toBe('function')
+        expect(o.hostsLiveWork!('gen-1')).toBe(2)
+        expect(o.hostsLiveWork!('gen-2')).toBe(1)
+        expect(o.hostsLiveWork!('gen-none')).toBe(0)
+      }
+      // COUNTER-ASSERTION: the guard is scoped to the trident launcher. A chat /
+      // synthesis substrate must keep the 2026-06-18 abandon-poison semantics.
+      const rest = captured.filter((o) => !o.substrate_instance_id.startsWith('cc-trident-fire-'))
+      expect(rest.length).toBeGreaterThan(0)
+      for (const o of rest) expect(o.hostsLiveWork, o.substrate_instance_id).toBeUndefined()
+    } finally {
+      await shutdownAllPersistentRepls()
+      db.close()
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('wireSubstrates — swappable provider (trident stays Claude Code)', () => {

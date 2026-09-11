@@ -114,4 +114,13 @@ export type Event =
        * and the wire shape is unchanged.
        */
       keepalive?: boolean
+      /**
+       * The exact persistent-pool child GENERATION serving this turn. Stamped by
+       * `pool.ts` on the ONE post-inject `working` status (never on keepalives),
+       * so a caller that cannot wait for the `completion` — trident's fire seam,
+       * whose settle budget can elapse while the launcher turn is still draining
+       * — still learns WHICH child now hosts its work at the moment it starts.
+       * The same value the turn's `completion` later carries. Additive + optional.
+       */
+      launcher_session_key?: string
     }
