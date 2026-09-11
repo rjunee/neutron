@@ -3048,9 +3048,12 @@ export function buildOpenGraphComposer(
             throw new Error('host deploy approval prompt failed to persist a durable row')
           }
           // The grant→prompt link. `request()` persists this id into the
-          // approval row so the expiry sweep can retire the very button it
-          // raised — a grant that dies while its button stays drawn is the
-          // "still tappable, connected to nothing" state the owner hit.
+          // approval row so the sweep can retire the very button it raised — a
+          // grant that dies while its button stays drawn is the "still tappable,
+          // connected to nothing" state the owner hit. A grant now dies ONLY when
+          // its ref moves off the sha it was bound to, so this is the link that
+          // takes a button away at the one moment it has stopped meaning
+          // anything — never merely because it has been on screen a while.
           return { prompt_id: result.prompt_id }
         },
         // Retire the dead grant's button on every surface. `appWs` is declared
@@ -3063,7 +3066,7 @@ export function buildOpenGraphComposer(
             await appWs.deref((a) => a.recordPromptChoice(input))
           },
         }),
-        // The expiry sentence, on the grant's OWN topic, INERT: an expired
+        // The staleness sentence, on the grant's OWN topic, INERT: a retired
         // approval is history, not a new prompt, and it must never be tappable.
         post_notice: async (topic_id, body) => {
           await deliver(topic_id, { body, durability: 'inert' })
@@ -3084,9 +3087,16 @@ export function buildOpenGraphComposer(
         log: (m) => log.info('host_deploy', { detail: m }),
       })
 
-      // ── The sweeper. A dead grant must stop being pending WITHOUT a tap:
-      // until now nothing on this box expired one, so the row sat `pending`
-      // forever and the "Approval requested […]" banner sat with it.
+      // ── The sweeper. A grant that has stopped being TRUE must stop being
+      // pending WITHOUT a tap, so a button whose commit list no longer describes
+      // what would install does not sit on the owner's screen looking live.
+      //
+      // ⚠️ IT SWEEPS ON STALENESS, NOT ON AGE (owner, 2026-09-11). The age
+      // predicate is what took his Approve button away five minutes after it
+      // appeared, for a reason unrelated to whether tapping it was still correct;
+      // `handleOwnerButtonAnswer` re-proves the sha on the tap itself, so this
+      // loop is hygiene and never the authority. Do not reintroduce a TTL here.
+      //
       // HOST-DEPLOY-SCOPED by construction (`sweepExpiredGrants` scans only
       // `host-deploy` rows) — a global `ApprovalManager.expireStale()` tick
       // would also expire pending RITUAL grants the owner may answer days later.

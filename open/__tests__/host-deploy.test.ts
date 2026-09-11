@@ -1266,73 +1266,145 @@ describe('two taps in the same window cannot deploy twice, or deploy after a Den
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('a grant has a lifetime of its own', () => {
-  test('an approval older than the TTL is refused even though nothing swept it', async () => {
+describe("a grant's life is bound to its SHA, not to the clock", () => {
+  /** Move `ref` off the sha the grant was bound to. The ONLY way a grant dies. */
+  const movingGit = (): { state: GitState; git: HostDeployGit; move: () => void } => {
+    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
+    return { state, git: fakeGit(state), move: () => { state.refs['origin/main'] = MOVED_SHA } }
+  }
+
+  test('ACCEPTANCE: an Approve tap an HOUR late still deploys — age refuses nothing', async () => {
     const h = harness()
     await h.service.request({})
     await settle()
+    const approve = h.approveValue()
 
-    // NOTHING calls `ApprovalManager.expireStale()` on this box — that was the
-    // point of the Argus r1 minor. Roll only the clock; run no sweep. The row is
-    // still literally `pending` in the table when the tap arrives.
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
-    expect(approvals.listPending(PROJECT)).toHaveLength(1)
-    const oldApprove = h.approveValue()
-
-    const out = await answer(h, oldApprove)
-    expect(h.dispatchCalls).toEqual([])
-    expect(out!.body).toContain('has expired')
-    // A SENTENCE AND A FRESH GRANT, not silence and not "ask again" — the owner
-    // was told to tap something that had already died; making him re-ask is how a
-    // 5-minute window becomes unwinnable.
-    expect(out!.body).toContain('fresh approval')
-    await settle()
-    expect(h.emits).toHaveLength(2)
-    expect(h.emits[1]!.topic_id).toBe(TOPIC)
-    const fresh = h.emits[1]!.options.map((o) => o.value)
-    for (const v of fresh) expect(HOST_DEPLOY_VALUE_RE.test(v)).toBe(true)
-    expect(fresh).not.toContain(oldApprove)
-    // The old grant is dead and EXACTLY ONE grant is waiting — the new one. A
-    // re-raise never approves: nothing was dispatched.
-    expect(approvals.listPending(PROJECT)).toHaveLength(1)
-    const rows = approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)
-    expect(rows).toHaveLength(2)
-    expect(rows.map((r) => r.status).sort()).toEqual(['expired', 'pending'])
-    expect(h.dispatchCalls).toEqual([])
-  })
-
-  test('the fresh grant from an expired tap deploys on its own tap, and only then', async () => {
-    const h = harness()
-    await h.service.request({})
+    // TWELVE TTLs. Not a boundary probe — the point is that no amount of elapsed
+    // time is a reason, so the number is deliberately absurd. The owner reads on a
+    // delay; on 2026-09-11 three consecutive taps of his all landed after a
+    // five-minute gate had killed what he was answering, and `126fc642` went
+    // undeployed through all three. Nothing swept here either: the row is still
+    // literally `pending` when the tap arrives, and `origin/main` has not moved.
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS * 12
+    const out = await answer(h, approve)
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
-    // Tapping the DEAD button re-raises. It does not deploy — that is the whole
-    // difference between a re-raise and an auto-approve.
-    await answer(h, h.approveValue())
-    await settle()
-    expect(h.dispatchCalls).toEqual([])
-
-    // The owner taps the button he was just handed. NOW it deploys.
-    const out = await answer(h, h.approveValue())
     expect(h.dispatchCalls).toHaveLength(1)
     expect(h.dispatchCalls[0]!.sha).toBe(TARGET_SHA)
     expect(out!.body).toContain('Deploy requested')
+    // AND IT DEPLOYED ON THE TAP HE MADE. No replacement prompt was minted, so
+    // there is no second button for him to chase — that loop is the defect.
+    expect(h.emits).toHaveLength(1)
+    expect(approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.status).toBe(
+      'approved',
+    )
   })
 
-  test('a repeat tap on the dead button points at the waiting prompt instead of raising a second one', async () => {
-    const h = harness()
+  test('a late tap whose ref MOVED is still refused, and re-raised — the sha is the gate that survived', async () => {
+    const { git, move } = movingGit()
+    const h = harness({ git })
     await h.service.request({})
     await settle()
     const oldApprove = h.approveValue()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS * 12
+    move()
+
+    const out = await answer(h, oldApprove)
+    await settle()
+    // The commit list he read no longer describes what would install, so this tap
+    // must not deploy — deleting the age gate must not have deleted this one.
+    expect(h.dispatchCalls).toEqual([])
+    expect(out!.body).toContain('Stale approval')
+    expect(out!.body).toContain('fresh approval')
+    expect(h.emits).toHaveLength(2)
+    const fresh = h.emits[1]!.options.map((o) => o.value)
+    for (const v of fresh) expect(HOST_DEPLOY_VALUE_RE.test(v)).toBe(true)
+    expect(fresh).not.toContain(oldApprove)
+    const rows = approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)
+    expect(rows.map((r) => r.status).sort()).toEqual(['expired', 'pending'])
+  })
+
+  test('the fresh grant from a stale tap deploys on its own tap, and only then', async () => {
+    const { git, move } = movingGit()
+    const h = harness({ git })
+    await h.service.request({})
+    await settle()
+
+    move()
+    await answer(h, h.approveValue())
+    await settle()
+    // A re-raise is not an auto-approve.
+    expect(h.dispatchCalls).toEqual([])
+
+    const out = await answer(h, h.approveValue())
+    expect(h.dispatchCalls).toHaveLength(1)
+    expect(h.dispatchCalls[0]!.sha).toBe(MOVED_SHA)
+    expect(out!.body).toContain('Deploy requested')
+  })
+
+  test('a late DENY is still a deny — a dead clock never turns a refusal into a deploy', async () => {
+    const h = harness()
+    await h.service.request({})
+    await settle()
+    const deny = h.denyValue()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS * 12
+    const out = await answer(h, deny)
+    expect(h.dispatchCalls).toEqual([])
+    expect(out!.body).toContain('Deploy declined')
+    expect(approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.status).toBe(
+      'denied',
+    )
+  })
+
+  test('a late tap when the host already sits on the approved sha deploys NOTHING', async () => {
+    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
+    const h = harness({ git: fakeGit(state) })
+    await h.service.request({})
+    await settle()
+
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS * 12
+    // A standing window covered it, or someone deployed it another way. The sha is
+    // UNCHANGED, so gate (c) passes and only gate (c2) stands between this tap and
+    // a pointless restart of the owner's instance.
+    state.head = TARGET_SHA
+
+    const out = await answer(h, h.approveValue())
+    await settle()
+    expect(h.dispatchCalls).toEqual([])
+    expect(out!.body).toContain('already at')
+    expect(out!.body).toContain('nothing left to install')
+    // No replacement prompt: there is nothing to approve.
+    expect(h.emits).toHaveLength(1)
+  })
+
+  test('an unreadable HEAD fails OPEN — a valid approval is not blocked to avoid a wasted one', async () => {
+    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
+    const h = harness({ git: fakeGit(state) })
+    await h.service.request({})
+    await settle()
+
+    // Gate (c) has already proved the sha; (c2) is an optimisation, and an
+    // optimisation that cannot read git must not become a refusal.
+    state.throwOn = 'HEAD'
+    const out = await answer(h, h.approveValue())
+    expect(h.dispatchCalls).toHaveLength(1)
+    expect(out!.body).toContain('Deploy requested')
+  })
+
+  test('a repeat tap on a stale button points at the waiting prompt instead of raising a second one', async () => {
+    const { git, move } = movingGit()
+    const h = harness({ git })
+    await h.service.request({})
+    await settle()
+    const oldApprove = h.approveValue()
+
+    move()
     await answer(h, oldApprove)
     await settle()
     expect(h.emits).toHaveLength(2)
 
-    // The dead button is still on screen; tapping it again must not mint a
-    // prompt per tap.
     const again = await h.service.handleOwnerButtonAnswer({
       user_id: OWNER,
       user_text: oldApprove,
@@ -1340,60 +1412,17 @@ describe('a grant has a lifetime of its own', () => {
       prior_option_values: [oldApprove, ...h.options()],
     })
     await settle()
-    expect(again!.body).toContain('already waiting')
+    expect(again!.body).toContain('nothing was deployed')
     expect(h.emits).toHaveLength(2)
     expect(approvals.listPending(PROJECT)).toHaveLength(1)
     expect(h.dispatchCalls).toEqual([])
   })
 
-  test('a racing second tap on a TTL-dead grant re-raises exactly once', async () => {
-    const h = harness()
-    await h.service.request({})
-    await settle()
-    const oldApprove = h.approveValue()
-
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
-    await answer(h, oldApprove)
-    await settle()
-    // The second tap on the SAME dead token finds the row already retired by the
-    // first — `cancelPending` is the claim — so it raises nothing.
-    const second = await h.service.handleOwnerButtonAnswer({
-      user_id: OWNER,
-      user_text: oldApprove,
-      topic_id: TOPIC,
-      prior_option_values: [oldApprove, ...h.options()],
-    })
-    await settle()
-    expect(h.emits).toHaveLength(2)
-    expect(second!.body).toContain('nothing was deployed')
-    expect(h.dispatchCalls).toEqual([])
-  })
-
-  test('an expired tap when the host has caught up says nothing is left to deploy', async () => {
-    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
-    const h = harness({ git: fakeGit(state) })
-    await h.service.request({})
-    await settle()
-
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
-    // Someone else deployed it in the meantime. There is nothing to re-raise, and
-    // a prompt that asks the owner to approve a no-op is worse than a sentence.
-    state.head = TARGET_SHA
-    state.refs['origin/main'] = TARGET_SHA
-
-    const out = await answer(h, h.approveValue())
-    await settle()
-    expect(out!.body).toContain('nothing is left to deploy')
-    expect(h.emits).toHaveLength(1)
-    expect(h.dispatchCalls).toEqual([])
-  })
-
-  test('an approval INSIDE the window still deploys — the gate is a boundary, not a wall', async () => {
+  test('an approval tapped immediately still deploys — nothing about the fast path changed', async () => {
     const h = harness()
     await h.service.request({})
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS - 1_000
     const out = await answer(h, h.approveValue())
     expect(h.dispatchCalls).toHaveLength(1)
     expect(out!.body).toContain('Deploy requested')
@@ -1401,7 +1430,7 @@ describe('a grant has a lifetime of its own', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
-describe('a dead grant is swept without a tap, and says so', () => {
+describe('a grant is swept when it stops being TRUE, never when it gets old', () => {
   /** Insert a raw pending approval row `age_ms` old — the sweep's input shape. */
   const insertPending = async (
     id: string,
@@ -1414,6 +1443,12 @@ describe('a dead grant is swept without a tap, and says so', () => {
        VALUES (?, ?, ?, ?, ?, 'pending', ?)`,
       [id, PROJECT, TOPIC, tool_name, JSON.stringify({ ref: 'origin/main' }), (nowMs - age_ms) / 1000],
     )
+  }
+
+  /** A git whose `origin/main` can be moved off the sha a grant was bound to. */
+  const movingGit = (): { state: GitState; git: HostDeployGit; move: () => void } => {
+    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
+    return { state, git: fakeGit(state), move: () => { state.refs['origin/main'] = MOVED_SHA } }
   }
 
   test('the emitted prompt id is persisted onto the grant', async () => {
@@ -1430,13 +1465,35 @@ describe('a dead grant is swept without a tap, and says so', () => {
     expect(JSON.parse(row.args_json).target_sha).toBe(TARGET_SHA)
   })
 
-  test('a grant past its TTL is expired, its button retired and its topic told — with no tap', async () => {
+  test('ACCEPTANCE: a grant whose sha still stands is LEFT ALONE, however old — the button does not disappear', async () => {
     const h = harness()
+    await h.service.request({ ref: 'origin/main', topic_id: 'app:owner:neutron-open' })
+    await settle()
+
+    // The owner's complaint, as an assertion: the sweep used to take his Approve
+    // button off the screen five minutes after it appeared, for a reason that said
+    // nothing about whether tapping it was still correct. Twelve TTLs later, with
+    // `origin/main` exactly where it was, nothing is retired and nothing is said.
+    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS * 12
+    expect(await h.service.sweepExpiredGrants()).toBe(0)
+
+    expect(approvals.listPending(PROJECT)).toHaveLength(1)
+    expect(h.retired).toEqual([])
+    expect(h.notices).toEqual([])
+    // AND IT IS STILL LIVE, not merely still listed: the button deploys.
+    const out = await answer(h, h.approveValue())
+    expect(h.dispatchCalls).toHaveLength(1)
+    expect(out!.body).toContain('Deploy requested')
+  })
+
+  test('a grant whose ref MOVED is expired, its button retired and its topic told — with no tap', async () => {
+    const { git, move } = movingGit()
+    const h = harness({ git })
     await h.service.request({ ref: 'origin/main', topic_id: 'app:owner:neutron-open' })
     await settle()
     const prompt_id = h.promptId()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    move()
     const swept = await h.service.sweepExpiredGrants()
 
     expect(swept).toBe(1)
@@ -1449,35 +1506,39 @@ describe('a dead grant is swept without a tap, and says so', () => {
     expect(h.retired).toEqual([{ prompt_id, topic_id: 'app:owner:neutron-open' }])
     expect(h.notices).toHaveLength(1)
     expect(h.notices[0]!.topic_id).toBe('app:owner:neutron-open')
-    expect(h.notices[0]!.body).toContain('expired')
+    expect(h.notices[0]!.body).toContain('no longer matches')
     expect(h.notices[0]!.body).toContain('nothing was deployed')
     expect(h.notices[0]!.body).toContain('origin/main')
     // THE assertion: an unattended tick can never deploy.
     expect(h.dispatchCalls).toEqual([])
   })
 
-  test('a second sweep of the same grant expires nothing and says nothing', async () => {
-    const h = harness()
+  test('a git failure keeps the grant AND its button — the sweep fails open', async () => {
+    const state: GitState = { head: HEAD_SHA, refs: { 'origin/main': TARGET_SHA }, commits: COMMITS }
+    const h = harness({ git: fakeGit(state) })
     await h.service.request({ ref: 'origin/main' })
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
-    expect(await h.service.sweepExpiredGrants()).toBe(1)
-    expect(await h.service.sweepExpiredGrants()).toBe(0)
-    expect(h.notices).toHaveLength(1)
-    expect(h.retired).toHaveLength(1)
-  })
-
-  test('a grant still inside its window is left alone', async () => {
-    const h = harness()
-    await h.service.request({ ref: 'origin/main' })
-    await settle()
-
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS - 1_000
+    // This loop is hygiene, not authority. A flaked `git` must never be the thing
+    // that destroys an approval the owner is about to tap; the tap re-checks.
+    state.throwOn = 'origin/main'
     expect(await h.service.sweepExpiredGrants()).toBe(0)
     expect(approvals.listPending(PROJECT)).toHaveLength(1)
     expect(h.retired).toEqual([])
     expect(h.notices).toEqual([])
+  })
+
+  test('a second sweep of the same grant expires nothing and says nothing', async () => {
+    const { git, move } = movingGit()
+    const h = harness({ git })
+    await h.service.request({ ref: 'origin/main' })
+    await settle()
+
+    move()
+    expect(await h.service.sweepExpiredGrants()).toBe(1)
+    expect(await h.service.sweepExpiredGrants()).toBe(0)
+    expect(h.notices).toHaveLength(1)
+    expect(h.retired).toHaveLength(1)
   })
 
   test('a row a tap decides between the scan and the claim is not counted and not announced', async () => {
@@ -1489,13 +1550,14 @@ describe('a dead grant is swept without a tap, and says so', () => {
         await approvals.respondApproval(id, 'denied', OWNER)
         return false
       }
-    const h = harness({ approvals: racing })
+    const { git, move } = movingGit()
+    const h = harness({ approvals: racing, git })
     await h.service.request({ ref: 'origin/main' })
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    move()
     expect(await h.service.sweepExpiredGrants()).toBe(0)
-    // The tap already answered the owner; a second "it expired" would contradict it.
+    // The tap already answered the owner; a second notice would contradict it.
     expect(h.notices).toEqual([])
     expect(h.retired).toEqual([])
     expect(approvals.findByToolName(PROJECT, HOST_DEPLOY_APPROVAL_TOOL_NAME)[0]!.status).toBe(
@@ -1503,16 +1565,17 @@ describe('a dead grant is swept without a tap, and says so', () => {
     )
   })
 
-  test('a pending RITUAL grant older than the TTL is NOT touched', async () => {
+  test('a pending RITUAL grant is NOT touched, however old', async () => {
     // THE JUDGMENT CALL, asserted. A global `expireStale()` tick would kill this
     // row minutes after boot; a ritual grant has no re-raise path and the owner
     // may legitimately answer it days later. The sweep is host-deploy-SCOPED.
-    const h = harness()
+    const { git, move } = movingGit()
+    const h = harness({ git })
     await insertPending('ritual-row-1', 'ritual:morning-brief', HOST_DEPLOY_APPROVAL_TTL_MS * 100)
     await h.service.request({ ref: 'origin/main' })
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    move()
     expect(await h.service.sweepExpiredGrants()).toBe(1)
 
     expect(approvals.get('ritual-row-1')!.status).toBe('pending')
@@ -1520,7 +1583,10 @@ describe('a dead grant is swept without a tap, and says so', () => {
     expect(h.notices[0]!.body).toContain('host-deploy')
   })
 
-  test('a grant with no linked prompt is still expired and still announced', async () => {
+  test('a grant whose own terms cannot be read back is expired and announced', async () => {
+    // A legacy row with no `target_sha`: there is no sha to re-check, and
+    // `handleAnswer` refuses it at the same `null` check, so its button is already
+    // connected to nothing. Retiring it takes away no capability.
     const h = harness()
     await insertPending('legacy-grant', HOST_DEPLOY_APPROVAL_TOOL_NAME, HOST_DEPLOY_APPROVAL_TTL_MS * 3)
 
@@ -1532,33 +1598,36 @@ describe('a dead grant is swept without a tap, and says so', () => {
   })
 
   test('an unretirable prompt does not stop the notice or the rest of the sweep', async () => {
-    const h = harness({ retireThrows: true })
+    const { git, move } = movingGit()
+    const h = harness({ git, retireThrows: true })
     await h.service.request({ ref: 'origin/main' })
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    move()
     expect(await h.service.sweepExpiredGrants()).toBe(1)
     expect(h.notices).toHaveLength(1)
     expect(approvals.listPending(PROJECT)).toEqual([])
   })
 
   test('a box that wires neither seam still expires the row', async () => {
-    const h = harness({ noSweepSeams: true })
+    const { git, move } = movingGit()
+    const h = harness({ git, noSweepSeams: true })
     await h.service.request({ ref: 'origin/main' })
     await settle()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    move()
     expect(await h.service.sweepExpiredGrants()).toBe(1)
     expect(approvals.listPending(PROJECT)).toEqual([])
   })
 
   test('tapping a SWEPT grant gets the sentence and a fresh prompt, not silence', async () => {
-    const h = harness()
+    const { git, move } = movingGit()
+    const h = harness({ git })
     await h.service.request({ ref: 'origin/main' })
     await settle()
     const oldApprove = h.approveValue()
 
-    nowMs += HOST_DEPLOY_APPROVAL_TTL_MS + 1_000
+    move()
     expect(await h.service.sweepExpiredGrants()).toBe(1)
 
     // The button was retired server-side, but a client that missed the frame can
