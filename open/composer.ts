@@ -6492,6 +6492,15 @@ export function buildOpenGraphComposer(
       // past its lifetime — the owner's only cure for that is a page reload.
       approval_notifier: buildAppWsApprovalNotifier({
         registry: appWsRegistry,
+        // EMPTY ON PURPOSE — this is the correct production value, not dead
+        // config. Every `prompt-user` approval today emits its own code-rendered
+        // Approve/Deny prompt (`open/host-deploy.ts`,
+        // `reminders/ritual-registration.ts`), so the plain-text push was a
+        // second, UNACTIONABLE copy stacking up beneath the real one in every
+        // open project at once. Owner reported it twice. Add a tool name here
+        // ONLY for a `prompt-user` approval that renders no button prompt of its
+        // own — and prefer giving that approval buttons instead.
+        announce_tools: new Set<string>(),
         ttl_ms: APPROVAL_DEFAULT_TTL_MS,
       }),
       // F4 — real supervision-watchdog notifier (app-ws + O4 system_events),
