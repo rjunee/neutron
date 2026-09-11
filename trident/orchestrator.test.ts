@@ -4381,6 +4381,102 @@ describe('orchestrator — an UNCONFIRMED fire (launcher turn left draining past
     expect(after.failure_reason).toContain('launcher turn later ended failed: fire turn closed without a completion event')
     expect(h.inputs).toHaveLength(1)
   })
+
+  // A PENDING RECORD BELONGS TO THE DISPATCH THAT MINTED IT AND TO NO OTHER.
+  // The record is keyed by run id, but the thing it describes is one launcher
+  // TURN. Once the run has been relaunched, the turn it describes is dead and its
+  // generation belongs to a child that is gone — adopting it onto the live
+  // workflow hands the eviction guard and the crash latch the wrong generation,
+  // and running its deadline fails a run whose new lane is healthy.
+  test('a relaunch SUPERSEDES the unconfirmed record of the dispatch it replaced — the new lane never wears the dead generation, and never dies on the old deadline', async () => {
+    let t = 0
+    let fires = 0
+    const h = buildHarness({
+      plan: () => {
+        fires += 1
+        return fires === 1
+          ? { fire: { ...unconfirmed(new Promise<FireOutcome>(() => {})), launcher_session_key: 'generation-A' } }
+          : { fire: { status: 'fired', error: null, launcher_session_key: 'generation-B' } }
+      },
+      now: () => new Date(t).toISOString(),
+      begin_crash_recovery: true,
+      gather_run_evidence: async () => ({
+        process: { observed: 'nothing', detail: 'no process' },
+        artifacts: { observed: 'nothing', detail: 'none' },
+        ref: { observed: 'unknown', detail: 'not probed' },
+      }),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    // Dispatch A fires unconfirmed and parks the run with a record whose deadline
+    // is t=1000 and whose generation is the now-doomed launcher child.
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.workflow_run_id).toBe('generation-A')
+    const dispatchA = store.get(run.id)!.subagent_run_id
+    expect(dispatchA).not.toBeNull()
+
+    // That launcher child dies (this is the eviction this whole change exists to
+    // stop; it is not gone from the world, just made rarer). Crash recovery
+    // relaunches the run, which mints dispatch B on a NEW generation.
+    t = 400
+    await store.update(run.id, { subagent_status: 'crashed', failure_reason: 'pooled child evicted' })
+    await h.loop.runOnce()
+    let after = store.get(run.id)!
+    expect(h.inputs).toHaveLength(2)
+    expect(after.subagent_run_id).not.toBe(dispatchA)
+    expect(after.subagent_status).toBe('running')
+    // Red mutation: drop `unconfirmedFires.delete(run.id)` at the top of `launch()`
+    // and §1c adopts 'generation-A' back onto the live lane on the next tick.
+    expect(after.workflow_run_id).toBe('generation-B')
+
+    // Past dispatch A's deadline. The record it left must have no say over a run
+    // it no longer describes: no failure, no cancel, no second lane.
+    t = 1_500
+    await h.loop.runOnce()
+    after = store.get(run.id)!
+    expect(after.phase).not.toBe('failed')
+    expect(after.subagent_status).toBe('running')
+    expect(after.workflow_run_id).toBe('generation-B')
+    expect(h.inputs).toHaveLength(2)
+  })
+
+  test('a record that survives into a DIFFERENT dispatch (the fire that settles after the relaunch) is dropped at the read site, not applied', async () => {
+    let t = 0
+    const h = buildHarness({
+      plan: () => ({ fire: { ...unconfirmed(new Promise<FireOutcome>(() => {})), launcher_session_key: 'generation-A' } }),
+      now: () => new Date(t).toISOString(),
+    })
+    const run = await createRun({ merge_mode: 'pr' as MergeMode })
+
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.workflow_run_id).toBe('generation-A')
+
+    // The row is re-dispatched by a path that did not run `launch()`'s supersede —
+    // the ordering the identity check exists for is a fire promise for dispatch A
+    // resolving AFTER a relaunch already minted B, which re-inserts the record
+    // behind the delete. Either way the record's dispatch id no longer matches the
+    // row's, and that is the whole test.
+    t = 400
+    await store.update(run.id, {
+      subagent_run_id: 'wf-dispatch-B',
+      workflow_run_id: 'generation-B',
+      subagent_status: 'running',
+    })
+
+    // Red mutation: drop the `pendingFire.dispatch_id !== run.subagent_run_id`
+    // check in §1c and the row is re-stamped with 'generation-A' here, then failed
+    // on A's deadline below.
+    t = 900
+    await h.loop.runOnce()
+    expect(store.get(run.id)!.workflow_run_id).toBe('generation-B')
+
+    t = 1_500
+    await h.loop.runOnce()
+    const after = store.get(run.id)!
+    expect(after.phase).not.toBe('failed')
+    expect(after.workflow_run_id).toBe('generation-B')
+    expect(h.inputs).toHaveLength(1)
+  })
 })
 
 // F5 (review): every eviction latches `crashed`, but the codex forge build is

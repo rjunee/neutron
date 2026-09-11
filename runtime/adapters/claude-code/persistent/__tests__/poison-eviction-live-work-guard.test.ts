@@ -389,6 +389,35 @@ describe('abandon-poison eviction guard — a poisoned launcher hosting live wor
     expect(await sweepQuarantinedChildren()).toBe(0)
   })
 
+  it('a later dispatch reaps the drained quarantined child on its own — nothing else calls the sweep in production', async () => {
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    let hosted = 4
+    const sub = createPersistentReplSubstrate(opts(host, { hostsLiveWork: () => hosted }))
+
+    await abandonFirstTurn(sub, messagesSeen)
+    await drain(sub.start(spec('turn-2')))
+    expect(quarantinedChildCount()).toBe(1)
+
+    // Still hosting: dispatching does not reap it.
+    await drain(sub.start(spec('turn-3')))
+    expect(quarantinedChildCount()).toBe(1)
+    expect(childAlive(1)).toBe(true)
+
+    // Drained. `sweepQuarantinedChildren()` is exported for the test above, but in
+    // production NOTHING calls it except the heartbeat at the top of
+    // `getOrSpawnSession` — so a plain dispatch must be enough. Red mutation:
+    // delete that `fireAndForget('persistent-repl.quarantine-sweep', ...)` line and
+    // the child below stays alive forever (it is outside the pool, so the
+    // supervision watchdog cannot see it either).
+    hosted = 0
+    await drain(sub.start(spec('turn-4')))
+    // The sweep is FIRED, not awaited, by the dispatch path.
+    await waitUntil(() => quarantinedChildCount() === 0)
+    expect(quarantinedChildCount()).toBe(0)
+    expect(childAlive(1)).toBe(false)
+  })
+
+
   it('control: with hostsLiveWork → 0 the poisoned child IS evicted, and onChildCrash is told the EVICTED generation', async () => {
     const { host, spawnCount, messagesSeen } = makeWedgeOnceHost()
     const askedFor: string[] = []

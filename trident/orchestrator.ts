@@ -5000,7 +5000,32 @@ export function buildTridentOrchestrator(
     //     Harvest (§1) still runs first: a fast workflow that already wrote its
     //     result is harvested, not re-litigated.
     const pendingFire = unconfirmedFires.get(run.id)
-    if (pendingFire !== undefined && run.subagent_run_id !== null && run.subagent_status === 'running') {
+    // A PENDING RECORD BELONGS TO THE DISPATCH THAT MINTED IT AND TO NO OTHER.
+    // The record is keyed by run id, but what it describes is one launcher TURN. A
+    // run that has since been relaunched carries a DIFFERENT `subagent_run_id`;
+    // applying the old record to it adopts a dead child's generation onto the live
+    // workflow (handing the eviction guard and the crash latch the wrong
+    // generation) and runs the dead turn's deadline against a healthy new lane.
+    // Superseded records are dropped here rather than merely ignored, so the map
+    // cannot accumulate them for the process's lifetime.
+    //
+    // THIS IS THE ONLY OWNERSHIP CHECK, deliberately. A matching `delete` at the
+    // top of `launch()` was written first and removed: it is unreachable as a
+    // distinct behaviour — every stale record either passes through here (dropped)
+    // or through the terminal-phase cleanup in `stepCore` (dropped) — so it could
+    // not be mutation-proved, and an unprovable guard is not a guard. It also does
+    // not close the race it claimed to: a fire for dispatch A that resolves AFTER
+    // a relaunch re-inserts its record BEHIND any delete, which is exactly the
+    // ordering this check is here to catch.
+    if (pendingFire !== undefined && pendingFire.dispatch_id !== run.subagent_run_id) {
+      unconfirmedFires.delete(run.id)
+    }
+    if (
+      pendingFire !== undefined &&
+      pendingFire.dispatch_id === run.subagent_run_id &&
+      run.subagent_run_id !== null &&
+      run.subagent_status === 'running'
+    ) {
       const late = pendingFire.late
       const generation = pendingFire.generation
       const adoption: Partial<TridentRun> =
