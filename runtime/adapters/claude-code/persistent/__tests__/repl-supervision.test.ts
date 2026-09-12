@@ -405,7 +405,7 @@ describe('S2 supervision — #1 watchdog tick respawns a wedged (health-dead) RE
     // What the dying gateway wrote down, generation-scoped, just before the kill.
     const generationKey = getReplRegistrySnapshot(registryPath)[key]?.child_generation as string
     expect(generationKey).toBeDefined()
-    expect(recordGatewayShutdownOutcome(registryPath, key, generationKey, 1_755_000_000_000, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(registryPath, key, generationKey, 1_755_000_000_000, 'alive-and-killed')).toBe('alive-and-killed')
     // The marker also stamps `child_crash_notified_at`, which is what stops this very
     // tick from firing a SECOND, bare notification that would overwrite the deploy
     // attribution in the store. Clear it so this case can observe the sink at all —

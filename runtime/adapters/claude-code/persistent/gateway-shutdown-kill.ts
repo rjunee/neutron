@@ -733,8 +733,8 @@ export function recordGatewayShutdownOutcome(
    *  kernel cannot be asked; the entry then records a pid a later reader may not
    *  attribute a death to. */
   identity?: ProcessIdentity,
-): boolean {
-  if (typeof childGeneration !== 'string' || childGeneration.length === 0) return false
+): GatewayShutdownObservation | undefined {
+  if (typeof childGeneration !== 'string' || childGeneration.length === 0) return undefined
   try {
     // APPEND, KEYED BY GENERATION. Any generation this session key had killed gets an
     // entry, including a QUARANTINED one the row no longer names — that child is the
@@ -743,7 +743,7 @@ export function recordGatewayShutdownOutcome(
     // timestamp: the kill happened once) and bounded to the newest
     // GATEWAY_SHUTDOWN_KILL_ALARM_COUNT.
     const existing = getRecord(registryPath, sessionKey)
-    if (existing === undefined) return false
+    if (existing === undefined) return undefined
     const prior = Array.isArray(existing.killed_by_gateway_shutdown) ? existing.killed_by_gateway_shutdown : []
     const entries =
       gatewayShutdownKillEntryFor(existing, childGeneration) !== undefined
@@ -771,9 +771,26 @@ export function recordGatewayShutdownOutcome(
             stillReferenced,
           )
     patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
-    return gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration) !== undefined
+    // WHAT IS ON DISK, NOT WHETHER SOMETHING IS. The read-back used to check that an
+    // entry EXISTS and the caller then recorded the observation it had ASKED FOR — so a
+    // second recording of a generation that already had an entry (first write wins, by
+    // the idempotence rule above) returned success while the disk still held the earlier,
+    // possibly weaker, observation. `durablyRecorded` then named a value no reader would
+    // ever find, which is the field's own defect returning by a second route: two rounds
+    // ago it was set before the disk changed, and here it is set without the disk having
+    // changed at all. A READ-BACK THAT CHECKS EXISTENCE CANNOT SUPPORT A CLAIM ABOUT
+    // CONTENT.
+    //
+    // The alternative was a transition lattice — let `already-gone` strengthen
+    // `could-not-sample` and apply it. Deliberately not taken: the ONLY strengthening
+    // this module needs is the post-kill confirmation, and
+    // `promoteGatewayShutdownObservation` already owns it and already verifies its own
+    // content. A second writer with a second rule for the same field is what M36 caught
+    // in retention, where two writes obeying two rules put back what the other dropped.
+    // So the journal keeps first-write-wins and tells the truth about it.
+    return observationOf(gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration))
   } catch {
-    return false
+    return undefined
   }
 }
 
@@ -951,8 +968,22 @@ export function recordGatewayShutdownKill(
           },
       identity,
     )
-    durablyRecorded = wrote ? observed : null
-    if (!wrote) {
+    // THE DISK'S ANSWER, verbatim. Not `observed`: what was requested and what is stored
+    // can differ, and the field means "what is on disk for this generation".
+    durablyRecorded = wrote ?? null
+    if (wrote !== undefined && wrote !== observed) {
+      // A record for this generation was already there, and it says something else. The
+      // delivery phase treats this report as UNBACKED (it is attempted first, and its
+      // recovery diagnostic names the weaker record) — but the operator is told here too,
+      // because two shutdowns disagreeing about one generation is a fact about the
+      // system, not a detail of this write.
+      process.stderr.write(
+        `[repl] gateway shutdown recorded generation=${childGeneration.slice(0, 8)} as "${observed}" but the ` +
+          `registry already holds "${wrote}" for it — the earlier entry stands, and this report is treated as ` +
+          `the only channel for what it observed\n`,
+      )
+    }
+    if (wrote === undefined) {
       // The row is gone, or unwritable. A best-effort write that quietly did nothing is
       // the silence this module exists to remove, so it is said out loud — AND carried
       // on the report, so the delivery phase cannot promise a recovery that has nothing

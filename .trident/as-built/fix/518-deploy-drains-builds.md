@@ -433,6 +433,37 @@ why nothing inside this process can change that while the REPL lives in the gate
 cgroup. So the PR carries no `Closes`, the issue stays open against the drain/survive half
 (#538/#539), and criteria 1 and 2 stay unticked.
 
+### The operation succeeded, so the value must be right
+
+`recordGatewayShutdownOutcome` keeps the first entry for a generation — the kill happened
+once, and the journal records when — and its read-back checked that an entry EXISTS. So a
+second recording with a DIFFERENT observation returned success while the disk still held the
+earlier one, and `recordGatewayShutdownKill` set `durablyRecorded` to the value it had
+ASKED FOR. The field then named a value no reader would ever find, which corrupts both the
+delivery prioritisation (unbacked reports go first) and the recovery diagnostic the operator
+reads when a live report is lost.
+
+It is `durablyRecorded`'s own defect arriving a second time: two rounds ago it was set after
+persisting only the pre-kill observation, and the fix was to recompute it when the disk
+changes. This is the same sentence with the disk NOT changing — the `ok && stdout` shape at
+the storage layer.
+
+**Chosen: report what is on disk.** The recorder returns the stored observation (or nothing
+at all), the caller carries that verbatim, and a disagreement between what was requested and
+what is stored is written to stderr, because two shutdowns disagreeing about one generation
+is a fact about the system rather than a detail of one write. The alternative — define a
+transition lattice and let `already-gone` strengthen `could-not-sample` — was deliberately
+not taken: the only strengthening this module needs is the post-kill confirmation, and
+`promoteGatewayShutdownObservation` already owns it AND verifies its own content. A second
+writer with a second rule for the same field is exactly what M36 caught in retention, where
+two writes obeying two rules put back what the other had dropped.
+
+The boundary is now the test: the idempotence case repeated the SAME observation, and two
+calls that agree prove nothing about two that differ. Both directions are covered — a
+strengthening attempt and a weakening one — each asserting what is ON DISK afterwards rather
+than what the call returned, plus the end-to-end consequence that the report carries the
+disk's value into the delivery diagnostic.
+
 ### A state that aborts its reader is not represented, only spelled
 
 `sampleLivenessBeforeShutdownKill` catches a throwing liveness probe and records
@@ -1007,7 +1038,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-101 mutations applied one at a time, each reverted after: **101 red, 0 survivors.** Every
+103 mutations applied one at a time, each reverted after: **103 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

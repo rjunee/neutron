@@ -178,7 +178,7 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
     // generation it describes.
     const path = registryPath()
     seed(path)
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000, 'alive-and-killed')).toBe('alive-and-killed')
     patchRecord(path, 'cc-trident-fire-o-abc /repo', { child_generation: 'gen-NEXT' })
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     // The old generation's record SURVIVES the respawn — that is the point of it...
@@ -223,7 +223,7 @@ describe('recordGatewayShutdownOutcome', () => {
     // this case only pins the split.
     const path = registryPath()
     seed(path)
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 555, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 555, 'alive-and-killed')).toBe('alive-and-killed')
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toEqual(['gen-live'])
     expect(killedAt(record, 'gen-live')).toBe(555)
@@ -255,12 +255,12 @@ describe('recordGatewayShutdownOutcome', () => {
     // RED-mutation: `return true` after `patchRecord` instead of reading the row back.
     const path = registryPath()
     seed(path)
-    expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBe(false)
+    expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBeUndefined()
     // And nothing was invented for the row that DOES exist.
     expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(false)
   })
 
-  it('reports false rather than throwing when the registry file cannot be reached', () => {
+  it('reports NOTHING ON DISK rather than throwing when the registry file cannot be reached', () => {
     const wrote = recordGatewayShutdownOutcome(
       join(tmpdir(), 'neutron-gsk-does-not-exist', 'nested', 'registry.json'),
       'k',
@@ -268,7 +268,64 @@ describe('recordGatewayShutdownOutcome', () => {
       1,
       'alive-and-killed',
     )
-    expect(wrote).toBe(false)
+    expect(wrote).toBeUndefined()
+  })
+
+  it('A SECOND RECORDING WITH A DIFFERENT OBSERVATION REPORTS WHAT IS ON DISK, NOT WHAT WAS ASKED', () => {
+    // THE BOUNDARY THE IDEMPOTENCE CASE COULD NOT REACH: it repeated the SAME
+    // observation, and two calls that agree prove nothing about two that differ. First
+    // write wins (the kill happened once), so the second call must say the earlier value
+    // — the caller sets `durablyRecorded` from this return, and a claim about content
+    // cannot rest on a read-back that only checked EXISTENCE.
+    //
+    // RED-mutation: return `... !== undefined` from the read-back again. Both directions
+    // below then report the requested value and the disk disagrees with the report.
+    const path = registryPath()
+    seed(path)
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', 700, 'could-not-sample', 4242)).toBe('could-not-sample')
+    // A STRENGTHENING attempt...
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', 800, 'already-gone', 4242)).toBe('could-not-sample')
+    expect(observationOf(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live'))).toBe('could-not-sample')
+
+    // ...and a WEAKENING attempt, on its own row, asserted the same way: what is on disk
+    // afterwards, never what the call was given.
+    const other = registryPath()
+    seed(other)
+    expect(recordGatewayShutdownOutcome(other, KEY, 'gen-live', 700, 'alive-when-reached', 4242)).toBe(
+      'alive-when-reached',
+    )
+    expect(recordGatewayShutdownOutcome(other, KEY, 'gen-live', 800, 'could-not-sample', 4242)).toBe(
+      'alive-when-reached',
+    )
+    expect(observationOf(gatewayShutdownKillEntryFor(getRecord(other, KEY), 'gen-live'))).toBe('alive-when-reached')
+  })
+
+  it('and the REPORT carries the disk value, so the delivery diagnostic cannot promise the wrong recovery', async () => {
+    // The consequence, end to end: `recordGatewayShutdownKill` sets `durablyRecorded` from
+    // that return. With the existence check it named a value no reader would ever find,
+    // and the operator line for a lost report promised a recovery of the STRONGER
+    // observation. RED-mutation: `durablyRecorded = observed` again.
+    const path = registryPath()
+    seed(path)
+    const options = { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path } as PersistentReplSubstrateOptions
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', 700, 'could-not-sample', 4242)).toBe('could-not-sample')
+
+    const { result: report, lines } = captureStderrSync(() =>
+      recordGatewayShutdownKill(options, KEY, 'gen-live', 800, 'alive'),
+    )
+
+    expect(report.observed).toBe('alive-when-reached')
+    expect(report.durablyRecorded).toBe('could-not-sample')
+    // Said out loud: two shutdowns disagreeing about one generation is a fact about the
+    // system, not a detail of this write.
+    expect(lines.join('')).toContain('the registry already holds')
+    // And the delivery phase's recovery promise is the WEAKER record, not the report's own
+    // observation. (This report is withheld from the death sink — nothing established a
+    // death — and that notice carries the same recovery sentence.)
+    const { lines: delivery } = await captureStderr(() =>
+      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, wait: instantWait }),
+    )
+    expect(delivery.join('')).toContain('WEAKER than this report')
   })
 })
 
@@ -607,9 +664,9 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     // and this reddens on the first assertion.
     const path = registryPath()
     seed(path) // row names 'gen-live'
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500, 'alive-and-killed')).toBe('alive-and-killed')
     // The quarantined generation the row has already moved past.
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-QUARANTINED', 600, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-QUARANTINED', 600, 'alive-and-killed')).toBe('alive-and-killed')
 
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toEqual(['gen-live', 'gen-QUARANTINED'])
@@ -628,8 +685,8 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     // and the recorded time drifts away from the kill it describes.
     const path = registryPath()
     seed(path)
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500, 'alive-and-killed')).toBe(true)
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 900, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 500, 'alive-and-killed')).toBe('alive-and-killed')
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 900, 'alive-and-killed')).toBe('alive-and-killed')
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(killedGenerations(record)).toEqual(['gen-live'])
     expect(killedAt(record, 'gen-live')).toBe(500)
@@ -648,7 +705,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     const path = registryPath()
     seed(path)
     const ANCIENT = 1_000
-    expect(recordGatewayShutdownOutcome(path, KEY, 'g0', ANCIENT, 'alive-and-killed', 4242)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, KEY, 'g0', ANCIENT, 'alive-and-killed', 4242)).toBe('alive-and-killed')
 
     // `g0` still owns an in-flight run; every other generation does not.
     const stillReferenced = (generation: string): boolean => generation === 'g0'
@@ -679,7 +736,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     const path = registryPath()
     seed(path)
     const ANCIENT = 1_000
-    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', ANCIENT, 'alive-and-killed', 4242)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', ANCIENT, 'alive-and-killed', 4242)).toBe('alive-and-killed')
 
     patchRecord(path, KEY, { child_generation: 'gen-next' })
     const options = {
@@ -722,7 +779,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     // leak. RED-mutation: `return true` from the age test — nothing is ever released.
     const path = registryPath()
     seed(path)
-    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-old', 1_000, 'alive-and-killed', 4242)).toBe(true)
+    expect(recordGatewayShutdownOutcome(path, KEY, 'gen-old', 1_000, 'alive-and-killed', 4242)).toBe('alive-and-killed')
     patchRecord(path, KEY, { child_generation: 'gen-new' })
     recordGatewayShutdownOutcome(
       path,
@@ -767,8 +824,8 @@ describe('the row records EVERY generation it killed, which is what a quarantine
   it('a row that does not exist is still refused — a no-op is not a success', () => {
     const path = registryPath()
     seed(path)
-    expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBe(false)
-    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', '', 1, 'alive-and-killed')).toBe(false)
+    expect(recordGatewayShutdownOutcome(path, 'a-key-with-no-row', 'gen-live', 1, 'alive-and-killed')).toBeUndefined()
+    expect(recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', '', 1, 'alive-and-killed')).toBeUndefined()
   })
 })
 
@@ -825,7 +882,7 @@ describe('an entry that cannot say what was observed is evidence of nothing', ()
     for (const observed of ['alive-and-killed', 'already-gone', 'could-not-sample'] as const) {
       const path = registryPath()
       seed(path)
-      expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', 42, observed, 4242)).toBe(true)
+      expect(recordGatewayShutdownOutcome(path, KEY, 'gen-live', 42, observed, 4242)).toBe(observed)
       const record = getRecord(path, KEY)
       expect(observationOf(gatewayShutdownKillEntryFor(record, 'gen-live'))).toBe(observed)
       expect(wasKilledByGatewayShutdown(record)).toBe(observed === 'alive-and-killed')

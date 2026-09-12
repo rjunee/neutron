@@ -726,7 +726,7 @@ describe('a fresh spawn does not inherit the previous generation\'s excuse (#518
     const firstGeneration = loadRegistry(registryPath)[key]?.child_generation
     expect(firstGeneration).toBeDefined()
     // Pretend a gateway shutdown killed generation #1 and left its marker behind.
-    expect(recordGatewayShutdownOutcome(registryPath, key, firstGeneration as string, 1_755_000_000_000, 'alive-and-killed')).toBe(true)
+    expect(recordGatewayShutdownOutcome(registryPath, key, firstGeneration as string, 1_755_000_000_000, 'alive-and-killed')).toBe('alive-and-killed')
 
     // Turn 2 evicts the poisoned child (no live work) and spawns a fresh one, which
     // rewrites this row with a new generation.

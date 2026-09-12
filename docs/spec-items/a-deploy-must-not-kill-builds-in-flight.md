@@ -165,6 +165,18 @@ disappears.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1052`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:1034`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- A READ-BACK THAT CHECKS EXISTENCE CANNOT SUPPORT A CLAIM ABOUT CONTENT.
+  `recordGatewayShutdownOutcome` keeps the FIRST entry for a generation (the kill happened
+  once) and its read-back asked only whether an entry exists — so a second recording with a
+  DIFFERENT observation returned success, and the caller then set `durablyRecorded` to the
+  value it had ASKED FOR while the disk held the earlier one. That is `durablyRecorded`'s
+  own defect by a second route: two rounds ago it was set before the disk changed, here
+  without the disk changing at all. The recorder now returns WHAT IS ON DISK (the
+  observation, or nothing), the caller carries that, and a disagreement is said out loud.
+  Chosen over defining a strengthening lattice deliberately: the only strengthening this
+  module needs is the post-kill confirmation, which `promoteGatewayShutdownObservation`
+  already owns and already verifies — a second writer with a second rule for one field is
+  what M36 caught in retention.
 - THE UNDETERMINED STATE WAS HONOURED WHERE IT WAS SAMPLED AND DISCARDED WHERE IT WAS
   CONFIRMED. `sampleLivenessBeforeShutdownKill` catches a throwing liveness probe — that is
   why `could-not-sample` exists — and `confirmShutdownExits` then called the same
