@@ -815,6 +815,37 @@ Filenames stay. `dev-channel-pty-bind` and `pty-noise` are still accurate: a her
 IS a pty, and what changed is who allocates it, which is what the corrected docstrings
 now say. Renaming would churn every citation to buy nothing.
 
+### A missing CI run is not a passing CI run
+
+Worth recording because the failure mode is silence, and the naive check is green.
+
+After the r10 push, `gh pr checks` reported **4 checks, all pass**. The `ci` workflow —
+typecheck, lint, layering, purity, the 8 test shards — **had not run at all**. Only
+CodeQL's four jobs existed, and they passed, so any monitor asking "is everything
+settled and non-failing?" would have answered yes on a PR whose entire test suite had
+never executed.
+
+The cause: `main` had moved (#636, #650) and the PR was `CONFLICTING`. `ci.yml` triggers
+on `pull_request`, which runs against the *merge* ref — and GitHub cannot compute a merge
+ref for a conflicting PR, so the workflow was never created. A conflict does not show up
+as a failing check; it shows up as **checks that do not exist**.
+
+This is the same tell as the stacked-PR check count earlier in this build (13 vs 17), and
+it defeats the same instinct. So the count is now part of the condition: the watcher
+requires **17 checks present AND all non-pending** before it will call CI green, rather
+than "all present checks are non-pending". *All of the checks that exist have passed* is
+not a claim about the checks that should exist.
+
+And the conflict itself had a trap. `docs/spec-items/README.md` is a **generated** rollup:
+`scripts/__tests__/spec-items-index.test.ts:32` asserts the committed file is byte-exact
+with the renderer's output, so a hand-resolved index fails CI *even when it reads
+correctly*. My hand resolution happened to be right — I checked the three counts against
+the filesystem (24 items, 5 blocking, 1 needs-spec) rather than adding the two sides — and
+regenerating produced a byte-identical file. That the diff was empty is the point worth
+recording, not the reassurance: reading correctly and being the renderer's output are two
+different properties, and only the second one is what the gate tests. Regenerate, then
+assert drift is zero.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
