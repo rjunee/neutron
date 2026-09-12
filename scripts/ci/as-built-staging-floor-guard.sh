@@ -82,9 +82,10 @@
 #   GITHUB_EVENT_NAME               'pull_request' / 'merge_group' / 'push' / ...
 #   GITHUB_EVENT_PATH               the event payload the shas are read from
 #
-# EXIT: 0 = every directory holding a staged record has a floor, and the top-level
-#           floor survives (or the base has no floor yet, in which case this diff
-#           is the change installing it),
+# EXIT: 0 = the PROPOSED TREE has a floor under `.trident/as-built/` and in every
+#           directory holding a staged record. The base is allowed to lack the
+#           top-level floor — that is the diff installing it — but the head is
+#           never allowed to, and that asymmetry is the whole bootstrap.
 #       1 = the branch proposes a directory that can empty,
 #       2 = missing/unresolvable input, or git could not be asked.
 
