@@ -385,12 +385,23 @@ export interface WorktreeReapReport {
    */
   refs_restore_failed: { ref: string; sha: string }[]
   /**
-   * THE DRY-RUN INVENTORY: every ref that passed all fourteen checks and would be reaped the
-   * moment #635 lands. Strictly more than exists today, where nothing reaps and nothing
-   * reports — and it is the evidence for #635 rather than an argument about it: the answer to
-   * "what exactly would this delete on the real repository" comes out of here.
+   * THE DRY-RUN CANDIDATE INVENTORY — refs that passed gates 1-10. NOT "would be deleted":
+   * this is an UPPER BOUND on that, and the name says so because an earlier version did not.
+   *
+   * GATES 11-14 ARE NOT IN THIS COUNT AND CANNOT BE. Gate 11 IS the salvage write, so a dry
+   * run that evaluated it would not be dry — and a candidate whose salvage the host rejects is
+   * correctly listed here and correctly never deleted, which is the distinction the report has
+   * to carry rather than hide. Gates 12-14 are not merely skipped for convenience either: 12
+   * re-reads the very sources gates 4, 5, 7 and 8 have just read, and 13's precondition is the
+   * sha `for-each-ref` returned moments earlier. Their entire value is re-measuring AFTER time
+   * has passed and AFTER writes, and in a dry sweep nothing has mutated in between — so
+   * running them would re-derive the same answer from the same inputs and add the APPEARANCE
+   * of rigour rather than any. Gate 14 requires the delete to have happened at all.
+   *
+   * So this is the strongest honest count available without writing anything, and the gap
+   * between it and "what would actually be deleted" is named rather than papered over.
    */
-  refs_reapable: { ref: string; sha: string }[]
+  refs_candidates: { ref: string; sha: string }[]
 }
 
 interface WorktreeEntry {
@@ -426,7 +437,7 @@ function emptyReport(): WorktreeReapReport {
     refs_stood_down: 0,
     refs_restored: [],
     refs_restore_failed: [],
-    refs_reapable: [],
+    refs_candidates: [],
   }
 }
 
@@ -1173,7 +1184,10 @@ async function reapBranchRefs(
     // ZERO WRITES, and that is an improvement rather than merely a smaller change: not
     // creating salvage refs for deletions that are not happening avoids seeding a namespace
     // that has no pruner (see the record).
-    report.refs_reapable.push({ ref, sha })
+    // A CANDIDATE, not a decision: gates 1-10 passed. Gates 11-14 are evaluated only at
+    // deletion time (see the field's own note), so a ref listed here can still be refused by
+    // the salvage or by the claim probe when #635 turns this branch into a call.
+    report.refs_candidates.push({ ref, sha })
     report.refs_kept.push({ ref, reason: DEFERRED_PENDING_CLAIMANT_GUARD })
     continue
     // ───────────────────────────────────────────────────────────────────────────────
@@ -1497,7 +1511,7 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     report.detached.length === 0 &&
     report.removed.length === 0 &&
     report.refs_deleted.length === 0 &&
-    report.refs_reapable.length === 0 &&
+    report.refs_candidates.length === 0 &&
     report.refs_stood_down === 0 &&
     report.refs_restored.length === 0 &&
     report.refs_restore_failed.length === 0
@@ -1519,7 +1533,7 @@ function logSummaryIfActed(report: WorktreeReapReport): void {
     refs_stood_down: report.refs_stood_down,
     refs_restored: report.refs_restored.length,
     refs_restore_failed: report.refs_restore_failed.length,
-    refs_reapable: report.refs_reapable.length,
+    refs_candidates: report.refs_candidates.length,
   })
 }
 

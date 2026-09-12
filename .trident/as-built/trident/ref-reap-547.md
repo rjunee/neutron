@@ -50,8 +50,27 @@ probe to refuse on an unreadable listing, proven BEFORE deletion is re-enabled.
 the repair, the measurement and the reporting all land. The `update-ref -d` itself does not run: the
 destructive half is an exported `deleteReapableRef` the sweep does not call, behind one named reason
 (`DEFERRED_PENDING_CLAIMANT_GUARD`) pointing at **#635**. The sweep records what it WOULD reap in
-`refs_reapable` — measured on the repo of record: **72 of 80 refs**, with 2 held by a worktree and 6
-kept for unprovable ownership.
+`refs_candidates` — measured on the repo of record: **72 of 80 refs** pass gates 1-10, with 2 held by
+a worktree and 6 kept for unprovable ownership.
+
+THAT NUMBER IS AN UPPER BOUND, NOT A MEASUREMENT OF WHAT WOULD BE DELETED, and an earlier version of
+this record said otherwise — it claimed the dry run "runs all fourteen checks". It runs ten. The field
+was called `refs_candidates`, which promised the stronger thing, and the 72 was quoted onward as the
+answer to "what exactly would this delete". It is the answer to "what could this delete at most".
+
+The gap is not laziness and cannot be closed by trying harder. GATE 11 IS THE SALVAGE WRITE, so a dry
+run that evaluated it would not be dry — and a candidate whose salvage the host rejects is correctly
+listed and correctly never deleted, which is a distinction the report now carries rather than hides.
+GATES 12-14 are not skipped for convenience either: gate 12 re-reads the very sources gates 4, 5, 7
+and 8 have just read, and gate 13's precondition is the sha `for-each-ref` returned moments earlier.
+Their entire value is re-measuring AFTER time has passed and AFTER writes; in a dry sweep nothing has
+mutated in between, so running them would re-derive the same answer from the same inputs and add the
+APPEARANCE of rigour rather than any of it. Gate 14 requires the delete to have happened.
+
+So the field is named `refs_candidates`, the number is presented as an upper bound with the reason,
+and #635's comment was corrected in place. The sequencing argument is unaffected — 72 is still not a
+small first exposure — but "an upper bound presented as a measurement" is exactly the class this
+change spent nine rounds eliminating, and it appeared in the one artefact other people act on.
 
 **THE DEFERRAL WAS FIRST DECIDED THE OTHER WAY, AND THE REASON IT WAS WRONG IS THE BASELINE.** The
 coordinating judgement was to narrow the record's claim and file the claimant-side guard as follow-up;
@@ -82,9 +101,10 @@ in production carrying a green history that no longer meant anything. The extrac
 tests running against the very function #635 re-enables, and the 87-test suite is itself the safety net
 for the refactor. Three things fell out of it that the short-circuit would not have given:
 
-  * THE DRY-RUN INVENTORY IS WORTH HAVING ON ITS OWN. A sweep that runs all fourteen checks and reports
-    which refs are reapable is strictly more than exists today, where nothing reaps and nothing reports.
-    It is the evidence attached to #635 rather than an argument about it.
+  * THE DRY-RUN CANDIDATE INVENTORY IS WORTH HAVING ON ITS OWN. A sweep that runs gates 1-10 and
+    reports which refs are CANDIDATES is strictly more than exists today, where nothing reaps and
+    nothing reports. It is the evidence attached to #635 rather than an argument about it — an upper
+    bound, stated as one.
   * ZERO WRITES IS AN IMPROVEMENT, not merely a smaller change. Not creating ~72 salvage refs for
     deletions that are not happening avoids seeding a namespace this record already flags as having no
     pruner.

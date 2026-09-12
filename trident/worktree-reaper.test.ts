@@ -38,7 +38,7 @@ import {
  * for `#635` (a run whose HEAD does not resolve must refuse to commit), because nothing deletes
  * these refs today and a destructive operation should not arrive ahead of the only check that
  * can settle its failure mode without a race. The sweep therefore records what it WOULD reap in
- * `refs_reapable` and calls nothing.
+ * `refs_candidates` and calls nothing.
  *
  * Every test below that exercises the salvage, the claim probe, the compare-and-swap delete or
  * the repair drives it through here, so the code `#635` re-enables is code whose coverage never
@@ -51,7 +51,7 @@ import {
 async function sweepAndReap(opts: Parameters<typeof sweepTridentWorktrees>[0]): Promise<WorktreeReapReport> {
   const report = await sweepTridentWorktrees(opts)
   const budget = { attempts: 0 }
-  for (const { ref: full, sha } of [...report.refs_reapable]) {
+  for (const { ref: full, sha } of [...report.refs_candidates]) {
     const repo = opts.store.listRepoPaths().find((candidate) => candidate !== '') ?? ''
     await deleteReapableRef(opts, repo, full, full.slice('refs/heads/'.length), sha, report, budget)
   }
@@ -1577,8 +1577,8 @@ describe('branch-ref reap — the refusals (#547)', () => {
     // A sweep that found REAPABLE refs is the most interesting sweep there is while the
     // deletion is deferred — it is the dry-run inventory #635 is waiting on — so it must not
     // be silent either.
-    expect(condition).toContain('report.refs_reapable.length === 0')
-    expect(guard).toContain('refs_reapable: report.refs_reapable.length')
+    expect(condition).toContain('report.refs_candidates.length === 0')
+    expect(guard).toContain('refs_candidates: report.refs_candidates.length')
   })
 
   test('a DETACHED worktree appearing on the tip mid-sweep stops the reap', async () => {
@@ -2217,7 +2217,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
 
     expect(listings).toBeGreaterThan(0)
     expect(report.refs_deleted).toEqual([])
-    expect(report.refs_reapable).toEqual([])
+    expect(report.refs_candidates).toEqual([])
     expect(report.refs_stood_down).toBe(1)
     expect(
       report.refs_kept.some((k) => k.reason.includes('holders-unenumerable')),
@@ -2519,7 +2519,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
 
     // AND THE DRY-RUN INVENTORY IS THE POINT: it says exactly what #635 will unlock.
-    expect(report.refs_reapable).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
     expect(
       report.refs_kept.some(
         (k) => k.ref === ref(branch) && k.reason === DEFERRED_PENDING_CLAIMANT_GUARD,
@@ -2527,6 +2527,65 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
       JSON.stringify(report.refs_kept),
     ).toBe(true)
   }, 60_000)
+
+  test('A CANDIDATE IS AN UPPER BOUND: gate 11 can still refuse one, and the report says so', async () => {
+    // THE SEMANTICS, MADE PROVABLE. `refs_candidates` means "passed gates 1-10", not "would be
+    // deleted" — gates 11-14 run only at deletion time, and gate 11 IS the salvage write, so a
+    // dry sweep cannot evaluate it without ceasing to be dry.
+    //
+    // The earlier name (`refs_reapable`) promised the stronger thing, and the count taken from
+    // it was quoted upward as "what exactly would this delete". It was an upper bound on that.
+    // This test is what makes the weaker, true claim checkable: the ref IS a candidate, it is
+    // NOT deleted, and the report carries both facts separately rather than collapsing them.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/candidate-refused-at-salvage'
+    const sha = await seedRef(repo, branch, 'candrefused')
+    const opts = {
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd: string[], cwd?: string) => {
+        // Only the salvage WRITE is rejected — gate 11, the first gate a dry run cannot reach.
+        if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
+          return { ok: false, stdout: '', stderr: 'the host refuses to write', exit_code: 1 }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    }
+
+    // THE DRY SWEEP lists it as a candidate, because gates 1-10 all pass.
+    const report = await sweepTridentWorktrees(opts)
+    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_deleted).toEqual([])
+
+    // AND DELETION TIME REFUSES IT, on the gate the dry run could not evaluate.
+    await deleteReapableRef(opts, repo, ref(branch), branch, sha, report, { attempts: 0 })
+
+    // BOTH FACTS SURVIVE IN THE REPORT, separately: still a candidate, still not deleted.
+    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === ref(branch) && k.reason.startsWith('salvage-unverified:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+    // So a candidate count is an UPPER BOUND on a deletion count, and here they differ by one.
+    expect(report.refs_candidates.length).toBeGreaterThan(report.refs_deleted.length)
+  }, 60_000)
+
+  test('the field and the log line both say CANDIDATE, not reapable', () => {
+    // The rename is the fix, so it is pinned. A field called `refs_reapable` promised that
+    // gates 11-14 had been evaluated; nothing in a dry sweep can evaluate them, and the name
+    // is what made the overclaim easy to quote onward.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    expect(source).not.toContain('refs_reapable')
+    expect(source).toContain('refs_candidates')
+    // And the field documents the gap rather than leaving the reader to find it.
+    const doc = source.slice(0, source.indexOf('refs_candidates: { ref: string; sha: string }[]'))
+    expect(doc).toContain('GATES 11-14 ARE NOT IN THIS COUNT AND CANNOT BE')
+    expect(doc).toContain('UPPER BOUND')
+  })
 
   test('THE COMPLEMENT: called directly, the destructive half still does the whole sequence', async () => {
     // Without this the deferral test above would be satisfied by a reaper that can no longer
@@ -2542,7 +2601,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     }
 
     const report = await sweepTridentWorktrees(opts)
-    expect(report.refs_reapable).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
     expect(await refExists(repo, ref(branch))).toBe(true)
 
     await deleteReapableRef(opts, repo, ref(branch), branch, sha, report, { attempts: 0 })
