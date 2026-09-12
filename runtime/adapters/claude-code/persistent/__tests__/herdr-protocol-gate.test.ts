@@ -674,6 +674,109 @@ describe('herdr client framing', () => {
     expect(seen).toEqual([{ pane_id: 'w1:p1' }])
   })
 
+  it('FRAGMENTED input is linear, not quadratic — the cap bounds bytes, not work', async () => {
+    // A LIMIT ON HOW MUCH YOU KEEP IS NOT A LIMIT ON HOW MUCH YOU DO. Every chunk used
+    // to copy the whole accumulation through `Buffer.concat`, so cost was quadratic in
+    // the NUMBER of deliveries while the byte cap — which only bounds retention —
+    // looked like it covered the hostile case. Against the 8 MiB cap, one-byte
+    // deliveries force on the order of 35 TB of cumulative copying before teardown.
+    //
+    // The existing 64-byte boundary case cannot see this: it feeds one chunk, so the
+    // quadratic term never appears. What distinguishes the implementations is the
+    // number of DELIVERIES, not the number of bytes.
+    const client = new HerdrClient(60_000, 4 << 20) // 4 MiB cap, above the 1.6 MB fed
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+
+    // 200k deliveries of 8 bytes = 1.6 MB. Quadratic cost is deliveries × total ÷ 2 ≈
+    // 160 GB of copying; linear is 1.6 MB. THE LOAD WAS CHOSEN BY MEASUREMENT, not by
+    // guess: on this host the queue takes 44 ms and the `Buffer.concat`-per-chunk
+    // version takes 21,433 ms — a 487× separation. The 5 s bound therefore sits ~113×
+    // above the passing implementation and ~4× below the failing one, so it
+    // discriminates with margin at both ends rather than by luck on one machine. My
+    // first attempt used a 4 s bound over 200k ONE-byte chunks, and the quadratic
+    // mutant finished inside it (M94 survived) — the load, not just the bound, is what
+    // makes this test able to see the defect.
+    const eight = Buffer.alloc(8, 0x78)
+    const started = Date.now()
+    for (let i = 0; i < 200_000; i++) client.onBytes(eight)
+    const elapsed = Date.now() - started
+
+    // Still buffered, still under the cap, still open: the work was done, not skipped.
+    // Without this the "fast" result is satisfied by an implementation that drops
+    // input on the floor.
+    expect(client.bufferedBytes()).toBe(1_600_000)
+    expect(client.isClosed()).toBe(false)
+    // WALL-CLOCK-BOUND-OK: the defect IS elapsed time, so no deterministic assertion
+    // can replace it — quadratic and linear buffering produce byte-identical state and
+    // differ only in the work done to get there, which nothing in the public surface
+    // counts. MEASURED MARGIN on the reference host at 200k x 8 bytes: queue 44 ms,
+    // concat-per-chunk 21,433 ms (487x). The 5,000 ms bound sits ~113x above the
+    // passing implementation and ~4x below the failing one, so it tolerates a heavily
+    // loaded runner without ever admitting the quadratic version.
+    expect(elapsed).toBeLessThan(5000)
+
+    // AND THE BYTES SURVIVE REASSEMBLY — on a FRESH client, because terminating the
+    // 200k of junk above would (correctly) tear that one down as an unparseable frame.
+    // Speed is worthless if the queue loses or reorders what it defers, so a frame
+    // delivered one byte at a time must still arrive whole.
+    const reassembly = new HerdrClient(60_000)
+    reassembly.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const seen: Record<string, unknown>[] = []
+    const sub = reassembly.subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
+      seen.push(d)
+    })
+    feed(reassembly, '{"id":"n1","result":{"type":"ok"}}\n')
+    await sub
+    const frame = '{"event":"pane_exited","data":{"pane_id":"w1:p1"}}\n'
+    for (const ch of frame) reassembly.onBytes(Buffer.from(ch, 'utf8'))
+    expect(seen).toEqual([{ pane_id: 'w1:p1' }])
+    expect(reassembly.bufferedBytes()).toBe(0)
+    expect(reassembly.isClosed()).toBe(false)
+  })
+
+  it('the leftover tail is COPIED, not a view that pins the whole delivery', async () => {
+    // `subarray` returns a VIEW, so a 1-byte remainder of a 2 MB delivery keeps the
+    // entire 2 MB alive while `bufferedBytes()` truthfully reports 1. Watching the
+    // logical length would say the buffer is empty and the memory would still be held
+    // — the same shape as the defect above, where the byte cap looked like it bounded
+    // the cost and bounded only half of it. So retention gets its own observable.
+    const client = new HerdrClient(60_000, 8 << 20)
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => {} })
+    const ok = client.call('pane.get', {})
+    // One delivery: a ~2 MB VALID frame, then a single trailing byte.
+    const big = `{"id":"n1","result":{"x":"${'z'.repeat(2_000_000)}"}}\n`
+    client.onBytes(Buffer.from(`${big}a`))
+    expect(Object.keys(await ok)).toEqual(['x']) // the frame really was processed
+
+    expect(client.bufferedBytes()).toBe(1) // logical: one byte outstanding
+    // ...and the allocation matches it. A view would report ~2,000,030 here, so the
+    // two numbers agreeing is the whole assertion.
+    expect(client.retainedBytes()).toBe(1)
+  })
+
+  it('a fragmented UNTERMINATED frame still trips the cap, at the same boundary', async () => {
+    // The bound must survive the rewrite: enforcing it on a running total rather than
+    // on a concatenated buffer must not move where it fires. Without this pair, the
+    // linearity case above is satisfied by simply deleting the bound.
+    const cap = 4096
+    const client = new HerdrClient(60_000, cap)
+    let ends = 0
+    client.attach({ write: (d) => Buffer.byteLength(d, 'utf8'), end: () => void (ends += 1) })
+    const pending = client.call('pane.read', {}).then(
+      () => undefined,
+      (e: unknown) => e as Error,
+    )
+    // EXACTLY at the limit, delivered in fragments: accepted, still open.
+    for (let i = 0; i < cap; i++) client.onBytes(Buffer.from('y'))
+    expect(client.isClosed()).toBe(false)
+    expect(client.bufferedBytes()).toBe(cap)
+    // One byte past: torn down.
+    client.onBytes(Buffer.from('y'))
+    expect(client.isClosed()).toBe(true)
+    expect(ends).toBe(1)
+    expect((await pending)!.message).toMatch(/no newline/)
+  })
+
   it('CONTROL — both LEGITIMATE envelopes still work', async () => {
     // Otherwise a validator that rejected everything would pass all of the above.
     const client = new HerdrClient(5000)

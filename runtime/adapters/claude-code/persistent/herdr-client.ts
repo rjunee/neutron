@@ -202,7 +202,25 @@ export class HerdrClient implements HerdrRpc {
   private seq = 0
   /** Undecoded inbound bytes — never a string, so a split multi-byte character
    *  cannot be decoded twice. See {@link HerdrClient.onBytes}. */
-  private bytes: Buffer = Buffer.alloc(0)
+  /**
+   * Inbound bytes not yet formed into a complete frame, held as a QUEUE rather than
+   * one growing Buffer.
+   *
+   * WHY NOT `Buffer.concat` PER CHUNK. That copied the entire accumulation on every
+   * delivery, so cost was quadratic in the number of chunks: against the 8 MiB cap,
+   * one-byte deliveries force on the order of 35 TB of cumulative copying before the
+   * cap ever trips. THE SIZE CAP BOUNDS RETENTION AND SAYS NOTHING ABOUT CPU, which
+   * is the resource actually exhausted — a limit on how much you KEEP is not a limit
+   * on how much you DO, and the cap looked like it covered the hostile case while
+   * covering half of it.
+   *
+   * Queued chunks are concatenated ONCE, only when a newline actually arrives, so a
+   * peer that never terminates a frame costs O(bytes) in total rather than O(bytes²).
+   */
+  private chunks: Buffer[] = []
+
+  /** Total bytes across {@link chunks}; tracked so the bound never needs a concat. */
+  private pendingLength = 0
   private readonly pending = new Map<string, Pending>()
   private readonly handlers = new Map<string, Set<HerdrEventHandler>>()
   private closed = false
@@ -245,14 +263,38 @@ export class HerdrClient implements HerdrRpc {
     // question the close had just settled. `settleExit` closing the client is a
     // meaningless guarantee if the socket can keep writing into the host afterwards.
     //
-    // It also un-did teardown's other job. Teardown releases `this.bytes` because it
+    // It also un-did teardown's other job. Teardown releases the queue because it
     // may hold up to `maxFrameBytes`; with no guard here, chunks arriving afterwards
     // simply started accumulating again — the buffer teardown claims to have released
     // grew back, unbounded by anything that would ever read it.
     if (this.closed) return
     // `Buffer.from(Uint8Array)` copies, so the socket may reuse its buffer.
-    this.bytes =
-      this.bytes.length === 0 ? Buffer.from(chunk) : Buffer.concat([this.bytes, Buffer.from(chunk)])
+    const buf = Buffer.from(chunk)
+    if (buf.length === 0) return
+
+    // FAST PATH: no frame completes in this chunk, so there is nothing to parse and
+    // no reason to touch what is already queued. Cost is O(this chunk). This is the
+    // path a hostile peer drives, and it is the one that used to be quadratic.
+    //
+    // Scanning only the NEW chunk is sound because the loop below drains every
+    // complete frame it can see, so whatever remains queued is newline-free by
+    // construction.
+    const firstNewline = buf.indexOf(NEWLINE_BYTE)
+    this.chunks.push(buf)
+    this.pendingLength += buf.length
+    if (firstNewline < 0) {
+      // The unterminated bound, enforced on the RUNNING TOTAL — no concat needed to
+      // ask the question. `>` not `>=`: a frame exactly at the limit is legitimate.
+      if (this.pendingLength > this.maxFrameBytes) this.failUnterminated()
+      return
+    }
+
+    // A frame completes here, so materialise the queue — ONCE, not once per chunk.
+    const bytes =
+      this.chunks.length === 1 ? this.chunks[0]! : Buffer.concat(this.chunks, this.pendingLength)
+    this.chunks = []
+    this.pendingLength = 0
+
     // THE ORDER BELOW IS THE POINT, and it was wrong. A guard must run BEFORE the
     // thing it guards. The size bound lived after the loop, checking only what was
     // left UNTERMINATED — so a complete oversized frame was decoded, parsed and
@@ -266,14 +308,21 @@ export class HerdrClient implements HerdrRpc {
     //   3. parse, then validate the envelope — both necessarily after the decode,
     //      because you cannot parse bytes you have not decoded. That ordering is
     //      inherited but correct; the size check's was not.
+    //
+    // `start` is a CURSOR, not a re-slice. The previous version rebuilt the buffer
+    // after every frame (`Buffer.from(subarray(nl + 1))`), which made a batch of N
+    // frames in one delivery quadratic too — the same defect as the append, one loop
+    // further in.
+    let start = 0
     for (;;) {
-      const nl = this.bytes.indexOf(NEWLINE_BYTE)
+      const nl = bytes.indexOf(NEWLINE_BYTE, start)
       if (nl < 0) break
-      // (1) SIZE FIRST. `nl` is the frame's byte length, excluding the delimiter.
-      if (nl > this.maxFrameBytes) {
+      // (1) SIZE FIRST. The frame's byte length, excluding the delimiter.
+      const frameBytes = nl - start
+      if (frameBytes > this.maxFrameBytes) {
         this.teardown(
           new Error(
-            `herdr: inbound frame of ${nl} bytes exceeds the ${this.maxFrameBytes}-byte limit — ` +
+            `herdr: inbound frame of ${frameBytes} bytes exceeds the ${this.maxFrameBytes}-byte limit — ` +
               `refusing to decode or dispatch it. Treating the transport as failed rather than ` +
               `processing a frame this client will not accept.`,
           ),
@@ -281,28 +330,38 @@ export class HerdrClient implements HerdrRpc {
         return
       }
       // (2) A COMPLETE line — decode it, and only it.
-      const line = this.bytes.toString('utf8', 0, nl)
-      this.bytes = Buffer.from(this.bytes.subarray(nl + 1))
+      const line = bytes.toString('utf8', start, nl)
+      start = nl + 1
       if (line.trim() === '') continue
       // (3) parse + envelope validation live in `dispatch`.
       this.dispatch(line)
       if (this.closed) return // a frame tore the transport down
     }
+
     // WHAT REMAINS IS UNTERMINATED. A frame is normally small, which is exactly why
     // no bound was written — but "normally small" is an expectation, not a limit. A
-    // peer that never sends `0x0A` would grow this buffer until exhaustion, copying
-    // quadratically on the way, and the RPC clock cannot help because bytes keep
-    // arriving whether or not a request is waiting. Well-formed-so-far is not
-    // complete.
-    if (this.bytes.length > this.maxFrameBytes) {
-      this.teardown(
-        new Error(
-          `herdr: inbound frame exceeded ${this.maxFrameBytes} bytes with no newline ` +
-            `(${this.bytes.length} buffered) — the peer is not speaking this framing. Treating the ` +
-            `transport as failed rather than buffering until exhaustion.`,
-        ),
-      )
+    // peer that never sends `0x0A` would grow this buffer until exhaustion, and the
+    // RPC clock cannot help because bytes keep arriving whether or not a request is
+    // waiting. Well-formed-so-far is not complete.
+    if (start < bytes.length) {
+      // COPY the tail rather than keeping a view: `subarray` retains the whole parent
+      // allocation, so a 1-byte remainder of an 8 MiB delivery would pin 8 MiB.
+      const tail = Buffer.from(bytes.subarray(start))
+      this.chunks = [tail]
+      this.pendingLength = tail.length
+      if (this.pendingLength > this.maxFrameBytes) this.failUnterminated()
     }
+  }
+
+  /** The unterminated-frame bound, shared by both paths that can reach it. */
+  private failUnterminated(): void {
+    this.teardown(
+      new Error(
+        `herdr: inbound frame exceeded ${this.maxFrameBytes} bytes with no newline ` +
+          `(${this.pendingLength} buffered) — the peer is not speaking this framing. Treating the ` +
+          `transport as failed rather than buffering until exhaustion.`,
+      ),
+    )
   }
 
   private dispatch(line: string): void {
@@ -440,7 +499,8 @@ export class HerdrClient implements HerdrRpc {
     }
     // Release the inbound buffer: after teardown nothing will ever read it, and it
     // may be holding up to HERDR_MAX_FRAME_BYTES.
-    this.bytes = Buffer.alloc(0)
+    this.chunks = []
+    this.pendingLength = 0
     this.failAll(err)
   }
 
@@ -463,7 +523,23 @@ export class HerdrClient implements HerdrRpc {
    * a closed client accumulates nothing.
    */
   bufferedBytes(): number {
-    return this.bytes.length
+    return this.pendingLength
+  }
+
+  /**
+   * Bytes of ALLOCATION the queue is holding alive, which is not the same number as
+   * {@link bufferedBytes}.
+   *
+   * A `subarray` is a VIEW: it keeps its parent allocation alive, so a 1-byte
+   * remainder of an 8 MiB delivery pins 8 MiB while reporting a logical length of 1.
+   * That is the same shape as the defect this whole change is about — a quantity that
+   * looks bounded because the number you are watching is bounded — so the retained
+   * size gets its own observable rather than being taken on trust.
+   */
+  retainedBytes(): number {
+    let total = 0
+    for (const c of this.chunks) total += c.buffer.byteLength
+    return total
   }
 
   /**

@@ -1072,6 +1072,72 @@ and were evidence of a different bug entirely. Rewritten, M90 now reddens exactl
 accumulation case and M89 exactly the dispatch case, which is what separates the two
 requirements.
 
+### A limit on how much you KEEP is not a limit on how much you DO
+
+Review r14, and it is the resource version of the sentence this branch keeps rediscovering.
+
+**Inbound buffering was quadratic.** Every chunk copied the whole accumulation through
+`Buffer.concat`, so cost grew with the *number of deliveries* while the 8 MiB frame cap —
+which bounds only *retention* — sat there looking like it covered the hostile case.
+One-byte deliveries force on the order of **35 TB of cumulative copying** before the cap
+ever trips. The guard bounded the wrong quantity: **CPU was the resource actually
+exhausted, and nothing was watching it.**
+
+There were two quadratic sources, not one. The append was the reported one; the frame
+loop had the same defect a level in, rebuilding the buffer after every frame
+(`Buffer.from(subarray(nl + 1))`), so a batch of N frames in a single delivery was
+quadratic too. Fixed as a queue of chunks concatenated ONCE when a newline actually
+arrives, plus a cursor instead of a re-slice.
+
+**And the test load had to be chosen by measurement, not by guess.** My first attempt fed
+200k one-byte chunks under a 4 s bound — and the quadratic mutant finished inside it, so
+**M94 survived**. Measured on this host: the queue takes **44 ms**, the concat-per-chunk
+version **21,433 ms** — a 487× separation at 200k × 8 bytes. The bound now sits ~113×
+above the passing implementation and ~4× below the failing one. *The load, not just the
+threshold, is what makes a performance test able to see the defect* — and a wall-clock
+assertion whose margin you have not measured is a guess wearing a number.
+
+**A third instance of the same shape fell out of the fix.** `subarray` returns a VIEW,
+so a 1-byte remainder of a 2 MB delivery pins the whole 2 MB while `bufferedBytes()`
+truthfully reports 1. Watching the logical length would say the buffer is empty while the
+memory is still held — the identical error one layer down. The tail is copied, and
+retention got its **own observable** (`retainedBytes`) rather than being taken on trust,
+because the number that was already there could not see it.
+
+### "Loudly" was half a criterion, and the half nobody asserted
+
+The gate test named *"FAILS OPEN, loudly"* asserted only that the screen eventually
+arrived. But **"the screen arrived" is IMPLIED BY failing open and says nothing about
+loudly** — silence the warning and the test stayed green, against both its own name and
+the spec. An assertion that is a *proxy* for the criterion is not the criterion, and
+**half a compound criterion asserted is a criterion not asserted.**
+
+It now captures stderr and requires exactly one warning that names the wiring bug and the
+consequence, paired with a control that a timely `beginOutput()` warns not at all —
+without which "warns once" is satisfied by warning on every spawn, making the diagnostic
+worthless precisely when it is true.
+
+The control needed a **combined** mutation to prove it discriminates, because two guards
+protect it: `beginOutput` clears the timer AND the timer checks `released`. Disabling
+either alone leaves the control green; disabling both reddens it (M97c).
+
+### The evidence rule this branch converged on
+
+Stated once, because it has now paid three times — M88b (the fake), M96c (the accessor),
+M97c (the gate):
+
+> **When a mutation survives, ask what is absorbing it; when it reddens loudly, ask
+> whether it reddened for the reason you think.**
+
+Both halves cost something real here. M88 surviving alone was what proved the fake was
+the *enabling condition* rather than a convenience, and the same shape recurred exactly:
+**M96b survives alone, and M96c — the view plus a logical-length accessor — is GREEN with
+the bug present**, which is the proof that the accessor measuring ALLOCATION rather than
+length is what makes the retention defect visible at all. And M91's 38 red cases looked
+like strong evidence while being evidence of a different bug entirely, because I had
+deleted the assignment instead of moving it. A mutation that changes more than the one
+thing it names cannot tell you which thing the test caught.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1179,6 +1245,15 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M91 | MOVE `closed = true` below `failAll` (ordering only) | SURVIVED — the ordering is unobservable; see above |
 | M92 | a refused subscribe keeps its handler registered | RED 1 |
 | M93 | unregister on EVERY subscribe, not only the failed one | RED 3 |
+| M94 | restore the quadratic append (`concat` per chunk) | RED 1 — only after the load was re-chosen by measurement |
+| M95 | drop the unterminated bound on the fast path | RED 3 |
+| M95b | PAIR: bound at `>=` so a frame exactly at the cap is rejected | RED 2 |
+| M96 | keep a `subarray` VIEW of the tail instead of copying it | RED 1 |
+| M96b | `retainedBytes` reports logical length, not allocation | SURVIVED alone — see M96c |
+| M96c | M96b **combined** with the view restored | GREEN with the bug present: the accessor's fidelity is the enabling condition |
+| M97 | the fail-open gate releases but says NOTHING | RED 1 |
+| M97b | warn even when `beginOutput()` was called in time | SURVIVED alone — `beginOutput` clears the timer |
+| M97c | M97b **combined** with `clearTimeout` removed (both guards off) | RED 1 (the control) |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

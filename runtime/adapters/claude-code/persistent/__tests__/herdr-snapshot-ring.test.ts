@@ -583,6 +583,12 @@ describe('the producer does not start before its consumer can exist', () => {
     // Withholding output forever is worse than delivering it late: a REPL whose
     // screens never reach the detectors is wedged silently and looks idle. So the
     // gate is an ordering device, not a permission.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      errs.push(String(c))
+      return true
+    }) as typeof process.stderr.write
     const server = new FakeHerdrServer()
     server.screen = 'eventually'
     const screens: string[] = []
@@ -601,6 +607,55 @@ describe('the producer does not start before its consumer can exist', () => {
     // beginOutput() is DELIBERATELY not called.
     await until(() => screens.includes('eventually'), 'released by the fail-open timer')
     child.kill()
+    process.stderr.write = realWrite
+
+    // ...AND *LOUDLY*, WHICH IS HALF THE CRITERION AND WAS THE HALF NOT ASSERTED.
+    // "The screen arrived" is IMPLIED BY failing open and says nothing at all about
+    // loudly: silence the warning and the old test stayed green, against both its own
+    // name and the spec. An assertion that is a PROXY for the criterion is not the
+    // criterion — and half a compound criterion asserted is a criterion not asserted.
+    const warned = errs.filter((e) => e.includes('beginOutput() was not called'))
+    expect(warned.length).toBe(1) // exactly one: a per-poll warning would bury the log
+    // Actionable: it must name the caller's bug and the consequence, or it is noise
+    // that happens to match a substring.
+    expect(warned[0]).toContain('WIRING BUG')
+    expect(warned[0]).toContain('snapshot-replace')
+  })
+
+  it('CONTROL — a TIMELY beginOutput() warns not at all', async () => {
+    // Without this, "warns exactly once" is satisfied by warning on every spawn, which
+    // would make the diagnostic worthless precisely when it is true.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      errs.push(String(c))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const server = new FakeHerdrServer({ paneId: 'w9:pTimely' })
+      server.screen = 'promptly'
+      const screens: string[] = []
+      const host = new HerdrHost({
+        connect: async () => server,
+        pollIntervalMs: 5,
+        sleep: (ms) => Bun.sleep(ms),
+        workspaceId: 'w9',
+        outputGateMaxMs: 30,
+      })
+      const child = await host.spawn(['claude'], {
+        cwd: '/tmp',
+        env: {},
+        onScreen: (sc) => screens.push(sc),
+      })
+      child.beginOutput?.() // the caller does its job
+      await until(() => screens.includes('promptly'), 'released by the caller')
+      // Outlast the fail-open timer: the warning must not arrive late either.
+      await Bun.sleep(60)
+      child.kill()
+    } finally {
+      process.stderr.write = realWrite
+    }
+    expect(errs.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
   })
 
   it('beginOutput() is idempotent', async () => {

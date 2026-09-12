@@ -250,6 +250,34 @@ not-new. That is accepted and recorded here rather than hidden.
       calls and a pane that is actually closed. Control: a successful close settles,
       latches, and closes.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **Inbound buffering is linear in bytes, not quadratic in deliveries.** The frame
+      cap bounds RETENTION and says nothing about CPU, which is the resource a
+      fragmenting peer actually exhausts — one-byte deliveries against an 8 MiB cap force
+      ~35 TB of copying before the cap trips. Neither the append nor the frame loop may
+      re-copy the accumulation. The single-chunk boundary cases cannot see this: what
+      distinguishes the implementations is the number of DELIVERIES, so the case must
+      fragment. The load must be chosen by MEASUREMENT and the margin recorded — a first
+      attempt at 200k×1 byte under 4 s let the quadratic mutant pass; at 200k×8 bytes the
+      separation is 44 ms against 21,433 ms on the reference host. Pair it with proof the
+      work was done rather than skipped (bytes still buffered, transport still open) and
+      with reassembly of a frame delivered one byte at a time, or "fast" is satisfied by
+      dropping input.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **Retention is measured as ALLOCATION, not as logical length.** A `subarray` tail is
+      a view that pins its whole parent, so a 1-byte remainder of a 2 MB delivery holds
+      2 MB while the logical length truthfully reports 1. The leftover must be copied,
+      and the assertion must read the allocation — a logical-length observable cannot see
+      the defect at all (verified: view + logical-length accessor is green with the bug
+      present).
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **The output gate fails open AND loudly — both halves asserted.** "The screen
+      eventually arrived" is IMPLIED BY failing open and says nothing about loudly, so a
+      test asserting only delivery passes with the warning silenced. Capture stderr and
+      require exactly one warning that names the caller's wiring bug and the consequence,
+      paired with the control that a timely `beginOutput()` emits none. The control is
+      protected by two guards (`beginOutput` clears the timer; the timer checks
+      `released`), so only a mutation disabling BOTH shows it discriminates.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **A CLOSED transport accepts nothing.** After `close()`, `onBytes` must neither
       dispatch nor buffer: a post-close frame must not reach a subscription handler
       (`pane_exited` is the one that would re-open a settled exit), and repeated chunks
