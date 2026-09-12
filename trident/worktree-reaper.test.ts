@@ -3572,11 +3572,59 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
     )
   }, 60_000)
 
-  test('THE COMPLEMENT: an owner that stays dead still deletes', async () => {
-    // Without this the case above is satisfied by a boundary that refuses everything once a
-    // recorded worktree exists. Same shape, same recorded tree, no process in it.
-    const m = await mintedWithARecordedTree('liveness-stays-dead')
+  test('a RECORDED WORKTREE that appears after minting stops the delete, with no process at all', async () => {
+    // THE DESTRUCTIVE DEFECT THIS CASE EXISTS FOR (#547 round 19). `store.ts` documents
+    // `TridentBranchOwner.worktree` as "its continued EXISTENCE keeps the ref", and the initial
+    // sweep enforces it — but `refClaimedNow` rechecked holders, owners and processes and never
+    // re-asked this one. A directory created between minting and the delete is invisible to every
+    // other cell: it is not a worktree git knows, the row is still terminal, and nothing need be
+    // running in it. The path reached the CAS and deleted the branch over UNCOMMITTED WORK.
+    //
+    // THIS TEST PREVIOUSLY ASSERTED THE OPPOSITE. It created the recorded directory after minting
+    // and expected DELETION, on the reasoning that a boundary refusing whenever a recorded
+    // worktree exists "refuses everything". That reasoning was wrong: refusing exactly then is
+    // gate 9's contract. A test that asserts the unsafe side of a boundary is worse than no test,
+    // because it is why nobody noticed.
+    const m = await mintedWithARecordedTree('worktree-after-mint')
+
+    // THE FIXTURE MUST NOT HAVE PERFORMED THE STEP UNDER TEST. A setup richer than production's
+    // turns a missing implementation into a passing test silently: if the recorded directory
+    // already existed at mint time, gate 9 would have refused in the SWEEP, no candidate would
+    // exist, and a boundary that rechecks nothing would still "refuse" — for the wrong reason.
+    // So the absence at mint time is asserted, not assumed, and `onlyCandidate` above has already
+    // proven a candidate was genuinely minted THROUGH gate 9.
+    expect(existsSync(m.tree)).toBe(false)
+
+    // The tree comes into existence with uncommitted work in it, unregistered with git, and with
+    // no process standing anywhere near it.
     mkdirSync(m.tree, { recursive: true })
+    writeFileSync(join(m.tree, 'uncommitted.txt'), 'work that exists nowhere else\n')
+
+    const report = emptyReapReport()
+    await deleteReapableRef(m.opts, m.repo, m.minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(keptReasonFor(report, ref(m.branch))).toBe(
+      `refuses-now: the run's recorded worktree exists at ${m.tree}`,
+    )
+    expect(await refExists(m.repo, ref(m.branch))).toBe(true)
+    expect(await git(m.repo, 'rev-parse', ref(m.branch))).toBe(m.sha)
+    // AND THE REFUSAL CAME FROM THE RECHECK, not from git noticing a worktree: the directory is
+    // unregistered, so it appears in no `worktree list`, and the reason above names gate 9's cell
+    // rather than a holder. Pinning the REASON is what stops this passing for the wrong cause.
+    expect(await git(m.repo, 'worktree', 'list', '--porcelain')).not.toContain(m.tree)
+    // And the work is still there, which is the whole point.
+    expect(readFileSync(join(m.tree, 'uncommitted.txt'), 'utf8')).toContain('nowhere else')
+  }, 60_000)
+
+  test('THE COMPLEMENT: a recorded path that is STILL ABSENT still deletes', async () => {
+    // The pair that distinguishes "rechecks existence" from "refuses whenever a worktree is
+    // recorded". Same owner row, same recorded path, and the directory is never created — so the
+    // gate has nothing to find and the reap proceeds.
+    const m = await mintedWithARecordedTree('worktree-still-absent')
+    expect(existsSync(m.tree)).toBe(false)
+    // A live process elsewhere in the repo, to prove the refusal below is not merely "no processes
+    // exist at all".
     addProcCwd(m.proc, 9102, join(m.repo, '.claude'))
 
     const report = emptyReapReport()
@@ -3586,7 +3634,7 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
       {
         ref: ref(m.branch),
         sha: m.sha,
-        salvage: `${SALVAGE_REF_PREFIX}liveness-stays-dead/${m.sha}`,
+        salvage: `${SALVAGE_REF_PREFIX}worktree-still-absent/${m.sha}`,
       },
     ])
     expect(await refExists(m.repo, ref(m.branch))).toBe(false)

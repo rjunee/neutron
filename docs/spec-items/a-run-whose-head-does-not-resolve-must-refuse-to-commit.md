@@ -133,6 +133,12 @@ test:
   `delete(id)` (`/trident stop`'s hard delete) is that path, so the destructive boundary would have
   deleted a ref with no owner row at all. Gate 7 is re-measured too as of #606, and any entry still
   justified by "X does not happen" rather than by code you can point at is an entry to re-derive.
+  **Gate 9 was the same mistake in a second form** and is re-measured as of #606 as well: it was filed
+  as "mutable, deliberately not re-measured" because the only leftover case looked harmless (an
+  unregistered, process-free directory), and such a directory can hold uncommitted work — so the
+  boundary reached the compare-and-swap and deleted a branch over it. Any cell justified by "the only
+  case left over is harmless" is a freshness claim in disguise: it is computed against the world as it
+  stands and assumes the remainder cannot grow.
 - **(c) The refusal is not inferrable from the index.** A worktree whose HEAD resolves but which has
   nothing staged is a no-op commit, not this condition, and must not be conflated with it — the
   discriminator is `rev-parse --verify HEAD`, not "No commits yet" in `git status` output, which is

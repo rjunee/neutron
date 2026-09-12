@@ -67,8 +67,8 @@ probe to refuse on an unreadable listing, proven BEFORE deletion is re-enabled.
 
 ### WHAT THIS SHIPS, AND WHAT IT DELIBERATELY DOES NOT
 
-**THIS IS A PREPARATORY CHANGE, AND #547 STAYS OPEN.** What ships makes the deletion possible and
-safe to enable ONCE #635 LANDS; it does not enable it, and it does not by itself make the deletion
+**THIS IS A PREPARATORY CHANGE, AND #547 STAYS OPEN.** What ships builds the gates the deletion will
+need and proves each of them; it does not enable it, and it does not by itself make the deletion
 safe (see "which gates are current" below — the gates prove they RAN, and #635 is what eliminates the
 outcome they cannot). Stale `trident/*` refs still survive their runs after
 this merges, and the next launch of those cards still re-enters them — the failure #547 describes is
@@ -537,7 +537,7 @@ measured it"**.
 SO EVERY GATE NOW CARRIES A FRESHNESS CLASSIFICATION, in the module header beside the three-route
 `.ok` classification, because the two answer the same kind of question about different axes: that one
 says which decisions need three values, this one says which gates are CURRENT and which are merely
-HISTORICAL. Five are mutable and re-measured (4, 5, 7, 8, 10); two are mutable and deliberately not,
+HISTORICAL. Six are mutable and re-measured (4, 5, 7, 8, 9, 10); one is mutable and deliberately not,
 with the reason written down (9, whose remaining case is an empty unregistered directory holding no
 work; 11, which is itself a write); three are immutable for a candidate's life (2, 6 and the sha,
 pinned by the CAS); and two are global and now re-asked per ref as well (1 and 3). A gate that is
@@ -553,6 +553,42 @@ WHAT THE ALTERNATIVE WOULD HAVE BOUGHT, and why it was not taken: making candida
 inseparable from a liveness snapshot. A snapshot bound to the candidate is still a snapshot — it
 narrows the window between measurement and delete rather than closing it, and it would have encoded
 the wrong model, that a candidate is a promise about the world rather than a record of a check.
+
+### A LEFTOVER-CASE ARGUMENT ASSUMES THE LEFTOVER CANNOT GROW
+
+Gate 9 — no owning run's recorded worktree exists on disk — was filed in the freshness audit as
+MUTABLE AND DELIBERATELY NOT RE-MEASURED, with this argument: a tree could be recreated between
+minting and the delete, but gates 4/5's fresh listing sees any tree git knows about and gate 10's
+fresh `/proc` sees anything running in one, so the residue is *"an empty directory with nothing
+running in it and no git registration — which holds no work"*. Every clause is true. The conclusion
+is false: an unregistered, process-free directory can hold a file, and `store.ts` documents this very
+field as **"its continued EXISTENCE keeps the ref"**. So the destructive path reached the CAS and
+deleted a branch with uncommitted work underneath it, and the suite asserted that outcome.
+
+**A DIRECTORY'S ABSENCE IS NOT A STABLE FACT, AND THE OBLIGATION STARTS WHEN THE RESOURCE EXISTS.**
+This record already states that rule about refs — a ref that does not exist does not enumerate on the
+next sweep, so nothing automated repairs it — and it governs the worktree a ref belongs to just as
+much. The failure was arguing from the SHAPE OF THE LEFTOVER rather than from the resource: "what
+remains once the other gates have spoken" is computed against the world as it stands, and silently
+assumes that remainder cannot GROW. Freshness is precisely about the remainder growing. **Any cell
+justified by "the only case left over is harmless" is a freshness claim in disguise, and needs the
+same treatment as one.**
+
+AND THE TEST ASSERTED THE UNSAFE SIDE, which is why nobody noticed — including me, twice, since I
+wrote both the cell and the test. Round 15's complement created the recorded directory after minting
+and expected DELETION, reasoning that a boundary refusing whenever a recorded worktree exists "refuses
+everything". Refusing exactly then IS gate 9's contract, so the test encoded the defect as the
+requirement. **A test that asserts the wrong side of a boundary is worse than no test**: absent
+coverage leaves a question open, while a wrong assertion answers it, and every later reader — every
+later ROUND — treats it as settled. The pair is now a refusal case (populated directory, no process,
+work preserved) against a true complement (recorded path still absent, still deletes), so the two
+together distinguish "rechecks existence" from "refuses whenever a worktree is recorded".
+
+A STRUCTURAL CONSEQUENCE WORTH NAMING: gate 9 at the boundary SUBSUMES gate 10's worktree witness,
+because a process standing in the recorded tree implies that tree exists. The recheck therefore asks
+gate 10 first, where the sweep asks gate 9 first — so the operator is told "something is running in
+it" rather than the weaker "a directory exists". Both cells stay independently reddenable, proven by
+mutating each alone.
 
 ### THE LAST PLACE AN OVERCLAIM HIDES IS THE STRING THE OPERATOR IS HANDED
 
@@ -841,6 +877,13 @@ unreadable-measurement refusals have their own case; and the restore classificat
 adversarial shape for EACH half of the EEXIST predicate — a fatal exit carrying a different message,
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
+
+GATE 9'S FRESHNESS HAS TWO CASES, paired so they cannot both be satisfied by a boundary that refuses
+everything: a recorded worktree that APPEARS after minting, holding an uncommitted file, unregistered
+and process-free, stops the delete and the work survives; a recorded path that is STILL ABSENT deletes
+even with a live process elsewhere in the repo. Three mutations, each applied alone: the recheck
+removed reds the first and DELETES the branch over the file; the recheck made unconditional reds the
+second; gate 10 removed reds three process cases, which is what proves the two cells independent.
 
 THE OPERATOR-FACING REASON HAS TWO CASES: the string taken out of a real sweep's report must say
 candidate, the gate range and "upper bound" and must contain none of six overclaiming phrases; and no

@@ -276,20 +276,31 @@
  *       proved ownership can be GONE at delete time; an empty owner list is unprovable ownership
  *       and refuses, exactly as `owner-unknown` does in the sweep.
  *     · 8 (every owner row terminal) — a dispatch's claim is an INSERT of a non-terminal row.
+ *     · 9 (no owning run's recorded worktree exists on disk) — RE-MEASURED SINCE ROUND 19, and
+ *       the cell this audit got WRONG: see the retraction below.
  *     · 10 (no live process in an owning run's tree) — RE-MEASURED SINCE ROUND 15, and the
  *       omission that made this section necessary: a process can start inside an ordinary
  *       directory without anything in the holder listing or the phase changing.
  *     · 13 and 14 are themselves the atomic write and the measurement after it.
  *
  *   MUTABLE AND *NOT* RE-MEASURED, deliberately, with the reason:
- *     · 9 (no owning run's recorded worktree still exists on disk). A tree could be
- *       recreated between mint and delete, but gate 4/5's fresh listing sees any tree git
- *       knows about and gate 10's fresh `/proc` sees anything running in one, so the
- *       remaining case is an empty directory with nothing running in it and no git
- *       registration — which holds no work. Credit this gate with nothing today anyway: 0
- *       of 291 rows carry a `worktree` (see the gate).
  *     · 11 (the salvage) is not re-measured because it is a WRITE performed at delete time;
  *       there is nothing earlier to go stale.
+ *
+ *   RETRACTED — GATE 9 WAS FILED HERE AND IT WAS WRONG (#547 round 19). The argument was: a tree
+ *   could be recreated between mint and delete, but gates 4/5 see any tree git knows about and
+ *   gate 10 sees anything running in one, so the residue is "an empty directory with nothing
+ *   running in it and no git registration — which holds no work". Every clause is true and the
+ *   conclusion is false. An unregistered, process-free directory can hold a file, and
+ *   `store.ts` documents this very field as "its continued EXISTENCE keeps the ref". The path
+ *   reached the CAS and deleted a branch over uncommitted work; the suite asserted that outcome.
+ *
+ *   THE DISTINCTION THE ARGUMENT MISSED: **a directory's absence is not a stable fact, and the
+ *   obligation starts when the resource EXISTS.** This module already states that rule about refs
+ *   — a ref that does not exist does not enumerate, so nothing repairs it — and the same rule
+ *   governs the worktree a ref belongs to. Reasoning from "what is left over once the other gates
+ *   have spoken" silently assumes the leftover cannot GROW, which is the one thing freshness is
+ *   about.
  *
  *   IMMUTABLE FOR THE LIFE OF A CANDIDATE, so freshness is not a question — and each of these
  *   rests on a mechanism rather than on nothing having been observed to change it:
@@ -1235,6 +1246,34 @@ async function refClaimedNow(
   if (busy !== undefined) {
     return `a process stands in ${busy.worktree ?? busy.workflow_run_id ?? '?'}`
   }
+
+  // WHY GATE 9 IS CHECKED AFTER GATE 10 HERE, where the sweep asks them the other way round: a
+  // process standing in the recorded worktree implies that worktree EXISTS, so gate 9 would
+  // otherwise subsume gate 10's worktree witness and the operator would be told "a directory
+  // exists" when the truth available is "something is running in it". The stronger evidence wins
+  // the reason string. Both cells stay independently reddenable: removing this one reds a
+  // populated-directory-with-no-process case, removing the other reds a live-process case.
+  // GATE 9, RE-MEASURED (#547 round 19). THE RECORDED WORKTREE MAY HAVE COME INTO EXISTENCE.
+  //
+  // `TridentBranchOwner.worktree` is documented in `store.ts` as "its continued EXISTENCE keeps
+  // the ref", and the initial sweep enforces exactly that — then this probe rechecked holders,
+  // owners and processes and never re-asked this one. A directory created between minting and
+  // the delete is invisible to every other cell here: it is not a worktree git knows, so the
+  // holder listing does not see it; the row is still terminal; and nothing need be running in it.
+  // The path reached the CAS and deleted the branch with UNCOMMITTED WORK underneath it.
+  //
+  // THE AUDIT GOT THIS CELL WRONG IN THE OTHER DIRECTION — it was filed as "mutable, deliberately
+  // not re-measured" on the argument that the remaining case is an empty unregistered directory
+  // holding no work. That argument assumed the directory stays absent. **A directory's absence is
+  // not a stable fact, and the obligation starts when the resource EXISTS** — the same rule this
+  // module states about refs, applied to the worktree a ref belongs to.
+  const standing = named.find(
+    (owner) => owner.worktree !== null && owner.worktree !== '' && existsSync(owner.worktree),
+  )
+  if (standing !== undefined) {
+    return `the run's recorded worktree exists at ${standing.worktree ?? ''}`
+  }
+
   return null
 }
 
