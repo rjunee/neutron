@@ -283,6 +283,40 @@ already here?* was never asked — the same discipline that caught `codex-build.
 being a second codex caller, simply not applied a second time. A spec item that names
 no implementation surface will grow one by default, and the default is a duplicate.
 
+### Deferring a fix is allowed; deferring a boundary is not
+
+The last two corrections were both a criterion narrower than the promise above it,
+and the second names a rule worth keeping.
+
+**The scrub union.** Having filed the three-list drift as #645, this item's own
+credential test still seeded only the two variables the wrappers unset — while the
+same document, two sections earlier, recorded that `OPENAI_AUTH_TOKEN` and
+`OPENAI_API_TOKEN` escape both wrappers, and `auth.ts:24-33` classifies those as
+variables a spawn must not inherit. An implementation leaking either would have
+passed this suite while breaking the hard contract the suite exists to enforce, with
+the evidence of the hole sitting in the same file. **A criterion may defer a fix; it
+may not defer a boundary it owns.** The test now seeds the union of all four, and
+#645 becomes the thing that keeps the lists in step rather than a reason to test
+less.
+
+**The "pinned CLI" was not pinned.** Every syntax decision here was justified against
+0.149.1, but nothing in the tree pins it: the wrappers check `command -v codex` and
+degrade to NOT_CONNECTED (`trident/codex-review.sh:154`,
+`trident/codex-build.sh:852`), so the binary is whatever the host has, and a repo
+search for the version literal finds it only in this item's own prose. The acceptance
+suite could pass against mocked argv while deployment ran a different contract.
+
+That is not speculative, and the proof was already in this record: the existing
+adapter builds `codex exec --resume <id>` (`exec.ts:67`) and 0.149.1 answers
+`error: unexpected argument '--resume' found`, exit 2, because `resume` became a
+subcommand. **A caller in this tree has already been broken by exactly this drift,
+and the symptom was an exit code nobody read.** The item now requires a startup
+capability probe that refuses an unsupported surface loudly — chosen over a version
+pin because the number is not the contract and the binary is not ours to pin. Same
+policy as #538, whose herdr client must `ping` and compare protocol versions because
+the socket server does none and the protocol moved 20 → 22 in nineteen days: verify
+the contract at startup, fail loudly, rather than discover it mid-run.
+
 ### Not established
 
 - Whether `codex app-server proxy` and the unix control socket work at all. Twenty

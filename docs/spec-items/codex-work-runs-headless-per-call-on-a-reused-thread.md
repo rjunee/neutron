@@ -99,10 +99,15 @@ the adapter's.
    Unchanged from `trident/codex-review.sh`: ChatGPT subscription `auth.json`,
    never a metered `OPENAI_API_KEY`. Validating the file is **not sufficient** —
    the codex CLI prefers an inherited `OPENAI_API_KEY` over persisted OAuth, so the
-   adapter scrubs `OPENAI_API_KEY` **and** `OPENAI_KEY` from every child's
-   environment, exactly as `trident/codex-review.sh:145-152` does under its HARD
-   BILLING CONTRACT header. A correct `auth.json` beside a leaked inherited key
-   bills the metered key.
+   adapter scrubs the **union of every recognised credential variable** from every
+   child's environment: `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`,
+   `OPENAI_API_TOKEN`. That is wider than either list in the tree today — the
+   wrappers unset the first two under their HARD BILLING CONTRACT header
+   (`trident/codex-review.sh:145-152`), `auth.ts:24-33` names the last two as
+   variants the spawn must not inherit — and it is deliberately wider, because the
+   cost of scrubbing a variable codex ignores is zero and the cost of missing one is
+   a silently metered bill. #645 unifies the lists; this contract does not depend on
+   it landing first.
 5. **One `auth.json` file per account, shared by SYMLINK.** codex rotates the
    refresh token when it refreshes, so two independent copies of one account's
    `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A second
@@ -124,7 +129,16 @@ the adapter's.
    (Decisions Log 2026-09-11). Today neither consumer needs one: the build runs
    `--sandbox danger-full-access` on record (`trident/codex-build.sh:181-200`) so it
    never escalates, and review reads a diff.
-7. **A thread id has exactly one owner, and that owner's calls on it are strictly
+7. **The CLI's contract is probed at startup, not assumed.** Before the first turn,
+   the adapter verifies the surface it depends on — the `resume` **subcommand**, and
+   the config keys it passes — and refuses with a distinct unsupported-version
+   outcome if it is absent, recording `codex --version` either way. A probe rather
+   than a pinned version string, because the wrappers do not install codex (they
+   check `command -v codex` and degrade to NOT_CONNECTED,
+   `trident/codex-review.sh:154`), so the binary is the host's and a pin here would
+   be a claim about someone else's machine. Precedent and same policy: #538's herdr
+   client must `ping` and compare protocol versions for exactly this reason.
+8. **A thread id has exactly one owner, and that owner's calls on it are strictly
    sequential.** Fan-out is expressed as **one thread id per lane**, never as
    several callers sharing an id. Cache warmth is unaffected — it is per-thread,
    so each lane keeps its own warm thread — and this is the only arrangement that
@@ -203,10 +217,21 @@ the adapter's.
       (i) File path: an `auth.json` with `auth_mode` absent and `OPENAI_API_KEY`
       set returns the not-connected outcome without spawning codex; a subscription
       `auth.json` does spawn it.
-      (ii) **Environment path:** the test seeds **both** `OPENAI_API_KEY` and
-      `OPENAI_KEY` in the parent environment alongside a valid subscription
-      `auth.json`, then asserts **neither variable is present in the spawned
-      child's environment**. The assertion must read the child's env (the env
+      (ii) **Environment path:** the test seeds the **union of every recognised
+      codex credential variable** in the parent environment — `OPENAI_API_KEY`,
+      `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN` — alongside a valid
+      subscription `auth.json`, then asserts **not one of them is present in the
+      spawned child's environment**. The union, not either existing list: the
+      wrappers unset only the first two (`trident/codex-review.sh:152`,
+      `trident/codex-build.sh:850`) while `auth.ts:24-33` classifies the last two as
+      variables the spawn "must NOT inherit". #645 unifies the lists; **this
+      criterion does not wait for it**, because a boundary this item promises is a
+      boundary this item tests. An implementation that leaks `OPENAI_AUTH_TOKEN`
+      would otherwise pass this suite while breaking the contract the suite exists
+      to enforce — on a hole this very document names.
+      Bidirectional half: a benign control variable seeded in the parent (say
+      `NEUTRON_SCRUB_CONTROL=1`) and `PATH` must **still be present** in the child,
+      or a scrub that empties the whole environment satisfies the assertion above. The assertion must read the child's env (the env
       object handed to the spawn, or `/proc/<pid>/environ`), **never** the config or
       the `auth.json` — the file being correct is exactly what the broken
       implementation gets right. This is not hypothetical: the codex CLI **prefers**
@@ -263,6 +288,28 @@ the adapter's.
       A test that only asserts "an escalation succeeded" passes against
       `--dangerously-bypass-approvals-and-sandbox`, so the test must also assert
       that flag is absent from every argv the adapter builds.
+- [ ] The codex CLI's contract is **verified at startup and refused loudly** when it
+      does not match. verify: a test drives the adapter against a stub `codex` whose
+      `exec resume --help` lacks the `resume` subcommand and asserts the adapter
+      returns a **distinct typed unsupported-version outcome before spawning any
+      turn** — not a generic failure, and not a run that proceeds. Positive half: a
+      stub exposing the expected surface is accepted and the recorded
+      `codex --version` appears in the run's record.
+      **Chosen: a capability probe, not a version pin** — the number is not the
+      contract, and the contract is not ours to pin. The wrappers do not install
+      codex; they check `command -v codex` and degrade to NOT_CONNECTED
+      (`trident/codex-review.sh:154`, `trident/codex-build.sh:852`), so the binary is
+      whatever the host already has and a version literal in this repo would be a
+      claim about someone else's machine. A probe of the actual surface is
+      enforceable there, and survives a patch release that changes nothing.
+      **This drift is measured, not anticipated:** `runtime/adapters/codex-cli/exec.ts:67`
+      builds `codex exec --resume <id>`, which on 0.149.1 is
+      `error: unexpected argument '--resume' found`, exit 2 — `resume` became a
+      subcommand and a caller in this tree has been broken by it already, reporting
+      only an exit code nobody reads. Same policy as #538, whose herdr client must
+      `ping` and compare protocol versions because the socket server does no version
+      check and the protocol moved 20 → 22 in nineteen days: **verify the contract at
+      startup and fail loudly rather than discovering it mid-run.**
 - [ ] No long-lived codex process is created. verify: a test asserts every codex
       child the adapter spawns has exited by the time the adapter's call returns,
       and that the adapter exposes no start/stop/health surface for a server.
