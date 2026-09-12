@@ -72,6 +72,13 @@ test:
 - **(b) A run whose HEAD resolves normally STILL COMMITS,** with the commit carrying its expected
   parent. Proven in the same suite, against the same code path, with an ordinary worktree: the commit
   lands and `git rev-list --parents -1 HEAD` shows two words, not one.
+- **(d) THE REAP PERFORMS DELETIONS ONLY ONCE THIS GUARD IS IN PLACE.** #606 landed every gate, the
+  salvage, the measurement and the reporting but deliberately performs **no deletions** — the
+  destructive half sits in an exported `deleteReapableRef` that the sweep does not call, behind one
+  named reason (`DEFERRED_PENDING_CLAIMANT_GUARD`). Satisfying this item therefore includes deleting
+  that deferral and restoring the single call, and proving the sweep deletes again. Until then the
+  sweep records what it *would* reap in `refs_reapable`: **72 of 80 refs on the repo of record** as of
+  2026-09-12 (see the issue comment), which is the exposure this sequencing exists to hold back.
 - **(c) The refusal is not inferrable from the index.** A worktree whose HEAD resolves but which has
   nothing staged is a no-op commit, not this condition, and must not be conflated with it — the
   discriminator is `rev-parse --verify HEAD`, not "No commits yet" in `git status` output, which is

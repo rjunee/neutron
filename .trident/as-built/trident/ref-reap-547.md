@@ -1,4 +1,4 @@
-## 2026-09-12 — a run's branch ref no longer outlives the run: a durable holder gate, an atomic delete, and a reap that cannot outrun a dispatch
+## 2026-09-12 — the reap that measures everything and deletes nothing yet: fourteen gates, an atomic delete held back for its guard
 
 Measured on the repo of record, 2026-09-12: **79 `refs/heads/trident/*` refs**, 78 of them held by
 no worktree at all, and every one of them a ref whose run had already ended. A surviving ref is not
@@ -25,6 +25,52 @@ the workflow's own process is alive. A run reaped by the hang watchdog, cancelle
 that already fires on every path, was built to never delete a branch: the ref WAS the rescue copy
 of a failed run's commits (`.trident/plans/trident/nothing-ever-reaps-a-trident-worktr.md`).
 
+### WHAT THIS SHIPS, AND WHAT IT DELIBERATELY DOES NOT
+
+**IT PERFORMS NO DELETIONS.** Every gate, the salvage, the atomic compare-and-swap, the claim probe,
+the repair, the measurement and the reporting all land. The `update-ref -d` itself does not run: the
+destructive half is an exported `deleteReapableRef` the sweep does not call, behind one named reason
+(`DEFERRED_PENDING_CLAIMANT_GUARD`) pointing at **#635**. The sweep records what it WOULD reap in
+`refs_reapable` — measured on the repo of record: **72 of 80 refs**, with 2 held by a worktree and 6
+kept for unprovable ownership.
+
+**THE DEFERRAL WAS FIRST DECIDED THE OTHER WAY, AND THE REASON IT WAS WRONG IS THE BASELINE.** The
+coordinating judgement was to narrow the record's claim and file the claimant-side guard as follow-up;
+the review gate overturned it and the overturn was right. The error was measuring this change against a
+world in which these refs were already being deleted — which was never true. Nothing deletes them
+today. So #606 does not *improve* a destructive operation, it *introduces* one, and with it a failure
+mode that does not currently exist: a run committing onto no history at all, its PR a whole-tree diff
+against unrelated history. "The commits are never lost" is true, was verified, and is not the same
+claim as "nothing bad happens". Narrowing the record made it honest; it did not make the change safe.
+
+THE GENERAL FORM, which is the part worth carrying: **a change that introduces automation is measured
+against a world in which that automation does not exist.** Comparing it to the improved version of
+itself flatters it, and "the bad outcome is rare and recoverable" is an argument for shipping the guard
+first, not for shipping without it.
+
+WHY THE GUARD IS NOT BUILDABLE IN THIS LANE, measured rather than assumed:
+`trident/inner-workflow.mjs` contains **zero** `git commit` calls. A build's commit is the LLM agent
+running `git commit` in Bash inside its worktree, driven by prompt text (11 sites). The four TS files
+that do call `git commit` are none of them the build's commit — workspace init, the leak preflight's
+scratch commit, the as-built appender's, and the outer publisher's rebase replay. So there is no
+function to guard: the options were a per-worktree `pre-commit` hook (a new mechanism with new failure
+modes), editing a file outside this lane, or prompt text, which is not an enforceable guard.
+
+WHY AN EXTRACTION RATHER THAN A SHORT-CIRCUIT, since the simpler change was available. Short-circuiting
+inside the sweep would have left the destructive half unreached **in tests as well as in production**,
+so #635 would re-enable roughly twenty tests' worth of code whose coverage had lapsed — arriving back
+in production carrying a green history that no longer meant anything. The extraction keeps all of those
+tests running against the very function #635 re-enables, and the 87-test suite is itself the safety net
+for the refactor. Three things fell out of it that the short-circuit would not have given:
+
+  * THE DRY-RUN INVENTORY IS WORTH HAVING ON ITS OWN. A sweep that runs all fourteen checks and reports
+    which refs are reapable is strictly more than exists today, where nothing reaps and nothing reports.
+    It is the evidence attached to #635 rather than an argument about it.
+  * ZERO WRITES IS AN IMPROVEMENT, not merely a smaller change. Not creating ~72 salvage refs for
+    deletions that are not happening avoids seeding a namespace this record already flags as having no
+    pruner.
+  * #635'S DIFF BECOMES ONE DELETION AND ONE CALL, about as reviewable as an enabling change gets.
+
 ### The generalisation, which outlived the specific fixes
 
 **ON A DESTRUCTIVE PATH, "FALSE" AND "UNKNOWN" MUST NEVER SHARE A BRANCH — AND A BOOLEAN RESULT TYPE
@@ -39,12 +85,29 @@ question git answers with an exit code:
 | 4 | did the create-only salvage refuse because the ref exists? | "already exists" with every other failure | exit **128** AND the message |
 | 6 | did the delete happen? | "refused" with "timed out, so I cannot tell" | success / timeout / other |
 | 7 | is the ref there now? | "absent" with "`fatal: permission denied`" | exit **0** / **1** / anything else |
+| 7b | did the delete happen, when the call THREW? | "threw" with "refused" | a throw after the command had its chance is *unknown* |
 
 Round 7's is the one that shows the cost plainly: a hard git error read as *absent*, so the sweep
 recorded a **deletion it had no evidence for**. Each of the three fixes was correct and each left the
 same latent shape next door, because the type carried one bit where the domain has three states. A
 `HostCommandResult` exposes `exit_code`; `ok` is a convenience over it, and a convenience is the wrong
 thing to branch a destructive decision on.
+
+INSTANCE FOUR ARRIVED BY A ROUTE THE `.ok` AUDIT DID NOT COVER, which is the most useful thing about
+it. A `catch` is not an `.ok` decision — but "the command threw AFTER having its chance to take
+effect" IS a failure class, and it is the one that looks least like one. The delete's catch recorded
+`delete-refused` and moved on, so a throw landing after the ref lock committed left the ref deleted
+with the repair never reached. The extracted test therefore has to be read with that included: does
+every failure class — the throw-after-doing-it included — take the same branch, and is that branch the
+refusing one?
+
+The follow-up audit classifies every `catch` around a host call by whether the command MUTATES: six are
+read-only, where a throw genuinely means no measurement and refusing is right; five mutate. Exactly ONE
+of those five was wrong, and the classification is what found it rather than inspection. Of the
+remaining four, the restore's catch does infer on throw — a throw after a successful restore produces a
+false "RESTORE FAILED" alarm — and it is left that way deliberately: over-reporting on a repair path is
+the correct place to be wrong, and the sentence naming it is the difference between a residue that is
+known and one that is not.
 
 THE TEST FOR WHETHER TWO VALUES SUFFICE, which is the part to carry to the next module: **does every
 failure class take the SAME branch, and is that branch the refusing one?** If yes, collapsing costs

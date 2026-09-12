@@ -20,13 +20,54 @@ import {
   buildWorktreeReaperLoop,
   DEFAULT_REAP_INTERVAL_MS,
   DEFAULT_WORKTREE_RETENTION_MS,
+  deleteReapableRef,
+  DEFERRED_PENDING_CLAIMANT_GUARD,
   MAX_REF_DELETIONS_PER_SWEEP,
   MAX_RESTORE_ATTEMPTS,
   SALVAGE_REF_PREFIX,
   TRIDENT_REF_PREFIX,
   sweepTridentWorktrees,
   type WorktreeReaperStore,
+  type WorktreeReapReport,
 } from './worktree-reaper.ts'
+
+/**
+ * THE SWEEP PLUS THE DESTRUCTIVE HALF — which production does NOT do, and that is the point.
+ *
+ * `#606` ships every gate, the measurement and the reporting; the `update-ref -d` itself waits
+ * for `#635` (a run whose HEAD does not resolve must refuse to commit), because nothing deletes
+ * these refs today and a destructive operation should not arrive ahead of the only check that
+ * can settle its failure mode without a race. The sweep therefore records what it WOULD reap in
+ * `refs_reapable` and calls nothing.
+ *
+ * Every test below that exercises the salvage, the claim probe, the compare-and-swap delete or
+ * the repair drives it through here, so the code `#635` re-enables is code whose coverage never
+ * lapsed — which is the whole reason the destructive half was extracted rather than short-
+ * circuited. `#635`'s change is to delete the deferral and call this sequence from the sweep.
+ *
+ * For a refusal case this is a pure passthrough: nothing is reapable, so nothing is called and
+ * the behaviour is the sweep's own.
+ */
+async function sweepAndReap(opts: Parameters<typeof sweepTridentWorktrees>[0]): Promise<WorktreeReapReport> {
+  const report = await sweepTridentWorktrees(opts)
+  const budget = { attempts: 0 }
+  for (const { ref: full, sha } of [...report.refs_reapable]) {
+    const repo = opts.store.listRepoPaths().find((candidate) => candidate !== '') ?? ''
+    await deleteReapableRef(opts, repo, full, full.slice('refs/heads/'.length), sha, report, budget)
+  }
+  return report
+}
+
+/**
+ * The kept-reason a test means: the LAST one recorded for this ref, skipping the deferral note
+ * the sweep always adds for a reapable ref. `find` picked that note up and hid the outcome the
+ * test was actually asserting on.
+ */
+function keptReasonFor(report: WorktreeReapReport, full: string): string | undefined {
+  return report.refs_kept
+    .filter((k) => k.ref === full && k.reason !== DEFERRED_PENDING_CLAIMANT_GUARD)
+    .at(-1)?.reason
+}
 
 const roots: string[] = []
 
@@ -129,7 +170,7 @@ describe('sweepTridentWorktrees — real git', () => {
     mkdirSync(unrelated)
     addProcCwd(proc, 101, unrelated)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo),
       run_host: spawnCapture,
       proc_root: proc,
@@ -154,7 +195,7 @@ describe('sweepTridentWorktrees — real git', () => {
     addProcCwd(proc, 201, worktree)
     addProcCwd(proc, 202, nested)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo),
       run_host: spawnCapture,
       proc_root: proc,
@@ -176,7 +217,7 @@ describe('sweepTridentWorktrees — real git', () => {
     backdate(repo, now)
     backdate(candidate, now)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -207,7 +248,7 @@ describe('sweepTridentWorktrees — real git', () => {
       },
     ]
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, runs),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -233,7 +274,7 @@ describe('sweepTridentWorktrees — real git', () => {
     backdate(old, now)
     backdate(dirty, now)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -268,7 +309,7 @@ describe('sweepTridentWorktrees — real git', () => {
       },
     }
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store,
       run_host: spawnCapture,
       proc_root: join(root, 'missing-proc'),
@@ -372,7 +413,7 @@ test('workflow generation claims a matching worktree basename', async () => {
   const now = Date.now()
   backdate(worktree, now)
 
-  const report = await sweepTridentWorktrees({
+  const report = await sweepAndReap({
     store: stubStore(repo, [
       { worktree: null, branch: null, repo_path: '/elsewhere', workflow_run_id: generation },
     ]),
@@ -466,7 +507,7 @@ describe('branch-ref reap — every terminal path (#547)', () => {
       const branch = `trident/end-${phase}`
       const sha = await seedRef(repo, branch, `end${phase}`)
 
-      const report = await sweepTridentWorktrees({
+      const report = await sweepAndReap({
         store: stubStore(repo, [], [owner(branch, { phase })]),
         run_host: spawnCapture,
         proc_root: makeProc(root),
@@ -489,7 +530,7 @@ describe('branch-ref reap — every terminal path (#547)', () => {
       const branch = `trident/live-${phase}`
       const sha = await seedRef(repo, branch, `live${phase}`)
 
-      const report = await sweepTridentWorktrees({
+      const report = await sweepAndReap({
         store: stubStore(repo, [], [owner(branch, { phase })]),
         run_host: spawnCapture,
         proc_root: makeProc(root),
@@ -512,7 +553,7 @@ describe('branch-ref reap — every terminal path (#547)', () => {
     const branch = 'trident/many-owners'
     const sha = await seedRef(repo, branch, 'many')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [
         owner(branch, { phase: 'failed' }),
         owner(branch, { phase: 'stopped' }),
@@ -536,7 +577,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     addProcCwd(proc, 501, holder)
     const before = await git(repo, 'rev-parse', 'refs/heads/trident/held-live')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/held-live', { phase: 'failed', worktree: holder })]),
       run_host: spawnCapture,
       proc_root: proc,
@@ -569,7 +610,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     addProcCwd(proc, 701, holder)
     const before = await git(repo, 'rev-parse', 'refs/heads/trident/hidden')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/hidden', { phase: 'failed', worktree: holder })]),
       run_host: async (cmd, cwd) => {
         const result = await spawnCapture(cmd, cwd)
@@ -605,7 +646,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const holder = await addWorktree(repo, 'wf_clean-holder', 'trident/held-clean')
     const now = Date.now()
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/held-clean', { phase: 'stopped' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -630,7 +671,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const now = Date.now()
     backdate(holder, now)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       // No worktree recorded on the owner row, so nothing but the sweep's own memory of
       // the detach stands between this ref and a delete.
       store: stubStore(repo, [], [owner('trident/dirty-past', { phase: 'failed' })]),
@@ -672,7 +713,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const store = stubStore(repo, [], [owner('trident/dirty-two', { phase: 'failed' })])
     const proc = makeProc(root)
 
-    const first = await sweepTridentWorktrees({
+    const first = await sweepAndReap({
       store, run_host: spawnCapture, proc_root: proc, now: () => now,
     })
     expect(first.detached).toContain(holder)
@@ -680,7 +721,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await refExists(repo, 'refs/heads/trident/dirty-two')).toBe(true)
 
     // SWEEP 2 — nothing about the tree changed; it is simply already detached.
-    const second = await sweepTridentWorktrees({
+    const second = await sweepAndReap({
       store, run_host: spawnCapture, proc_root: proc, now: () => now,
     })
 
@@ -694,7 +735,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', 'refs/heads/trident/dirty-two')).toBe(tip)
     expect(readFileSync(join(holder, 'only-copy.txt'), 'utf8')).toBe('nowhere else\n')
     // Still held on a third, so this is a property and not an off-by-one.
-    const third = await sweepTridentWorktrees({
+    const third = await sweepAndReap({
       store, run_host: spawnCapture, proc_root: proc, now: () => now,
     })
     expect(third.refs_deleted).toEqual([])
@@ -716,14 +757,14 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const store = stubStore(repo, [], [owner('trident/young-two', { phase: 'stopped' })])
     const proc = makeProc(root)
 
-    const first = await sweepTridentWorktrees({
+    const first = await sweepAndReap({
       store, run_host: spawnCapture, proc_root: proc, now: () => now,
     })
     expect(first.detached).toContain(holder)
     expect(first.preserved.some((e) => e.path === holder && e.reason === 'within retention')).toBe(true)
     expect(first.refs_deleted).toEqual([])
 
-    const second = await sweepTridentWorktrees({
+    const second = await sweepAndReap({
       store, run_host: spawnCapture, proc_root: proc, now: () => now,
     })
 
@@ -745,7 +786,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const now = Date.now()
     backdate(holder, now)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/removable', { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -766,7 +807,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     await seedRef(repo, branch, 'rebasing')
     const tree = await addWorktree(repo, 'wf_rebase-1')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -807,7 +848,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'worktree', 'list', '--porcelain')).toContain('detached')
     expect(await git(tree, 'rev-parse', 'HEAD')).not.toBe(tip)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -840,7 +881,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(tree, 'rev-parse', 'HEAD')).not.toBe(tip)
     expect(await git(repo, 'worktree', 'list', '--porcelain')).toContain('detached')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'done' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -864,7 +905,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const tree = await addWorktree(repo, 'co_plain', branch)
     const tip = await git(repo, 'rev-parse', `refs/heads/${branch}`)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -908,10 +949,10 @@ describe('branch-ref reap — the refusals (#547)', () => {
     }
 
     // Sweep 1 detaches it while the directory is still there.
-    await sweepTridentWorktrees({ store, run_host: denyPrune, proc_root: proc })
+    await sweepAndReap({ store, run_host: denyPrune, proc_root: proc })
     rmSync(tree, { recursive: true, force: true })
 
-    const report = await sweepTridentWorktrees({ store, run_host: denyPrune, proc_root: proc })
+    const report = await sweepAndReap({ store, run_host: denyPrune, proc_root: proc })
 
     expect(report.refs_stood_down).toBe(1)
     expect(report.refs_deleted).toEqual([])
@@ -931,7 +972,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const branch = 'trident/lying-host'
     const sha = await seedRef(repo, branch, 'lyinghost')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         // Break the salvage WRITE so the verify is reached at all...
@@ -974,7 +1015,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const proc = makeProc(root)
     addProcCwd(proc, 801, busy)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [
         owner(treeBranch, { phase: 'failed' }),
         owner(treeBranch, { phase: 'stopped', worktree: stranded }),
@@ -1008,7 +1049,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const b = await seedRef(repo, 'trident/unprovable-b', 'unprovb')
     await addWorktree(repo, 'wf_opaque-1')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [
         owner('trident/unprovable-a', { phase: 'failed' }),
         owner('trident/unprovable-b', { phase: 'done' }),
@@ -1029,7 +1070,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const branch = 'trident/no-proc'
     const sha = await seedRef(repo, branch, 'noproc')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: join(root, 'absent-proc'),
@@ -1045,7 +1086,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const { root, repo } = await makeRepo()
     const mine = await seedRef(repo, 'trident/somebody-elses', 'mine')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/unrelated', { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -1072,7 +1113,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const stranded = join(root, 'stranded-tree')
     mkdirSync(stranded)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed', worktree: stranded })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -1099,7 +1140,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const proc = makeProc(root)
     addProcCwd(proc, 601, elsewhere)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed', workflow_run_id: generation })]),
       run_host: spawnCapture,
       proc_root: proc,
@@ -1125,7 +1166,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const before = await seedRef(repo, branch, 'raced')
     let raced: string | null = null
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         // Fire on the DELETE itself — the last possible moment, so no amount of
@@ -1175,12 +1216,12 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const store = stubStore(repo, [], [owner(branch, { phase: 'failed' })])
     const proc = makeProc(root)
 
-    const first = await sweepTridentWorktrees({ store, run_host: spawnCapture, proc_root: proc })
+    const first = await sweepAndReap({ store, run_host: spawnCapture, proc_root: proc })
     expect(first.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
 
     // The card is dispatched again and fails again at the very same commit.
     await git(repo, 'branch', branch, sha)
-    const second = await sweepTridentWorktrees({ store, run_host: spawnCapture, proc_root: proc })
+    const second = await sweepAndReap({ store, run_host: spawnCapture, proc_root: proc })
 
     expect(second.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
     expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
@@ -1201,7 +1242,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const other = await git(repo, 'rev-parse', 'refs/heads/main')
     await git(repo, 'update-ref', `refs/trident-reaped/impostor/${sha}`, other)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -1228,7 +1269,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const store = stubStore(repo, [], [owner(branch, { phase: 'failed' })])
     const proc = makeProc(root)
 
-    const interrupted = await sweepTridentWorktrees({
+    const interrupted = await sweepAndReap({
       store,
       run_host: async (cmd, cwd) => {
         if (cmd.includes('update-ref') && cmd.includes('-d')) {
@@ -1244,7 +1285,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(repo, 'rev-parse', `refs/trident-reaped/half-done/${sha}`)).toBe(sha)
 
     // The next sweep confirms the existing salvage and finishes the job.
-    const resumed = await sweepTridentWorktrees({ store, run_host: spawnCapture, proc_root: proc })
+    const resumed = await sweepAndReap({ store, run_host: spawnCapture, proc_root: proc })
     expect(resumed.refs_deleted.map((e) => e.ref)).toContain(`refs/heads/${branch}`)
     expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
     expect(await git(repo, 'rev-parse', `refs/trident-reaped/half-done/${sha}`)).toBe(sha)
@@ -1264,7 +1305,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     mkdirSync(dirname(claimant), { recursive: true })
     let claimed = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         // Fire at the LAST possible moment: the delete command itself.
@@ -1310,7 +1351,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     mkdirSync(dirname(claimant), { recursive: true })
     let deleteAttempted = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (cmd.includes('update-ref') && cmd.includes('-d')) deleteAttempted = true
@@ -1348,7 +1389,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
       listBranchOwners: () => [...rows],
     }
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store,
       run_host: async (cmd, cwd) => {
         if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
@@ -1381,7 +1422,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const sha = await seedRef(repo, branch, 'remade')
     let theirSha = ''
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         const result = await spawnCapture(cmd, cwd)
@@ -1435,7 +1476,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     mkdirSync(dirname(claimant), { recursive: true })
     let deleted = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         // A claimant appears during the delete, exactly as in the ownership-race test: the
@@ -1461,11 +1502,11 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(report.refs_restored).toEqual([])
     expect(report.refs_deleted).toEqual([])
     expect(report.refs_restore_failed).toEqual([{ ref: `refs/heads/${branch}`, sha }])
-    const record = report.refs_kept.find((k) => k.ref === `refs/heads/${branch}`)
-    expect(record?.reason, JSON.stringify(report.refs_kept)).toContain('RESTORE FAILED')
-    expect(record?.reason).toContain('is ABSENT')
+    const record = keptReasonFor(report, `refs/heads/${branch}`)
+    expect(record, JSON.stringify(report.refs_kept)).toContain('RESTORE FAILED')
+    expect(record).toContain('is ABSENT')
     // The recovery command names the branch and the exact sha, because nothing else will.
-    expect(record?.reason).toContain(`git branch ${branch} ${sha}`)
+    expect(record).toContain(`git branch ${branch} ${sha}`)
     // THE GROUND TRUTH: the ref really is gone, which is why this must be loud.
     expect(await refExists(repo, `refs/heads/${branch}`)).toBe(false)
     // And the tip is still reachable, so the recovery line above actually works.
@@ -1496,7 +1537,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
       mkdirSync(dirname(claimant), { recursive: true })
       let deleted = false
 
-      const report = await sweepTridentWorktrees({
+      const report = await sweepAndReap({
         store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
         run_host: async (cmd, cwd) => {
           if (!deleted && cmd.includes('update-ref') && cmd.includes('-d')) {
@@ -1533,6 +1574,11 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const condition = guard.slice(0, guard.indexOf('return'))
     expect(condition).toContain('report.refs_restore_failed.length === 0')
     expect(guard).toContain('refs_restore_failed: report.refs_restore_failed.length')
+    // A sweep that found REAPABLE refs is the most interesting sweep there is while the
+    // deletion is deferred — it is the dry-run inventory #635 is waiting on — so it must not
+    // be silent either.
+    expect(condition).toContain('report.refs_reapable.length === 0')
+    expect(guard).toContain('refs_reapable: report.refs_reapable.length')
   })
 
   test('a DETACHED worktree appearing on the tip mid-sweep stops the reap', async () => {
@@ -1543,7 +1589,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const branch = 'trident/detached-claimant'
     const sha = await seedRef(repo, branch, 'detclaim')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         const result = await spawnCapture(cmd, cwd)
@@ -1576,7 +1622,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const sha = await seedRef(repo, branch, 'probeblind')
     let listings = 0
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (cmd.includes('-z') && cmd.includes('list')) {
@@ -1610,7 +1656,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     await addWorktree(repo, 'rb_darkening')
     let deleting = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (cmd.includes('update-ref') && cmd.some((a) => a.startsWith(SALVAGE_REF_PREFIX))) {
@@ -1653,7 +1699,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
       },
     }
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store,
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -1686,7 +1732,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     // THE PREMISE: it resolves to main's tip, so every sha-keyed gate and the CAS agree.
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(mainTip)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -1718,7 +1764,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     let restoreCalls = 0
     const createOnly: string[][] = []
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -1765,7 +1811,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     let deleted = false
     const restoreEnvs: (Record<string, string> | undefined)[] = []
 
-    await sweepTridentWorktrees({
+    await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd, extraEnv) => {
         if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -1797,7 +1843,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     let deleted = false
     let restoreCalls = 0
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -1831,7 +1877,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     mkdirSync(dirname(claimant), { recursive: true })
     let deleted = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (!deleted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -1871,7 +1917,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const sha = await seedRef(repo, branch, 'beforecommit')
     let attempted = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (!attempted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -1929,7 +1975,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
       const sha = await seedRef(repo, branch, 'presence')
       let attempted = false
 
-      const report = await sweepTridentWorktrees({
+      const report = await sweepAndReap({
         store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
         run_host: async (cmd, cwd) => {
           if (!attempted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -1953,8 +1999,8 @@ describe('branch-ref reap — the refusals (#547)', () => {
         expect(report.refs_stood_down).toBe(0)
       } else {
         expect(report.refs_deleted, JSON.stringify(report.refs_kept)).toEqual([])
-        const kept = report.refs_kept.find((k) => k.ref === ref(branch))
-        expect(kept?.reason, JSON.stringify(report.refs_kept)).toStartWith(
+        const kept = keptReasonFor(report, ref(branch))
+        expect(kept, JSON.stringify(report.refs_kept)).toStartWith(
           shape.expect === 'present' ? 'delete-timed-out:' : 'delete-indeterminate:',
         )
         // Only the UNKNOWN class is a stand-down; a present ref is an ordinary refusal.
@@ -1972,7 +2018,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const sha = await seedRef(repo, branch, 'ordinary')
     let presenceReads = 0
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (cmd.includes('rev-parse') && cmd.includes(ref(branch))) presenceReads += 1
@@ -1987,6 +2033,79 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await refExists(repo, ref(branch))).toBe(false)
   }, 60_000)
 
+  test('A DELETE THAT SUCCEEDED AND THEN THREW is repaired, not reported as refused', async () => {
+    // INSTANCE FOUR of the same mistake, by a route the `.ok` audit did not cover: a thrown
+    // exception is not an `.ok` decision, and a throw AFTER the command had its chance is
+    // *unknown*, not *false*. The runner performs the delete and then throws — a broken pipe,
+    // a harness fault, a kill surfaced as an exception rather than as `timed_out` — and the
+    // catch used to record `delete-refused` and `continue`, so gate 14 and the restore were
+    // never reached: the ref stayed deleted and the claimant's HEAD dangled while the report
+    // said the ref was kept.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/delete-threw-after-doing-it'
+    const sha = await seedRef(repo, branch, 'threwafter')
+    const claimant = join(repo, '.claude', 'worktrees', 'wf_threw-claimant')
+    mkdirSync(dirname(claimant), { recursive: true })
+    let threw = false
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!threw && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          threw = true
+          await spawnCapture(['git', '-C', repo, 'worktree', 'add', claimant, branch], repo)
+          // THE DELETE REALLY HAPPENS...
+          const real = await spawnCapture(cmd, cwd)
+          expect(real.ok, real.stderr).toBe(true)
+          // ...and only then does the call blow up.
+          throw new Error('the host died after the ref lock committed')
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(threw).toBe(true)
+    // NOT a refusal: the repair ran, so the ref is back and the claimant is whole.
+    expect(report.refs_kept.some((k) => k.reason.startsWith('delete-refused:'))).toBe(false)
+    expect(report.refs_restored).toEqual([{ ref: ref(branch), sha }])
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+    expect(await git(claimant, 'rev-parse', 'HEAD')).toBe(sha)
+    expect(await git(claimant, 'rev-parse', '--abbrev-ref', 'HEAD')).toBe(branch)
+  }, 60_000)
+
+  test('a delete that threw WITHOUT doing it is still measured, not assumed', async () => {
+    // The other side of the same throw: nothing happened, no claimant. The outcome must come
+    // from reading the ref, not from the exception — and the ref is still there, so this is a
+    // kept ref and not a deletion.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/delete-threw-before-doing-it'
+    const sha = await seedRef(repo, branch, 'threwbefore')
+    let threw = false
+
+    const report = await sweepAndReap({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!threw && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          threw = true
+          throw new Error('the host died before the ref lock committed')
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(threw).toBe(true)
+    expect(report.refs_deleted).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === ref(branch) && k.reason.startsWith('delete-timed-out:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+  }, 60_000)
+
   test('a timeout whose ref cannot be RE-READ is unknown, and unknown is not a deletion', async () => {
     // The third answer. A rev-parse that will not answer leaves the outcome unmeasured, and
     // an unmeasured outcome is not a deletion — it is a stand-down, so it is also logged.
@@ -1995,7 +2114,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const sha = await seedRef(repo, branch, 'unreadable')
     let attempted = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (!attempted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
@@ -2029,7 +2148,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const sha = await seedRef(repo, branch, 'nosalv')
     let deleteAttempted = false
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (cmd.includes('update-ref') && cmd.includes('-d')) deleteAttempted = true
@@ -2063,7 +2182,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const branch = 'trident/unenumerable'
     const sha = await seedRef(repo, branch, 'unenum')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         const result = await spawnCapture(cmd, cwd)
@@ -2089,7 +2208,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const branch = 'trident/holders-dark'
     const sha = await seedRef(repo, branch, 'holddark')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         if (cmd.includes('-z') && cmd.includes('list')) {
@@ -2114,7 +2233,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const now = Date.now()
     backdate(dirty, now)
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/dirty-ref', { phase: 'failed', worktree: dirty })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -2139,7 +2258,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const now = Date.now()
     backdate(removable, now)
 
-    const waiting = await sweepTridentWorktrees({
+    const waiting = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -2163,7 +2282,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
 
     const secondRoot = join(root, 'second')
     mkdirSync(secondRoot)
-    const after = await sweepTridentWorktrees({
+    const after = await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(secondRoot),
@@ -2180,7 +2299,7 @@ describe('branch-ref reap — the refusals (#547)', () => {
     const mine = await seedRef(repo, 'feature/mine', 'feature')
     const pinned = await seedRef(repo, 'member/pinned-lane', 'member')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [
         owner('feature/mine', { phase: 'failed' }),
         owner('member/pinned-lane', { phase: 'done' }),
@@ -2198,6 +2317,96 @@ describe('branch-ref reap — the refusals (#547)', () => {
   }, 30_000)
 })
 
+describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
+  // `#606` ships every gate, the measurement and the reporting; it performs no deletions.
+  // Nothing deletes these refs today, so shipping the write would introduce a destructive
+  // operation ahead of the only check that can settle its failure mode without a race — and
+  // that check is on the claimant's side (`#635`), where a build's commit is the agent running
+  // `git commit`, so it is not buildable in this lane at all.
+  test('a SWEEP issues NO delete and NO salvage write — zero writes, both pinned', async () => {
+    // BOTH absences are asserted. Pinning only the delete would leave "zero writes" unpinned,
+    // and the salvage half is a real claim: not seeding `refs/trident-reaped/` for deletions
+    // that are not happening is why the deferral is an improvement and not just a smaller change.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/deferred-not-reaped'
+    const sha = await seedRef(repo, branch, 'deferred')
+    const writes: string[][] = []
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('update-ref')) writes.push([...cmd])
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    // NOT A WRITE OF ANY KIND.
+    expect(writes, `unexpected writes: ${JSON.stringify(writes)}`).toEqual([])
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_restored).toEqual([])
+    expect(report.refs_restore_failed).toEqual([])
+    // The ref and the salvage namespace are both untouched.
+    expect(await git(repo, 'rev-parse', ref(branch))).toBe(sha)
+    expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
+
+    // AND THE DRY-RUN INVENTORY IS THE POINT: it says exactly what #635 will unlock.
+    expect(report.refs_reapable).toEqual([{ ref: ref(branch), sha }])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === ref(branch) && k.reason === DEFERRED_PENDING_CLAIMANT_GUARD,
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+  }, 60_000)
+
+  test('THE COMPLEMENT: called directly, the destructive half still does the whole sequence', async () => {
+    // Without this the deferral test above would be satisfied by a reaper that can no longer
+    // delete anything at all. `deleteReapableRef` is what `#635` re-enables, so it has to be
+    // demonstrably intact — salvage written, ref gone, inventory honoured.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/deferred-but-intact'
+    const sha = await seedRef(repo, branch, 'intact')
+    const opts = {
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    }
+
+    const report = await sweepTridentWorktrees(opts)
+    expect(report.refs_reapable).toEqual([{ ref: ref(branch), sha }])
+    expect(await refExists(repo, ref(branch))).toBe(true)
+
+    await deleteReapableRef(opts, repo, ref(branch), branch, sha, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `refs/trident-reaped/deferred-but-intact/${sha}` },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+    expect(await git(repo, 'rev-parse', `refs/trident-reaped/deferred-but-intact/${sha}`)).toBe(sha)
+  }, 60_000)
+
+  test('the sweep has exactly ONE non-call of the destructive half, and it names #635', () => {
+    // One place to find when asking "why is nothing being reaped". The sweep must not reference
+    // `deleteReapableRef` at all — a commented-out call or a guarded one is two answers.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    // Asserted on the CALL, not on the name. The deferral comment inside the sweep names
+    // `deleteReapableRef` deliberately — that is how a reader finds the other half — so a
+    // mention-based assertion would be testing the prose instead of the behaviour.
+    const sweep = source.slice(
+      source.indexOf('async function reapBranchRefs('),
+      source.indexOf(' * THE DESTRUCTIVE HALF, extracted'),
+    )
+    expect(sweep).not.toMatch(/(await |void )deleteReapableRef\s*\(/)
+    expect(sweep.match(/DEFERRED_PENDING_CLAIMANT_GUARD/g) ?? []).toHaveLength(1)
+    // And the whole module calls it from nowhere: production reaches it only once #635 lands.
+    expect(source).not.toMatch(/(await |void )deleteReapableRef\s*\(/)
+    // POSITIVE CONTROL on the regex, so "no call found" cannot mean "pattern never matches".
+    expect('  await deleteReapableRef(opts, repo,').toMatch(/(await |void )deleteReapableRef\s*\(/)
+    expect(DEFERRED_PENDING_CLAIMANT_GUARD).toContain('#635')
+  })
+})
+
 describe('branch-ref reap — a stand-down is never silent (#547)', () => {
   // `logSummaryIfActed` returns early unless something was ACTED on, so a ref sweep that
   // refused every ref logged nothing at all — indistinguishable from a repo with nothing
@@ -2209,7 +2418,7 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
     const { root, repo } = await makeRepo()
     await seedRef(repo, 'trident/latched', 'latched')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/latched', { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -2224,7 +2433,7 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
     await seedRef(repo, 'trident/opaque-state', 'opaquestate')
     await addWorktree(repo, 'rb_opaque')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/opaque-state', { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -2239,7 +2448,7 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
     const { root, repo } = await makeRepo()
     await seedRef(repo, 'trident/dark-refs', 'darkrefs')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo, [], [owner('trident/dark-refs', { phase: 'failed' })]),
       run_host: async (cmd, cwd) => {
         const result = await spawnCapture(cmd, cwd)
@@ -2265,7 +2474,7 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
       const { root, repo } = await makeRepo()
       const sha = await seedRef(repo, 'trident/repo-went-dark', 'repodark')
 
-      const report = await sweepTridentWorktrees({
+      const report = await sweepAndReap({
         store: stubStore(repo, [], [owner('trident/repo-went-dark', { phase: 'failed' })]),
         run_host: async (cmd, cwd) => {
           const isPlainList =
@@ -2298,7 +2507,7 @@ describe('branch-ref reap — a stand-down is never silent (#547)', () => {
     const { root, repo } = await makeRepo()
     await seedRef(repo, 'trident/hand-made', 'handmade')
 
-    const report = await sweepTridentWorktrees({
+    const report = await sweepAndReap({
       store: stubStore(repo),
       run_host: spawnCapture,
       proc_root: makeProc(root),
@@ -2360,7 +2569,7 @@ describe('branch-ref reap — the backlog sweep (#547)', () => {
     const unownedSha = await seedRef(repo, unowned, 'backlogun')
     const proc = makeProc(root)
 
-    const first = await sweepTridentWorktrees({
+    const first = await sweepAndReap({
       store: stubStore(repo, [], owners),
       run_host: spawnCapture,
       proc_root: proc,
@@ -2371,7 +2580,7 @@ describe('branch-ref reap — the backlog sweep (#547)', () => {
     // The unprovable one is never in the drain, this sweep or any other.
     expect(first.refs_deleted.some((e) => e.ref === `refs/heads/${unowned}`)).toBe(false)
 
-    const second = await sweepTridentWorktrees({
+    const second = await sweepAndReap({
       store: stubStore(repo, [], owners),
       run_host: spawnCapture,
       proc_root: proc,
@@ -2392,7 +2601,7 @@ describe('branch-ref reap — the backlog sweep (#547)', () => {
     const branch = 'trident/reachable'
     const sha = await seedRef(repo, branch, 'reachable')
 
-    await sweepTridentWorktrees({
+    await sweepAndReap({
       store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
       run_host: spawnCapture,
       proc_root: makeProc(root),
