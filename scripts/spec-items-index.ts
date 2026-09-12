@@ -94,7 +94,9 @@ const SLUG_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/
 export function readSpecItem(dir: string, filename: string): SpecItem {
   const slug = filename.replace(/\.md$/, '')
   if (!SLUG_RE.test(slug)) throw new Error(`${slug}: slug must match ${SLUG_RE} (no leading dot)`)
-  const fm = parseFrontmatter(readFileSync(join(dir, filename), 'utf8'), slug)
+  const text = readFileSync(join(dir, filename), 'utf8')
+  const fm = parseFrontmatter(text, slug)
+  checkDeclaredStructure(slug, fm, text)
   const title = fm.title
   if (title === undefined || title === '') throw new Error(`${slug}: missing required frontmatter 'title'`)
   if (title.length > 70) throw new Error(`${slug}: title is ${title.length} chars, max 70`)
@@ -108,6 +110,53 @@ export function readSpecItem(dir: string, filename: string): SpecItem {
     priority: must(slug, 'priority', fm.priority, PRIORITIES),
     cutover,
     needs_spec,
+  }
+}
+
+/**
+ * Counts of a spec item's load-bearing structure: `## ` sections, `- [ ] ` acceptance
+ * criteria, and top-level numbered contract items.
+ *
+ * WHY THIS EXISTS. An editing script that replaced "from this heading to end of file"
+ * silently dropped a whole trailing section of a spec item, and nothing noticed until an
+ * unrelated tool threw on the missing heading. Truncation is invisible to every other check
+ * here: the frontmatter still parses, the index still renders, and the remaining prose still
+ * reads correctly. An item that declares its own shape turns that class of edit into a
+ * failure at the moment it happens, which is the only kind of guard worth having.
+ */
+export interface SpecItemStructure {
+  sections: number
+  criteria: number
+  contract_items: number
+}
+
+export function countStructure(text: string): SpecItemStructure {
+  const lines = text.split('\n')
+  return {
+    sections: lines.filter((l) => l.startsWith('## ')).length,
+    criteria: lines.filter((l) => l.startsWith('- [ ] ')).length,
+    contract_items: lines.filter((l) => /^[0-9]+\. \*\*/.test(l)).length,
+  }
+}
+
+/**
+ * Verify an item whose frontmatter DECLARES its structure. Opt-in per item: an item with
+ * none of the three keys is unconstrained, so this cannot make ordinary edits fail. An
+ * item that declares a count and drifts from it fails loudly, naming both numbers.
+ */
+export function checkDeclaredStructure(slug: string, fm: Record<string, string>, text: string): void {
+  const actual = countStructure(text)
+  for (const key of ['sections', 'criteria', 'contract_items'] as const) {
+    const declared = fm[key]
+    if (declared === undefined) continue
+    const want = Number(declared)
+    if (!Number.isInteger(want)) throw new Error(`${slug}: frontmatter '${key}' is '${declared}', must be an integer`)
+    if (actual[key] !== want) {
+      throw new Error(
+        `${slug}: declares ${key}: ${want} but the body has ${actual[key]}. ` +
+          `If the change is intended, update the frontmatter in the same commit.`,
+      )
+    }
   }
 }
 

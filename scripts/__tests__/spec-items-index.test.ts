@@ -24,6 +24,8 @@ import {
   readSpecItem,
   readSpecItems,
   renderIndex,
+  countStructure,
+  checkDeclaredStructure,
 } from '../spec-items-index.ts'
 
 const DIR = join(import.meta.dir, '..', '..', SPEC_ITEMS_DIR)
@@ -150,5 +152,43 @@ describe('the validator rejects what it should', () => {
 
   test('quoted frontmatter values are unquoted', () => {
     expect(parseFrontmatter('---\nlegacy_ref: "a b"\n---\n', 'x').legacy_ref).toBe('a b')
+  })
+
+  // The failure this pins: an edit that replaced "from a heading to end of file" dropped a
+  // whole trailing section, and every other check here still passed. A declared structure
+  // makes truncation fail at the moment of the edit.
+  describe('declared structure', () => {
+    const body = ['## A', '- [ ] one', '- [ ] two', '1. **c one**', '2. **c two**', '## B', 'x'].join('\n')
+
+    test('counts sections, criteria and contract items', () => {
+      expect(countStructure(body)).toEqual({ sections: 2, criteria: 2, contract_items: 2 })
+    })
+
+    test('an item that declares nothing is unconstrained', () => {
+      expect(() => checkDeclaredStructure('x', {}, body)).not.toThrow()
+    })
+
+    test('a matching declaration passes', () => {
+      expect(() =>
+        checkDeclaredStructure('x', { sections: '2', criteria: '2', contract_items: '2' }, body),
+      ).not.toThrow()
+    })
+
+    test('a dropped trailing section fails, naming both numbers', () => {
+      const truncated = body.slice(0, body.indexOf('## B'))
+      expect(() => checkDeclaredStructure('x', { sections: '2' }, truncated)).toThrow(
+        /declares sections: 2 but the body has 1/,
+      )
+    })
+
+    test('a removed criterion fails', () => {
+      expect(() => checkDeclaredStructure('x', { criteria: '2' }, body.replace('- [ ] two\n', ''))).toThrow(
+        /declares criteria: 2 but the body has 1/,
+      )
+    })
+
+    test('a non-integer declaration is refused rather than ignored', () => {
+      expect(() => checkDeclaredStructure('x', { sections: 'two' }, body)).toThrow(/must be an integer/)
+    })
   })
 })

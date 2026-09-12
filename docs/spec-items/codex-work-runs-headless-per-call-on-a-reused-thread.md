@@ -5,6 +5,9 @@ status: open
 priority: P1
 cutover: false
 legacy_ref: "spike: GitHub issue #543; pivot plan §3.3"
+sections: 4
+criteria: 10
+contract_items: 8
 ---
 
 Recurring cross-model work (codex test agents, codex reviewers, any repeated
@@ -110,14 +113,33 @@ the adapter's.
    cost of scrubbing a variable codex ignores is zero and the cost of missing one is
    a silently metered bill. #645 unifies the lists; this contract does not depend on
    it landing first.
-5. **One account, one `CODEX_HOME`.** The adapter uses the `CODEX_HOME` the wrappers
-   resolve and never materialises an account's `auth.json` **in any location it can write**
-   — the selected home aside. Deliberately *not* "anywhere on the filesystem": that is
-   unprovable without an enforced filesystem boundary, and an unenforceable broad claim is
-   worth less than a true narrow one. **The gap, stated rather than implied:** a location
-   the adapter is never given — `/dev/shm`, another user's tree — is outside both the
-   property and the test. Closing it needs a sandbox with an enforced boundary, which is
-   larger machinery than this item carries.
+5. **One account, one `CODEX_HOME`. The bounded subject is THE ADAPTER, observed at the
+   spawn boundary — not the turn.** The adapter uses the `CODEX_HOME` the wrappers resolve
+   and **itself** materialises an account's `auth.json` nowhere else: no copy, hard link,
+   symlink or write, asserted where it spawns and in the locations it is handed.
+
+   **The named residual, and it is a security property stated no wider than its test.** A
+   turn the caller runs at `--sandbox danger-full-access` — which is what a build runs
+   (`trident/codex-build.sh:1401-1402`) — is **unconfined**. It reads
+   `$CODEX_HOME/auth.json` like any process of that user and can copy the credential
+   anywhere the user can write, `/dev/shm` included. **No assertion in this item covers
+   that, and none can**, because:
+   - **Confining the turn is unavailable on this host, measured:** `unshare -Urm` fails at
+     `write /proc/self/uid_map: Operation not permitted`, and
+     `kernel.apparmor_restrict_unprivileged_userns = 1`. No unprivileged user+mount
+     namespace, so a test cannot make the turn's writable set equal the scanned set.
+   - **Removing the credential from disk is unresolved, not ruled out.** `CODEX_ACCESS_TOKEN`
+     is a real credential channel in the binary, and a turn with **no `auth.json` at all**
+     reached the API and returned `401 Unauthorized` — the token was sent and rejected. The
+     only token available without triggering a refresh of the shared live credential was
+     eight days old, and an OAuth access token lives about an hour, so *token expired* and
+     *channel unsupported* could not be separated. Refreshing to find out would have written
+     the `auth.json` the cross-model gates were using.
+   **What would close it:** either a confined execution boundary for full-access turns, or
+   a per-call home holding a short-lived token — the second turning on the one measurement
+   above, which needs a fresh token and therefore its own item. Until then the exposure is
+   the one every process of that user already has, and it is written here rather than
+   implied by a scan that stops at four directories.
    Multiple homes exist in production but hold **different** credentials — one per
    rotation seat (`slotHome`, `trident/codex-credential.ts:401`), one per project
    override (`codexProjectHome`, `trident/codex-auth.ts:191`) — and selecting among them
@@ -313,9 +335,12 @@ form; the "kills:" note names what the earlier form let through.
       which re-sources the user's profile and can re-export a scrubbed key into the
       grandchild that actually runs.**
 
-- [ ] **An account's credentials are never materialised in any location the adapter can
-      write, the selected home aside.** verify by **checking the resulting state, not the
-      act that produced it**. The scan's root is **exactly the set of locations the adapter
+- [ ] **The ADAPTER materialises an account's credentials in exactly one location.**
+      Subject: the adapter. Boundary: its spawn and the locations it is handed. **Not the
+      turn** — see the named residual in contract item 5; an unconfined
+      `danger-full-access` turn can copy the credential anywhere its user can write, that
+      is not assertable here, and the claim is deliberately no wider than this test.
+      verify by **checking the resulting state, not the act that produced it**. The scan's root is **exactly the set of locations the adapter
       is given**, enumerated and justified in the test: the selected `CODEX_HOME`, the
       worktree it is told to run in, its own state directory, and the temp dir passed to it.
       That set is the property's scope, not a convenient subset of it — the criterion and

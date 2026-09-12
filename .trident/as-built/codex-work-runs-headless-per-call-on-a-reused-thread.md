@@ -325,6 +325,54 @@ which needs no parentage to be sound. Two of the ten criteria named an instrumen
 than their claim, which suggests this question earns a standing place rather than a
 one-off.
 
+**Where the instrument cannot look, and why the answer was to stop measuring.** The
+credential scan reached everywhere it claimed and could not be lied to — and the scanned set
+was still smaller than the *reachable* set. A build runs
+`--sandbox danger-full-access` (`trident/codex-build.sh:1401-1402`), so an unconfined turn
+reads `$CODEX_HOME/auth.json` and can write `/dev/shm/auth.json`: every assertion passes and
+the stated property is false. A seeded-leak control per location does not help — it proves
+the walk reaches everywhere it *claims*, which was the previous round's finding, and says
+nothing about the places it does not claim. **A bounded instrument is honest only when
+something bounds the subject to match.**
+
+Three options were measured in order rather than argued:
+
+- **Remove the hazard — unresolved, and stated as unresolved.** `CODEX_ACCESS_TOKEN` is a
+  real credential channel in the binary, and a turn with **no `auth.json` at all** reached the
+  API and returned `401 Unauthorized` — the token was sent and rejected, which an unsupported
+  channel would not do. But the only token obtainable without refreshing the live shared
+  credential was **eight days old** against an access-token lifetime of about an hour, so
+  *expired* and *unsupported* could not be separated, and refreshing would have written the
+  `auth.json` the cross-model gates were using. Inconclusive is the honest answer; the
+  measurement that would settle it needs a fresh token and therefore its own item.
+- **Bound the subject — measured out on this host.** `unshare -Urm` fails at
+  `write /proc/self/uid_map: Operation not permitted`, with
+  `kernel.apparmor_restrict_unprivileged_userns = 1`. No unprivileged user+mount namespace,
+  so a test cannot make the turn's writable set equal the scanned set.
+- **So the claim came down.** The criterion's subject is now **the adapter**, observed at its
+  spawn boundary and in the locations it is handed — and the residual is written out in the
+  contract: a `danger-full-access` turn is unconfined, builds require full access, the
+  exposure is the one every process of that user already has, and closing it needs either a
+  confined execution boundary or a per-call short-lived token.
+
+The reviewing point that made this the right order is worth keeping: **three rounds spent
+making one instrument adequate — reach, then forgeability, then scope — usually means the
+property is being measured where it should be prevented.** Here prevention was unavailable
+and unresolved, so the claim was narrowed and the gap named; but the diagnosis is right, and
+the next lane to spend three rounds on an instrument should ask it before the fourth.
+
+**The truncation is now caught by a check rather than by luck.** An edit that replaced "from
+this heading to end of file" dropped a whole trailing section of the spec item, and nothing
+noticed until an unrelated tool threw on a missing heading — the frontmatter still parsed,
+the index still rendered, the remaining prose still read correctly. A spec item may now
+**declare its own structure** (`sections`, `criteria`, `contract_items`), and
+`checkDeclaredStructure` fails the build when the body drifts, naming both numbers
+(`scripts/spec-items-index.ts`). Opt-in per item, so it cannot make ordinary edits fail;
+declared on this item as 4/10/8. Verified against the real failure: replaying the exact edit
+on this document now produces *"declares sections: 4 but the body has 3"*. Six tests pin it,
+including the dropped-section case and a non-integer declaration being refused rather than
+ignored.
+
 **An instrument must also be unforgeable by its subject — question 6 does not ask that.**
 The long-lived-process check has now named three instruments and each failed differently.
 The process group could not see a `setsid`/double-forked descendant: **too little reach**.
