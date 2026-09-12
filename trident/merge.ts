@@ -2300,19 +2300,40 @@ export async function conflictEvidence(
  * needs to know WHY each side's change exists, which the conflict markers alone do not
  * say, so the caller runs the read-only git itself and quotes the result.
  *
- * Bounded ONCE, by COUNT (`MAX_HISTORY_COMMITS_PER_SIDE`), so git is never asked for a
- * whole history. The byte budget that used to sit here as well is gone (#541 round 13):
- * it was the machinery that shortened records to fit, and shortening is what this lane
- * removed. A repo with enormous commit messages can therefore make the evidence too big —
- * and the answer to that is now the same as for an enormous conflict, which is to escalate
- * to the owner rather than show a judge a piece of it. `-s` (no diff body) keeps this to
+ * Bounded by COUNT (`MAX_HISTORY_COMMITS_PER_SIDE`) so git is never asked for a whole history,
+ * and by BYTES through the arbitration's shared `CollectionBudget` — a limit on how many is not
+ * a limit on how much, so both are needed and they bound different quantities. The per-record
+ * byte cap that used to sit here is gone (#541 round 13): it was machinery for SHORTENING
+ * records to fit, and shortening is what this lane removed. `-s` (no diff body) keeps this to
  * subjects and messages — the "why", not the "what", which the hunks already carry.
  *
- * Never throws and never fails the merge: a history we could not read makes the
- * arbitration thinner, and that is strictly better than turning a conflict the owner
- * could have answered into a git error nobody asked for. NOTE the asymmetry with an
- * oversized history, which does NOT arbitrate: unreadable history is a complete answer
- * ("there is none to show"), while an oversized one is a partial view of a real answer.
+ * NEVER THROWS AND NEVER FAILS THE MERGE, which is not the same as never mattering: turning a
+ * conflict the owner could have answered into a git error nobody asked for would be strictly
+ * worse, so every failure here returns an `EvidencePart` and the caller decides.
+ *
+ * AND EVERY FAILURE HERE MEANS THE JUDGE IS NOT ASKED — there is no "thinner arbitration" exit
+ * and no asymmetry between the two (#541 round 30). An earlier version of this docblock claimed
+ * both: that an unreadable history merely thinned the evidence, and that it differed from an
+ * oversized one because "unreadable history is a complete answer ('there is none to show')".
+ * BOTH HALVES WERE FALSE, and the second was false in the direction this whole lane exists to
+ * close — it asserted exactly the equation the comment thirty lines below names as the defect:
+ * A READ FAILURE IS NOT EVIDENCE THAT NO HISTORY EXISTS. A maintainer reading this contract
+ * would have concluded the `missing` returns were over-strict and relaxed them, and the code
+ * would have agreed with them until they reached that comment.
+ *
+ * `evidence-unreadable` and `over-budget` take the IDENTICAL path: `assembleEvidence` routes any
+ * `missing` part to a refusal, and the conflict goes to the owner unarbitrated. They are the
+ * same in the only respect the judge cares about — NEITHER IS EVIDENCE ABOUT WHAT THE HISTORY
+ * CONTAINS. One says we could not find out; the other says we found out and cannot show it; a
+ * judge can act on neither.
+ *
+ * THE REAL ASYMMETRY IS DOWNSTREAM, AND IT IS WHY `ArbiterNotAskedWhy` CARRIES BOTH. The two
+ * are indistinguishable to the judge and entirely distinct to the operator reading the kill
+ * criterion: `over-budget` says this tier's useful RANGE is narrow — the conflicts it can see
+ * whole are a subset of the ones that arise — while `evidence-unreadable` says something is
+ * BROKEN, and a run of them is a bug report rather than a verdict on the feature. Collapsing
+ * them would make a repository full of large conflicts and a repository with failing git reads
+ * produce the same number, and those call for opposite responses.
  */
 async function sideHistory(
   run_host: RunHostCommand,
@@ -3016,8 +3037,8 @@ async function rebaseBranchOntoBase(
     })
     if (!outcome.resolved) {
       // ARBITER TIER (#541). The resolver gave up; ask the arbiter whether a
-      // second round can finish it — NOT a better-directed one: nothing the arbiter writes
-      // reaches the resolver, and what the decision buys is the attempt. ONE read-only turn,
+      // second round can finish it. The round carries NOTHING the arbiter writes — what the
+      // decision buys is the attempt itself, not direction for it. ONE read-only turn,
       // capped per run by the arbiter itself.
       //
       // EVERY WAY THIS CAN GO WRONG LANDS ON THE LINE BELOW. `unavailable` (no

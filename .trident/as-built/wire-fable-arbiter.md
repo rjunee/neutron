@@ -1589,6 +1589,45 @@ detector cannot tell from a promise. I reworded the prompt rather than weakening
 counted as escalated rather than named; the landed rebase not closing the bet; the late
 escalation not closing it; the prompt promising a better-directed round again.
 
+### ROUND 30 — a contract that instructed its reader to reintroduce the defect
+
+`sideHistory`'s docblock said a history we could not read "makes the arbitration thinner", and
+drew an explicit asymmetry: *"unreadable history is a complete answer ('there is none to show'),
+while an oversized one is a partial view of a real answer."*
+
+Both halves were false. Every read failure returns `missing`, `assembleEvidence` routes any
+`missing` part to a refusal, and `over-budget` takes the identical path — so there is no thinner
+exit and no asymmetry in either direction.
+
+**What makes it more than drift is where the contradiction points.** Thirty lines below, the
+comment explaining why the round-19 placeholder was removed says: *the judge had no way to tell
+"this side has no commits" from "we could not ask" — a read failure is not evidence that no
+history exists.* The docblock asserted **exactly the equation that comment names as the
+defect**. A maintainer reading the function's contract would have concluded the `missing`
+returns were over-strict and relaxed them, and the code would have agreed with them until they
+reached that comment.
+
+So this was the branch's own thesis contradicted in its own contract, in the one document a
+future author reads BEFORE changing the function. **Fourth time on this branch that a claim
+outlived the thing it described**, after the guidance channel's three.
+
+**The rewrite says why the two exits are the same rather than asserting an asymmetry**: neither
+a history we could not read nor one too big to show is evidence about what the history contains
+— one says we could not find out, the other says we found out and cannot show it, and a judge
+can act on neither.
+
+**And it names the asymmetry that IS real, which is why `ArbiterNotAskedWhy` carries both
+values.** The two are indistinguishable to the judge and entirely distinct to the operator
+reading the kill criterion: `over-budget` says the tier's useful RANGE is narrow, while
+`evidence-unreadable` says something is BROKEN — a run of them is a bug report, not a verdict on
+the feature. Collapsing them would make a repository full of large conflicts and a repository
+with failing git reads produce the same number, and those call for opposite responses.
+
+No mutation for this one: the behaviour it misdescribed is already pinned (the seam property
+drives both `git log` failure shapes and the over-budget shapes to not-asked). What changed is
+that the contract now agrees with the code it sits above — **a docblock is the instruction a
+future author follows, and this one was instructing them to undo the PR.**
+
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
 Worth stating as its own finding rather than as an apology. The tests were written from the same
