@@ -12,7 +12,7 @@ A **slug is immutable once merged**: identity is the filename, so renaming
 destroys one item and creates another while every external reference still points
 at the old name. Retitle through the `title:` frontmatter instead.
 
-**24 items.** 5 block the harness-orchestrator cutover; 1 still needs a spec.
+**25 items.** 6 block the harness-orchestrator cutover; 1 still needs a spec.
 
 ## Blocking the cutover
 
@@ -23,6 +23,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) — Rev-range base: pinned sha, origin/<base> when it resolves, else bare
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`a-deploy-must-not-kill-builds-in-flight`](a-deploy-must-not-kill-builds-in-flight.md) — Stop a deploy from killing the builds still in flight
+- [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 
 ## Not buildable yet
 
@@ -78,6 +79,7 @@ branch is cut (standard §3.1, §3.2).
 
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
+| [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |

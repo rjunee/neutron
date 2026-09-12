@@ -2,6 +2,8 @@
 // Late-bound tool-bridge accessors + the reply-sink coordinates accessor
 // (D2 split). The ReplToolBridge/sink singletons live in pool-state.ts (D1).
 
+import { readFileSync } from 'node:fs'
+
 import {
   activityTapRef,
   type ReplToolBridge,
@@ -110,15 +112,80 @@ export function clearReplActivityTapIf(fn: ReplActivityTap): void {
 }
 
 // ---------------------------------------------------------------------------
+// Reply sink port override — wired once from the resolved BootConfig.
+//
+// Fourth instance of the same accessor pattern as the tool bridge / todo sync /
+// activity tap above, and for the same reason: the value lives in the boot
+// configuration, the consumer is a leaf that must not read `process.env` a second
+// time, and the composer is the one place that has both. Re-exported here so a
+// composer imports it from the adapter's public surface rather than a deep path.
+// ---------------------------------------------------------------------------
+
+export { parseSinkPortOverride, setReplSinkPortOverride } from './sink-coordinates.ts'
+
+// ---------------------------------------------------------------------------
 // Reply sink — one loopback HTTP server the dev-channels POST back to.
 // Module singleton so it is shared across every per-turn substrate instance.
 // The `ReplSink` class + the `sink` singleton live in `pool-state.ts` (D1),
 // imported above with the rest of the per-process pool state.
 // ---------------------------------------------------------------------------
 
-/** Exposed for tests acting as the dev-channel: the live sink coordinates. */
-export function getReplSinkInfo(): { port: number; token: string } {
-  sink.ensureStarted()
+/**
+ * Exposed for tests acting as the dev-channel: the live sink coordinates.
+ *
+ * Both are now DURABLE (ISSUES #537) — the loopback port `resolveSinkPort()`
+ * derives from the state dir of the token path, and the token itself is persisted
+ * 0600 at `defaultSinkTokenPath()` — so a caller with no substrate options in hand
+ * gets the same coordinates the next process in the same home will. A
+ * caller that HAS options (the spawn path) wires them through
+ * `sink.ensureStarted({ port, tokenPath })` instead; whichever starts the
+ * process-singleton sink first fixes its coordinates.
+ */
+export async function getReplSinkInfo(): Promise<{ port: number; token: string }> {
+  await sink.ensureStarted()
   return { port: sink.port, token: sink.token }
 }
+
+/**
+ * The coordinates a SPAWNED CHILD was given, read the way the child itself reads
+ * them: out of the per-session MCP config that `spawnSession` wrote and named on
+ * argv (`--mcp-config <path>`).
+ *
+ * This exists because a child no longer carries the instance root token — it carries
+ * `HMAC(root, childGeneration)`, minted for its own incarnation
+ * (`sink-coordinates.ts`'s `deriveChildSinkToken`). A test faking a `PtyHost` is
+ * standing in for that child, so it must present what that child was handed; reading
+ * it from the child's own config file is both the faithful path and the only one that
+ * cannot drift from what the sink authorizes.
+ */
+export function bakedChildSinkInfo(argv: readonly string[]): { port: number; token: string } {
+  const at = argv.indexOf('--mcp-config')
+  const configPath = at === -1 ? undefined : argv[at + 1]
+  if (configPath === undefined) {
+    throw new Error('repl-sink: argv carries no --mcp-config, so no child coordinates')
+  }
+  const parsed = JSON.parse(readFileSync(configPath, 'utf8')) as {
+    mcpServers?: Record<string, { env?: Record<string, string> }>
+  }
+  const servers = parsed.mcpServers ?? {}
+  // The dev-channel entry is the one keyed by the per-spawn channel name; the tools
+  // bridge (when present) carries the same credential, so either answers.
+  for (const entry of Object.values(servers)) {
+    const env = entry.env
+    if (env?.['SINK_TOKEN'] !== undefined && env['SINK_PORT'] !== undefined) {
+      return { port: Number(env['SINK_PORT']), token: env['SINK_TOKEN'] }
+    }
+  }
+  throw new Error(`repl-sink: no SINK_TOKEN in the per-session config at ${configPath}`)
+}
+
+/*
+ * `getStartedReplSinkInfo()` — the synchronous accessor that returned the sink's ROOT
+ * token — is DELETED, not renamed. It existed so a test's fake `PtyHost.spawn(argv)`
+ * (synchronous by interface) could present what a child presents; a child now presents
+ * its own per-incarnation credential, so `bakedChildSinkInfo(argv)` above reads that
+ * out of the child's own config instead. Keeping a root-token accessor around would be
+ * keeping the shape of the hole: nothing that authorizes anything should be reachable
+ * without naming a child.
+ */
 

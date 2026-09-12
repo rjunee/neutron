@@ -472,7 +472,9 @@ import {
 } from './activity-inspector.ts'
 import type { AppWsOutboundActivityEvent } from '@neutronai/wire-types'
 import {
+  parseSinkPortOverride,
   setReplActivityTap,
+  setReplSinkPortOverride,
   type ReplActivityTap,
 } from '@neutronai/runtime/adapters/claude-code/persistent/persistent-repl-substrate.ts'
 import { classifyWorkBoardTaskType } from '@neutronai/work-board/task-type-classifier.ts'
@@ -4614,6 +4616,25 @@ export function buildOpenGraphComposer(
       }
     }
     setReplActivityTap(wiredActivityTap)
+    // ISSUES #537 — the reply sink's port override, from THIS boot's single env
+    // resolution. The sink derives its port per instance and this is the operator's
+    // override of that; it is wired here, beside the other process-level sink
+    // singletons, because the composer is the one place that holds both the resolved
+    // config and the adapter surface.
+    //
+    // AN INJECTED CONFIG IS AUTHORITATIVE. When an entrypoint threaded `config`, that
+    // IS the resolution — `env` is not consulted, so a config resolved with the knob
+    // set cannot be silently overruled by a stale (or absent) process variable, which
+    // is exactly the divergence a review reproduced when the runtime read the
+    // environment for itself. Only the composer-direct / embed shape, where nothing
+    // resolved a config at all, falls back to reading `env` here.
+    setReplSinkPortOverride(
+      parseSinkPortOverride(
+        options.config !== undefined
+          ? options.config.replSinkPort
+          : env['NEUTRON_REPL_SINK_PORT'],
+      ),
+    )
     const activitySurface = createActivitySurface({
       inspector: activityInspector,
       auth: appOwnerAuth,
