@@ -238,9 +238,15 @@ const wouldReForge = (s: Synthesis): boolean =>
 
 /** The loop's own condition, so the helper above cannot drift from it. */
 test('the fix loop really does exit on both kinds', () => {
-  const loop = SRC.slice(SRC.indexOf('  while (\n    finalVerdict ==='))
-  expect(loop).toContain("synthesis.blockKind !== 'infra-only'")
-  expect(loop).toContain("synthesis.blockKind !== 'advisory-only'")
+  // Anchored on `round++` — the fix loop's first statement — rather than on the opening
+  // text of its condition, which is not this test's subject and does legitimately change
+  // (a pending re-plan is now its own reason to iterate, so the condition no longer
+  // begins with `finalVerdict`). The claim here is only that BOTH kinds still end the
+  // loop, so that is all this matches on.
+  const loop = /while \(([\s\S]{0,800}?)\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
+  expect(loop).not.toBeNull()
+  expect(loop?.[1]).toContain("synthesis.blockKind !== 'infra-only'")
+  expect(loop?.[1]).toContain("synthesis.blockKind !== 'advisory-only'")
 })
 
 const laneBlocker: Peer = { name: 'kimi', title: 'kimi deferred', evidence: 'timeout' }

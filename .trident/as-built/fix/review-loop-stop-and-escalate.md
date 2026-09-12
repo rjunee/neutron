@@ -96,6 +96,30 @@ every pre-existing path it is a no-op (they can only fire inside the fix loop, w
 only while the verdict is `REQUEST_CHANGES`), so it closes the new door without touching
 the old ones.
 
+**THE SAME CATEGORY ERROR, ONE STEP LATER — and the enumeration that should have found
+it.** Hearing the declaration was only half. With the claim reaching `decideEscalation`, a
+`design-gap` beside minor/nit findings was AUTHORISED for a re-plan that could not run: the
+severity gate had already turned the verdict into `APPROVE` and `classifyBlock` had called
+the list `advisory-only`, so every clause of the fix loop's `while` was false. The run then
+reported `re-plan-unreachable` WITH FIVE ROUNDS STILL IN THE BUDGET — a false diagnosis,
+and the kind that sends the next reader after the cap instead of after the gate. The spec
+item's criterion "a design-gap buys exactly ONE bounded re-plan" was ticked over a path
+that could not execute for this case.
+
+A pending re-plan is now its OWN reason to enter the loop. The blockKind clauses exist to
+stop the loop re-Forging against findings already declared non-blocking; that reasoning
+does not apply, because a re-plan round does not re-Forge against the findings at all — it
+rebuilds against a REVISED PLAN.
+
+THE ENUMERATION, since this was the second instance: every site where `finalVerdict` gates
+something, classified as code-quality or work-viability. Seven gates. Six are correctly
+about code quality (the two early-APPROVE paths, the round-lost forcings, `isInfraOnlyStop`,
+the reported `checkpoint`, the terminal findings list) and one — the `blockKind` ternary
+reading `APPROVE ? 'none'` before the escalation — is made correct by forcing the verdict
+when a run stops. The fix loop's `while` was the only remaining miscategorised one, and it
+is the one review found. A third would be found the same way, which is the argument for
+doing the enumeration rather than waiting for the next report.
+
 **AND THAT FORCING SURFACED A LATENT BUG RATHER THAN CAUSING ONE — worth recording because
 of how it was found.** A cross-model test went red, and the honest first question was
 whether the change had broken it. It had not: the ledger was also recording the round that
@@ -416,6 +440,19 @@ against the CHECK constraint in the committed schema snapshot — the one statem
 set a database will actually enforce.
 
 ### A SOURCE-TEXT ASSERTION BREAKS WHEN THE BEHAVIOUR IS CORRECTLY IMPROVED
+
+(Instances two, three and four arrived while finishing this branch, and one of them had
+PREDICTED ITSELF. `inner-workflow.test.ts` pinned `while (\s*finalVerdict` — under a
+comment explaining that its previous version had been broken by a legitimately-added
+clause and had therefore been rewritten to assert "the two PROPERTIES rather than the
+literal condition text". It still encoded an opinion about the condition's SHAPE, so
+adding the re-plan disjunct broke it for the second time. Two more in
+`review-round-cap.test.ts` and `synthesis-unavailable.test.ts` sliced the loop by its
+opening text for the same reason. All three now anchor on `round++` — the loop's first
+statement, which is what they actually mean — and assert their clauses INSIDE the matched
+condition with no claim about order or neighbours. They were repaired rather than deleted
+because each guards something the executed suites do not: a local helper's fidelity to the
+loop, and the `round++` step itself.)
 
 This one arrived on its own and is worth more than the code it cost. A wiring test
 required the literal `if (!rePlan || typeof rePlan.executionSpec !== 'string' …)`.

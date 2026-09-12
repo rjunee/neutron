@@ -87,6 +87,13 @@ Built on branch `fix/review-loop-stop-and-escalate`; record at
 - [x] A `design-gap` buys exactly ONE bounded re-plan per run, with the findings attached.
       Assert a second re-plan is refused — unbounded re-planning reproduces the same waste
       as a plan↔fix oscillation.
+      INCLUDING when the code itself is fine. A design gap declared alongside only
+      minor/nit findings was authorised and then discarded: the severity gate had turned
+      that round's verdict into APPROVE and the fix loop was gated on it, so the re-plan
+      could not run and the stop reported `re-plan-unreachable` with rounds still in the
+      budget. A pending re-plan is now its own reason to enter the loop, because it is a
+      claim about the WORK'S VIABILITY and every other clause of that loop is a claim about
+      the CODE'S QUALITY. Asserted at exactly one planner call, in both directions.
 - [x] **The RUN reports; the ORCHESTRATOR decides.** A build must never mutate the Work
       Board itself. Assert a run cannot reorder cards — a test where the run writes to the
       board must go red.

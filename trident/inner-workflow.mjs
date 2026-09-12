@@ -8093,6 +8093,15 @@ ${task}${reflectionGuidance}`,
       replansUsed += 1
       rePlanPending = true
       rePlanWhatIsMissing = decision.whatIsMissing
+      // NO VERDICT REPAIR HERE, DELIBERATELY. Restoring REQUEST_CHANGES at this point
+      // reads as the obvious move — the severity gate may have approved the round and a
+      // revised plan means the work is not done — but it would be a THIRD spelling of
+      // that rule and it cannot change any outcome: the loop below is entered on
+      // `rePlanPending` regardless of the verdict, and the fix round reassigns
+      // `finalVerdict` from its own re-review before anything reads it. If the loop
+      // cannot run at all (the cap), the pending flag becomes a STOP and the post-loop
+      // force covers it. Mutation-checked: removing such a repair changed nothing, which
+      // is why it is not here.
       log(`trident-v2 escalation: design-gap declared at round ${roundNumber} — spending the ONE bounded re-plan (${decision.evidence})`)
       return
     }
@@ -8125,12 +8134,24 @@ ${task}${reflectionGuidance}`,
   // the cap a backstop again. It is placed before the blockKind clauses for
   // readability only — the ledger above records nothing for a round that did not
   // judge the code, so the two can never both be true.
+  // A PENDING RE-PLAN IS ITS OWN REASON TO ITERATE, and it has to be, because the other
+  // three clauses are all claims about CODE QUALITY while a re-plan is a claim about the
+  // WORK'S VIABILITY. A `design-gap` declared alongside only minor/nit findings is the
+  // case that proves it: `enforceSeverityGate` turns that round's verdict into APPROVE and
+  // `classifyBlock` calls the list `advisory-only`, so all three clauses were false, the
+  // loop never ran, and the ONE bounded re-plan the spec item grants was authorised and
+  // then silently discarded — reported as `re-plan-unreachable` with five rounds still in
+  // the budget. The blockKind clauses exist to stop the loop re-Forging against findings
+  // already declared non-blocking; that reasoning does not apply here, because a re-plan
+  // round does not re-Forge against the FINDINGS at all — it rebuilds against a REVISED
+  // PLAN.
   while (
-    finalVerdict === 'REQUEST_CHANGES' &&
-    round < maxRounds &&
     escalation === null &&
-    synthesis.blockKind !== 'infra-only' &&
-    synthesis.blockKind !== 'advisory-only'
+    round < maxRounds &&
+    (rePlanPending ||
+      (finalVerdict === 'REQUEST_CHANGES' &&
+        synthesis.blockKind !== 'infra-only' &&
+        synthesis.blockKind !== 'advisory-only'))
   ) {
     round++
     // ── THE BOUNDED RE-PLAN RUNS HERE, BEFORE THE FIX AGENT ─────────────────────
@@ -8433,7 +8454,7 @@ ${task}${rePlanNote}${reflectionGuidance}`,
       kind: 'design-gap',
       whatIsMissing: rePlanWhatIsMissing,
       triggers: ['design-gap', 're-plan-unreachable'],
-      evidence: `a design gap was declared at round ${round} of ${maxRounds}, which leaves no round for the bounded re-plan to run in`,
+      evidence: `a design gap was declared at round ${round} of ${maxRounds}, which is the last round the cap allows, so there is no round left for the bounded re-plan to run in`,
       refusedClaim: '',
       undecidable: [],
       round,

@@ -418,7 +418,7 @@ describe('a design gap with NO ROUND LEFT to re-plan in', () => {
     const escalation = result.escalation as Record<string, unknown>
     expect(escalation.triggers).toContain('re-plan-unreachable')
     expect(escalation.whatIsMissing).toBe('the execution spec itself asked for the tautological test')
-    expect(String(escalation.evidence)).toContain('no round for the bounded re-plan')
+    expect(String(escalation.evidence)).toContain('no round left for the bounded re-plan')
   })
 
   test('a design gap declared on the LAST permitted round escalates the same way', async () => {
@@ -512,44 +512,98 @@ describe('a DECLARATION is heard even when the code is fine — the fast trigger
   // CODE'S QUALITY. Routing the first through a gate built for the second made the loop
   // deafest exactly when the reviewer was clearest.
 
-  test.each([
-    ['missing-dependency', 'card X must land before this can be built'],
-    ['design-gap', 'the plan assumes an API that does not exist'],
-  ] as const)(
-    'HEADLINE: `%s` declared with ONLY non-blocking findings STOPS the run at round 1',
-    async (kind, whatIsMissing) => {
-      const { captured, result } = await runWorkflow({
-        maxRounds: 6,
-        rounds: [
-          {
-            // Nothing a fix round could act on — which is the point. The reviewer is not
-            // saying the code is bad; it is saying the work cannot proceed.
-            findings: [finding('a:b:c', 'minor'), finding('d:e:f', 'nit')],
-            escalate: { kind, whatIsMissing },
-          },
-        ],
-      })
+  test('HEADLINE: `missing-dependency` declared with ONLY non-blocking findings STOPS at round 1', async () => {
+    const { captured, result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [
+        // Nothing a fix round could act on — which is the point. The reviewer is not
+        // saying the code is bad; it is saying the work cannot proceed.
+        {
+          findings: [finding('a:b:c', 'minor'), finding('d:e:f', 'nit')],
+          escalate: { kind: 'missing-dependency', whatIsMissing: 'card X must land first' },
+        },
+      ],
+    })
 
-      expect(result.blockKind).toBe(kind)
-      const escalation = result.escalation as Record<string, unknown>
-      expect(escalation).toBeDefined()
-      expect(escalation.triggers).toContain(kind)
-      expect(String(escalation.whatIsMissing)).toBe(whatIsMissing)
-      expect(escalation.round).toBe(1)
+    expect(result.blockKind).toBe('missing-dependency')
+    const escalation = result.escalation as Record<string, unknown>
+    expect(escalation.triggers).toContain('missing-dependency')
+    expect(escalation.round).toBe(1)
 
-      // AND IT MUST NOT ALSO MERGE. The terminal result reads `finalVerdict === 'APPROVE'`
-      // BEFORE it reads the escalation, so an approved-and-escalated run would report
-      // `blockKind: 'none'` and the outer loop would ship the branch — work a reviewer had
-      // just declared unbuildable, silently. This is the assertion that closes that.
-      expect(result.verdict).not.toBe('APPROVE')
-      expect(result.checkpoint).not.toBe('argus-approved')
+    // AND IT MUST NOT ALSO MERGE. The terminal result reads `finalVerdict === 'APPROVE'`
+    // BEFORE it reads the escalation, so an approved-and-escalated run would report
+    // `blockKind: 'none'` and the outer loop would ship the branch — work a reviewer had
+    // just declared unbuildable, silently.
+    expect(result.verdict).not.toBe('APPROVE')
+    expect(result.checkpoint).not.toBe('argus-approved')
 
-      // …and it stopped at round 1 without buying a fix round, which is what "the FAST
-      // trigger" means: no arithmetic has two rounds to compare yet.
-      expect(labels(captured, 'forge:fix-round-')).toEqual([])
-      expect(result.round).toBe(1)
-    },
-  )
+    // A missing dependency buys NO re-plan: no plan of this card's can conjure the other
+    // card, so there is nothing to re-plan against.
+    expect(labels(captured, 'plan:fable')).toEqual([])
+    expect(labels(captured, 'forge:fix-round-')).toEqual([])
+    expect(result.round).toBe(1)
+  })
+
+  test('HEADLINE: `design-gap` with ONLY non-blocking findings still buys its ONE re-plan', async () => {
+    // THE OTHER HALF, and it was wrong in the opposite direction. Hearing the declaration
+    // was not enough: the LOOP was still gated on code-work severity, so a design gap
+    // declared beside minor/nit findings authorised a re-plan that could never run —
+    // `enforceSeverityGate` had turned the verdict into APPROVE and `classifyBlock` had
+    // called the list `advisory-only`, so every clause of the `while` was false. The run
+    // then reported `re-plan-unreachable` WITH FIVE ROUNDS STILL IN THE BUDGET, which is
+    // a false diagnosis that sends the next reader after the cap instead of after the
+    // gate. The spec item grants a design gap one bounded re-plan; this asserts it is
+    // actually spent.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 6,
+      rounds: [
+        {
+          findings: [finding('a:b:c', 'minor'), finding('d:e:f', 'nit')],
+          escalate: { kind: 'design-gap', whatIsMissing: 'the plan assumes an API that does not exist' },
+        },
+        { findings: [], verdict: 'APPROVE' },
+      ],
+    })
+
+    // EXACTLY ONCE, in both directions: zero is the regression this test exists for, and
+    // two is the unbounded re-planning the design forbids.
+    expect(labels(captured, 'plan:fable')).toEqual(['plan:fable'])
+    // …and its revised spec reached Forge, which is the whole point of re-planning.
+    const fix = captured.find((c) => c.label === 'forge:fix-round-2')
+    expect(fix).toBeDefined()
+    expect(fix?.prompt).toContain(REPLAN_SPEC_MARKER)
+    // The planner was briefed with what the reviewer said was missing.
+    expect(captured.find((c) => c.label === 'plan:fable')?.prompt).toContain(
+      'the plan assumes an API that does not exist',
+    )
+
+    // It re-planned, rebuilt, and the panel then approved — so the run converged rather
+    // than escalating. NOT `re-plan-unreachable`, which is what it used to report.
+    expect(result.verdict).toBe('APPROVE')
+    expect(result.escalation).toBeUndefined()
+    expect(result.round).toBe(2)
+  })
+
+  test('`re-plan-unreachable` is only reported when the CAP really leaves no round', async () => {
+    // The false-diagnosis half, pinned from the other side: with rounds remaining the
+    // re-plan RUNS (above), so this trigger must appear only when the cap is genuinely
+    // exhausted. A reachability failure claimed while budget remains is the kind of wrong
+    // answer that sends the next reader after the cap instead of after the gate.
+    const { captured, result } = await runWorkflow({
+      maxRounds: 1,
+      rounds: [
+        {
+          findings: [finding('a:b:c', 'minor')],
+          escalate: { kind: 'design-gap', whatIsMissing: 'the plan is wrong' },
+        },
+      ],
+    })
+    expect(result.blockKind).toBe('design-gap')
+    const escalation = result.escalation as Record<string, unknown>
+    expect(escalation.triggers).toContain('re-plan-unreachable')
+    expect(String(escalation.evidence)).toContain('the last round the cap allows')
+    expect(labels(captured, 'plan:fable')).toEqual([])
+  })
 
   test('the stop does NOT attribute an arithmetic reading to a round that measured none', async () => {
     // The declaration arrives on round 3, AFTER two rounds that did judge the code. The

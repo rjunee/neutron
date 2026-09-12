@@ -183,12 +183,19 @@ describe('review-round cap — the two knobs may not drift apart', () => {
     // The concrete drift this catches: `round++` -> `round += 2` would skip
     // rounds, so a lane would get five fix rounds instead of nine while the cap
     // literal still read 10.
-    const loop =
-      /while \(\s*\n\s*finalVerdict === 'REQUEST_CHANGES' &&\s*\n\s*round < maxRounds &&\s*\n\s*escalation === null &&\s*\n\s*synthesis\.blockKind !== 'infra-only' &&\s*\n\s*synthesis\.blockKind !== 'advisory-only'\s*\n\s*\) \{\s*\n\s*round\+\+\s*\n/.exec(
-        SRC,
-      )
+    // ANCHORED ON `round++`, NOT ON THE CONDITION'S EXACT TEXT. This used to pin every
+    // clause of the `while` in order, so it broke the moment a clause was legitimately
+    // ADDED — a pending re-plan became its own reason to iterate — even though the step
+    // it exists to guard had not changed. That is the third time in this branch that a
+    // source assertion has failed on a correct improvement, and the fix is the same
+    // each time: assert the thing you mean. What this test means is "one round per
+    // iteration", so it matches a `while (…) { round++ }` with any condition inside.
+    const loop = /while \(([\s\S]{0,800}?)\) \{\s*\n\s*round\+\+\s*\n/.exec(SRC)
     // Proved to have MATCHED before anything is concluded from it.
     expect(loop).not.toBeNull()
+    // The cap clause is still IN that condition — without this, a loop that stepped by
+    // one but had lost its bound would pass.
+    expect(loop?.[1]).toContain('round < maxRounds')
   })
 
   test('the loop guards the verdict, infra-only and advisory-only clauses', () => {
