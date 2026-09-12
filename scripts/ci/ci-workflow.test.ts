@@ -1320,6 +1320,17 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
     // run — the defect wearing a placeholder's clothes.
     if (!/\*\.md\) RECORD_DIRS\["\$dir"\]=1/.test(source)) return 'a .md file is no longer counted as a record'
 
+    // THE HEAD MUST CARRY THE TOP-LEVEL FLOOR UNCONDITIONALLY. The bootstrap
+    // exemption that lets this guard install itself is scoped to the BASE side
+    // alone; scoped to "either side" — `base_has_top_floor = 1 && head = 0`, which
+    // is how it first shipped — it passes a tree where NEITHER side has the floor,
+    // which is the state the guard exists to refuse, on the first run, when nothing
+    // else is watching. The boundary is pinned in the guard's own suite; this stops
+    // the condition regressing to the two-sided spelling.
+    if (!/if \[ "\$head_has_top_floor" = 0 \]; then/.test(source)) {
+      return 'the top-level floor check is no longer asked of the head unconditionally'
+    }
+
     // "Not there" and "could not look" must stay different answers. `ls-tree`
     // succeeds with empty output for an absent path, so the exit code is the only
     // thing that can carry the unknown.
@@ -1414,6 +1425,14 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
     [
       'a .md file starts counting as a floor',
       (source) => source.replace(/\*\.md\) RECORD_DIRS\["\$dir"\]=1 ;;/, '*.md) FLOOR_DIRS["$dir"]=1 ;;'),
+    ],
+    [
+      'the bootstrap exemption widens from the base side to either side — the reported blocker, restored',
+      (source) =>
+        source.replace(
+          'if [ "$head_has_top_floor" = 0 ]; then',
+          'if [ "$base_has_top_floor" = 1 ] && [ "$head_has_top_floor" = 0 ]; then',
+        ),
     ],
     [
       'an unreadable tree becomes a pass',

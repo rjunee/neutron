@@ -235,24 +235,51 @@ fi
 head_has_top_floor=0
 [ -n "${FLOOR_DIRS[$STAGING_DIR]:-}" ] && head_has_top_floor=1
 
-# THE TOP-LEVEL FLOOR IS READ FROM THE BASE, NOT ASSUMED — the same reason
-# `as-built-write-guard.sh` reads the freeze note from the base rather than
-# asserting it. The change that INSTALLS the floor is judged against a base that
-# does not have it yet, so a blind refusal would red the only PR that can ever
-# make the guard's own claim true. A gate that cannot be introduced is not strict,
-# it is broken. This is not an escape hatch a later branch can take: removing the
-# floor is judged against a base that still HAS it.
-if [ "$base_has_top_floor" = 1 ] && [ "$head_has_top_floor" = 0 ]; then
+# THE VERDICT IS ASKED OF THE HEAD; ONLY THE BASE IS ALLOWED TO BE WRONG.
+#
+# The top-level floor is READ from the base rather than assumed — the same reason
+# `as-built-write-guard.sh` reads the freeze note from the base. The change that
+# INSTALLS the floor is judged against a base that does not have it yet, so a
+# blind refusal would red the only PR that can ever make the guard's own claim
+# true, and a gate that cannot be introduced is not strict, it is broken.
+#
+# BUT THE EXEMPTION IS SCOPED TO THE BASE SIDE, AND THE SCOPING IS THE WHOLE
+# POINT. This first shipped as "fail when the base HAS a floor and the head does
+# not", which reads as the same rule and is not: with neither side floored the
+# condition is false, and if every record-holding subdirectory happened to carry
+# its own floor the loop below passed too — so the guard exited 0 over a tree that
+# never installs the top-level floor at all, contradicting the invariant
+# `docs/as-built/README.md` states and this script's own header asserts. An
+# exemption written to let a guard install itself must name the side that is
+# allowed to be wrong. Scoped to EITHER side it exempts precisely the state the
+# guard exists to refuse, and it does so on the first run, when nothing else is
+# watching. Reproduced with real git before the fix and pinned by
+# `scripts/ci/as-built-staging-floor-guard.test.ts` after it.
+#
+# So: the head must carry the floor, always. What the base says only changes which
+# mistake the message names.
+if [ "$head_has_top_floor" = 0 ]; then
   {
-    echo "as-built-staging-floor-guard: FAILED — this branch removes the floor under ${STAGING_DIR}/."
-    echo "The base has a tracked non-record file there and the proposed tree has none, so a promotion"
-    echo "that consumes the last staged record would leave the directory with nothing in it. Git then"
-    echo "reads the promotion as a rename of ${STAGING_DIR}/ to docs/as-built/ and every open PR that"
-    echo "stages a record acquires 'CONFLICT (file location) ... suggesting it should perhaps be moved"
-    echo "to docs/as-built/<name>.md' — whose suggested resolution writes a shard FROM A BRANCH, which"
-    echo "the one-writer rule forbids. Measured 2026-09-12: one promotion emptied the directory and two"
-    echo "of seven open PRs acquired that conflict."
-    echo "Restore it: git checkout ${GUARD_BASE_SHA} -- ${STAGING_DIR}/${FLOOR_NAME}"
+    if [ "$base_has_top_floor" = 1 ]; then
+      echo "as-built-staging-floor-guard: FAILED — this branch removes the floor under ${STAGING_DIR}/."
+      echo "The base has a tracked non-record file there and the proposed tree has none."
+    else
+      echo "as-built-staging-floor-guard: FAILED — the proposed tree has no floor under ${STAGING_DIR}/."
+      echo "Neither the base nor this branch carries one, so this diff does not install it either. A"
+      echo "floored subdirectory is not a substitute: it holds ITS OWN directory open and says nothing"
+      echo "about this one, which is empty the moment its last subdirectory is drained."
+    fi
+    echo "A promotion that consumes the last staged record would then leave the directory with nothing"
+    echo "in it. Git reads the promotion as a rename of ${STAGING_DIR}/ to docs/as-built/ and every open"
+    echo "PR that stages a record acquires 'CONFLICT (file location) ... suggesting it should perhaps be"
+    echo "moved to docs/as-built/<name>.md' — whose suggested resolution writes a shard FROM A BRANCH,"
+    echo "which the one-writer rule forbids. Measured 2026-09-12: one promotion emptied the directory"
+    echo "and two of seven open PRs acquired that conflict."
+    if [ "$base_has_top_floor" = 1 ]; then
+      echo "Restore it: git checkout ${GUARD_BASE_SHA} -- ${STAGING_DIR}/${FLOOR_NAME}"
+    else
+      echo "Add it: an empty, tracked ${STAGING_DIR}/${FLOOR_NAME}"
+    fi
     echo "See docs/as-built/README.md."
   } >&2
   exit 1

@@ -82,6 +82,20 @@ machine-checked refusal at the moment of the mistake. So:
     true. That exemption covers the top-level deletion check ONLY — the per-directory
     rule still applies, or the exact state the repo was in on 2026-09-12 would pass.
 
+**AN EXEMPTION MUST BE SCOPED TO THE SIDE THAT IS ALLOWED TO BE WRONG.** The guard needs a
+bootstrap: the diff that installs the floor is judged against a base that does not have it
+yet, and a blind refusal would red the only PR that can ever make the guard's own claim
+true. That exemption first shipped as "fail when the base HAS a floor and the head does
+not" — which reads as the rule and is not it. With NEITHER side floored the condition is
+false, and a tree whose every record-holding subdirectory happened to carry its own floor
+then walked the per-directory loop clean as well, so the guard exited 0 over a tree that
+never installs the top-level floor at all. It exempted precisely the state it exists to
+refuse, on its first run, when nothing else was watching. Caught in cross-model review,
+reproduced with real git, and fixed by asking the question of the HEAD unconditionally and
+letting only the BASE be absent. The general shape is worth keeping: an exemption written
+to let a guard install itself must name the side that is allowed to be wrong, because
+"either side" always includes the one that must not be.
+
 **WHAT THE TESTS PROVE, AND THEIR CONTROLS.**
 
   - `trident/as-built-staging-floor-realgit.test.ts` runs the four arms above with the
@@ -91,7 +105,8 @@ machine-checked refusal at the moment of the mistake. So:
   - `scripts/ci/as-built-staging-floor-guard.test.ts` drives the guard through real git
     fixtures: floor deleted, floor renamed out of its directory, a record in an unfloored
     directory, a `.md` file offered as a floor, the bootstrap, the bootstrap NOT being a
-    general amnesty, both event payloads, and the refusals. Its last test pins the rule
+    general amnesty, NEITHER side floored at the top while every record directory is
+    floored, both event payloads, and the refusals. Its last test pins the rule
     against THIS repo's tracked tree, which is the only check that can catch main
     arriving in the bad state by a route the guard never sees (a manual promotion, a
     force-push, a revert).

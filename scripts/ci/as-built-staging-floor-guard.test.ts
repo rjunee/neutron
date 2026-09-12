@@ -214,29 +214,78 @@ describe('as-built staging floor guard (real git)', () => {
     }
   }, 30_000)
 
-  test('the bootstrap is not a general amnesty: an unfloored base with a record still FAILS', () => {
-    // Exempting the top-level deletion check on an unfloored base must not exempt
-    // the per-directory rule, or the state this repo was actually in on
-    // 2026-09-12 — records staged under a directory with no floor — would pass.
-    const unfloored = mkdtempSync(join(tmpdir(), 'staging-floor-guard-amnesty-'))
+  test('the bootstrap is not a general amnesty: it never reaches the PER-DIRECTORY rule', () => {
+    // Exempting the top-level check on an unfloored base must not exempt the
+    // per-directory rule, or the state this repo was actually in on 2026-09-12 —
+    // a record under a directory with no floor — would pass.
+    //
+    // The fixture floors the TOP on both sides deliberately, so the only thing
+    // that can fail it is the per-directory rule. Letting the top-level check fire
+    // here instead would make this test pass for a reason it is not about, which
+    // is how it read before the exemption was rescoped.
+    const amnesty = mkdtempSync(join(tmpdir(), 'staging-floor-guard-amnesty-'))
     try {
-      git(unfloored, 'init', '-q', '--initial-branch=main')
-      write(unfloored, '.trident/as-built/fix/an-earlier-change.md', RECORD)
-      git(unfloored, 'add', '-A')
-      commit(unfloored, 'base with a record and no floor anywhere')
-      const base = git(unfloored, 'rev-parse', 'HEAD')
+      git(amnesty, 'init', '-q', '--initial-branch=main')
+      write(amnesty, '.trident/as-built/.gitkeep', '')
+      write(amnesty, '.trident/as-built/fix/an-earlier-change.md', RECORD)
+      git(amnesty, 'add', '-A')
+      commit(amnesty, 'base: top level floored, the record\'s own directory NOT')
+      const base = git(amnesty, 'rev-parse', 'HEAD')
 
-      git(unfloored, 'switch', '-q', '-c', 'unrelated', base)
-      write(unfloored, 'code.ts', 'export const value = 2\n')
-      git(unfloored, 'add', '-A')
-      commit(unfloored, 'an unrelated change')
-      const head = git(unfloored, 'rev-parse', 'HEAD')
+      git(amnesty, 'switch', '-q', '-c', 'unrelated', base)
+      write(amnesty, 'code.ts', 'export const value = 2\n')
+      git(amnesty, 'add', '-A')
+      commit(amnesty, 'an unrelated change')
+      const head = git(amnesty, 'rev-parse', 'HEAD')
 
-      const result = runGuard(unfloored, base, head)
+      const result = runGuard(amnesty, base, head)
       expect(result.status).toBe(1)
       expect(result.stderr).toContain('.trident/as-built/fix/ — add .trident/as-built/fix/.gitkeep')
+      // Not the top-level failure: that one is floored on both sides here.
+      expect(result.stderr).not.toContain('has no floor under .trident/as-built/')
     } finally {
-      rmSync(unfloored, { recursive: true, force: true })
+      rmSync(amnesty, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  test('neither side floored at the TOP still FAILS, even when every record directory is floored', () => {
+    // THE BOUNDARY THE FIRST VERSION OF THIS GUARD GOT WRONG, and the reason it
+    // earns its own test rather than a line in another one. The top-level check was
+    // written as "the base HAS a floor and the head does not", which reads like the
+    // rule and is not it: with NEITHER side floored that condition is false, and a
+    // tree whose every record-holding subdirectory carries its own floor then walked
+    // the per-directory loop clean as well. The guard exited 0 over a tree that never
+    // installs the top-level floor at all — exempting, on its very first run, the one
+    // state it exists to refuse. An exemption written to let a guard install itself
+    // must be scoped to the side that is allowed to be wrong, which is the BASE.
+    //
+    // The subdirectory floor is present here on purpose: without it the per-directory
+    // rule would fail this fixture for an unrelated reason and the test would pass
+    // while proving nothing about the top-level check.
+    const neither = mkdtempSync(join(tmpdir(), 'staging-floor-guard-neither-'))
+    try {
+      git(neither, 'init', '-q', '--initial-branch=main')
+      write(neither, '.trident/as-built/fix/.gitkeep', '')
+      write(neither, '.trident/as-built/fix/an-earlier-change.md', RECORD)
+      git(neither, 'add', '-A')
+      commit(neither, 'base: every record directory floored, the top level NOT')
+      const base = git(neither, 'rev-parse', 'HEAD')
+
+      git(neither, 'switch', '-q', '-c', 'unrelated', base)
+      write(neither, 'code.ts', 'export const value = 2\n')
+      git(neither, 'add', '-A')
+      commit(neither, 'an unrelated change that installs nothing')
+      const head = git(neither, 'rev-parse', 'HEAD')
+
+      const result = runGuard(neither, base, head)
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('the proposed tree has no floor under .trident/as-built/')
+      expect(result.stderr).toContain('Add it: an empty, tracked .trident/as-built/.gitkeep')
+      // And not mistaken for the other failure: nothing was removed here.
+      expect(result.stderr).not.toContain('removes the floor')
+      expect(result.stdout).not.toContain('OK')
+    } finally {
+      rmSync(neither, { recursive: true, force: true })
     }
   }, 30_000)
 
