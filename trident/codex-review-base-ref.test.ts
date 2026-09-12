@@ -261,6 +261,53 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     expect(await git(w.repo, 'rev-parse', got)).toBe(w.remote)
   })
 
+  test('A VALUE THAT IS ALREADY THE RIGHT SHAPE IS KEPT — even when a promotable ref shadows it', async () => {
+    // THE PROMOTION ARMS RAN BEFORE THE INPUT WAS CLASSIFIED, so they could capture a value the
+    // contract says is kept verbatim. They are rev-parse probes on `refs/*/${BASE_REF}`, and
+    // those names are LEGAL for an already-qualified value: `git check-ref-format
+    // refs/remotes/origin/<40-hex>` exits 0.
+    //
+    // The launch-pinned SHA is the PRIMARY caller in this item, so its silent rewrite is
+    // exactly the Argus r4 shape the item exists for — a review against the wrong base, exit 0.
+    // The competing refs point at DIFFERENT commits here, or the assertion could not tell
+    // "kept verbatim" from "promoted to something that happens to match".
+    const w = await seedWorld()
+    const pin = w.remote // a real 40-hex object name…
+    await git(w.repo, 'update-ref', `refs/remotes/origin/${pin}`, w.local) // …shadowed, at ANOTHER commit
+    expect(await git(w.repo, 'rev-parse', `refs/remotes/origin/${pin}`)).toBe(w.local)
+    expect(pin).not.toBe(w.local)
+    expect(await promote(w.repo, pin)).toBe(pin)
+    // Asserted as the COMMIT too: the value still names what the caller pinned.
+    expect(await git(w.repo, 'rev-parse', await promote(w.repo, pin))).toBe(w.remote)
+
+    // The same capture reaches an explicit ref path.
+    await git(w.repo, 'update-ref', 'refs/remotes/origin/refs/tags/release', w.local)
+    expect(await promote(w.repo, 'refs/tags/release')).toBe('refs/tags/release')
+    expect(await git(w.repo, 'rev-parse', await promote(w.repo, 'refs/tags/release'))).toBe(w.local)
+  })
+
+  test('AN UPPERCASE OBJECT NAME IS A VALID ONE — the over-refusal direction, in the guard', async () => {
+    // Measured: `git rev-parse --verify "${UPPER}^{commit}"` succeeds and `${UPPER}..HEAD` is a
+    // valid range, so refusing it was an over-refusal — exit 3, DEFERRED, no review — of a
+    // legitimate full object name. `diffBaseRef` already lowercases before matching; the
+    // wrapper now accepts both cases, which is the same acceptance.
+    //
+    // The lowercase fixture is why the sweep could not see this: a boundary that only ever
+    // supplies one case cannot fail on a case-sensitivity bug.
+    const w = await seedWorld()
+    const upper = (w.remote as string).toUpperCase()
+    expect(upper).not.toBe(w.remote)
+    expect(await promote(w.repo, upper)).toBe(upper)
+    expect(await git(w.repo, 'rev-parse', upper)).toBe(w.remote)
+    // …and the lowercase sibling still passes, so this is not "accept any hex-looking word":
+    expect(await promote(w.repo, w.remote)).toBe(w.remote)
+    // A 39-hex and a 41-hex string are still SHORTHANDS, refused for their shape.
+    for (const bad of [(w.remote as string).slice(0, 39), `${w.remote}a`]) {
+      const res = await runBlock(w.repo, bad)
+      expect({ bad, ok: res.ok }).toEqual({ bad, ok: false })
+    }
+  })
+
   test('THE OTHER FAILURE DIRECTION, audited: what each arm turns away, and its remedy', async () => {
     // Prompted by the remote-only bug: a classifier has two failure directions, and five
     // rounds of sweeping only ever exercised the permissive one. So each refusing arm is

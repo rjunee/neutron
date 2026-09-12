@@ -232,6 +232,38 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-eight: both failure directions, in one round
+
+**Accepting too much — the promotion arms ran BEFORE the input was classified.** They are
+rev-parse probes on `refs/*/${BASE_REF}`, and those names are LEGAL for a value that is already
+qualified: `git check-ref-format refs/remotes/origin/<40-hex>` exits 0, and so does
+`refs/remotes/origin/refs/tags/release`. So a caller passing **the launch-pinned SHA — the
+primary caller in this item** — would have had it silently rewritten to
+`refs/remotes/origin/<sha>` wherever such a ref existed, and the review would have run against a
+different commit and exited 0. That is the Argus r4 shape the whole item is built on, reachable
+through the guard meant to prevent it.
+
+The fix is ORDERING, not new logic: the arm that keeps an already-shaped value is now FIRST, so
+nothing below can rewrite it. **A contract that says "verbatim" has to be enforced before the
+arms that could rewrite it**, however unlikely the collision. The test seeds the competing refs
+at DIFFERENT commits, because otherwise it cannot distinguish "kept verbatim" from "promoted to
+something that happens to match."
+
+**Refusing too much — the shape guard rejected an uppercase object name.** Measured: with
+`U=$(git rev-parse HEAD | tr a-f A-F)`, `git rev-parse --verify "${U}^{commit}"` succeeds and
+`${U}..HEAD` is a valid range, so a legitimate full object name was exiting 3, DEFERRED, with no
+review. `[0-9a-fA-F]` now, matching `diffBaseRef`'s acceptance. **The lowercase fixture is why
+the sweep could not see it: a boundary that only ever supplies one case cannot fail on a
+case-sensitivity bug.**
+
+**And the same question asked of the rest of the tree**, with its positive control. Every other
+40-hex comparison on this path is lowercase-only — and correctly so: each tests a value read
+from git's own stdout, where git emits its canonical lowercase form even when asked in upper
+(measured: `git rev-parse --verify <UPPER>^{commit}` echoes lowercase). The two that parse a
+token out of prose (`orchestrator.ts:2015`, `:2025`) already use `/i` and `.toLowerCase()`. The
+wrapper's was the only one testing an OPERATOR-SUPPLIED value case-sensitively, which is the
+distinction that decides the answer: **git's output is canonical; a caller's input is not.**
+
 ### Round twenty-seven: sweep the documents that describe the guard's INPUTS
 
 Round twenty-six changed a precondition and swept for the sentence that STATES the rule. Three

@@ -87,7 +87,22 @@ BASE_REF="${1:-main}"
 # A value that resolves to NOTHING is then refused by the guard below — git does NOT refuse it
 # out loud here, which is what this comment used to claim: the diff's stderr was discarded and
 # the empty result read as "no findings".
-if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
+if [[ "$BASE_REF" =~ ^[0-9a-fA-F]{40}$ || "$BASE_REF" == refs/* ]]; then
+  # ALREADY THE REQUIRED SHAPE — KEPT VERBATIM, and this arm is FIRST so that no promotion
+  # below can rewrite it. The arms are rev-parse probes on `refs/*/${BASE_REF}`, and those
+  # names are legal for values that are already qualified: `git check-ref-format
+  # refs/remotes/origin/<40-hex>` exits 0, and so does `refs/remotes/origin/refs/tags/release`.
+  # So a caller passing THE LAUNCH-PINNED SHA — the primary caller in the spec item — would
+  # have had it silently rewritten to `refs/remotes/origin/<sha>` wherever such a ref existed,
+  # and the review would have run against a different commit, exited 0, and cost the round.
+  # That is the Argus r4 incident this whole item is built on, reachable through the guard
+  # meant to prevent it.
+  #
+  # ORDERING, NOT NEW LOGIC: classify what already satisfies the contract, then fall through to
+  # the bare-name arms. **A contract that says "verbatim" has to be enforced before the arms
+  # that could rewrite it** — however unlikely the collision.
+  :
+elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
   # AMBIGUOUS — REFUSED, not passed through. This case was "left alone" until round
   # eighteen, on the reasoning that promoting would be a guess. Leaving it alone is also a
@@ -397,7 +412,13 @@ else
       fi
       ;;
     *)
-      if [[ ! "$BASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+      # UPPER OR LOWER. Git accepts an uppercase 40-hex object name — measured: with
+      # `U=$(git rev-parse HEAD | tr a-f A-F)`, `git rev-parse --verify "${U}^{commit}"`
+      # succeeds and `${U}..HEAD` is a valid range. A lowercase-only pattern refused a
+      # legitimate full object name with exit 3, which is the OVER-refusal direction again —
+      # the same one round twenty-six hit in the chain, now in the guard. `diffBaseRef`
+      # already lowercases before matching; this matches its acceptance.
+      if [[ ! "$BASE_REF" =~ ^[0-9a-fA-F]{40}$ ]]; then
         printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a 40-hex commit. DEFERRED — do NOT treat as an approval." >&2
         exit 3
       fi
