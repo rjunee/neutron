@@ -21,8 +21,14 @@ untouched: the probe ran against its own `CODEX_HOME` holding a copy of
 **symlink to the same file** the live dir points at. That was deliberate, not
 convenience: `trident/codex-credential.ts:396-399` records that codex rotates the
 refresh token when it refreshes, so two independent copies of one account's
-`auth.json` revoke each other. Sharing the file by reference is the only safe way
-to have a second `CODEX_HOME` for one account.
+`auth.json` revoke each other.
+
+**That was right for the spike and is not a production design** — see "Three rounds on
+a mechanism that should not have existed" below. It held only because nothing refreshed
+during the two hours: a refresh *initiated from the spike's own home* would have
+`rename`d over the symlink, replaced it with a regular file and split the credentials.
+The spike needed a second home to avoid contending with the review gates; the shipped
+adapter uses the same `CODEX_HOME` as the wrappers and needs no sharing at all.
 
 ### (a) Follow-up turns — PASS
 
@@ -153,91 +159,59 @@ the meter's resolution too.
   The entry now says what is true — headless removes the wedged long-lived owner,
   not the lock.
 
-### The sibling question: what OPERATION would a wrong implementation get right?
+### Three rounds on a mechanism that should not have existed
 
-Every other criterion corrected in this change was satisfied by the wrong **value** —
-a guessable nonce, a hard-coded sandbox mode, a key in the wrong place. One was
-satisfied by the wrong **write pattern**, and it is the more transferable miss.
+The sharing of one account's `auth.json` across two `CODEX_HOME`s was specified, then
+corrected three times, each correction defeated by a more accurate model of
+*replacement*:
 
-The `auth.json` sharing criterion asked for "the same credential file — same
-inode/`realpath`" and tested it by mutating the file in place. **A hard link passes
-both halves.** Measured here rather than argued:
+| mechanism | passes | fails |
+|---|---|---|
+| equal contents | a **copy** | the first token refresh |
+| same inode / `realpath` | a **hard link** | atomic replace — new inode, stale token behind |
+| a **symlink** | rotation through the *canonical* path | rotation through the *secondary* path |
 
-| | inode == canonical | `realpath` == canonical | after in-place write | after atomic replace |
-|---|---|---|---|---|
-| hard link | **true** | false | reads new value | **stale token** |
-| symlink | true | true | reads new value | reads new value |
+The last was measured, and it is the sharpest: **`rename` replaces a directory entry and
+does not follow the final symlink.** So a codex process whose `CODEX_HOME` *is* the
+secondary directory turns the link into a regular file on its own refresh, and the
+credentials split silently — the exact failure the mechanism existed to prevent.
 
-So inode equality does not discriminate at all, `realpath` does, and the *behaviour*
-only diverges under **replacement** — which is precisely how a credential file is
-rewritten, because atomic replace is the correct way to do it. A hard-linked
-implementation would therefore have passed every test as written and failed in
-production at the one moment the criterion existed to protect: a token rotation.
+Each fix was correct about the rotation it imagined. None was correct about all of them,
+and the fourth fix (symlink the *directory*, so a rename inside it lands in the real one)
+was never needed, because **the premise was wrong**. A second home for one account was an
+artefact of *this spike's* isolation requirement — running without contending with the
+review gates — and it got written into the production contract. Production never puts one
+account in two homes:
 
-The generalisation, which is not specific to credentials: **"what input would a wrong
-implementation get right?" has a sibling — "what *operation* would it get right?"**
-Anywhere a test asserts two paths are the same file, the discriminator is what
-happens when one is **replaced**, not when one is written through. The criterion now
-requires `islink` plus `realpath` equality, and exercises an atomic replace.
+> *"A SEAT IS NEVER MOVED OR COPIED BETWEEN DIRECTORIES. The codex CLI rotates the
+> refresh token when it refreshes, so two live directories holding one account revoke
+> each other. Selection is a pointer at one of these dirs and nothing more."*
+> — `trident/codex-credential.ts:396-399`
 
-The implementation was already correct — the spike used a symlink, for this reason.
-The criterion permitted something weaker than what was actually done, which is its
-own kind of failure: a record that would have let the next person do it wrong.
-- **The supervised form is unavailable.** `codex app-server daemon start` refuses
-  without a managed standalone install at
-  `$CODEX_HOME/packages/standalone/current/codex`; codex here is the npm
-  distribution and that directory does not exist under the live credential dir
-  (its parent does — the absence is real, not a bad path). Using the daemon would
-  mean adopting a second, self-updating codex distribution per `CODEX_HOME`.
-- **A path-length wall for per-project seats.** The daemon's control socket is
-  `$CODEX_HOME/app-server-control/app-server-control.sock`. At the per-project
-  `CODEX_HOME` shape — `<owner_home>/.codex/projects/<project_id>`,
-  `trident/codex-auth.ts:191-194` — that path measures **114 bytes against a
-  108-byte `SUN_LEN` limit**: `path must be shorter than SUN_LEN`, reported with
-  **exit status 0**. The global dir's own socket path is 68 bytes and fits. Filed
-  as its own Post-cutover issue (#637): the limit is not the expensive part, the
-  success exit code on a failed probe is — the same class as #542/#576, where a
-  429 folded into `deferred`, reached from the other direction.
+Multiple homes do exist there, and they hold **different credentials**: one per rotation
+seat (`slotHome`, `:401`) and one per project override (`codexProjectHome`,
+`trident/codex-auth.ts:191`). The tree already forbade the thing the contract was
+labouring to make safe. The item now says *one account, one home, and no materialising of
+credentials by copy, hard link or symlink* — and the whole class of finding is gone
+rather than fixed a fourth time. **The diff got smaller.**
 
-### Dead ends, in order
+### The third audit question
 
-1. `codex exec "<prompt>"` with a non-TTY stdin blocks reading stdin and appends
-   it as a `<stdin>` block ("Reading additional input from stdin…"). Every call
-   needs `< /dev/null`.
-2. `codex exec resume` rejects `-s/--sandbox` (`error: unexpected argument '-s'`).
-   It also has no `-C/--cd`, no `--add-dir` and no `--approve-for-me`. The sandbox
-   is settable only as `-c sandbox_mode=<mode>`; the cwd only as the process cwd.
-   `resume` is **not** flag-compatible with `exec`.
-3. `codex app-server daemon version` against a `CODEX_HOME` under a long path
-   reports `path must be shorter than SUN_LEN` — and exits **0**.
-4. `codex app-server daemon start` refuses without the managed standalone install
-   (above).
-5. Raw newline-delimited JSONRPC to a `--listen unix://PATH` socket: connection
-   accepted, then EOF, **nothing logged on either side**. The socket wants a
-   WebSocket upgrade — `failed to upgrade control socket websocket connection`
-   appears in the binary's strings.
-6. `codex app-server proxy --sock <path>`: stayed connected, never answered a
-   valid `initialize`. Silent.
-7. `codex app-server proxy` against the default control socket (with `daemon
-   version` confirming `status: running` over that same socket): same silence.
-8. The approval dead end in (c) above.
-9. Self-inflicted, worth recording because it will happen again: `pkill -f "codex
-   app-server"` from a Bash tool call kills the calling shell, because the
-   pattern matches that shell's own command line. Kill by pid from
-   `/proc/<pid>/cmdline`, skipping `/bin/bash`.
+Two questions had been extracted from this PR's failures: *what is the weakest
+implementation that passes this?* (criteria that permit too much) and *what would the
+correct implementation necessarily do that this forbids?* (criteria that permit too
+little). The three rounds above were neither. Those criteria were the right strictness
+and encoded **a wrong model of the environment** — that a refresh mutates in place, then
+that it replaces only the canonical path. So:
 
-`--listen ws://127.0.0.1:<port>` worked first try, announces `readyz`/`healthz`,
-and is directly speakable from the gateway's own runtime — that is the transport a
-persistent adapter would have used. Finding it by elimination consumed most of the
-spike, which is itself an answer to "can it be built EASILY".
+**What does this criterion assume about how the system behaves, and have I measured it?**
 
-### Contention with the concurrent review gates — none observed
-
-The gates ran `codex exec` against the live credential dir throughout, repeatedly
-and with turns in flight at the moments the probe ran. ~15 probe turns: no auth
-failure, no 429, no session conflict, no `auth.json` rotation divergence (one file,
-shared by reference). The thread writer lock is per-thread within one `CODEX_HOME`
-and never crossed over. A persistent REPL would not have collided with the gates.
+"Atomic rename does not follow a symlink" is exactly the kind of fact that decides a
+design and reads as too obvious to check. The three questions divide cleanly: too
+permissive, too strict, and **true only in an environment that does not exist**. The
+third is the one that took three rounds, because a criterion resting on a wrong
+environmental premise looks rigorous — it has a mechanism, a discriminator and a passing
+test — right up to the moment someone runs the operation it never modelled.
 
 ### The spike never asked what already existed
 

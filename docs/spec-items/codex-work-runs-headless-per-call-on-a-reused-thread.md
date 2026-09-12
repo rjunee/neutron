@@ -108,14 +108,13 @@ the adapter's.
    cost of scrubbing a variable codex ignores is zero and the cost of missing one is
    a silently metered bill. #645 unifies the lists; this contract does not depend on
    it landing first.
-5. **One `auth.json` file per account, shared by SYMLINK.** codex rotates the
-   refresh token when it refreshes, so two independent copies of one account's
-   `auth.json` revoke each other (`trident/codex-credential.ts:396-399`). A second
-   `CODEX_HOME` for the same account carries a **symlink** to the canonical file —
-   never a copy, and never a hard link. The link type is load-bearing, not
-   incidental: a credential file is rewritten by atomic replacement, which gives the
-   canonical path a new inode, and a hard link stays behind on the old one serving a
-   stale token.
+5. **One account, one `CODEX_HOME`.** The adapter uses the `CODEX_HOME` the wrappers
+   resolve and never materialises an account's `auth.json` a second time anywhere.
+   Multiple homes exist in production but hold **different** credentials — one per
+   rotation seat (`slotHome`, `trident/codex-credential.ts:401`), one per project
+   override (`codexProjectHome`, `trident/codex-auth.ts:191`) — and selecting among them
+   is a pointer at a directory, nothing more (`trident/codex-credential.ts:396-399`).
+
 6. **Approvals, and who is allowed to be the approver.** Headless codex cannot ask
    *Neutron* for an approval — there is no channel for it. `-c
    approval_policy=on-request` alone makes codex refuse an escalation outright, with
@@ -263,20 +262,21 @@ form; the "kills:" note names what the earlier form let through.
       which re-sources the user's profile and can re-export a scrubbed key into the
       grandchild that actually runs.**
 
-- [ ] **A second `CODEX_HOME` for one account reaches the canonical `auth.json`
-      through a symlink, and still does after a rotation.** verify:
-      (i) `lstat` on the secondary `auth.json` reports a **symbolic link** and
-      `realpath` equals the canonical file — **never inode equality**, which a hard
-      link also satisfies.
-      (ii) rotate the canonical file the way a client actually does — write temp,
-      then `rename`/`replace` over the path — and assert the secondary reads the new
-      token.
-      (iii) perform a rotation **through the secondary path too**, and assert the
-      secondary is *still a symlink* afterwards and both paths still agree.
-      *kills:* `copyFile`; `link()` — measured, a hard link is indistinguishable from a
-      symlink under in-place writes and serves a **stale token** after an atomic
-      replace; and **a rotation through the secondary path that replaces the link with
-      a regular file**, silently ending the sharing the first two checks established.
+- [ ] **An account's `auth.json` exists in exactly one place, and the adapter never
+      creates a second.** verify: the adapter resolves a `CODEX_HOME` **path** and
+      performs no write that materialises credentials — a test asserts that after a
+      full call cycle the number of `auth.json` files under the credential root is
+      unchanged, and that none of `copyFile`, `link` or `symlink` appears in the
+      adapter's sources (positive control: the same grep over a fixture that uses them
+      finds them). Bidirectional half: the adapter **does** still resolve the right
+      home when a per-project override or a non-default rotation seat is selected — so
+      the criterion is satisfied by correct selection, not by refusing to support
+      multiple homes at all.
+      *kills:* an adapter that provisions a second home for an account that has one, by
+      any means — copy, hard link or symlink. Each was specified and each failed under
+      a rotation it had not modelled; the as-built records that arc. The rule here is
+      the simpler one those failures pointed at: production never puts one account in
+      two homes, so there is no sharing mechanism to get right.
 
 - [ ] **Overlapping calls on one thread id serialize; calls on different thread ids do
       not.** verify: start call A, and while it is in flight start call B on the **same**
