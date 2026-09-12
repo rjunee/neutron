@@ -1029,8 +1029,23 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // systemd's KillMode=control-group is the guarantee layer (covers
     // crash / SIGKILL / hung drain); this is the polite layer that also
     // protects non-systemd deployments (Open self-host on macOS, dev
-    // runs). Continuity is unaffected — the next turn `--resume`s the
-    // captured session transcript.
+    // runs).
+    //
+    // #539 — IT NO LONGER KILLS EVERY CHILD, and the exception is narrow. A
+    // herdr-hosted REPL is a pane of the HERDR SERVER: it is in neither this
+    // process tree nor this cgroup, so the cgroup guarantee above never
+    // covered it and this polite kill was the only thing ending it. It is
+    // now left ALIVE when — and only when — a persisted registry row names
+    // its exact pane and its exact generation, which is precisely the state
+    // that lets the next boot find it again and either re-adopt it or close
+    // it (`gateway-shutdown-survival.ts`, `boot-adoption.ts`). Every other
+    // child is killed exactly as before.
+    //
+    // Continuity WAS "the next turn `--resume`s the captured transcript",
+    // which is still what happens for everything that is killed here. For a
+    // survivor it is stronger and different in kind: the same process keeps
+    // running with its conversation in memory, and the owner's `herdr
+    // session attach` view of it is uninterrupted.
     //
     // Timing note (Argus PR#438 minor 9, revised #518): worst case this
     // drain USED to exceed the unit's TimeoutStopSec=30, because the pool

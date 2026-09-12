@@ -1,6 +1,6 @@
 ---
 title: "SPEC.md — Neutron Open (master spec)"
-last_updated: 2026-09-12 (the Fable arbiter is wired with its cost capped at one arbitration per rebase, and the REPL substrate becomes selectable — herdr is the default container, the in-process PTY host is retained — Decisions Log 2026-09-12; previous: 2026-09-12 (recurring cross-model work is one-shot headless per call))
+last_updated: 2026-09-12 (a gateway restart keeps its project REPLs — the shutdown kill is gated on the pane being re-findable, Decisions Log 2026-09-12; previous: 2026-09-12 (the Fable arbiter is wired with its cost capped at one arbitration per rebase, and the REPL substrate becomes selectable — herdr is the default container, the in-process PTY host is retained — Decisions Log 2026-09-12; previous: 2026-09-12 (recurring cross-model work is one-shot headless per call)))
 ---
 <!-- CURRENT: harness-orchestrator-pivot/herdr-host (cutover gated on: trident works on the new shape · herdr is the DEFAULT REPL container, with the in-process PTY host retained as a selectable backend and no chooser yet — Decisions Log 2026-09-12 · migration re-run) -->
 
@@ -145,6 +145,16 @@ default/primary adapter, and an opt-in OpenAI GPT conversational adapter is also
 production-wired (BYO `OPENAI_API_KEY`, selected by env); autonomous builds
 (Trident) always run on Claude Code.
 
+A warm REPL runs in a **herdr pane** (Decisions Log 2026-09-12, "the REPL
+substrate becomes selectable"), which makes it a child of the herdr server
+rather than of the gateway: a **gateway** restart leaves it running and the next
+gateway re-adopts it with its conversation intact, while a **herdr server**
+restart does end it and recovery there is `--resume` onto the transcript
+(Decisions Log 2026-09-12, "a gateway restart keeps its project REPLs"). A
+surviving REPL is only ever left alive when a persisted registry row names its
+pane and its child generation; anything that cannot be found again is still
+killed at shutdown.
+
 ### 2.4 — Memory
 
 **GBrain is the sole durable memory store.** Scribe extracts salient facts as a
@@ -267,6 +277,15 @@ pointer]`. Immutable — entries are never removed or rewritten; a superseded
 decision stays with a "superseded" note. This log is the single home for the
 dated record of each locked decision; the body describes the resulting
 architecture and points here.
+
+### 2026-09-12 — A GATEWAY RESTART KEEPS ITS PROJECT REPLS. The shutdown kill that has terminated the whole warm pool since ISSUES #217 is now GATED: a herdr-hosted child is left running when — and only when — a persisted registry row names its exact pane and its exact generation, and the next gateway re-adopts it or closes it. **Narrows, and does not supersede, the ISSUES #217 rule recorded against the 2026-06-11 orphan incident**, which stays in force for every other child. Spec item: [`docs/spec-items/a-gateway-restart-keeps-the-project-repls.md`](docs/spec-items/a-gateway-restart-keeps-the-project-repls.md). GitHub issue #539 (herdr step 2c).
+
+- **What changes for the product.** The owner's acceptance criterion is *a gateway restart brings every project REPL back with its conversation intact*, and before this a restart killed them all; continuity was a fresh `claude --resume` on the next turn. It now keeps the SAME process: its conversation stays in memory, its dev-channel keeps serving, and the owner's `herdr session attach` view of it is uninterrupted. A killed-and-resumed REPL and a surviving one look identical from the outside and differ in everything that matters.
+- **Which process restarted is part of the claim, always.** A REPL is a pane of the herdr SERVER. A GATEWAY restart does not end it — that is what this recovers. A HERDR restart DOES, because panes are its children, and nothing here changes that; what survives one of those is the transcript, through the pre-existing `--resume`.
+- **The kill is narrowed rather than removed, because the incident it prevents is real.** 632 reparented processes and ~19 GB on 2026-06-11 is why it exists, and a herdr pane is in neither the gateway's process tree nor its cgroup — so `KillMode=control-group` never covered these children and the polite kill was the only thing ending them. What replaces it is a chain that can be checked: a child may survive only if a durable row names it; the next boot VISITS that row and adopts or closes; there is no branch that leaves a verified pane running. **The residual is named rather than hidden** — a registry lost between shutdown and boot strands one pane per session key, visible and labelled in herdr rather than invisible, and nothing reaps it automatically.
+- **Adoption is a claim about a live process, so it is never derived from the row.** Three probes, two authorities, each able to say no: herdr reports a live pane; that pane's foreground argv is a `claude` on the row's session id AND carrying the row's own dev-channel; and the dev-channel at the recorded port answers `/health` with that session id. `child_generation` comes back from the row (the child's sink credential is `HMAC(root, generation)`, so a survivor is refused 401 without it) while the incarnation is minted fresh, so a pre-restart straggler cannot complete a post-restart turn.
+- **herdr's own agent resume is OFF (`[session] resume_agents_on_restore = false`), and the config is not the mechanism.** herdr's restore re-execs `claude --resume <id>` with none of our flags, so a pane it resumed could never answer a turn — and it would be a second owner of a live transcript. The setting makes that rare; what makes it SAFE is a verdict: a `claude` on our transcript that is not our child is CLOSED before anything resumes it. A rule that lives only in a config file is advice.
+- **The one defect here that ACTS rather than fails is the adopted pane's first screen.** Every detector latch is in-memory, so a stale tool-approval prompt still on the pane would read as a rising edge and be answered `1`+Enter — on the owner's session. The first screen is a baseline, not a stimulus: latches are primed against it, so those signatures can fire only after falling and rising again.
 
 ### 2026-09-12 — THE FABLE ARBITER IS WIRED, WITH NO FILESYSTEM TOOLS AND ONE ARBITRATION PER REBASE. The build-escalation arbiter had zero production call sites; it now has one. **Supersedes the 2026-09-11 entry below in one respect only** — that entry lists the arbiter rule among the gates that are "ahead of every shipped system and stay", which was true of the rule and not of the code: `buildFableArbiter` was built, unit-tested, exported and constructed nowhere. Everything else in that entry stands. Detail: [`.trident/as-built/wire-fable-arbiter.md`](.trident/as-built/wire-fable-arbiter.md).
 
