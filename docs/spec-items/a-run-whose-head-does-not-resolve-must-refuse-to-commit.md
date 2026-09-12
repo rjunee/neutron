@@ -77,9 +77,32 @@ test:
   destructive half sits in an exported `deleteReapableRef` that the sweep does not call, behind one
   named reason (`DEFERRED_PENDING_CLAIMANT_GUARD`). That function accepts only a `ReapableCandidate`
   minted by the gate chain FOR THE REPOSITORY BEING ACTED ON, so the single call this item restores
-  must pass **each candidate to the repository it was minted for** — `candidate.repo` carries that
-  repository, canonically. Reconstructing `{ repo, ref, sha }`, or handing a candidate to any other
-  repository, is refused at the boundary and deletes nothing. A sweep spans several repositories, so
+  must pass **each candidate to the repository it was minted for**. Reconstructing `{ repo, ref, sha }`,
+  or handing a candidate to any other repository, is refused at the boundary and deletes nothing.
+
+  **TWO FIELDS, TWO RULES, AND THE ROUTING ONE MUST NOT BE CANONICALISED.** An earlier version of this
+  criterion said `candidate.repo` carries the repository "canonically", which would order the defect
+  #606 fixed in review — so it is stated as two separate obligations here:
+    - The PUBLIC routing field, `ReapableCandidate.repo` (`trident/worktree-reaper.ts:384`), is
+      **faithful to the spelling the sweep used and must not be normalised**, because
+      `TridentRunStore.listBranchOwners(repo_path)` (`trident/store.ts:1015`) is keyed by that exact
+      string: a store configured with a symlinked path answers nothing for the resolved one, so
+      canonicalising the routing key makes the delete-time owner read come back empty and every ref in
+      a link-reached repository is refused — fail-closed, and silently never reaped.
+    - The PRIVATE attestation, the `MINTED_CANDIDATES` map's value
+      (`trident/worktree-reaper.ts:433`), **is canonical at both ends** (`realpathSync`), because that
+      comparison must not turn on how a path was written.
+    - Both are set from the ONE call in `mintReapableCandidate`, so they cannot drift for a minted
+      candidate.
+
+  **THIS CLAUSE FAILS, not merely goes unblessed, for an implementation that canonicalises the routing
+  field** — including one that stores only a canonical form and derives the routing key from it. The
+  check is mechanical: a sweep driven through a symlinked repository path must still reap, with the
+  candidate carrying the symlinked spelling; if the routing field is normalised that case refuses and
+  this item is not satisfied. A candidate minted under one spelling and acted on under another must
+  still delete; if the attestation is compared raw, that case refuses and this item is not satisfied
+  either. Both directions are pinned by tests in `trident/worktree-reaper.test.ts` and each reds under
+  its own mutation. A sweep spans several repositories, so
   a restored call that aims every candidate at one of them reaps the first and refuses the rest:
   satisfying this item includes proving deletion happens in EVERY swept repository, not just one. Satisfying
   this item therefore includes deleting that deferral and restoring the single call, and proving the

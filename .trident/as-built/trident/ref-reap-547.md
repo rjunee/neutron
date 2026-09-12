@@ -1,10 +1,31 @@
 ## 2026-09-12 — preparing a branch-ref reap: fourteen gates and a measurement, with the deletion held behind a boundary until its guard lands
 
-Measured on the repo of record, 2026-09-12: **79 `refs/heads/trident/*` refs**, 78 of them held by
-no worktree at all, and every one of them a ref whose run had already ended. A surviving ref is not
-inert — the next launch of the same card RE-ENTERS it (`trident/inner-workflow.mjs:1346`: "If the
-branch already exists from a previous run of this card, RE-ENTER it rather than failing"), so the
+Measured on the repo of record, 2026-09-12 **before 02:38Z**: **79 `refs/heads/trident/*` refs**, 78 of
+them held by no worktree at all, and every one of them a ref whose run had already ended. A surviving
+ref is not inert — the next launch of the same card RE-ENTERS it (`trident/inner-workflow.mjs:1346`: "If
+the branch already exists from a previous run of this card, RE-ENTER it rather than failing"), so the
 card's next build starts on the stale base its last attempt failed from.
+
+TWO POPULATIONS APPEAR IN THIS RECORD, 79 AND 80, AND THE DIFFERENCE IS THIS LANE'S OWN BRANCH.
+Re-derived rather than reconciled, because a durable record is the one artefact where a plausible number
+is worse than an admitted gap. Every trident ref's creation time is recoverable from its per-branch
+reflog (`.git/logs/refs/heads/trident/*`, first entry): exactly one was created after 2026-09-02, namely
+`trident/ref-reap-547` at **2026-09-12T02:38:22Z** — the branch this change is being built on. So the
+publication measurement below ran against 79 refs before that moment, and the dry-sweep inventory ran
+against 80 after it. The count is still 80 as of 2026-09-12T10:14Z.
+
+THE EIGHTIETH REF CANNOT AFFECT THE CANDIDATE FIGURE, and that is checkable rather than reassuring: it
+is checked out by name in this lane's own linked worktree, so gate 4 keeps it, which is why the
+inventory's "held by a worktree" count is 2 where the 79-population line above says 1 (78 of 79 held by
+none). The other held ref is `trident/throughput-blocker-trident-s-own-pl`, held by COMMIT rather than
+by name — a detached worktree standing on its tip, which is gate 5's witness. The arithmetic closes
+from either end: 80 = 2 held + 6 unowned + 72 candidates, and 79 = 1 held + 6 unowned + 72 candidates.
+**The 72 is a count over the 78 refs that predate this lane, and it is the same 72 in both populations.**
+
+THE MEASUREMENT INSTRUMENT ADDED ITSELF TO THE POPULATION, which is the transferable part: a sweep of
+`trident/*` run from a `trident/*` branch counts its own branch, and the two numbers a reader will
+compare were taken on either side of that event. Neither figure was wrong; the record simply failed to
+say they had different denominators.
 
 WHICH PUBLICATION MEASUREMENT, because an unqualified number in a durable record invites exactly one
 re-derivation that disagrees — and one was made. By LIVE `git ls-remote` against origin the 79 split
@@ -67,8 +88,10 @@ destructive half is an exported `deleteReapableRef` the sweep does not call, beh
 (`DEFERRED_PENDING_CLAIMANT_GUARD`) pointing at **#635** — and it accepts only a `ReapableCandidate`
 the gate chain minted, so being exported does not make it reachable around the gates (see below). The
 sweep records CANDIDATES — refs that pass gates 1-10 — in `refs_candidates`; measured on the repo of
-record, **72 of 80 refs** pass those gates, with 2 held by a worktree and 6 kept for unprovable
-ownership.
+record AFTER this lane's own branch existed, **72 of 80 refs** pass those gates, with 2 held by a
+worktree (one by name — this lane's — and one by a detached HEAD on its tip) and 6 kept for unprovable
+ownership. The 80 and the 79 at the top of this record are the same population one ref apart; see there
+for the derivation and why the 72 is unchanged by it.
 
 THAT NUMBER IS AN UPPER BOUND, NOT A MEASUREMENT OF WHAT WOULD BE DELETED, and an earlier version of
 this record said otherwise — it claimed the dry run "runs all fourteen checks". It runs ten. The field
@@ -645,13 +668,20 @@ tuple is unattested by construction, however carefully the rest is checked. Appl
 repository identity lives in the mint's map, not as a field on the candidate, because a field the
 caller can write cannot be the thing that proves anything — a forger sets `repo` as readily as `ref`.
 
-CANONICAL, NOT LITERAL, and both directions matter. Two spellings of one repository (a symlinked path,
-a relative one, a trailing slash) must not mint under one name and be refused under another — that
-failure is silent, since a refusal reads like a gate doing its job. So both ends resolve through
-`realpathSync`. The fallback when resolution fails is the raw string, which compares equal only to the
-identical spelling: the worst outcome is a refusal for a repository that has just disappeared, never an
-acceptance for the wrong one. There is a test for the symlinked spelling still deleting, and it reds
-under two separate mutations — attesting the raw path, and canonicalising nothing.
+CANONICAL IN THE ATTESTATION, LITERAL IN THE ROUTING, and both directions matter. Two spellings of one
+repository (a symlinked path, a relative one, a trailing slash) must not mint under one name and be
+refused under another — that failure is silent, since a refusal reads like a gate doing its job. So both
+ends of the COMPARISON resolve through `realpathSync`. The fallback when resolution fails is the raw
+string, which compares equal only to the identical spelling: the worst outcome is a refusal for a
+repository that has just disappeared, never an acceptance for the wrong one. There is a test for the
+symlinked spelling still deleting, and it reds under two separate mutations — attesting the raw path,
+and canonicalising nothing.
+
+READ THE ROUND-16 SECTION BELOW BEFORE ACTING ON THIS PARAGRAPH. As first written this round
+canonicalised the candidate's ROUTING field too, and that was wrong for a reason this section could not
+see yet: `listBranchOwners(repo_path)` is keyed by the path string it is handed. The resolution belongs
+to the comparison only; the field stays faithful to the sweep's spelling. This paragraph is left
+standing rather than silently rewritten because the distinction it lacks is the finding.
 
 ### A GUARD ADDED FROM FIRST PRINCIPLES CAN CONTRADICT SOMETHING THE TREE ALREADY KNEW
 
@@ -799,9 +829,11 @@ asserted at 40 and a sha256 repo asserted at 64 and reaped end to end. And acros
 REPOSITORIES, which is the call structure #635 restores: two repos reaped in one sweep with each
 salvage landing in its own repo, one repo's held ref not stopping the other's, the same branch NAME in
 both repos judged by each repo's own owner rows, and a sweep driven through a symlinked repo path
-minting the canonical spelling. The last three exist because the first cut of the multi-repo test left
-three mutations alive — the harness routing, the field's normalisation, and per-repository ownership —
-and a surviving mutation is a missing case, not a note to add.
+routing by the spelling the STORE is keyed by. The last three exist because the first cut of the
+multi-repo test left three mutations alive — the harness routing, the field's spelling, and
+per-repository ownership — and a surviving mutation is a missing case, not a note to add. That third
+case asserted the opposite of what it asserts now: it was written when the field was canonicalised, and
+round 16 inverted it, because the store read is what decides which spelling the field must carry.
 
 SIX MUTATIONS SURVIVED A FIRST PASS ACROSS THE REVIEW ROUNDS and each one got a test rather than a
 note: the detached-on-tip witness, a failed holder listing reading as "no claimants", an unreadable
