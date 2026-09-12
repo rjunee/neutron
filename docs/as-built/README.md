@@ -103,11 +103,19 @@ Floors ship for the branch-name prefixes in use (`docs/`, `feat/`, `fix/`,
 `trident/`). A record staged under a new prefix brings its own `.gitkeep`, and the
 guard fails with the exact path to add.
 
-**Why it is not a `.md` file.** Both promoters glob the staging directory for
-`*.md` (`trident/as-built-appender.ts:101`), so a `README.md` there would be
-consumed and promoted as though it were a record — and the directory would be
-empty again. A floor is any tracked file that glob cannot carry away; an empty
-`.gitkeep` is the convention.
+**Why it is not a `.md` file, and why it is `.gitkeep` exactly.** Both promoters
+glob the staging directory for `*.md` (`trident/as-built-appender.ts:101`), so a
+`README.md` there would be consumed and promoted as though it were a record — and
+the directory would be empty again.
+
+The floor must be named `.gitkeep`, and the guard checks the name. The *mechanism*
+needs less than that: any tracked file survives the promoter's glob and keeps git
+from inferring a directory rename, so `junk.txt` would work. The name is required
+because the floor's other job is to be legible — a directory kept alive by a file
+nobody can explain is a directory somebody tidies, which is the deletion this rule
+exists to refuse. The guard accepted any non-Markdown file for a while, under this
+paragraph promising otherwise; that gap is now closed in both directions, and if
+the rule is ever loosened this paragraph must be loosened in the same commit.
 
 There is a fitting detail in this fix's own history: the first commit on the
 branch failed to create the placeholder with "No such file or directory", because

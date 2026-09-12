@@ -22,13 +22,14 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { execFileSync, spawnSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const GUARD_SH = fileURLToPath(new URL('./as-built-staging-floor-guard.sh', import.meta.url))
 const REPO_ROOT = fileURLToPath(new URL('../..', import.meta.url))
 const UNRESOLVABLE_SHA = '0123456789abcdef0123456789abcdef01234567'
 const RECORD = '## 2026-09-12 — a staged record\n\nbody\n'
+const FLOOR_NAME = '.gitkeep'
 
 function git(repo: string, ...args: string[]): string {
   return execFileSync('git', args, { cwd: repo, encoding: 'utf8' }).trim()
@@ -389,13 +390,66 @@ describe('as-built staging floor guard (real git)', () => {
       expect(result.stderr).toContain('.trident/as-built/spike/ — add .trident/as-built/spike/.gitkeep')
     }, 30_000)
 
-    test('a floor MOVED WITHIN its directory still floors it', () => {
-      // The rule is a property of the directory, not of the filename. `.gitkeep`
-      // is the convention; what the promoter cannot carry away is the rule.
+    test('a floor RENAMED WITHIN its directory is REFUSED — the name is the rule', () => {
+      // THIS TEST USED TO ASSERT THE OPPOSITE, and it was wrong in the way only a
+      // reading of the docs against the code can catch: it encoded "the rule is a
+      // property of the directory, not of the filename", which is what the guard
+      // then did and is NOT what docs/as-built/README.md promised. A test written
+      // from the same understanding as the guard cannot disagree with it.
+      //
+      // The mechanism really is satisfied by any tracked file — that is why the
+      // looser rule was defensible. The name is enforced because the floor's other
+      // job is to be legible: a directory kept alive by a file nobody can explain
+      // is a directory somebody tidies.
       const result = verdict(
         'renamed-within',
         { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
         { [TOP]: '', '.trident/as-built/fix/.keep': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/fix/ — restore .trident/as-built/fix/.gitkeep')
+    }, 30_000)
+
+    test('replacing the floor with another non-record file is REFUSED — the reported bypass', () => {
+      // `junk.txt` holds the directory open exactly as well as `.gitkeep` does, so
+      // the guard passed this and so did the by-name permanent-floor pin, which
+      // only ever compared parent directories. The documented rule and the enforced
+      // rule were different rules.
+      const result = verdict(
+        'junk-floor',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+        { [TOP]: '', '.trident/as-built/fix/junk.txt': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/fix/ — restore .trident/as-built/fix/.gitkeep')
+      expect(result.stdout).not.toContain('OK')
+    }, 30_000)
+
+    test('a non-record file that is NOT the floor does not floor a new directory either', () => {
+      // The same rule on the other side: a branch staging into a fresh prefix must
+      // bring a `.gitkeep`, not merely something that is not a record.
+      const result = verdict(
+        'junk-only-new',
+        { [TOP]: '' },
+        { [TOP]: '', '.trident/as-built/spike/notes.txt': '', '.trident/as-built/spike/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/spike/ — add .trident/as-built/spike/.gitkeep')
+    }, 30_000)
+
+    test('a directory may hold other files alongside its floor', () => {
+      // "Must hold this one", not "must hold only this one" — the positive control
+      // that the two tests above are refusing the MISSING name rather than the
+      // presence of anything else.
+      const result = verdict(
+        'floor-plus-extras',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '' },
+        {
+          [TOP]: '',
+          '.trident/as-built/fix/.gitkeep': '',
+          '.trident/as-built/fix/notes.txt': 'context someone parked here\n',
+          '.trident/as-built/fix/a-record.md': RECORD,
+        },
       )
       expect(result.status).toBe(0)
       expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
@@ -584,12 +638,17 @@ describe('as-built staging floor guard (real git)', () => {
     // vacuous, and a vacuous pin on main is exactly the failure being prevented.
     expect(paths.length).toBeGreaterThan(0)
 
-    const floorDirs = new Set(paths.filter((path) => !path.endsWith('.md')).map((path) => dirname(path)))
-    // Every permanent floor, whether or not a record happens to occupy it today.
-    expect(PERMANENT_FLOOR_DIRS.filter((dir) => !floorDirs.has(dir))).toEqual([])
+    // BY NAME, not by parent directory. This reduced every non-`.md` path to its
+    // directory and asked only whether the directory appeared — so replacing
+    // `.gitkeep` with `junk.txt` satisfied a test whose own comment said "by name".
+    const floors = new Set(paths.filter((path) => basename(path) === FLOOR_NAME).map((path) => dirname(path)))
+    expect(PERMANENT_FLOOR_DIRS.filter((dir) => !floors.has(dir))).toEqual([])
+    // Said twice, deliberately: the exact paths, so the assertion above cannot be
+    // read as satisfied by some other file in the same directory.
+    expect(PERMANENT_FLOOR_DIRS.map((dir) => `${dir}/${FLOOR_NAME}`).filter((path) => !paths.includes(path))).toEqual([])
 
     // And the occupied-directory rule, which catches a record staged somewhere new.
     const records = paths.filter((path) => path.endsWith('.md'))
-    expect(records.filter((record) => !floorDirs.has(dirname(record)))).toEqual([])
+    expect(records.filter((record) => !floors.has(dirname(record)))).toEqual([])
   }, 30_000)
 })

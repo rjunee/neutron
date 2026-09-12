@@ -36,16 +36,28 @@
 # top-level-sentinel-only tree still conflicting on a subdirectory record, and the
 # same tree with `fix/.gitkeep` merging clean.
 #
-# WHAT COUNTS AS A FLOOR is read off the promoter rather than guessed: it globs
-# `*.md` (`trident/as-built-appender.ts:101`), so any tracked file in the
-# directory whose name does not end in `.md` is one the promoter can never carry
-# away. That is also why the floor is NOT a `README.md` — a `.md` file here would
-# be promoted as though it were a record.
+# WHAT COUNTS AS A FLOOR is `.gitkeep`, by name. The mechanism needs less than
+# that — the promoter globs `*.md` (`trident/as-built-appender.ts:101`), so ANY
+# tracked non-`.md` file survives a drain and holds the directory open — but the
+# name is what makes the artefact self-explaining, and a floor nobody can explain
+# is a floor somebody deletes. See the classification in `read_tree` for the full
+# argument. The one thing the floor may never be is a `.md` file: the promoter
+# would carry it off and promote it as though it were a record.
 #
 # WHY A GUARD AND NOT A PARAGRAPH. `docs/as-built/README.md` says the placeholder
 # must never be deleted. A rule that lives only in prose is advice to an agent
 # that has never read it (root `AGENTS.md:65-67`); the mechanism that works is a
 # machine-checked refusal at the moment of the mistake. This is that refusal.
+#
+# THE DOCUMENTED RULE AND THE ENFORCED RULE ARE THE SAME RULE, and keeping them
+# that way is a standing obligation rather than a one-time check. This guard once
+# accepted any non-`.md` file as a floor while `docs/as-built/README.md` said the
+# floor is `.gitkeep` and that permanent floors are asserted BY NAME — so swapping
+# `.gitkeep` for `junk.txt` passed the guard and passed the pin, under
+# documentation that promised otherwise. No test of the guard could have found
+# that: every one of them encodes the same understanding the guard does. Only
+# reading the documentation against the code finds it. If the rule here is ever
+# loosened, loosen the README in the same commit or the gap is back.
 #
 # WHERE THE EVENT FILTER LIVES, AND WHY IT IS HERE RATHER THAN IN ci.yml.
 # Identical to `as-built-write-guard.sh`, whose header states the evidence: no
@@ -245,9 +257,24 @@ read_tree() {
     # symlink to nowhere would not, so they are not floors.
     case "$meta" in *' blob '*) ;; *) continue ;; esac
     dir="${path%/*}"
+    # THE FLOOR IS `.gitkeep` BY NAME, NOT "ANY FILE THAT IS NOT A RECORD", and
+    # that is a deliberate choice against the looser rule the property alone
+    # justifies. Any tracked file keeps git from inferring a directory rename, so
+    # `junk.txt` satisfies the mechanism exactly as well — which is why this
+    # classified by exclusion at first, and why replacing `.gitkeep` with
+    # `junk.txt` passed the guard AND the by-name pin while `docs/as-built/README.md`
+    # promised the name was enforced.
+    #
+    # The name is enforced because the guard's second job is to be legible. The
+    # failure this whole change exists to refuse is someone TIDYING AWAY a file
+    # whose purpose is not obvious, and a directory kept alive by `junk.txt` invites
+    # exactly that deletion. `.gitkeep` is a convention that reads as "kept on
+    # purpose" to a person and to every agent trained on a decade of repositories.
+    # A directory may hold other files too — the rule is that it must hold THIS one.
     case "$path" in
       *.md) RECORD_DIRS["$dir"]=1 ;;
-      *) FLOOR_DIRS["$dir"]=1 ;;
+      */"$FLOOR_NAME") FLOOR_DIRS["$dir"]=1 ;;
+      *) ;; # present in the tree, but not something this guard will call a floor
     esac
   done <"$scratch"
   rm -f "$scratch"

@@ -131,10 +131,10 @@ reachable the whole time; the push payload's `before`/`after` are exactly the ba
 the guard already judges, which also covers a force push for free, since `before` is the tip
 being overwritten.
 
-So: **coverage is the product of predicate, domain AND trigger.** Three rounds of review
-each found one factor wrong while the other two were right, and each round's tests measured
-only the factor it had just fixed. Named explicitly so a fourth factor has somewhere to be
-noticed, with what pins each:
+So: **coverage is the product of predicate, domain, trigger — and the identity of the rule
+you document with the rule you check.** Four rounds of review each found one factor wrong
+while the others were right, and each round's tests measured only the factor it had just
+fixed. Named explicitly so a fifth has somewhere to be noticed, with what pins each:
 
   - PREDICATE — is the question right for a directory it looks at. Pinned by the
     floor-deleted, floor-renamed, unfloored-record, `.md`-as-floor and bootstrap cases in
@@ -149,6 +149,34 @@ noticed, with what pins each:
     deleted on a push, a clean push, a force push, a ref deletion, a branch creation), by the
     `push)`-arm and `event_sha before` mutations, and by a test that `ci.yml` still fires on
     `push: branches: [main]` — the arm is inert if that trigger ever goes away.
+  - PROMISE VERSUS CHECK — whether the rule the documentation states is the rule the code
+    enforces. The guard accepted ANY non-`.md` blob as a floor while
+    `docs/as-built/README.md` said the floor is `.gitkeep` and that permanent floors are
+    asserted BY NAME, so replacing `.trident/as-built/fix/.gitkeep` with `junk.txt` passed
+    the guard AND passed the pin — whose own comment said "by name" while it compared parent
+    directories. Pinned now by the replacement and rename-within cases, by the pin asserting
+    the exact paths as well as the directories, and by the `FLOOR_NAME` mutations.
+
+    THIS IS THE FACTOR A TEST OF THE GUARD CAN NEVER FIND ON ITS OWN, and it is why it is
+    worth naming separately from the other three. Every test of a guard is written from the
+    same understanding as the guard; one of this suite's own cases asserted that renaming the
+    floor within its directory was FINE, stating "the rule is a property of the directory,
+    not of the filename" — a coherent claim, agreeing with the code, contradicting the
+    README, and therefore invisible to any amount of further testing. Only reading the
+    documentation against the code finds it.
+
+**WHY THE NAME IS ENFORCED RATHER THAN THE DOCUMENTATION NARROWED.** The two resolutions were
+genuinely different and the property argument favours the looser one: the floor's job is to
+stop git inferring a directory rename, and ANY tracked file does that, so `junk.txt` really
+does satisfy the mechanism. The name is enforced anyway, because the floor has a second job —
+being legible to whoever meets it next. The failure this entire change exists to refuse is
+someone tidying away a file whose purpose is not obvious, and a directory held open by
+`junk.txt` invites precisely that deletion; `.gitkeep` reads as "kept on purpose" to a person
+and to every agent trained on a decade of repositories. A third consideration settled it:
+narrowing the documentation would have meant weakening three documents to match the loosest
+possible implementation, and documentation is narrowed to match code only when the code's
+behaviour is the one you want. Here it was not. A directory may hold other files beside its
+floor — the rule is that it must hold THIS one.
 
 The main-tree pin is a real second control now rather than a claim standing in for one: it
 asserts the PERMANENT floors by name. That has to be a list, because a record-less directory

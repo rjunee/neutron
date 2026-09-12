@@ -1314,10 +1314,20 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
     if (!/unfloored\+=\("\$dir"\)/.test(source)) return 'an unfloored directory is not collected'
     if (!/\$\{#unfloored\[@\]\}" -gt 0/.test(source)) return 'an unfloored directory is not a failure'
 
-    // A FLOOR IS A NON-`.md` FILE, read off the promoter's own glob
-    // (trident/as-built-appender.ts:101). Counting a `.md` file as a floor would
-    // pass a directory whose only "floor" the promoter carries away on the next
-    // run — the defect wearing a placeholder's clothes.
+    // A FLOOR IS `.gitkeep`, BY NAME — the fourth factor, and the only one no test
+    // of the guard could have found on its own. The guard accepted ANY non-`.md`
+    // blob while `docs/as-built/README.md` said the floor is `.gitkeep` and that
+    // permanent floors are asserted by name, so swapping `.gitkeep` for `junk.txt`
+    // passed the guard and passed the pin. Every test of a guard encodes the same
+    // understanding the guard does; only reading the documentation against the code
+    // finds a promise the code does not keep. Pinned here so the two cannot drift
+    // apart again without this failing.
+    if (!/\*\/"\$FLOOR_NAME"\) FLOOR_DIRS\["\$dir"\]=1/.test(source)) {
+      return 'the floor is no longer recognised by name'
+    }
+    if (!/^FLOOR_NAME='\.gitkeep'$/m.test(source)) return 'the floor name is not .gitkeep'
+    // And a `.md` file is still never a floor: the promoter would carry it off and
+    // promote it as though it were a record.
     if (!/\*\.md\) RECORD_DIRS\["\$dir"\]=1/.test(source)) return 'a .md file is no longer counted as a record'
 
     // THE HEAD MUST CARRY THE TOP-LEVEL FLOOR UNCONDITIONALLY. The bootstrap
@@ -1325,22 +1335,9 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
     // alone; scoped to "either side" — `base_has_top_floor = 1 && head = 0`, which
     // is how it first shipped — it passes a tree where NEITHER side has the floor,
     // which is the state the guard exists to refuse, on the first run, when nothing
-    // else is watching. The boundary is pinned in the guard's own suite; this stops
-    // the condition regressing to the two-sided spelling.
+    // else is watching.
     if (!/if \[ "\$head_has_top_floor" = 0 \]; then/.test(source)) {
       return 'the top-level floor check is no longer asked of the head unconditionally'
-    }
-
-    // THE TRIGGER, WHICH IS THE THIRD FACTOR. A correct predicate over a correct
-    // domain enforces nothing on an event that exits before reaching either. This
-    // guard skipped every non-branch event, so a push to main deleting a
-    // record-less floor passed it — and the main-tree pin that was named as the
-    // compensating control did not cover that state either. `ci.yml` triggers on
-    // `push: branches: [main]` and `layering` runs there with `fetch-depth: 0`, so
-    // the event was reachable all along; `before`/`after` are the base/head pair.
-    if (!/^\s*push\)/m.test(source)) return 'push to main is not a guarded event'
-    if (!source.includes('event_sha before') || !source.includes('event_sha after')) {
-      return 'the push payload mapping is incomplete'
     }
 
     // THE DOMAIN, NOT JUST THE PREDICATE. The record-directory loop enumerates only
@@ -1356,6 +1353,17 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
       return 'the guard no longer checks every floor the base has'
     }
     if (!/\$\{#removed\[@\]\}" -gt 0/.test(source)) return 'a removed floor is not a failure'
+
+    // THE TRIGGER, WHICH IS THE THIRD FACTOR. A correct predicate over a correct
+    // domain enforces nothing on an event that exits before reaching either. This
+    // guard skipped every non-branch event, so a push to main deleting a
+    // record-less floor passed it — and the main-tree pin named as the compensating
+    // control did not cover that state either. `ci.yml` triggers on
+    // `push: branches: [main]` and `layering` runs there with `fetch-depth: 0`.
+    if (!/^\s*push\)/m.test(source)) return 'push to main is not a guarded event'
+    if (!source.includes('event_sha before') || !source.includes('event_sha after')) {
+      return 'the push payload mapping is incomplete'
+    }
 
     // "Not there" and "could not look" must stay different answers. `ls-tree`
     // succeeds with empty output for an absent path, so the exit code is the only
@@ -1486,6 +1494,14 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
     [
       'the push before-sha mapping is dropped',
       (source) => source.replace('event_sha before', ''),
+    ],
+    [
+      'any non-record file counts as a floor again — the junk.txt bypass, restored',
+      (source) => source.replace('*/"$FLOOR_NAME") FLOOR_DIRS["$dir"]=1 ;;', '*) FLOOR_DIRS["$dir"]=1 ;;'),
+    ],
+    [
+      'the floor name is changed out from under the documentation',
+      (source) => source.replace("FLOOR_NAME='.gitkeep'", "FLOOR_NAME='.keepme'"),
     ],
     [
       'an unreadable tree becomes a pass',
