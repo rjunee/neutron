@@ -152,7 +152,7 @@ async function seedApproved(): Promise<void> {
 }
 
 describe('#541 the arbiter tier is CONSULTED by the composed orchestrator', () => {
-  test('a wired `arbitrate` reaches the real merge deps and its retry decision lands the build', async () => {
+  test('a wired `arbitrate` reaches the real merge deps and its retry decision lands the build (no arbiter text passed)', async () => {
     const { host } = mergingHost(1)
     const seen: ArbitrationInput[] = []
     let resolverCalls = 0
@@ -192,7 +192,9 @@ describe('#541 the arbiter tier is CONSULTED by the composed orchestrator', () =
       expect(seen[0]?.run.id).toBe(RUN_ID)
       // Rooted at the run's own merge worktree, not the shared checkout.
       expect(seen[0]?.repo_path).toBe(WT)
-      // And ACTED ON: the resolver was re-dispatched carrying the reasoning.
+      // And ACTED ON: the resolver was re-dispatched. NOTHING the arbiter wrote goes
+      // with it — the guidance channel was removed because passing an untrusted judge's
+      // prose into a credentialed, write-capable prompt let it steer that agent.
       expect(resolverCalls).toBe(2)
       expect(new TridentRunStore(db).get(RUN_ID)?.phase).toBe('done')
     } finally {

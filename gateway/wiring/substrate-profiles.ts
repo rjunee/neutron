@@ -335,10 +335,13 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
  * stops this turn pushing; it does nothing about its CALLER pushing its edits.
  *
  * That half is closed somewhere else entirely, and NOT by this profile: `trident/arbiter.ts`
- * grants only Read/Glob/Grep, and `--tools` is a real CLI-level gate that survives
+ * grants NO TOOLS AT ALL, and `--tools` is a real CLI-level gate that survives
  * `--dangerously-skip-permissions` (proved against a real binary in
- * `trident/__tests__/arbiter-tool-gate.e2e.test.ts`). A turn with no `Bash` cannot write at
- * all, so there is no local write for this profile to worry about. `merge.ts`'s
+ * `trident/__tests__/arbiter-tool-gate.e2e.test.ts`). Read tools were removed alongside the
+ * write ones, because dropping `Bash` stopped writes and did nothing about DISCLOSURE:
+ * `Read` alone lets a malicious input aim at a credential file while the verdict channel
+ * carries the answer out. A turn with no tools can neither write nor read, so there is no
+ * local filesystem reach for this profile to worry about. `merge.ts`'s
  * `worktreeFingerprint` is kept as labelled defence in depth — it cannot see an asynchronous
  * writer and is not the enforcement of anything.
  *

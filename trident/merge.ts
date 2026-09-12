@@ -1808,12 +1808,39 @@ export async function worktreeFingerprint(run_host: RunHostCommand, wt: string):
  */
 export const ARBITER_HISTORY_BYTES_PER_SIDE = 2_048
 
-/** Keep the FIRST `maxBytes` bytes of `s` (UTF-8). A cut landing mid-character yields
- *  a replacement char, which is cosmetic and never a parse the prompt relies on. */
-function headBytes(s: string, maxBytes: number): string {
-  const buf = Buffer.from(s, 'utf8')
-  if (buf.byteLength <= maxBytes) return s
-  return buf.subarray(0, maxBytes).toString('utf8')
+/**
+ * Keep the longest prefix of `s` whose UTF-8 encoding is at most `maxBytes` bytes,
+ * cutting only on CODE-POINT boundaries (#541 review round 8).
+ *
+ * THE PREVIOUS VERSION WAS NOT A BYTE CAP, AND IT WAS THE THING DOING THE ENFORCING.
+ * It sliced the `Buffer` and decoded whatever fell out, so a cut landing mid-character
+ * produced U+FFFD — which RE-ENCODES TO THREE BYTES. `headBytes('a'.repeat(2047) +
+ * '\u{1F600}TAIL', 2048)` came back 2,050 bytes. The comment called that "cosmetic";
+ * it was the cap silently failing by up to two bytes per truncation, in the one function
+ * the caller relies on for the guarantee.
+ *
+ * Worth recording WHY it survived three rounds. Last round the guarantee was moved from
+ * the composition to the returned value, which was the right move and changed nothing,
+ * because the primitive doing the asserting was itself wrong — and the test that proved
+ * the cap used only ASCII, so it shared the primitive's blind spot exactly. Moving an
+ * assertion closer to the guarantee is worth nothing if the thing you assert WITH is the
+ * broken part.
+ *
+ * `for…of` iterates CODE POINTS, so a surrogate pair is never split, and the returned
+ * string's re-encoded length is the quantity actually bounded.
+ */
+export function headBytes(s: string, maxBytes: number): string {
+  if (maxBytes <= 0) return ''
+  if (Buffer.byteLength(s, 'utf8') <= maxBytes) return s
+  let out = ''
+  let used = 0
+  for (const codePoint of s) {
+    const size = Buffer.byteLength(codePoint, 'utf8')
+    if (used + size > maxBytes) break
+    out += codePoint
+    used += size
+  }
+  return out
 }
 
 /**
@@ -1945,13 +1972,17 @@ async function sideHistory(
  * everything else is today's escalation, which is why this function cannot make
  * the merge worse than it is without it.
  *
- * THE EVIDENCE IS NOW SPLIT BY WHO CAN REACH IT (#541 review round 3). The arbiter
- * has Read/Glob/Grep and nothing else, so:
- *   - the conflict HUNKS are named, not pasted — it is standing in the files, and a
- *     pasted excerpt would be a second, staler copy of what it can open;
- *   - each side's HISTORY is pasted, because that is the one thing it used to get
- *     from Bash and can no longer obtain. Bounded per side and defanged
- *     (`sideHistory`), since git-authored text is attacker-influenceable.
+ * THE EVIDENCE IS EVERYTHING THE ARBITER WILL EVER SEE (#541 review round 8). The turn
+ * has NO TOOLS — not read-only ones, none — so it cannot open the conflicted files, and
+ * this function's output is the whole of its world:
+ *   - the conflicted PATHS are named (folded per name), so it knows what is in dispute;
+ *   - each side's HISTORY is pasted, bounded per side and defanged (`sideHistory`),
+ *     because git-authored text is attacker-influenceable;
+ *   - the resolver's own escalation question is quoted, folded.
+ * If the arbiter ever genuinely cannot decide from this, the fix is to ADD A FIELD HERE,
+ * never to restore a tool: the caller controlling exactly what the judge can see IS the
+ * confinement property, and it is the only one available while the profile shape freezes
+ * `permission_mode`/`sandbox`.
  */
 async function arbitrateConflict(
   arbitrate: TridentArbiter | undefined,

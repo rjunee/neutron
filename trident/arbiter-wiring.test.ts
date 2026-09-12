@@ -32,6 +32,7 @@ import type { HostCommandResult } from './git-mode.ts'
 import {
   ARBITER_HISTORY_BYTES_PER_SIDE,
   buildMergeCleanupDeps,
+  headBytes,
   CONFLICT_ARBITER_RETRY_OPTION,
   CONFLICT_ARBITRATION_OPTIONS,
   MAX_ARBITRATIONS_PER_REBASE,
@@ -1006,6 +1007,37 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     return parts.slice(1).map((part) => part.split('\n\n')[0] ?? '')
   }
 
+  test('headBytes is a BYTE cap for every character width, not just ASCII', () => {
+    // THE PRIMITIVE THAT WAS DOING THE ENFORCING WAS ITSELF WRONG, for three rounds. It
+    // sliced a Buffer and decoded the remainder, so a cut landing mid-character produced
+    // U+FFFD — which re-encodes to THREE bytes. The exact repro is the first case below:
+    // it returned 2,050 bytes for a 2,048 cap.
+    //
+    // And the reason no test saw it is the part worth keeping: the cap test used only
+    // ASCII `A`, so it shared the primitive's blind spot exactly. Moving the assertion
+    // closer to the guarantee (which is what last round did, correctly) buys nothing when
+    // the thing you assert WITH is the broken part. Every width is driven here, each
+    // straddling the boundary, and the assertion is on the RE-ENCODED length.
+    const cap = ARBITER_HISTORY_BYTES_PER_SIDE
+    const cases: [string, string, number][] = [
+      ['4-byte emoji straddling the boundary', 'a'.repeat(cap - 1) + '\u{1F600}TAIL', cap],
+      ['3-byte CJK straddling the boundary', 'a'.repeat(cap - 2) + '世界', cap],
+      ['2-byte latin straddling the boundary', 'a'.repeat(cap - 1) + 'éé', cap],
+      ['nothing but 4-byte characters', '\u{1F600}'.repeat(700), cap],
+      ['an exact ASCII fit is not truncated', 'a'.repeat(cap), cap],
+      ['a cap smaller than one character yields empty', '\u{1F600}abc', 2],
+    ]
+    for (const [name, input, limit] of cases) {
+      const out = headBytes(input, limit)
+      expect(Buffer.byteLength(out, 'utf8'), name).toBeLessThanOrEqual(limit)
+      // Never a replacement character: the cut is on a code-point boundary, so no
+      // partial sequence is ever decoded.
+      expect(out.includes('\uFFFD'), `${name}: produced U+FFFD`).toBe(false)
+    }
+    // Not vacuous — the exact-fit case really does return the whole string.
+    expect(headBytes('a'.repeat(cap), cap).length).toBe(cap)
+  })
+
   test(`each side is at most ARBITER_HISTORY_BYTES_PER_SIDE bytes — AT the cap and at cap+1`, async () => {
     // ASSERT THE CLAIM, NOT A PROXY. The previous tests asserted the whole evidence
     // stayed under 8,000 bytes, which is four times the advertised per-side cap — it
@@ -1014,15 +1046,20 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     // that dropped a record. Both boundaries are driven, because a cap tested only
     // well past its edge is a cap tested nowhere near it.
     const cap = ARBITER_HISTORY_BYTES_PER_SIDE
-    for (const [label, firstRecordBytes] of [
-      ['at the cap', cap],
-      ['at cap+1', cap + 1],
+    for (const [label, firstRecordBytes, filler] of [
+      ['at the cap', cap, 'A'],
+      ['at cap+1', cap + 1, 'A'],
+      // MULTIBYTE, because the ASCII-only version of this test is exactly what let a
+      // broken `headBytes` through: 4-byte characters are where a buffer-slicing
+      // truncation overshoots.
+      ['at cap+1 with 4-byte characters', cap + 1, '\u{1F600}'],
     ] as const) {
       const run = localRun(`feat-cap-${firstRecordBytes}`)
       const wt = wtOf('/shared', run)
       // A newest record sized exactly at (or one past) the cap, plus an older one — the
       // shape that forced the marker to be appended outside the budget.
-      const newest = `n0001 ${'A'.repeat(Math.max(0, firstRecordBytes - 7))}`
+      const fillerBytes = Buffer.byteLength(filler, 'utf8')
+      const newest = `n0001 ${filler.repeat(Math.max(0, Math.ceil((firstRecordBytes - 7) / fillerBytes)))}`
       const { host } = historyHost(wt, () => ok([newest, 'o9999 older\n'].join('\u0000') + '\u0000'))
       const { arbitrate, seen } = stubArbiter({ kind: 'unavailable', reason: 'x' })
       const deps = buildMergeCleanupDeps(host, {

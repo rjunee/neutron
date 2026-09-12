@@ -6075,13 +6075,15 @@ export function buildOpenGraphComposer(
     // #541 — THE ARBITER TIER, above the resolver. `buildFableArbiter` had been
     // built, unit-tested and exported with ZERO production call sites since
     // 2026-08-15; this is the construction that gives it one. A fresh ephemeral
-    // REPL rooted in the conflicted worktree gets ONE bounded turn when the
-    // resolver escalates, and may only choose between "retry with this guidance"
-    // and "stop" — `approve`, `merge` and `skip-review` cannot even enter the
-    // option set (`FORBIDDEN_OPTION_IDS`). Instance prefix per `arbiter.ts`. Gated
-    // on the SAME live-credential predicate as the resolver: an arbiter can only
-    // run where builds run. Absent → a resolver escalation posts its question to
-    // chat, exactly as before.
+    // REPL with NO TOOLS AT ALL gets ONE bounded turn when the resolver escalates,
+    // and returns one bit: grant another resolver round, or let the escalation
+    // reach the owner. Nothing it writes is passed anywhere — the guidance channel
+    // was removed because it let an untrusted judge steer a credentialed agent —
+    // and `approve`/`merge`/`skip-review` cannot even enter the option set
+    // (`FORBIDDEN_OPTION_IDS`). Instance prefix per `arbiter.ts`. Gated on the SAME
+    // live-credential predicate as the resolver: an arbiter can only run where
+    // builds run. Absent → a resolver escalation posts its question to chat,
+    // exactly as before.
     //
     // CREDENTIAL-FREE BY PROFILE, not by prompt — the `PROFILE_LEAK_FIXER` rule
     // fourteen lines below, and this turn needs it MORE than that one does. On the

@@ -63,6 +63,57 @@ file; one seam per change. And `on_infra_retry` (`orchestrator.ts:387`), which i
 other never-passed production option — issue #535 owns it, and this change does not
 silently expand into it.
 
+### THE ARBITER HAS NO TOOLS — and the test that said otherwise was pinning the bug
+
+The final gate found a live hole and it is the sharpest finding of the lane. Dropping
+`Bash` removed the WRITE vector and was treated as closing the boundary. It does not:
+**removing write tools does not prevent disclosure.** `Read` alone is sufficient — this
+turn is fed repository-authored text (commit messages, filenames, another agent's prose),
+so a malicious input aims a read at a credential file or a sibling checkout and the verdict
+channel carries the answer out. One bit per arbitration is still a channel, and the
+attacker chooses the question. Before this PR that was dormant code; wiring the call site
+converted a latent capability into a reachable attack surface.
+
+**And my own e2e test asserted the vulnerability as expected behaviour.** I wrote an arm
+named "KNOWN GAP" that asserts an absolute read outside the cwd SUCCEEDS — deliberately,
+with a measurement, and green. On a security boundary, in the PR that made it reachable. A
+passing test pinning a defect is the failure mode this entire lane chased, and I committed
+the purest instance of it while writing the section that names the pattern. It is deleted
+and replaced by its inverse: hostile input instructed to disclose a canary outside the cwd
+gets nothing, with a control arm granting `Read` that discloses it immediately — so the
+absence is attributable to the grant and not to a model declining.
+
+`ARBITER_TOOL_NAMES` is now `[]`. Confinement by flags was never available (the profile
+shape freezes `permission_mode`/`sandbox` until phase B/D), so the choice was unconfined or
+toolless. Toolless is also the better design rather than merely the safer one: the caller
+already assembles and folds every piece of evidence, so **the caller controls exactly what
+the judge can see** — the confinement property, obtained structurally. A judge that can go
+read the tree is not judging the evidence it was given. If it ever cannot decide, the
+evidence assembly is short a field; add the field, never the tool. `--tools ""` disabling
+every built-in is the #361/#175 mechanism used ON PURPOSE here — that lesson is about a
+turn which NEEDS tools getting none, and this turn needs none.
+
+Everything that presupposed a shell went with it: the prompt no longer carries
+`REDIRECT_RULE` or `NO_PATTERN_KILL_RULE`, and no longer tells the turn to "Read the
+conflicted files as needed". Prose contradicting the grant next to a security boundary is
+worse than elsewhere, because the next reader resolves the contradiction by trusting the
+comment.
+
+### The byte cap was never a byte cap — the primitive was the broken part
+
+Three rounds on one cap. Round 6 moved the guarantee from the composition to the returned
+value, which was right and changed nothing, because `headBytes` sliced a UTF-8 `Buffer` and
+decoded whatever fell out: a cut landing mid-character yields U+FFFD, which **re-encodes to
+three bytes**. `headBytes('a'.repeat(2047) + '😀TAIL', 2048)` returned 2,050 bytes. It now
+truncates on code-point boundaries and the assertion is on the re-encoded length.
+
+The reason no test saw it is the lesson: the cap test used only ASCII `A`, so it shared the
+primitive's blind spot exactly. **Moving an assertion closer to the guarantee buys nothing
+when the thing you assert WITH is the broken part** — and the only reason this surfaced is
+that someone fed it a character the test author never would have. Every width now straddles
+the boundary in the test, and the per-side cap case runs with 4-byte characters as well as
+ASCII.
+
 ### The read-only property, and the two wrong answers before it
 
 THE ENFORCEMENT IS THE TOOL SURFACE. `ARBITER_TOOL_NAMES` is `['Read','Glob','Grep']`.
