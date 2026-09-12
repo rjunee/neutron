@@ -317,6 +317,70 @@ policy as #538, whose herdr client must `ping` and compare protocol versions bec
 the socket server does none and the protocol moved 20 → 22 in nineteen days: verify
 the contract at startup, fail loudly, rather than discover it mid-run.
 
+### The acceptance section is the product, and it was wrong five times
+
+The verdict never moved across six review rounds. The **criteria** were corrected in
+every one, and always in the same direction: **narrower than the rule they enforce.**
+The billing test covered two credential variables of four; the cache ratio proved
+warmth rather than resumption; the symlink check was satisfied by a hard link; the
+sandbox assertion was satisfied by an empty value; the approval criterion contradicted
+the very form the contract prescribed. For a docs-only change that is the whole risk —
+everything else here is prose describing a decision, while the criteria are what will
+be executed against an implementation by someone who was not in the conversation.
+
+**The discipline, adopted explicitly and now written into the section itself:** after
+stating a rule, write its criterion and then ask **"what is the weakest implementation
+that passes this?"** If the answer is an implementation you would reject, the criterion
+is not finished. It is the question this repository already asks of code, turned on
+one's own criteria — and it is mechanical, so it can be run over a whole section in one
+pass.
+
+**Run over all ten criteria, it caught eight.** Two were the findings that prompted the
+pass; six were not:
+
+| criterion | weakest implementation that passed |
+|---|---|
+| durable recall | "resume the most recent thread" — with one thread in the store, `--last` returns the nonce |
+| `--last` ban | an adapter avoiding the literal string and computing newest-thread itself |
+| sandbox mode | honours the caller's mode, then passes `--dangerously-bypass-approvals-and-sandbox` |
+| credential scrub | `bash -lc "codex …"`, whose login shell re-sources the profile and can re-export a scrubbed key |
+| symlink sharing | a rotation performed *through the secondary path*, replacing the link with a regular file |
+| overlapping calls | a single global lock — "B waited" passes while every unrelated call serializes too |
+| approvals (found) | never escalating at all, satisfying the "not requested" branch |
+| startup probe (found) | a stub that accepts `resume` but rejects `sandbox_mode`, failing mid-turn |
+
+Fixes, respectively: a decoy thread created *after* the recorded one so newest ≠
+recorded; a behavioural half beside the grep; the bypass-flag exclusion moved to where
+sandbox is asserted; an assertion that codex is exec'd directly, not through a login
+shell; a rotation through both paths with `islink` re-checked; a different-thread-ids
+half asserting overlap; driving a real escalation to completion; and per-key negative
+cases proving no turn spawned.
+
+### Two measurements that simplified the result
+
+**One approval form, not two.** The contract had prescribed `--approve-for-me` on first
+calls and `-c approvals_reviewer=auto_review` on resumed ones — a split that made the
+acceptance assertion contradict the documented design. Measuring removed the split
+rather than encoding it: `-c approval_policy=on-request -c approvals_reviewer=auto_review`
+completes an escalated write on a **first** call too, so there is one form everywhere
+and one assertion. `--approve-for-me` is dropped; it is the same thing spelled as a flag
+and does not exist on `codex exec resume`.
+
+**The startup probe is free.** `codex exec --strict-config` rejects an unrecognised
+`-c` key with `unknown configuration field <name>` and exits **before any model call** —
+0.06 s, zero tokens. Passing every relied-upon key together with one deliberately bogus
+**sentinel** therefore validates them all in a single free invocation: codex names only
+the sentinel when every real key is recognised, and names a misspelled real key
+*instead of* the sentinel when one is not. The sentinel also makes the probe fail
+closed — if codex ever stopped rejecting unknown keys, nothing would be named and the
+probe must treat that as unsupported.
+
+> Incidental, found while building that probe and not chased: the owner's live
+> `config.toml` carries a per-project `approval_policy` field that **0.149.1 no longer
+> recognises**, so any codex invocation adding `--strict-config` fails to load config
+> at all. Nothing runs `--strict-config` today. Noted because the probe above is the
+> first thing that would.
+
 ### Not established
 
 - Whether `codex app-server proxy` and the unix control socket work at all. Twenty

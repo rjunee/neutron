@@ -121,8 +121,12 @@ the adapter's.
    approval_policy=on-request` alone makes codex refuse an escalation outright, with
    **exit 0** and no event, so a caller that sets it without a reviewer gets a task
    silently not done. The only headless mechanism is codex's own automatic-review
-   subagent, reached as `--approve-for-me` on a first call and as `-c
-   approvals_reviewer=auto_review` on a resumed one. **It is not a safety control**
+   subagent, and there is **one form for every call**: `-c approval_policy=on-request`
+   with `-c approvals_reviewer=auto_review`, measured working on a first call and on a
+   resumed one alike. `--approve-for-me` is the same thing spelled as a flag and is
+   **not used**, because it does not exist on `codex exec resume` — one form that works
+   everywhere beats two that must be selected by call shape. **It is not a safety
+   control**
    — the spike did not establish that it ever denies. Therefore: work that needs an
    approval *decision* does not run on headless codex, and an approval that must
    reach the **owner** never does — owner questions flow from the orchestrator
@@ -164,157 +168,148 @@ the adapter's.
 
 ## Acceptance
 
-- [ ] A recorded `thread_id` survives **the adapter being destroyed**, and the
-      resumed call reaches the first call's conversation. verify: one test that
-      crosses a real restart, because two calls in one process is a weaker claim
-      wearing this one's clothes — **a memory-only `Map` passes that and loses
-      continuity on restart, which is the exact boundary this design is built on.**
-      The test: (1) generate a fresh high-entropy nonce (≥128 bits, e.g.
-      `randomUUID()`) and plant it in call 1; (2) **destroy the adapter instance and
-      every in-process cache** — a new process, or at minimum a new instance
-      constructed from nothing but the durable store's path; (3) **reload the
-      thread id from durable state**, and assert it was read from there, not
-      carried in a variable; (4) resume and assert the nonce comes back by **exact
-      structured extraction** — equality against the generated string, never a
-      substring sniff or a model-judged "mentions it".
-      Control: a call prompted with the **byte-identical text** and no `thread_id`
-      must not return the nonce. And assert the nonce is absent from call 2's own
-      prompt and from any file the run can read (the worktree, `AGENTS.md`, the spec
-      items), or what is measured is retrieval from context the test handed over.
-      A low-entropy or guessable fact would let the "no memory at all"
-      implementation pass the control by inference, which is one of the two wrong
-      implementations this criterion exists to catch; the memory-only map is the
-      other.
-- [ ] The resumed call is built as a **resume of the recorded id**, asserted
-      deterministically on the argv. verify: a test asserts the argv for a
-      follow-up call is exactly `exec resume <the recorded thread_id> …` — the
-      `resume` **subcommand**, not a `--resume` flag (which does not exist on the
-      pinned CLI: `codex exec --resume <id>` returns `error: unexpected argument
-      '--resume' found`, exit 2) — and that the id equals the one read back from
-      durable state. Negative half: an adapter that re-establishes context by
-      re-sending prompt text must fail, which this catches because its argv carries
-      no `resume` subcommand and no id.
-      **This, plus the restart-crossing test above, is the proof that the thread was
-      reused.** The cache ratio is not: see the telemetry note below.
-- [ ] Every `resume` call applies the **caller's** sandbox mode and cwd, exactly.
-      verify: a test builds resume argv for **two different** caller-requested
-      modes (e.g. `read-only` and `workspace-write`) and asserts, for each, that
-      argv contains `-c sandbox_mode=<that exact value>` — string equality against
-      the requested mode, not a prefix or substring match on `sandbox_mode=`. Two
-      modes is the load-bearing part: one mode is satisfied by a hard-coded
-      constant. The test asserts explicitly that no argv it builds carries an empty
-      value or `danger-full-access` unless that is what the caller asked for, and
-      that the child's cwd equals the caller's value — exercised with a caller cwd
-      **different from the test process's own**, so inheriting the parent's cwd
-      fails rather than coincidentally passing.
-- [ ] `--last` appears nowhere in the adapter. verify: `grep -rn -- '--last'` over
-      the adapter's sources returns nothing, with the positive control that the
-      same grep over `docs/spec-items/codex-work-runs-headless-per-call-on-a-reused-thread.md`
-      finds it.
-- [ ] A metered API key cannot be spent, **including one inherited from the
-      parent environment**. verify: two tests, and the second is the one that
-      matters.
-      (i) File path: an `auth.json` with `auth_mode` absent and `OPENAI_API_KEY`
-      set returns the not-connected outcome without spawning codex; a subscription
-      `auth.json` does spawn it.
-      (ii) **Environment path:** the test seeds the **union of every recognised
-      codex credential variable** in the parent environment — `OPENAI_API_KEY`,
-      `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN` — alongside a valid
-      subscription `auth.json`, then asserts **not one of them is present in the
-      spawned child's environment**. The union, not either existing list: the
-      wrappers unset only the first two (`trident/codex-review.sh:152`,
-      `trident/codex-build.sh:850`) while `auth.ts:24-33` classifies the last two as
-      variables the spawn "must NOT inherit". #645 unifies the lists; **this
-      criterion does not wait for it**, because a boundary this item promises is a
-      boundary this item tests. An implementation that leaks `OPENAI_AUTH_TOKEN`
-      would otherwise pass this suite while breaking the contract the suite exists
-      to enforce — on a hole this very document names.
-      Bidirectional half: a benign control variable seeded in the parent (say
-      `NEUTRON_SCRUB_CONTROL=1`) and `PATH` must **still be present** in the child,
-      or a scrub that empties the whole environment satisfies the assertion above. The assertion must read the child's env (the env
-      object handed to the spawn, or `/proc/<pid>/environ`), **never** the config or
-      the `auth.json` — the file being correct is exactly what the broken
-      implementation gets right. This is not hypothetical: the codex CLI **prefers**
-      an inherited `OPENAI_API_KEY` over persisted OAuth, which is why
-      `trident/codex-review.sh:145-152` unsets both variants under a header calling
-      it a HARD BILLING CONTRACT. An adapter that validates the file and then leaks
-      an inherited key into the child silently bills a metered key while passing
-      every other criterion here.
-- [ ] A second `CODEX_HOME` for one account reaches the canonical `auth.json`
-      **through a symlink**, and keeps reaching it across a rotation. verify: two
-      assertions, and the second is the one with teeth.
-      (i) **Structural:** `lstat` on the secondary `auth.json` reports a **symbolic
-      link** (`islink` true), and the link resolves to the canonical file — assert
-      `realpath` equality, **never inode equality**, which a hard link also
-      satisfies.
-      (ii) **Behavioural, and it must use atomic replacement:** rewrite the
-      canonical file the way a client actually rotates a credential — write a temp
-      file, then `rename`/`replace` it over the canonical path — and assert the
-      secondary home reads the **new** token back. An in-place mutation is not an
-      acceptable substitute here: measured, a hard link and a symlink are
-      indistinguishable under in-place write (both read the new value) and diverge
-      only under replacement, where the hard link keeps the old inode and serves a
-      **stale token**.
-      Two mutants this kills, both of which passed the earlier wording: `copyFile`,
-      and `link()`. The second is the dangerous one, because atomic replace is the
-      *correct* way to rewrite a credential file — so a hard-linked implementation
-      would pass every test here and fail in production at the exact moment this
-      criterion exists to protect, a refresh, silently revoking the other home
-      (`trident/codex-credential.ts:396-399`).
-- [ ] Two overlapping calls on one thread id produce the specified behaviour, not a
-      collision. verify: a test starts call A on a thread and, while A is still in
-      flight, starts call B on the same thread id; it asserts B **waited** (B's
-      turn began no earlier than A's completion) and that both returned their own
-      result. Negative half, and the one that matters: a test that forces the
-      writer-lock error — a second `CODEX_HOME`-level caller the per-process queue
-      cannot see — asserts the caller receives the **conflict-specific typed
-      outcome**, and asserts it is NOT the adapter's generic failure outcome and
-      NOT a success. An adapter that swallows the conflict and retries silently, or
-      one that reports it as an ordinary failure, fails this while still passing
-      the waiting half.
-- [ ] An escalation is either **not requested** or **completed explicitly** — never
-      silently refused mid-task. verify: the adapter's default for build-shaped work
-      matches what ships today (`trident/codex-build.sh:1402` runs
-      `--sandbox danger-full-access`, so nothing escalates) and a test asserts the
-      argv carries no approval routing in that mode. For any call that CAN escalate,
-      a test asserts the argv carries **both** `-c approval_policy=on-request` and
-      `-c approvals_reviewer=auto_review`, and drives a real escalation that
-      completes. Negative half, and it is the one that catches the measured trap:
-      a call built with `approval_policy=on-request` and **no** reviewer must be
-      refused by the adapter at build time rather than dispatched — measured on CLI
-      0.149.1, that combination makes codex refuse the escalation outright with
-      **exit 0** and no approval event, so the model reports a task it could not do
-      while the wrapper sees success.
-      A test that only asserts "an escalation succeeded" passes against
-      `--dangerously-bypass-approvals-and-sandbox`, so the test must also assert
-      that flag is absent from every argv the adapter builds.
-- [ ] The codex CLI's contract is **verified at startup and refused loudly** when it
-      does not match. verify: a test drives the adapter against a stub `codex` whose
-      `exec resume --help` lacks the `resume` subcommand and asserts the adapter
-      returns a **distinct typed unsupported-version outcome before spawning any
-      turn** — not a generic failure, and not a run that proceeds. Positive half: a
-      stub exposing the expected surface is accepted and the recorded
-      `codex --version` appears in the run's record.
-      **Chosen: a capability probe, not a version pin** — the number is not the
-      contract, and the contract is not ours to pin. The wrappers do not install
-      codex; they check `command -v codex` and degrade to NOT_CONNECTED
-      (`trident/codex-review.sh:154`, `trident/codex-build.sh:852`), so the binary is
-      whatever the host already has and a version literal in this repo would be a
-      claim about someone else's machine. A probe of the actual surface is
-      enforceable there, and survives a patch release that changes nothing.
-      **This drift is measured, not anticipated:** `runtime/adapters/codex-cli/exec.ts:67`
-      builds `codex exec --resume <id>`, which on 0.149.1 is
-      `error: unexpected argument '--resume' found`, exit 2 — `resume` became a
-      subcommand and a caller in this tree has been broken by it already, reporting
-      only an exit code nobody reads. Same policy as #538, whose herdr client must
-      `ping` and compare protocol versions because the socket server does no version
-      check and the protocol moved 20 → 22 in nineteen days: **verify the contract at
-      startup and fail loudly rather than discovering it mid-run.**
-- [ ] No long-lived codex process is created. verify: a test asserts every codex
-      child the adapter spawns has exited by the time the adapter's call returns,
-      and that the adapter exposes no start/stop/health surface for a server.
-      This is the criterion that fails if the persistent shape is reintroduced by
-      the back door.
+Every criterion below was written, then re-read against one question: **what is the
+weakest implementation that passes this?** Where the answer was an implementation
+that should be rejected, the criterion was widened. The `- [ ]` text is the widened
+form; the "kills:" note names what the earlier form let through.
+
+- [ ] **A recorded `thread_id` survives the adapter being destroyed, and the resumed
+      call reaches the first call's conversation.** verify: (1) generate a fresh
+      ≥128-bit nonce (`randomUUID()`) and plant it in call 1; (2) **create a decoy
+      thread afterwards**, so the recorded thread is *not* the most recent one in the
+      `CODEX_HOME`; (3) destroy the adapter instance and every in-process cache — a
+      new process, or an instance built from nothing but the durable store's path;
+      (4) reload the id from durable state and assert it came from there; (5) resume
+      and assert the nonce returns by **exact equality** against the generated string
+      — never a substring sniff or a model-judged "mentions it".
+      Controls: a call with the byte-identical prompt and no `thread_id` must not
+      return the nonce; and the nonce must be absent from call 2's prompt and from
+      every file the run can read.
+      *kills:* a memory-only `Map` (dies at step 3); a guessable fact (the control
+      passes by inference); **and "resume the most recent thread"** — without the
+      decoy at step 2, `resume --last` recalls the nonce and passes.
+
+- [ ] **The follow-up call is built as a resume of the recorded id, and of no other.**
+      verify: the argv is exactly `exec resume <the recorded id> …` — the `resume`
+      **subcommand**, never a `--resume` flag, which does not exist on this CLI
+      (`codex exec --resume <id>` → `error: unexpected argument '--resume' found`,
+      exit 2) — and the id equals the one read back from durable state. With the
+      decoy thread present, assert the argv carries the **recorded** id and not the
+      decoy's.
+      *kills:* re-sending prompt text to fake continuity (no `resume`, no id); and
+      any newest-thread heuristic, which the decoy makes visible in the argv.
+
+- [ ] **`--last` and every equivalent of it are absent.** verify: `grep -rn -- '--last'`
+      over the adapter's sources returns nothing (positive control: the same grep over
+      this file finds it) **and** the behavioural half — with the decoy thread present,
+      a follow-up call must reach the recorded thread, not the newest.
+      *kills:* an adapter that avoids the literal string but computes "most recent"
+      itself by reading the sessions directory. A grep tests a spelling; this tests
+      the behaviour the rule is about.
+
+- [ ] **Every call applies the caller's sandbox mode and cwd, exactly, and never
+      disables the sandbox.** verify: build argv for **two different** caller-requested
+      modes (`read-only`, `workspace-write`) and assert each carries
+      `-c sandbox_mode=<that exact value>` by string equality — not a prefix match on
+      `sandbox_mode=`. Assert no argv the adapter can build carries an empty value, or
+      `danger-full-access` unless the caller asked for it, or
+      `--dangerously-bypass-approvals-and-sandbox` **ever**. cwd is exercised with a
+      value different from the test process's own.
+      *kills:* a hard-coded constant (two modes); an empty value (prefix match); and
+      **an implementation that honours the mode and then bypasses the sandbox
+      entirely**, which the earlier wording permitted because the bypass exclusion
+      lived only in the approval criterion.
+
+- [ ] **A metered API key cannot be spent, including one inherited from the
+      environment.** verify:
+      (i) an `auth.json` with `auth_mode` absent and `OPENAI_API_KEY` set returns the
+      not-connected outcome without spawning codex; a subscription `auth.json` spawns it.
+      (ii) seed the **union of every recognised credential variable** in the parent —
+      `OPENAI_API_KEY`, `OPENAI_KEY`, `OPENAI_AUTH_TOKEN`, `OPENAI_API_TOKEN` — and
+      assert **not one** reaches the process that execs codex. Read the child's
+      environment (the env handed to the spawn, or `/proc/<pid>/environ`), never the
+      config: the file being correct is what the broken implementation gets right.
+      (iii) assert the adapter **execs `codex` directly** rather than through a login
+      shell.
+      Bidirectional: `PATH` and a benign marker (`NEUTRON_SCRUB_CONTROL=1`) must still
+      be present in the child.
+      *kills:* validating the file and leaking an ambient key (the CLI prefers it —
+      `trident/codex-review.sh:145-152`); scrubbing only the wrappers' two variables
+      while `auth.ts:24-33` names two more the spawn must not inherit; a scrub that
+      empties the environment (the bidirectional half); and **`bash -lc "codex …"`,
+      which re-sources the user's profile and can re-export a scrubbed key into the
+      grandchild that actually runs.**
+
+- [ ] **A second `CODEX_HOME` for one account reaches the canonical `auth.json`
+      through a symlink, and still does after a rotation.** verify:
+      (i) `lstat` on the secondary `auth.json` reports a **symbolic link** and
+      `realpath` equals the canonical file — **never inode equality**, which a hard
+      link also satisfies.
+      (ii) rotate the canonical file the way a client actually does — write temp,
+      then `rename`/`replace` over the path — and assert the secondary reads the new
+      token.
+      (iii) perform a rotation **through the secondary path too**, and assert the
+      secondary is *still a symlink* afterwards and both paths still agree.
+      *kills:* `copyFile`; `link()` — measured, a hard link is indistinguishable from a
+      symlink under in-place writes and serves a **stale token** after an atomic
+      replace; and **a rotation through the secondary path that replaces the link with
+      a regular file**, silently ending the sharing the first two checks established.
+
+- [ ] **Overlapping calls on one thread id serialize; calls on different thread ids do
+      not.** verify: start call A, and while it is in flight start call B on the **same**
+      id; assert B's turn began no earlier than A's completion and both returned their
+      own result. Then start two calls on **different** thread ids and assert they
+      overlap in time. Negative half: force the writer-lock error from outside the
+      per-process queue and assert the caller gets the **conflict-specific typed
+      outcome** — not the generic failure outcome, and not a success.
+      *kills:* swallowing the conflict and retrying silently; reporting it as an
+      ordinary failure; and **a single global lock**, which passes "B waited" while
+      serializing every unrelated call — the different-ids half is what separates a
+      per-thread queue from a process-wide one.
+
+- [ ] **An escalation is either not requested or completed explicitly — never silently
+      refused mid-task.** verify: for build-shaped work the argv matches what ships
+      today (`trident/codex-build.sh:1402` runs `--sandbox danger-full-access`, so
+      nothing escalates) and carries no approval routing. For escalation-capable work,
+      **drive a real escalation to completion** — it is not enough that the mode
+      exists — with argv carrying `-c approval_policy=on-request` **and**
+      `-c approvals_reviewer=auto_review`, on **both** a first call and a resumed one:
+      measured, that single form works on both, so there is one form and one assertion.
+      Negative half: a call built with `approval_policy=on-request` and **no** reviewer
+      must be refused by the adapter before dispatch — measured, that combination makes
+      codex refuse the escalation with **exit 0** and no approval event, so the work is
+      silently not done.
+      *kills:* satisfying the criterion by never escalating at all (the "not requested"
+      branch alone); `--dangerously-bypass-approvals-and-sandbox`, excluded above; and
+      **the earlier split form**, which required `--approve-for-me` on first calls in
+      the contract while the assertion demanded the config pair — so the documented
+      design necessarily failed its own criterion.
+
+- [ ] **The CLI's contract is verified at startup and refused loudly, before any turn
+      is spawned.** verify: the probe checks (a) `codex exec resume --help` exposes the
+      `resume` **subcommand**, and (b) **every config key the adapter passes** —
+      `sandbox_mode`, `approval_policy`, `approvals_reviewer` — is recognised, by one
+      invocation that also carries a deliberately bogus **sentinel** key under
+      `--strict-config`. Measured: codex then reports `unknown configuration field
+      <sentinel>` and exits **before any model call** (0.06 s, zero tokens); a
+      misspelled real key is named **instead of** the sentinel, so the probe is
+      discriminating and free.
+      Positive case: the probe passes and the recorded `codex --version` appears in the
+      run's record. Negative cases, one per relied-upon key: a stub rejecting that key
+      yields a **distinct typed unsupported-version outcome**, and the test asserts
+      **no turn was spawned** — not merely that the run failed.
+      *kills:* a probe that checks only `resume` and lets a rejected `sandbox_mode`
+      surface mid-turn, which is the exact failure the probe exists to prevent; a probe
+      that detects the problem after work has started; and a sentinel-less probe that
+      would pass silently if codex ever stopped rejecting unknown keys.
+
+- [ ] **No long-lived codex process is created.** verify: every codex process the
+      adapter starts — **including any detached or re-parented descendant**, not only
+      direct children — has exited by the time the call returns; no codex process
+      remains in the adapter's process group; and the adapter exposes no
+      start/stop/health surface for a server and opens no listening socket.
+      *kills:* the persistent shape returning by the back door; and **a detached
+      grandchild**, which "every child has exited" does not cover.
 
 ## Telemetry, deliberately not acceptance
 
