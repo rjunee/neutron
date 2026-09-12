@@ -341,14 +341,23 @@ async function readAtRevision(
     // merely came along from the base is not a nomination this build made.
     const changed = await changedFilesOnBranch(run_host, repo_path, base, revision)
     if (changed === null) {
-      // BOTH READINGS, because the diff reader collapses them: it answers null
-      // for a diff it could not read AND for a diff that is EMPTY (its last
-      // line, `files.length === 0 ? null : files`). Saying only "could not read"
-      // sent an operator hunting a git failure for a branch that simply changes
-      // nothing — the exact note ambiguity invariant (c) exists to remove.
+      // WHICH ONE IT WAS, now that the reader can tell. This note used to say
+      // "is empty or could not be read" because `changedFilesOnBranch` answered
+      // null for both — a git failure and a branch that changes nothing — and an
+      // operator was sent hunting a git problem that never happened. The reader
+      // now returns `[]` for the empty diff (`changedFilesWithStatus`), so null
+      // means exactly one thing and the note says it. Invariant (c) — no note
+      // ambiguity — is satisfied by separating the causes rather than by naming
+      // both.
       return {
         claim: null,
-        note: `no committed nomination: the diff ${baseProse}...${revision} is empty or could not be read`,
+        note: `no committed nomination: the diff ${baseProse}...${revision} could not be read`,
+      }
+    }
+    if (changed.length === 0) {
+      return {
+        claim: null,
+        note: `no committed nomination: the diff ${baseProse}...${revision} is empty — this branch changes no file`,
       }
     }
     if (!changed.includes(path)) {

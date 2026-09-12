@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path'
 import type { HostCommandResult } from './git-mode.ts'
 import { spawnCapture } from './git-mode.ts'
 import type { RunHostCommand } from './merge.ts'
-import { isProseOnlyChange, parseMutationClaim, runMutationProofGate } from './mutation-prover.ts'
+import { classifyMutationTarget, isProseOnlyChange, parseMutationClaim, runMutationProofGate } from './mutation-prover.ts'
 import {
   MUTATION_CLAIM_ARTIFACT_DIR,
   MUTATION_CLAIM_ARTIFACT_MAX_BYTES,
@@ -53,6 +53,35 @@ function fail(exit_code: number): HostCommandResult {
   return { ok: false, stdout: '', stderr: 'fatal: path does not exist', exit_code }
 }
 
+/**
+ * A scripted answer to the reader's diff leg, in the wire format
+ * `changedFilesWithStatus` actually parses: `-z --name-status`, i.e.
+ * `<status>NUL<path>NUL` records rather than newline-separated names. Tests
+ * still spell the thing they mean (a newline listing) and this puts the record
+ * shape around it, so a change to the reader's flags lands in ONE place.
+ */
+function diffOk(listing: string): HostCommandResult {
+  const paths = listing.split('\n').filter((l) => l.length > 0)
+  return ok(paths.map((path) => `M\0${path}\0`).join(''))
+}
+
+/** The exact argv the reader issues for the diff leg. Spelled once so the
+ *  assertions below pin the real command instead of drifting from it. */
+function diffArgv(base: string, rev: string): string[] {
+  return [
+    'git',
+    '-C',
+    REPO,
+    '-c',
+    'core.quotePath=false',
+    'diff',
+    '-z',
+    '--no-renames',
+    '--name-status',
+    `${base}...${rev}`,
+  ]
+}
+
 /** The OID a mutable ref is pinned to before the read's three legs run. */
 const REF_OID = 'b'.repeat(40)
 
@@ -79,7 +108,11 @@ function makeHost(opts: {
     calls.push([...cmd])
     if (opts.throws === true) throw new Error('spawn failed')
     if (cmd.includes('rev-parse')) return answer(opts.pin, `${REF_OID}\n`)
-    if (cmd.includes('diff')) return answer(opts.diff, `${PATH}\ntrident/limit.ts\n`)
+    if (cmd.includes('diff')) {
+      return opts.diff === undefined || typeof opts.diff === 'string'
+        ? diffOk(opts.diff ?? `${PATH}\ntrident/limit.ts\n`)
+        : opts.diff
+    }
     if (cmd.includes('cat-file')) {
       return answer(opts.size, String(Buffer.byteLength(typeof body === 'string' ? body : '', 'utf8')))
     }
@@ -120,7 +153,7 @@ describe('readCommittedMutationClaim', () => {
     // from git's object record BEFORE the body is ever asked for — the ordering
     // is what makes the cap bound the read rather than describe it afterwards.
     expect(host.calls).toEqual([
-      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`],
+      diffArgv(BASE, OID),
       ['git', '-C', REPO, 'cat-file', '-s', `${OID}:${PATH}`],
       ['git', '-C', REPO, 'show', `${OID}:${PATH}`],
     ])
@@ -136,13 +169,13 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).toBeNull()
     expect(read.note).toContain('is not in the diff')
     // Refused on the DIFF leg — no body was ever fetched.
-    expect(host.calls).toEqual([['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${OID}`]])
+    expect(host.calls).toEqual([diffArgv(BASE, OID)])
   })
 
   test('AN INHERITED, UNTOUCHED ARTIFACT IS NOT A NOMINATION', async () => {
     // The regression this file exists for: the path is tracked, so a branch cut
     // after a predecessor merged starts life already holding a nomination it
-    // never wrote. `git diff --name-only base...rev` does not list it, and the
+    // never wrote. `git diff --name-status base...rev` does not list it, and the
     // read must be null — "nominated nothing" must not become "reuse the
     // previous PR's claim".
     const inherited = makeHost({ diff: 'trident/unrelated.ts\n' })
@@ -160,22 +193,27 @@ describe('readCommittedMutationClaim', () => {
     const host = makeHost({ diff: fail(128) })
     const read = await readCommittedMutationClaim(host.run, REPO, SOURCE)
     expect(read.claim).toBeNull()
-    expect(read.note).toContain('is empty or could not be read')
+    expect(read.note).toContain('could not be read')
+    expect(read.note).not.toContain('is empty')
   })
 
-  test('an EMPTY diff is not reported as an unreadable one', async () => {
-    // `changedFilesOnBranch` answers null for both, so the note must not pick a
-    // side: a branch that changes nothing sent an operator hunting a git failure
-    // that never happened. The note names both readings, which is what the
-    // reader actually knows.
+  test('an EMPTY diff is not reported as an unreadable one — and now says which it is', async () => {
+    // THE AMBIGUITY, CLOSED FROM THE OTHER END. This note used to name BOTH
+    // readings because the diff reader collapsed them into one null; it no
+    // longer does (`changedFilesWithStatus` returns `[]` for a diff git read
+    // perfectly and found empty), so each cause gets its own sentence and an
+    // operator is not sent hunting a git failure that never happened.
     const empty = makeHost({ diff: '' })
     const emptyRead = await readCommittedMutationClaim(empty.run, REPO, SOURCE)
     expect(emptyRead.claim).toBeNull()
-    expect(emptyRead.note).toContain('is empty or could not be read')
-    // The two indistinguishable causes really do read the same, deliberately…
+    expect(emptyRead.note).toContain('is empty')
+    expect(emptyRead.note).not.toContain('could not be read')
+    // The two causes are DISTINGUISHABLE — the whole point of the separation.
     const broken = makeHost({ diff: fail(128) })
-    expect((await readCommittedMutationClaim(broken.run, REPO, SOURCE)).note).toBe(emptyRead.note)
-    // …and the old one-sided wording is gone.
+    const brokenNote = (await readCommittedMutationClaim(broken.run, REPO, SOURCE)).note
+    expect(brokenNote).not.toBe(emptyRead.note)
+    expect(brokenNote).toContain('could not be read')
+    // …and the old one-sided wording is still gone.
     expect(emptyRead.note).not.toContain('could not read the diff')
     // POSITIVE CONTROL: a diff that DOES list the artifact still reads a claim,
     // so this is a note about a real refusal and not a constant.
@@ -202,7 +240,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.note).toContain('main?FORGED?APPROVE?')
     // THE OPERAND IS UNTOUCHED: folding what git receives would read a different
     // diff. The argv carries the hostile name byte for byte.
-    expect(host.calls[0]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${hostile}...${OID}`])
+    expect(host.calls[0]).toEqual(diffArgv(hostile, OID))
 
     // POSITIVE CONTROL: an ordinary base is quoted in full, so the assertions
     // above are about the FOLD and not about a note that omits the base.
@@ -304,7 +342,7 @@ describe('readCommittedMutationClaim', () => {
         if (cmd.includes('rev-parse')) {
           return cmd.some((a) => a.includes('refs/remotes/origin/')) ? ok(`${REF_OID}\n`) : inconclusive
         }
-        if (cmd.includes('diff')) return ok(`${PATH}\n`)
+        if (cmd.includes('diff')) return diffOk(`${PATH}\n`)
         if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
         return ok(BODY)
       }
@@ -331,7 +369,7 @@ describe('readCommittedMutationClaim', () => {
       if (cmd.includes('rev-parse')) {
         return cmd.some((a) => a.includes('refs/remotes/origin/')) ? ok(`${REF_OID}\n`) : fail(1)
       }
-      if (cmd.includes('diff')) return ok(`${PATH}\n`)
+      if (cmd.includes('diff')) return diffOk(`${PATH}\n`)
       if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
       return ok(BODY)
     }
@@ -357,7 +395,7 @@ describe('readCommittedMutationClaim', () => {
     // the machine's. Sharing one catch made those two byte-identical.
     const throwsOnShow: RunHostCommand = async (cmd) => {
       if (cmd.includes('show')) throw new Error('spawn failed')
-      if (cmd.includes('diff')) return ok(`${PATH}\n`)
+      if (cmd.includes('diff')) return diffOk(`${PATH}\n`)
       if (cmd.includes('cat-file')) return ok('10')
       return ok(`${REF_OID}\n`)
     }
@@ -463,7 +501,7 @@ describe('readCommittedMutationClaim', () => {
       // git's own answer for a ref that is not there: exit 1, no stdout.
       if (j.includes('refs/heads/')) return fail(1)
       if (cmd.includes('rev-parse')) return ok(`${REF_OID}\n`)
-      if (cmd.includes('diff')) return ok(`${PATH}\n`)
+      if (cmd.includes('diff')) return diffOk(`${PATH}\n`)
       if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
       return ok(BODY)
     }
@@ -497,7 +535,7 @@ describe('readCommittedMutationClaim', () => {
       calls.push([...cmd])
       const operand = cmd.at(-1) ?? ''
       if (cmd.includes('rev-parse')) return ok(`${operand.startsWith('refs/remotes/') ? ORIGIN_HEAD : LOCAL_HEAD}\n`)
-      if (cmd.includes('diff')) return ok(listing[operand] ?? '')
+      if (cmd.includes('diff')) return diffOk(listing[operand] ?? '')
       if (cmd.includes('cat-file')) return ok(String(Buffer.byteLength(BODY, 'utf8')))
       return ok(BODY)
     }
@@ -520,7 +558,7 @@ describe('readCommittedMutationClaim', () => {
     // that returns null whenever two tips differ.
     const nominated: RunHostCommand = async (cmd) =>
       cmd.includes('diff') && (cmd.at(-1) ?? '').includes(LOCAL_HEAD)
-        ? ok(`${PATH}\ntrident/limit.ts\n`)
+        ? diffOk(`${PATH}\ntrident/limit.ts\n`)
         : await twoTips(cmd, REPO)
     expect(
       (await readCommittedMutationClaim(nominated, REPO, { expected_head: null, branch: BRANCH, base_branch: BASE }))
@@ -556,7 +594,7 @@ describe('readCommittedMutationClaim', () => {
     expect(read.claim).not.toBeNull() // positive control: the read really happened
     expect(host.calls).toEqual([
       ['git', '-C', REPO, 'rev-parse', '--verify', '--quiet', '--end-of-options', `refs/heads/${BRANCH}^{commit}`],
-      ['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${REF_OID}`],
+      diffArgv(BASE, REF_OID),
       ['git', '-C', REPO, 'cat-file', '-s', `${REF_OID}:${PATH}`],
       ['git', '-C', REPO, 'show', `${REF_OID}:${PATH}`],
     ])
@@ -657,7 +695,7 @@ describe('readCommittedMutationClaim', () => {
       })
       // Positive control: the read completed against the default diff listing.
       expect(read.claim).not.toBeNull()
-      expect(host.calls[0]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${base}...${OID}`])
+      expect(host.calls[0]).toEqual(diffArgv(base, OID))
     }
   })
 
@@ -679,7 +717,7 @@ describe('readCommittedMutationClaim', () => {
     })
 
     expect(read.claim).not.toBeNull()
-    expect(host.calls[0]).toEqual(['git', '-C', REPO, 'diff', '--name-only', `${BASE}...${'a'.repeat(40)}`])
+    expect(host.calls[0]).toEqual(diffArgv(BASE, 'a'.repeat(40)))
   })
 
   test('a host that throws resolves null rather than rejecting', async () => {
@@ -737,7 +775,7 @@ describe('agent-route parity at the REAL gate — the fallback adds no trust', (
       expected_head: OID,
       run_host: async (cmd) => {
         if (cmd.includes('rev-parse')) return ok(`${OID}\n`)
-        if (cmd.includes('diff') && cmd.includes('--name-only')) return ok('/repo/src/limit.ts\n')
+        if (cmd.includes('diff') && cmd.includes('--name-status')) return diffOk('/repo/src/limit.ts\n')
         return ok('')
       },
       run_guard: async (argv) => {
@@ -763,11 +801,11 @@ describe('the nomination file itself is neither a target nor a behaviour change'
   const UPPERCASE_SPELLING = `${MUTATION_CLAIM_ARTIFACT_DIR}/${BRANCH}.JSON`
   const collusiveHost: RunHostCommand = async (cmd) => {
     if (cmd.includes('rev-parse')) return ok(`${OID}\n`)
-    if (cmd.includes('diff') && cmd.includes('--name-only')) {
+    if (cmd.includes('diff') && cmd.includes('--name-status')) {
       // Two harness-driving markdown paths ride along so the contract's "these
       // are legal targets" promise can be tested where it holds and where it
       // does not — the diff-binding check must not be what refuses either.
-      return ok(
+      return diffOk(
         `${SELF_NOMINATIONS.join('\n')}\n${UPPERCASE_SPELLING}\ntrident/limit.ts\nskills/tests/SKILL.md\nskills/trident/SKILL.md\n`,
       )
     }
@@ -838,21 +876,32 @@ describe('the nomination file itself is neither a target nor a behaviour change'
     expect(isProseOnlyChange([`${MUTATION_CLAIM_ARTIFACT_DIR}/sneaky.ts`])).toBe(false)
   })
 
-  test('the brief tells the truth about the ONE place a harness-driving path is NOT nominable', async () => {
-    // The contract says harness-driving markdown gets no exemption AND is itself
-    // a legal target. At `skills/tests/SKILL.md` both halves are true and the
-    // path is still refused — it carries a `tests/` segment, which the gate reads
-    // as a test file. A build sent at that target would be refused; the brief now
-    // names the exception instead of promising it.
-    const deadlocked = 'skills/tests/SKILL.md'
-    expect(isProseOnlyChange([deadlocked])).toBe(false) // no exemption…
-    const out = await gate(deadlocked)
-    expect({ ok: out.ok, ran: out.ran.length }).toEqual({ ok: false, ran: 0 }) // …and no proof either
-    expect(out.reason).toContain('test file')
-    // CONTROL: the same basename OUTSIDE a tests/ segment is exactly what the
-    // brief promises — proof-required and nominable.
+  test('THE EXCEPTION IS GONE: a harness-driving path under tests/ is nominable, like every other', async () => {
+    // WHAT THIS TEST USED TO PIN, and why it changed. The contract says
+    // harness-driving markdown gets no exemption AND is itself a legal target.
+    // `skills/tests/SKILL.md` used to break the second half: the old path-prefix
+    // rule read ANY `tests/` segment as declaring a test, so the gate demanded a
+    // proof for that diff and then refused the only file it could be bound to —
+    // a deadlock the brief had to carve out as an exception.
+    //
+    // Classification by what DECLARES a test removes the carve-out rather than
+    // documenting it: a declaration is a `*.test.*` / `*_test.{go,py}` BASENAME
+    // or being a direct child of `__tests__/` (`isDeclaredTestFile`), and
+    // `skills/tests/SKILL.md` is neither. So both halves of the brief's promise
+    // now hold at this path, and the assertion is the promise itself.
+    const once_deadlocked = 'skills/tests/SKILL.md'
+    expect(isProseOnlyChange([once_deadlocked])).toBe(false) // no exemption…
+    expect(classifyMutationTarget(once_deadlocked)).toBe('production') // …and a legal target
+    const out = await gate(once_deadlocked)
+    expect(out.ran.length).toBeGreaterThan(0) // …so the proof actually RUNS
+    expect(out.reason).not.toContain('test file')
+    // CONTROL, unchanged: the same basename outside a tests/ segment behaves
+    // identically, which is the point — there is no longer a difference.
     expect(isProseOnlyChange(['skills/trident/SKILL.md'])).toBe(false)
     expect((await gate('skills/trident/SKILL.md')).ran.length).toBeGreaterThan(0)
+    // AND THE DECLARATION STILL BITES where a test really is declared: a
+    // `*.test.ts` basename is refused as a target however ordinary its directory.
+    expect(classifyMutationTarget('skills/trident/SKILL.test.ts')).toBe('test')
   })
 
   test('AN UPPERCASE `.JSON` SPELLING IS AN ORDINARY FILE ON BOTH SIDES — the comment, executed', async () => {
