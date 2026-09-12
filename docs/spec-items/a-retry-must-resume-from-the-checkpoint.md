@@ -8,13 +8,31 @@ legacy_ref: "SPEC.md § Phases → Steps (2026-09-12 split)"
 ---
 
 **A retry must resume from the checkpoint, not merely from the PR.** A re-dispatch creates a NEW run
-row with `inner_checkpoint = null` and `ralph_round = 0`; only the fire-time `detectExistingPr` probe
-(`trident/orchestrator.ts` `launch`) recovers continuity, by setting `pr` and so making the inner
-workflow's `resuming` true. That is enough to preserve the *code* (Forge re-enters the branch, the
-planner is told to read the committed work) but the governed plan is regenerated from scratch and the
-review rounds restart — planning and review tokens are re-spent every crash. Acceptance: a retry carries
-the dead run's `inner_checkpoint` and `ralph_round` forward, or states plainly on the card that it will
-not. A resume that depends on a GitHub PR probe also silently degrades to zero in `local` merge-mode.
+row, and what that row inherits now depends on the card's `linked_run_id`.
+
+**What carries.** When a card names its own governed prior run, `dispatchBoardBoundBuild` loads that run
+by id and the new row is born with the prior's Ralph spend — `ralph_round` together with the cap it is
+measured against, `min(prior, this dispatch)` — and, when the prior's checkpoint is review-capable
+(`fix-round-N`, `outer-published:*`) and the live branch tip still holds its recorded head, with that
+checkpoint, its head, its findings and its base pin. The review `round` comes from the checkpoint name,
+so review rounds are not restarted for such a resume.
+
+**What still does not carry, which is what this item remains open for.**
+
+- The spend rides `linked_run_id`, so anything that moves or clears that link starts a fresh budget: one
+  ordinary status-dot advance off the `failed` lane NULLs it, an intervening non-governed run becomes
+  what it names, and `onboarding/overnight/register.ts` dispatches with no card at all. `max_ralph_rounds`
+  therefore still bounds a RUN and not a CARD (`#629`).
+- The governed plan is still regenerated from scratch. The inner workflow's cheap continuation planner is
+  gated on `resumeCheckpoint === 'ralph-task-built'`, which is `died-before-build` and never resumed, so
+  every shape that IS resumed pays the full survey.
+- A refusal to carry is not stated on the card. There is no board surface to write it to; the dispatch
+  emits a log line instead, and a server log is not card text.
+
+Acceptance: a retry carries the dead run's `inner_checkpoint` and `ralph_round` forward, or states plainly
+on the card that it will not. The fire-time `detectExistingPr` probe (`trident/orchestrator.ts` `launch`)
+must not be the thing that recovers continuity — it only sets `pr`, and it silently degrades to zero in
+`local` merge-mode, where there is no origin to ask.
 
 ## Acceptance
 
