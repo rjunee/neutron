@@ -202,6 +202,32 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round sixteen: the instrument under suspicion got fixed; the one written beside it did not
+
+The unpinned half of the ordering criterion was a fixture shortcut.
+`orchestrator.test.ts`'s "A PINNED dispatch issues NO origin-ref probe" asserted the absence
+correctly and then "complemented" it by calling `originBaseResolves` **directly**. That is a
+positive control for the ARGV SHAPE — worth keeping, and kept — but it reaches past the
+orchestrator to the helper it wants to observe, so it could not have failed on an orchestrator
+that skips the probe, issues it twice, or computes it eagerly, which is the entire content of
+the criterion it was standing in for.
+
+Replaced with a real dispatch: a **local-mode** run whose `rev-parse --verify
+refs/heads/main^{commit}` FAILS, which is the arm where `orchestrator.ts` leaves `base_sha`
+null. The pin's absence is asserted (`pin: null`) rather than assumed — the first draft used
+an empty-but-ok answer, which the harness deliberately overrides for `^{commit}` probes, so
+the run quietly carried a pin and the test would have been a second copy of the pinned case.
+One tick, so "exactly one" is a claim about the DISPATCH and not a tally over a whole run.
+Mutations in both directions, because both are regressions the criterion names: dropping
+`diffBaseRef` from the dispatch (ZERO) reds it; making the binding invoke the thunk twice
+(TWO) reds it.
+
+**The lesson is where it was found.** This survived a round spent explicitly hunting
+instrument defects — three were found in the scanner and closed structurally, and the test
+written alongside that work took the shortcut. **The instrument you are auditing is rarely the
+one that fails next.** Suspicion is aimed, and what it is aimed at gets the careful treatment;
+everything written beside it inherits the attention that was left over.
+
 ### Round fifteen: three rounds on one instrument means the property should be prevented
 
 The scan had a third defect — `RANGE.exec(line)` ran **once per physical line**

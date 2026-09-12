@@ -198,10 +198,18 @@ The resolution order is evidence-first, and is the same at every site:
       neither view suffices alone — a unit test cannot see what the caller does and an
       integration test cannot see what the function does: "THE PROBE IS NOT EVEN CALLED when
       the pin is valid" (a spy thunk with zero calls, plus the complement that an unpinned
-      call issues exactly one) and "A PINNED dispatch issues NO origin-ref probe" in
-      `trident/orchestrator.test.ts` (no probe argv on the host, with a positive control that
-      the asserted argv is the one `originBaseResolves` actually builds). Mutation: restoring
-      the eager `await` in the caller reds the integration one. **A function cannot enforce an
+      call issues exactly one) and, in `trident/orchestrator.test.ts`, a PAIR of dispatches:
+      "A PINNED dispatch issues NO origin-ref probe" (no probe argv on the host, with a
+      positive control that the asserted argv is the one `originBaseResolves` actually
+      builds) and "an UNPINNED dispatch issues EXACTLY ONE origin-ref probe", which runs a
+      local-mode dispatch whose base pin read FAILS — so `base_sha` stays null, asserted as
+      null rather than assumed — and counts the probes on the host for that one tick.
+      **The unpinned half used to call `originBaseResolves` directly**, which tests the
+      helper's argv and cannot see an orchestrator that skips the probe, issues it twice, or
+      computes it eagerly — the whole content of this criterion. Mutations, both directions
+      because both are regressions this names: dropping `diffBaseRef` from the dispatch
+      (ZERO probes) reds it, and making the binding invoke the thunk twice (TWO) reds it;
+      restoring the eager `await` in the caller reds the pinned one. **A function cannot enforce an
       ordering over inputs it is handed already-computed** — so the probe arrives as a thunk
       and the eager form no longer type-checks. That is one spelling, not the class: a caller
       can still pass `() => Promise.resolve(r)` around an already-awaited value, which is why

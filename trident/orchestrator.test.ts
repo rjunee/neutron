@@ -3182,6 +3182,51 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
     expect(calls.map((c) => c.join(' '))).toEqual([ORIGIN_PROBE('main')])
   })
 
+  test('an UNPINNED dispatch issues EXACTLY ONE origin-ref probe — the complement, through the orchestrator', async () => {
+    // THE COMPLEMENT THAT WAS MISSING, and the shortcut it replaces is the lesson. The test
+    // above asserts the ABSENCE of the probe on a pinned run and then "complemented" it by
+    // calling `originBaseResolves` DIRECTLY. That is a positive control for the ARGV SHAPE —
+    // worth having, and kept above — but it reaches past the orchestrator to the helper it
+    // wanted to observe, so it could not have failed on an orchestrator that skips the probe,
+    // issues it twice, or computes it eagerly. The criterion is about the dispatch boundary,
+    // so the complement has to run a dispatch.
+    //
+    // AN UNPINNED RUN, built from the code rather than by hoping: in local mode the launch
+    // path pins `base_sha` from `rev-parse --verify refs/heads/<base>^{commit}` ONLY when the
+    // answer is 40 hex (`orchestrator.ts`, the `freshBuild && merge_mode === 'local'` arm), so
+    // an empty answer there leaves the pin null and the dispatch has to ask the repository.
+    // The pin's absence is asserted below, because a run that quietly carried one would make
+    // this whole test a second copy of the pinned case.
+    const BASE_PIN_READ = 'git -C /repo rev-parse --verify refs/heads/main^{commit}'
+    const h = buildHarness({
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      // A FAILING read, not an empty-but-ok one: the harness deliberately overrides an
+      // `ok('')` answer to a `^{commit}` probe (an unreadable ref is not a neutral stub for
+      // the drift gate), so an empty answer here would be replaced by a canned sha and this
+      // run would quietly carry a pin again — which is exactly what the first draft of this
+      // test did, and what the `pin: null` assertion below now catches.
+      hostResponder: (cmd) =>
+        cmd.join(' ') === BASE_PIN_READ ? { ok: false, stdout: '', stderr: 'fatal: not a valid ref', exit_code: 128 } : undefined,
+    })
+    const run = await createRun({ merge_mode: 'local' as MergeMode })
+
+    // ONE TICK: the launch and the dispatch, and nothing after them. Scoping to the tick is
+    // what makes "exactly one" a claim about the DISPATCH rather than a tally over a whole
+    // run, whose later phases resolve the base again for their own reasons.
+    await h.loop.runOnce()
+    expect({ fires: h.inputs.length, pin: store.get(run.id)?.base_sha ?? null }).toEqual({ fires: 1, pin: null })
+    const atDispatch = h.hostCalls.map((c) => c.join(' ')).filter((c) => c === ORIGIN_PROBE('main'))
+    // EXACTLY ONE, and the two directions are different regressions: ZERO is the dispatch
+    // never asking (the bare local name reaches the build's test-strategy diff, which is the
+    // #546 defect), TWO is the eager form returning — a caller that computes the probe before
+    // the pin issues it on every arm.
+    expect({ probes: atDispatch.length }).toEqual({ probes: 1 })
+
+    // …and the unpinned run still completes, so this is not measuring a run that died early.
+    await h.complete()
+    expect((await runToTerminal(h, run.id)).phase).toBe('done')
+  })
+
   test('a null in-result claim falls back to the COMMITTED nomination at the reviewed OID — and the gate receives it', async () => {
     const seen: unknown[] = []
     const h = buildHarness({
