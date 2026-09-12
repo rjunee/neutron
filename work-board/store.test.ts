@@ -858,6 +858,79 @@ describe('WorkBoardStore — Phase 2b run binding + reconcile', () => {
     expect(requeued?.completed_at).toBeNull()
   })
 
+  test('HEADLINE: a BLOCKED card cannot be marked inline-active, by any writer', async () => {
+    // WRITABLE BY AN AGENT is what makes this the serious one: a blocked card exists to
+    // STOP work on it — the dispatch chokepoint refuses a build against it and both UIs
+    // drop its ▶ — so a flag that makes it pulse "something is moving here" contradicts
+    // every other signal on the row. `inline_active` is writable by the agent tool, the
+    // HTTP surface and the TodoWrite reconcile independently, so the refusal lives HERE,
+    // where it holds regardless of caller; an invariant that holds only in the caller
+    // that remembered it is not an invariant.
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'stop working on me' })
+    await store.attachRun(SLUG, a.id, 'run-esc')
+    await store.detachRun(SLUG, 'run-esc', 'blocked')
+    expect(store.get(SLUG, a.id)?.status).toBe('blocked')
+
+    // (1) the generic patch path — the reachable case, and the one `terminalTransition`
+    // could not see: the patch sets ONLY `inline_active`, so there is no status change
+    // to notice.
+    await store.update(SLUG, a.id, { inline_active: true })
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
+
+    // (2) the dedicated setter.
+    await store.setInlineActive(SLUG, a.id, true)
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
+
+    // CONTROL: the same two writers on an ORDINARY card still work, so a guard that
+    // simply stopped writing the flag would not pass the assertions above.
+    const b = await store.create(SLUG, { title: 'ordinary work' })
+    await store.update(SLUG, b.id, { status: 'in_progress', inline_active: true })
+    expect(store.get(SLUG, b.id)?.inline_active).toBe(true)
+    await store.setInlineActive(SLUG, b.id, false)
+    await store.setInlineActive(SLUG, b.id, true)
+    expect(store.get(SLUG, b.id)?.inline_active).toBe(true)
+  })
+
+  test('CLEARING inline_active on a blocked card is still allowed', async () => {
+    // The guard refuses the CLAIM, never the retraction: clearing can only ever move a
+    // row toward the consistent state, and refusing it would STRAND a stale flag —
+    // a blocked card pulsing forever with no writer able to stop it.
+    //
+    // THE FLAG IS SET BY RAW SQL, and it has to be: every store writer now refuses to
+    // put a blocked card into this state, so the only way to reach it is the way
+    // production will — a row written BEFORE the guard existed. A fixture built through
+    // the guarded writers would have the flag already off and the clear would be a
+    // no-op, which is what made this test pass against a guard that refused the clear
+    // too (mutation-checked).
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'clear me' })
+    await store.attachRun(SLUG, a.id, 'run-esc2')
+    await store.detachRun(SLUG, 'run-esc2', 'blocked')
+    db.raw().run('UPDATE work_board_items SET inline_active = 1 WHERE id = ?', [a.id])
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(true)
+    expect(store.get(SLUG, a.id)?.status).toBe('blocked')
+
+    await store.setInlineActive(SLUG, a.id, false)
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
+
+    db.raw().run('UPDATE work_board_items SET inline_active = 1 WHERE id = ?', [a.id])
+    await store.update(SLUG, a.id, { inline_active: false })
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
+  })
+
+  test('moving a card INTO the blocked lane clears the inline marker', async () => {
+    // The generic patch path saying what `detachRun` already says, so the two writers
+    // cannot disagree about a card that has stopped.
+    const store = new WorkBoardStore(db)
+    const a = await store.create(SLUG, { title: 'was working, now blocked' })
+    await store.update(SLUG, a.id, { status: 'in_progress', inline_active: true })
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(true)
+    await store.update(SLUG, a.id, { status: 'blocked' })
+    expect(store.get(SLUG, a.id)?.status).toBe('blocked')
+    expect(store.get(SLUG, a.id)?.inline_active).toBe(false)
+  })
+
   test('moving a completed card out of history clears its terminal evidence link', async () => {
     const store = new WorkBoardStore(db)
     const a = await store.create(SLUG, { title: 'reopen completed work' })

@@ -342,7 +342,16 @@ const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'ca
 export function isLinkedRunning(item: WorkBoardItem): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0;
   if (!linked) return false;
-  if (item.status === 'failed') return false;
+  // A TERMINAL LANE WRITTEN BY THE RECONCILE BEATS AN ABSENT `run_progress`. The
+  // fall-through below reads "no progress reported" as "still running", which is right
+  // for a card whose run is live and has not reported yet — and wrong for one whose run
+  // ENDED. `failed` has said so since #340; `blocked` needs it for the same reason and
+  // one more: the reconcile deliberately KEEPS the run link on a blocked card so the
+  // reported reason stays reachable, so this is the shape that actually occurs. Without
+  // it a blocked card whose run row has aged out of `run_progress` reads as RUNNING —
+  // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
+  // wrong reason.
+  if (item.status === 'failed' || item.status === 'blocked') return false;
   const rp = item.run_progress;
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label);
 }

@@ -39,8 +39,11 @@ interface ScriptedRound {
 interface RunOpts {
   rounds: ScriptedRound[]
   maxRounds?: number
-  /** What the bounded re-plan's `plan:fable` seat returns. */
-  rePlan?: 'ok' | 'null' | 'no-spec'
+  /** What the bounded re-plan's `plan:fable` seat does. `throws` is the case a
+   *  source read cannot distinguish from the others: `agent()` REJECTS on a transport
+   *  error, a schema refusal or an exhausted retry, and an uncaught rejection leaves
+   *  the fix loop entirely. */
+  rePlan?: 'ok' | 'null' | 'no-spec' | 'throws'
 }
 
 interface Captured {
@@ -104,6 +107,7 @@ async function runWorkflow(
     if (label === 'plan:fable') {
       // This run is NOT Ralph, so the ONLY `plan:fable` seat reachable is the bounded
       // re-plan. Counting this label therefore counts re-plans exactly.
+      if (opts.rePlan === 'throws') throw new Error('plan:fable transport failed after 3 attempts')
       if (opts.rePlan === 'null') return null
       if (opts.rePlan === 'no-spec') {
         return { implementationPlan: '- [ ] t', topTask: 't', executionSpec: '   ', complexity: 'reasoning', remainingTasks: 0 }
@@ -321,10 +325,19 @@ describe('the bounded re-plan — executed end to end', () => {
   test.each([
     ['the planner returned null', 'null' as const],
     ['the planner returned no execution spec', 'no-spec' as const],
+    ['the planner THREW', 'throws' as const],
   ])('%s → the run ESCALATES and dispatches NO fix round on the old plan', async (_label, rePlan) => {
     // `false`, `threw` and `succeeded-with-impossible-output` are all UNKNOWN. Carrying
     // on would send Forge in with the ORIGINAL plan while the run's one re-plan is
     // recorded as spent — the worst of both.
+    //
+    // THE THROWN CASE IS THE ONE THAT USED TO ESCAPE. An uncaught rejection left the fix
+    // loop, landed in the workflow's outer catch, and was persisted as
+    // `checkpoint: 'inner-error'` with NO escalation — a reviewer having proved the plan
+    // wrong, reported as an infrastructure death. This row is in the SAME `test.each` as
+    // the other two on purpose: the three are one outcome, and a commentary that groups
+    // them while the table covers only two is a comment asserting coverage that does not
+    // exist (which is what it was).
     const { captured, result } = await runWorkflow({
       maxRounds: 5,
       rePlan,
@@ -337,9 +350,18 @@ describe('the bounded re-plan — executed end to end', () => {
     // No fix round ran on the plan the reviewers rejected.
     expect(labels(captured, 'forge:fix-round-')).toEqual([])
     expect(result.blockKind).toBe('design-gap')
+    // NOT the workflow's crash shape: a thrown planner must not be reported as an
+    // infrastructure death, which is what an escaped rejection produced.
+    expect(result.checkpoint).not.toBe('inner-error')
+    expect(result.ok).toBe(true)
     const escalation = result.escalation as Record<string, unknown>
     expect(escalation.triggers).toContain('re-plan-failed')
     expect(String(escalation.whatIsMissing)).toContain('no execution spec')
+    // The three collapse to ONE outcome, and the evidence still says WHICH — a stop that
+    // could not name what happened is the thing this whole card is about.
+    expect(String(escalation.evidence)).toMatch(
+      rePlan === 'throws' ? /threw: / : rePlan === 'null' ? /returned null/ : /returned no executionSpec/,
+    )
   })
 })
 

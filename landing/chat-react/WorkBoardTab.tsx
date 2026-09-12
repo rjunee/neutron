@@ -115,7 +115,16 @@ const TERMINAL_PHASE_LABELS: readonly RunPhaseLabel[] = ['merged', 'failed', 'ca
 function isLinkedRunning(item: WorkBoardItem): boolean {
   const linked = item.linked_run_id !== null && item.linked_run_id.length > 0
   if (!linked) return false
-  if (item.status === 'failed') return false
+  // A TERMINAL LANE WRITTEN BY THE RECONCILE BEATS AN ABSENT `run_progress`. The
+  // fall-through below reads "no progress reported" as "still running", which is right
+  // for a card whose run is live and has not reported yet — and wrong for one whose run
+  // ENDED. `failed` has said so since #340; `blocked` needs it for the same reason and
+  // one more: the reconcile deliberately KEEPS the run link on a blocked card so the
+  // reported reason stays reachable, so this is the shape that actually occurs. Without
+  // it a blocked card whose run row has aged out of `run_progress` reads as RUNNING —
+  // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
+  // wrong reason.
+  if (item.status === 'failed' || item.status === 'blocked') return false
   const rp = item.run_progress
   return rp === undefined || !TERMINAL_PHASE_LABELS.includes(rp.phase_label)
 }
@@ -363,15 +372,29 @@ export interface WorkBoardSummary {
   running: number
   failed: number
   active: number
+  /** Cards whose build STOPPED ON PURPOSE and reported why. Its own count, not folded
+   *  into `failed` (a different word, a different response) and not into `active` (which
+   *  means in-flight — a blocked card is waiting, and folding it there would hide it). */
+  blocked: number
 }
 
 export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
   let running = 0
   let failed = 0
   let active = 0
+  let blocked = 0
   for (const it of items) {
     if (isLinkedRunning(it)) {
       running += 1
+      // CHECKED BEFORE THE FAILED BRANCH, and that ordering is the whole fix. The
+      // reconcile KEEPS the terminal run link on a blocked card, and that run's
+      // `step_label` is `failed` — so the branch below matched it and the pane counted
+      // a blocked card as a failure. This is the third rendering path to make that
+      // mistake (the decoder dropped the card, the row said Failed, the summary counted
+      // it Failed), and all three had the same cause: the card's own lane is the
+      // durable fact and it has to be asked FIRST.
+    } else if (it.status === 'blocked') {
+      blocked += 1
     } else if (it.status === 'failed' || (it.run_progress !== undefined && resolveStepLabel(it.run_progress) === 'failed')) {
       // Count durable status='failed' cards even when run_progress has been cleared.
       failed += 1
@@ -381,7 +404,7 @@ export function summarize(items: readonly WorkBoardItem[]): WorkBoardSummary {
       active += 1
     }
   }
-  return { running, failed, active }
+  return { running, failed, active, blocked }
 }
 
 export function WorkBoardTab({

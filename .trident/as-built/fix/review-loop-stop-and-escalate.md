@@ -146,9 +146,26 @@ mutation-checked: a reconcile that reads the raw JSON and obeys it turns both te
 
 ### A STATUS IS NOT A VALUE — it is the set of paths that must agree about it
 
-Three separate findings on this branch had one shape: a new state was added to the
-vocabulary and not to the transitions, the renderers, or the boundaries. So the paths
-were enumerated — decode, render, advance, dispatch, escalate — and each was checked:
+FIVE separate findings across four review rounds had one shape: a new state added to the
+vocabulary and not to a path that reads it. Round 1 the decoder DROPPED the card; round 2
+the row rendered it **Failed**; round 3 the summary COUNTED it failed and an agent could
+mark it inline-active. Each fix reached the artefact the finding named and stopped there,
+which is the failure this note exists to end.
+
+WHAT THE ONE-AT-A-TIME ROUNDS HAD IN COMMON, and it is worth stating because it predicts
+the next one: the reconcile deliberately KEEPS the terminal run link on a blocked card so
+the reported reason stays reachable, and that run's `step_label` is `failed`. So EVERY
+derivation that asked the RUN before the LANE inherited the same lie — the tag, the dot,
+the notice, the summary, `isLinkedRunning`. The rule that fixes all of them at once: on a
+card whose lane is durable and terminal-ish, **the lane is the fact and the run refines
+it**, never the other way round.
+
+THE SWEEP, done mechanically rather than by memory: every site in a Work-Board-consuming
+file that compares a board status against a literal or enumerates the set — **95 sites
+across 14 files**, every one examined. **13 non-test files were changed** (52 added
+`blocked`-bearing lines); the rest were checked and correctly need no change, and the ones
+where "no change" is a judgement rather than an obvious no-op are listed below with the
+reason. By the coordinator's list:
 
 - **decode** — the SQL CHECK, the store type, the wire envelope, and BOTH client
   `parseWorkBoardItems` allowlists (see below).
@@ -170,12 +187,35 @@ holding. For `blocked` the omission IS the guardrail; the schema now says so, an
 moving a card OUT of it is an ordinary `status:'upcoming'` update and that move is the
 decision.
 
-Checked and deliberately UNCHANGED, with the reason: `inline-activity.ts` (a blocked card
-arrives with `inline_active` already cleared by `detachRun`, and the only rule that could
-turn it back on requires `status === 'in_progress'` — so nothing can claim live inline
-work on it); `project-rail.ts` (a blocked card with a bound terminal run raises rail
-ATTENTION, which is correct — it needs the owner; the internal variable is named for
-failure but the signal is "needs you").
+- **summary / roll-up** — `summarize` counted a blocked card as FAILED (the kept terminal
+  run matched its `step_label` branch), so the pane's chip said "1 failed" beside a row
+  labelled "Blocked". It now has its own count, checked BEFORE the failed branch; the
+  pane stays open for it (a block demands attention more squarely than a failure, which
+  can at least be retried) but does not COUNT as work kicking off, because announcing the
+  absence of work is not what an auto-open is for.
+- **live-run derivation** — `isLinkedRunning` read "no `run_progress` reported" as "still
+  running", which is right for a live run that has not reported and wrong for one that
+  ENDED. `failed` had said so since #340; `blocked` needs it more, because the kept link
+  plus an aged-out run row is the shape that actually occurs. Without it a blocked card
+  pulsed, counted as `running`, and had its ▶ suppressed for the wrong reason.
+- **inline-activity** — the serious one, because it is WRITABLE BY AN AGENT: a blocked
+  card exists to stop work, and `work_board_update` accepted `inline_active` independently
+  of status. Refused at the STORE (both `update` and `setInlineActive`), not at the tool,
+  because the flag has three independent writers and an invariant that holds only in the
+  caller that remembered it is not an invariant. Moving INTO the lane clears the flag, the
+  CLAIM is refused while in it, the CLEAR is always allowed (refusing it would strand a
+  stale flag with no writer able to stop it), and the DERIVATION refuses to read one — so
+  a flag stored before the block cannot outlive it.
+
+Checked and deliberately UNCHANGED, with the reason: `project-rail.ts` (a blocked card
+with a bound terminal run raises rail ATTENTION, which is correct — it needs the owner;
+the internal variable is named for failure but the signal is "needs you"); `listActive`
+and the client lane splits (`blocked` is ACTIVE — unfinished work that is waiting, so it
+belongs in the active lane and keeps its `sort_order`); `dispatch-holds` (a `card_blocked`
+refusal lands in the sweep's permanent arm and drops the hold, which is right: nothing can
+re-test a decision); `work-wakeup-selection` (wakes `in_progress` only, so a blocked card
+is never re-woken to re-read the same block); `board-dispatch`'s blocker-card scan (a
+blocker that is itself blocked still holds its dependent).
 
 ### The renderers were deriving from the run, and the run says "failed"
 
@@ -201,6 +241,53 @@ reported a code rejection. That is the silent drop this card exists to remove, r
 by the card's own remedy. It now escalates rather than stretching the cap — the findings
 say the plan is wrong and there is no budget left to act on it, which is exactly what the
 orchestrator needs told.
+
+### A REJECTED planner is the same outcome as a null one, and now says so
+
+`agent()` REJECTS on a transport error, a schema refusal or an exhausted retry. The
+bounded re-plan awaited it with no `try`, so an uncaught rejection left the fix loop
+entirely, landed in the workflow's outer catch, and was persisted as
+`checkpoint: 'inner-error'` with NO escalation on it: a reviewer would have PROVED the
+plan was wrong and the run would have reported an infrastructure death. That is this
+file's own subject — a terminal state that says the wrong thing about why.
+
+`threw`, `returned null` and `returned a plan with no execution spec` are one outcome —
+"the planner did not produce a plan" — and the collapse is now DELIBERATE rather than
+accidental. It is written as ONE expression that both decides and names (`rePlanFailure`),
+because a condition and a description computed apart can disagree; every arm is
+load-bearing and mutating any one of them changes what the run reports. The E2E suite's
+`test.each` carries all three rows, which is what its own commentary had been claiming
+while the table covered two.
+
+### The migration REBUILDS a table that holds the owner's real board
+
+0140 widens a CHECK on a STRICT table, which SQLite cannot ALTER — so it does what
+0053/0097/0130 did: CREATE, `INSERT … SELECT`, `DROP TABLE`, rename. That `DROP` is the
+risk: the transfer is an explicit column list, and a column omitted from it is not a lint
+error, it is DELETED DATA — unrecoverable, invisible until the owner notices a card is
+wrong, and it runs once against live data. Writing this migration already dropped 0139's
+`blockers` once; only the committed schema snapshot caught it, and a snapshot sees the
+COLUMN SET, never the CONTENTS.
+
+Nothing else could see it either: the runner tests assert ordinal 140 RAN, the fresh
+snapshot asserts the resulting shape, and every store test runs where 0140 has already
+applied — none of them ever holds a populated 0139-shaped row, so none of them can lose
+one. `migrations/__tests__/0140-work-board-blocked-preserves-every-column.test.ts` seeds
+one with NON-DEFAULT values in every column (a column left at its default looks correct
+against a rebuild that dropped it and let the default refill it), applies 0140, and
+compares the row as a WHOLE OBJECT — so a column added later and forgotten in a future
+rebuild's SELECT fails there rather than shipping. It also pins both indexes by name, the
+`foreign_keys` restoration, and that the widened CHECK still refuses a lane nobody
+declared. Seven mutations, including three different dropped columns and a misordering:
+all red.
+
+WHETHER THE REBUILD IS NEEDED AT ALL — asked, and the answer is yes. SQLite has no
+`ALTER TABLE … DROP CONSTRAINT`; the only rebuild-free route is `PRAGMA
+writable_schema=ON` surgery on `sqlite_master`, which SQLite's own documentation calls
+dangerous and which corrupts the database outright if the rewritten text is wrong. The
+12-step rebuild is the documented safe procedure and is what this table's three previous
+migrations already use; a fourth spelling of "change a CHECK" would be one more thing to
+get right. Prevention was not available, so verification is what makes it safe.
 
 ### A latent CI landmine this branch stepped on, and the lane that closes it
 

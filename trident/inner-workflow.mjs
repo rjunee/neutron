@@ -8074,30 +8074,69 @@ ${task}${reflectionGuidance}`,
     // sent in. It runs INSIDE the loop — which is the whole correction: `plan:fable`
     // is otherwise invoked once, outside it, and never hears a reviewer.
     //
-    // A NULL PLAN IS NOT A RE-PLAN. The planner seat returning nothing is an UNKNOWN
-    // outcome, not a successful re-plan with an empty spec, and carrying on would
-    // send Forge in with the ORIGINAL plan while the run's one re-plan is recorded as
-    // spent. So it escalates to the orchestrator instead — the remedy was attempted,
-    // it did not produce anything, and the next decision is not this run's to make.
+    // A NULL PLAN IS NOT A RE-PLAN, AND NEITHER IS A THROWN ONE. The planner seat
+    // returning nothing is an UNKNOWN outcome, not a successful re-plan with an empty
+    // spec, and carrying on would send Forge in with the ORIGINAL plan while the run's
+    // one re-plan is recorded as spent. So it escalates to the orchestrator instead —
+    // the remedy was attempted, it did not produce anything, and the next decision is
+    // not this run's to make.
+    //
+    // THE THROW IS CAUGHT RIGHT HERE, and that is the whole point of the try. `agent()`
+    // REJECTS on a transport error, a schema refusal, an exhausted retry — and an
+    // uncaught rejection escapes the fix loop entirely, lands in the workflow's outer
+    // catch, and is persisted as `checkpoint: 'inner-error'` with NO escalation on it.
+    // A reviewer would have proved the plan was wrong, and the run would have reported
+    // an infrastructure death. That is this file's own subject — a terminal state that
+    // says the wrong thing about why — so `threw` and `returned nothing` are collapsed
+    // DELIBERATELY into one outcome ("the planner did not produce a plan") rather than
+    // by omission, and the evidence still says WHICH of the two it was.
     if (rePlanPending) {
       rePlanPending = false
       log(`trident-v2 escalation: bounded re-plan (round ${round}) — plan:fable with ${Array.isArray(synthesis.findings) ? synthesis.findings.length : 0} finding(s) attached`)
-      const rePlan = await agent(
-        rePlanPrompt(
-          Array.isArray(synthesis.findings) ? synthesis.findings : [],
-          round - 1,
-          rePlanWhatIsMissing,
-        ),
-        withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
-      )
-      if (!rePlan || typeof rePlan.executionSpec !== 'string' || rePlan.executionSpec.trim() === '') {
+      let rePlan = null
+      // '' means the seat did not throw. A thrown cause is redacted + capped by the SAME
+      // helper every other persisted cause in this file goes through, because it is
+      // model/transport text and it reaches the owner.
+      let rePlanThrew = ''
+      try {
+        rePlan = await agent(
+          rePlanPrompt(
+            Array.isArray(synthesis.findings) ? synthesis.findings : [],
+            round - 1,
+            rePlanWhatIsMissing,
+          ),
+          withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA }),
+        )
+      } catch (err) {
+        rePlanThrew = infraCause(err && err.message ? String(err.message) : String(err))
+        // '' would read as "did not throw" two lines down, so a cause that redacts away
+        // to nothing still has to say that something was thrown.
+        if (rePlanThrew === '') rePlanThrew = 'the planner seat threw (no readable message)'
+        log(`trident-v2 escalation: bounded re-plan THREW — ${rePlanThrew}`)
+      }
+      // ONE EXPRESSION THAT BOTH DECIDES AND NAMES. The three outcomes are one
+      // outcome — "the planner did not produce a plan" — and the run still has to say
+      // WHICH, because a stop that cannot name what happened is the defect this whole
+      // card is about. Written as a single reason string rather than as a boolean
+      // beside a separate message: a condition and a description that are computed
+      // apart can disagree, and every arm here is load-bearing (mutating any one of
+      // them changes what the run reports).
+      const rePlanFailure =
+        rePlanThrew !== ''
+          ? `threw: ${rePlanThrew}`
+          : !rePlan
+            ? 'returned null'
+            : typeof rePlan.executionSpec !== 'string' || rePlan.executionSpec.trim() === ''
+              ? 'returned no executionSpec'
+              : ''
+      if (rePlanFailure !== '') {
         escalation = {
           action: 'stop',
           kind: 'design-gap',
           whatIsMissing:
             'a reviewer declared the plan wrong and the ONE bounded re-plan produced no execution spec, so this run has no revised plan to build against',
           triggers: ['design-gap', 're-plan-failed'],
-          evidence: `the bounded re-plan at round ${round} returned ${rePlan ? 'no executionSpec' : 'null'}`,
+          evidence: `the bounded re-plan at round ${round} ${rePlanFailure}`,
           refusedClaim: '',
           undecidable: [],
           round,

@@ -945,6 +945,59 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('the SUMMARY counts a blocked card as blocked — not failed, not running', async () => {
+    // `summarize` is a pure export of the module under test; imported here rather than
+    // at file scope because the module needs the happy-dom globals installed first.
+    const { summarize } = await import('../WorkBoardTab.tsx')
+    // The third rendering path to get this wrong in three rounds (the decoder dropped
+    // the card, the row said Failed, the summary counted it Failed), and all three had
+    // one cause: the reconcile KEEPS the terminal run link on a blocked card, that run's
+    // `step_label` is `failed`, and every derivation that asked the RUN before the LANE
+    // inherited the lie. The pane's chip is what the owner reads at a glance.
+    const terminal: RunProgress = {
+      run_id: 'run-esc',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 2,
+      started_at: '2026-09-12T00:00:00Z',
+      last_advanced_at: '2026-09-12T00:01:00Z',
+      elapsed_ms: 60_000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency)',
+    }
+    const blocked = summarize([
+      item({ id: 's1', status: 'blocked', linked_run_id: 'run-esc', run_progress: terminal }),
+    ])
+    expect(blocked).toEqual({ running: 0, failed: 0, active: 0, blocked: 1 })
+
+    // …AND WITH NO `run_progress` AT ALL, which is the shape once the run row ages out.
+    // `isLinkedRunning` reads "no progress reported" as "still running" — right for a
+    // live run that has not reported, wrong for one that ENDED — so without the lane
+    // check this counted as RUNNING instead.
+    expect(summarize([item({ id: 's2', status: 'blocked', linked_run_id: 'run-esc' })])).toEqual({
+      running: 0,
+      failed: 0,
+      active: 0,
+      blocked: 1,
+    })
+
+    // CONTROL: the same two fixtures in the FAILED lane still count as failed, so a
+    // summary that simply stopped counting failures would not pass the assertions above.
+    expect(
+      summarize([item({ id: 's3', status: 'failed', linked_run_id: 'run-esc', run_progress: terminal })]),
+    ).toEqual({ running: 0, failed: 1, active: 0, blocked: 0 })
+    expect(summarize([item({ id: 's4', status: 'failed', linked_run_id: 'run-esc' })])).toEqual({
+      running: 0,
+      failed: 1,
+      active: 0,
+      blocked: 0,
+    })
+  })
+
   it('a BLOCKED card RENDERS, and offers NO play/retry control at all', async () => {
     // Two failures in one fixture, both measured against the real render:
     //  (1) the card must APPEAR. The decoders used to drop an unknown status, so a

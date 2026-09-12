@@ -550,6 +550,23 @@ describe('a BLOCKED card offers neither play nor retry', () => {
     expect(blocked.inline_active).toBe(false);
   });
 
+  it('is NOT "linked running" with a kept link and NO run_progress', () => {
+    // `isLinkedRunning` reads "no progress reported" as "still running" — right for a
+    // live run that has not reported yet, wrong for one that ENDED. The reconcile
+    // deliberately KEEPS the run link on a blocked card so the reported reason stays
+    // reachable, and `run_progress` is derived from a run row that ages out, so this is
+    // the shape that actually occurs. Without the lane check the card reads as RUNNING:
+    // it pulses, it counts in the summary's `running`, and its ▶ is suppressed for the
+    // wrong reason (which is what made the canPlay test above pass either way).
+    const blocked = item({ status: 'blocked', linked_run_id: 'run-esc' });
+    expect(blocked.run_progress).toBeUndefined();
+    expect(isLinkedRunning(blocked)).toBe(false);
+    expect(canPlay(blocked)).toBe(false);
+    // CONTROL: an in_progress card with the identical link and no progress IS running —
+    // so this is the lane deciding, not the absent run_progress.
+    expect(isLinkedRunning(item({ status: 'in_progress', linked_run_id: 'run-esc' }))).toBe(true);
+  });
+
   it('isRetry is false EVEN THOUGH the card keeps its run link', () => {
     // The link is kept on purpose — it is how the reported reason stays reachable — and
     // it used to be sufficient on its own to label the card a retry.

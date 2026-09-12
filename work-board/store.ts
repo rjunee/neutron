@@ -882,8 +882,29 @@ export class WorkBoardStore {
       const terminalTransition =
         patch.status !== undefined &&
         patch.status !== current.status &&
-        (patch.status === 'done' || patch.status === 'failed' || patch.status === 'archived')
-      if (patch.inline_active !== undefined && !terminalTransition) {
+        (patch.status === 'done' ||
+          patch.status === 'failed' ||
+          patch.status === 'archived' ||
+          // …and INTO 'blocked', which is not terminal but is the lane that says work
+          // has STOPPED. `detachRun` already clears the flag on every outcome; this is
+          // the generic path saying the same thing, so the two writers cannot disagree.
+          patch.status === 'blocked')
+      // ...AND A BLOCKED CARD MAY NOT BE MARKED INLINE-ACTIVE AT ALL, whether it is
+      // becoming blocked or already is. A blocked card exists to STOP work on it: the
+      // dispatch chokepoint refuses a build against it and both UIs drop its ▶, so a
+      // flag that makes it pulse "something is moving here" contradicts every other
+      // signal on the row. It is enforced HERE, at the store, and not at the tool,
+      // because `inline_active` is writable by the agent tool, the HTTP surface and the
+      // TodoWrite reconcile independently — an invariant that holds only in the caller
+      // that remembered it is not an invariant. CLEARING is always allowed; only the
+      // claim is refused, which can only ever move the row toward consistency.
+      //
+      // KEYED ON THE EFFECTIVE STATUS, not on the patch: the reachable case is a patch
+      // that sets ONLY `inline_active` on a card that is ALREADY blocked, which
+      // `terminalTransition` cannot see because it looks at `patch.status`.
+      const effectiveStatus = patch.status ?? current.status
+      const blockedClaim = patch.inline_active === true && effectiveStatus === 'blocked'
+      if (patch.inline_active !== undefined && !terminalTransition && !blockedClaim) {
         push('inline_active', patch.inline_active ? 1 : 0)
       }
       if (patch.status !== undefined && patch.status !== current.status) {
@@ -1031,7 +1052,14 @@ export class WorkBoardStore {
    * only ever move a row toward the consistent state.
    */
   async setInlineActive(project_slug: string, id: string, active: boolean): Promise<void> {
-    const terminalGuard = active ? " AND status NOT IN ('done', 'failed')" : ''
+    // 'blocked' joins the guard for a DIFFERENT reason than the two terminal lanes, and
+    // it is worth keeping straight: 'done'/'failed' are here because a FINISHED row that
+    // still claims live work pulses forever and cannot self-heal; 'blocked' is here
+    // because the lane exists to STOP work on the card — the dispatch chokepoint refuses
+    // a build against it and both UIs drop its ▶, so a flag that says "something is
+    // moving here" contradicts every other signal on the row. Unblocking is a status
+    // write, and the claim is welcome again the moment that happens.
+    const terminalGuard = active ? " AND status NOT IN ('done', 'failed', 'blocked')" : ''
     await this.db.run(
       `UPDATE work_board_items SET inline_active = ?, updated_at = ?
         WHERE project_slug = ? AND id = ?${terminalGuard}`,
