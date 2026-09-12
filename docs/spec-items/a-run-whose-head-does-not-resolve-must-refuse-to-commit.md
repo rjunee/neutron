@@ -77,8 +77,13 @@ test:
   destructive half sits in an exported `deleteReapableRef` that the sweep does not call, behind one
   named reason (`DEFERRED_PENDING_CLAIMANT_GUARD`). Satisfying this item therefore includes deleting
   that deferral and restoring the single call, and proving the sweep deletes again. Until then the
-  sweep records what it *would* reap in `refs_reapable`: **72 of 80 refs on the repo of record** as of
-  2026-09-12 (see the issue comment), which is the exposure this sequencing exists to hold back.
+  sweep records CANDIDATES in `refs_candidates` — refs that pass gates 1-10: **72 of 80 on the repo of
+  record** as of 2026-09-12 (see the issue comment). That figure is an UPPER BOUND on what would be
+  deleted, not a measurement of it: gate 11 *is* the salvage write, so a dry run that evaluated it
+  would not be dry, and gates 12-14 re-measure sources gates 4-8 have just read, so in a dry sweep
+  they would re-derive the same answer and add the appearance of rigour rather than any. The exposure
+  this sequencing holds back is therefore "at most 72", which is still not a small first exposure for
+  an operation that does not exist today.
 - **(e) THE CLAIM PROBE REFUSES ON AN UNREADABLE HOLDER LISTING, proven before deletion is
   re-enabled.** #606's probe had a hole — a `worktree list` that succeeded with impossible output
   (zero records, which git cannot produce) read as "no claimants" and would have permitted a delete.

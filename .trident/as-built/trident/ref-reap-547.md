@@ -437,6 +437,30 @@ atomicity fix there are ZERO occurrences of `'-D'`: the delete is lowercase `git
 the source assertions ban `'branch', '-D'` and the bare `'-D'` flag outright while requiring exactly
 one `'update-ref', '-d'`. A record that describes the round before last is worse than no record.
 
+### A rename must follow the CONCEPT, not just its mentions
+
+The `refs_reapable` → `refs_candidates` rename was propagated through the code, the module header,
+this record, and the corrected #635 comment — every place that *describes* the change. It stopped at
+`docs/spec-items/a-run-whose-head-does-not-resolve-must-refuse-to-commit.md`, whose acceptance
+criterion still named the old field. That document is not about this rename; it is about a different
+piece of work that happens to depend on the name — and it is the document that will be used to judge
+whether #635 is done. So the one place the stale name could do real damage was the one place the
+sweep for stale names did not look.
+
+**A rename must follow the concept into documents that do not mention the change at all.** The
+mentions are easy: they are in the diff, or one grep away in the files you already touched. The
+dangerous references are in artefacts written for other purposes, by other work, that took a
+dependency on the name in passing — a normative acceptance clause, a runbook, a card. The test is not
+"did I update everything I changed" but "what else takes this name as an input, including things I
+have no reason to open".
+
+Grepping caught it here, and the grep needed a positive control precisely because a field name appears
+in prose without ceremony — there is no syntax to look for, so a search that finds nothing is
+indistinguishable from a search that was wrong. The stale clause also carried the stale FRAMING, not
+only the stale token: it said the sweep "records what it *would* reap", which is the overclaim the
+rename existed to retire. Fixing the identifier without fixing the sentence would have left the
+document wrong in the way that mattered.
+
 ### The transferable pattern
 
 FOUR ROUNDS OF THIS REVIEW WERE SPENT NARROWING A RACE THAT CANNOT BE CLOSED FROM THIS SIDE OF IT.
