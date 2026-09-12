@@ -68,6 +68,13 @@ instance, user, project and credential, so two rows in one registry belong to su
 with different options, and rebuilding one row's session from another's would scope a
 REPL to the wrong project. Each substrate reconciles its own key with its own options.
 
+The consequence, named rather than left to be discovered: a row whose substrate this
+process has not constructed is NOT reconciled, so its pane keeps running until a turn
+for that key arrives (which is when a substrate for it is built, and which is exactly
+when it matters). That is safe because the watchdog's own liveness probe reads a
+healthy survivor as healthy and takes no action, and a wedged one goes through the
+pre-existing `#105` pid-identity orphan kill before its respawn.
+
 Every `adopted` verdict is a conjunction of three probes that could have come back
 negative, through two independent authorities: herdr says the pane is live; the pane's
 foreground argv matches twice over; and the dev-channel at the row's recorded port
