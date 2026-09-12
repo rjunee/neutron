@@ -321,8 +321,9 @@ form; the "kills:" note names what the earlier form let through.
 
 - [ ] **In-process overlap on one thread id waits under a configured bound;
       cross-process overlap returns the typed conflict inside a fixed latency ceiling;
-      different thread ids never block each other.** verify four cases. Case (ii) must
-      use **two real adapter processes**, not an injected error.
+      different thread ids never block each other.** verify four cases. **Case (iii)** —
+      the cross-process one — must use **two real adapter processes**, not an injected
+      error.
       (i) **in-process, within the bound** — start call A, and while it is in flight
       start call B on the **same** id in the same process; assert B's turn began no
       earlier than A's completion and both returned their own result.
