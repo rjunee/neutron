@@ -12,9 +12,9 @@ This file ships with Neutron and is **identical in every Neutron coding
 repository**. It is the single description of how work is captured, specified,
 built and recorded. A repository adopts it by copying this file to
 `docs/process/work-tracking.md` and pointing its agent entry point at it — a root
-`AGENTS.md` where the repo allows one, otherwise `CONTRIBUTING.md` plus the
-per-directory `AGENTS.md` convention. (This repository reserves the root
-`AGENTS.md` path as a leak-gate tripwire, so it uses the latter shape.)
+`AGENTS.md`, plus `CONTRIBUTING.md` and the per-directory `AGENTS.md` convention
+where a repo has them. A repo that reserves the root `AGENTS.md` path for some
+other reason uses the latter two alone and says so here.
 
 It is harness-agnostic on purpose: Claude Code, Codex and anything else Neutron
 orchestrates all read the same rules. The `work-tracking` skill invokes it.
