@@ -358,9 +358,23 @@ export interface PersistentReplSubstrateOptions {
    *
    * THIS IS ALSO THE SELECTION SEAM, and deliberately the only one: the in-process
    * Bun-native host (`bun-terminal-host.ts`) is kept as an option reachable by
-   * injecting it HERE, with no user-facing chooser anywhere. The two backends are not
-   * interchangeable — see `pty-host.ts` for the three differences and the one defect
-   * they create. Tests inject a fake.
+   * injecting it HERE, with no user-facing chooser anywhere.
+   *
+   * READ THIS BEFORE CHOOSING ONE. The two backends are NOT interchangeable:
+   *  • EXIT CODES exist under Bun and NOWHERE in herdr, where `exited` always resolves
+   *    `null` and crash-versus-recycle collapses entirely onto `wasKilledByUs`.
+   *  • EXIT DETECTION is a push under Bun and a POLL under herdr, so herdr learns of an
+   *    exit on the tick after it happens rather than at the instant it does.
+   *  • **A REPAINT IS NEW OUTPUT UNDER BUN.** `onScreen` is a rendered pane under herdr
+   *    and an accumulation of the byte stream under Bun, and `PtyRing.textSince` is a
+   *    multiset difference against a baseline SCREEN. Under herdr an Ink repaint
+   *    redraws the same pane and the difference is empty — which is the whole reason
+   *    snapshot-replace was taken over diff-append. Under Bun the repaint really is new
+   *    bytes, so the same content reads as new output and a per-turn detector can see
+   *    it again. The Bun path is no worse than it was before herdr step 2b, but it does
+   *    not get that fix: anything relying on repaint collapsing works on herdr ONLY.
+   *
+   * Tests inject a fake.
    */
   ptyHost?: PtyHost
   /** Path to the dev-channel MCP server script. Default: the shipped one. */

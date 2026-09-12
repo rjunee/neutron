@@ -38,25 +38,81 @@
 
 import { stripPtyNoise, newDcsStripState, type DcsStripState } from './pty-noise.ts'
 import { encodeKey, encodeKeys, type Key } from './keystrokes.ts'
-import { bottomNLines } from './pty-ring.ts'
+import { clampLeadingLines, DEFAULT_RING_MAX_BYTES } from './pty-ring.ts'
 import type { PtyChild, PtyHost, PtySpawnOpts } from './pty-host.ts'
 import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
 
 /**
- * How much accumulated output this host keeps as "the screen", in LINES.
+ * How much accumulated output this host keeps as "the screen", in UTF-8 BYTES.
  *
- * Bounded in lines rather than characters on purpose: a character cut would have to
- * decide what to do about a surrogate pair, and the whole point of the byte-versus-unit
- * lesson on this branch is that a bound measured in the wrong unit is a bug waiting to
- * be found. A line boundary can never fall inside a character. The consumer
- * (`PtyRing`) applies its own byte cap on top, so this only has to be finite.
+ * BYTES, NOT LINES, and the first version got this wrong. A line-count bound
+ * (`bottomNLines(screen, 2000)`) cannot bound memory at all, because a LINE IS
+ * UNBOUNDED: a child whose output contains no newline — `yes x | tr -d '\n'` is the
+ * one-command repro — is a single line forever, and every "trim" then retains
+ * everything. The quantity that bounds memory is bytes, so that is the quantity the
+ * code holds. This is the same move the herdr client's inbound buffer needed three
+ * times (copying, retention, allocation count): stop bounding a proxy for the resource
+ * and bound the resource.
+ *
+ * Set to the RING's own cap, deliberately: the host never retains more than its
+ * consumer would keep, so the two cannot drift into a state where this holds megabytes
+ * the ring is about to discard.
  */
-const SCREEN_LINES = 2000
+const SCREEN_MAX_BYTES = DEFAULT_RING_MAX_BYTES
 
-/** Only walk the accumulation when it is plausibly over the cap: splitting on every
- *  chunk would make a cheap append quadratic, which is the defect this branch removed
- *  from the herdr client's inbound buffer. 200 bytes/line is generous. */
-const SCREEN_TRIM_AT_CHARS = SCREEN_LINES * 200
+/**
+ * Clamp down to this, not to the cap, when the cap is exceeded.
+ *
+ * A LOW-WATER MARK, for the same reason the client's buffer doubles rather than growing
+ * by one: trimming back to exactly the cap means the very next chunk is over it again,
+ * and an O(screen) clamp per chunk is the quadratic behaviour this branch already
+ * removed once. Cutting to three quarters buys a quarter of the budget before the next
+ * clamp, so the clamp is amortised O(1) per byte.
+ */
+const SCREEN_TRIM_TO_BYTES = Math.floor(SCREEN_MAX_BYTES * 0.75)
+
+/**
+ * The screen accumulator, EXTRACTED AND EXPORTED so it can be tested without a pty.
+ *
+ * Not extracted for tidiness — extracted because the pty fixture cannot test it. A pty
+ * has a fixed kernel buffer and no flow control: when the reader is slower than the
+ * writer the kernel DROPS output, silently and by a varying amount (measured: the same
+ * 3 MB child delivered 490 KB on one run and 317 KB on another). So a bound asserted
+ * end-to-end through a real pty can pass because the child's output never reached the
+ * cap, and it can fail for reasons that have nothing to do with the bound. A fixture
+ * does not have to be permissive to hide a defect; it only has to be unrepresentative.
+ *
+ * Driven directly, this is a pure function of the chunk sequence, and the byte bound is
+ * decidable.
+ */
+export function newScreenAccumulator(
+  maxBytes: number = SCREEN_MAX_BYTES,
+  trimToBytes: number = SCREEN_TRIM_TO_BYTES,
+): { push: (text: string) => string } {
+  let screen = ''
+  // TRACKED INCREMENTALLY. Measuring the whole accumulation on every delivery would be
+  // O(screen) per chunk — cheap per call and quadratic over a session, which is exactly
+  // the shape that had to be removed from the herdr client's inbound buffer.
+  let bytes = 0
+  return {
+    push(text: string): string {
+      screen += text
+      bytes += Buffer.byteLength(text, 'utf8')
+      if (bytes > maxBytes) {
+        // ONE implementation of "cut a string to a byte budget, line-aligned, without
+        // splitting a character" — `pty-ring.ts`'s, which already had to get the
+        // mid-line cut and the surrogate pair right. It drops whole leading lines
+        // first and falls back to a byte-boundary tail for a single over-long line,
+        // which is the case a line-count bound could not reach. It preserves the line
+        // structure exactly, including a trailing newline, so nothing here has to
+        // reason about joining the last line to the next chunk.
+        screen = clampLeadingLines(screen, trimToBytes)
+        bytes = Buffer.byteLength(screen, 'utf8')
+      }
+      return screen
+    },
+  }
+}
 
 /** Minimal shape of `Bun.Terminal` we consume (kept narrow so the file type-
  *  checks even where the ambient Bun types lag the runtime). */
@@ -133,7 +189,7 @@ export class BunTerminalHost implements PtyHost {
     // Handing it one byte chunk at a time would therefore make every delivery erase
     // all previous output — the exact inverse of the old `onData` contract, and
     // silently: the ring would look alive and hold only the last few bytes.
-    let screen = ''
+    const accumulator = newScreenAccumulator()
     // A STREAMING decoder. `stripPtyNoise` removes escape sequences at the BYTE level,
     // so a stripped chunk can end mid-character; decoding each chunk independently
     // turns that into U+FFFD pairs while everything downstream still looks like text.
@@ -148,17 +204,7 @@ export class BunTerminalHost implements PtyHost {
         if (clean.length === 0) return
         const text = decoder.decode(clean, { stream: true })
         if (text === '') return // the chunk was a partial character; wait for the rest
-        screen += text
-        if (screen.length > SCREEN_TRIM_AT_CHARS) {
-          // PRESERVE THE TRAILING NEWLINE. `bottomNLines` deliberately drops one (a
-          // trailing newline is not an empty last line), which is right for a finished
-          // capture and WRONG for a running accumulation: dropping it would join the
-          // last line to whatever the next chunk brings.
-          const openLine = !screen.endsWith('\n')
-          const kept = bottomNLines(screen, SCREEN_LINES)
-          screen = openLine ? kept : `${kept}\n`
-        }
-        opts.onScreen(screen)
+        opts.onScreen(accumulator.push(text))
       },
     })
 

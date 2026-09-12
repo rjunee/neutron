@@ -33,6 +33,7 @@
  * which separates *spared* from *reused*.
  */
 
+import { withCapturedStderr } from './capture-stderr.ts'
 import { describe, it, expect, afterEach } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
@@ -191,20 +192,21 @@ async function waitUntil(pred: () => boolean, budgetMs = 2000): Promise<void> {
   throw new Error('waitUntil: condition not met within budget')
 }
 
-/** Capture `[repl] …` stderr lines for the duration of `fn`. */
+/**
+ * Capture `[repl] …` stderr lines for the duration of `fn`.
+ *
+ * DELEGATES rather than hand-rolls. This used to install the override itself and
+ * "restore" `original.bind(process.stderr)` — a different function object from the one
+ * it replaced, so the process never came back to where it started. Five suites had that
+ * bug; `capture-stderr.ts` is now the only place the assignment lives, and a guard
+ * fails any test that makes it again.
+ */
 async function captureStderr<T>(fn: () => Promise<T>): Promise<{ result: T; lines: string[] }> {
-  const lines: string[] = []
-  const original = process.stderr.write.bind(process.stderr)
-  process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-    lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
-    return true
-  }) as typeof process.stderr.write
-  try {
-    const result = await fn()
-    return { result, lines }
-  } finally {
-    process.stderr.write = original
-  }
+  let result!: T
+  const lines = await withCapturedStderr(async () => {
+    result = await fn()
+  })
+  return { result, lines }
 }
 
 /** Abandon turn 1 the way a budget-elapsed caller does, once the REPL has taken it. */

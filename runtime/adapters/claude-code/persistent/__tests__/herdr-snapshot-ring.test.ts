@@ -22,7 +22,8 @@ import { describe, expect, it } from 'bun:test'
 import { HerdrHost } from '../herdr-host.ts'
 import { PtyRing } from '../pty-ring.ts'
 import { OutputScanner } from '../output-scan.ts'
-import { FakeHerdrServer, until, withCapturedStderr } from './herdr-fake-server.ts'
+import { FakeHerdrServer, until } from './herdr-fake-server.ts'
+import { withCapturedStderr } from './capture-stderr.ts'
 import { HerdrError } from '../herdr-client.ts'
 import { HERDR_PANE_NOT_FOUND } from '../herdr-protocol.ts'
 import { terminateChild } from '../repl-session.ts'
@@ -380,22 +381,14 @@ describe('herdr bridge — a pane that ends is discovered by POLLING', () => {
     // really is 120 rows, so "could not read the geometry" and "the geometry is 120"
     // were one state. The consequence is silent and positional: on a taller pane
     // every read comes back short and detectors see less than they are written for.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((c: unknown): boolean => {
-      errs.push(String(c))
-      return true
-    }) as typeof process.stderr.write
-    try {
+    const errs = await withCapturedStderr(async () => {
       const server = new FakeHerdrServer({ paneId: 'w9:pGuess' })
       server.viewportRows = null // pane.get answers with no scroll geometry
       const { child, screens } = await spawnWithFake(server)
       await until(() => screens.length >= 1, 'first screen')
       await until(() => server.callsTo('pane.read').length >= 3, 'several polls')
       child.kill()
-    } finally {
-      process.stderr.write = realWrite
-    }
+    })
     const said = errs.filter((e) => e.includes('ASSUMING'))
     // Said, and said ONCE — a per-poll warning at 5ms would bury the log it is
     // supposed to inform.
@@ -406,22 +399,14 @@ describe('herdr bridge — a pane that ends is discovered by POLLING', () => {
   it('CONTROL — a MEASURED viewport says nothing, so the warning carries information', async () => {
     // Without this, the assertion above is satisfied by warning unconditionally,
     // which tells a reader nothing about whether the geometry was read.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((c: unknown): boolean => {
-      errs.push(String(c))
-      return true
-    }) as typeof process.stderr.write
-    try {
+    const errs = await withCapturedStderr(async () => {
       const server = new FakeHerdrServer({ paneId: 'w9:pMeasured' })
       server.viewportRows = 120 // the SAME number the fallback would have guessed
       const { child, screens } = await spawnWithFake(server)
       await until(() => screens.length >= 1, 'first screen')
       await until(() => server.callsTo('pane.read').length >= 3, 'several polls')
       child.kill()
-    } finally {
-      process.stderr.write = realWrite
-    }
+    })
     // 120 measured must be distinguishable from 120 assumed — that is the entire
     // point, and picking the fallback's own value is what makes the pair sharp.
     expect(errs.filter((e) => e.includes('ASSUMING'))).toEqual([])
@@ -431,23 +416,15 @@ describe('herdr bridge — a pane that ends is discovered by POLLING', () => {
     // Neither an error nor an answer. Leaving the screen undefined is right — an
     // unknown must not be delivered as an empty screen — but doing it silently makes
     // a drifted reply shape look exactly like a permanently idle REPL.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((c: unknown): boolean => {
-      errs.push(String(c))
-      return true
-    }) as typeof process.stderr.write
     let delivered: string[] = []
-    try {
+    const errs = await withCapturedStderr(async () => {
       const server = new FakeHerdrServer({ paneId: 'w9:pMalformed' })
       server.malformMethod('pane.read', { read: { pane_id: 'w9:pMalformed', text: 42 } })
       const { child, screens } = await spawnWithFake(server)
       await until(() => server.callsTo('pane.read').length >= 3, 'several polls')
       delivered = screens
       child.kill()
-    } finally {
-      process.stderr.write = realWrite
-    }
+    })
     // NOTHING delivered — not an empty screen, which would erase a dead REPL's last
     // output from the ring and drop a detector latch.
     expect(delivered).toEqual([])
@@ -632,13 +609,7 @@ describe('the producer does not start before its consumer can exist', () => {
   it('CONTROL — a TIMELY beginOutput() warns not at all', async () => {
     // Without this, "warns exactly once" is satisfied by warning on every spawn, which
     // would make the diagnostic worthless precisely when it is true.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((c: unknown): boolean => {
-      errs.push(String(c))
-      return true
-    }) as typeof process.stderr.write
-    try {
+    const errs = await withCapturedStderr(async () => {
       const server = new FakeHerdrServer({ paneId: 'w9:pTimely' })
       server.screen = 'promptly'
       const screens: string[] = []
@@ -659,9 +630,7 @@ describe('the producer does not start before its consumer can exist', () => {
       // Outlast the fail-open timer: the warning must not arrive late either.
       await Bun.sleep(60)
       child.kill()
-    } finally {
-      process.stderr.write = realWrite
-    }
+    })
     expect(errs.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
   })
 

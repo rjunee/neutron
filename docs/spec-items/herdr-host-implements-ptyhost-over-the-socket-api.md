@@ -22,11 +22,24 @@ selector is explicitly OUT of scope here and waits on the herdr path being verif
 on the instance.
 
 **THE TWO BACKENDS ARE NOT INTERCHANGEABLE**, and that is the real cost of keeping both.
-Stated here, in `pty-host.ts` and in `bun-terminal-host.ts` so no reader assumes parity:
-exit codes exist under Bun and nowhere in herdr; exit is a push under Bun and a poll
-under herdr; and `onScreen` is a rendered pane under herdr but an accumulation of the
-byte stream under Bun. The acceptance criterion below names the one behavioural defect
-that divergence creates rather than hiding it.
+Stated here, at the selection seam (`types.ts`'s `ptyHost`), in `pty-host.ts` and in
+`bun-terminal-host.ts`, so a reader meets it BEFORE choosing rather than after:
+
+1. **Exit codes** exist under Bun and nowhere in herdr, where `exited` always resolves
+   `null` and crash-versus-recycle collapses entirely onto `wasKilledByUs`.
+2. **Exit detection** is a push under Bun (`proc.exited` settles) and a POLL under herdr
+   (a typed `pane_not_found`), so herdr learns of an exit a tick late.
+3. **A repaint is new output under Bun.** `onScreen` is a rendered pane under herdr and
+   an accumulation of the byte stream under Bun, and `PtyRing.textSince` is a multiset
+   difference against a baseline SCREEN. Under herdr an Ink repaint redraws the same
+   pane and the difference is empty — the whole reason snapshot-replace was taken over
+   diff-append. Under Bun the repaint really is new bytes, so the same content reads as
+   new output and a per-turn detector can see it again.
+
+The third is a genuine defect on the Bun path, and it is named rather than papered over:
+that path is no worse than it was before this item — the old byte-counter ring had the
+same limitation, documented — but it does not get the fix. **Anything that relies on
+repaint collapsing works on herdr only.**
 
 ## The central design problem: what scopes a turn when the ring is a screen
 
@@ -158,10 +171,31 @@ not-new. That is accepted and recorded here rather than hidden.
       seam exists. Neither backend claims the REPL acted on the line.
       (c) `onScreen` ACCUMULATES. `PtyRing.replace` overwrites with each delivery, so
       forwarding one byte chunk per call would erase all previous output every time —
-      silently, with the ring looking alive and holding the last few bytes. The
-      accumulation is trimmed on a LINE boundary (a character cut would have to reason
-      about surrogate pairs) and decoded with a STREAMING decoder, because `stripPtyNoise`
-      cuts at byte level and can leave a chunk ending mid-character.
+      silently, with the ring looking alive and holding the last few bytes. Decoded with
+      a STREAMING decoder, because `stripPtyNoise` cuts at byte level and can leave a
+      chunk ending mid-character.
+      AND THE ACCUMULATION IS BOUNDED IN UTF-8 BYTES, NOT LINES. A line count is not a
+      bound, because A LINE IS UNBOUNDED: a child whose output contains no newline
+      (`yes x | tr -d '\n'`) is one line forever and a line-count trim retains all of
+      it. The quantity that bounds memory is bytes, so that is the quantity the code
+      holds — the same move the herdr client's inbound buffer needed three times. The
+      cut REUSES `pty-ring.ts`'s clamp rather than growing a second copy: one
+      implementation of "line-aligned, character-safe, to a byte budget" instead of two
+      chances to get the surrogate pair or the mid-line cut wrong. It trims to a
+      LOW-WATER MARK, not to the cap, or the next chunk is over again and an O(screen)
+      clamp runs per chunk — the quadratic shape already removed once on this branch.
+      THE FIXTURE HAS TO BE THE ACCUMULATOR, NOT A PTY. A pty has a fixed kernel buffer
+      and no flow control: when the reader is slower than the writer the kernel DROPS
+      output, silently and by a varying amount (measured on this host: the same 3 MB
+      child delivered 490,432 bytes on one run and 316,608 on the next). A bound
+      asserted end-to-end through that fixture can pass because the output never reached
+      the cap — verified, by a character-safety mutation that survived it. The
+      accumulator is exported and driven directly; the pty tests keep the contract, not
+      the bound. Cases: newline-free volume, newline-free MULTIBYTE, an ASTRAL character
+      (a UTF-16 slice splits a surrogate pair), the trailing newline surviving a trim,
+      and the budget being USED between clamps — which is the only thing that reddens a
+      byte counter left stale after a clamp, since that variant clamps every chunk and
+      produces no shrink to count.
       `exitCause` is deliberately ABSENT under Bun: both its values name herdr mechanisms,
       and `undefined` means "not known", which is the truth.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
@@ -393,9 +427,22 @@ not-new. That is accepted and recorded here rather than hidden.
       The helper needs its own cases in both directions — a body that REJECTS restores
       AND still propagates its error (a helper that swallowed it would hide every live
       failure it exists to surface), and a body that resolves restores and returns what
-      it captured. And the rule is enforced rather than observed: a guard fails any
-      `*.e2e.test.ts` that assigns `process.stderr.write` at all, with a positive control
-      that the pattern finds the assignment where it legitimately lives.
+      it captured.
+      AND THE RESTORE MUST BE THE ORIGINAL REFERENCE, not a bound copy of it: installing
+      `original.bind(process.stderr)` leaves a DIFFERENT function object in place, so
+      nested or repeated captures stack binds and nothing ever returns the process to
+      where it started. Five suites had exactly that, including the one whose own test
+      asserts identity restoration.
+      THE RULE IS ENFORCED, AND ITS DOMAIN IS THE DOMAIN OF THE RULE. The guard fails any
+      test that assigns `process.stderr.write` at all — every `*.test.ts` and every module
+      under a `__tests__/` directory, with ONE sanctioned assignment site
+      (`__tests__/capture-stderr.ts`). It was first scoped to `*.e2e.test.ts`, which is
+      where the defect was noticed, and that scoped it to the SAMPLE: none of the five
+      offenders was an e2e file, so the guard could not see any of them. The positive
+      control has two parts for the same reason — the pattern must find the sanctioned
+      assignment, AND the walk must reach the file holding it. An empty result proves
+      nothing if either the pattern or the domain is wrong, and on this branch both have
+      been.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts tests/integration/pty-e2e-registered.test.ts`
 - [ ] **No test may switch a live proof off.** The live herdr proofs are the only tests
       in this repo that can see a real server, and they are exactly the instrument that

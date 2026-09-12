@@ -25,7 +25,7 @@
 
 import { describe, expect, test } from 'bun:test'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
-import { dirname, join, relative } from 'node:path'
+import { dirname, join, relative, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..')
@@ -46,6 +46,31 @@ function walkTests(dir: string, out: string[] = []): string[] {
     }
     if (st.isDirectory()) walkTests(full, out)
     else if (entry.endsWith('.test.ts')) out.push(full)
+  }
+  return out
+}
+
+/**
+ * Every `.ts` a test run can load: every `*.test.ts`, plus every module under a
+ * `__tests__/` directory (fakes, fixtures, capture helpers).
+ *
+ * WIDER THAN `walkTests` ON PURPOSE. A rule about what tests may do to process state
+ * has to cover the files tests IMPORT, or the next hand-rolled copy simply moves into a
+ * helper and the guard reports clean.
+ */
+function allTestSources(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    if (SKIP_DIRS.has(entry)) continue
+    const full = join(dir, entry)
+    let st: ReturnType<typeof statSync>
+    try {
+      st = statSync(full)
+    } catch {
+      continue
+    }
+    if (st.isDirectory()) allTestSources(full, out)
+    else if (entry.endsWith('.test.ts')) out.push(full)
+    else if (entry.endsWith('.ts') && full.includes(`${sep}__tests__${sep}`)) out.push(full)
   }
   return out
 }
@@ -112,7 +137,9 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     const SWITCHES = ['HERDR_SOCKET_PATH', 'NEUTRON_PTY_E2E']
     const writers: string[] = []
     const offenders: string[] = []
-    for (const f of walkTests(REPO_ROOT)) {
+    // `allTestSources`, not `walkTests`: same domain lesson as the stderr guard below —
+    // a helper module under `__tests__/` is exactly where the next copy would hide.
+    for (const f of allTestSources(REPO_ROOT)) {
       let src: string
       try {
         src = readFileSync(f, 'utf8')
@@ -140,18 +167,25 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
     expect(offenders).toEqual([])
   })
 
-  // A LIVE PROOF MAY NOT MONKEY-PATCH PROCESS STATE BY HAND. The hand-rolled shape is
-  // install, do the interesting thing, restore — and the interesting thing in a live
-  // proof is `await host.spawn(...)`, which rejects on a protocol mismatch, an
-  // unreachable socket or a pid that never arrives. The restore then never runs and
-  // `process.stderr.write` stays patched for the rest of the process. That is the worst
-  // possible failure shape: the one test that can see a real server fails, and its
-  // failure silently degrades every test after it. Use the scoped capture helper, whose
-  // restore is in a `finally`.
-  test('no live proof monkey-patches stderr by hand', () => {
+  // NO TEST MAY MONKEY-PATCH PROCESS STATE BY HAND — not just the live ones. The
+  // hand-rolled shape is install, do the interesting thing, restore, and it goes wrong
+  // two ways that both leave the process changed for everything after it: the restore
+  // sits after an `await` that can reject (a spawn that fails on a protocol mismatch,
+  // an unreachable socket, a pid that never arrives), and the "restore" installs
+  // `original.bind(process.stderr)` — a DIFFERENT function object from the one it
+  // replaced, so nested or repeated captures stack binds forever.
+  //
+  // THIS GUARD WAS FIRST SCOPED TO `*.e2e.test.ts`, WHICH IS WHERE I FOUND THE
+  // PROBLEM — and that is the whole lesson. Five suites had the bind bug and none of
+  // them was an e2e file, so the guard could not see any of them. A guard scoped to the
+  // file type where the defect was noticed is a guard scoped to the sample; the domain
+  // has to be the domain of the RULE. It is now every test in the repo, plus every
+  // module under a `__tests__/` directory, because a helper is exactly where the next
+  // hand-rolled copy would hide.
+  test('no test monkey-patches stderr by hand — the helper is the only assignment', () => {
     const PATCH = /process\.stderr\.write\s*=(?!=)/
-    const offenders = walkTests(REPO_ROOT)
-      .filter((f) => f.endsWith('.e2e.test.ts'))
+    const HELPER = 'runtime/adapters/claude-code/persistent/__tests__/capture-stderr.ts'
+    const offenders = allTestSources(REPO_ROOT)
       .filter((f) => {
         try {
           return PATCH.test(readFileSync(f, 'utf8'))
@@ -160,14 +194,14 @@ describe('every NEUTRON_PTY_E2E-gated suite is registered in a runner', () => {
         }
       })
       .map((f) => relative(REPO_ROOT, f))
+      .filter((rel) => rel !== HELPER)
     expect(offenders).toEqual([])
-    // POSITIVE CONTROL: the pattern finds the assignment where it legitimately lives,
-    // so an empty offender list is an absence rather than a typo.
-    const helper = readFileSync(
-      join(REPO_ROOT, 'runtime/adapters/claude-code/persistent/__tests__/herdr-fake-server.ts'),
-      'utf8',
-    )
-    expect(PATCH.test(helper)).toBe(true)
+    // POSITIVE CONTROL, in two parts: the pattern finds the assignment where it
+    // legitimately lives, and the WALK reaches that file at all. An empty offender list
+    // proves nothing if either the pattern or the domain is wrong, and both have been
+    // wrong on this branch already.
+    expect(PATCH.test(readFileSync(join(REPO_ROOT, HELPER), 'utf8'))).toBe(true)
+    expect(allTestSources(REPO_ROOT).map((f) => relative(REPO_ROOT, f))).toContain(HELPER)
   })
 
   test('the registry lists no suite that no longer exists', () => {

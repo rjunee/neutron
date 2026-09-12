@@ -18,6 +18,7 @@
  *  - the default (no flag) warm substrate writes NO `/clear` (opt-in; unchanged).
  */
 
+import { withCapturedStderr } from './capture-stderr.ts'
 import { CONTEXT_RESET_COMMAND } from '../signatures.ts'
 import { describe, it, expect, afterEach } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
@@ -230,23 +231,15 @@ describe('PersistentReplSubstrate — reset_context_per_turn (import warm-sessio
     // happened completely invisible. What a wrong implementation gets right: the
     // import still completes, and the turns still return. So the run succeeding is
     // not the assertion; the diagnostic is.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: unknown): boolean => {
-      errs.push(String(chunk))
-      return true
-    }) as typeof process.stderr.write
     let out1 = ''
-    try {
+    const errs = await withCapturedStderr(async () => {
       const { host, timeline } = makeRecordingHost('send_keys refused')
       const sub = createPersistentReplSubstrate(opts(host, { reset_context_per_turn: true }))
       await drain(sub.start(spec('chunk-0')))
       out1 = await drain(sub.start(spec('chunk-1')))
       // Nothing was submitted — the refusal means the REPL never saw the command.
       expect(CLEARS(timeline)).toBe(0)
-    } finally {
-      process.stderr.write = realWrite
-    }
+    })
     // The import was NOT stranded...
     expect(out1).toBe('seen=1 got=chunk-1')
     // ...and the failure was reported, with the backend's reason.
@@ -258,21 +251,13 @@ describe('PersistentReplSubstrate — reset_context_per_turn (import warm-sessio
   it('CONTROL — when the submit is accepted, nothing is reported as failed', async () => {
     // Without this the case above is satisfied by a pool that reports EVERY reset as
     // failed, which is just as blind as reporting none.
-    const errs: string[] = []
-    const realWrite = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: unknown): boolean => {
-      errs.push(String(chunk))
-      return true
-    }) as typeof process.stderr.write
-    try {
+    const errs = await withCapturedStderr(async () => {
       const { host, timeline } = makeRecordingHost()
       const sub = createPersistentReplSubstrate(opts(host, { reset_context_per_turn: true }))
       await drain(sub.start(spec('chunk-0')))
       await drain(sub.start(spec('chunk-1')))
       expect(CLEARS(timeline)).toBe(1)
-    } finally {
-      process.stderr.write = realWrite
-    }
+    })
     expect(errs.filter((e) => e.includes('context-reset /clear failed'))).toEqual([])
   })
 

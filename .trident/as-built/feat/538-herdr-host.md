@@ -1513,6 +1513,69 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### A line count is not a bound, because a line is unbounded
+
+Keeping the Bun host brought a pre-existing defect into scope, which is exactly the cost
+of the option: **the old backend is no longer dormant code, it is supported code.** Its
+accumulation was bounded by `bottomNLines(screen, 2000)` — "keep the last 2000 lines" —
+and a child whose output contains no newline is ONE line forever. `yes x | tr -d '\n'`
+is the whole repro: every trim retained everything, and the screen grew without limit.
+Every test used newline-terminated output, so none of them could see it.
+
+The answer is the herdr client's answer, for the third time on this branch: stop bounding
+a proxy for the resource and bound the resource. The accumulation is now denominated in
+UTF-8 BYTES, tracked incrementally so no delivery costs O(screen).
+
+Two things made it cheap to do right. The cut REUSES `pty-ring.ts`'s `clampLeadingLines`
+rather than growing a second copy — one implementation of "line-aligned, character-safe,
+to a byte budget" instead of two chances to get the surrogate pair or the mid-line cut
+wrong, and it already handles the case a line count could not reach (a single line longer
+than the whole budget, cut on a byte boundary walked off continuation bytes). And it
+trims to a LOW-WATER MARK rather than to the cap, because trimming to the cap means the
+next chunk is over it again and the O(screen) clamp runs per chunk — the quadratic shape
+this branch already removed once.
+
+**The fixture had to stop being a pty, and that is the finding worth keeping.** A pty has
+a fixed kernel buffer and no flow control: when the reader is slower than the writer the
+kernel DROPS output, silently and by a varying amount. Measured on this host with a 3 MB
+newline-free child: 490,432 bytes delivered on one run, 316,608 on the next. So a bound
+asserted end-to-end through a pty can pass because the output never reached the cap — and
+it did: the mutation that replaces the character-safe byte tail with a UTF-16 `slice`
+SURVIVED the pty test and reddens immediately against the extracted accumulator. A
+fixture does not have to be permissive to hide a defect; it only has to be
+unrepresentative. The accumulator is exported and driven directly with synthetic chunks;
+the pty tests keep the contract and no longer carry the bound.
+
+M166 is the other one worth recording. A byte counter left stale after a clamp still
+bounds the screen — it just clamps on EVERY chunk, pinning the accumulation at the
+low-water mark. That produces no strict shrink, so a clamp-frequency count cannot see it,
+and a peak recorded over the whole run cannot either, because the peak happened during
+the one-off climb before the first clamp. What reddens it is measuring the maximum size
+WHILE SATURATED: the budget has to be used between clamps, not merely respected.
+
+### The fourth instrument whose domain was narrower than its claim
+
+Five suites installed `process.stderr.write` by hand and "restored"
+`original.bind(process.stderr)` — a different function object from the one they replaced,
+so nested or repeated captures stack binds and the process never returns to where it
+started. One of those suites is the one whose own test asserts identity restoration.
+
+The guard I had added could not see any of them: it scanned `*.e2e.test.ts`, because that
+is where I found the problem. **A guard scoped to the file type where the defect was
+noticed is a guard scoped to the sample.** That is the fourth time on this PR — a pattern
+that matched `===`, a grep without a line-start anchor, a per-delivery bound standing in
+for a per-frame one, and now a file glob. Each time the instrument was narrower than the
+claim it was making.
+
+The domain is now the domain of the rule: every `*.test.ts` in the repo plus every module
+under a `__tests__/` directory, since a helper is exactly where the next hand-rolled copy
+would hide. The single sanctioned assignment lives in its own module
+(`__tests__/capture-stderr.ts`), and the positive control has two parts — the pattern must
+find that assignment, and the walk must reach the file holding it — because an empty
+result proves nothing if either the pattern or the domain is wrong, and on this branch
+both have been. The same widening was applied to the `HERDR_SOCKET_PATH` guard, which had
+the same too-narrow walk.
+
 ### SCOPE REVERSAL: the in-process backend is kept as an option, not deleted
 
 This item began as a hard delete — "`bun-terminal-host.ts` is deleted, not left beside
@@ -2049,6 +2112,13 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M161 | the trim's trailing-newline preservation is removed | SURVIVED — the trim never runs at test volumes |
 | M162 | COMBINED: the trim always runs AND drops the trailing newline | RED 1 |
 | M162b | CONTROL OF THE COMBINATION: the trim always runs, preservation KEPT | GREEN — so the preservation is the load-bearing half, not the condition |
+| M163 | the screen bound is a LINE COUNT again | RED 5 |
+| M164 | PAIR: no bound at all | RED 5 |
+| M165 | the clamp cuts UTF-16 units instead of a character-safe byte tail | SURVIVED against a real pty (it drops output) → moved to the accumulator → RED 3 |
+| M166 | the byte counter is not refreshed after a clamp | SURVIVED twice (no strict shrink to count) → budget-use-when-saturated assertion → RED 1 |
+| M167 | the clamp trims to the CAP, not the low-water mark | RED 1 |
+| M168 | the clamp uses `bottomNLines` (drops the trailing newline) | RED 5 |
+| M169 | a test hand-rolls the stderr patch outside the helper | RED 1 (the widened guard) |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

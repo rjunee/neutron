@@ -28,6 +28,7 @@
  * wedged REPL and times out — the hang.
  */
 
+import { withCapturedStderr } from './capture-stderr.ts'
 import { describe, it, expect, afterEach } from 'bun:test'
 import type { AgentSpec } from '../../../../substrate.ts'
 import type { SessionHandle } from '../../../../session-handle.ts'
@@ -287,19 +288,11 @@ describe('abandon-poison is logged AT POISON TIME (2026-09-03)', () => {
     // investigation.
     const { host, messagesSeen } = makeWedgeThenHealthyHost()
     const sub = createPersistentReplSubstrate(opts(host, { turnTimeoutMs: 30_000 }))
-    const lines: string[] = []
-    const original = process.stderr.write.bind(process.stderr)
-    process.stderr.write = ((chunk: string | Uint8Array): boolean => {
-      lines.push(typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8'))
-      return true
-    }) as typeof process.stderr.write
-    try {
+    const lines = await withCapturedStderr(async () => {
       const h1 = sub.start(spec('turn-1'))
       await waitUntil(() => messagesSeen() >= 1)
       await h1.cancel()
-    } finally {
-      process.stderr.write = original
-    }
+    })
     const poison = lines.filter((l) => l.startsWith('[repl] abandon-poison '))
     expect(poison).toHaveLength(1)
     expect(poison[0]).toMatch(

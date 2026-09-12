@@ -15,7 +15,7 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { bunTerminalHost } from '../bun-terminal-host.ts'
+import { bunTerminalHost, newScreenAccumulator } from '../bun-terminal-host.ts'
 import type { PtyChild } from '../pty-host.ts'
 
 /** Wait until `cond()` holds, or throw. */
@@ -157,5 +157,111 @@ describe('the in-process Bun PTY backend is kept as a working option', () => {
     expect(child.exitCause).toBeUndefined()
     child.kill()
     await child.exited
+  })
+})
+
+/**
+ * THE BOUND IS TESTED WITHOUT A PTY, ON PURPOSE.
+ *
+ * A pty has a fixed kernel buffer and no flow control: when the reader is slower than
+ * the writer the kernel DROPS output, silently and by a varying amount. Measured on
+ * this host with a 3 MB newline-free child: 490,432 bytes delivered on one run and
+ * 316,608 on the next. A bound asserted through that fixture can pass because the
+ * output never reached the cap — which is exactly what happened when the mutation that
+ * cuts UTF-16 units instead of a character-safe byte tail SURVIVED. A fixture does not
+ * have to be permissive to hide a defect; it only has to be unrepresentative.
+ *
+ * The accumulator is a pure function of the chunk sequence, so driven directly the
+ * bound is decidable.
+ */
+describe('the screen accumulator is bounded in BYTES', () => {
+  const CAP = 64 * 1024
+  const TRIM_TO = 48 * 1024
+
+  it('output with NO NEWLINES is still bounded — a line count cannot bound memory', () => {
+    // A LINE IS UNBOUNDED, so a line count is not a bound. The first version of this
+    // host kept "the last 2000 lines"; a child whose output contains no newline is ONE
+    // line forever, so every trim retained everything. `yes x | tr -d '\n'` is the
+    // one-command repro, and every other test here uses newline-terminated output.
+    const acc = newScreenAccumulator(CAP, TRIM_TO)
+    let screen = ''
+    for (let i = 0; i < 3000; i++) screen = acc.push('x'.repeat(1024)) // 3 MB, no newline
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(CAP)
+    // ...and it kept the TAIL, which is the direction every detector read is anchored.
+    expect(screen.endsWith('x'.repeat(16))).toBe(true)
+    expect(screen.length).toBeGreaterThan(0)
+  })
+
+  it('a newline-free MULTIBYTE stream is cut on a CHARACTER boundary', () => {
+    // The only arrangement that can tell a byte-safe cut from a UTF-16 slice: an
+    // all-ASCII cap test passes for an implementation that slices code units, and a
+    // newline-terminated one never reaches the single-over-long-line path at all.
+    const acc = newScreenAccumulator(CAP, TRIM_TO)
+    let screen = ''
+    for (let i = 0; i < 3000; i++) screen = acc.push('é'.repeat(512)) // 1 KiB per chunk
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(CAP)
+    expect(screen).not.toContain('�')
+    // Every character is intact — a mid-character cut would leave a replacement char
+    // or a lone surrogate at the front.
+    expect([...screen].every((c) => c === 'é')).toBe(true)
+  })
+
+  it('an ASTRAL character is never split — the surrogate pair survives the cut', () => {
+    // `.slice()` counts UTF-16 units, so a cut can land BETWEEN the two halves of a
+    // surrogate pair and produce a lone surrogate, which is not a character at all.
+    const acc = newScreenAccumulator(CAP, TRIM_TO)
+    let screen = ''
+    for (let i = 0; i < 2000; i++) screen = acc.push('😀'.repeat(256)) // 4 bytes each
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(CAP)
+    expect(screen).not.toContain('�')
+    expect([...screen].every((c) => c === '😀')).toBe(true)
+  })
+
+  it('keeps line structure and the TRAILING NEWLINE when it trims', () => {
+    // `bottomNLines` drops a trailing newline (right for a finished capture, wrong for
+    // a running accumulation) — this is why the clamp is `clampLeadingLines`, which
+    // preserves it. Without that, the last line joins the next chunk.
+    const acc = newScreenAccumulator(CAP, TRIM_TO)
+    let screen = ''
+    for (let i = 0; i < 20_000; i++) screen = acc.push(`line-${i}\n`)
+    expect(Buffer.byteLength(screen, 'utf8')).toBeLessThanOrEqual(CAP)
+    expect(screen.endsWith('\n')).toBe(true)
+    const lines = screen.split('\n').filter((l) => l !== '')
+    expect(lines[lines.length - 1]).toBe('line-19999')
+    // No line was joined to its neighbour by the trim.
+    expect(lines.every((l) => /^line-\d+$/.test(l))).toBe(true)
+  })
+
+  it('CLAMPS AMORTISED, not on every chunk — the low-water mark is load-bearing', () => {
+    // Trimming back to exactly the cap means the next chunk is over it again and the
+    // O(screen) clamp runs per chunk, which is the quadratic shape this branch already
+    // removed from the herdr client. Cutting to a low-water mark buys a quarter of the
+    // budget between clamps. Counted through the one observable a pure accumulator has:
+    // the screen SHRINKING.
+    const acc = newScreenAccumulator(CAP, TRIM_TO)
+    let prev = 0
+    let clamps = 0
+    // Measured over the SECOND HALF, once the accumulator is saturated. The first
+    // half contains the one-off climb from empty to the cap, and a peak recorded there
+    // is not evidence the budget is still being used later — which is exactly how a
+    // stale byte counter hid (it clamps on every chunk forever AFTER that first peak).
+    let maxWhenSaturated = 0
+    for (let i = 0; i < 3000; i++) {
+      const size = Buffer.byteLength(acc.push('x'.repeat(1024)), 'utf8')
+      if (size < prev) clamps += 1
+      if (i >= 1500) maxWhenSaturated = Math.max(maxWhenSaturated, size)
+      prev = size
+    }
+    // 3 MB through a 64 KiB cap with a 16 KiB gap is ~187 clamps, not ~3000. This is
+    // what reddens a clamp that trims back to the CAP instead of the low-water mark.
+    expect(clamps).toBeGreaterThan(0)
+    expect(clamps).toBeLessThan(300)
+    // AND the accumulation is allowed to USE its budget between clamps. Needed as its
+    // own assertion: a counter that is never refreshed after a clamp stays permanently
+    // over the cap, so the clamp runs on every chunk and the screen is pinned at the
+    // low-water mark — which produces no strict SHRINKS at all and is therefore
+    // invisible to the count above (verified: that mutation survived until this line).
+    expect(maxWhenSaturated).toBeGreaterThan(CAP - 2048)
+    expect(maxWhenSaturated).toBeLessThanOrEqual(CAP)
   })
 })

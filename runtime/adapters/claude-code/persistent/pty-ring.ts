@@ -229,8 +229,17 @@ function splitScreen(text: string): string[] {
  * reader here splits on newlines, so a half line would enter the line array as a
  * real line and a positional guard could match on the fragment. Dropping from the
  * front is the least-harmful clamp because every detector read is bottom-anchored.
+ *
+ * EXPORTED because it has a second consumer, and having ONE implementation is the
+ * point. `bun-terminal-host.ts` accumulates a screen out of a byte stream and has to
+ * bound it — and bounding it by LINES cannot work, because a line is unbounded: a
+ * child emitting output with no newline in it (`yes x | tr -d '\n'`) is one line
+ * forever, and any line-count bound retains all of it. The quantity that can bound
+ * memory is BYTES, and the character-safe, line-aligned way to cut to a byte budget
+ * already existed here. Two copies of that would be two chances to get the surrogate
+ * pair or the mid-line cut wrong.
  */
-function clampLeadingLines(text: string, maxBytes: number): string {
+export function clampLeadingLines(text: string, maxBytes: number): string {
   const lines = text.split('\n')
   let start = 0
   let size = utf8Bytes(text)

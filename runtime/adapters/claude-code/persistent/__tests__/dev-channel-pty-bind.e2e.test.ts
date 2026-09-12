@@ -31,7 +31,7 @@ import { buildSettings } from '../build-settings.ts'
 import { HerdrHost } from '../herdr-host.ts'
 import type { PtyChild } from '../pty-host.ts'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
-import { withCapturedStderr } from './herdr-fake-server.ts'
+import { withCapturedStderr } from './capture-stderr.ts'
 
 // herdr is the REPL container now, so this needs a live herdr server as well as a
 // real `claude`. Both are opt-in facts about the machine, and neither is present
