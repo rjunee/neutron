@@ -1007,6 +1007,49 @@ describe('AN EDGE-VALUE CAP IS NOT AN UNSET CAP', () => {
     expect(carriedRalphCap(30, null)).toBe(DEFAULT_MAX_RALPH_ROUNDS)
     expect(carriedRalphCap(30, undefined)).toBe(DEFAULT_MAX_RALPH_ROUNDS)
   })
+
+  test('a NULL cap WITH a carried round is refused — the COMBINATION was the gap', async () => {
+    // THE HOLE MY OWN TESTS LEFT (final gate, blocker 1). They covered null-cap-defaults
+    // (no round) and omitted-cap-rejects (with a round) SEPARATELY, and the combination
+    // fell between them: the cap is resolved with `??`, which treats null and undefined
+    // alike, while the pair guard checked only `=== undefined`. So
+    // `{ ralph_round: 5, max_ralph_rounds: null }` passed the guard AND resolved to 20,
+    // creating the unbounded half-pair 5/20 that `TridentUnboundedCarriedRoundError`
+    // exists to refuse. Two spellings of ABSENT taking different branches, one layer
+    // below where the same asymmetry was fixed a round earlier.
+    // RED-mutation: `=== undefined` instead of `== null` in the pair guard and this row
+    // is created at 5/20.
+    await expect(
+      store.create({
+        slug: 'null-cap-with-round', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+        ralph: true, ralph_round: 5, max_ralph_rounds: null as unknown as number,
+      }),
+    ).rejects.toThrow(TridentUnboundedCarriedRoundError)
+    // …and `undefined` is refused identically, which is the point: the two spellings of
+    // absent now take the SAME branch.
+    await expect(
+      store.create({
+        slug: 'undef-cap-with-round', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+        ralph: true, ralph_round: 5,
+      }),
+    ).rejects.toThrow(TridentUnboundedCarriedRoundError)
+    // POSITIVE CONTROLS, so this cannot pass by refusing everything: a null cap with NO
+    // carried round still defaults (nothing is half-paired), and a named cap with a round
+    // is accepted at the value named.
+    const noRound = await store.create({
+      slug: 'null-cap-no-round', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, max_ralph_rounds: null as unknown as number,
+    })
+    expect({ round: noRound.ralph_round, cap: noRound.max_ralph_rounds }).toEqual({
+      round: 0,
+      cap: DEFAULT_MAX_RALPH_ROUNDS,
+    })
+    const paired = await store.create({
+      slug: 'paired-cap-with-round', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, ralph_round: 5, max_ralph_rounds: 9,
+    })
+    expect({ round: paired.ralph_round, cap: paired.max_ralph_rounds }).toEqual({ round: 5, cap: 9 })
+  })
 })
 
 describe("AN EDITED SPEC DOC MUST NOT COST THE CARD ITS BUDGET", () => {
@@ -1373,8 +1416,16 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     expect(t.phase).toBe('failed')
     // The token every downstream reader keys on is still there…
     expect(t.failure_reason).toContain('max_ralph_rounds')
-    // …and the explanation is now TRUE.
-    expect(t.failure_reason).toContain('inherited a spent budget')
+    // …and the explanation is now TRUE — which THIS ASSERTION ITSELF GOT WRONG ONCE.
+    // It used to require the phrase "inherited a spent budget", pinning a claim the row
+    // cannot support: `inner_checkpoint === null` does not establish that a predecessor
+    // existed, so the same wording was handed to a brand-new run at its cap (see the
+    // fresh-run boundary test below). A test asserting a claim is only as good as the
+    // claim; this one made a lying message look verified.
+    expect(t.failure_reason).toContain('no build of its own')
+    expect(t.failure_reason).toContain('does not record which')
+    // It may NAME inheritance as one of two possibilities; it may not assert it.
+    expect(t.failure_reason).not.toContain('inherited')
     expect(t.failure_reason).not.toContain('without converging')
 
     // POSITIVE CONTROL — a run that DID build something and then exhausted the loop keeps
@@ -1386,7 +1437,51 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
     )
     expect(ran.phase).toBe('failed')
     expect(ran.failure_reason).toContain('without converging')
-    expect(ran.failure_reason).not.toContain('inherited a spent budget')
+    expect(ran.failure_reason).not.toContain('no build of its own')
+  })
+
+  test('A BRAND-NEW run at its cap is not described as inheriting anything', async () => {
+    // THE FRESH-RUN BOUNDARY, and the reason the first fix for this was also wrong. The
+    // replacement wording keyed on `inner_checkpoint === null` — a PROXY — and then
+    // asserted INHERITANCE, which that proxy does not establish. Measured by the final
+    // gate: a brand-new Ralph run created with `max_ralph_rounds: 0`, transitioned from
+    // `forge-init`, has a null checkpoint and round 0 and was reported as having
+    // inherited a spent budget from a predecessor that does not exist. Worse than vague:
+    // it sends the reader hunting an earlier run rather than at the data.
+    //
+    // "WHAT INPUT WOULD A WRONG IMPLEMENTATION GET RIGHT?" — wording that ALWAYS says
+    // "inherited" satisfies a test that drives only the inherited case, which is exactly
+    // what the previous version had. So the two cases are asserted together and the
+    // inheritance claim is asserted ABSENT from both.
+    // RED-mutation: reintroduce "it inherited a spent budget … used by an earlier run of
+    // this card" on the `builtNothingItself` branch and this test fails while the
+    // inherited-case test above still passes — which is how the defect got in.
+    const fresh = await store.create({
+      slug: 'fresh-at-cap', project_slug: 'proj-1', repo_path: tmp, task: 'x',
+      ralph: true, max_ralph_rounds: 0,
+    })
+    // A genuinely fresh row: no predecessor, nothing spent, nothing built.
+    expect({ round: fresh.ralph_round, cap: fresh.max_ralph_rounds, cp: fresh.inner_checkpoint }).toEqual(
+      { round: 0, cap: 0, cp: null },
+    )
+
+    // `forge-init` in ralph mode needs a REMAINING_TASKS from the bootstrap before it
+    // reaches the cap check at all — without it the transition fails earlier, on its own
+    // reason. `{ remaining: 1 }` is the ordinary "one task still to build" bootstrap, so
+    // this is the real path into `enterRalphPlan` for a brand-new governed run.
+    const t = computeTransition({ ...fresh, phase: 'forge-init' }, { remaining: 1 })
+    expect(t.phase).toBe('failed')
+    expect(t.failure_reason).toContain('max_ralph_rounds')
+    // IT MUST NOT CLAIM A PREDECESSOR. No form of the word, because the claim is what
+    // was wrong rather than one phrasing of it.
+    expect(t.failure_reason).not.toContain('inherited')
+    expect(t.failure_reason).not.toContain('earlier run of this card spent it')
+    // …and it must still not blame a planner that never ran.
+    expect(t.failure_reason).not.toContain('without converging')
+    // What it DOES say is observable from this row alone, and it names both
+    // possibilities rather than choosing one the row cannot distinguish.
+    expect(t.failure_reason).toContain('no build of its own')
+    expect(t.failure_reason).toContain('does not record which')
   })
 })
 

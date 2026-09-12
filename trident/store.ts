@@ -743,7 +743,17 @@ export class TridentRunStore {
       // DEFAULT_MAX_RALPH_ROUNDS silently RAISES the bound of any card that had a
       // tighter one. Carrying the round is meaningless without it, so the write site
       // refuses the half-pair rather than completing it with a default.
-      if (input.max_ralph_rounds === undefined) {
+      // `== null`, NOT `=== undefined` (final gate, blocker 1). The cap is RESOLVED
+      // thirty lines up with `??`, which treats null and undefined alike, while this
+      // check saw only one of them — so `{ ralph_round: 5, max_ralph_rounds: null }`
+      // passed the pair guard AND resolved to the default, creating the unbounded
+      // half-pair 5/20 that this very error exists to refuse. Two spellings of ABSENT
+      // taking different branches, again: the same asymmetry fixed one layer over at the
+      // `isRalphCap` validation, in the one place left where a `??` normalisation was
+      // paired with an `=== undefined` validation rather than with a comparison on the
+      // normalised value. (Audited: every other `??` in `create` compares the result, so
+      // none of them can disagree about null.)
+      if (input.max_ralph_rounds == null) {
         throw new TridentUnboundedCarriedRoundError(carriedRalphRound)
       }
     }

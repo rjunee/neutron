@@ -222,18 +222,44 @@ function enterRalphPlan(
     // sends whoever reads the row hunting a planner problem that does not exist. A
     // terminal reason that misdescribes what happened is worse than a vague one.
     //
-    // `inner_checkpoint === null` is the fact that separates them, read off the row
-    // rather than inferred: every Ralph iteration writes a checkpoint, so a null one
-    // means this row never completed a phase. The `max_ralph_rounds` token is present in
-    // both spellings — `delivery.ts` and several tests key on it — so only the
-    // explanation changes, never the classification.
-    const neverRan = run.inner_checkpoint === null
+    // AND THE FIRST FIX FOR IT WAS ALSO A LIE, for the reason this whole lane keeps
+    // relearning: it keyed the wording on a PROXY. The discriminator was the same
+    // `inner_checkpoint === null` used below, but the CLAIM was "it inherited a spent
+    // budget from an earlier run of this card" — and checkpoint-is-null does not mean
+    // inheritance happened. Repro (final gate): a BRAND-NEW Ralph run created with
+    // `max_ralph_rounds: 0`, transitioned from `forge-init`, has a null checkpoint and
+    // round 0 and was reported as inheriting from a predecessor THAT DOES NOT EXIST.
+    // That is worse than vague wording, not better: it sends whoever reads the card
+    // hunting for an earlier run rather than at the data in front of them.
+    //
+    // SO THE CLAIM IS NARROWED TO WHAT THE ROW ACTUALLY SHOWS, and provenance is not
+    // claimed at all. `inner_checkpoint === null` is kept as the discriminator because
+    // for the thing it is now used to say — "this run has no build of its own" — it is
+    // a FACT about this row rather than an inference: every Ralph iteration's checkpoint
+    // is written by the workflow, so a null one means this row completed no phase.
+    //
+    // WHY NOT RECORD PROVENANCE INSTEAD, which would let the reason say more. Because
+    // every signal available here is another proxy, and one more proxy is the one thing
+    // this must not be. `ralph_round > 0` looks like it would work — `create` writes 0
+    // for every row that inherits nothing — but THIS function advances the counter
+    // without writing a checkpoint, so a run that legitimately spent its rounds through
+    // the phase graph reaches the cap at `ralph_round > 0` with a null checkpoint and
+    // would be mislabelled in exactly the same way. Real provenance means a new column
+    // and a migration, and it buys a better sentence rather than a better decision; the
+    // honest cheap answer is to stop making the claim. The two possibilities are NAMED
+    // as possibilities, with the row's inability to tell them apart stated, which is
+    // strictly more useful than vagueness and strictly more honest than picking one.
+    //
+    // The `max_ralph_rounds` token is present in both spellings — `delivery.ts` and
+    // several tests key on it — so only the explanation changes, never the
+    // classification.
+    const builtNothingItself = run.inner_checkpoint === null
     return {
       phase: 'failed',
       round: run.round,
       ralph_round: run.ralph_round,
-      failure_reason: neverRan
-        ? `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) before this run built anything: it inherited a spent budget (${run.ralph_round} of ${run.max_ralph_rounds} already used by an earlier run of this card) and so had no iteration left to start. This is an exhausted CARD, not a planner that failed to converge`
+      failure_reason: builtNothingItself
+        ? `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) with ralph_round already at ${run.ralph_round} and no build of its own on this run (inner_checkpoint is null): there was no iteration left to start, so nothing was attempted. The budget was spent before this run began — either an earlier run of this card used it up and the count carried forward, or the cap was set this low at dispatch. This row does not record which, so check the card's earlier runs and the configured cap rather than looking for a planner that failed to converge`
         : `Ralph loop hit max_ralph_rounds (${run.max_ralph_rounds}) without converging`,
       note: 'ralph loop → failed (max ralph rounds reached)',
     }

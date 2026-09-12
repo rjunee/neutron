@@ -225,6 +225,45 @@ regression, and whoever hits it will most likely change the fix rather than the 
 disposition here was to INVERT each one, with a docblock recording what it used to assert
 and why that was wrong, rather than delete it quietly.
 
+**AND THE FIX FOR THE LYING REASON WAS ITSELF A LIE, keyed on a PROXY — the dominant
+defect of this build phase, appearing in a message string instead of a test.** The
+replacement wording discriminated on `inner_checkpoint === null`, which is exactly right
+for "this run has no build of its own", and then used it to assert something else
+entirely: that the budget had been INHERITED from an earlier run. Measured by the final
+gate: a brand-new Ralph run created with `max_ralph_rounds: 0` and transitioned from
+`forge-init` has a null checkpoint and round 0, and was reported as having inherited a
+spent budget from a predecessor THAT DOES NOT EXIST. The proxy correlated with the claim
+in the cases in mind and diverged in the one that was not. And a terminal reason is what
+the owner reads when a card dies, so naming a cause that did not occur is worse than
+vagueness: it sends the reader hunting a run that never existed.
+
+PROVENANCE WAS THE BETTER OPTION AND WAS REJECTED FOR A MEASURED REASON, recorded because
+the reasoning is the reusable part. Every signal available at that point is another proxy.
+`ralph_round > 0` looks decisive — `create` writes 0 for every row that inherits nothing —
+but `enterRalphPlan` ADVANCES the counter without writing a checkpoint, so a run that
+legitimately spent its rounds through the phase graph arrives at the cap with
+`ralph_round > 0` and a null checkpoint and would be mislabelled identically. Real
+provenance therefore means a new column and a migration, and it buys a better SENTENCE
+rather than a better DECISION. So the claim was narrowed instead: the reason now states
+only what the row shows, NAMES the two possibilities (an earlier run used the budget up,
+or the cap was set that low at dispatch) and says the row cannot tell them apart. Strictly
+more useful than vague, strictly more honest than picking one.
+
+The test that had pinned the lying wording is corrected too, and it is the sixth of its
+kind in this lane: it required the phrase "inherited a spent budget", which made a false
+message look verified. A test asserting a claim is only ever as good as the claim.
+
+**AND TWO SPELLINGS OF ABSENT DISAGREED ONE LAYER LOWER.** `create` resolves the cap with
+`??` (null and undefined alike) while the carried-round pair guard checked only
+`=== undefined`, so `{ ralph_round: 5, max_ralph_rounds: null }` passed the guard AND
+defaulted to 20 — the unbounded half-pair `TridentUnboundedCarriedRoundError` exists to
+refuse. The same asymmetry fixed a round earlier at the `isRalphCap` validation, in the
+one remaining place where a `??` normalisation was paired with an `=== undefined`
+validation instead of a comparison on the normalised value. Audited: every other `??` in
+`create` compares the RESULT, so none of them can disagree about null. The coverage gap
+was the shape of the tests, not their absence — null-cap-defaults and omitted-cap-rejects
+were both covered, SEPARATELY, and the combination fell between them.
+
 **A BULK EDIT THAT PARTIALLY APPLIES AND EXITS QUIETLY IS INDISTINGUISHABLE FROM ONE THAT
 WORKED, and that produced a FALSE REPORT in this very record.** Three multi-edit scripts
 used to write these paragraphs each asserted their anchors, hit one stale anchor partway
