@@ -230,13 +230,24 @@
  *      CAS succeeds, and a branch a live run is standing on is deleted. `update-ref -d`
  *      does not refuse a checked-out branch, so nothing fails closed on its own.
  *
- *      9a is the ordinary case and 9b is what makes the OUTCOME correct rather than the bad
- *      ordering merely rare: git offers no primitive that compares a HOLDER and unlinks a
- *      ref in one operation (`update-ref --stdin` refuses `verify` + `delete` on one ref),
- *      so the one remaining interleaving is REPAIRED instead of raced. The repair is
- *      lossless — the sha is unchanged by construction, so the claimant's HEAD symref
- *      resolves to the same commit, and the restore is create-only so a claimant that made
- *      its own branch wins. See the call site for the residue this leaves.
+ *      9a is the ordinary case and 9b narrows the bad ordering from likely to unlikely and
+ *      REPAIRS it where it can: git offers no primitive that compares a HOLDER and unlinks
+ *      a ref in one operation (`update-ref --stdin` refuses `verify` + `delete` on one
+ *      ref), so the remaining interleaving is repaired rather than raced. WHERE THE REPAIR
+ *      SUCCEEDS it is lossless — the sha is unchanged by construction, so the claimant's
+ *      HEAD symref resolves to the same commit, and the restore is create-only so a
+ *      claimant that made its own branch wins.
+ *
+ *      IT IS NOT CORRECT FOR EVERY INTERLEAVING, and this file used to say it was. Two
+ *      cases survive: a claimant 9b does not detect (it appears after 9b's own read), and
+ *      a restore that FAILS. Both leave the ref absent under a live claimant, whose next
+ *      commit is PARENTLESS — a whole-tree diff against unrelated history, which is the
+ *      silently-wrong-base class this card exists to eliminate. Nothing automated repairs
+ *      it, because a ref that does not exist does not enumerate on the next sweep; the
+ *      `RESTORE FAILED` line and `refs_restore_failed` exist to make a human the recovery
+ *      path. THIS IS THE WHOLE REASON THE DELETION IS DEFERRED TO #635: the claimant-side
+ *      guard is what closes these two, and it closes them without a race. See the call
+ *      site for the residue, stated at its worst.
  */
 
 import {
@@ -309,6 +320,20 @@ export const MAX_REF_DELETIONS_PER_SWEEP = 50
  * proves anything.
  */
 export interface ReapableCandidate {
+  /**
+   * The canonical repository these gates ran against — ROUTING DATA, never the proof.
+   *
+   * It is here because the destructive call is `(repo, candidate)` and a sweep covers MANY
+   * repositories: a caller holding an inventory of candidates has to know which repository
+   * each belongs to, and reading it off the candidate is the only way that cannot drift from
+   * what was minted. #635 restores the call inside the per-repository loop, where `repo` is
+   * already in scope; the inventory is what anything outside that loop has to work from.
+   *
+   * IT IS NOT WHAT THE BOUNDARY CHECKS. A forger writes this field as readily as `ref`, so
+   * the comparison is against the mint's own map — see `MINTED_CANDIDATES`. This field is
+   * checked against nothing and proves nothing; it tells a caller where to aim.
+   */
+  readonly repo: string
   readonly ref: string
   readonly sha: string
 }
@@ -373,8 +398,11 @@ function canonicalRepo(repo: string): string {
  * Module-private on purpose — exporting it would hand back the bypass this type removes.
  */
 function mintReapableCandidate(repo: string, ref: string, sha: string): ReapableCandidate {
-  const candidate: ReapableCandidate = Object.freeze({ ref, sha })
-  MINTED_CANDIDATES.set(candidate, canonicalRepo(repo))
+  const canonical = canonicalRepo(repo)
+  // The field and the map's value are set from ONE resolution, so the routing data a caller
+  // reads and the identity the boundary checks can never disagree for a minted candidate.
+  const candidate: ReapableCandidate = Object.freeze({ repo: canonical, ref, sha })
+  MINTED_CANDIDATES.set(candidate, canonical)
   return candidate
 }
 
@@ -1503,8 +1531,10 @@ export async function deleteReapableRef(
     report.refs_kept.push({ ref, reason: `delete-refused: ${hostText(deleted)}` })
     return
   }
-  // GATE 14 — AND NOTHING CLAIMED IT DURING THE DELETE. This is what makes the
-  // OUTCOME correct for every interleaving instead of merely making the bad one rare.
+  // GATE 14 — AND NOTHING CLAIMED IT DURING THE DELETE. This narrows the bad ordering and
+  // repairs what it catches. It does NOT make the outcome correct for every interleaving,
+  // and this comment used to claim that it did (#547 round 14) — see the residue below,
+  // which is the reason the deletion is deferred to #635 rather than a footnote to it.
   //
   // Gate 12 and the CAS together still leave one ordering: a dispatch claims the slug
   // and checks the branch out AFTER 11a read and BEFORE `update-ref -d` ran, at the
@@ -1521,9 +1551,23 @@ export async function deleteReapableRef(
   // claimant has meanwhile made its own branch at a different sha, that branch wins and
   // this reports rather than clobbers.
   //
-  // The residue is a sub-second window in which the ref does not resolve, which can fail
-  // a concurrent `git switch` in the claiming run's first step. That is a retryable error
-  // in a run that has just started, against silently deleting a live lane's branch.
+  // THE RESIDUE, STATED AT ITS WORST RATHER THAN AT ITS BEST — and its best is what this
+  // comment used to state. On the SUCCESS and EEXIST paths it is a sub-second window in
+  // which the ref does not resolve, which can fail a concurrent `git switch` in the
+  // claiming run's first step: a retryable error in a run that has just started.
+  //
+  // ON TWO OTHER PATHS IT IS NEITHER SUB-SECOND NOR RETRYABLE. A claimant this probe does
+  // not see (it arrives after this read) and a restore that FAILS both leave the ref ABSENT
+  // under a live claimant. Its HEAD symref then reports "No commits yet" and its next commit
+  // is PARENTLESS, so its PR reads as a whole-tree diff against unrelated history — the
+  // silently-wrong-base class this card exists to eliminate. No commit is lost and the
+  // printed `git branch <name> <sha>` recovery works, but nothing AUTOMATED repairs it,
+  // because a ref that does not exist does not enumerate on the next sweep.
+  //
+  // So the honest claim is: the bad ordering is narrowed and repaired where detected, never
+  // eliminated from this side. #635 — a run whose HEAD does not resolve must refuse to
+  // commit — is what eliminates the OUTCOME, from the side that can observe it without a
+  // race. Anyone reading this while enabling deletion should read that clause first.
   const claimedDuring = await refClaimedNow(opts, repo, ref, short, sha)
   if (claimedDuring !== null) {
     // BOUNDED RETRY, CREATE-ONLY ON EVERY ATTEMPT (#547 round 5). The residue on the

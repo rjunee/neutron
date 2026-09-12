@@ -63,14 +63,18 @@ that does not solve it, and nobody looking again.
 the repair, the measurement and the reporting all land. The `update-ref -d` itself does not run: the
 destructive half is an exported `deleteReapableRef` the sweep does not call, behind one named reason
 (`DEFERRED_PENDING_CLAIMANT_GUARD`) pointing at **#635** — and it accepts only a `ReapableCandidate`
-the gate chain minted, so being exported does not make it reachable around the gates (see below). The sweep records CANDIDATES — refs that pass gates 1-10 — in
-`refs_candidates` — measured on the repo of record: **72 of 80 refs** pass gates 1-10, with 2 held by
-a worktree and 6 kept for unprovable ownership.
+the gate chain minted, so being exported does not make it reachable around the gates (see below). The
+sweep records CANDIDATES — refs that pass gates 1-10 — in `refs_candidates`; measured on the repo of
+record, **72 of 80 refs** pass those gates, with 2 held by a worktree and 6 kept for unprovable
+ownership.
 
 THAT NUMBER IS AN UPPER BOUND, NOT A MEASUREMENT OF WHAT WOULD BE DELETED, and an earlier version of
 this record said otherwise — it claimed the dry run "runs all fourteen checks". It runs ten. The field
-was called `refs_candidates`, which promised the stronger thing, and the 72 was quoted onward as the
-answer to "what exactly would this delete". It is the answer to "what could this delete at most".
+was then called **`refs_reapable`**, which promised the stronger thing, and the 72 was quoted onward as
+the answer to "what exactly would this delete". It is the answer to "what could this delete at most".
+(CORRECTED, round 14: this sentence named `refs_candidates` as the offending field — the NEW name, the
+fix — so the passage explaining why the rename was necessary indicted the name it had arrived at. A
+reader following the explanation would conclude the current field is the overclaiming one.)
 
 The gap is not laziness and cannot be closed by trying harder. GATE 11 IS THE SALVAGE WRITE, so a dry
 run that evaluated it would not be dry — and a candidate whose salvage the host rejects is correctly
@@ -318,7 +322,9 @@ repairs. What IS guaranteed, and what is not:
 
   * THE COMMITS ARE NEVER LOST. The salvage ref holds the tip before any delete is attempted, so
     `git rev-list --all` still reaches it and the printed `git branch <name> <sha>` works. This is the
-    property the whole design rests on and it holds for every interleaving.
+    property the whole design rests on, and it is the ONE property that holds for every interleaving —
+    which is not the same as the outcome being correct for every interleaving, and the distinction is
+    the reason the deletion waits for #635.
   * A DETECTED CLAIMANT IS RESTORED, at the identical sha, create-only, retried a bounded number of
     times.
   * AN UNDETECTED CLAIMANT — one that resolved the branch between the probe's two snapshots — IS LEFT
@@ -572,6 +578,27 @@ against real git — a sha1 repository asserted at length 40, a sha256 one asser
 to end, salvage name included — alongside negatives at 39, 41, 63, 65 and right-width-wrong-charset, so
 "40 or 64" cannot quietly become "40 or more".
 
+### NARROWING A CLAIM MEANS NARROWING IT WHEREVER IT IS ASSERTED, AND THE COMMENTS OUTLIVE THE RECORD
+
+Round 8 narrowed this change's strongest claim — gate 14 does NOT make the outcome correct for every
+interleaving — and the narrowing landed in THIS FILE, because this file is what the instruction named.
+The module header and the comment at the gate itself kept the strong version for six more rounds:
+*"what makes the OUTCOME correct for every interleaving"*, and a residue described only as a
+sub-second retryable `git switch` failure, directly above the code whose failure mode is a dangling
+HEAD and a PARENTLESS commit.
+
+WHY THAT PARTICULAR DUPLICATE WAS THE WORST ONE. **#635 will be written against those comments.**
+Whoever enables the deletion reads the sentence beside the gate they are unlocking — and that
+sentence said the thing whose falseness is the entire reason the gate is locked. A record nobody is
+required to open was honest while the code that the next change is written from was not.
+
+So the comments now state the residue at its worst, name the two surviving interleavings (a claimant
+the probe does not see, and a restore that fails), and point at #635 as the thing that eliminates the
+OUTCOME rather than narrowing its probability. The one property that really does hold for every
+interleaving — the commits are never lost, because the salvage precedes every delete — is now
+distinguished from the outcome being correct, because collapsing those two is how the overclaim
+survived this long.
+
 ### The pattern all four of these findings share
 
 A decision made correctly, whose consequences were not propagated to the things that DEPEND on it.
@@ -587,13 +614,29 @@ contract, an acceptance clause. Each of those was written by someone who had no 
 decision. It caught this PR twice in one round, on a review that was explicitly watching for it
 elsewhere.
 
-AND THEN TWICE MORE, ONE ROUND LATER, in the two directions that question has to be asked in. Deciding
+AND THEN THREE TIMES MORE. First, in the two directions that question has to be asked in. Deciding
 the primitive takes an attested candidate did not prompt anyone to ask **what else that primitive
 reads** — `repo`, which the attestation then did not cover. Deciding it should re-check the object name
 did not prompt anyone to ask **what this tree considers an object name** — a question `codex-build.sh`
 had already answered. Neither is in the diff; both were one grep away. So the question has a second
 half: after asking what my decision has made false, ask **what my decision assumes that something else
 here has already decided** — the inputs the new rule reads, and the conventions it re-states.
+
+AND A THIRD FAILURE MODE OF THE SAME QUESTION, which is asking it and then answering it about ONE
+artefact. Round 8 asked what the narrowed claim had made false and fixed the record; two comments
+asserting the same claim stayed. Round 14 found them. The question has to be answered with a GREP for
+the claim, not with a list of the documents that came to mind — because the places that assert a thing
+are not the places that discuss it, and the ones that matter most are the ones the next change will be
+written from.
+
+THE SAME SHAPE ONE LEVEL DOWN, and it is the most instructive instance in this record because two
+correct decisions collided. The test harness routed every minted candidate to the FIRST repository, a
+harmless simplification while a candidate was `{ ref, sha }` and the attestation was repo-blind.
+Binding the attestation to the repository — correct — turned that simplification into a defect: every
+candidate from the second repository onward was refused, so the destructive path across repositories
+was WRONG in the stand-in for the very call structure #635 restores. Neither decision was wrong and
+nobody checked the join. A guard's blast radius includes the test harness, and a harness that stands
+in for a call structure is production code for the purpose of asking what a change has made false.
 
 ### The transferable pattern
 
@@ -632,7 +675,7 @@ adversarial shape for EACH half of the EEXIST predicate — a fatal exit carryin
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
 
-THE DESTRUCTIVE BOUNDARY HAS ITS OWN NINE CASES and its own ten mutations, every negative paired with
+THE DESTRUCTIVE BOUNDARY HAS ITS OWN THIRTEEN CASES and its own thirteen mutations, every negative paired with
 a complement so no refusal can be satisfied by a boundary that refuses everything. Within one
 repository: an out-of-namespace forgery, an in-namespace forgery, a COPY of a genuinely minted
 candidate (which pins that the proof is identity, not field equality), and malformed object names at
@@ -641,7 +684,13 @@ salvage, and without spending the sweep's deletion allowance. Across repositorie
 in one repo refused against another holding the same ref at the same commit, and the same candidate
 still deleting in the repo it was minted for. Across spellings: a symlinked path to the SAME
 repository still deletes. Across object formats: real-git positives at both widths, a sha1 repo
-asserted at 40 and a sha256 repo asserted at 64 and reaped end to end.
+asserted at 40 and a sha256 repo asserted at 64 and reaped end to end. And across A SWEEP'S
+REPOSITORIES, which is the call structure #635 restores: two repos reaped in one sweep with each
+salvage landing in its own repo, one repo's held ref not stopping the other's, the same branch NAME in
+both repos judged by each repo's own owner rows, and a sweep driven through a symlinked repo path
+minting the canonical spelling. The last three exist because the first cut of the multi-repo test left
+three mutations alive — the harness routing, the field's normalisation, and per-repository ownership —
+and a surviving mutation is a missing case, not a note to add.
 
 SIX MUTATIONS SURVIVED A FIRST PASS ACROSS THE REVIEW ROUNDS and each one got a test rather than a
 note: the detached-on-tip witness, a failed holder listing reading as "no claimants", an unreadable

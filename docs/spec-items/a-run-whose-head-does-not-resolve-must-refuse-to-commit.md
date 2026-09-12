@@ -77,9 +77,11 @@ test:
   destructive half sits in an exported `deleteReapableRef` that the sweep does not call, behind one
   named reason (`DEFERRED_PENDING_CLAIMANT_GUARD`). That function accepts only a `ReapableCandidate`
   minted by the gate chain FOR THE REPOSITORY BEING ACTED ON, so the single call this item restores
-  must pass the candidate the sweep minted, in the repo it was minted for — reconstructing
-  `{ ref, sha }`, or carrying a candidate across repositories, is refused at the boundary and deletes
-  nothing. Satisfying
+  must pass **each candidate to the repository it was minted for** — `candidate.repo` carries that
+  repository, canonically. Reconstructing `{ repo, ref, sha }`, or handing a candidate to any other
+  repository, is refused at the boundary and deletes nothing. A sweep spans several repositories, so
+  a restored call that aims every candidate at one of them reaps the first and refuses the rest:
+  satisfying this item includes proving deletion happens in EVERY swept repository, not just one. Satisfying
   this item therefore includes deleting that deferral and restoring the single call, and proving the
   sweep deletes again. Until then the sweep records CANDIDATES in `refs_candidates` — refs that pass
   gates 1-10: **72 of 80 on the repo of record** as of 2026-09-12 (see the issue comment). That figure is an UPPER BOUND on what would be

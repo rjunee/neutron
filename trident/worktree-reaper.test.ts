@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   utimesSync,
@@ -54,11 +55,17 @@ async function sweepAndReap(opts: Parameters<typeof sweepTridentWorktrees>[0]): 
   const report = await sweepTridentWorktrees(opts)
   const budget = { attempts: 0 }
   for (const minted of [...report.refs_candidates]) {
-    const repo = opts.store.listRepoPaths().find((candidate) => candidate !== '') ?? ''
+    // EACH CANDIDATE GOES TO THE REPOSITORY IT WAS MINTED FOR (#547 round 14). This used to
+    // aim every candidate at the FIRST non-empty `listRepoPaths()` entry, which was invisible
+    // while a candidate was `{ ref, sha }` and the attestation was repo-blind. Once the
+    // attestation became repo-bound, that harness silently refused every candidate from the
+    // second repository onward — so a multi-repository sweep's destructive path was not merely
+    // untested, it was WRONG in the stand-in for the call structure #635 restores.
+    //
     // THE CANDIDATE IS PASSED THROUGH, NOT REBUILT. `deleteReapableRef` only accepts a value
-    // the gate chain minted, so a test that reconstructed `{ ref, sha }` here would be
+    // the gate chain minted, so a test that reconstructed `{ repo, ref, sha }` here would be
     // refused at gate 0 — which is exactly the property the negative tests below pin.
-    await deleteReapableRef(opts, repo, minted, report, budget)
+    await deleteReapableRef(opts, minted.repo, minted, report, budget)
   }
   return report
 }
@@ -153,6 +160,23 @@ function stubStore(
     // pre-#547 case below therefore asserts the ref survives for a real reason (gate 5,
     // "no run row names this branch") rather than because the sweep was switched off.
     listBranchOwners: () => owners,
+  }
+}
+
+/**
+ * A store spanning SEVERAL repositories, with per-repository owner rows.
+ *
+ * `listBranchOwners` is called once per repository by the sweep, so a multi-repository case has
+ * to answer per repository or every repo sees every repo's owners — which would make a
+ * cross-repository mistake look like success.
+ */
+function stubMultiStore(
+  byRepo: Record<string, TridentBranchOwner[]>,
+): WorktreeReaperStore {
+  return {
+    listRepoPaths: () => Object.keys(byRepo),
+    listNonTerminal: () => [],
+    listBranchOwners: (repo) => byRepo[repo] ?? [],
   }
 }
 
@@ -485,6 +509,17 @@ async function seedRef(repo: string, branch: string, marker: string): Promise<st
   const sha = await git(seed, 'rev-parse', 'HEAD')
   await git(repo, 'worktree', 'remove', seed)
   return sha
+}
+
+/**
+ * The canonical spelling of a repository path, which is what a minted candidate carries.
+ *
+ * Asserted through `realpathSync` rather than against the raw path, so these cases do not
+ * quietly depend on the test root having no symlink in it — on a host where `/tmp` is itself a
+ * link, a raw comparison would pass or fail for a reason that has nothing to do with the code.
+ */
+function canonical(repo: string): string {
+  return realpathSync(repo)
 }
 
 /** The full ref for a short branch name, so the tests read the way the module does. */
@@ -2545,7 +2580,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
 
     // AND THE DRY-RUN INVENTORY IS THE POINT: it says exactly what #635 will unlock.
-    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
     expect(
       report.refs_kept.some(
         (k) => k.ref === ref(branch) && k.reason === DEFERRED_PENDING_CLAIMANT_GUARD,
@@ -2580,7 +2615,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
 
     // THE DRY SWEEP lists it as a candidate, because gates 1-10 all pass.
     const report = await sweepTridentWorktrees(opts)
-    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
     expect(report.refs_deleted).toEqual([])
 
     // AND DELETION TIME REFUSES IT, on the gate the dry run could not evaluate. The candidate
@@ -2588,7 +2623,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
 
     // BOTH FACTS SURVIVE IN THE REPORT, separately: still a candidate, still not deleted.
-    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
     expect(report.refs_deleted).toEqual([])
     expect(
       report.refs_kept.some(
@@ -2632,7 +2667,7 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     }
 
     const report = await sweepTridentWorktrees(opts)
-    expect(report.refs_candidates).toEqual([{ ref: ref(branch), sha }])
+    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
     expect(await refExists(repo, ref(branch))).toBe(true)
 
     await deleteReapableRef(opts, repo, onlyCandidate(report), report, { attempts: 0 })
@@ -2980,7 +3015,7 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
       proc_root: proc,
     })
     const minted = onlyCandidate(sweep)
-    expect(minted).toEqual({ ref: ref(branch), sha })
+    expect(minted).toEqual({ repo: canonical(repo), ref: ref(branch), sha })
 
     const report = emptyReport()
     await deleteReapableRef(opts(repo, proc), repo, { ...minted } as ReapableCandidate, report, budget())
@@ -3230,4 +3265,154 @@ describe('the attestation covers the repository too, and both object formats (#5
     expect(malformed).not.toContain(sha)
     expect(await refExists(repo, ref(branch))).toBe(true)
   }, 60_000)
+})
+
+/**
+ * TWO REPOSITORIES IN ONE SWEEP, through the call shape `#635` restores (#547 round 14).
+ *
+ * The harness used to aim every minted candidate at the FIRST non-empty `listRepoPaths()` entry.
+ * While a candidate was `{ ref, sha }` and the attestation was repo-blind that was merely
+ * sloppy; once the attestation became repo-bound it made the second repository's candidates
+ * refuse — so the destructive path across repositories was WRONG in the very harness that
+ * stands in for production's call structure, and no test could see it because no test drove two
+ * repositories through the destructive half.
+ */
+describe('a sweep spanning two repositories reaps in each of them (#547)', () => {
+  test('both repositories are reaped, each candidate against its own', async () => {
+    const first = await makeRepo()
+    const second = await makeRepo()
+    const branchOne = 'trident/in-the-first'
+    const branchTwo = 'trident/in-the-second'
+    const shaOne = await seedRef(first.repo, branchOne, 'firstrepo')
+    const shaTwo = await seedRef(second.repo, branchTwo, 'secondrepo')
+
+    const report = await sweepAndReap({
+      store: stubMultiStore({
+        [first.repo]: [owner(branchOne, { phase: 'failed' })],
+        [second.repo]: [owner(branchTwo, { phase: 'done' })],
+      }),
+      run_host: spawnCapture,
+      proc_root: makeProc(first.root),
+    })
+
+    // Each candidate carries the repository its gates ran against, so the inventory alone is
+    // enough to route the destructive call — which is what the harness now does.
+    expect(report.refs_candidates).toEqual([
+      { repo: canonical(first.repo), ref: ref(branchOne), sha: shaOne },
+      { repo: canonical(second.repo), ref: ref(branchTwo), sha: shaTwo },
+    ])
+
+    // BOTH are deleted. Before this round the second was refused at the boundary.
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branchOne), sha: shaOne, salvage: `${SALVAGE_REF_PREFIX}in-the-first/${shaOne}` },
+      { ref: ref(branchTwo), sha: shaTwo, salvage: `${SALVAGE_REF_PREFIX}in-the-second/${shaTwo}` },
+    ])
+    expect(await refExists(first.repo, ref(branchOne))).toBe(false)
+    expect(await refExists(second.repo, ref(branchTwo))).toBe(false)
+
+    // And each salvage landed in ITS OWN repository, not both in the first.
+    expect(await git(first.repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe(
+      `${SALVAGE_REF_PREFIX}in-the-first/${shaOne}`,
+    )
+    expect(await git(second.repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe(
+      `${SALVAGE_REF_PREFIX}in-the-second/${shaTwo}`,
+    )
+
+    // No boundary refusal anywhere: the routing is right, not merely lucky.
+    expect(report.refs_kept.map((k) => k.reason).join('\n')).not.toContain('not-a-reapable-candidate')
+  }, 120_000)
+
+  test('the SAME branch name in both repos is judged by each repo OWN rows', async () => {
+    // The cross-repository ownership confusion this routing has to survive. `trident/<slug>` is
+    // derived from the card, so two repositories genuinely can hold the same branch name — and
+    // an owner row is matched by that short name. If ownership were read across repositories
+    // rather than per repository, the first repo's terminal row would authorise deleting the
+    // SECOND repo's ref, which no gate ran against.
+    const owned = await makeRepo()
+    const unowned = await makeRepo()
+    const branch = 'trident/same-slug-both-repos'
+    const shaOwned = await seedRef(owned.repo, branch, 'ownedone')
+    const shaUnowned = await seedRef(unowned.repo, branch, 'unownedone')
+    expect(shaOwned).not.toBe(shaUnowned)
+
+    const report = await sweepAndReap({
+      store: stubMultiStore({
+        [owned.repo]: [owner(branch, { phase: 'failed' })],
+        [unowned.repo]: [],
+      }),
+      run_host: spawnCapture,
+      proc_root: makeProc(owned.root),
+    })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha: shaOwned, salvage: `${SALVAGE_REF_PREFIX}same-slug-both-repos/${shaOwned}` },
+    ])
+    expect(await refExists(owned.repo, ref(branch))).toBe(false)
+    // The unowned repo keeps its ref, for its OWN reason, and gets no salvage written.
+    expect(await git(unowned.repo, 'rev-parse', ref(branch))).toBe(shaUnowned)
+    expect(await git(unowned.repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe('')
+    expect(report.refs_kept).toEqual(
+      expect.arrayContaining([
+        { ref: ref(branch), reason: 'owner-unknown: no run row names this branch' },
+      ]),
+    )
+  }, 120_000)
+
+  test('a sweep driven through a SYMLINKED repo path mints the canonical spelling', async () => {
+    // What makes routing by `candidate.repo` safe across spellings: the field is normalised at
+    // mint, so a store configured with a symlinked path still produces a candidate whose repo
+    // matches what the boundary resolves. Without this the field would be one spelling and the
+    // attestation another, and routing by the field would refuse at the boundary.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/minted-through-a-link'
+    const sha = await seedRef(repo, branch, 'throughlink')
+    const alias = join(root, 'via-link')
+    symlinkSync(repo, alias, 'dir')
+
+    const report = await sweepAndReap({
+      store: stubMultiStore({ [alias]: [owner(branch, { phase: 'failed' })] }),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    // The candidate names the REAL path, not the link it was swept through.
+    expect(report.refs_candidates).toEqual([{ repo: canonical(repo), ref: ref(branch), sha }])
+    expect(report.refs_candidates[0]?.repo).not.toBe(alias)
+    // And routing by that field still deletes, which is the point of normalising it.
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(branch), sha, salvage: `${SALVAGE_REF_PREFIX}minted-through-a-link/${sha}` },
+    ])
+    expect(await refExists(repo, ref(branch))).toBe(false)
+  }, 60_000)
+
+  test('one repository being unreapable does not stop the other', async () => {
+    // The per-repository independence the deletion budget and a mid-sweep death rely on, across
+    // repositories rather than across refs: the first repo's ref is held by a live worktree, the
+    // second's is free, and the free one is still reaped.
+    const first = await makeRepo()
+    const second = await makeRepo()
+    const held = 'trident/held-in-the-first'
+    const free = 'trident/free-in-the-second'
+    const heldWorktree = await addWorktree(first.repo, 'wf_live-1', held)
+    const shaFree = await seedRef(second.repo, free, 'freeone')
+    const proc = makeProc(first.root)
+    addProcCwd(proc, 4242, heldWorktree)
+
+    const report = await sweepAndReap({
+      store: stubMultiStore({
+        [first.repo]: [owner(held, { phase: 'failed' })],
+        [second.repo]: [owner(free, { phase: 'failed' })],
+      }),
+      run_host: spawnCapture,
+      proc_root: proc,
+      now: () => Date.now(),
+    })
+
+    expect(report.refs_deleted).toEqual([
+      { ref: ref(free), sha: shaFree, salvage: `${SALVAGE_REF_PREFIX}free-in-the-second/${shaFree}` },
+    ])
+    expect(await refExists(first.repo, ref(held))).toBe(true)
+    expect(await refExists(second.repo, ref(free))).toBe(false)
+    expect(keptReasonFor(report, ref(held))).toStartWith('held-by-worktree:')
+  }, 120_000)
 })
