@@ -67,11 +67,14 @@ BASE_REF="${1:-main}"
 #   * branch AND tag of the same name → AMBIGUOUS: REFUSED (exit 3). Leaving it alone was
 #     also a guess — git's, and git picks the TAG.
 #   * branch, no tag, with `refs/remotes/origin/<x>` → `refs/remotes/origin/<x>`.
+#   * TAG ONLY, no branch of that name → REFUSED (exit 3). A bare word that resolves only as
+#     a tag is not a base branch; `refs/tags/<x>` said explicitly is still accepted below.
 #   * branch, no tag, no remote counterpart → `refs/heads/<x>`. The FALLBACK gets the same
 #     treatment as the primary arm: it runs in the degraded world (fresh clone, no remote,
 #     detached CI checkout), which is where a stray tag is likeliest and least noticed.
-# Anything else is kept VERBATIM: a 40-hex sha, `origin/<x>`, `HEAD~1`, a tag with no branch
-# of that name, and a repository with no origin at all.
+# Anything else is kept VERBATIM, because it is the caller's own EXPLICIT choice rather than a
+# bare word git will resolve for them: a 40-hex sha, `origin/<x>`, `refs/tags/<x>`, `HEAD~1`,
+# and a name that resolves to nothing at all (git refuses that one out loud).
 if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
   # AMBIGUOUS — REFUSED, not passed through. This case was "left alone" until round
@@ -89,6 +92,16 @@ elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null
   # into: git prefers refs/tags/ over refs/remotes/ and resolves the shorthand to the TAG,
   # with a stderr warning this script sends to /dev/null and exit 0.
   BASE_REF="refs/remotes/origin/${BASE_REF}"
+elif ! git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
+  && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
+  # TAG-ONLY — REFUSED. A bare name that resolves ONLY as a tag is not a base branch, and it
+  # is the least likely thing an operator meant by "the base". This repository holds a live
+  # instance: `archive/agent-replies-prior-iter-3b35767` exists as a tag and as no branch, so
+  # the bare name resolved happily (exit 0) and the review would have run against it.
+  # An operator who really means the tag can say `refs/tags/<x>`, which is kept verbatim by
+  # the final arm — this refuses the AMBIGUITY, not the intent.
+  printf '%s\n' "codex-review.sh: base ref '${BASE_REF}' names only refs/tags/${BASE_REF} — a tag is not a base branch. Pass refs/tags/${BASE_REF} if you meant it, or a branch that exists." >&2
+  exit 3
 elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1; then
   # THE LOCAL BRANCH, QUALIFIED — the fallback, held to the same standard as the arm above.
   # A branch with no remote counterpart used to be "kept verbatim", which is the same

@@ -8,18 +8,19 @@ issue_ref: "#546"
 ---
 
 **Every rev-range base resolves to the launch-pinned sha; else to `refs/remotes/origin/<base>`
-when that ref resolves to a commit; else to `refs/heads/<base>` when THAT resolves; else to the
-bare name** — the last of which is stated, tested, and the one case this change cannot improve
-on. Every arm names the ref it verified: a shorthand is a different thing from the ref it looks
-like, because git permits `refs/tags/origin/main` and `refs/tags/main` and prefers tags when
-disambiguating.
+when that ref resolves to a commit; else to `refs/heads/<base>` when THAT resolves; else it is
+REFUSED.** No arm hands back a bare name. Every arm names the ref it verified: a shorthand is a
+different thing from the ref it looks like, because git permits `refs/tags/origin/main` and
+`refs/tags/main`, prefers tags when disambiguating, and resolves a bare word against every
+namespace — so an unqualified base is a base nobody chose.
 
 That last condition is **"the ref does not resolve"**, not "the repository has no remote". They are
 different states and the second is wider than what the code establishes: a repository can have
 `origin` configured while `refs/remotes/origin/<base>` is missing, deleted or never fetched, and
-there `refs/heads/<base>` is taken — the local branch, named in full. The probe is a single
-`git rev-parse --verify`, so it also answers
-"no" when it cannot run at all — fail-closed toward the behaviour this repository had before #546.
+there `refs/heads/<base>` is taken — the local branch, named in full — and when that does not
+resolve either the base is REFUSED rather than guessed. The probe is a single
+`git rev-parse --verify`, so it also answers "no" when it cannot run at all, which now fails
+CLOSED (a refusal) rather than falling through to a word git would resolve for us.
 Deliberately **no fetch**: a build worktree should not be reaching the network to answer a
 diff-base question.
 
@@ -144,10 +145,19 @@ The resolution order is evidence-first, and is the same at every site:
    noticed. `refs/heads/main` and `refs/tags/main` coexist happily and git prefers the tag, so
    the bare word named something nobody had checked. **A fallback deserves the same rigour as
    the primary path, not less, because it executes in worse conditions.**
-4. the **bare name only when NEITHER ref resolves** — no remote-tracking ref AND no local
-   branch of that name, or a probe that could not run at all. Nothing better exists to name
-   there, and git errors loudly on an unknown revision rather than resolving it to something
-   wrong, so this arm is allowed to hand back an unqualified word.
+4. **REFUSED when NEITHER ref resolves** — no remote-tracking ref AND no local branch of that
+   name, or a probe that could not run at all. **`diffBaseRef` throws `TridentUnresolvableBaseError`
+   and the workflow composes `refs/heads/<base>` anyway, which git rejects (fatal, 128).** The
+   bare word is NOT inert, which is what "git errors loudly on an unknown revision" missed: git
+   resolves it against every namespace, and a same-named TAG answers to it. **This repository
+   holds a live instance** — `archive/agent-replies-prior-iter-3b35767` exists as a tag and as
+   no branch, so the bare name resolved happily, exit 0. A tag that shares a branch's name is
+   the least likely thing an operator meant by "the base branch".
+
+   The two implementations differ here and only here, stated rather than papered over: a shell
+   substitution is composed in one process and evaluated in another, so it cannot refuse — it
+   can only name a ref the other process will refuse. Both halves are asserted, including that
+   the composed word is one git actually rejects.
 
    Arm 3 is what a repository with no remote gets, what a worktree whose `origin` is configured
    but whose base ref is missing, deleted or unfetched gets, and what a fresh clone gets: the

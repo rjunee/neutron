@@ -151,13 +151,28 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     expect(await git(w.repo, 'rev-parse', 'origin/main')).toBe(w.local)
   })
 
-  test('A TAG IS NOT PROMOTED, even when origin/<same-name> exists — the regression', async () => {
-    // `origin/release` resolves, so the string-shaped promotion rewrote this and the
-    // review ran against B. The argument is a tag; `refs/heads/release` does not exist;
-    // the answer must be the tag, at A.
+  test('A TAG IS NOT PROMOTED to origin/<same-name> — and a BARE tag-only name is now REFUSED', async () => {
+    // THE ORIGINAL REGRESSION: `origin/release` resolves, so the string-shaped promotion
+    // rewrote this and the review ran against B — a different commit, silently. That must
+    // still not happen.
+    //
+    // AND THE NEW HALF: the old answer was to keep `release` VERBATIM, which is a bare word
+    // that resolves only as a tag. This repository has a live instance of exactly that shape
+    // (`archive/agent-replies-prior-iter-3b35767`), and a tag is not a base branch — so the
+    // bare form is refused, with the explicit `refs/tags/release` still accepted below.
     const w = await seedWorld()
-    expect(await promote(w.repo, 'release')).toBe('release')
-    expect(await git(w.repo, 'rev-parse', 'release')).toBe(w.local)
+    const res = await runBlock(w.repo, 'release')
+    expect({ ok: res.ok, stdout: res.stdout }).toEqual({ ok: false, stdout: '' })
+    expect(res.stderr).toContain('refs/tags/release')
+    expect(res.stderr).toContain('a tag is not a base branch')
+    // NOT promoted to the remote-tracking ref — the refusal must not be the promotion in
+    // disguise, so the commit the name would have reached is named here too.
+    expect(res.stderr).not.toContain('refs/remotes/origin/release')
+    expect(await git(w.repo, 'rev-parse', 'refs/tags/release')).toBe(w.local)
+    expect(await git(w.repo, 'rev-parse', 'refs/remotes/origin/release')).toBe(w.remote)
+    // THE WAY OUT, kept working: an operator who means the tag says so explicitly.
+    expect(await promote(w.repo, 'refs/tags/release')).toBe('refs/tags/release')
+    expect(await git(w.repo, 'rev-parse', await promote(w.repo, 'refs/tags/release'))).toBe(w.local)
   })
 
   test('an AMBIGUOUS name — both a branch and a tag — is REFUSED, not passed through', async () => {

@@ -409,10 +409,29 @@ export async function diffBaseRef(
   // remote-tracking ref resolves, and naming it in full is the difference between "the local
   // branch" and "whatever git picks for that word".
   if (await ref_resolves(`refs/heads/${name}`)) return `refs/heads/${name}`
-  // THE LAST RESORT: neither ref exists. There is nothing better to name — git will say so
-  // when the range runs, loudly, because an unknown revision is a real error rather than a
-  // silently-resolved wrong one.
-  return name
+  // NO THIRD ARM. Neither ref resolves, and the bare name is REFUSED rather than returned.
+  //
+  // THIS REPOSITORY HOLDS A LIVE INSTANCE of why. `archive/agent-replies-prior-iter-3b35767`
+  // exists only as a TAG: both probes above answer no, and the bare name then resolves —
+  // happily, exit 0 — as that tag. A tag that happens to share a branch's name is the least
+  // likely thing an operator meant by "the base branch", and computing a review diff against
+  // it is how #546 started. Measured on git 2.43 in a repo with a tag and no such branch:
+  //
+  //   git diff --name-only --end-of-options 'archive/thing..HEAD'            → exit 0, a diff
+  //   git diff --name-only --end-of-options 'refs/heads/archive/thing..HEAD' → FATAL, exit 128
+  //
+  // So "the caller's diff will fail loudly" is true only of the QUALIFIED form — which is the
+  // same mistake this file already made once about an empty base, and the reason that one is
+  // refused here too.
+  //
+  // THE SEQUENCE THIS ENDS. Three rounds put this defect in three positions: the qualified
+  // path, the `refs/heads` fallback, then the no-ref fallback. Each fix was correct and each
+  // left the next-worse path holding the original behaviour — **a fallback inherits the defect
+  // the primary path was fixed for unless it is fixed in the same change**, and the sequence
+  // terminates only when the last fallback stops returning a value at all. Every `return`
+  // above is a 40-hex sha or a fully qualified ref; there is no path out of here carrying an
+  // unqualified name.
+  throw new TridentUnresolvableBaseError(name)
 }
 
 /**
@@ -427,6 +446,24 @@ export class TridentEmptyBaseError extends Error {
         'so an empty base yields a plausible wrong answer rather than a failure.',
     )
     this.name = 'TridentEmptyBaseError'
+  }
+}
+
+/**
+ * A base name that resolves to NO REF — neither `refs/remotes/origin/<name>` nor
+ * `refs/heads/<name>`. Thrown rather than returned as a bare word, because a bare word is not
+ * inert: git resolves it against every namespace, and a same-named TAG answers to it (this
+ * repository has one). The binding's contract is that every value it hands back is a sha or a
+ * fully qualified ref, and this is the arm that makes that true.
+ */
+export class TridentUnresolvableBaseError extends Error {
+  constructor(readonly base: string) {
+    super(
+      `refusing a base that names no ref: ${JSON.stringify(base)}. Neither refs/remotes/origin/${base} nor ` +
+        `refs/heads/${base} resolves to a commit, and the bare name is not inert — a tag of that name would ` +
+        'answer to it and the review would be computed against a base nobody chose.',
+    )
+    this.name = 'TridentUnresolvableBaseError'
   }
 }
 

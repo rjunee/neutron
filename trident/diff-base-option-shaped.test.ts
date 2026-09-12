@@ -41,6 +41,7 @@ import {
   TridentEmptyBaseError,
   TridentOptionShapedBaseError,
   TridentPaddedBaseError,
+  TridentUnresolvableBaseError,
 } from './merge.ts'
 import { gitRangeArgv, type GitRangeArgv } from './git-range.ts'
 
@@ -273,19 +274,59 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     expect(await diffBaseRef('main', null, probe(true))).toBe('refs/remotes/origin/main')
     // THE FALLBACK IS QUALIFIED TOO: no remote-tracking ref, but the local branch exists.
     expect(await diffBaseRef('main', null, probe(headsOnly('main')))).toBe('refs/heads/main')
-    // …and only when NEITHER resolves is the bare name the answer — there is nothing better
-    // to name, and git errors loudly on an unknown revision rather than resolving it wrongly.
-    expect(await diffBaseRef('main', null, probe(false))).toBe('main')
+    // …and when NEITHER resolves the binding REFUSES. The bare name is not inert: git resolves
+    // it against every namespace and a same-named TAG answers to it — this repository holds a
+    // live one (`archive/agent-replies-prior-iter-3b35767` is a tag and no branch), so handing
+    // back the word would have computed a review against it, exit 0.
+    await expect(diffBaseRef('main', null, probe(false))).rejects.toThrow(TridentUnresolvableBaseError)
     expect(await diffBaseRef('release/1.x', null, probe(true))).toBe('refs/remotes/origin/release/1.x')
     expect(await diffBaseRef('release/1.x', null, probe(headsOnly('release/1.x')))).toBe('refs/heads/release/1.x')
     // THE ORDER OF THE TWO QUESTIONS, asserted as the sequence asked: the remote-tracking ref
     // first, the local branch only when that one says no.
     const asked = probe(false)
-    await diffBaseRef('main', null, asked)
+    await expect(diffBaseRef('main', null, asked)).rejects.toThrow(TridentUnresolvableBaseError)
     expect(asked.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
     const stops = probe(true)
     await diffBaseRef('main', null, stops)
     expect(stops.asked).toEqual(['refs/remotes/origin/main'])
+  })
+
+  test('NO RETURN STATEMENT HANDS BACK AN UNQUALIFIED NAME — read off the shipped source', async () => {
+    // THE TERMINATING CONDITION, made checkable instead of argued. Three rounds put one defect
+    // in three positions — the qualified path, the `refs/heads` fallback, then the no-ref
+    // fallback — and each fix left the next-worse path holding the original behaviour. The
+    // sequence ends only when the last fallback stops returning a value at all, so this reads
+    // the function's OWN returns and requires every one to be a sha or a fully qualified ref.
+    const src = readFileSync(join(import.meta.dir, 'merge.ts'), 'utf8')
+    const start = src.indexOf('export async function diffBaseRef(')
+    expect(start).toBeGreaterThan(-1)
+    const end = src.indexOf('\n}', start)
+    expect(end).toBeGreaterThan(start)
+    const body = src
+      .slice(start, end)
+      .split('\n')
+      .filter((l) => !l.trim().startsWith('//') && !l.trim().startsWith('*'))
+      .join('\n')
+    // ANYWHERE on the line, not just at its start: the two qualified returns are written
+    // `if (await ref_resolves(…)) return \`refs/…\``, and an anchored pattern walked straight
+    // past them — which would also have walked past `if (x) return name`. The instrument had
+    // the same blind spot as the code it checks, one more time.
+    const returns = [...body.matchAll(/\b(?:return|throw)\s+([^\n]+)/g)].map((m) => (m[1] as string).trim())
+    // The extraction must have found ALL of them — the pin, two qualified returns and four
+    // refusals — or this asserts nothing. Pinned as a count so a new arm cannot slip in
+    // unexamined.
+    expect(returns.length).toBe(7)
+    for (const r of returns) {
+      const qualified =
+        r.includes('base_sha.trim().toLowerCase()') || // the 40-hex pin
+        r.includes('`refs/remotes/origin/${name}`') ||
+        r.includes('`refs/heads/${name}`') ||
+        r.startsWith('new Trident') // a refusal returns nothing at all
+      expect({ r, qualified }).toEqual({ r, qualified: true })
+    }
+    // And specifically: no `return name`, in any spelling. That exact statement is what the
+    // last three rounds kept re-introducing one arm further down.
+    expect(body).not.toMatch(/^\s*return name\s*$/m)
   })
 
   test('THE PROBE IS NOT EVEN CALLED when the pin is valid — asserted as an ABSENT side effect', async () => {
@@ -319,7 +360,7 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     expect(await diffBaseRef('main', null, resolving)).toBe('refs/remotes/origin/main')
     expect(resolving.asked).toEqual(['refs/remotes/origin/main'])
     const falling = probe(false)
-    expect(await diffBaseRef('main', null, falling)).toBe('main')
+    await expect(diffBaseRef('main', null, falling)).rejects.toThrow(TridentUnresolvableBaseError)
     expect(falling.asked).toEqual(['refs/remotes/origin/main', 'refs/heads/main'])
   })
 
@@ -412,17 +453,42 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     }
   })
 
-  test('unpinned, NEITHER ref resolves: both answer the bare name — the last resort', async () => {
-    // The third world, which the row above used to stand in for. With no `refs/heads/<base>`
-    // either there is nothing better to name, and git errors loudly on an unknown revision
-    // rather than resolving it to something wrong — which is the whole reason this arm is
-    // allowed to hand back an unqualified word.
+  test('unpinned, NEITHER ref resolves: NOBODY returns a bare name — the ONE row where the two differ', async () => {
+    // THE TAG-ONLY WORLD, and the row that used to assert `ts: 'main', mjs: 'main'` — with no
+    // tag in the fixture, so it could not fail on the defect it was covering. This repository
+    // holds a live instance: `archive/agent-replies-prior-iter-3b35767` resolves as a TAG and
+    // as no branch, so a bare name answers to it, exit 0.
+    //
+    // AND THIS IS THE ONE PLACE THE TWO IMPLEMENTATIONS CANNOT AGREE, stated rather than
+    // papered over: the TS binding REFUSES; the `.mjs` composes a shell word in one process
+    // for another process to evaluate, so it cannot refuse — it can only name a ref the other
+    // process will reject. Both are asserted, and the `.mjs` word is shown to be one git
+    // actually rejects, so neither path computes a diff against a base nobody chose.
     const w = await seedWorld('parity-no-refs')
     await git(w.repo, 'branch', '-m', 'main', 'trunk')
+    // The tag is what makes this row load-bearing: without it, a bare `main` merely fails.
+    await git(w.repo, 'tag', 'main', w.base)
     expect(await git(w.repo, 'for-each-ref', '--format=%(refname)', 'refs/heads/main')).toBe('')
+    expect(await git(w.repo, 'rev-parse', 'refs/tags/main')).toBe(w.base)
+
     for (const mergeMode of ['pr', 'local'] as const) {
-      const got = await bothAgree(w, { baseBranch: 'main', resolves: false, mergeMode })
-      expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'main', mjs: 'main' })
+      await expect(diffBaseRef('main', null, probe(false))).rejects.toThrow(TridentUnresolvableBaseError)
+      const composed = await workflowDiffBase({ baseBranch: 'main', repoPath: w.repo, mergeMode })
+      const word = (await spawnCapture(['bash', '-c', `printf %s ${composed}`], w.repo)).stdout.trim()
+      expect({ mergeMode, word }).toEqual({ mergeMode, word: 'refs/heads/main' })
+      // MEASURED: that word is a ref git REFUSES here — loudly, 128, with nothing written —
+      // which is the property the TS throw provides on its side.
+      const ranged = await spawnCapture(
+        ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `${word}..${w.head}`],
+        w.repo,
+      )
+      expect({ mergeMode, ok: ranged.ok, out: ranged.stdout.trim() }).toEqual({ mergeMode, ok: false, out: '' })
+      // …while the BARE word the row used to assert resolves happily against the tag.
+      const bare = await spawnCapture(
+        ['git', '-C', w.repo, 'diff', '--name-only', '--end-of-options', `main..${w.head}`],
+        w.repo,
+      )
+      expect({ mergeMode, ok: bare.ok }).toEqual({ mergeMode, ok: true })
     }
   })
 
@@ -574,12 +640,12 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1588, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2322, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2434, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5271, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1595, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2329, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2441, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5278, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 819, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { file: 'codex-review.sh', line: 321, why: 'shell: the standalone reviewer builds its own diff' },
+    { file: 'codex-review.sh', line: 334, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {

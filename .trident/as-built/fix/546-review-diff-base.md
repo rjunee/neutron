@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5438` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5445` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -217,6 +217,54 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round nineteen: the sequence ends when the last fallback stops returning a value
+
+The tag-only case. `diffBaseRef` probed remote, then heads, and on neither returned the bare
+name — which passes both negative probes and then **resolves as a TAG**. Not hypothetical:
+**this repository holds a live instance.** `archive/agent-replies-prior-iter-3b35767` exists as
+`refs/tags/...` and as no branch, so the bare word answered to it, exit 0, and a review diff
+would have been computed against a base nobody chose. Measured on git 2.43:
+
+    git diff --name-only --end-of-options 'archive/thing..HEAD'            → exit 0, a diff
+    git diff --name-only --end-of-options 'refs/heads/archive/thing..HEAD' → FATAL, exit 128
+
+So "the bare name is fine because git errors loudly on an unknown revision" was false in the
+same way "the caller's diff will fail loudly" was false about an empty base, two rounds
+earlier: **a bare word is not inert — git resolves it against every namespace.**
+
+**THREE ROUNDS, THREE POSITIONS OF ONE DEFECT** — the qualified path (seventeen), the
+`refs/heads` fallback (eighteen), the no-ref fallback (nineteen). Each fix was correct and each
+left the next-worse path holding the original behaviour. The sharper form of round eighteen's
+lesson: **a fallback inherits the defect the primary path was fixed for unless it is fixed in
+the same change — and the sequence terminates only when the last fallback stops returning a
+value at all.**
+
+So it does. `diffBaseRef` now throws `TridentUnresolvableBaseError` instead of handing back a
+word; every one of its returns is a 40-hex pin or a fully qualified ref. The `.mjs` composes
+`refs/heads/<base>` unconditionally on the second arm — **the one place the two implementations
+cannot agree**, because a shell substitution is composed in one process and evaluated in
+another, so it cannot refuse; it can only name a ref the other process rejects. Both halves are
+asserted, and the composed word is measured to be one git actually refuses. `codex-review.sh`
+refuses a bare tag-only argument (exit 3, its DEFERRED), while an explicit `refs/tags/<x>` is
+still accepted — the refusal is of the AMBIGUITY, not of the intent.
+
+**The terminating condition is now checkable by a test rather than by a promise.** "NO RETURN
+STATEMENT HANDS BACK AN UNQUALIFIED NAME" reads `diffBaseRef`'s own source, extracts every
+`return`/`throw`, and requires each to be the pin, a qualified ref, or a refusal — and asserts
+that `return name` appears in no spelling. That is the condition stated as something a reader
+can confirm before pushing, not something review confirms afterwards.
+
+Mutations: restoring the bare return reds 4; restoring the bare `printf` reds 6; letting the
+wrapper keep a tag-only name reds 1; and hiding a bare `return name` inside a single-line
+`if (…) return …` reds 3, including the structural test itself.
+
+**That last mutation exists because the structural test had the code's own blind spot.** Its
+first version anchored the pattern at the start of a line, so it never saw the two returns
+written as `if (await ref_resolves(…)) return \`refs/…\`` — it examined five statements and
+declared seven correct. Widened to match a `return` anywhere on the line and to pin the COUNT
+at 7, so a new arm cannot slip in unexamined. **An instrument written to check a rule keeps
+inheriting the assumption the rule was broken by** — the fourth time on this branch.
 
 ### Round eighteen: the degraded path is the one that runs when things are already wrong
 
@@ -1021,7 +1069,7 @@ fallback (the bare name is kept when `origin/<base>` does not resolve — prefix
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5271`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5278`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

@@ -475,6 +475,46 @@ describe('the review diff is taken against the resolved base, not the stale loca
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })
 
+  test('TAG-ONLY: the command names refs/heads/<base> and git REFUSES — no diff against a tag', async () => {
+    // THE LAST POSITION THIS DEFECT HAD. With no remote-tracking ref AND no local branch, the
+    // substitution used to print the bare name — and a bare name is not inert: git resolves it
+    // against every namespace, so a same-named TAG answers to it. This repository holds a live
+    // instance (`archive/agent-replies-prior-iter-3b35767` is a tag and no branch).
+    //
+    // The composed word is now `refs/heads/<base>` whether or not it resolves, so the failure
+    // is LOUD and the tag is never diffed against. Asserted as the ref named AND as the
+    // outcome, with the contrast measured in the same repository.
+    const w = await seedWorld('tag-only-base')
+    await git(w.consumer, 'remote', 'remove', 'origin')
+    for (const ref of (await git(w.consumer, 'for-each-ref', '--format=%(refname)', 'refs/remotes/')).split('\n').filter((r) => r !== '')) {
+      await git(w.consumer, 'update-ref', '-d', ref)
+    }
+    // `main` becomes a TAG and stops being a branch — the exact shape of the live instance.
+    await git(w.consumer, 'switch', '-q', '-c', 'trunk')
+    await git(w.consumer, 'branch', '-D', 'main')
+    await git(w.consumer, 'tag', 'main', w.staleBase)
+    // Left on `trunk` deliberately: the resume diff names an explicit head OID, so what is
+    // checked out is not an input — and switching to the build branch is impossible here,
+    // since the consumer only ever FETCHED it.
+    expect(await git(w.consumer, 'for-each-ref', '--format=%(refname)', 'refs/heads/main')).toBe('')
+    expect(await git(w.consumer, 'rev-parse', 'refs/tags/main')).toBe(w.staleBase)
+
+    const out = await runResumeDiff(w, { pr: false })
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/heads/main')
+    // THE OUTCOME: git refused the range, so the `&& wc -c` never ran and there is NO byte
+    // count at all — `writeResumeDiff`'s own failure signal. Asserted as "not a number the
+    // workflow could report", which is louder than 0 and cannot be confused with an empty
+    // diff someone might rationalise.
+    expect({ finite: Number.isFinite(out.bytes) }).toEqual({ finite: false })
+    expect(filesInDiffFile(out.diffFile)).toEqual([])
+    // THE CONTRAST, measured here: the bare word this used to compose produces a diff.
+    const bare = await spawnCapture(
+      ['git', '-C', w.consumer, 'diff', '--name-only', '--end-of-options', `main..${w.head}`],
+      w.consumer,
+    )
+    expect({ ok: bare.ok, empty: bare.stdout.trim() === '' }).toEqual({ ok: true, empty: false })
+  })
+
   test('FRESH local ref: the resolved base and the bare name AGREE, file for file', async () => {
     // THE COMPLEMENT, and it is deliberately stated WITHOUT reference to the composed
     // command: it is a claim about git, and it must hold whichever base the workflow
