@@ -1399,13 +1399,17 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  *    four commits behind `origin/main` yields FIVE files where the branch changed ONE,
  *    in local mode exactly as in pr mode. So local mode gets the same preference, and
  *    the shell decides per-repository whether the ref exists.
- *  • the bare name whenever `refs/remotes/origin/<base>` does not resolve to a commit —
- *    which is NOT the same as "there is no remote", and saying so was the sixth overclaim
- *    on this branch. `origin` can be configured while that ref is missing, deleted or
- *    never fetched: an ordinary state for a worktree that has not fetched. The
+ *  • `refs/heads/<base>` whenever `refs/remotes/origin/<base>` does not resolve to a
+ *    commit — which is NOT the same as "there is no remote", and saying so was the sixth
+ *    overclaim on this branch. `origin` can be configured while that ref is missing, deleted
+ *    or never fetched: an ordinary state for a worktree that has not fetched. The
  *    substitution below also takes this arm when git cannot run at all. No fetch is
  *    attempted — a build worktree should not reach the network to answer a diff-base
- *    question — so `refs/heads/<base>` is simply the best available answer there.
+ *    question — so the local branch is simply the best available answer there, and it is
+ *    named IN FULL: this arm read "the bare name" until round nineteen, and a bare word is
+ *    not inert — git resolves it against every namespace and a same-named tag answers to it.
+ *    The arm is unconditional, so an unresolvable `refs/heads/<base>` is composed anyway and
+ *    git rejects it out loud rather than resolving something nobody chose.
  *
  * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
@@ -2399,8 +2403,9 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 // DELIBERATELY NOT `diffBase` (#546), and this is the one site in the file that is not.
 // The difference is NOT the merge mode — an earlier draft of this comment said `diffBase`
 // "in LOCAL mode names the LOCAL ref", which stopped being true when the fallback stopped
-// being keyed on merge mode. `diffBase` prefers `origin/<base>` in BOTH modes whenever
-// that ref resolves, and reaches the bare name only when it does not. Saying otherwise
+// being keyed on merge mode. `diffBase` prefers `refs/remotes/origin/<base>` in BOTH modes
+// whenever that ref resolves, and composes `refs/heads/<base>` when it does not — never a
+// bare name, an arm round nineteen removed. Saying otherwise
 // here was the worst possible placement for that stale claim: it sits beside the one
 // operand whose local/pr distinction is real, so a reader comparing the two was told the
 // difference is the merge mode when it is not.

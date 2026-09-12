@@ -7,15 +7,19 @@
  * `--end-of-options`, that `codex-review.sh`'s promotion block picks the right ref. None of
  * them runs a range. So the record could claim — and did, in four places — that a bare base
  * branch name is "unconstructable" at `codex-build.sh` because its argv default is empty
- * and an empty value skips the diff. That claim is FALSE, and its own spec item requires
- * what falsifies it: when `refs/remotes/origin/<base>` does not resolve, `diffBase`
- * legitimately yields the bare NAME, that name is passed as argv `$2`, and it reaches
+ * and an empty value skips the diff. That claim was FALSE when it was made: `diffBase` then
+ * yielded a bare NAME whenever `refs/remotes/origin/<base>` did not resolve, and that name
+ * was passed as argv `$2` and reached
  * `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"`.
  *
  * IF A CLAIM SAYS SOMETHING CANNOT BE BUILT, IT HAS TO NAME THE MECHANISM THAT PREVENTS
- * IT. The mechanism here — no base-branch-name binding, empty default — prevents the
- * wrapper CHOOSING a base. It does not prevent a bare name ARRIVING at one. These tests
- * run the path the claim said did not exist.
+ * IT. The mechanism named there — no base-branch-name binding, empty default — prevents the
+ * wrapper CHOOSING a base; it never prevented a value ARRIVING at one. **Round nineteen
+ * removed `diffBase`'s bare-name arm, so the trident path now hands this argv a sha or a
+ * fully qualified ref — but that is a property of the CALLER, and argv comes from anyone.**
+ * These tests run the range with whatever they hand it, which is the only way to show that
+ * the wrapper cannot repair a bad base and therefore that the composing side's choice is
+ * load-bearing.
  *
  * ── WHAT A WRONG IMPLEMENTATION WOULD GET RIGHT ───────────────────────
  * A test that hands the wrapper line a resolved ref in a fresh repository passes whatever
@@ -155,7 +159,7 @@ async function seed(label: string, opts: { remote: boolean }): Promise<World> {
   return { repo, out: join(root, 'diff.patch'), others: others.sort() }
 }
 
-describe('codex-build.sh: the bare base name DOES reach the range, and the wrapper cannot repair it', () => {
+describe('codex-build.sh: whatever argv carries DOES reach the range, and the wrapper cannot repair it', () => {
   test('NO REMOTE: the bare name is what arrives, and it is the right answer there', async () => {
     // THE CLAIM THIS REPLACES: "codex-build.sh holds no base-branch-name binding, so a
     // bare-base range is unconstructable there". The wrapper cannot CHOOSE a base — true —

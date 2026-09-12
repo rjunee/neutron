@@ -61,14 +61,16 @@
 #                                       when a build committed but never wrote one.
 #                                       WHATEVER `inner-workflow.mjs`'s `diffBase`
 #                                       RESOLVED: the launch-pinned base sha, else
-#                                       `origin/<base>` when that ref resolves, else the
-#                                       bare base name. An earlier version of this comment
-#                                       said "a RESOLVED REF, never a bare local branch
-#                                       name" — that was false, and the fallback it forgot
-#                                       is the legitimate one: with no resolving
-#                                       `refs/remotes/origin/<base>` there is no better
-#                                       answer without a fetch, so the bare name IS what
-#                                       arrives here and reaches the range below.
+#                                       `refs/remotes/origin/<base>` when that ref resolves,
+#                                       else `refs/heads/<base>`. NEVER a bare name — that
+#                                       arm was removed in round nineteen of #546, because a
+#                                       bare word is not inert and a same-named tag answers
+#                                       to it. (Two earlier versions of this comment are
+#                                       worth keeping: it said "a RESOLVED REF, never a bare
+#                                       local branch name" while the bare fallback existed,
+#                                       and then said the bare name "IS what arrives here"
+#                                       after that was corrected. The first was wrong about
+#                                       the code, the second is now wrong about it again.)
 #                                       This script must therefore never IMPROVE the value
 #                                       and never guess one: a bare `main` chosen HERE would
 #                                       diff against whatever `refs/heads/main` holds in a

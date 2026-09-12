@@ -35,12 +35,14 @@
 # benign never-set-up path and degrades to Claude-only.
 #
 # Usage:  CODEX_HOME=/path/to/project/codex bash trident/codex-review.sh [base-ref]
-# The base ref is the left-hand side of the fallback branch diff (the trident path
-# supplies a RESOLVED one — the launch-pinned base sha or `origin/<base>` — via
-# `inner-workflow.mjs`'s `diffBase`). A bare local branch name is resolved to its
-# remote-tracking ref below when one exists, because `refs/heads/main` in a shared
-# checkout is only as fresh as the last pull and a range against it presents every
-# commit merged into the base since as this branch's own work (#546).
+# The base ref is the left-hand side of the fallback branch diff (the trident path supplies
+# a sha or a FULLY QUALIFIED ref — the launch-pinned base sha, `refs/remotes/origin/<base>`
+# or `refs/heads/<base>` — via `inner-workflow.mjs`'s `diffBase`, which has no arm that
+# produces a bare name). A bare argument from a HAND RUN is qualified below: to its
+# remote-tracking ref when one exists, else to `refs/heads/<x>`, because `refs/heads/main` in
+# a shared checkout is only as fresh as the last pull and a range against it presents every
+# commit merged into the base since as this branch's own work (#546) — and because a bare
+# word is not inert, so a same-named tag would answer to it.
 # Output/verdict streamed to stdout verbatim.
 # =============================================================================
 
@@ -58,10 +60,11 @@ BASE_REF="${1:-main}"
 # `codex-review.sh release` reviewed from B — a different commit, silently. This wrapper
 # takes a general `[base-ref]`, so that is a real input, and the trident path could not
 # see it because it never passes a TAG: it passes whatever `diffBase` resolved — a sha,
-# `origin/<base>`, or a bare base name when no remote-tracking ref resolves. (This said
-# "it always passes an already-resolved ref", which the bare-name fallback contradicts;
-# what makes trident blind to the tag case is the KIND of value it passes, not that the
-# value is always resolved.)
+# `refs/remotes/origin/<base>` or `refs/heads/<base>`. (Two corrections live here: it said
+# "it always passes an already-resolved ref", which the then-current bare-name fallback
+# contradicted, and it said "or a bare base name when no remote-tracking ref resolves" until
+# round nineteen removed that arm. What makes trident blind to the tag case is the KIND of
+# value it passes.)
 #
 # SO THE BLOCK BELOW DECIDES BY KIND, and every arm names a ref IN FULL:
 #   * branch AND tag of the same name → AMBIGUOUS: REFUSED (exit 3). Leaving it alone was

@@ -205,13 +205,14 @@ export async function detectBaseBranch(
  * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
  * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
  *
- * WHY A BARE LOCAL BRANCH NAME IS THE WRONG ANSWER WHEREVER A BETTER ONE EXISTS — and
- * the right one, exactly once, where none does. **This heading said "ALWAYS" for twelve
- * rounds, twenty lines above step 3 below, which returns the bare name when
- * `refs/remotes/origin/<base>` does not resolve, and above the spec item that REQUIRES
- * that fallback.** Twenty lines is the informative distance: a comment is read as context
- * FOR the code beneath it, not as a claim to be checked AGAINST it, so proximity hid the
- * contradiction instead of exposing it. `refs/heads/main` in a
+ * WHY A BARE LOCAL BRANCH NAME IS NEVER THE ANSWER — and why saying so took nineteen
+ * rounds. **This heading said "ALWAYS" for twelve rounds while step 3 below, twenty lines
+ * away, returned the bare name**, and twenty lines is the informative distance: a comment is
+ * read as context FOR the code beneath it, not as a claim to be checked AGAINST it, so
+ * proximity hid the contradiction instead of exposing it. The heading was then narrowed to
+ * "wherever a better one exists" to match that fallback — and round nineteen removed the
+ * fallback instead, because a bare word is not inert. The absolute is true now; it was not
+ * true when it was first written, which is the whole lesson. `refs/heads/main` in a
  * shared build checkout is only as fresh as the last time something on this box
  * pulled it, and a range against a stale base silently presents every commit merged
  * in between as this branch's own work. MEASURED twice: Argus r4 / run 25b2327d —
@@ -226,16 +227,18 @@ export async function detectBaseBranch(
  * `diffBase` and `probeCiBase`'s ref use:
  *  1. `base_sha` — the sha `origin/<base>` held AT LAUNCH, which the launcher observed
  *     and cut the build branch from. A sha cannot go stale and it IS the cut point.
- *  2. `origin/<base>` WHENEVER THAT REF RESOLVES — the remote-tracking ref, in either
- *     merge mode. In pr mode the launch path fetches
+ *  2. `refs/remotes/origin/<base>` WHENEVER THAT REF RESOLVES — the remote-tracking ref, in
+ *     either merge mode. In pr mode the launch path fetches
  *     `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build
  *     when that fetch or its rev-parse fails, so there it exists and is as fresh as
- *     launch; elsewhere the caller asks (`originBaseResolves`).
- *  3. the bare name whenever that ref does not resolve to a commit — no remote at all, an
- *     `origin` configured but not fetched (or whose base ref was deleted), or a probe that
- *     could not run. In every one of those `refs/heads/<base>` is the best available base.
+ *     launch; elsewhere the caller asks (`refResolves`).
+ *  3. `refs/heads/<base>` whenever that ref does not resolve to a commit — no remote at all,
+ *     an `origin` configured but not fetched (or whose base ref was deleted), or a probe that
+ *     could not run. In every one of those the local branch is the best available base.
  *     NOT "only when the repository has no remote": that is a wider condition than
- *     `originBaseResolves` establishes, and saying it was the sixth overclaim on #546.
+ *     `refResolves` establishes, and saying it was the sixth overclaim on #546. This step
+ *     said "the bare name" until round nineteen; the CONDITION was right, the ANSWER was not.
+ *  4. REFUSED when neither ref resolves — see the throw below.
  *
  * THE THIRD PARAMETER WAS `merge_mode` AND THAT WAS A BUG, not just an imprecision.
  * This doc used to justify it as "the bare name in local mode ONLY — a local-mode run

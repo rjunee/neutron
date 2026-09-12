@@ -2345,8 +2345,9 @@ export function buildTridentOrchestrator(
   }
 
   /**
-   * The LEFT-HAND SIDE of any rev-range this orchestrator builds (#546): the
-   * launch-pinned sha, else `origin/<base>` when that ref resolves, else the bare name.
+   * The LEFT-HAND SIDE of any rev-range this orchestrator builds (#546): the launch-pinned
+   * sha, else `refs/remotes/origin/<base>` when that ref resolves, else `refs/heads/<base>`;
+   * a base that resolves to neither is REFUSED. Never a bare name — see `diffBaseRef`.
    *
    * The remote question is asked of the REPOSITORY, never inferred from `merge_mode` —
    * `local` means the outer loop merges locally, not that there is no remote, and keying
@@ -2728,11 +2729,12 @@ export function buildTridentOrchestrator(
     // available answer. Two of those three fallback worlds still have a better answer:
     // `run.base_sha` is the launch-observed tip, and `origin/<base>` is a remote-tracking
     // ref the launch path fetches (and, in pr mode, refuses to start without). `diffBaseRef`
-    // picks whichever exists and reaches the bare name whenever `refs/remotes/origin/<base>`
-    // does not resolve — NOT "only in local mode", which is the framing the fix that removed
-    // it left behind here. The merge mode says nothing about whether a remote exists; keying
-    // the fallback on it was the defect, and a comment still asserting it is the same claim
-    // surviving its own correction.
+    // picks whichever exists and falls back to `refs/heads/<base>` whenever
+    // `refs/remotes/origin/<base>` does not resolve — NOT "only in local mode", which is the
+    // framing the fix that removed it left behind here, and NOT the bare name, which is what
+    // this comment said until round nineteen. The merge mode says nothing about whether a
+    // remote exists; keying the fallback on it was the defect, and a comment still asserting
+    // it is the same claim surviving its own correction.
     const baseRef =
       rebased.baseSha !== ''
         ? rebased.baseSha
@@ -3322,11 +3324,13 @@ export function buildTridentOrchestrator(
       const localHead = local.stdout.trim()
       if (!local.ok || !/^[0-9a-f]{40}$/.test(localHead)) return null
 
-      // THE BASE `resolvedDiffBase` CHOSE (#546) — the launch pin, else `origin/<base>`
-      // when that ref resolves, else the bare name, which is legitimate and is the only
-      // answer there is without a fetch. This comment said "never the bare local branch
-      // name", which the fallback contradicts; what must never happen is this call site
-      // naming a base of its own. A stale `refs/heads/main`
+      // THE BASE `resolvedDiffBase` CHOSE (#546) — the launch pin, else
+      // `refs/remotes/origin/<base>` when that ref resolves, else `refs/heads/<base>`, which
+      // is the best answer there is without a fetch. Never a bare name, and a base that
+      // resolves to neither ref is refused. (This comment has been wrong twice: it said
+      // "never the bare local branch name" while the bare fallback existed, then described
+      // that fallback as legitimate after round nineteen removed it.) What must never happen
+      // is this call site naming a base of its own. A stale `refs/heads/main`
       // makes `rev-list --count <base>..<localHead>` count the base's own unmerged history
       // as this lane's commits, and this count is what decides whether a stranded run built
       // anything worth salvaging.
@@ -4473,7 +4477,7 @@ export function buildTridentOrchestrator(
         active_runs: active,
         mem_available_bytes: budget.mem_available_bytes,
         // THE BASE `diffBaseRef` CHOSE (#546) — the pin, `origin/<base>` when it resolves,
-        // else the bare name — never a base named here. The block this renders tells the build to run
+        // else `refs/heads/<base>` — never a bare name, and never a base named here. The block this renders tells the build to run
         // `git diff --name-only <base>` against its WORKING TREE to pick the stage-1
         // test set; a stale `refs/heads/main` adds every file the base moved past to
         // that set, which is the wasteful direction of the same defect.

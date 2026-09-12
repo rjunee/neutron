@@ -138,10 +138,11 @@ fi
 #
 # DEFENCE IN DEPTH, NOT THE GUARANTEE. What enforces the invariant is structural:
 # one binding per boundary (`diffBase`, `diffBaseRef()`), plus an argv boundary that
-# hands the wrappers whatever that binding resolved — a sha, `origin/<base>`, or the
-# legitimate bare name when no remote-tracking ref resolves. (This said "an
-# already-resolved ref"; the fallback is a bare name, and `codex-wrapper-bare-base.test.ts`
-# runs both wrappers' shipped range lines to show it arriving.)
+# hands the wrappers whatever that binding resolved — a sha, `refs/remotes/origin/<base>`,
+# or `refs/heads/<base>`, never a bare name (round nineteen; this line said "the legitimate
+# bare name when no remote-tracking ref resolves" until then). `codex-wrapper-bare-base.test.ts`
+# runs both wrappers' shipped range lines to measure what they do with whatever they are
+# handed, since argv comes from anyone.
 #
 # THAT BOUNDARY IS NOT UNIFORM, and this comment used to say it was — "no variable
 # holding a base branch NAME exists in their scope at all". `codex-build.sh` reaches

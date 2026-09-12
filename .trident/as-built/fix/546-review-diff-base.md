@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5445` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5450` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -90,10 +90,12 @@ Stated in the order of how much it proves:
    error.
    **`codex-review.sh` is weaker still, and an earlier draft of this record overstated it by
    lumping the two together.** Its default is the literal `main`
-   (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which it promotes to
-   `origin/main` when that ref resolves and leaves bare when it does not. So: a resolved ref
-   on the trident path, which always passes one, and merely *demoted* in a standalone run
-   against a repo with no `origin/<base>`. Its own range line has no opinion either, which
+   (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which it QUALIFIES:
+   `refs/remotes/origin/main` when that ref resolves, else `refs/heads/main`, refusing an
+   ambiguous or tag-only argument. (Through round eighteen it "left bare when it does not",
+   which is the arm round nineteen removed.) So: a sha or a qualified ref on the trident
+   path, and a qualified local ref in a standalone run against a repo with no
+   `origin/<base>`. Its own range line has no opinion either, which
    the same new test measures: the promotion above it is load-bearing precisely because the
    range line is not.
 2. **One binding per boundary.** `diffBase` (`inner-workflow.mjs`) and the exported
@@ -229,6 +231,37 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round twenty: the sweep's DENOMINATOR was "documents I was pointed at"
+
+Round nineteen changed the contract; the reconciliation that followed it reached the spec item
+and the as-built — the two documents named in the finding — and stopped there. **Five live
+operational comments still described the removed fallback**, including the gate's own stated
+INVARIANT, `lint.sh`'s summary of it, both wrappers' argv contracts, and a line sitting beside
+production orchestration. Those are not narrative: they govern a security-sensitive boundary,
+and the root `AGENTS.md` rule is explicit that a change narrowing a guard must fix every
+document asserting the old rule **in the same change**.
+
+**This is round eighteen's lesson with the denominator wrong again.** The fallback inherits the
+defect the primary path was fixed for; a sweep inherits the blind spot of its DOMAIN. "The
+documents I was pointed at" is a list, and a list cannot be complete about a claim that lives
+wherever anyone happened to restate it.
+
+So this one was run as a grep over the whole tree — `bare name`, `bare NAME`, `shorthand`,
+`else the name`, `or a bare` — and every hit READ rather than pattern-replaced, because some
+are correctly historical:
+
+| | |
+|---|---|
+| grep hits tree-wide | **293** across 97 files |
+| hits in files that touch the #546 contract, all read | **137** |
+| passages changed | **22**, across 10 files |
+| left as-is | the rest — unrelated uses (`env`'s bare binary name), the defect's own description, and retractions that already name the round they were true in |
+
+The terminating condition was stated before the work and verified by grep after it: **no live
+comment or doc in the tree describes a bare or unqualified name as a value `diffBaseRef` or the
+workflow can produce.** Every survivor is an explicit retraction, a description of the defect,
+or about something else entirely.
 
 ### Round nineteen: the sequence ends when the last fallback stops returning a value
 
@@ -409,6 +442,10 @@ taken unrelated edits). **Five had moved**, one more than the three reported:
 | `probeCiBase`, final tree | `:5410` | **`:5416`** | `grep -n 'async function probeCiBase'` |
 | the wrapper range (as-built) | `codex-build.sh:809` | **`:819`** | `grep -nF 'git diff --end-of-options "${BASE_DIFF_REF}..HEAD"'` |
 | the wrapper range (spec item) | `codex-build.sh:809` | **`:819`** | same |
+
+(Those two rows record what round sixteen measured. Both moved again when later rounds edited
+`codex-build.sh`; the live citations are re-derived at the end of every round, and the banner
+above says so — a table of past corrections is not a source of current line numbers.)
 | the mutated resume range | `inner-workflow.mjs:5243` | **`:5249`** | `grep -nF` on the composed `cmd` |
 | the CodeQL escape, "as merged" | `:260` | **`:261`**, and relabelled | `grep -n '\${'` for the construct |
 
@@ -632,8 +669,10 @@ about what this code does.** Each was read against the code it sits above:
   gate-reach claims ("the next site cannot re-introduce the class by forgetting", "fails CI
   on a rev-range whose base bypasses this") narrowed to the spellings the gate enumerates;
   six "A RESOLVED REF, never the bare local branch name" (three in `orchestrator.ts`, one in
-  `codex-review.sh`, one in `lint.sh`, one in `inner-workflow.test.ts`) — the legitimate fallback IS a bare name, so what
-  must never happen is a call site naming a base of its own; `inner-workflow.mjs`'s "the ONLY
+  `codex-review.sh`, one in `lint.sh`, one in `inner-workflow.test.ts`) — **at that round** the
+  fallback was a bare name, so what must never happen is a call site naming a base of its own.
+  (Round nineteen then removed the bare fallback, which made the original absolutes true again
+  and these corrections themselves stale — every one was re-reconciled in round twenty.); `inner-workflow.mjs`'s "the ONLY
   place the base branch NAME is read" (`probeCiBase`, `branchLogBase` and the prompts read it
   too); two in `orchestrator.test.ts` and one in `cross-model-dispatch.test.ts`; this record's
   "a change to either alone cannot land" — **falsified by the very round that added the
@@ -984,12 +1023,13 @@ And the contradiction was not only editorial — the defect was still live under
   the last place the defect lived.
 
 Fixed by making the unpinned arm a **shell substitution**: ask the repository whether
-`refs/remotes/origin/<base>` resolves, prefer it when it does, and fall back to the bare
-name only when it does not — the same in both modes, decided per repository at the moment
-the range is built rather than inferred from the merge mode. That is the branch's own
-principle applied once more: one fewer place where a base branch name can be a range
-operand at all. Local mode now yields one file; mutating the fallback back to the bare name
-reddens the test, and a separate no-remote fixture proves the fallback is still reached.
+`refs/remotes/origin/<base>` resolves, prefer it when it does, and fall back only when it
+does not — the same in both modes, decided per repository at the moment the range is built
+rather than inferred from the merge mode. (At this round the fallback was the bare name;
+round nineteen made it `refs/heads/<base>`.) That is the branch's own principle applied once
+more: one fewer place where a base branch name can be a range operand at all. Local mode now
+yields one file; mutating the fallback back to the MERGE-MODE-KEYED form reddens the test, and
+a separate no-remote fixture proves the fallback is still reached.
 
 ### Three claims outran their instrument, and the audit is the lesson
 
@@ -1103,7 +1143,7 @@ fallback (`refs/heads/<base>` when `refs/remotes/origin/<base>` does not resolve
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5278`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5283`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

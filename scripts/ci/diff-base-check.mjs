@@ -1,11 +1,14 @@
 #!/usr/bin/env bun
 // DIFF-BASE gate — a REGRESSION ALARM for #546's class, not a proof of its absence.
 //
-// The INVARIANT is "a base BRANCH NAME reaches a rev-range operand ONLY where
-// `refs/remotes/origin/<base>` does not resolve to a commit". Not "never", and not "only
-// with no remote" — both were earlier drafts of this sentence and both were wider than
-// the code. `origin` can be configured while its base ref is missing, deleted or never
-// fetched, and there `refs/heads/<base>` is the best available base. That case is
+// The INVARIANT is "a rev-range operand is a sha or a FULLY QUALIFIED ref, never a bare
+// branch name". `diffBaseRef` returns the launch pin, `refs/remotes/origin/<base>`, or
+// `refs/heads/<base>`, and throws when neither ref resolves; the workflow composes the same
+// two refs. (Through round eighteen this read "a base BRANCH NAME reaches a rev-range
+// operand ONLY where `refs/remotes/origin/<base>` does not resolve" — the CONDITION was
+// right and the ANSWER was wrong: a bare word is not inert, git resolves it against every
+// namespace, and a same-named tag answers to it. Round nineteen removed that arm.) The
+// unresolved-remote case is
 // legitimate, tested, and listed with the blind spots below. This file does not
 // establish the invariant either way; it makes a relapse loud. What establishes it is
 // structural, two sections down — read that before trusting a green run.
@@ -30,8 +33,10 @@
 // ── WHAT ACTUALLY GUARANTEES THE INVARIANT — AND IT IS NOT THIS FILE ──
 // What enforces it is STRUCTURAL, not textual. (This section used to open "the invariant
 // is NO CODE PATH composes a rev-range from a base BRANCH NAME" — an absolute that the
-// same file then contradicted by requiring the bare name as a fallback. The fallback is
-// real; the absolute was not.):
+// same file then contradicted by requiring the bare name as a fallback. At that round the
+// fallback was real and the absolute was not; round nineteen removed the bare fallback, so
+// the absolute is true again — for the remote/local refs, which are what this section is
+// about.):
 //
 //   * ONE BINDING PER BOUNDARY. `diffBase` in `trident/inner-workflow.mjs` and the
 //     exported `diffBaseRef()` in `trident/merge.ts` are the only things that turn a
@@ -52,12 +57,14 @@
 //     takes the base as argv `$2` and holds no base-branch-name binding at all: its default
 //     is EMPTY (`"${2:-}"`), and an empty value skips the last-resort diff entirely. So the
 //     wrapper adds no way to INVENT a bare base — but it is not unconstructable there, and
-//     this comment said it was. `diffBase`'s legitimate fallback (no resolving
-//     `refs/remotes/origin/<base>`) is a bare NAME, it is passed as that argv, and it
-//     reaches `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"`. Measured through the
-//     shipped line in `codex-wrapper-bare-base.test.ts`. What the wrapper guarantees is
-//     narrower and still worth having: the base it ranges against is exactly what the
-//     composing side decided, never a guess of its own.
+//     this comment said it was. What ARRIVES is the composing side's business: since round
+//     nineteen `diffBase` has no arm that produces a bare name, so the trident path hands
+//     this argv a sha or a fully qualified ref. (This paragraph said "the legitimate
+//     fallback … is a bare NAME" until then.) The wrapper still takes argv from anyone, so
+//     `codex-wrapper-bare-base.test.ts` measures what the shipped line
+//     `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` does with a bare, a stale and a
+//     padded value. What the wrapper guarantees is narrower and still worth having: the base
+//     it ranges against is exactly what the composing side decided, never a guess of its own.
 //
 //     `trident/codex-review.sh` IS WEAKER STILL. Its argv default is the literal `main`
 //     (`BASE_REF="${1:-main}"`) — a bare base branch name, in scope — which the rev-parse
@@ -111,9 +118,11 @@
 //   * THE LEGITIMATE UNRESOLVABLE-REF FALLBACK. When `refs/remotes/origin/<base>` does
 //     not resolve to a commit — no remote at all, OR an `origin` that is configured but
 //     whose base ref is missing, deleted or unfetched — `refs/heads/<base>` is the best
-//     available base and a bare name there is correct. The gate cannot tell that from the
-//     defect by reading source and does not try. `inner-workflow.mjs` decides it in the
-//     shell, per repository, at the moment the range is built, without fetching.
+//     available base. It is composed FULLY QUALIFIED (this said "and a bare name there is
+//     correct" until round nineteen, which is exactly the shape a same-named tag captures).
+//     The gate cannot tell that case from the defect by reading source and does not try:
+//     `inner-workflow.mjs` decides it in the shell, per repository, at the moment the range
+//     is built, without fetching.
 //   * ANY SPELLING NOT ENUMERATED ABOVE. That set is open, and the next member of
 //     it will be found the same way the last two were — by mutating the fix and
 //     checking the gate reddens, never by reading this list and feeling covered.

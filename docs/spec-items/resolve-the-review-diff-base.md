@@ -109,7 +109,7 @@ things:
   **From trident it now receives only a sha or a fully qualified ref**, because `diffBase` has
   no arm that composes a bare name. That is a property of the CALLER, not of the wrapper: argv
   comes from anyone, so `trident/codex-wrapper-bare-base.test.ts` still measures what the
-  shipped line `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:819`) does
+  shipped line `git diff --end-of-options "${BASE_DIFF_REF}..HEAD"` (`codex-build.sh:821`) does
   with a bare name, a stale one and a padded one. **If a claim says something cannot be built,
   it has to name the mechanism that prevents it** — an earlier draft called a bare-base range
   there *unconstructable*, and the mechanism it named prevents the wrapper CHOOSING a base, not
@@ -208,8 +208,8 @@ The resolution order is evidence-first, and is the same at every site:
       Verified by "LOCAL MODE, unpinned, WITH a remote: same stale ref, same ONE file", which
       asserts the resolved base AND the file list AND the five-file contrast measured from git in
       the same repo — the previous version of this test asserted the command *shape* and could
-      not see the bug in the fixture it ran against. Mutating the fallback back to the bare name
-      reddens it.
+      not see the bug in the fixture it ran against. Mutating the fallback back to its
+      MERGE-MODE-KEYED form reddens it.
 - [ ] **The two implementations of the rule agree, row by row.** `diffBaseRef` (TS) and
       `diffBase` (`.mjs`) cannot share a module — the workflow script takes no imports — and
       have diverged twice, on the merge-mode fallback and on whether the pin is read before
