@@ -224,10 +224,21 @@ The resolution order is evidence-first, and is the same at every site:
       Verified by `trident/diff-base-option-shaped.test.ts`: the binding refuses under both
       probe answers; **every hit of `/\}\.\.|\.\.\$\{/` across `orchestrator.ts`,
       `inner-workflow.mjs`, `merge.ts`, `mutation-prover.ts`, `mutation-claim-artifact.ts` and
-      both wrappers either carries the marker in its statement or is listed as an argued
+      both wrappers either carries the marker IN ITS OWN COMMAND or is listed as an argued
       non-invocation** (21 hits, 18 shielded, 3 operator-facing notes plus one shell label),
       with the per-file counts pinned; and per command family, against real git, the marker is
       shown to be what stops the write while ordinary ranges still work.
+      **"Its own command" is parsed, not guessed from proximity.** The first version of this
+      instrument called a range shielded if the marker appeared anywhere in the twelve
+      preceding lines, so a protected command one to twelve lines above an unprotected one
+      shielded it and the criterion was unenforced again. Attribution now runs from the
+      nearest preceding `git` TOKEN in the comment-blanked source to the range operand — the
+      argv array (including the multi-line form) or the shell command — and a range with no
+      `git` token within 600 characters is **UNATTRIBUTABLE, which fails rather than passes**.
+      Controls, both halves: a fixture whose protected command precedes an unprotected one
+      must report exactly one offender, and the same fixture with the second command shielded
+      must report none — driven through the real detector, not a second per-line filter, which
+      is what the previous control did (it proved *a* detector worked, not *this* one).
       **The instrument this replaces was keyed to `${baseRef}` and therefore blind to
       `computeDiffLineCount`'s `base_ref` and to `mutation-prover.ts`'s three-dot range spread
       over its own argv lines — both of which shipped unshielded.** Mutations, each measured:
@@ -239,7 +250,9 @@ The resolution order is evidence-first, and is the same at every site:
       **Residual gap, stated rather than left implicit:** a range assembled without an
       interpolation adjacent to the operator (a fully computed operand string, or `..` reached
       by concatenation across statements) is outside this matcher, as is any module not in the
-      list above. Adding a module is a one-line change to `MODULES`; the list is pinned by the
+      list above. Attribution is textual rather than a real AST parse, so a `git` token inside
+      a string literal that is not a command could in principle attribute a range to itself;
+      the 600-character bound and the pinned per-file counts are what keep that loud. Adding a module is a one-line change to `MODULES`; the list is pinned by the
       per-file counts so a new consumer inside those files is a hard failure.
 - [ ] **The wrapper promotes BY KIND, not by string shape.** `codex-review.sh` takes a general
       `[base-ref]`. Promoting whenever `origin/<x>` resolved meant a **tag** `release` was

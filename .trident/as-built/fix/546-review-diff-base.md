@@ -233,6 +233,31 @@ across seven shipped modules, with per-file counts pinned and every non-invocati
 Controls: a planted consumer named `whicheverNameIFeelLike` (a spelling that appears nowhere
 in the tree) reds the test; removing it goes clean again.
 
+**Then the replacement instrument could pass falsely too, for a second reason.** It called a
+range shielded if `--end-of-options` appeared anywhere in the TWELVE PRECEDING LINES, so a
+protected command one to twelve lines above an unprotected one shielded it — the marker
+attributed to a command it does not belong to. **A coverage test that infers structure from
+line proximity is measuring LAYOUT, not syntax**: twelve lines is a guess about formatting,
+and formatting is not a property of the call. Its positive control could not catch this,
+because the control used a SEPARATE per-line filter and never ran the detector at all — it
+proved that *a* detector works, not that *this* one does. Two code paths, one guard.
+
+Attribution is now parsed: from the nearest preceding `git` TOKEN in the comment-blanked
+source to the range operand — the argv array (multi-line included) or the shell command. The
+real maximum distance in the tree is 468 characters (`mutation-prover.ts`'s multi-line argv),
+and the three operator-facing notes that merely *describe* a range sit 1205-1587 characters
+from any `git`, so the 600-character bound separates prose from commands on measurement rather
+than by assertion. **A range the detector cannot attribute is a FAILURE, not a pass.** The
+controls run through the detector itself, both halves: protected-then-unprotected must report
+exactly one offender, the same fixture with the second shielded must report none, a `git`
+token inside a comment must attribute and shield nothing, and a range with no command near it
+must come back unattributable. Mutation: restoring the twelve-line window reds two of them.
+
+**Three times now the code was fixed and the completeness claim rested on an instrument that
+could not see the gap** — a search keyed to one spelling of an identifier, then a proximity
+window, and in between a window that read its own documentation. Each was a narrower claim
+than it appeared, and none of the prose sweeps could have found any of them.
+
 **And the first version of that fix passed every mutation.** The statement window it searched
 for the marker included the COMMENTS this round added above each shielded site, and those
 comments say `--end-of-options`. **An instrument that reads its own documentation as evidence
