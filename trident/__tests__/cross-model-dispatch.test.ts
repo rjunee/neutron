@@ -1252,12 +1252,17 @@ describe('THE BUILD RUNS ON CODEX — no Anthropic model is requested for the ph
     // remote) hard-deferred at the baseline before codex launched, every round.
     const local = promptFor((await runWorkflow(productionArgs(CODEX_BUILD))).captured, 'forge:build')
     expect(local).toContain(
+      // arg $2 is the RESOLVED diff base (#546): the bare local name in local mode,
+      // where there is no origin for `refs/heads/main` to be behind.
       `bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'local'`,
     )
 
     const prArgs = { ...productionArgs(CODEX_BUILD), mergeMode: 'pr' }
     const pr = promptFor((await runWorkflow(prArgs)).captured, 'forge:build')
-    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
+    // …and `origin/<base>` in pr mode, which is the half #546 was about: the wrapper's
+    // last-resort `git diff <base>..HEAD` ran against whatever `refs/heads/main` held.
+    expect(pr).toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'origin/main' 'pr'`)
+    expect(pr).not.toContain(`bash '${CODEX_BUILD_SCRIPT_PATH}' 'trident/a-run' 'main' 'pr'`)
     // The two really are different commands, so neither assertion is passing on a
     // constant that happens to contain both.
     expect(local).not.toContain("'main' 'pr'")

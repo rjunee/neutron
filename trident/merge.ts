@@ -200,6 +200,54 @@ export async function detectBaseBranch(
   return 'main'
 }
 
+/**
+ * THE BASE OF A LOCAL REV-RANGE. Resolve `detectBaseBranch`'s output through here
+ * before it becomes the left-hand side of a `git diff`/`log`/`rev-list` range.
+ *
+ * WHY A BARE LOCAL BRANCH NAME IS THE WRONG ANSWER, ALWAYS. `refs/heads/main` in a
+ * shared build checkout is only as fresh as the last time something on this box
+ * pulled it, and a range against a stale base silently presents every commit merged
+ * in between as this branch's own work. MEASURED twice: Argus r4 / run 25b2327d —
+ * local `main` was 8 merges behind `origin/main`, the review artifact was 15,154
+ * lines across ~100 files for a branch whose own work was 20 files / 1,738 lines,
+ * and a reviewer vetoed the branch over bugs in files it does not touch; and #546 —
+ * 149 files read instead of 30. The failure is silent in BOTH directions that matter:
+ * git exits 0, and the extra files are real code, so nothing downstream can tell the
+ * inflated diff from a genuinely large one.
+ *
+ * THE ORDER IS EVIDENCE-FIRST, and it is the same order `inner-workflow.mjs`'s
+ * `diffBase` and `probeCiBase`'s ref use:
+ *  1. `base_sha` — the sha `origin/<base>` held AT LAUNCH, which the launcher observed
+ *     and cut the build branch from. A sha cannot go stale and it IS the cut point.
+ *  2. `origin/<base>` in pr mode — the remote-tracking ref. The launch path fetches
+ *     `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build
+ *     when that fetch or its rev-parse fails, so in pr mode the ref exists and is as
+ *     fresh as launch.
+ *  3. the bare name in local mode ONLY — the one world where it is right rather than
+ *     merely tolerated: a local-mode run has no origin to be behind, and the launcher
+ *     pins `base_sha` from `refs/heads/<base>` itself there.
+ *
+ * DELIBERATELY PURE — no `run_host`, no probe. The three inputs are all already in
+ * hand at every call site, so the resolution cannot fail, cannot be skipped for cost,
+ * and is trivially testable. `scripts/ci/diff-base-check.mjs` fails CI on a rev-range
+ * whose base bypasses this.
+ */
+export function diffBaseRef(
+  base_branch: string,
+  base_sha: string | null | undefined,
+  merge_mode: string,
+): string {
+  if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
+    return base_sha.trim().toLowerCase()
+  }
+  const name = base_branch.trim()
+  // An empty name would make the range `..<head>`, which git reads as HEAD..<head> —
+  // a different question with a plausible-looking answer. Hand it back untouched and
+  // let the caller's own diff fail loudly instead.
+  if (name.length === 0) return base_branch
+  return merge_mode === 'pr' ? `origin/${name}` : name
+}
+
 // ---------------------------------------------------------------------------
 // BASE-DRIFT HOLD (ISSUES #542)
 // ---------------------------------------------------------------------------

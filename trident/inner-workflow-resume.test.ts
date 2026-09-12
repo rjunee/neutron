@@ -125,6 +125,9 @@ interface ResumeOpts {
   pr?: boolean
   /** What `gh pr checks` reports for the PR, in PR mode. Defaults to green. */
   ci?: 'red' | 'green'
+  /** The launcher's pinned base sha — the commit `origin/<base>` held at launch.
+   *  Omitted → the workflow resolves the base from the branch name instead. */
+  baseSha?: string
   /** What the SAME check reports AT THE BASE. 'red' → the PR's red is excused as
    *  pre-existing (advisory), which is the finding this branch's economy is about. */
   ciBase?: 'red' | 'green'
@@ -273,6 +276,7 @@ async function runResume(opts: ResumeOpts): Promise<RunOut> {
     models: { fable: 'fable', opus: 'opus', sonnet: 'sonnet', fast: 'haiku' },
     reflectionGuidance: '',
     ...(opts.testStrategy !== undefined ? { testStrategy: opts.testStrategy } : {}),
+    ...(opts.baseSha !== undefined ? { baseSha: opts.baseSha } : {}),
   }
 
   const body = SRC.replace('export const meta', 'const meta')
@@ -311,10 +315,32 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
   test('the regenerated diff is taken from the OID, never from the branch name', async () => {
     const out = await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED })
     const cmd = promptFor(out, 'resume-diff')
+    // LOCAL MODE (`runResume`'s default), so the base is the bare name — there is no
+    // origin to be behind. The RIGHT-hand side is what this test is about.
     expect(cmd).toContain(`git diff 'main'..'${RECORDED}'`)
     // A branch-name diff would silently swap the code under review if anything
     // pushed between the head comparison and this command.
     expect(cmd).not.toContain("git diff 'main'..'trident/resume-run'")
+  })
+
+  test('the regenerated diff resolves its BASE too — origin/<base> in pr mode (#546)', async () => {
+    // The LEFT-hand side, which had the mirror-image defect: `refs/heads/main` in the
+    // shared repo of record is only as fresh as the last pull, so the resume handed the
+    // reviewers every commit merged into the base since. Measured at 149 files where the
+    // branch changed 30. `trident/review-diff-base-realgit.test.ts` proves the effect
+    // against real git with a deliberately stale local ref; this pins the composed form.
+    const prCmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr: true }), 'resume-diff')
+    expect(prCmd).toContain(`git diff 'origin/main'..'${RECORDED}'`)
+    expect(prCmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
+
+    // And the LAUNCH-PINNED sha outranks even that: it is the commit the branch was
+    // actually cut from, and a sha cannot go stale.
+    const pinned = 'f'.repeat(40)
+    const pinnedCmd = promptFor(
+      await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr: true, baseSha: pinned }),
+      'resume-diff',
+    )
+    expect(pinnedCmd).toContain(`git diff '${pinned}'..'${RECORDED}'`)
   })
 
   test("'argus-approved' + unchanged head → NO build and NO review at all", async () => {

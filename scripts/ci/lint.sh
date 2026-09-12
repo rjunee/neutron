@@ -130,4 +130,16 @@ if ! bun "$HERE/keyboard-taps-check.mjs"; then
   fail=1
 fi
 
+# ── CHECK 8: a base BRANCH NAME as a rev-range operand (ISSUES #546) ───
+# `git diff main..<head>` in a shared build checkout diffs against whatever
+# `refs/heads/main` holds, so every commit merged into the base since the last
+# pull is presented as this branch's own work — measured at 149 files where the
+# branch changed 30 (#546) and at ~100 files where it changed 20 (run 25b2327d).
+# The class had already been fixed twice as a CALL SITE, thirty lines from two
+# sites that still composed the bare name; this is the same fix as a RULE.
+# See diff-base-check.mjs.
+if ! bun "$HERE/diff-base-check.mjs"; then
+  fail=1
+fi
+
 exit "$fail"

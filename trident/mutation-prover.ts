@@ -3848,11 +3848,18 @@ export interface ChangedFile {
 export async function changedFilesWithStatus(
   run_host: RunHostCommand,
   repo_path: string,
-  base_branch: string,
+  base_ref: string,
   ref: string | null,
 ): Promise<ChangedFile[] | null> {
   if (ref === null || ref.trim().length === 0) return null
-  const base = base_branch.trim()
+  // `base_ref`, NOT a base BRANCH (#546), and the rename IS the fix here. The
+  // three-dot range below resolves the merge-base, and a stale local
+  // `refs/heads/main` IS an ancestor of the build branch — so a bare local branch
+  // name puts every file the base moved past into the blast radius this gate scores
+  // a nomination against. Resolving it is the CALLER's job (`diffBaseRef`,
+  // trident/merge.ts); this function deliberately still accepts any revision git
+  // does, for the reason argued two paragraphs down.
+  const baseRef = base_ref.trim()
   // THE ONE THING THE BASE MAY NOT BE: an OPTION. The range form admits no
   // `--end-of-options` marker, so `git diff --name-status "--output=<path>...<ref>"`
   // exits 0 and CREATES the file the base named — the whole operand, range
@@ -3870,7 +3877,7 @@ export async function changedFilesWithStatus(
   // repo refuse with "branch diff could not be read", forever. A base git cannot
   // resolve simply fails the diff, which reads as "could not be read" and makes
   // the gate REQUIRE the proof — never a pass.
-  if (base.length === 0 || base.startsWith('-')) return null
+  if (baseRef.length === 0 || baseRef.startsWith('-')) return null
   // `--no-renames`: rename detection prints ONLY the destination, so a
   // production file `git mv`-ed to a test-shaped name would appear in this list
   // as a declared test and could carry the whole diff into the exemption below.
@@ -3920,7 +3927,7 @@ export async function changedFilesWithStatus(
       '-z',
       '--no-renames',
       '--name-status',
-      `${base}...${ref}`,
+      `${baseRef}...${ref}`,
     ],
     repo_path,
   )
@@ -3963,10 +3970,10 @@ export async function changedFilesWithStatus(
 export async function changedFilesOnBranch(
   run_host: RunHostCommand,
   repo_path: string,
-  base_branch: string,
+  base_ref: string,
   ref: string | null,
 ): Promise<string[] | null> {
-  const entries = await changedFilesWithStatus(run_host, repo_path, base_branch, ref)
+  const entries = await changedFilesWithStatus(run_host, repo_path, base_ref, ref)
   return entries === null ? null : entries.map((e) => e.path)
 }
 

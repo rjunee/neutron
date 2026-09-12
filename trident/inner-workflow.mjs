@@ -1361,6 +1361,45 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
   ? baseSha.trim().toLowerCase()
   : null
 
+/**
+ * THE ONLY NAME THIS FILE GIVES A DIFF BASE. Every rev-range asking "what did this
+ * branch change relative to the base it will merge into" reads this — the forge
+ * contract's reviewer diff, the resume diff, the planner's inspection hint, and the
+ * base argv handed to both codex wrappers. (`branchLogBase` below is the one range
+ * that does NOT, and the comment there says why: it asks a different question.)
+ *
+ * WHY IT EXISTS AS ONE BINDING AND NOT AS N CORRECT CALL SITES. A bare LOCAL branch
+ * name is the wrong left-hand side, and the failure is silent: `git diff main..<head>`
+ * in the shared build checkout diffs against whatever `refs/heads/main` happens to
+ * hold, and that ref is only as fresh as the last time something on this box ran `git
+ * pull` on it. MEASURED (Argus r4, run 25b2327d, recorded at `orchestrator.ts`'s own
+ * review-diff site): local `main` was 8 merges behind `origin/main`, the published
+ * artifact was 15,154 lines across ~100 files against a branch whose own work was 20
+ * files / 1,738 lines, and a reviewer vetoed the branch over bugs in files it does not
+ * touch. #546 measured the same shape here: 149 files read instead of 30. The defect
+ * had already been fixed ONCE as a call site (the branch log below, and `probeCiBase`'s
+ * pinned ref) while two other sites in this same file still composed the bare name —
+ * which is what a boundary that depends on the next author remembering buys you.
+ *
+ * THE ORDER IS EVIDENCE-FIRST:
+ *  • `pinnedBase` — the sha `origin/<base>` held AT LAUNCH, observed by the outer
+ *    launcher (`orchestrator.ts`, base pinning) and the exact commit the build branch
+ *    was cut from. A sha cannot go stale, and it is the cut point, so this branch's own
+ *    work is exactly what the range names. `probeCiBase` already prefers it.
+ *  • `origin/<base>` in pr mode — the remote-tracking ref. The launcher FETCHES
+ *    `+refs/heads/<base>:refs/remotes/origin/<base>` and REFUSES to start the build if
+ *    that fetch or its rev-parse fails, so in pr mode this ref exists and is as fresh
+ *    as launch. The same choice `planProbeRef` makes for the branch side.
+ *  • the bare name in local mode — the ONE world where it is right rather than merely
+ *    tolerated: a local-mode run has no origin to be behind, and the launcher pins
+ *    `base_sha` from `refs/heads/<base>` itself on that path.
+ *
+ * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
+ * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from
+ * here, so the next site cannot re-introduce the class by forgetting.
+ */
+const diffBase = pinnedBase !== null ? pinnedBase : isPr ? `origin/${baseBranch}` : baseBranch
+
 function forgeStep1(reenter) {
   return reenter
     ? `Branch ${forgeBranch}${isPr ? ' (and its PR)' : ''} ALREADY EXISTS. Re-enter it WITHOUT \`-c\`: \`git fetch origin ${forgeBranch} 2>/dev/null || true; git switch ${forgeBranch} 2>/dev/null || git switch -c ${forgeBranch}\`. Continue the existing work — do NOT restart from scratch.`
@@ -1423,7 +1462,7 @@ CONTRACT
 2. Make the SMALLEST CORRECT change that satisfies the task. Match the codebase's conventions — three similar lines beat a premature abstraction.
 3. ${scopedTestStrategy === '' ? 'Run the relevant tests (redirect verbose output to a log, read only the tail). Iterate until green.' : subsetTestStrategy ? "Run the tests per the TEST EXECUTION block ABOVE — stage 1 blast-radius only; the FULL suite is DEFERRED to the terminal task. Report testsPassed=false and suiteOutcome='deferred', and include the stage-1 result in your final text. Iterate until green." : 'Run the tests per the TEST EXECUTION block ABOVE — stage 1 fail-fast first, then the FULL suite, which is REQUIRED before you may report testsPassed=true. Iterate until green.'}
 4. ${forgePushStep(reenter)}
-5. Write the branch diff to a file (e.g. \`git diff ${pinnedBase ?? baseBranch}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
+5. Write the branch diff to a file (e.g. \`git diff ${diffBase}..HEAD > /tmp/trident-${slug}.diff\`) for the reviewers.${artifactStep}
 ${reportStep}. Report worktreePath (pwd), branch (=${forgeBranch}), commitSha, prNumber (${isPr ? 'the integer PR number' : 'null in local mode'}), diffFile, testsPassed, mutationClaim (see MUTATION NOMINATION below)${scopedTestStrategy === '' ? '' : subsetTestStrategy ? " and suiteOutcome. For this intermediate task report testsPassed=false and suiteOutcome='deferred', and include the stage-1 blast-radius result in your final text" : ' and suiteOutcome (the TEST EXECUTION block above defines the four values and what `failed-preexisting` costs to claim). When claiming `failed-preexisting` you MUST also fill suiteEvidence with the base-branch comparison — the exact failing test files and the observed result of re-running them at the base branch without your diff; an empty suiteEvidence makes the claim a blocker'} via the schema. In your final text, also emit the last lines, unfenced:
    ${FORGE_PR_LINE}
    BRANCH=${forgeBranch}
@@ -1924,7 +1963,7 @@ ${buildAgentStampInstruction}${writeBriefInstructions}
 ${chunkBlocks}
 
 THEN run this ONE command: launch the wrapper DETACHED (Claude Code's Bash tool has a 600-second per-call ceiling; the wrapper must not be its child when that unrelated ceiling expires):
-${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(baseBranch)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
+${wrapperStampPrefix}rm -f ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)}; nohup setsid sh -c 'status=$1; pidf=$2; shift 2; printf "%s\n" "$$" > "$pidf"; "$@"; rc=$?; printf "%s\n" "$rc" > "$status"' sh ${shSingleQuote(exitFile)} ${shSingleQuote(pidFile)} env ${envPrefix}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_BUILD_BRIEF_FILE=${shSingleQuote(briefFile)}${partsEnv}${integrityEnv} NEUTRON_CODEX_BUILD_DIFF_FILE=${shSingleQuote(diffFile)} NEUTRON_CODEX_BUILD_TRAILER_FILE=${shSingleQuote(trailerFile)}${checkpointEnv} bash ${shSingleQuote(script)} ${shSingleQuote(forgeBranch)} ${shSingleQuote(diffBase)} ${shSingleQuote(mergeMode)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)} </dev/null &${runCommandNote}
 
 Then WAIT for completion using this command. It waits at most 540 seconds, safely below the Bash tool's 600-second ceiling. If it prints CODEX_BUILD_STILL_RUNNING, run the SAME wait command again; repeat up to five times (45 minutes total, matching the fire session's absolute ceiling):
 for i in $(seq 1 108); do if test -s ${shSingleQuote(trailerFile)}; then cat ${shSingleQuote(trailerFile)}; exit 0; fi; if test -s ${shSingleQuote(exitFile)}; then echo CODEX_EXIT=$(cat ${shSingleQuote(exitFile)}); exit 0; fi; sleep 5; done; echo CODEX_BUILD_STILL_RUNNING
@@ -2157,7 +2196,7 @@ function planFablePrompt(resuming) {
   // redo/overwrite that work (Codex [P2]). Before this split the fused in-Forge
   // planner ran inside the re-entered worktree and saw branch state for free.
   const resumeNote = resuming
-    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${baseBranch}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
+    ? `\nRESUME — a prior run ALREADY committed progress on branch ${forgeBranch}. Inspect THAT branch, not only the base: run \`git fetch origin ${forgeBranch} 2>/dev/null || true\`, then read its committed plan + changes (e.g. \`git show ${forgeBranch}:IMPLEMENTATION_PLAN.md 2>/dev/null\`, \`git diff ${diffBase}..${forgeBranch}\`). CONTINUE from that committed state: regenerate the plan reflecting already-checked-off tasks and pick the NEXT unchecked task — do NOT redo or overwrite completed work.`
     : ''
   const stampCommand = workflowStageStampCommand('plan-start')
   const stampInstruction = stampCommand === null
@@ -2226,6 +2265,17 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 // A plain local base branch may be stale in non-PR mode and would then make base
 // history look like work from this branch, crowding the useful commits out of the
 // bounded window.
+//
+// DELIBERATELY NOT `diffBase` (#546), and this is the one site in the file that is not.
+// `diffBase` answers "what did this branch change relative to the base it will merge
+// into", so in LOCAL mode it correctly names the LOCAL ref — which is the base the outer
+// loop merges the branch into there. This asks a different question: "which commits are
+// this branch's own, for a BOUNDED synthesis window", and the answer wants the widest
+// exclusion available in either mode, which is the remote-tracking ref step 2 refreshes
+// independently just above. The command tolerates its own failure (`|| true`, and an
+// empty `branchLog` is a documented normal answer), so a repo with no origin degrades the
+// log rather than breaking it. Pinned by `inner-workflow-plan-next.test.ts` — "local mode
+// probes the local ref, which is the authority there" asserts BOTH halves of this split.
 const branchLogBase = `origin/${baseBranch}`
 
 function planProbePrompt() {
@@ -5075,7 +5125,7 @@ async function writeResumeDiff(headOid) {
   const fetchStep = isPr
     ? `(git fetch origin ${shSingleQuote(forgeBranch)} 2>/dev/null || true) && `
     : ''
-  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${shSingleQuote(baseBranch)}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
+  const cmd = `cd ${shSingleQuote(repoPath)} && ${fetchStep}git diff ${shSingleQuote(diffBase)}..${shSingleQuote(headOid)} > ${shSingleQuote(out)} && wc -c < ${shSingleQuote(out)}`
   const res = await agent(
     `Run EXACTLY this single Bash command and report the number it prints (the diff's size in bytes) via the schema. Report bytes=0 if it prints nothing or errors. Do NOT interpret the value, do NOT run anything else, do NOT modify any other file.
 ${cmd}`,
@@ -6135,7 +6185,7 @@ function codexReviewerPrompt(diffFile) {
   // how GPT-5 worded its answer.
   return `You are the CODEX ${opts.adversarial === true ? 'ADVERSARIAL' : 'CROSS-MODEL'} REVIEW bridge for trident (read-only). ${NO_INTERACTIVE_RULE} ${REDIRECT_RULE} ${NO_PATTERN_KILL_RULE}
 Run EXACTLY this ONE synchronous foreground command from ${repoPath} (do NOT background it, do NOT add flags):
-  ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(baseBranch)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
+  ${envPrefix}${reviewStageEnv}CODEX_HOME=${shSingleQuote(codexHome || '')} NEUTRON_CODEX_DIFF_FILE=${shSingleQuote(diffFile)} bash ${shSingleQuote(script)} ${shSingleQuote(diffBase)} > ${shSingleQuote(outFile)} 2> ${shSingleQuote(errFile)}; echo "CODEX_EXIT=$?"; if grep -q CODEX_REVIEW_DIFF_TRUNCATED ${shSingleQuote(errFile)}; then echo "CODEX_TRUNCATED=1"; else echo "CODEX_TRUNCATED=0"; fi
 Read the CODEX_EXIT code, then map it to your result (read ${outFile}/${errFile} only as needed — tail, do not flood context):
 - EXIT 0  → codexStatus='connected'. Parse the review in ${outFile}: set verdict=REQUEST_CHANGES if it ends 'VERDICT: REQUEST_CHANGES' or lists any evidence-backed blocker, else APPROVE. Convert its blockers into findings (severity/title/evidence).
 - codexTruncated: copy the CODEX_TRUNCATED line VERBATIM — 1 → true, 0 → false. It is NOT your judgement call and NOT something to infer from the review text: it says whether codex was shown only the FIRST N lines of the diff. Report it truthfully even when the review reads like a clean approval; the synthesis re-scopes a truncated verdict itself.

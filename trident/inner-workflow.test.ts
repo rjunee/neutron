@@ -73,6 +73,9 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     'checkpointSh',
     'forgeBranch',
     'baseBranch',
+    // The RESOLVED diff base (#546) — what the wrapper's `git diff <base>..HEAD` is given.
+    // Distinct from `baseBranch`, which the brief still quotes as prose ("Base branch: main").
+    'diffBase',
     'mergeMode',
     'codexHome',
     'NO_INTERACTIVE_RULE',
@@ -107,6 +110,7 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     '/harness/trident/checkpoint.sh',
     'trident/prompt-pin',
     'main',
+    'origin/main',
     'pr',
     '/codex-home',
     '',
@@ -838,6 +842,9 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'codexHome',
       'codexReviewSh',
       'baseBranch',
+      // The RESOLVED diff base (#546) — the ref the wrapper's standalone
+      // `git diff <base>..HEAD` fallback is given, never the bare local branch name.
+      'diffBase',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
       'NO_PATTERN_KILL_RULE',
@@ -861,6 +868,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       '/codex-home',
       '/harness/trident/codex-review.sh',
       'main',
+      'origin/main',
       '',
       '',
       '',
@@ -902,7 +910,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     // its own quoting intact (a broken prefix would swallow the rest of the line).
     expect(command).toContain(
       "NEUTRON_CODEX_REVIEW_STAGE_RUN_ID='heartbeat-env-pin' CODEX_HOME='/codex-home' " +
-        "NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' bash '/harness/trident/codex-review.sh' 'main'",
+        "NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' bash '/harness/trident/codex-review.sh' 'origin/main'",
     )
   })
 
@@ -915,7 +923,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     expect(command).not.toContain('NEUTRON_CODEX_REVIEW_STAGE_DB')
     expect(command).toContain(
       "CODEX_HOME='/codex-home' NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' " +
-        "bash '/harness/trident/codex-review.sh' 'main'",
+        "bash '/harness/trident/codex-review.sh' 'origin/main'",
     )
   })
 

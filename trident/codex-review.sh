@@ -35,12 +35,26 @@
 # benign never-set-up path and degrades to Claude-only.
 #
 # Usage:  CODEX_HOME=/path/to/project/codex bash trident/codex-review.sh [base-ref]
-# Default base is `main`. Output/verdict streamed to stdout verbatim.
+# The base ref is the left-hand side of the fallback branch diff (the trident path
+# supplies a RESOLVED one — the launch-pinned base sha or `origin/<base>` — via
+# `inner-workflow.mjs`'s `diffBase`). A bare local branch name is resolved to its
+# remote-tracking ref below when one exists, because `refs/heads/main` in a shared
+# checkout is only as fresh as the last pull and a range against it presents every
+# commit merged into the base since as this branch's own work (#546).
+# Output/verdict streamed to stdout verbatim.
 # =============================================================================
 
 set -uo pipefail
 
 BASE_REF="${1:-main}"
+# PREFER THE REMOTE-TRACKING REF over a bare local branch name (#546), and change
+# nothing else: a 40-hex sha, an already-qualified `origin/<x>`, a tag and a ref that
+# has no `origin/` counterpart all fail the rev-parse below and are kept verbatim. The
+# local name is only DEMOTED, never rejected — a repo with no origin at all still gets
+# the diff it got before.
+if git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+  BASE_REF="origin/${BASE_REF}"
+fi
 : "${CODEX_HOME:=}"
 # How many lines of diff to hand codex — mirror Argus's oversized-diff guard so a
 # huge diff can't blow the arg length / codex context. Overridable for tests.
