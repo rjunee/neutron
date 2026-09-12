@@ -180,7 +180,7 @@ runs before the tree is touched; an empty scan exits 1.
 ### The gate's own verification had the gate's own bug
 
 CodeQL `js/useless-regexp-character-escape`, HIGH, two alerts, both at
-`scripts/ci/diff-base-check.test.ts:176` as filed (the same construct is `:261` on the final tree) — *"The escape sequence `\$` is equivalent to
+`scripts/ci/diff-base-check.test.ts:176` as filed (the same construct is `:265` on the final tree) — *"The escape sequence `\$` is equivalent to
 just `$`, so the sequence may still represent a meta-character when it is used in a
 regular expression."*
 
@@ -231,6 +231,40 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round twenty-four: the gate exempted the thing it exists to catch
+
+`QUALIFIERS` held `'origin/'`, so `findBareBaseRanges('git diff origin/${baseBranch}..${head}')`
+returned `[]` — and the gate's own NEGATIVE control listed that line as a near-miss that must
+stay silent. One round after the runtime path was changed to refuse the shorthand, **the
+regression alarm for this exact class was still exempting it**, and its tests enshrined the
+exemption.
+
+**That is the sharpest position of the five**, and the set is now informative as a whole: the
+returned value, the `refs/heads` fallback, the no-ref fallback, the wrapper's argument, and the
+gate's exemption list. Each was a place still holding the old contract after the primary path
+moved. The last one is worst because **a gate that exempts the thing it exists to catch cannot
+report its own blind spot** — it is the `2>/dev/null` on the diff, one layer up.
+
+Fixed by making the exemption a `refs/` PATH test rather than a prefix LIST — **a list invites
+entries that merely look qualified**, and no reading of `['refs/heads/', 'refs/remotes/',
+'origin/']` says which of its members are refs. The list is gone rather than corrected, so there
+is one pattern to read against the invariant instead of three strings to audit. The shorthand
+moved from the negative control to the POSITIVE one, where it is now pinned at line 19 with the
+other five shapes, and a `refs/tags/` near-miss took its place in the silent list.
+
+**The terminating condition gains its second clause**, and it is two lines to check rather than
+another sweep:
+
+> Every value that reaches a git rev-range is a full object name or begins with `refs/` — **and
+> the gate that enforces this exempts nothing that is not itself one of those two forms.**
+
+Mutation: putting `origin/` back on the list reds 5 tests AND makes the gate refuse to run at
+all — its own positive control fails, which is the behaviour a control exists for.
+
+One quiet confirmation of round twenty-three fell out of this: with the exemption narrowed, the
+gate still reports **0 found in 126 files**. Had `branchLogBase` or any other site still composed
+`origin/<base>`, it would now be an offence.
 
 ### Round twenty-three: "contains a slash" is not "fully qualified"
 

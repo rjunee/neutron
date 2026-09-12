@@ -41,7 +41,7 @@ const ROOT = join(import.meta.dir, '..', '..')
 const GATE = join(import.meta.dir, 'diff-base-check.mjs')
 
 describe('the matcher finds every shape #546 actually shipped in', () => {
-  test('the positive control reproduces EXACTLY its five offenses, at their lines', () => {
+  test('the positive control reproduces EXACTLY its six offenses, at their lines', () => {
     // Pinned as VALUES — the line numbers and the names, not "more than zero" and
     // not "at least the ones I thought of". A relation against a constant stays
     // green when the constant moves (#575), and a count alone stays green when the
@@ -52,6 +52,10 @@ describe('the matcher finds every shape #546 actually shipped in', () => {
       { line: 8, name: 'baseBranch' },
       { line: 13, name: 'base' },
       { line: 16, name: 'BASE_BRANCH' },
+      // THE SHORTHAND, promoted from the NEGATIVE control in round twenty-four: this gate
+      // exempted `origin/${baseBranch}..` while the runtime path refused it. A gate that
+      // exempts the thing it exists to catch cannot report its own blind spot.
+      { line: 19, name: 'baseBranch' },
     ])
   })
 
@@ -271,9 +275,21 @@ describe('the matcher stays silent on every near-miss', () => {
     for (const src of [
       'const behind = `rev-list --count refs/heads/${base_branch}..${remoteRef}`',
       'const cmd = `git diff refs/remotes/origin/${baseBranch}..${head}`',
-      'const cmd = `git diff origin/${baseBranch}..${head}`',
+      'const cmd = `git diff refs/tags/${baseBranch}..${head}`',
     ]) {
       expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
+    }
+    // …AND THE SHORTHAND IS NOT ONE OF THEM. `origin/<x>` was in this silent list until round
+    // twenty-four: it is not a ref, it is a name git resolves across namespaces, and it
+    // prefers TAGS — `refs/tags/origin/main` captures it (measured on git 2.43). The gate's
+    // exemption list must agree with the invariant it enforces: an operand is a full object
+    // name or begins with `refs/`, and anything else on that list is a hole by construction.
+    for (const src of [
+      'const cmd = `git diff origin/${baseBranch}..${head}`',
+      'const cmd = `git diff origin/${base_branch}..${head}`',
+      'git diff "origin/${BASE_BRANCH}..HEAD"',
+    ]) {
+      expect({ src, hits: findBareBaseRanges(src).length }).toEqual({ src, hits: 1 })
     }
   })
 
@@ -282,7 +298,7 @@ describe('the matcher stays silent on every near-miss', () => {
     // regex until it matches", which would trade a blind spot for a muted gate.
     for (const src of [
       'git diff "${BASE_DIFF_REF}"..HEAD',
-      'git diff "origin/${baseBranch}"..HEAD',
+      'git diff "refs/remotes/origin/${baseBranch}"..HEAD',
       "const cmd = 'git diff ' + baseRef + '..HEAD'",
       "const cmd = 'git diff ' + base_sha + '..HEAD'",
       'const r = `git diff ${diffBase}` +\n  `..${head}`',

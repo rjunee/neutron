@@ -312,8 +312,32 @@ const RANGE_CONCAT = /([A-Za-z_$][\w$]*)\s*\+\s*["'\x60]\s*\.{2,3}/g
 /** Every identifier mentioned in an interpolated expression. */
 const IDENTIFIER = /[A-Za-z_$][\w$]*/g
 
-/** Prefixes that make the operand an EXPLICIT ref rather than a bare branch name. */
-const QUALIFIERS = ['refs/heads/', 'refs/remotes/', 'origin/']
+/**
+ * What makes the operand an EXPLICIT ref rather than a shorthand.
+ *
+ * ONLY a `refs/` path. The prefix LIST this replaces held `'origin/'` until round twenty-four,
+ * which meant this gate —
+ * the regression alarm for exactly this class — EXEMPTED `origin/${baseBranch}..${head}`
+ * while the runtime path had been changed to refuse it. **A gate that exempts the thing it
+ * exists to catch cannot report its own blind spot**; it is the `2>/dev/null` on the diff,
+ * one layer up.
+ *
+ * `origin/<x>` is not qualified, it only looks it: git disambiguates a shorthand across
+ * namespaces and prefers TAGS, so `refs/tags/origin/main` captures it (measured on git 2.43 —
+ * `git rev-parse origin/main` answers the tag, and a review against it read two files where
+ * the remote-tracking ref's answer was none).
+ *
+ * THE EXEMPTION MUST AGREE WITH THE INVARIANT, which is that every operand is a full object
+ * name or begins with `refs/`. That is a one-line check rather than a sweep: this pattern is
+ * the whole exemption, and anything it admits that is not one of those two forms is a hole by
+ * construction.
+ *
+ * IT IS A `refs/` PATH TEST, NOT A PREFIX LIST — `refs/heads/`, `refs/remotes/origin/`,
+ * `refs/tags/`, anything under `refs/`. The list it replaces (`['refs/heads/', 'refs/remotes/',
+ * 'origin/']`) is how `origin/` got the exemption in the first place: **a list invites entries
+ * that merely look qualified**, and no reading of it says which ones are refs.
+ */
+const QUALIFIED_PREFIX = /refs\/[A-Za-z0-9_\-./]*$/
 
 /**
  * Every identifier in `source` that holds a base BRANCH name — by spelling or by
@@ -478,7 +502,7 @@ export function findBareBaseRanges(source) {
         const name = mentioned.find((n) => BRANCH_NAME.test(n) || tainted.has(n))
         if (name === undefined) continue
         const before = line.slice(0, m.index)
-        if (QUALIFIERS.some((q) => before.endsWith(q))) continue
+        if (QUALIFIED_PREFIX.test(before)) continue
         if (isExempt(lines, lineNo - 1)) continue
         // One report per (line, name): a joined continuation is scanned as part of the
         // line above it AND on its own, so a range can otherwise be counted twice.
@@ -526,6 +550,9 @@ export const POSITIVE_CONTROL = [
   '}',
   '# a .sh call site',
   'git diff "${BASE_BRANCH}..HEAD" > "$f"',
+  '// the SHORTHAND, which this gate exempted until round twenty-four: not a ref, a name git',
+  '// resolves across namespaces — and it prefers tags',
+  'const short = `git diff origin/${baseBranch}..${head}`',
 ].join('\n')
 
 /** Exactly ONE hit — the un-argued exemption on the last line. Everything else is
@@ -539,7 +566,7 @@ export const NEGATIVE_CONTROL = [
   'const pinned = `git diff ${base_sha}..${head}`',
   'const behind = `rev-list --count refs/heads/${base_branch}..${remoteRef}`',
   'const remote = `git diff refs/remotes/origin/${base_branch}..${head}`',
-  'const short = `git diff origin/${baseBranch}..${head}`',
+  'const tagged = `git diff refs/tags/${base_branch}..${head}`',
   '// DIFF-BASE-OK: the base here is a sha the caller already resolved upstream',
   'const argued = `git diff ${baseBranch}..${head}`',
   'const unargued = `git diff ${baseBranch}..${head}` // DIFF-BASE-OK',
@@ -553,6 +580,7 @@ function runControls() {
     { line: 8, name: 'baseBranch' },
     { line: 13, name: 'base' },
     { line: 16, name: 'BASE_BRANCH' },
+    { line: 19, name: 'baseBranch' },
   ]
   const gotPositive = positive.map((h) => ({ line: h.line, name: h.name }))
   if (JSON.stringify(gotPositive) !== JSON.stringify(wantPositive)) {

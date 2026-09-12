@@ -7,10 +7,14 @@ cutover: true
 issue_ref: "#546"
 ---
 
-**EVERY VALUE THAT REACHES A GIT REV-RANGE IS A FULL OBJECT NAME OR BEGINS WITH `refs/`.**
+**EVERY VALUE THAT REACHES A GIT REV-RANGE IS A FULL OBJECT NAME OR BEGINS WITH `refs/` — AND
+THE GATE THAT ENFORCES THIS EXEMPTS NOTHING THAT IS NOT ITSELF ONE OF THOSE TWO FORMS.**
 Nothing else — that is the property, and it is about what git RECEIVES rather than about which
 caller produced it, which is what makes it exhaustive where four earlier statements of the rule
-were enumerations of paths. **"Contains a slash" is not "fully qualified":** `origin/main` is a
+were enumerations of paths. The second clause is not decoration: `scripts/ci/diff-base-check.mjs`
+exempted `origin/` while the runtime path refused it, so **the regression alarm for this exact
+class was blind to it**. That clause is checkable by reading `QUALIFIERS` against this sentence —
+two lines, not a sweep. **"Contains a slash" is not "fully qualified":** `origin/main` is a
 shorthand git disambiguates by its own precedence, which prefers TAGS, so `refs/tags/origin/main`
 captures it.
 
