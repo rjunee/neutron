@@ -279,17 +279,35 @@ describe('the matcher stays silent on every near-miss', () => {
     ]) {
       expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
     }
-    // …AND THE SHORTHAND IS NOT ONE OF THEM. `origin/<x>` was in this silent list until round
-    // twenty-four: it is not a ref, it is a name git resolves across namespaces, and it
-    // prefers TAGS — `refs/tags/origin/main` captures it (measured on git 2.43). The gate's
-    // exemption list must agree with the invariant it enforces: an operand is a full object
-    // name or begins with `refs/`, and anything else on that list is a hole by construction.
+    // …AND THESE ARE NOT REFS, however much they look like one. The exemption must agree with
+    // the invariant it enforces — an operand is a full object name or BEGINS WITH `refs/` —
+    // so anything it admits that is not one of those two forms is a hole by construction.
+    //
+    // Two holes have been found here, one per round: `'origin/'` on a prefix LIST (it is a
+    // shorthand git resolves across namespaces, preferring TAGS), and then an UNANCHORED
+    // `refs/` pattern, which matched at index 3 of `notrefs/` and inside `origin/refs/`.
+    // **The exemption kept deciding "qualified" by a looser rule than the invariant.**
     for (const src of [
       'const cmd = `git diff origin/${baseBranch}..${head}`',
       'const cmd = `git diff origin/${base_branch}..${head}`',
       'git diff "origin/${BASE_BRANCH}..HEAD"',
+      // `refs/` as a SUFFIX of another token — the unanchored pattern's blind spot.
+      'const cmd = `git diff notrefs/${baseBranch}..${head}`',
+      'const cmd = `git diff xrefs/${baseBranch}..${head}`',
+      // …and a `refs/` path that is not at the START of the operand.
+      'const cmd = `git diff origin/refs/${baseBranch}..${head}`',
     ]) {
       expect({ src, hits: findBareBaseRanges(src).length }).toEqual({ src, hits: 1 })
+    }
+    // THE COMPLEMENT, so the anchor is not just "report everything": a real `refs/` operand is
+    // still silent at every boundary it can legally start at.
+    for (const src of [
+      'const cmd = `git diff refs/heads/${baseBranch}..${head}`',
+      'git diff "refs/remotes/origin/${BASE_BRANCH}..HEAD"',
+      "const cmd = 'git diff refs/tags/' + baseBranch",
+      'const cmd = `git diff refs/heads/${baseBranch}..${head}`\nconst x = 1',
+    ]) {
+      expect({ src, hits: findBareBaseRanges(src) }).toEqual({ src, hits: [] })
     }
   })
 

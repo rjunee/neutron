@@ -274,7 +274,14 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
       expect({ arg, got, shaped }).toEqual({ arg, got, shaped: true })
     }
     // …and the inputs that CANNOT be given that shape are refused rather than passed on.
-    for (const arg of ['no-such-branch', 'release']) {
+    //
+    // THE SAME ADVERSARIAL VECTOR THE CI GATE USES (`scripts/ci/diff-base-check.test.ts`, "a
+    // QUALIFIED ref is not a hit"). The two classifiers cannot share a function — one decides
+    // about SOURCE TEXT in JavaScript, the other about a runtime VALUE in bash — so they share
+    // the vector instead: a new spelling has to be added in both places, and until it is, one
+    // of them fails. Six positions of this defect were all deciders disagreeing about what
+    // counts as qualified; #658 tracks reducing that to one definition.
+    for (const arg of ['no-such-branch', 'release', 'notrefs/main', 'xrefs/main', 'origin/refs/main']) {
       const res = await runBlock(w.repo, arg)
       expect({ arg, ok: res.ok }).toEqual({ arg, ok: false })
     }

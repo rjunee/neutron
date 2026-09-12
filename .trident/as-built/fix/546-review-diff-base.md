@@ -232,6 +232,37 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-five: six positions, and every one was a DECIDER
+
+The exemption's replacement pattern was **unanchored**. `/refs\/[A-Za-z0-9_\-./]*$/` matches
+`refs/` at index 3 of `notrefs/`, so `git diff notrefs/${baseBranch}..${head}` was exempted —
+and so was `origin/refs/<base>`, where a `refs/` path sits inside another operand. Measured
+before the fix:
+
+    "git diff refs/heads/"   old: EXEMPT   new: EXEMPT
+    "git diff notrefs/"      old: EXEMPT   new: report
+    "git diff xrefs/"        old: EXEMPT   new: report
+    "git diff origin/refs/"  old: EXEMPT   new: report
+
+Anchored at a token boundary, with those three spellings asserted as HITS and a complement
+asserting real `refs/` operands stay silent at every boundary they can legally start at.
+Mutation: removing the anchor reds it.
+
+**WHAT THE SIX POSITIONS HAVE IN COMMON, which is the closing observation for this item.** The
+primary path, two fallbacks, the wrapper's argument, the gate's exemption list, and the gate's
+exemption pattern — **every one was a place that decided whether a value counted as qualified**,
+and each fix corrected one decider while the next one downstream kept its own looser definition.
+The property has held at the point of use since round twenty-two; what kept failing after that
+was the CLASSIFIER, in each of the places one existed.
+
+**Three deciders exist today, and that is the shape producing these.** `diffBaseRef` CONSTRUCTS
+qualified values and has not drifted since — constructing is why. `codex-review.sh` classifies a
+runtime VALUE in bash. The gate classifies SOURCE TEXT in JavaScript. They cannot share a
+function: two languages, two domains. **What they share now is the adversarial VECTOR**,
+duplicated deliberately in both test files with a cross-reference, so a new spelling must be
+added in both places and until it is, one of them fails. That is weaker than one predicate, so
+**#658 is filed** for the consolidation, with the six positions as its evidence.
+
 ### Round twenty-four: the gate exempted the thing it exists to catch
 
 `QUALIFIERS` held `'origin/'`, so `findBareBaseRanges('git diff origin/${baseBranch}..${head}')`

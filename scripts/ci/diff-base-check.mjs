@@ -336,8 +336,15 @@ const IDENTIFIER = /[A-Za-z_$][\w$]*/g
  * `refs/tags/`, anything under `refs/`. The list it replaces (`['refs/heads/', 'refs/remotes/',
  * 'origin/']`) is how `origin/` got the exemption in the first place: **a list invites entries
  * that merely look qualified**, and no reading of it says which ones are refs.
+ *
+ * AND IT IS ANCHORED AT A TOKEN BOUNDARY, which the first version was not. `/refs\/…$/` with
+ * no boundary matches `refs/` at index 3 of `notrefs/`, so `git diff notrefs/${baseBranch}..`
+ * was exempted — and `notrefs/<base>` is an ordinary shorthand. `origin/refs/<x>` too: `/` is
+ * not a boundary here, because a `refs/` path that is not at the START of the operand is a
+ * path inside something else. Same class as the list, one layer down: **the exemption kept
+ * deciding "qualified" by a looser rule than the invariant it enforces.**
  */
-const QUALIFIED_PREFIX = /refs\/[A-Za-z0-9_\-./]*$/
+const QUALIFIED_PREFIX = /(^|[\s'"`(=,;:])refs\/[A-Za-z0-9_\-./]*$/
 
 /**
  * Every identifier in `source` that holds a base BRANCH name — by spelling or by
