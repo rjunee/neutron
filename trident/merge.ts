@@ -2022,6 +2022,34 @@ export type ConflictEvidence =
  */
 const ARBITER_COLLECTION_BYTES_MAX = 8 * 1024 * 1024
 
+/**
+ * THE CEILING ON THE WHOLE COLLECTION, not on each part of it (#541 round 27).
+ *
+ * A CEILING ON EACH PART IS NOT A CEILING ON THE WHOLE — the fourth variant of this branch's
+ * sentence, and the first to appear INSIDE a fix. Round 25 weighed each stage blob separately
+ * and rejected only a single oversized one, so two 5 MiB sides sailed through and `git diff`
+ * processed ~10 MiB against a stated 8 MiB bound; and because the check lived inside the
+ * per-path loop, ten such files would have read 100 MiB. Round 26 then bounded the HISTORY
+ * cumulatively and left the blobs per-item, so one fix carried both shapes at once.
+ *
+ * So there is ONE budget per arbitration, threaded through every reader the way the truncation
+ * log is threaded through every fold. `weigh` returns false once the total is spent, and the
+ * caller refuses — the accumulation is the point, and it cannot be re-derived per call site.
+ */
+interface CollectionBudget {
+  weigh: (bytes: number) => boolean
+}
+
+function collectionBudget(max = ARBITER_COLLECTION_BYTES_MAX): CollectionBudget {
+  let used = 0
+  return {
+    weigh: (bytes) => {
+      used += bytes
+      return used <= max
+    },
+  }
+}
+
 /** Any git object's size in bytes WITHOUT reading it, or `null` if git would not say. */
 async function objectSize(run_host: RunHostCommand, repo: string, sha: string): Promise<number | null> {
   let res: HostCommandResult
@@ -2133,6 +2161,8 @@ export async function conflictEvidence(
   // label and a resolver question shortened in the preamble are the same fact about the same
   // evidence, and they must reach the completeness claim together.
   shortened: TruncationLog,
+  // THE SAME budget the history reader uses: one arbitration, one ceiling.
+  budget: CollectionBudget,
 ): Promise<ConflictEvidence> {
   // A LISTING WE COULD NOT READ IS UNKNOWN, never "no conflicted paths". git had just reported
   // a conflict; being unable to name the files is a failure to establish it.
@@ -2177,7 +2207,7 @@ export async function conflictEvidence(
         const blob = stage.get(side === 'BASE' ? 2 : 3) ?? ''
         const size = await objectSize(run_host, repo, blob)
         if (size === null) return { kind: 'unreadable', why: 'blob' }
-        if (size > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'over-budget' }
+        if (!budget.weigh(size)) return { kind: 'over-budget' }
         let res: HostCommandResult
         try {
           res = await run_host(['git', '-C', repo, 'cat-file', 'blob', blob], repo)
@@ -2221,7 +2251,8 @@ export async function conflictEvidence(
       for (const stageNo of [2, 3] as const) {
         const size = await objectSize(run_host, repo, stage.get(stageNo) ?? '')
         if (size === null) return { kind: 'unreadable', why: 'blob' }
-        if (size > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'over-budget' }
+        // ACCUMULATED across both sides AND across every conflicted file.
+        if (!budget.weigh(size)) return { kind: 'over-budget' }
       }
       let stat: HostCommandResult
       try {
@@ -2287,6 +2318,7 @@ async function sideHistory(
   run_host: RunHostCommand,
   repo: string,
   range: string,
+  budget: CollectionBudget,
 ): Promise<EvidencePart> {
   // BOUND THE READ BEFORE IT HAPPENS (#541 round 26). `--max-count` limits HOW MANY commits,
   // not HOW MUCH they weigh — a limit on how many is not a limit on how much — so a single
@@ -2307,12 +2339,10 @@ async function sideHistory(
     return { kind: 'missing', why: 'evidence-unreadable' }
   }
   if (!ids.ok) return { kind: 'missing', why: 'evidence-unreadable' }
-  let weighed = 0
   for (const sha of ids.stdout.split('\n').map((x) => x.trim()).filter((x) => x.length > 0)) {
     const size = await objectSize(run_host, repo, sha)
     if (size === null) return { kind: 'missing', why: 'evidence-unreadable' }
-    weighed += size
-    if (weighed > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'missing', why: 'over-budget' }
+    if (!budget.weigh(size)) return { kind: 'missing', why: 'over-budget' }
   }
   let res: HostCommandResult
   try {
@@ -2430,6 +2460,10 @@ type EvidencePart =
 export interface TruncationLog {
   fold: (value: string) => string
   any: () => boolean
+}
+
+export function collectionBudgetForTests(): CollectionBudget {
+  return collectionBudget()
 }
 
 export function truncationLog(): TruncationLog {
@@ -2630,7 +2664,10 @@ async function arbitrateConflict(
   // THE CONFLICT ITSELF — the one thing a toolless judge cannot obtain and must have
   // (round 9). Without it the turn was choosing on filenames alone.
   const shortened = truncationLog()
-  const hunks = await conflictEvidence(ctx.run_host, ctx.repo, ctx.listing, shortened)
+  // ONE ceiling for everything this arbitration reads — the conflict's blobs AND both sides'
+  // commit objects — because the bound is on the whole collection, not on each part of it.
+  const budget = collectionBudget()
+  const hunks = await conflictEvidence(ctx.run_host, ctx.repo, ctx.listing, shortened, budget)
   // NOT ASKED ON EVIDENCE WE DID NOT ESTABLISH (#541 round 15). `unreadable` used to be
   // reported as `complete` with a sentence that hedged between "one side only" and "git could
   // not read it", so a failed read reached the judge under an assurance that nothing had been
@@ -2641,8 +2678,8 @@ async function arbitrateConflict(
   // this tier can reach, and collapsing them would hide whichever one actually dominates.
   if (hunks.kind === 'binary') return { kind: 'not-asked', why: 'evidence-binary' }
   if (hunks.kind === 'over-budget') return { kind: 'not-asked', why: 'over-budget' }
-  const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`)
-  const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`)
+  const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`, budget)
+  const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`, budget)
   // ASSEMBLED THROUGH THE ONE OWNER (#541 round 19). Each component arrives as an
   // `EvidencePart`, and `assembleEvidence` refuses — returning `missing` — the moment any of
   // them is absent, which is what makes the completeness sentence it writes true by

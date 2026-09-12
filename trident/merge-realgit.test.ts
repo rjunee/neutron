@@ -29,6 +29,7 @@ import {
   buildMergeCleanupDeps,
   conflictEvidence,
   truncationLog,
+  collectionBudgetForTests,
   runWorktreePath,
   worktreeFingerprint,
   TridentBaseDriftHold,
@@ -964,7 +965,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     expect(reb.ok).toBe(false)
     expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     // A SMALL CONFLICT IS SHOWN WHOLE. There is no longer a `truncated` field to assert
     // against: the two states are "complete" and "not asked" (#541 round 13).
     expect(evidence.kind).toBe('complete')
@@ -1021,7 +1022,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'README.md')
     expect(stages).not.toContain('\t2\t')
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     // ESTABLISHED, so the judge is asked — refusing here would make the tier inert for every
     // modify/delete conflict.
     expect(evidence.kind).toBe('complete')
@@ -1082,7 +1083,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     expect(raw.stdout).toContain('Binary files')
     expect(raw.stdout).not.toContain('FEAT-SIDE-PIXELS')
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['logo.png'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['logo.png'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('binary')
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
@@ -1114,7 +1115,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'art.png')
     expect(stages).not.toContain('\t2\t')
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['art.png'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['art.png'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('binary')
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
@@ -1138,7 +1139,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, 'checkout', '-q', 'feat')
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     expect(body).toContain('FEAT-TEXT-TOKEN')
@@ -1177,7 +1178,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     // below vacuous, and the first draft of this test did exactly that.
     expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     // THE TAB SURVIVES. Without it the two sides are the same string.
@@ -1220,7 +1221,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
 
     expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('cfg.yml')
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['cfg.yml'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['cfg.yml'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     // Two-space indentation intact on both sides.
@@ -1239,7 +1240,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     // the tree disagree — the caller says this path is conflicted, the index does not list it
     // — and a disagreement about our reading is not a fact about the conflict.
     const repo = await makeBaseRepo()
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['never-existed.ts'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['never-existed.ts'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('unreadable')
     expect(evidence.kind === 'unreadable' ? evidence.why : '').toBe('not-in-index')
   }, 20_000)
@@ -1260,7 +1261,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, 'checkout', '-q', 'feat')
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     // THE WHOLE POINT OF ROUND 13. This case used to return a 4 KiB fragment plus a notice
     // saying it was a fragment — the shape that produced five defects in five rounds, twice
     // AFTER the refactor built to make them impossible. There is now no partial value to
@@ -1290,7 +1291,7 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await git(repo, 'checkout', '-q', 'feat')
     await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
 
-    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog())
+    const evidence = await conflictEvidence(spawnCapture, repo, { readable: true, paths: ['README.md'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     expect(Buffer.byteLength(body, 'utf8')).toBeLessThanOrEqual(ARBITER_PROMPT_BYTES_MAX)

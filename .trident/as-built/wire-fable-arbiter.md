@@ -1312,7 +1312,8 @@ Nine instances have shown the class is not "a few places got it wrong" but **"an
 operation on evidence is a silent shortener unless routed"**. So here is every one of them,
 found by grepping the evidence path for `.replace(`, `.slice(`, `.trim(`, `.substring(`,
 `.split(` and `.join(`, with the disposition for each. **Routed, or proven lossless. No
-exceptions.**
+exceptions — and where a row records a bound, it names WHICH QUANTITY that bound bounds, because
+four separate defects on this branch were a real bound on the wrong quantity.**
 
 | # | site | operation | disposition |
 |---|---|---|---|
@@ -1339,9 +1340,9 @@ kinds the first pass did not:
 | # | site | kind | disposition |
 |---|---|---|---|
 | 14 | `sideHistory` `--max-count` | a **request** for less | **disclosed and derived**: git is asked for N+1 to establish whether the cap BIT, N are shown, and the part is marked `bounded` — so `assembleEvidence` narrows the claim exactly when a commit really is being withheld (round 25). **It bounds HOW MANY, not HOW MUCH** — see row 17 for the byte ceiling, which is a different quantity and needed its own bound |
-| 17 | `sideHistory` message read | a **collection** with no byte ceiling | **bounded before reading** (round 26): the commit SHAs are fetched first (bounded by count, ~41 bytes each), each object is weighed with `cat-file -s`, and the RUNNING TOTAL is checked against `ARBITER_COLLECTION_BYTES_MAX` before the message-bearing `git log` is issued at all |
-| 15 | `conflictEvidence` two-sided diff | a **collection** with no ceiling | **bounded before reading**: both stage blobs are sized with `cat-file -s` against `ARBITER_COLLECTION_BYTES_MAX` before any content is fetched |
-| 16 | `conflictEvidence` one-sided blob | a **collection** with no ceiling | same |
+| 17 | `sideHistory` message read | a **collection** with no byte ceiling | **bounded before reading** (round 26): the commit SHAs are fetched first (bounded by count, ~41 bytes each), each object is weighed with `cat-file -s`, and the total is charged to the SAME arbitration-wide budget as rows 15-16 before the message-bearing `git log` is issued at all. Bounds TOTAL BYTES READ |
+| 15 | `conflictEvidence` two-sided diff | a **collection** with no ceiling | **bounded before reading, on the WHOLE collection**: both stage blobs are sized with `cat-file -s` and charged to the arbitration's single `CollectionBudget` before any content is fetched. Bounds TOTAL BYTES READ across both stages and every conflicted file |
+| 16 | `conflictEvidence` one-sided blob | a **collection** with no ceiling | same budget, same quantity |
 
 **Item 12 changed in this round as a consequence of the audit.** `arbiterPrompt` was folding
 evidence lines through the CAPPED fold and discarding the `truncated` flag — an unrouted
@@ -1453,6 +1454,48 @@ it bounds, and row 17 carries the byte ceiling.
 
 **Three mutations, all red:** the pre-check removed; the total not accumulated; an unweighable
 object counted as zero.
+
+### ROUND 27 — a ceiling on each part is not a ceiling on the whole
+
+**The fourth variant of this branch's sentence, and the first to appear INSIDE a fix.** Round 25
+weighed each stage blob separately and rejected only a single oversized one, so two 5 MiB sides
+passed a stated 8 MiB bound and `git diff` processed ~10 MiB. Worse than reported: the check sat
+**inside the per-path loop**, so ten such files would have read 100 MiB. And round 26 bounded the
+history *cumulatively* while leaving the blobs *per-item* — **one fix carrying both shapes at
+once**, which is the clearest evidence yet that this is a property of how I was reading bounds
+rather than a run of unrelated slips.
+
+| round | the bound | the quantity it actually bounded |
+|---|---|---|
+| 25 | display budget | what you **keep**, not what you **do** |
+| 26 | `--max-count` | how **many**, not how **much** |
+| 27 | the blob ceiling | **each part**, not **the whole** |
+
+**One `CollectionBudget` per arbitration**, threaded through every reader the way the truncation
+log is threaded through every fold — the conflict's blobs on both stages, across every file, and
+both sides' commit objects all charge the same total. The accumulation is the point, and it
+cannot be re-derived at a call site.
+
+**Three boundary cases, each individually legal and collectively not**: two stages of one file,
+two files, and the conflict plus the history. Plus a non-vacuity case proving ordinary sizes
+still reach the judge — without it, "refuse everything" passes.
+
+**And the audit rows now name the quantity.** The coordinator's instruction was the right
+generalisation: *if the audit table records a bound, the row should say which quantity it
+bounds.* Four defects on this branch were a real bound on the wrong quantity, so a row that says
+only "bounded" is exactly as useful as the bound was.
+
+**Drift, and the lesson it carries.** The test file's header and one test title still said a
+retry carries the arbiter's reasoning — the channel this PR closed deliberately as a
+privilege-escalation path. That is the same clause corrected in the as-built two rounds ago,
+surviving where it asserts rather than where it describes. **Tests are documents, and they are
+the ones that assert.** The sweep for that sentence also found it in a PLAN file, instructing a
+future lane to route publish-path retries "carrying the arbiter's guidance" — a live instruction
+to rebuild the thing the SPEC entry forbids. Corrected there too, which is outside #541's code
+but squarely inside its decision.
+
+**Three mutations, all red:** blobs bounded per-item again; each reader given its own budget;
+the budget not accumulating.
 
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
@@ -1717,7 +1760,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and twenty-two mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and twenty-five mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

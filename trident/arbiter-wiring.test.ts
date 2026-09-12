@@ -7,8 +7,11 @@
  *
  *   - the ONE hold that qualifies (a bounded resolver ESCALATED a rebase
  *     conflict) reaches the arbiter, and a `retry-resolution` decision is acted
- *     on — the same tree goes back to the resolver carrying the arbiter's
- *     reasoning, and the run lands;
+ *     on — the same tree goes back to the resolver CARRYING NOTHING THE ARBITER
+ *     WROTE, and the run lands. The guidance channel was removed deliberately as a
+ *     privilege-escalation path; what the decision buys is the ROUND, not a brief
+ *     for it. TESTS ARE DOCUMENTS, AND THEY ARE THE ONES THAT ASSERT, so a
+ *     present-tense sentence in a header is a current-state claim like any other;
  *   - the holds that do NOT qualify (base drift, the dirty merge worktree)
  *     reach the owner with the arbiter never consulted at all;
  *   - `{kind:'unavailable'}` falls through to the EXISTING owner path — neither
@@ -35,6 +38,7 @@ import {
   assembleEvidence,
   conflictEvidence,
   truncationLog,
+  collectionBudgetForTests,
   CONFLICT_ARBITER_RETRY_OPTION,
   CONFLICT_ARBITRATION_OPTIONS,
   MAX_ARBITRATIONS_PER_REBASE,
@@ -201,7 +205,7 @@ const RESOLVER_QUESTION =
   'flush.ts: drop-oldest vs block-until-space — which behaviour do you want?'
 
 describe('#541 — the arbiter tier is CONSULTED on a resolver escalation', () => {
-  test('a `retry-resolution` decision is ACTED ON: the same tree goes back to the resolver with the arbiter reasoning, and the merge lands', async () => {
+  test('a `retry-resolution` decision is ACTED ON: the same tree goes back to the resolver carrying NOTHING the arbiter wrote, and the merge lands', async () => {
     const run = localRun('feat-retry')
     const wt = wtOf('/shared', run)
     // ONE conflicting pass: the initial `rebase`. The arbiter-directed retry
@@ -1340,6 +1344,84 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     )
   })
 
+  test('THE CEILING IS ON THE WHOLE COLLECTION, not on each part of it', async () => {
+    // A CEILING ON EACH PART IS NOT A CEILING ON THE WHOLE — and this is the first instance of
+    // that sentence to appear INSIDE a fix: the history was bounded cumulatively while the
+    // conflict blobs were bounded individually, so two 5 MiB sides passed a stated 8 MiB bound
+    // and `git diff` processed ~10 MiB. Because the check sat inside the per-path loop, ten
+    // such files would have read 100 MiB.
+    //
+    // Three cases, each individually legal and collectively not: two stages of ONE file; two
+    // FILES; and the conflict plus the HISTORY, which share one arbitration's budget.
+    const FOUR_MIB = String(4 * 1024 * 1024 + 1)
+    const drive = async (
+      slug: string,
+      conflicted: string,
+      opts: { blobBytes?: string; commitBytes?: string } = {},
+    ): Promise<{ asked: number; why: string }> => {
+      const run = localRun(slug)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.includes('--format=%H')) return ok('e'.repeat(40))
+        if (cmd.includes('log')) return ok('aaa1 subject\u0000')
+        if (cmd.includes('cat-file') && cmd.includes('-s')) {
+          const sha = cmd[cmd.length - 1] ?? ''
+          return ok(sha === 'e'.repeat(40) ? (opts.commitBytes ?? '64') : (opts.blobBytes ?? '64'))
+        }
+        if (isUnmergedQuery(cmd)) return unmergedIndex(conflicted)
+        if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(conflicted)
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      const { arbitrate, seen } = stubArbiter({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'would have granted the retry',
+      })
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      const lines = await captureLogs(async () => {
+        await cleanupAfterMerge(run, deps).catch(() => {})
+      })
+      const line = lines.find((l) => l.includes('merge_conflict_arbiter_not_asked')) ?? ''
+      return { asked: seen.length, why: /why=([a-z-]+)/.exec(line)?.[1] ?? '' }
+    }
+
+    // TWO STAGES OF ONE FILE: 4 MiB each, neither over the 8 MiB ceiling, together over it.
+    const twoStages = await drive('feat-whole-1', 'f.ts', { blobBytes: FOUR_MIB })
+    expect(twoStages.why, 'both sides of one file accumulate').toBe('over-budget')
+    expect(twoStages.asked).toBe(0)
+
+    // TWO FILES: the per-path loop must not reset the budget either.
+    const twoFiles = await drive('feat-whole-2', ['a.ts', 'b.ts'].join('\u0000'), {
+      blobBytes: String(3 * 1024 * 1024),
+    })
+    expect(twoFiles.why, 'files accumulate across the loop').toBe('over-budget')
+    expect(twoFiles.asked).toBe(0)
+
+    // CONFLICT PLUS HISTORY: one arbitration, one ceiling.
+    const both = await drive('feat-whole-3', 'f.ts', {
+      blobBytes: String(3 * 1024 * 1024),
+      commitBytes: String(3 * 1024 * 1024),
+    })
+    expect(both.why, 'the conflict and the history share the budget').toBe('over-budget')
+    expect(both.asked).toBe(0)
+
+    // NOT VACUOUS: comfortably-sized inputs still reach the judge.
+    const fits = await drive('feat-whole-ok', 'f.ts', { blobBytes: '4096', commitBytes: '4096' })
+    expect(fits.asked, 'ordinary sizes are still judged').toBe(1)
+  })
+
   test('the history ceiling weighs the TOTAL, and an unweighable object is unknown', async () => {
     // TWO MUTATION SURVIVORS, closed together because they share a fixture shape.
     //
@@ -1785,7 +1867,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         return ok()
       }
       // What the evidence layer concluded, read directly from the same host.
-      const evidence = await conflictEvidence(host, wt, { readable: shape.listingOk !== false, paths: shape.conflicted.split('\u0000') }, truncationLog())
+      const evidence = await conflictEvidence(host, wt, { readable: shape.listingOk !== false, paths: shape.conflicted.split('\u0000') }, truncationLog(), collectionBudgetForTests())
       kinds[shape.name] = evidence.kind
       // And whether the judge was reached through the real seam.
       const { arbitrate, seen } = stubArbiter({
@@ -2660,7 +2742,7 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
       if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\u0007\u0007\u0007y\n')
       return ok()
     }
-    const evidence = await conflictEvidence(host, '/shared', { readable: true, paths: ['a.ts'] }, truncationLog())
+    const evidence = await conflictEvidence(host, '/shared', { readable: true, paths: ['a.ts'] }, truncationLog(), collectionBudgetForTests())
     expect(evidence.kind).toBe('complete')
     const body = evidence.kind === 'complete' ? evidence.body : ''
     // Three BELs → three spaces, not one.
