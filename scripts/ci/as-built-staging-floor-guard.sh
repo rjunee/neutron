@@ -65,22 +65,24 @@
 # route to the empty directory rather than the one spelled `D`. It also needs no
 # merge base, so a depth-1 Actions checkout cannot make the guard indeterminate.
 #
-# PUSH-TO-MAIN IS NOT GUARDED HERE, AND IS NOT UNGUARDED. There is no legitimate
-# deleter of a floor at all — the promoter only ever removes paths its own `*.md`
-# glob produced (`trident/as-built-appender.ts:101`), so it cannot take a floor
-# with it. Rather than invent a second code path with its own failure modes, the
-# floor on main is pinned by a test that runs in every shard on every event:
-# `scripts/ci/as-built-staging-floor-guard.test.ts` asserts this repo's own
-# tracked tree carries a floor in every directory that holds a record, so main
-# regressing reds the suite.
+# PUSH TO MAIN IS GUARDED TOO, AND THE ARGUMENT THAT IT NEED NOT BE WAS WRONG.
+# This script first skipped every non-branch event, on the reasoning that nothing
+# legitimate deletes a floor off a branch proposal and that a test pinning the
+# floors on main was the compensating control. Both halves failed. The pin only
+# required the top-level floor plus a floor in each directory that CURRENTLY holds
+# a `.md`, so deleting a RECORD-LESS prefix floor — `.trident/as-built/docs/.gitkeep`
+# with no record under `docs/` — passed the pin and was skipped by the guard, which
+# is precisely the state the removal check exists to refuse and precisely the event
+# (a force-push, a revert, a manual promotion) the pin was claimed to cover.
 #
-# ENV:
-#   GUARD_BASE_SHA                  PR/merge-queue base commit — explicit override
-#   GUARD_HEAD_SHA                  PR/merge-queue head commit — explicit override
-#   AS_BUILT_STAGING_FLOOR_ROOT     repo root to operate on (default: this repo)
-#   GITHUB_ACTIONS                  'true' inside Actions — makes the guard STRICT
-#   GITHUB_EVENT_NAME               'pull_request' / 'merge_group' / 'push' / ...
-#   GITHUB_EVENT_PATH               the event payload the shas are read from
+# `ci.yml` triggers on `push: branches: [main]` and the `layering` job runs there
+# with `fetch-depth: 0`, so the event was reachable all along. The push payload
+# carries `before` and `after`, which are exactly the base and head this guard
+# already knows how to judge — a force-push included, since `before` is the tip
+# being overwritten. So the same three questions run on the same two trees, and
+# the pin in `scripts/ci/as-built-staging-floor-guard.test.ts` is now a genuine
+# second control (it asserts every PERMANENT prefix floor, not only the occupied
+# ones) rather than a claim standing in for one.
 #
 # THREE QUESTIONS, AND THEY COVER DIFFERENT STATES ON PURPOSE. (1) Does the head
 # carry the top-level floor — always, with only the BASE allowed to be without it,
@@ -134,13 +136,35 @@ if [ -z "${GUARD_BASE_SHA:-}" ] && [ -z "${GUARD_HEAD_SHA:-}" ]; then
       GUARD_BASE_SHA="$(event_sha merge_group.base_sha)"
       GUARD_HEAD_SHA="$(event_sha merge_group.head_sha)"
       ;;
+    push)
+      # `before` and `after` are the two trees this guard already judges. A FORCE
+      # PUSH is covered for free: `before` is the tip being overwritten, so a push
+      # that drops a floor is compared against the tree that had it.
+      GUARD_BASE_SHA="$(event_sha before)"
+      GUARD_HEAD_SHA="$(event_sha after)"
+      # A branch DELETION pushes an all-zero `after`: there is no tree to judge.
+      # (`${v//0/}` empties only when every character is a zero, so this cannot
+      # swallow an unreadable payload — that is the empty case, which falls through
+      # to the strict branch below.)
+      if [ -n "${GUARD_HEAD_SHA}" ] && [ -z "${GUARD_HEAD_SHA//0/}" ]; then
+        echo "as-built-staging-floor-guard: this push deletes a ref and proposes no tree. Nothing to guard."
+        exit 0
+      fi
+      # A branch CREATION pushes an all-zero `before`: there is no base to compare,
+      # so the removal check has nothing to say and the head-side questions stand
+      # on their own. Pointing the base at the head is what expresses that — it does
+      # NOT weaken the head-side checks, which is where the floor is required.
+      if [ -n "${GUARD_BASE_SHA}" ] && [ -z "${GUARD_BASE_SHA//0/}" ]; then
+        GUARD_BASE_SHA="${GUARD_HEAD_SHA}"
+      fi
+      ;;
     *)
-      # Every non-branch event: see PUSH-TO-MAIN above. Nothing off a branch
-      # proposal deletes a floor, and the floor on main is pinned by test rather
-      # than by a second code path here. OUTSIDE Actions this is also how a
-      # developer running the gate by hand gets a pass — but INSIDE Actions a
-      # guarded event with no shas must NEVER land here, which is what the strict
-      # branch below enforces.
+      # Everything that is neither a branch proposal nor a push: a schedule, a
+      # manual dispatch, a release. None of them carry a base/head pair, and none
+      # of them can change a tree. OUTSIDE Actions this is also how a developer
+      # running the gate by hand gets a pass — but INSIDE Actions a guarded event
+      # with no shas must NEVER land here, which is what the strict branch below
+      # enforces.
       echo "as-built-staging-floor-guard: event '${GITHUB_EVENT_NAME:-<none>}' is not a branch proposal. Nothing to guard."
       exit 0
       ;;

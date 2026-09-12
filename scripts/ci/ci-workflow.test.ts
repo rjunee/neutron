@@ -1331,6 +1331,18 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
       return 'the top-level floor check is no longer asked of the head unconditionally'
     }
 
+    // THE TRIGGER, WHICH IS THE THIRD FACTOR. A correct predicate over a correct
+    // domain enforces nothing on an event that exits before reaching either. This
+    // guard skipped every non-branch event, so a push to main deleting a
+    // record-less floor passed it — and the main-tree pin that was named as the
+    // compensating control did not cover that state either. `ci.yml` triggers on
+    // `push: branches: [main]` and `layering` runs there with `fetch-depth: 0`, so
+    // the event was reachable all along; `before`/`after` are the base/head pair.
+    if (!/^\s*push\)/m.test(source)) return 'push to main is not a guarded event'
+    if (!source.includes('event_sha before') || !source.includes('event_sha after')) {
+      return 'the push payload mapping is incomplete'
+    }
+
     // THE DOMAIN, NOT JUST THE PREDICATE. The record-directory loop enumerates only
     // directories holding a `.md` at the head, so on its own it cannot see a floor
     // deleted from a record-LESS directory — a state `docs/as-built/README.md`
@@ -1369,6 +1381,13 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
 
   test('the gate that carries the guard is the one ci.yml runs unconditionally', () => {
     expect(yml).toContain('- run: bun scripts/ci/check-governed-repo-attributes.ts .')
+  })
+
+  test('ci.yml still triggers on push to main, which is what makes the push arm reachable', () => {
+    // The guard's push arm is inert if the workflow stops firing on push. Pinned
+    // here rather than assumed, because the argument that push needed no guarding
+    // was already wrong once on this guard.
+    expect(yml).toMatch(/^\s{2}push:\n\s{4}branches: \[main\]/m)
   })
 
   test('the guard script it names exists on disk', () => {
@@ -1459,6 +1478,14 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
     [
       'the base floors are never captured before the head read',
       (source) => source.replace('for dir in "${!FLOOR_DIRS[@]}"; do BASE_FLOOR_DIRS["$dir"]=1; done', ':'),
+    ],
+    [
+      'push stops being a guarded event — the trigger hole, restored',
+      (source) => source.replace(/^    push\)/m, '    never_push)'),
+    ],
+    [
+      'the push before-sha mapping is dropped',
+      (source) => source.replace('event_sha before', ''),
     ],
     [
       'an unreadable tree becomes a pass',

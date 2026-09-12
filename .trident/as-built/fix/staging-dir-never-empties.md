@@ -119,6 +119,43 @@ record-less directory, a prefix present only on the base side, a prefix present 
 head side floored and unfloored, a floor renamed within its own directory, and an untouched
 tree as the positive control that the harness can produce a pass at all.
 
+**THE THIRD SCOPE ERROR WAS THE EVENT, AND THE THREE TOGETHER ARE THE POINT.** The guard
+skipped every non-branch event, so a push to main deleting `.trident/as-built/docs/.gitkeep`
+— a record-less prefix floor — passed it untouched. The predicate was right by then and the
+domain was right, and neither ran. Worse, the compensating control this record and the
+guard's header both named for exactly that event did not compensate: the main-tree pin
+required the top-level floor plus a floor in each directory CURRENTLY holding a `.md`, and a
+record-less directory satisfies both clauses by being absent. `ci.yml` triggers on
+`push: branches: [main]` and `layering` runs there with `fetch-depth: 0`, so the event was
+reachable the whole time; the push payload's `before`/`after` are exactly the base and head
+the guard already judges, which also covers a force push for free, since `before` is the tip
+being overwritten.
+
+So: **coverage is the product of predicate, domain AND trigger.** Three rounds of review
+each found one factor wrong while the other two were right, and each round's tests measured
+only the factor it had just fixed. Named explicitly so a fourth factor has somewhere to be
+noticed, with what pins each:
+
+  - PREDICATE — is the question right for a directory it looks at. Pinned by the
+    floor-deleted, floor-renamed, unfloored-record, `.md`-as-floor and bootstrap cases in
+    `scripts/ci/as-built-staging-floor-guard.test.ts`, and by the two-sided-exemption
+    mutation in `scripts/ci/ci-workflow.test.ts`.
+  - DOMAIN — which directories it looks at at all. Pinned by the `describe` block sweeping
+    every shape a staged-prefix directory can take across the two trees (record-less floor
+    deleted, prefix only on the base side, prefix only on the head side floored and
+    unfloored, floor renamed within its directory, untouched tree as the positive control),
+    and by the `BASE_FLOOR_DIRS` mutations.
+  - TRIGGER — which events it runs on at all. Pinned by the push cases (a record-less floor
+    deleted on a push, a clean push, a force push, a ref deletion, a branch creation), by the
+    `push)`-arm and `event_sha before` mutations, and by a test that `ci.yml` still fires on
+    `push: branches: [main]` — the arm is inert if that trigger ever goes away.
+
+The main-tree pin is a real second control now rather than a claim standing in for one: it
+asserts the PERMANENT floors by name. That has to be a list, because a record-less directory
+leaves no trace in the tree once its floor is gone — nothing in HEAD can say that
+`.trident/as-built/docs/` ever existed. Adding a prefix means adding its floor to that list
+too, and the guard will already have refused the PR that stages there without one.
+
 **WHAT THE TESTS PROVE, AND THEIR CONTROLS.**
 
   - `trident/as-built-staging-floor-realgit.test.ts` runs the four arms above with the

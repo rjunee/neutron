@@ -63,6 +63,12 @@ branch merges clean; with the floor tidied away afterwards, it takes the
 stages into a directory, so it refuses; an empty `.gitkeep` costs nothing to
 keep.
 
+The guard runs on pull requests, on merge-queue commits **and on pushes to `main`** — a
+floor deleted by a force-push, a revert or a manual promotion is refused the same way. A
+second control in `scripts/ci/as-built-staging-floor-guard.test.ts` asserts the permanent
+floors by name against the tracked tree, because a directory whose floor is gone leaves
+nothing behind to notice it by.
+
 **What the floor prevents.** A promotion moves the last staged record out of a
 directory, that directory has no tracked file left, and git stops seeing it at
 all. The promotion commit is, file for file, a move out of that directory into
