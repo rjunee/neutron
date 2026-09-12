@@ -71,7 +71,7 @@ already carried `inner_checkpoint`, its head, its findings, the base pin and the
 with the cap it is measured against, `min(prior, dispatch)`, so a re-dispatch may
 tighten the budget and never loosen it. Record:
 `docs/as-built/a-retry-must-resume-from-the-checkpoint.md` (staged at
-`.trident/as-built/fix/519-retry-resumes-checkpoint.md`).
+`docs/as-built/519-retry-resumes-checkpoint.md`).
 
 **The scope, and the two halves are different widths.** Calling it "the mid-budget case"
 under-claimed — the phrasing this paragraph used to carry, and the same error as the
