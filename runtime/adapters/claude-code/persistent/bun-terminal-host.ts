@@ -362,14 +362,24 @@ export class BunTerminalHost implements PtyHost {
       'bun-terminal-host.exit',
       proc.exited.then((code) => {
         exited = true
-        // RELEASE, DO NOT JUST CANCEL. The child is gone, so nothing more will be
-        // produced and the last screen is the only record of what it printed —
-        // withholding it because the caller has not finished wiring loses a dead REPL's
-        // final output entirely, which is the failure `onScreen`'s "a failed read is not
-        // an empty screen" rule exists to prevent one layer up. Runs on a later tick
-        // than `spawn()` returning, so it cannot pre-empt the caller's `await`.
-        clearTimeout(gateTimer)
-        releaseOutput()
+        // THE EXIT SETTLES; IT DOES NOT RELEASE. Recording that the child is gone is not
+        // the same act as delivering its screen, and conflating them was a race in the
+        // exact case the gate exists for.
+        //
+        // An earlier version released here, reasoning that a dead child's last screen is
+        // the only record of what it printed and must not be withheld. The reason is
+        // sound and is preserved — the held screen IS still delivered, at release rather
+        // than before it. What was wrong was the ordering, and the comment that claimed
+        // this "runs on a later tick than `spawn()` returning, so it cannot pre-empt the
+        // caller's await" was simply false: if `proc.exited` is ALREADY RESOLVED, this
+        // callback is queued as a microtask BEFORE the caller's continuation from
+        // `await host.spawn(...)`, so `onScreen` fired before the caller even held the
+        // child. A child that dies instantly is also the child whose output most needs a
+        // detector already attached.
+        //
+        // So the gate survives the exit. The timer stays armed too: a caller that never
+        // calls `beginOutput()` still gets the final screen, late and with the warning it
+        // has earned, rather than never.
         try {
           terminal.close()
         } catch {

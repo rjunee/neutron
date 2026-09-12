@@ -242,6 +242,23 @@ not-new. That is accepted and recorded here rather than hidden.
       must be modelled before they can be shared honestly. Adding cases is the cheap part;
       agreeing what "the same case" means for two substrates with different observables
       is not.
+      THIRD SHARED CASE, AND ITS REASON IS ABOUT THE SUITE ITSELF. A child that is dead
+      AS EARLY AS ITS SUBSTRATE ALLOWS must still deliver nothing before `beginOutput()`.
+      The first fixture could not see this: both arms kept the child alive for the whole
+      case, and the pty backend released its held screen from the exit handler — so with
+      an ALREADY-RESOLVED `exited` that callback is queued as a microtask BEFORE the
+      caller's continuation from `await spawn(...)`, and `onScreen` fired before the
+      caller held the child. **A SHARED SUITE INHERITS THE BLIND SPOTS OF ITS SHARED
+      FIXTURE**, which is the pty-buffer lesson one level up — at the thing built to
+      catch such lessons. THE EXIT SETTLES; IT DOES NOT RELEASE: recording that the child
+      is gone is not the same act as delivering its screen, and the held screen is still
+      delivered, at release rather than before it.
+      "As early as allowed" CANNOT be made identical and the case must not pretend it
+      is: a pty hands back a process that has already exited, while herdr discovers a
+      vanished pane only by polling — and its poll loop is itself behind the gate, so it
+      cannot know until the gate opens. The positive control (`hasExited()`) is therefore
+      taken AFTER the release on both, or the assertion would be requiring herdr to break
+      its own gate.
       SECOND SHARED CASE, added because it is genuinely non-vacuous on both: `submitLine`
       after the child has exited must REJECT, by different mechanisms on each side —
       herdr learns of the exit by polling a vanished pane, the pty is told by its

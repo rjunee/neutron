@@ -508,3 +508,72 @@ describe('a failed spawn leaves no terminal open and no timer armed', () => {
     expect(errs.filter((e) => e.includes('beginOutput() was not called')).length).toBe(1)
   })
 })
+
+/**
+ * The other half of "the exit settles, it does not release": what the pty held must
+ * still ARRIVE. The conformance case asserts the contract both backends share — nothing
+ * before `beginOutput()` — and can only assert delivery conditionally, because herdr's
+ * pane vanishes taking its output with it and has nothing to hand over. This host DOES,
+ * and that is the reason the release-on-exit version was written in the first place: a
+ * dead child's last screen is the only record of what it printed.
+ */
+describe('a child that has ALREADY exited still hands over what it printed', () => {
+  function immediatelyDeadHost(screenText: string): BunTerminalHost {
+    return new BunTerminalHost({
+      createTerminal: (o) => {
+        const term = { write: () => 0, resize: () => undefined, close: () => undefined }
+        o.data?.(term, new TextEncoder().encode(screenText))
+        return term
+      },
+      spawn: () => ({
+        pid: 909,
+        exited: Promise.resolve(0), // already resolved when `spawn()` returns
+        exitCode: 0,
+        kill: () => undefined,
+      }),
+      outputGateMaxMs: 60_000,
+    })
+  }
+
+  it('holds it past the exit, then delivers it at beginOutput()', async () => {
+    const screens: string[] = []
+    const child = await immediatelyDeadHost('FATAL: could not start\n').spawn(['/bin/false'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (s) => screens.push(s),
+    })
+    await Bun.sleep(30)
+    expect(screens).toEqual([]) // the exit did not release it
+    expect(child.hasExited()).toBe(true) // ...and the exit DID settle, independently
+    child.beginOutput?.()
+    await Bun.sleep(30)
+    expect(screens.length).toBe(1)
+    expect(screens[0]).toContain('FATAL: could not start')
+  })
+
+  it('the fail-open timer still delivers it to a caller that never releases', async () => {
+    // Withholding forever is the other failure. A caller with a wiring bug gets the
+    // dead child's last screen late and loudly, rather than never.
+    const screens: string[] = []
+    const host = new BunTerminalHost({
+      createTerminal: (o) => {
+        const term = { write: () => 0, resize: () => undefined, close: () => undefined }
+        o.data?.(term, new TextEncoder().encode('last words\n'))
+        return term
+      },
+      spawn: () => ({
+        pid: 910,
+        exited: Promise.resolve(0),
+        exitCode: 0,
+        kill: () => undefined,
+      }),
+      outputGateMaxMs: 20,
+    })
+    const errs = await withCapturedStderr(async () => {
+      await host.spawn(['/bin/false'], { cwd: '/tmp', env: {}, onScreen: (s) => screens.push(s) })
+      await Bun.sleep(120) // `beginOutput()` is DELIBERATELY never called
+    })
+    expect(screens.some((s) => s.includes('last words'))).toBe(true)
+    expect(errs.filter((e) => e.includes('beginOutput() was not called')).length).toBe(1)
+  })
+})

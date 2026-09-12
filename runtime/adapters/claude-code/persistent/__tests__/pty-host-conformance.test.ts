@@ -61,6 +61,24 @@ interface Backend {
   /** Spawn a child whose substrate is ALREADY producing the startup screen, so the
    *  window between `spawn()` returning and `beginOutput()` is real on both. */
   spawn(onScreen: (s: string) => void): Promise<Spawned>
+  /**
+   * Spawn a child that is dead AS EARLY AS THIS SUBSTRATE ALLOWS.
+   *
+   * ADDED BECAUSE THE FIRST FIXTURE COULD NOT SEE A REAL DIVERGENCE. Both backends
+   * above keep the child alive for the whole case, and `BunTerminalHost` released its
+   * held screen from the exit handler — so with an ALREADY-RESOLVED `exited`, that
+   * callback is queued as a microtask BEFORE the caller's continuation from
+   * `await spawn(...)` and `onScreen` fired before the caller held the child. **A shared
+   * suite inherits the blind spots of its shared fixture**, which is the same lesson as
+   * the pty's non-deterministic buffer, one level up — at the thing meant to catch those.
+   *
+   * "As early as allowed" differs by substrate and cannot be made identical: a pty can
+   * hand back a process that has already exited, while herdr can only discover a
+   * vanished pane on a later poll. The shared assertion is therefore about the CONTRACT
+   * — nothing is delivered before `beginOutput()` — with a control that the arrangement
+   * really did settle the exit, so neither arm passes vacuously.
+   */
+  spawnAlreadyExiting(onScreen: (s: string) => void): Promise<Spawned>
   /** The text the startup screen contains. */
   readonly startup: string
 }
@@ -82,6 +100,22 @@ const herdrBackend: Backend = {
     })
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
     // The pane vanishes; the host learns of it on the next poll.
+    return { child, endChild: () => server.exitPane() }
+  },
+  async spawnAlreadyExiting(onScreen) {
+    const server = new FakeHerdrServer()
+    server.screen = STARTUP
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    // The earliest herdr can be dead: the pane is gone before the poll loop's first
+    // read, so the very first thing that loop learns is that the child is over.
+    server.exitPane()
     return { child, endChild: () => server.exitPane() }
   },
 }
@@ -119,6 +153,22 @@ const bunBackend: Backend = {
     const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
     // The process exits; the host is TOLD, rather than discovering it by polling.
     return { child, endChild: () => endProcess(0) }
+  },
+  async spawnAlreadyExiting(onScreen) {
+    const host = new BunTerminalHost({
+      createTerminal: (o) => {
+        const term = { write: () => 0, resize: () => undefined, close: () => undefined }
+        o.data?.(term, new TextEncoder().encode(`${STARTUP}\n`))
+        return term
+      },
+      // ALREADY RESOLVED. This is the arrangement the first fixture refused to model,
+      // and it is the one that exposes an exit handler queued ahead of the caller's own
+      // continuation from `await spawn(...)`.
+      spawn: () => ({ pid: 4243, exited: Promise.resolve(0), exitCode: 0, kill: () => undefined }),
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], { cwd: '/tmp', env: {}, onScreen })
+    return { child, endChild: () => undefined }
   },
 }
 
@@ -186,6 +236,40 @@ describe('PtyHost conformance — the readiness gate', () => {
           (e: unknown) => (e as Error).message,
         )
         expect(outcome).toContain('after exit')
+      })
+    })
+  }
+
+  for (const backend of BACKENDS) {
+    describe(`${backend.name} — a child that is already gone`, () => {
+      it('still delivers NOTHING before beginOutput(), and its last screen after', async () => {
+        const screens: string[] = []
+        const { child } = await backend.spawnAlreadyExiting((s) => screens.push(s))
+        await settle()
+        // THE CONTRACT. Recording that the child is gone is not the same act as
+        // delivering its screen, and a host that conflates them delivers to a consumer
+        // the caller has not wired yet — worst in exactly this case, since a child that
+        // dies instantly is the one whose output most needs a detector already attached.
+        expect(screens).toEqual([])
+
+        child.beginOutput?.()
+        await settle()
+        // POSITIVE CONTROL, AND IT HAS TO BE TAKEN HERE RATHER THAN ABOVE. The two
+        // substrates reach "already gone" at genuinely different moments and the
+        // difference is the gate doing its job: the pty hands back a process that has
+        // ALREADY exited, so its child is settled before this line; herdr discovers a
+        // vanished pane only by POLLING, and the poll loop is itself held behind the
+        // gate — so it cannot know the child is gone until the gate opens. Asserting
+        // before the release would have been asserting that herdr breaks its own gate.
+        expect(`${backend.name} exited: ${String(child.hasExited())}`).toBe(
+          `${backend.name} exited: true`,
+        )
+        // NOT LOST, ONLY HELD. Whatever the substrate produced before it died is the
+        // only record of what the child printed, and a snapshot-replace ring never
+        // re-delivers it — so withholding it forever would be the other failure.
+        // herdr's pane vanishes taking its output with it, so it has nothing to hand
+        // over; the pty accumulated a screen and must.
+        if (screens.length > 0) expect(screens.some((s) => s.includes(backend.startup))).toBe(true)
       })
     })
   }

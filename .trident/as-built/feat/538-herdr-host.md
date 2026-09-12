@@ -1527,6 +1527,43 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### A shared suite inherits the blind spots of its shared fixture
+
+Two rounds ago I made `BunTerminalHost` RELEASE its held screen from the exit handler,
+reasoning that a dead child's last screen is the only record of what it printed and must
+not be withheld. The reasoning was right and the ordering was wrong. I wrote that it
+"runs on a later tick than `spawn()` returning, so it cannot pre-empt the caller's
+`await`" — and that sentence is false whenever `proc.exited` is ALREADY RESOLVED: the
+callback is then queued as a microtask BEFORE the caller's continuation from
+`await host.spawn(...)`, so `onScreen` fired before the caller even held the child. **A
+child that dies instantly is also the child whose output most needs a detector already
+attached**, so the race lands in exactly the case the gate exists for.
+
+**The conformance suite could not see it, and that is the more important half.** Its
+first fixture deliberately left `exited` pending until after `spawn()` returned — both
+arms kept the child alive for the whole case. The suite is the mechanism that makes
+keeping two backends maintainable, and its first fixture was unrepresentative in
+precisely the way that hides a real divergence. Same lesson as the pty's
+non-deterministic kernel buffer and `comm` being one word, now one level up: at the
+instrument built to catch those.
+
+The fix keeps the reason and drops the conflation. **The exit settles; it does not
+release.** Recording that the child is gone is a different act from delivering its
+screen. The held screen is still delivered — at release rather than before it — and the
+fail-open timer stays armed across the exit, so a caller that never calls `beginOutput()`
+gets the dead child's last screen late and loudly rather than never. M194 (release on
+exit) and M195 (disarm without releasing) bracket it from both sides.
+
+**The case went into the conformance TABLE, not the Bun suite**, and doing that honestly
+required admitting the two substrates cannot reach "already gone" at the same moment: a
+pty hands back a process that has already exited; herdr discovers a vanished pane only by
+POLLING, and its poll loop is itself held behind the gate, so it cannot know until the
+gate opens. The positive control is therefore taken AFTER the release on both arms —
+taking it before would have been asserting that herdr breaks its own gate. What each arm
+can assert about delivery also differs (herdr's pane vanishes taking its output with it,
+so it has nothing to hand over), so the shared case asserts the shared contract and the
+pty's own suite carries the delivery.
+
 ### The same rule, for the third time, and this time it was still in the host
 
 **An obligation starts when the resource exists, not when the function succeeds.** The
@@ -2384,6 +2421,8 @@ Run against the named suites.
 | M191 | a failing spawn leaves the readiness timer armed (a FALSE wiring warning) | RED 1 |
 | M192 | the allocation is outside the guard again | RED 2 |
 | M193 | PAIR: the cleanup runs on SUCCESS too, closing a live pty | RED 5 |
+| M194 | the exit RELEASES the gate again — the microtask race | RED 3, one of them the SHARED suite |
+| M195 | PAIR: the exit disarms the gate WITHOUT releasing (the last screen is lost) | RED 2 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
