@@ -47,12 +47,29 @@
 set -uo pipefail
 
 BASE_REF="${1:-main}"
-# PREFER THE REMOTE-TRACKING REF over a bare local branch name (#546), and change
-# nothing else: a 40-hex sha, an already-qualified `origin/<x>`, a tag and a ref that
-# has no `origin/` counterpart all fail the rev-parse below and are kept verbatim. The
-# local name is only DEMOTED, never rejected — a repo with no origin at all still gets
-# the diff it got before.
-if git rev-parse --verify --quiet "origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+# PREFER THE REMOTE-TRACKING REF over a stale local BRANCH name (#546) — and promote BY
+# KIND, not by string shape.
+#
+# THE REGRESSION THIS FIXES, because the first version of this block had it. It promoted
+# whenever `origin/${BASE_REF}` resolved, and its comment claimed "a tag … fails the
+# rev-parse below and is kept verbatim". That is false. `origin/<x>` resolving says a
+# remote-tracking ref named `<x>` EXISTS; it says nothing about what the caller handed
+# us. With a tag `release` at commit A and a remote branch `origin/release` at commit B,
+# `codex-review.sh release` reviewed from B — a different commit, silently. This wrapper
+# takes a general `[base-ref]`, so that is a real input, and the trident path could not
+# see it because it always passes an already-resolved ref.
+#
+# SO THE PROMOTION NOW REQUIRES PROOF THAT THE ARGUMENT IS A LOCAL BRANCH NAME:
+#   * `refs/heads/<x>` must resolve — the only evidence available here that `<x>` NAMES
+#     A BRANCH rather than a tag, a sha, or an already-qualified remote ref;
+#   * `refs/tags/<x>` must NOT resolve — when both exist the name is ambiguous, git says
+#     so itself, and guessing is what this whole block exists to stop;
+#   * `refs/remotes/origin/<x>` must resolve — there has to be something to promote to.
+# Anything else is kept VERBATIM: a 40-hex sha, `origin/<x>`, `HEAD~1`, a tag, a branch
+# with no remote counterpart, and a repository with no origin at all.
+if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
+  && ! git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1 \
+  && git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
   BASE_REF="origin/${BASE_REF}"
 fi
 : "${CODEX_HOME:=}"

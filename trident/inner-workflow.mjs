@@ -1399,9 +1399,13 @@ const pinnedBase = typeof baseSha === 'string' && /^[0-9a-f]{40}$/.test(baseSha.
  *    four commits behind `origin/main` yields FIVE files where the branch changed ONE,
  *    in local mode exactly as in pr mode. So local mode gets the same preference, and
  *    the shell decides per-repository whether the ref exists.
- *  • the bare name ONLY when there is genuinely no remote — no `refs/remotes/origin/
- *    <base>` to read. That is the one case left, it is stated rather than assumed, and
- *    it is the only case this whole change cannot improve on.
+ *  • the bare name whenever `refs/remotes/origin/<base>` does not resolve to a commit —
+ *    which is NOT the same as "there is no remote", and saying so was the sixth overclaim
+ *    on this branch. `origin` can be configured while that ref is missing, deleted or
+ *    never fetched: an ordinary state for a worktree that has not fetched. The
+ *    substitution below also takes this arm when git cannot run at all. No fetch is
+ *    attempted — a build worktree should not reach the network to answer a diff-base
+ *    question — so `refs/heads/<base>` is simply the best available answer there.
  *
  * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range in this file (and in
  * `trident/`, `tools/`) whose base is composed from `baseBranch` instead of read from

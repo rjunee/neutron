@@ -156,6 +156,45 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round six: a regression from round five, and the title one notch wide again
+
+**The regression.** Round five made `codex-review.sh` prefer `origin/<x>` over a stale local
+branch `<x>`. It promoted **by string shape** — "does `origin/${BASE_REF}` resolve?" — and its own
+comment claimed a tag would be kept verbatim. It would not have been: with a tag `release` at one
+commit and a remote branch `origin/release` at another, `codex-review.sh release` reviewed the
+wrong commit, silently. The wrapper takes a general `[base-ref]`, so that is a real input; the new
+wrapper tests only exercised the already-resolved ref trident passes, so nothing covered it.
+
+Fixed by promoting **by kind**: `refs/heads/<x>` must resolve (the only available evidence that
+`<x>` names a branch), `refs/tags/<x>` must not (ambiguity is not guessed at), and
+`refs/remotes/origin/<x>` must resolve. `trident/codex-review-base-ref.test.ts` builds one
+repository holding both collisions and pins the COMMIT each argument lands on; mutating back to the
+string-shaped promotion reddens two tests.
+
+**This is the second over-reaching generalisation on this branch, and they share a shape:** the
+merge-mode fallback inferred *"no remote"* from *"merges locally"*; the promotion inferred
+*"branch"* from *"resolves"*. Both substituted an available signal for the one that mattered.
+
+**And the title was still a notch wide.** Round five's retitle promised the bare name "only when
+the repository has no remote"; the code tests whether **one ref currently resolves**. A repository
+can have `origin` configured while `refs/remotes/origin/<base>` is missing, deleted or never
+fetched — an ordinary state — and there the code takes the bare name while the spec said it should
+not. The no-remote fixture stepped over exactly that gap by removing the remote *and* its refs.
+
+Narrowed to the probe in all five places (title, normative section, gate header, `merge.ts`,
+`inner-workflow.mjs`), and a `CONFIGURED ORIGIN, MISSING BASE REF` fixture now covers the gap —
+asserting the remote is still configured, so it cannot quietly decay into a second no-remote case.
+No fetch was added: a build worktree should not reach the network to answer a diff-base question.
+
+**The discipline that finally worked, applied before the push rather than after the gate:** for the
+sentence as newly written, name the state that would falsify it and go look for that state *in the
+code*. Doing that turned up three more conditions, each small and each enough to make it wrong — an
+option-shaped name (refused without probing), an empty name (returned ahead of the flag entirely),
+and `codex-review.sh`'s stricter standalone promotion. All three are now in the spec item.
+
+Six rounds, six overclaims, each narrower than the last. The pattern was never carelessness:
+**narrowing a claim is itself a claim, and it gets made with the same optimism as the original.**
+
 ### The headline claim was the title, and the audit walked past it
 
 A fifth round found the largest overclaim of the five, in the one place the audit had not

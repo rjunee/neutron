@@ -1,5 +1,5 @@
 ---
-title: "Rev-range base: pinned sha, origin/<base>, bare only when no remote"
+title: "Rev-range base: pinned sha, origin/<base> when it resolves, else bare"
 group: trident
 status: open
 priority: P0
@@ -7,9 +7,30 @@ cutover: true
 issue_ref: "#546"
 ---
 
-**Every rev-range base resolves to the launch-pinned sha, or to `origin/<base>` when that ref
-resolves, and to a bare local branch name only when the repository has no remote** — which is
+**Every rev-range base resolves to the launch-pinned sha; else to `origin/<base>` when
+`refs/remotes/origin/<base>` resolves to a commit; else to a bare local branch name** — which is
 stated, tested, and the one case this change cannot improve on.
+
+That last condition is **"the ref does not resolve"**, not "the repository has no remote". They are
+different states and the second is wider than what the code establishes: a repository can have
+`origin` configured while `refs/remotes/origin/<base>` is missing, deleted or never fetched, and
+there the bare name is taken. The probe is a single `git rev-parse --verify`, so it also answers
+"no" when it cannot run at all — fail-closed toward the behaviour this repository had before #546.
+Deliberately **no fetch**: a build worktree should not be reaching the network to answer a
+diff-base question.
+
+**Three narrower conditions, found by reading the code for states that would falsify the sentence
+above rather than by re-reading the sentence.** Each is small; each would have made it wrong:
+
+- an **option-shaped** base name (`-x`) — `originBaseResolves` answers false *without probing*, so
+  the bare name is taken even where `origin/-x` would resolve. That is deliberate: an operand
+  beginning with `-` is the injection vector `changedFilesWithStatus` already refuses;
+- an **empty** base name — `diffBaseRef` returns the input untouched ahead of the flag entirely,
+  so the "resolves / does not resolve" framing does not apply to it at all;
+- `codex-review.sh`'s **standalone** promotion is *stricter still*: it additionally requires
+  `refs/heads/<x>` to resolve and `refs/tags/<x>` not to, so it promotes only a proven,
+  unambiguous local branch name. The trident path never reaches it (it passes an already-resolved
+  ref); a caller passing a tag does, and that is the regression this round fixed.
 
 An earlier draft of this item said "a bare local branch name is **never** the left-hand side of a
 rev-range" and, below, "**no code path** composes a rev-range from a base branch NAME" — while the
@@ -75,8 +96,11 @@ The resolution order is evidence-first, and is the same at every site:
    ref. In pr mode the launch path fetches `+refs/heads/<base>:refs/remotes/origin/<base>` and
    refuses to start the build if that fetch or its rev-parse fails, so it exists and is as fresh
    as launch; in local mode it is preferred too, whenever the repository has one;
-3. the **bare name only when `refs/remotes/origin/<base>` does not resolve** — a repository with
-   no remote, where `refs/heads/<base>` is the base of record and there is no better answer.
+3. the **bare name whenever `refs/remotes/origin/<base>` does not resolve to a commit** — a
+   repository with no remote, one whose `origin` is configured but whose base ref is missing,
+   deleted or unfetched, and one where the probe itself could not run. In all of those
+   `refs/heads/<base>` is the best available base and there is no better answer without a fetch,
+   which this deliberately does not do.
 
    This step used to read "the bare name in **local mode** only — the one world where it is right
    rather than tolerated: a local-mode run has no origin to be behind". **That was false, and it
@@ -119,12 +143,25 @@ The resolution order is evidence-first, and is the same at every site:
       the same repo — the previous version of this test asserted the command *shape* and could
       not see the bug in the fixture it ran against. Mutating the fallback back to the bare name
       reddens it.
-- [ ] **The no-remote fallback is reached, and is the only case the bare name is used in.**
-      Verified by "NO REMOTE: the bare name is the fallback", which removes the remote and every
-      `refs/remotes/` ref from the fixture, asserts the substitution resolves to `main`, and
-      asserts it still produces a real diff. Without it the fix would be "always prefer
-      `origin/`", which breaks every repository that has none and which no with-remote test can
-      detect.
+- [ ] **The wrapper promotes BY KIND, not by string shape.** `codex-review.sh` takes a general
+      `[base-ref]`. Promoting whenever `origin/<x>` resolved meant a **tag** `release` was
+      silently rewritten to the remote branch `origin/release` — a different commit — because
+      `origin/<x>` resolving proves a remote-tracking ref exists, not that the argument was a
+      branch. Verified by `trident/codex-review-base-ref.test.ts`, which builds one repository
+      holding both collisions at once and pins the COMMIT each argument resolves to: a local
+      branch is promoted, a tag is not, an ambiguous branch+tag name is not, and a sha,
+      `origin/<x>`, `HEAD~1` and an unknown name are kept verbatim. The block under test is
+      extracted from the shipped script rather than retyped; mutating it back to the
+      string-shaped form reddens two tests.
+- [ ] **The fallback is reached whenever the REF does not resolve — not only when the repository
+      has no remote.** Two fixtures, because they are different states and an earlier draft of
+      this criterion named only the first: "NO REMOTE: the bare name is the fallback" removes the
+      remote and every `refs/remotes/` ref; "CONFIGURED ORIGIN, MISSING BASE REF" keeps `origin`
+      configured and deletes only `refs/remotes/origin/main`, which is the ordinary state of a
+      fresh worktree that has not fetched. Both assert the substitution resolves to `main` and
+      that a real diff is still produced. Without the first the fix would be "always prefer
+      `origin/`", which breaks every repository that has none; without the second the spec would
+      go on claiming a condition wider than the probe establishes.
 - [ ] **Reverting the fix reddens the suite.** Restoring `${shSingleQuote(baseBranch)}` at
       `writeResumeDiff` must turn `trident/review-diff-base-realgit.test.ts` red. Measured:
       4 of 7 tests fail, and the two agreement/complement tests stay green.
@@ -149,7 +186,7 @@ The resolution order is evidence-first, and is the same at every site:
       an alias chain to a fixpoint. **This criterion does NOT claim every rev-range**, and
       the gate's header enumerates what it cannot see (a range assembled across statements,
       a computed name, a nested interpolation, a helper taking the base as a `string`
-      parameter, the legitimate no-remote fallback, any unenumerated
+      parameter, the legitimate unresolvable-ref fallback, any unenumerated
       spelling). A pass means "none of the enumerated spellings is present".
 - [ ] **Every spelling the gate has been caught missing is now matched, and each fix is
       independently load-bearing.** The four known ones: the name inside a call

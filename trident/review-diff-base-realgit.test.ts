@@ -370,6 +370,32 @@ describe('the review diff is taken against the resolved base, not the stale loca
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
   })
 
+  test('CONFIGURED ORIGIN, MISSING BASE REF: still the bare name — the condition is the REF', async () => {
+    // THE SIXTH OVERCLAIM ON THIS BRANCH, and the one the no-remote fixture steps over.
+    // The spec said the bare name is taken "only when the repository has no remote"; the
+    // code tests whether ONE REF RESOLVES. Those are different states, and this is the
+    // gap between them: `origin` configured and reachable, `refs/remotes/origin/main`
+    // simply absent — the ordinary state of a worktree that has not fetched.
+    //
+    // Deliberately NO FETCH, here or in the product: a build worktree should not reach the
+    // network to answer a diff-base question, so `refs/heads/main` is the best available
+    // base and the bare name is correct.
+    const w = await seedWorld('configured-origin-missing-ref')
+    await git(w.consumer, 'update-ref', '-d', 'refs/remotes/origin/main')
+    // The remote is STILL CONFIGURED — this is the whole point of the fixture, so assert
+    // it rather than assume it, or the test silently becomes a second no-remote case.
+    expect(await git(w.consumer, 'remote')).toContain('origin')
+    expect(
+      (await spawnCapture(['git', '-C', w.consumer, 'rev-parse', '--verify', 'refs/remotes/origin/main'], w.consumer))
+        .ok,
+    ).toBe(false)
+
+    const out = await runResumeDiff(w, { pr: false })
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('main')
+    expect(out.bytes).toBeGreaterThan(0)
+    expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE, ...w.staleFiles].sort())
+  })
+
   test('FRESH local ref: the resolved base and the bare name AGREE, file for file', async () => {
     // THE COMPLEMENT, and it is deliberately stated WITHOUT reference to the composed
     // command: it is a claim about git, and it must hold whichever base the workflow

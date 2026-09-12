@@ -20,7 +20,7 @@ These are the items the harness-orchestrator cutover is gated on.
 
 - [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) — Carry a dead run's checkpoint and ralph round into its retry
 - [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) — Emit a terminal cause on every terminal path, and report it
-- [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) — Rev-range base: pinned sha, origin/<base>, bare only when no remote
+- [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) — Rev-range base: pinned sha, origin/<base> when it resolves, else bare
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`a-deploy-must-not-kill-builds-in-flight`](a-deploy-must-not-kill-builds-in-flight.md) — Stop a deploy from killing the builds still in flight
 
@@ -39,7 +39,7 @@ branch is cut (standard §3.1, §3.2).
 |---|---|---|---|
 | [`a-retry-must-resume-from-the-checkpoint`](a-retry-must-resume-from-the-checkpoint.md) | Carry a dead run's checkpoint and ralph round into its retry | P0 | yes |
 | [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) | Emit a terminal cause on every terminal path, and report it | P0 | yes |
-| [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: pinned sha, origin/<base>, bare only when no remote | P0 | yes |
+| [`resolve-the-review-diff-base`](resolve-the-review-diff-base.md) | Rev-range base: pinned sha, origin/<base> when it resolves, else bare | P0 | yes |
 | [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) | Stop and escalate a review loop instead of iterating on a bad plan | P0 | yes |
 | [`publish-only-resume-without-re-running-forge`](publish-only-resume-without-re-running-forge.md) | Re-publish a built commit after a credential blink, without rebuilding | P1 | — |
 | [`surface-infra-retries-to-the-owner`](surface-infra-retries-to-the-owner.md) | Surface infrastructure retries to the owner | P2 | — |
