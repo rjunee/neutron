@@ -30,8 +30,11 @@ above rather than by re-reading the sentence.** Each is small; each would have m
   now throws `TridentOptionShapedBaseError`, and every consumer carries `--end-of-options` as
   defence in depth. Verified by `trident/diff-base-option-shaped.test.ts` per command family,
   with three mutations;
-- an **empty** base name — `diffBaseRef` returns the input untouched ahead of the flag entirely,
-  so the "resolves / does not resolve" framing does not apply to it at all;
+- an **empty** base name — **REFUSED** (`TridentEmptyBaseError`), so the
+  "resolves / does not resolve" framing does not apply to it at all. This bullet said
+  "returns the input untouched" for two rounds while the acceptance below required refusal;
+  `..<head>` is not an error — `git diff --name-only` exits 0 with no output — so returning
+  it produced a plausible wrong answer;
 - `codex-review.sh`'s **standalone** promotion is *stricter still*: it additionally requires
   `refs/heads/<x>` to resolve and `refs/tags/<x>` not to, so it promotes only a proven,
   unambiguous local branch name. The trident path never reaches it (it passes an already-resolved
@@ -140,8 +143,11 @@ The resolution order is evidence-first, and is the same at every site:
       not a hard-wired preference for `origin/<base>`. Verified by "A PINNED BASE THAT IS THE
       STALE SHA IS STILL HONOURED" — which a fix that unconditionally reached for
       `origin/<base>` would fail while passing every other stale-case test.
-- [ ] **Local mode gets the SAME resolution as pr mode, and the bare name is reached only with
-      no remote.** The fallback was `merge_mode`-keyed, which is the last place this defect
+- [ ] **Local mode gets the SAME resolution as pr mode, and the bare name is reached only when
+      `refs/remotes/origin/<base>` does not resolve** — not "only with no remote", which this
+      criterion carried after the condition it names had already been narrowed, and which its
+      own sibling criterion two entries down contradicts. The fallback was `merge_mode`-keyed,
+      which is the last place this defect
       lived: local mode against a stale `main` produced five files where the branch changed one.
       Verified by "LOCAL MODE, unpinned, WITH a remote: same stale ref, same ONE file", which
       asserts the resolved base AND the file list AND the five-file contrast measured from git in
@@ -160,6 +166,21 @@ The resolution order is evidence-first, and is the same at every site:
       refusal belongs on the arm that reads the name; a module-scope check failed runs whose
       pin meant the name was never used. Verified by "ORDER: a valid PIN wins before the name
       is examined — in BOTH implementations", which asserts the two together in one test.
+- [ ] **A valid pin short-circuits the probe — asserted as an ABSENT side effect.** The
+      third parameter of `diffBaseRef` is a THUNK, not a boolean, because every caller of the
+      boolean form wrote `diffBaseRef(base, sha, await originBaseResolves(…))` and JavaScript
+      evaluates that argument first: the probe ran on every pinned dispatch, and a pinned
+      dispatch failed whenever the probe did, having already held everything it needed. The
+      result stayed correct, so no value assertion could see it. Verified twice, because
+      neither view suffices alone — a unit test cannot see what the caller does and an
+      integration test cannot see what the function does: "THE PROBE IS NOT EVEN CALLED when
+      the pin is valid" (a spy thunk with zero calls, plus the complement that an unpinned
+      call issues exactly one) and "A PINNED dispatch issues NO origin-ref probe" in
+      `trident/orchestrator.test.ts` (no probe argv on the host, with a positive control that
+      the asserted argv is the one `originBaseResolves` actually builds). Mutation: restoring
+      the eager `await` in the caller reds the integration one. **A function cannot enforce an
+      ordering over inputs it is handed already-computed** — so the ordering is a property of
+      the signature, and the eager form no longer type-checks.
 - [ ] **An empty base is refused at the binding.** `..<head>` is not an error — measured,
       `git diff --name-only` exits 0 with no output and `git rev-list --count` exits 0
       printing `0` — so an empty base yields a plausible wrong answer, not a failure. The

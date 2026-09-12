@@ -35,7 +35,7 @@ import {
   type MutationGateOutcome,
 } from './mutation-prover.ts'
 import { mutationClaimArtifactPath } from './mutation-claim-artifact.ts'
-import { diffBaseRef, MAX_CONFLICT_ROUNDS, runWorktreePath } from './merge.ts'
+import { diffBaseRef, MAX_CONFLICT_ROUNDS, originBaseResolves, runWorktreePath } from './merge.ts'
 import { isTerminalPhase } from './state-machine.ts'
 import { TridentRunStore, type MergeMode, type TridentRun } from './store.ts'
 import { TridentTickLoop, type TridentTerminalHook } from './tick.ts'
@@ -3127,6 +3127,52 @@ describe('orchestrator — the committed mutation nomination reaches the gate', 
       return { ok: true, reason: 'spy accepted the nominated claim', exempt: false, evidence: null }
     }
   }
+
+  /**
+   * THE ORDERING, SEEN FROM OUTSIDE `diffBaseRef` (#546 round eleven).
+   *
+   * `resolvedDiffBase` used to compute the origin-ref probe in the ARGUMENT POSITION —
+   * `diffBaseRef(base, run.base_sha, await originBaseResolves(…))` — and JavaScript
+   * evaluates that before the function can return the pin. So the probe ran on every
+   * pinned dispatch, and a pinned dispatch failed whenever the probe did, having already
+   * held everything it needed.
+   *
+   * The RESULT was correct throughout, so no value assertion could see it. An ordering
+   * over already-computed inputs is visible from outside only as a SIDE EFFECT THAT DID
+   * NOT HAPPEN — so this asserts the absence of the probe argv on the host, which is the
+   * only view that could have caught it. The unit-level twin (a spy thunk with zero calls)
+   * is in `diff-base-option-shaped.test.ts`; both are needed, because the unit test cannot
+   * see what the caller does and this one cannot see what the function does.
+   */
+  const ORIGIN_PROBE = (base: string): string =>
+    `git -C /repo rev-parse --verify --quiet refs/remotes/origin/${base}^{commit}`
+
+  test('A PINNED dispatch issues NO origin-ref probe — and an unpinned one does', async () => {
+    const seen: unknown[] = []
+    const h = buildHarness({
+      prove_mutation: claimSpyGate(seen),
+      plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
+      merge_deps: {},
+      hostResponder: serveArtifact(JSON.stringify(ARTIFACT_CLAIM)),
+    })
+    const run = await createRun()
+    expect((await runToTerminal(h, run.id)).phase).toBe('done')
+
+    // The run carries a pin (`driftFreeHost` answers the launch rev-parse with
+    // NO_DRIFT_SHA), and every consumer took it — so the probe was never needed.
+    const joined = h.hostCalls.map((c) => c.join(' '))
+    expect(joined.filter((c) => c === ORIGIN_PROBE('main'))).toEqual([])
+    // POSITIVE CONTROL that the argv shape above is the one `originBaseResolves` builds —
+    // otherwise the assertion is about a string nothing ever emits. Asserted by calling
+    // the real probe against the same recording host.
+    const calls: string[][] = []
+    const recording = async (argv: string[]): Promise<HostCommandResult> => {
+      calls.push(argv)
+      return ok(NO_DRIFT_SHA)
+    }
+    expect(await originBaseResolves(recording, '/repo', 'main')).toBe(true)
+    expect(calls.map((c) => c.join(' '))).toEqual([ORIGIN_PROBE('main')])
+  })
 
   test('a null in-result claim falls back to the COMMITTED nomination at the reviewed OID — and the gate receives it', async () => {
     const seen: unknown[] = []
@@ -6687,7 +6733,7 @@ describe('orchestrator — TEST EXECUTION strategy composition at fire time', ()
     // `false` = "origin/<base> does not resolve", which is now the ONLY thing that
     // selects the bare name. It used to be `'local'`, keyed on the merge mode — the
     // defect the fifth review round found.
-    const resolvedBase = diffBaseRef(marker, NO_DRIFT_SHA, false)
+    const resolvedBase = await diffBaseRef(marker, NO_DRIFT_SHA, async () => false)
     expect(resolvedBase).toBe(NO_DRIFT_SHA)
     const detail = buildTestStrategyDetail(repo, {
       cores: budget.cores,

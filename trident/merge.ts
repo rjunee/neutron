@@ -239,16 +239,32 @@ export async function detectBaseBranch(
  * branch changed ONE — the same inflation as pr mode. So the question is now "does the
  * ref resolve", asked of the repository, and never inferred from the merge mode.
  *
- * STILL PURE — no `run_host`, no probe. The probe is `originBaseResolves` below, so a
- * caller that already knows the answer does not pay for it twice and this function stays
- * trivially testable. `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base
- * bypasses this.
+ * THE PROBE ARRIVES AS A THUNK, AND THAT IS THE SIGNATURE DOING THE WORK.
+ *
+ * The third parameter used to be a `boolean`. Every caller therefore wrote
+ * `diffBaseRef(base, sha, await originBaseResolves(...))` — and JavaScript evaluates that
+ * argument BEFORE this function runs, so the probe fired on every dispatch INCLUDING the
+ * pinned ones, where the pin means the name is never read. The answer stayed correct,
+ * which is why it survived; what it cost is that a pinned run did work it did not need,
+ * and — the part that matters — A PINNED DISPATCH FAILED IF THE PROBE FAILED, having
+ * already held everything it required. The pin exists precisely so a run does not depend
+ * on ref resolution.
+ *
+ * This is the round-eight ordering defect one layer out: there the `.mjs` binding
+ * validated the name before consulting the pin; here the CALLER computed the probe before
+ * the pin could be consulted. A function cannot enforce an ordering over inputs it is
+ * handed already-computed — so the ordering is now a property of the SIGNATURE. The thunk
+ * is invoked on exactly the arm that needs it, and the eager-boolean form no longer
+ * exists to be written. Same principle as the rest of this branch: make the wrong shape
+ * unconstructable rather than remembered.
+ *
+ * `scripts/ci/diff-base-check.mjs` fails CI on a rev-range whose base bypasses this.
  */
-export function diffBaseRef(
+export async function diffBaseRef(
   base_branch: string,
   base_sha: string | null | undefined,
-  origin_base_resolves: boolean,
-): string {
+  origin_base_resolves: () => Promise<boolean>,
+): Promise<string> {
   if (typeof base_sha === 'string' && /^[0-9a-f]{40}$/.test(base_sha.trim().toLowerCase())) {
     return base_sha.trim().toLowerCase()
   }
@@ -307,7 +323,9 @@ export function diffBaseRef(
   if (name.startsWith('-')) {
     throw new TridentOptionShapedBaseError(name)
   }
-  return origin_base_resolves ? `origin/${name}` : name
+  // THE PROBE IS INVOKED HERE AND NOWHERE ELSE — after the pin, after both refusals, on
+  // the one arm whose answer depends on it.
+  return (await origin_base_resolves()) ? `origin/${name}` : name
 }
 
 /**
@@ -346,7 +364,8 @@ export class TridentOptionShapedBaseError extends Error {
  * Does `refs/remotes/origin/<base>` name a commit in this repository?
  *
  * The one input `diffBaseRef` cannot derive from what a caller already holds, split out
- * so that function stays pure. Fail-closed toward the BARE NAME: a probe that cannot run
+ * so `diffBaseRef` holds only the ORDER and never the I/O — it invokes this through a thunk
+ * on the one arm that needs an answer. Fail-closed toward the BARE NAME: a probe that cannot run
  * answers false, which yields the behaviour this repository had before #546 rather than a
  * range against a ref that may not exist — an unresolvable base makes `git diff` fail and
  * the caller reports "could not be read", which is louder but wrong more often.

@@ -68,8 +68,13 @@ carried by the STRUCTURE, not by the gate. Stated in the order of how much it pr
   the forge contract's reviewer diff, the planner's resume inspection hint, the resume
   diff, and the base argv of both codex wrappers. Order: the launch-pinned sha, else
   `origin/<base>` in pr mode, else the bare name in local mode.
-- `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, origin_base_resolves)`, exported and
-  pure, next to `detectBaseBranch` which produces the name it refuses to let through.
+- `trident/merge.ts` — `diffBaseRef(base_branch, base_sha, origin_base_resolves)` where the
+  third argument is a **thunk** `() => Promise<boolean>` invoked only on the arm that needs
+  it, next to `detectBaseBranch` which produces the name it refuses to let through. It was
+  a plain `boolean` and "pure" for most of this branch; round eleven found that every caller
+  then wrote `await originBaseResolves(…)` in the argument position, which JavaScript
+  evaluates *before* the pin can be returned — so the ordering had to become a property of
+  the signature. See the round-eleven section.
   Used at every `resolveBase()`-fed range in `trident/orchestrator.ts`.
 - the shell wrappers compose **no** base at all: `trident/codex-build.sh` and
   `trident/codex-review.sh` receive a resolved ref as argv. `BASE_BRANCH` became
@@ -167,6 +172,42 @@ workflow — while the PR was `UNSTABLE`, because **CodeQL is a separate workflo
 against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
+
+### Round eleven: the caller defeated the ordering, and a rule sweep the number sweep missed
+
+**`resolvedDiffBase` computed the probe in the ARGUMENT POSITION** —
+`diffBaseRef(base, run.base_sha, await originBaseResolves(…))` — and JavaScript evaluates
+that before the function can return the pin. So the origin-ref probe fired on every pinned
+dispatch, and **a pinned dispatch failed whenever the probe failed**, having already held
+everything it needed. The pin exists precisely so a run does not depend on ref resolution.
+
+This is round eight's ordering defect one layer out: there the `.mjs` binding validated the
+name before consulting the pin; here the CALLER computed the probe before the pin could be
+consulted. **A function cannot enforce an ordering over inputs it is handed
+already-computed** — so the third parameter is now a THUNK, invoked on exactly the arm that
+needs it, and the eager-boolean form no longer type-checks. The rule stopped being something
+each caller must remember and became a property of the signature, which is this branch's
+principle applied to an ordering rather than to a value.
+
+**The test gap is the instructive half.** The result was correct throughout, so no value
+assertion could see it — and the parity tests call `diffBaseRef` directly, so the caller's
+ordering was invisible to them. An ordering over already-computed inputs is visible from
+outside only as **a side effect that did not happen**: `run_host` receives no probe argv on a
+pinned dispatch. Both views are now asserted, because neither suffices — a unit test cannot
+see what the caller does, and an integration test cannot see what the function does. Each
+carries its complement (an unpinned call issues exactly one probe) and the integration one
+carries a positive control that the argv it asserts absent is the argv `originBaseResolves`
+actually builds.
+
+**And a RULE sweep, which the round-nine NUMBER sweep did not cover.** That sweep checked
+counts, line numbers and tallies across four documents and did it thoroughly; these were
+normative sentences, a different class of claim in the same files. Two were still describing
+designs this branch replaced: the spec said an empty base is "returned untouched" while its
+own acceptance required refusal, and a criterion still said the bare fallback happens "only
+with no remote" while its sibling two entries down said otherwise. Both corrected, plus the
+purity claims this round's thunk invalidated here and in `merge.ts`. **Sweeping one class of
+claim does not sweep the others** — a document can be numerically exact and normatively
+stale at the same time.
 
 ### Round ten: a mitigation asserted instead of measured, and a lag that moved
 

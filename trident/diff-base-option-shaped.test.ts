@@ -117,6 +117,16 @@ async function workflowDiffBase(args: {
 }
 
 const GIT_ID = ['-c', 'user.name=Test Setup', '-c', 'user.email=setup@neutron.local', '-c', 'commit.gpgsign=false']
+
+/** A probe thunk that answers `value`, and records whether it was ever invoked. */
+function probe(value: boolean): (() => Promise<boolean>) & { calls: number } {
+  const fn = async (): Promise<boolean> => {
+    fn.calls += 1
+    return value
+  }
+  fn.calls = 0
+  return fn
+}
 const created: string[] = []
 afterAll(() => {
   for (const dir of created) rmSync(dir, { recursive: true, force: true })
@@ -155,15 +165,15 @@ async function seedWorld(label: string): Promise<World> {
 }
 
 describe('the BINDING refuses an option-shaped base — it is not routed past', () => {
-  test('diffBaseRef throws, whatever the probe said and whatever else is in hand', () => {
+  test('diffBaseRef throws, whatever the probe said and whatever else is in hand', async () => {
     for (const bad of ['--output=/tmp/x', '-x', '--upload-pack=touch', '  --output=/tmp/y  ']) {
       // Both probe answers, because the defect was that `false` selected the bare branch:
       // neither value may produce a returned string.
       for (const resolves of [true, false]) {
-        expect(() => diffBaseRef(bad, null, resolves)).toThrow(TridentOptionShapedBaseError)
+        await expect(diffBaseRef(bad, null, probe(resolves))).rejects.toThrow(TridentOptionShapedBaseError)
       }
       // …and a pinned sha still wins outright, since it is read before the name at all.
-      expect(diffBaseRef(bad, 'a'.repeat(40), false)).toBe('a'.repeat(40))
+      expect(await diffBaseRef(bad, 'a'.repeat(40), probe(false))).toBe('a'.repeat(40))
     }
   })
 
@@ -190,7 +200,7 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     // So it is refused at the binding — in BOTH implementations, and for whitespace too.
     for (const empty of ['', '   ', '\t']) {
       for (const resolves of [true, false]) {
-        expect(() => diffBaseRef(empty, null, resolves)).toThrow(TridentEmptyBaseError)
+        await expect(diffBaseRef(empty, null, probe(resolves))).rejects.toThrow(TridentEmptyBaseError)
       }
     }
     await expect(workflowDiffBase({ baseBranch: '', repoPath: w.repo })).rejects.toThrow(
@@ -200,7 +210,7 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     // …and a PIN still wins, because the pin is read before the name. Same ordering the
     // option-shaped case needed.
     const sha = 'e'.repeat(40)
-    expect(diffBaseRef('', sha, false)).toBe(sha)
+    expect(await diffBaseRef('', sha, probe(false))).toBe(sha)
     expect(await workflowDiffBase({ baseBranch: '', baseSha: sha, repoPath: w.repo })).toBe(`'${sha}'`)
   })
 
@@ -218,21 +228,51 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
     // Asserted in BOTH implementations in one test, because covering only `diffBaseRef`
     // is precisely how the divergence survived.
     const sha = 'b'.repeat(40)
-    expect(diffBaseRef('--output=/tmp/x', sha, false)).toBe(sha)
+    expect(await diffBaseRef('--output=/tmp/x', sha, probe(false))).toBe(sha)
     expect(await workflowDiffBase({ baseBranch: '--output=/tmp/x', baseSha: sha })).toBe(`'${sha}'`)
   })
 
   test('ORDER: with NO pin, both refuse the same name', async () => {
-    expect(() => diffBaseRef('--output=/tmp/x', null, false)).toThrow(TridentOptionShapedBaseError)
+    await expect(diffBaseRef('--output=/tmp/x', null, probe(false))).rejects.toThrow(
+      TridentOptionShapedBaseError,
+    )
     await expect(workflowDiffBase({ baseBranch: '--output=/tmp/x' })).rejects.toThrow(
       /would read as an option, not a revision/,
     )
   })
 
-  test('THE COMPLEMENT: an ordinary name is unaffected in both directions', () => {
-    expect(diffBaseRef('main', null, true)).toBe('origin/main')
-    expect(diffBaseRef('main', null, false)).toBe('main')
-    expect(diffBaseRef('release/1.x', null, true)).toBe('origin/release/1.x')
+  test('THE COMPLEMENT: an ordinary name is unaffected in both directions', async () => {
+    expect(await diffBaseRef('main', null, probe(true))).toBe('origin/main')
+    expect(await diffBaseRef('main', null, probe(false))).toBe('main')
+    expect(await diffBaseRef('release/1.x', null, probe(true))).toBe('origin/release/1.x')
+  })
+
+  test('THE PROBE IS NOT EVEN CALLED when the pin is valid — asserted as an ABSENT side effect', async () => {
+    // THE ROUND-ELEVEN DEFECT, one layer out from round eight's. The third parameter was a
+    // `boolean`, so every caller wrote `diffBaseRef(base, sha, await originBaseResolves(…))`
+    // and JavaScript evaluated that BEFORE the function could return the pin: the probe
+    // fired on every pinned dispatch, and a pinned dispatch failed whenever the probe did —
+    // having already held everything it needed.
+    //
+    // The result stayed correct, so no value assertion could see it. An ordering over
+    // inputs is only visible from outside as a side effect that did NOT happen, which is
+    // what these two assert.
+    const pinned = probe(true)
+    expect(await diffBaseRef('main', 'd'.repeat(40), pinned)).toBe('d'.repeat(40))
+    expect(pinned.calls).toBe(0)
+
+    // …and both refusals also short-circuit it: a name that cannot be a revision is not
+    // worth a subprocess.
+    for (const bad of ['', '--output=/tmp/x']) {
+      const skipped = probe(true)
+      await expect(diffBaseRef(bad, null, skipped)).rejects.toThrow()
+      expect({ bad, calls: skipped.calls }).toEqual({ bad, calls: 0 })
+    }
+
+    // THE COMPLEMENT: with no pin and a usable name, the probe IS issued — exactly once.
+    const used = probe(false)
+    expect(await diffBaseRef('main', null, used)).toBe('main')
+    expect(used.calls).toBe(1)
   })
 
   test('the probe still declines to spend a subprocess on such a name', async () => {
@@ -266,7 +306,7 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     w: World,
     row: { baseBranch: string; baseSha?: string; originResolves: boolean; mergeMode?: 'pr' | 'local' },
   ): Promise<{ ts: string; mjs: string }> {
-    const ts = diffBaseRef(row.baseBranch, row.baseSha ?? null, row.originResolves)
+    const ts = await diffBaseRef(row.baseBranch, row.baseSha ?? null, probe(row.originResolves))
     const composed = await workflowDiffBase({
       baseBranch: row.baseBranch,
       repoPath: w.repo,
@@ -317,7 +357,7 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     // it holds constant, and the axis you hold constant is usually the one you did not
     // notice you were choosing.
     const w = await seedWorld('parity-empty')
-    expect(() => diffBaseRef('', null, false)).toThrow(TridentEmptyBaseError)
+    await expect(diffBaseRef('', null, probe(false))).rejects.toThrow(TridentEmptyBaseError)
     await expect(workflowDiffBase({ baseBranch: '', repoPath: w.repo })).rejects.toThrow(
       /refusing an empty base branch/,
     )
@@ -325,7 +365,9 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
 
   test('unpinned, option-shaped: both REFUSE rather than answering', async () => {
     const w = await seedWorld('parity-refuse')
-    expect(() => diffBaseRef('--output=/tmp/x', null, false)).toThrow(TridentOptionShapedBaseError)
+    await expect(diffBaseRef('--output=/tmp/x', null, probe(false))).rejects.toThrow(
+      TridentOptionShapedBaseError,
+    )
     await expect(workflowDiffBase({ baseBranch: '--output=/tmp/x', repoPath: w.repo })).rejects.toThrow(
       /would read as an option, not a revision/,
     )

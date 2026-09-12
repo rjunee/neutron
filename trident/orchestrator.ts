@@ -2338,7 +2338,10 @@ export function buildTridentOrchestrator(
    */
   async function resolvedDiffBase(run: TridentRun): Promise<string> {
     const base = await resolveBase(run)
-    return diffBaseRef(base, run.base_sha, await originBaseResolves(opts.run_host, run.repo_path, base))
+    // THE PROBE IS PASSED, NOT CALLED. `await originBaseResolves(...)` in the argument
+    // position ran it before `diffBaseRef` could return the pin — correct answer, wasted
+    // work, and a pinned dispatch that failed whenever the probe did.
+    return diffBaseRef(base, run.base_sha, () => originBaseResolves(opts.run_host, run.repo_path, base))
   }
 
   /** Best-effort probe for an existing PR on the run's branch (idempotent resume
@@ -4405,10 +4408,8 @@ export function buildTridentOrchestrator(
         // `git diff --name-only <base>` against its WORKING TREE to pick the stage-1
         // test set; a stale `refs/heads/main` adds every file the base moved past to
         // that set, which is the wasteful direction of the same defect.
-        base_branch: diffBaseRef(
-          base,
-          base_sha,
-          await originBaseResolves(opts.run_host, pinnedRun.repo_path, base),
+        base_branch: await diffBaseRef(base, base_sha, () =>
+          originBaseResolves(opts.run_host, pinnedRun.repo_path, base),
         ),
       })
       test_strategy = detail.block
