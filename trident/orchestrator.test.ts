@@ -4356,8 +4356,12 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       expect(final.phase).toBe('failed')
       expect(final.inner_verdict).toBe('REVIEW_NOT_RUN')
       expect(final.inner_checkpoint).not.toBeNull() // the precondition for arm 1, asserted
-      expect(final.failure_reason ?? '').toContain('A resumable build IS on this row')
+      expect(final.failure_reason ?? '').toContain('inner_checkpoint ')
+      expect(final.failure_reason ?? '').toContain('are not recorded here')
       expect(final.failure_reason ?? '').not.toContain('without converging')
+      // No resumability claim: `reviewCapableCheckpoint` declines some checkpoint names
+      // and this arm does not consult it, so it must not assert what it cannot check.
+      expect(final.failure_reason ?? '').not.toContain('resumable build IS')
       // This path's OWN fact — how much work is left — survives the extraction. The state
       // machine has no such number, so it is the half a shared helper could quietly drop.
       expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
@@ -4385,7 +4389,7 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
       // how the divergence survived, and the failure mode of every extraction (the helper
       // exists; one call site does not use it).
       expect(final.failure_reason ?? '').toContain('no build of its own on this run')
-      expect(final.failure_reason ?? '').not.toContain('A resumable build IS on this row')
+      expect(final.failure_reason ?? '').not.toContain('are not recorded here')
       // The classification token is unchanged on both arms, so nothing downstream shifts.
       expect(final.failure_reason ?? '').toContain('max_ralph_rounds')
       expect(final.failure_reason ?? '').toContain('4 task(s) still unbuilt')
@@ -4475,8 +4479,11 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     expect(final.failure_reason ?? '').not.toContain('without converging')
     // What it MAY say is what the row shows: a resumable build exists, and who made it is
     // not recorded — which is true whether the checkpoint was inherited or produced.
-    expect(final.failure_reason ?? '').toContain('A resumable build IS on this row')
-    expect(final.failure_reason ?? '').toContain('does not record WHO produced it')
+    // The weakest claim: the inherited checkpoint's NAME, and an explicit statement that
+    // resumability and authorship are not recorded. Nothing asserted that this run built.
+    expect(final.failure_reason ?? '').toContain(`inner_checkpoint '${CP}'`)
+    expect(final.failure_reason ?? '').toContain('are not recorded here')
+    expect(final.failure_reason ?? '').not.toContain('resumable build IS')
   })
 
   test('the intermediate re-fire never leaves a harvestable inner_result behind (no re-harvest loop)', async () => {

@@ -202,6 +202,42 @@ database, and the three sqlite cannot store are covered through the real dispatc
 chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
 duplicated, and not pretending the schema is weaker than it is.
 
+**FIVE ROUNDS, FIVE PROXIES, EACH NARROWER AND EACH STILL AN OVERCLAIM. THE STOPPING
+POINT IS THE WEAKEST STATEMENT THE DATA SUPPORTS, NOT THE MOST INFORMATIVE ONE THAT SEEMS
+TRUE.** The sequence, in order: *this run converged* → *it inherited a spent budget* →
+*it built something* → *a resumable build exists* → *a checkpoint with this name is on
+the row*. The fourth one looked unimpeachable and was false for `ralph-task-built`, the
+checkpoint the ralph handoff itself writes, which `reviewCapableCheckpoint` declines — so
+the sentence claimed resumability for the one name this same change classifies as
+unresumable. Each round the wording reached for a fact the row does not carry, and each
+round produced a narrower fact it still does not carry.
+
+The final version asserts only the name and its presence, and says outright that
+resumability and authorship are not recorded here. Splitting the arm on
+`reviewCapableCheckpoint` would have bought a more informative sentence for the price of
+a fifth discriminator on a string with NO PRODUCTION READER — `delivery.ts` never parses
+it and production routes on `phase: 'failed'`, which was this lane's own earlier finding
+— so it was declined. A claim that cannot be wrong is worth more here than one that is
+usually right.
+
+**FOUR STALE COMMENTS ON ONE CHANGE, ALL THE SAME KIND: TRUE WHEN WRITTEN, NEVER RE-READ
+WHEN THE CODE MOVED.** `ralph-budget.ts`'s header asserting the card-level bound this
+record disproves; a comment crediting `delivery.ts` with a dependency it does not have;
+`run-disposition.ts` scoping the carry to mid-budget runs and promising an exhausted retry
+"another full budget", both of which stopped being true in the same patch that decoupled
+the budget from the commit seed; and `store.ts` describing unreadable counters as
+normalising to `0` in the lines immediately above the throw that removed exactly that
+fail-open behaviour. The last is the dangerous kind — a reader trusting it would restore
+the normalisation believing the code already did that.
+
+A sweep of every comment in the touched files against the code beneath it then found a
+fifth, and the worst of them: when the reason string moved to a shared owner, its ENTIRE
+derivation was left behind in `state-machine.ts`, where it went stale within one round —
+still describing arm 1 as "this run built something … unchanged", still crediting
+`delivery.ts`. A duplicated RATIONALE is the same defect as a duplicated RULE: it drifts,
+and it drifts silently because nothing compiles it. What remains at that call site is the
+one local fact the function contributes and a pointer to the owner.
+
 **FOUR ROUNDS ON ONE SENTENCE, AND THE LAST PROXY WAS IN THE ARM THAT WAS NEVER IN
 DISPUTE.** Arm collapse, cap-versus-counter, the inheritance claim — and then arm 1,
 which nobody had argued about, turned out to rest on the same kind of proxy as the claim

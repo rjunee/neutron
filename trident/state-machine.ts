@@ -214,93 +214,20 @@ function enterRalphPlan(
 ): { phase: TridentPhase; round: number; ralph_round: number; failure_reason: string | null; note: string } {
   const nextRalphRound = run.ralph_round + 1
   if (nextRalphRound > run.max_ralph_rounds) {
-    // WHY THE REASON IS TWO REASONS (#519, adversarial review item 3). Since a
-    // re-dispatch can INHERIT a card's spent Ralph budget, a row can reach this branch
-    // having run no iteration of its own — the measured case: a prior at 20/20 whose
-    // spec doc was edited past the slug's 35th character produces a fresh `forge-init`
-    // row at 20/20 with no checkpoint, which fails here. Calling that "without
-    // converging" is false: nothing was attempted, so nothing failed to converge, and it
-    // sends whoever reads the row hunting a planner problem that does not exist. A
-    // terminal reason that misdescribes what happened is worse than a vague one.
-    //
-    // AND THE FIRST FIX FOR IT WAS ALSO A LIE, for the reason this whole lane keeps
-    // relearning: it keyed the wording on a PROXY. The discriminator was the same
-    // `inner_checkpoint === null` used below, but the CLAIM was "it inherited a spent
-    // budget from an earlier run of this card" — and checkpoint-is-null does not mean
-    // inheritance happened. Repro (final gate): a BRAND-NEW Ralph run created with
-    // `max_ralph_rounds: 0`, transitioned from `forge-init`, has a null checkpoint and
-    // round 0 and was reported as inheriting from a predecessor THAT DOES NOT EXIST.
-    // That is worse than vague wording, not better: it sends whoever reads the card
-    // hunting for an earlier run rather than at the data in front of them.
-    //
-    // SO THE CLAIM IS NARROWED TO WHAT THE ROW ACTUALLY SHOWS, and provenance is not
-    // claimed at all. `inner_checkpoint === null` is kept as the discriminator because
-    // for the thing it is now used to say — "this run has no build of its own" — it is
-    // a FACT about this row rather than an inference: every Ralph iteration's checkpoint
-    // is written by the workflow, so a null one means this row completed no phase.
-    //
-    // WHY NOT RECORD PROVENANCE INSTEAD, which would let the reason say more. Because
-    // every signal available here is another proxy, and one more proxy is the one thing
-    // this must not be. `ralph_round > 0` looks like it would work — `create` writes 0
-    // for every row that inherits nothing — but THIS function advances the counter
-    // without writing a checkpoint, so a run that legitimately spent its rounds through
-    // the phase graph reaches the cap at `ralph_round > 0` with a null checkpoint and
-    // would be mislabelled in exactly the same way. Real provenance means a new column
-    // and a migration, and it buys a better sentence rather than a better decision; the
-    // honest cheap answer is to stop making the claim. The two possibilities are NAMED
-    // as possibilities, with the row's inability to tell them apart stated, which is
-    // strictly more useful than vagueness and strictly more honest than picking one.
-    //
-    // The `max_ralph_rounds` token is present in both spellings — `delivery.ts` and
-    // several tests key on it — so only the explanation changes, never the
-    // classification.
     // THE SENTENCE IS OWNED BY `ralphCapFailureReason` (ralph-budget.ts), NOT WRITTEN
-    // HERE (final gate). It used to be written here, and `refireNextRalphTask`
-    // (orchestrator.ts) went on emitting "without converging" unconditionally — the same
-    // rule applied to the site in front of me and not to its sibling, for the fourth time
-    // on this change. The derivation of the three arms, and of why there are three rather
-    // than four, lives with the function. What remains here is the call.
+    // HERE — and this comment is deliberately SHORT because the last four versions of it
+    // were not. When the sentence moved to a shared owner, its whole derivation was left
+    // behind here and went stale within one round: it still described arm 1 as "this run
+    // built something ... 'without converging' is accurate for it, unchanged", which the
+    // very next fix made false, and it still credited `delivery.ts` with reading the
+    // string, which it never has. A duplicated rationale is the same defect as a
+    // duplicated rule — it drifts, and it drifts silently because nothing compiles it.
     //
-    // THREE BRANCHES, BECAUSE THE ROW DISTINGUISHES THREE THINGS — and the previous
-    // revision collapsed two of them (final gate, round three). Having correctly removed
-    // a claim that was NOT determinable (inheritance), it retreated to the most general
-    // wording available and thereby asserted something FALSE about the cases that were
-    // never ambiguous: a brand-new run configured `max_ralph_rounds: 0` was told "the
-    // budget was spent before this run began" when nothing had ever been allocated, let
-    // alone spent. Keying on a proxy asserts more than you know; retreating to the most
-    // general wording asserts something false about the unambiguous cases. Same error,
-    // opposite sides: the message not matching what the row establishes.
-    //
-    // WHAT IS REACHABLE HERE, derived rather than assumed. The refusal fires iff
-    // `ralph_round + 1 > max_ralph_rounds`, i.e. `ralph_round >= max_ralph_rounds`.
-    // `max_ralph_rounds` is written ONLY by `TridentRunStore.create` — it is absent from
-    // `TridentRunUpdate`, so nothing patches it — and `create` refuses any cap that is
-    // not a non-negative safe integer (`isRalphCap`). So `cap >= 0` always, and
-    // `ralph_round === 0` at this point IMPLIES `cap === 0`. The fourth combination one
-    // might expect — round 0 under a positive cap — cannot reach this branch at all,
-    // which is why there are three arms and not four.
-    //
-    //   (1) A CHECKPOINT EXISTS → this run built something and then ran out. "Without
-    //       converging" is accurate for it, and it is the original wording, unchanged.
-    //   (2) NO CHECKPOINT AND ralph_round === 0 → therefore cap 0: no Ralph iteration was
-    //       ever authorised. Nothing was spent, by this run or any other. Determinable
-    //       from the row, so the message says it plainly and claims nothing else.
-    //   (3) NO CHECKPOINT AND ralph_round > 0 → the budget HAS been consumed, and that
-    //       much is certain whoever consumed it. WHO is not: this row may have advanced
-    //       the counter itself through the phase graph (this function bumps it without
-    //       writing a checkpoint) or carried the count in from an earlier run of the
-    //       card. Only THAT question needs the two-possibility wording, and the row's
-    //       inability to answer it is stated rather than resolved by guessing.
-    //
-    // THE `max_ralph_rounds` TOKEN APPEARS IN ALL THREE, so the classification is
-    // unchanged and only the explanation differs. Who actually depends on that, named
-    // rather than assumed (an earlier draft of this line credited `delivery.ts`, which
-    // does not mention `max_ralph_rounds` anywhere — an asserted consumer that does not
-    // exist, found by re-reading the claims in this file against the code behind them):
-    // `ported-fixes.test.ts`, `state-machine.test.ts` and `orchestrator.test.ts` all
-    // assert the token out of `failure_reason`. No PRODUCTION reader parses it today;
-    // `phase: 'failed'` is what production routes on, and that is identical on all three
-    // arms.
+    // What belongs here is the LOCAL fact this function contributes, and nothing else:
+    // the refusal fires iff `ralph_round + 1 > max_ralph_rounds`, so at this point
+    // `ralph_round >= max_ralph_rounds`. Everything about WHICH arm that produces, why
+    // there are three and not four, and what each may and may not claim, lives with the
+    // function that writes it.
     const failure_reason = ralphCapFailureReason(run)
     return {
       phase: 'failed',

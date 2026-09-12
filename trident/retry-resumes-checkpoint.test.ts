@@ -1449,11 +1449,31 @@ describe('THE TERMINAL REASON MUST SAY WHICH FAILURE HAPPENED', () => {
       {},
     )
     expect(ran.phase).toBe('failed')
-    expect(ran.failure_reason).toContain('A resumable build IS on this row')
+    // The WEAKEST TRUE STATEMENT: the checkpoint's NAME is present, and nothing is
+    // claimed about it. `ralph-task-built` is the case that makes the difference —
+    // `reviewCapableCheckpoint` (run-disposition.ts) DECLINES it, so the previous
+    // wording's "a resumable build IS on this row" was flatly false for exactly the
+    // checkpoint the ralph handoff writes. Fifth proxy on one sentence.
+    expect(ran.failure_reason).toContain("inner_checkpoint 'ralph-task-built'")
     expect(ran.failure_reason).not.toContain('no build of its own')
-    // AND IT CLAIMS NO AUTHORSHIP, for the same reason arm 3 claims none: the row does
-    // not record it. RED-mutation: restore "without converging" to arm 1.
+    // AND IT CLAIMS NOTHING ELSE: not authorship, not resumability, not convergence.
+    // RED-mutation: restore any of the five overclaims to arm 1.
     expect(ran.failure_reason).not.toContain('without converging')
+    expect(ran.failure_reason).not.toContain('resumable build IS')
+    expect(ran.failure_reason).not.toContain('inherited')
+    // …and it says plainly that it does not know, which is the load-bearing half.
+    expect(ran.failure_reason).toContain('are not recorded here')
+
+    // THE REVIEW-CAPABLE NAME TAKES THE SAME ARM AND THE SAME WORDING — the boundary the
+    // old claim stepped over. Both names reach arm 1; neither gets a resumability claim,
+    // so the arm needs no fifth discriminator.
+    const reviewable = computeTransition(
+      { ...row, phase: 'ralph-task', inner_checkpoint: 'fix-round-3' },
+      {},
+    )
+    expect(reviewable.failure_reason).toContain("inner_checkpoint 'fix-round-3'")
+    expect(reviewable.failure_reason).toContain('are not recorded here')
+    expect(reviewable.failure_reason).not.toContain('resumable build IS')
   })
 
   test('A BRAND-NEW run with NO budget allocated is told exactly that — branch 2 of 3', async () => {

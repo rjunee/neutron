@@ -698,10 +698,18 @@ export class TridentRunStore {
     // adopted and refuses only a NEW planning iteration. Clamping was not an option
     // either: it manufactures budget out of a number nobody asked for.
     //
-    // Anything that is not a positive safe integer reads as 0 rather than throwing:
-    // `undefined` is the shape every existing caller passes, and a garbled number is
-    // the fresh-budget case, not a reason to lose a build. `carryableRalphRound` is
-    // the same normaliser the producer applies — one predicate, both places.
+    // ABSENT reads as 0 — `undefined`/`null` is the shape every existing caller passes,
+    // and a fresh row has spent nothing. PRESENT-BUT-UNREADABLE THROWS
+    // (`TridentInvalidRalphRoundError`, below): there is no normalisation of a counter
+    // that is not MORE permissive than the truth, because a counter quietly read as 0
+    // authorises the card's entire budget. `carryableRalphRound` is the same three-way
+    // reader the producer applies — one predicate, both places.
+    //
+    // AN EARLIER VERSION OF THIS COMMENT SAID THE OPPOSITE — "anything that is not a
+    // positive safe integer reads as 0 rather than throwing" — which described the
+    // fail-open behaviour this patch exists to remove, sitting immediately above the
+    // throw that removed it. That is the dangerous kind of stale comment: a reader
+    // trusting it would restore the normalisation believing the code already did that.
     // ABSENT GETS THE DEFAULT; PRESENT-BUT-UNREADABLE IS REFUSED (final review round).
     // The `??` alone was correct for `undefined` and silently wrong for every other
     // non-cap: `NaN`, a negative and a fractional value are not nullish, so they were

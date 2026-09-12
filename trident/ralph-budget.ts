@@ -198,15 +198,24 @@ export function carriedRalphCap(prior_cap: unknown, dispatch_cap: unknown): numb
  * `max_ralph_rounds === 0`, and round 0 under a positive cap cannot reach this code at
  * all.
  *
- *   1. A CHECKPOINT EXISTS — so a RESUMABLE BUILD is on this row. Note what this does
- *      NOT say: that THIS run produced it. The dispatch chokepoint COPIES a prior run's
- *      checkpoint onto the new row (`board-dispatch.ts`, the salvage-resume seed), so a
- *      non-null checkpoint is a proxy for authorship and not proof of it — a re-dispatch
- *      of a linked prior at its cap arrives here carrying `fix-round-3` having run no
- *      Ralph iteration at all, and the original wording called that "without
- *      converging". Authorship needs provenance this row does not record, exactly as it
- *      does for arm 3; the difference between the arms is whether a build EXISTS, which
- *      is knowable, not who made it, which is not.
+ *   1. A CHECKPOINT EXISTS ON THIS ROW. That is the whole claim — the name, and that it
+ *      is present. NOT that this run produced it (the dispatch chokepoint copies a prior
+ *      run's checkpoint forward), and NOT that it is resumable (`ralph-task-built` is a
+ *      checkpoint that `reviewCapableCheckpoint` in run-disposition.ts declines, so
+ *      "a resumable build is present" was false for it).
+ *
+ *      THIS ARM COST FIVE ROUNDS OF REVIEW, and the sequence is the lesson: "this run
+ *      converged" → "it inherited a spent budget" → "it built something" → "a resumable
+ *      build exists" → the name is present. Each was weaker than the last and each was
+ *      still stronger than the row supports. The wording kept reaching for a fact the
+ *      data does not carry. The stopping point is the WEAKEST statement the data
+ *      supports, not the most informative one that seems true.
+ *
+ *      Splitting this arm on `reviewCapableCheckpoint` would buy a more informative
+ *      sentence at the cost of a fifth discriminator on a string with NO PRODUCTION
+ *      READER — `delivery.ts` never parses it and production routes on `phase: 'failed'`
+ *      — so it was declined. The checkpoint NAME is in the message and the row is
+ *      queryable; an operator who needs more can read the row.
  *   2. NO CHECKPOINT AND `ralph_round === 0` — therefore cap 0: no iteration was ever
  *      authorised, so nothing was spent by anyone. Determinable from the row.
  *   3. NO CHECKPOINT AND `ralph_round > 0` — the budget IS consumed, whoever consumed
@@ -231,12 +240,11 @@ export function ralphCapFailureReason(row: {
     typeof row.remaining_tasks === 'number' && Number.isFinite(row.remaining_tasks)
       ? ` (${row.remaining_tasks} task(s) still unbuilt)`
       : ''
-  // A RESUMABLE BUILD IS PRESENT — not necessarily one this run made. See arm 1 above:
-  // `inner_checkpoint` is copied forward by the dispatch seed, so authorship is not
-  // readable from it and is not claimed.
-  const hasResumableBuild = row.inner_checkpoint !== null
-  if (hasResumableBuild) {
-    return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round}: the budget is exhausted, so no further iteration could start. A resumable build IS on this row (inner_checkpoint '${row.inner_checkpoint}') — but this row does not record WHO produced it, since a re-dispatch copies the prior run's checkpoint forward, so it may be this run's work or an earlier run's. Check the card's earlier runs and the configured cap${tail}`
+  // A CHECKPOINT IS PRESENT. Nothing more is claimed about it — see arm 1 above for the
+  // five successively narrower overclaims this replaced.
+  const hasCheckpoint = row.inner_checkpoint !== null
+  if (hasCheckpoint) {
+    return `Ralph loop hit max_ralph_rounds (${row.max_ralph_rounds}) with ralph_round at ${row.ralph_round}: the budget is exhausted, so no further iteration could start. This row carries inner_checkpoint '${row.inner_checkpoint}'; whether that work is resumable, and which run produced it, are not recorded here — read the row and the card's earlier runs${tail}`
   }
   if (row.ralph_round === 0) {
     return `Ralph loop cannot start: max_ralph_rounds is ${row.max_ralph_rounds}, so no Ralph iteration was ever authorised for this run. Nothing has been spent — ralph_round is 0 and this run built nothing — so there is no exhausted budget and no planner to investigate. The cap itself is the reason: raise max_ralph_rounds at dispatch if this card is meant to build${tail}`

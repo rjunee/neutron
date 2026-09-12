@@ -210,23 +210,25 @@ export function terminalRunDisposition(
  * writes 0 hands a mid-budget run a fresh count and restarts its cadence, so the
  * periodic full re-plan lands on the wrong iteration of the SAME piece of work.
  *
- * WHAT THIS DOES *NOT* FIX, measured (cross-model adversarial review, P1). It does
- * NOT make `max_ralph_rounds` a bound on the CARD, and the earlier revision of this
- * file claimed it did. A run that EXHAUSTS the loop takes
- * `refireNextRalphTask`'s cap branch, which builds its terminal row through
- * `failedRun` and therefore leaves `inner_checkpoint` at whatever the last re-fire
- * wrote — `ralph-task-built`. That name is not review-capable
- * ({@link reviewCapableCheckpoint}), so the exhausted row classifies
- * `died-before-build`, `builtButNeverReviewedSeed` declines it, and the next
- * dispatch is a fresh build. Pressing ▶ again therefore still buys another full
- * budget; it just costs one exhaustion cycle per press instead of none. The row is
- * recreated by every dispatch, so ANY per-row counter is one reset away by
- * construction — the durable fix is to hold the spend on the CARD, or to refuse the
- * dispatch when the card's budget is spent, and that is a different change.
+ * WHAT THIS DOES *NOT* FIX. It does NOT make `max_ralph_rounds` a bound on the CARD.
+ * The spend rides the card's `linked_run_id`, and one ordinary status-dot advance off
+ * the `failed` lane NULLs that link (`work-board/store.ts`), so the next dispatch
+ * inherits nothing — same card, same slug, same branch, full fresh budget. An
+ * intervening NON-GOVERNED run launders it the same way, because this function answers
+ * null when either run is ungoverned and `latestTerminalBySlug` returns only the latest
+ * terminal row. Holding the spend on the card is `#629`.
  *
- * SO THE HONEST SCOPE IS THE MID-BUDGET CASE: a governed run that died at
- * `fix-round-N` or `outer-published:*` with rounds left keeps its count and its
- * cadence when its card is re-dispatched. That is what this function delivers.
+ * AN EARLIER VERSION OF THIS PARAGRAPH SAID SOMETHING NOW FALSE, and it is corrected
+ * here rather than quietly deleted because the reason it went stale is the point. It
+ * said an EXHAUSTED run — which dies on `ralph-task-built`, a name
+ * {@link reviewCapableCheckpoint} declines — gets "another full budget", and scoped this
+ * function to mid-budget runs. Both were true when written and stopped being true in the
+ * same patch: the budget carry was decoupled from the COMMIT seed, so it is gated on the
+ * board link alone and no longer on the disposition. This function now carries any valid
+ * governed pair, exhausted included, which is exactly what the exhausted-run tests in
+ * `retry-resumes-checkpoint.test.ts` assert. A comment describing pre-fix behaviour is
+ * worse than none: a reader trusting it would restore the gate believing it was already
+ * there.
  *
  * THE PAIR IS INDIVISIBLE. Returning a round without its cap is not a bound: a
  * prior at `5 / 5` re-dispatched under the ambient default became `5 / 20`, and
