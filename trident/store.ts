@@ -23,6 +23,7 @@ import { phaseForCheckpoint } from './checkpoint-phase.ts'
 import { checkpointRound } from './checkpoint-round.ts'
 import { trimAsciiWs } from './ascii-trim.ts'
 import { reviewCapableCheckpoint } from './run-disposition.ts'
+import { DEFAULT_MAX_RALPH_ROUNDS, ralphRoundIsSpendable } from './ralph-budget.ts'
 
 /**
  * The state-machine cursor. The first five are live (in-flight) phases;
@@ -85,11 +86,39 @@ export class TridentIncompleteSeedError extends Error {
  */
 export class TridentUnseededPinError extends Error {
   constructor(
-    column: 'inner_checkpoint_head' | 'base_sha' | 'inner_checkpoint_findings',
+    column: 'inner_checkpoint_head' | 'base_sha' | 'inner_checkpoint_findings' | 'ralph_round',
     value: string | null,
   ) {
-    super(`refusing to create a trident run with no inner_checkpoint but ${column}=${value === null ? 'NULL' : `'${value}'`}: those columns are the salvage-resume seed and are meaningless without the checkpoint that names it — an unseeded row carrying a base_sha is not a fresh launch to launch(), so it is never pinned and the publish-time "not cut from origin/<base>" refusal fires against an unchecked value`)
+    super(
+      `refusing to create a trident run with no inner_checkpoint but ${column}=${value === null ? 'NULL' : `'${value}'`}: those columns are the salvage-resume seed and are meaningless without the checkpoint that names it — ` +
+        (column === 'ralph_round'
+          // THE TAIL IS THE COLUMN'S OWN CONSEQUENCE, not always base_sha's (#519).
+          // A carried re-fire counter on an unseeded row is not a mis-pinned base; it
+          // is a row that starts a FRESH build already partway through a Ralph budget
+          // it never spent, and whose plan-refresh cadence lands on the wrong iteration.
+          ? 'an unseeded row is a fresh build, and a fresh build has spent no Ralph iterations — carrying a count onto it charges the new build for work it did not do and shifts the periodic full re-plan onto the wrong iteration'
+          : 'an unseeded row carrying a base_sha is not a fresh launch to launch(), so it is never pinned and the publish-time "not cut from origin/<base>" refusal fires against an unchecked value'),
+    )
     this.name = 'TridentUnseededPinError'
+  }
+}
+
+/**
+ * A carried `ralph_round` the row could never spend (#519).
+ *
+ * `refireNextRalphTask` (orchestrator.ts) refuses at
+ * `ralph_round + 1 > max_ralph_rounds`, so a row born at or past its own cap
+ * cannot continue the Ralph loop it was seeded to continue.
+ * `builtButNeverReviewedSeed` already answers 0 for that shape, through the SAME
+ * `ralphRoundIsSpendable` predicate and the same {@link DEFAULT_MAX_RALPH_ROUNDS}
+ * — this is that predicate at the write site, for the same reason
+ * `TridentUnresumableSeedError` is: the safety of a seeded row must not rest on a
+ * check one function away.
+ */
+export class TridentUnusableRalphRoundError extends Error {
+  constructor(ralph_round: number, max_ralph_rounds: number) {
+    super(`refusing to create a trident run carrying ralph_round=${ralph_round} with max_ralph_rounds=${max_ralph_rounds}: the row could never re-fire (refireNextRalphTask refuses at ralph_round + 1 > max_ralph_rounds), so it would be born unable to continue the Ralph loop it was seeded to continue — carry 0 and take a fresh budget instead`)
+    this.name = 'TridentUnusableRalphRoundError'
   }
 }
 
@@ -281,8 +310,21 @@ export interface CreateTridentRunInput {
   max_rounds?: number
   /** Defaults to false. */
   ralph?: boolean
-  /** Defaults to 20. */
+  /** Defaults to {@link DEFAULT_MAX_RALPH_ROUNDS}. */
   max_ralph_rounds?: number
+  /**
+   * SALVAGE-RESUME SEED — the prior run's Ralph re-fire counter (#519). Omitted →
+   * 0, the fresh-dispatch value every other caller keeps.
+   *
+   * PART OF THE SEED, not an independent knob: `create` REFUSES a non-zero value on
+   * a row that seeds no `inner_checkpoint` (`TridentUnseededPinError`), because a
+   * fresh build has spent no Ralph iterations, and refuses one at or past this row's
+   * own `max_ralph_rounds` (`TridentUnusableRalphRoundError`), because
+   * `refireNextRalphTask` could never re-fire it. `builtButNeverReviewedSeed`
+   * (run-disposition.ts) is the only writer and applies both predicates first, on
+   * the same {@link DEFAULT_MAX_RALPH_ROUNDS} — one predicate, both places.
+   */
+  ralph_round?: number
   /** Defaults to 'local'; set by `detectMergeMode` at creation. */
   merge_mode?: MergeMode
   branch?: string | null
@@ -563,6 +605,40 @@ export class TridentRunStore {
         throw new TridentUnseededPinError('inner_checkpoint_findings', input.inner_checkpoint_findings ?? null)
       }
     }
+    // THE CARRIED RE-FIRE COUNTER IS THE FOURTH SEED COLUMN (#519), and it is
+    // checked here for exactly the reason the other three are: the safety of a
+    // seeded row must not rest on a predicate one function away. Two things make a
+    // carried round unwritable.
+    //
+    //   AN UNSEEDED ROW MAY NOT CARRY ONE. A row with no `inner_checkpoint` is a
+    //   fresh build; it has spent no Ralph iterations, so a non-zero count charges
+    //   it for work it did not do and lands the periodic full re-plan
+    //   (`ralphRound % PLAN_REFRESH_EVERY`, inner-workflow.mjs) on the wrong
+    //   iteration. Refused with the same `TridentUnseededPinError` the other three
+    //   unseeded-pin shapes take.
+    //
+    //   AND IT MUST LEAVE A RE-FIRE. `refireNextRalphTask` (orchestrator.ts)
+    //   refuses at `ralph_round + 1 > max_ralph_rounds`, so a round at or past THIS
+    //   row's cap creates a row that cannot continue the loop it was seeded to
+    //   continue — the one outcome worse than starting over.
+    //
+    // Anything that is not a non-negative safe integer reads as 0 rather than
+    // throwing: `undefined` is the shape every existing caller passes, and a
+    // garbled number is the fresh-budget case, not a reason to fail a dispatch.
+    const maxRalphRounds = input.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS
+    const requestedRalphRound = input.ralph_round
+    const carriedRalphRound =
+      Number.isSafeInteger(requestedRalphRound) && (requestedRalphRound as number) > 0
+        ? (requestedRalphRound as number)
+        : 0
+    if (carriedRalphRound > 0) {
+      if (seededCheckpoint === '') {
+        throw new TridentUnseededPinError('ralph_round', String(carriedRalphRound))
+      }
+      if (!ralphRoundIsSpendable(carriedRalphRound, maxRalphRounds)) {
+        throw new TridentUnusableRalphRoundError(carriedRalphRound, maxRalphRounds)
+      }
+    }
     const id = input.id ?? crypto.randomUUID()
     const ts = this.now()
     const run: TridentRun = {
@@ -596,8 +672,10 @@ export class TridentRunStore {
       // `inner-workflow.mjs` alone would have changed NOTHING for a real lane.
       max_rounds: input.max_rounds ?? 10,
       ralph: input.ralph ?? false,
-      ralph_round: 0,
-      max_ralph_rounds: input.max_ralph_rounds ?? 20,
+      // THE PRIOR RUN'S RE-FIRE COUNTER, or 0 (#519). Validated above, so this is
+      // the value the guard accepted rather than the raw argument.
+      ralph_round: carriedRalphRound,
+      max_ralph_rounds: maxRalphRounds,
       branch: input.branch ?? null,
       // SALVAGE-RESUME SEED (see `CreateTridentRunInput`): normally null, and
       // non-null only when the dispatch chokepoint has proven a prior terminal run

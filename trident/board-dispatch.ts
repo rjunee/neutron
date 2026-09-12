@@ -26,9 +26,13 @@
  * It also SALVAGES a build that already exists. When the card's latest terminal
  * run is built-but-never-reviewed (`run-disposition.ts`) and the live branch tip
  * still resolves to exactly the commit that run recorded, the new row is created
- * already carrying that run's checkpoint evidence — so `launch()` takes its
- * existing resume path and the commit goes to REVIEW instead of being rebuilt
- * from scratch. Every other shape dispatches exactly as it did before.
+ * already carrying that run's checkpoint evidence AND its Ralph re-fire counter —
+ * so `launch()` takes its existing resume path, the commit goes to REVIEW instead
+ * of being rebuilt from scratch, and the card's `max_ralph_rounds` budget is not
+ * silently reset to a fresh 20 by the act of re-pressing ▶ (#519). Every other
+ * shape dispatches exactly as it did before, and now SAYS SO: one
+ * `dispatch_resume_seed` line per dispatch that had a prior terminal run, naming
+ * either what was carried or the proof that failed.
  *
  * Before creating the run it resolves THIS project's own git-initialized build
  * workspace (`<owner_home>/Projects/<project_slug>/code`, `ensureProjectBuildWorkspace`)
@@ -78,6 +82,7 @@ import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from '
 import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
 import type { MergeMode, TridentRun, TridentRunStore } from './store.ts'
+import { DEFAULT_MAX_RALPH_ROUNDS } from './ralph-budget.ts'
 
 const log = createLogger('trident')
 
@@ -1097,6 +1102,17 @@ export async function dispatchBoardBoundBuild(
   // ('ralph-progress-unknown'), so the resolved `ralph` flag is an input to the
   // seed decision rather than something read after the row exists.
   //
+  // THE CHECKPOINT IS NOT THE WHOLE OF CONTINUITY (#519). `ralph_round` is the
+  // other durable half: `refireNextRalphTask` bounds the entire Ralph loop on it
+  // and `buildWorkflowArgs` threads it to the inner workflow's planner-cadence
+  // gate, so a retry that resets it to 0 hands the card a FRESH 20-iteration
+  // budget every time ▶ is pressed — the bound `max_ralph_rounds` exists to impose
+  // becomes unenforceable by re-dispatch — and restarts the plan-refresh cadence.
+  // It travels under the SAME proof as the checkpoint, plus the two facts a
+  // counter needs (both runs governed, and a round that still leaves a re-fire);
+  // `carriedRalphRound` in run-disposition.ts owns that predicate and `create`
+  // re-applies it at the write site.
+  //
   // THE HEAD EQUALITY IS LOAD-BEARING, not a nicety. It is what makes ADOPTING the
   // prior run's commit — its checkpoint, head, findings and base pin — safe: the
   // branch provably still holds this lane's own recorded commit. Seeding does NOT
@@ -1127,6 +1143,16 @@ export async function dispatchBoardBoundBuild(
   // asks about NON-terminal rows and live worktree locks, this one about the card's
   // latest TERMINAL row — so neither can mask the other.
   let seed: ReturnType<typeof builtButNeverReviewedSeed> = null
+  // WHY THE SEED DECISION IS NAMED OUT LOUD (#519). Every arm below that declines
+  // falls back to a byte-identical FRESH dispatch, and a fresh dispatch looks
+  // exactly like a first attempt: a row with a null checkpoint and `ralph_round`
+  // 0. So the one place the refusal existed at all was the absence of two column
+  // values, which no operator reads and no journal records — a card that silently
+  // rebuilt finished work was indistinguishable from a card that had never been
+  // built. The reason is decided on the same lines that decide the seed and
+  // emitted once, after the last await, so the line reports the decision that was
+  // actually made rather than one it was heading for.
+  let seedReason = 'no_prior_terminal_run'
   const prior = deps.store.latestTerminalBySlug(deps.project_slug, slug)
   // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
   // DIFFERENT cards whose titles agree on their first 35 slugged characters share
@@ -1164,9 +1190,28 @@ export async function dispatchBoardBoundBuild(
   // intact. The saving is claimed only when the board itself says whose commit is
   // being adopted.
   const cardsPriorRun = typeof item.linked_run_id === 'string' ? item.linked_run_id.trim() : ''
-  if (prior !== null && prior.task === input.task && cardsPriorRun !== '' && cardsPriorRun === prior.id) {
-    const candidate = builtButNeverReviewedSeed(prior, { ralph })
-    if (candidate !== null) {
+  if (prior === null) {
+    seedReason = 'no_prior_terminal_run'
+  } else if (prior.task !== input.task) {
+    seedReason = 'prior_run_is_a_different_card'
+  } else if (cardsPriorRun === '') {
+    seedReason = 'card_names_no_run'
+  } else if (cardsPriorRun !== prior.id) {
+    seedReason = 'card_names_a_different_run'
+  } else {
+    // THE EFFECTIVE RE-FIRE CAP OF THE ROW ABOUT TO BE CREATED, resolved exactly as
+    // `create` resolves it, because the carried `ralph_round` is only usable if it
+    // leaves a re-fire inside THIS row's cap — not the prior row's. Passing the
+    // prior row's own cap would offer `create` a round it then refuses
+    // (`TridentUnusableRalphRoundError`), turning a salvageable dispatch into a
+    // backend error.
+    const candidate = builtButNeverReviewedSeed(prior, {
+      ralph,
+      max_ralph_rounds: deps.max_ralph_rounds ?? DEFAULT_MAX_RALPH_ROUNDS,
+    })
+    if (candidate === null) {
+      seedReason = 'prior_run_has_no_resumable_build'
+    } else {
       // The call itself sits inside the try: a NON-async probe throws at the
       // call, before any promise exists for a .catch to attach to (Argus r7).
       let tip = ''
@@ -1179,8 +1224,38 @@ export async function dispatchBoardBoundBuild(
       } catch {
         tip = '' // a thrown probe is NO evidence — fall through to a fresh dispatch
       }
-      if (tip.trim().toLowerCase() === candidate.head) seed = candidate
+      const observed = tip.trim().toLowerCase()
+      if (observed === candidate.head) {
+        seed = candidate
+        seedReason = 'resumed'
+      } else {
+        // THE TWO FAILURES ARE DIFFERENT FACTS AND ARE REPORTED AS SUCH. A 40-hex
+        // tip that is not the recorded one means the branch moved — someone else's
+        // commit, or a force-push — and resuming onto it would build against state
+        // that is gone. An empty read means the branch is absent, or the ref could
+        // not be read at all (an uncredentialed remote, a thrown probe); that is
+        // not evidence of another lane's work, it is the absence of evidence. Both
+        // refuse, because `unknown` authorises nothing; only the sentence differs,
+        // and it is the sentence that tells an operator whether to look at the
+        // branch or at the credential.
+        seedReason = observed === '' ? 'branch_tip_unreadable_or_absent' : 'branch_tip_moved'
+      }
     }
+  }
+  // ONE LINE, ALWAYS, WHENEVER THERE WAS A PRIOR TERMINAL RUN TO ASK ABOUT — a
+  // card with none has nothing to report and stays silent. `resumed` names what
+  // was carried; every other value names the proof that failed, and the row
+  // written instead is the honest fresh one.
+  if (prior !== null) {
+    log.info('dispatch_resume_seed', {
+      project: deps.project_slug,
+      item: board_item_id,
+      branch,
+      prior_run_id: prior.id,
+      reason: seedReason,
+      checkpoint: seed?.checkpoint ?? null,
+      ralph_round: seed?.ralph_round ?? 0,
+    })
   }
 
   // (5) FILE CONTENTION — do not start a build on a file a LIVE run already owns.
@@ -1240,6 +1315,10 @@ export async function dispatchBoardBoundBuild(
             inner_checkpoint_head: seed.head,
             inner_checkpoint_findings: seed.findings,
             base_sha: seed.base_sha,
+            // AND THE RE-FIRE COUNTER (#519) — 0 on every shape that could not
+            // prove a round worth carrying, which is what `create` writes anyway,
+            // so an unusable prior round is byte-identical to a fresh row.
+            ralph_round: seed.ralph_round,
           }
         : {}),
       ...(deps.max_rounds !== undefined ? { max_rounds: deps.max_rounds } : {}),
