@@ -97,6 +97,15 @@ test:
   deletion re-enables everything the probe decides. So this item's change must re-run those refusals
   as part of its own acceptance rather than trusting them: a guard that is safe only because the
   thing it guards is switched off is not yet a guard.
+- **(f) THE CLAIM PROBE RE-MEASURES PROCESS LIVENESS, not only holders and owner rows.** #606's probe
+  refreshed the worktree listing and the run rows and reused the sweep's one-time `/proc` snapshot, so
+  gate 10 was historical while the others were current: a process starting inside an owning run's
+  recorded worktree after minting changed neither the listing nor the phase, and the ref was deleted
+  beneath it. Fixed in #606 and mutation-proven there; restated here because an attestation proves the
+  gates RAN and not that they still HOLD, and this item is what re-enables the write. The module header
+  carries a per-gate freshness classification — which gates are re-measured at delete time and which
+  are historical — and satisfying this item includes checking that classification is still accurate for
+  every gate the restored call depends on.
 - **(c) The refusal is not inferrable from the index.** A worktree whose HEAD resolves but which has
   nothing staged is a no-op commit, not this condition, and must not be conflated with it — the
   discriminator is `rev-parse --verify HEAD`, not "No commits yet" in `git status` output, which is

@@ -205,8 +205,8 @@
  *      reachable — outside `refs/heads` so it can never re-enter a launch, and outside
  *      `refs/tags` so it neither clutters `git tag` nor rides a `--follow-tags` push.
  *      Recovery is `git branch <name> <sha>`. Salvage failing REFUSES the delete.
- *  12. NOTHING CLAIMS THE REF AS OF NOW — holders and live owners RE-MEASURED, not
- *      remembered, immediately before the delete.
+ *  12. NOTHING CLAIMS THE REF AS OF NOW — holders, live owners AND process liveness
+ *      RE-MEASURED, not remembered, immediately before the delete.
  *  13. THE DELETE IS ONE ATOMIC COMPARE-AND-SWAP: `git update-ref -d <ref>
  *      <expected-sha>` checks the old value and unlinks the ref under one ref lock, so a
  *      branch that has advanced since the enumeration cannot be deleted at all. There is
@@ -248,6 +248,50 @@
  *      path. THIS IS THE WHOLE REASON THE DELETION IS DEFERRED TO #635: the claimant-side
  *      guard is what closes these two, and it closes them without a race. See the call
  *      site for the residue, stated at its worst.
+ *
+ * ── WHICH GATES ARE CURRENT AND WHICH ARE HISTORICAL ─────────────────────────────
+ *
+ * AN ATTESTATION PROVES THE GATES RAN; IT DOES NOT PROVE THEY STILL HOLD. Provenance is
+ * not currency. A `ReapableCandidate` answers "were these inputs gated?" and cannot answer
+ * "is that still the case?" — so for every gate the question has to be asked separately:
+ * CAN ITS SUBJECT CHANGE between minting and the delete, and if so, is it measured again?
+ *
+ * Anyone enabling the deletion needs this list, because a gate that is merely historical is
+ * a gate that was true once.
+ *
+ *   MUTABLE AND RE-MEASURED at delete time, all inside `refClaimedNow`:
+ *     · 4 (no worktree holds it by name) — a `git worktree add` can happen at any moment.
+ *     · 5 (no detached linked tree on the tip) — same listing, same freshness.
+ *     · 8 (every owner row terminal) — a dispatch's claim is an INSERT of a non-terminal row.
+ *     · 10 (no live process in an owning run's tree) — RE-MEASURED SINCE ROUND 15, and the
+ *       omission that made this section necessary: a process can start inside an ordinary
+ *       directory without anything in the holder listing or the phase changing.
+ *     · 13 and 14 are themselves the atomic write and the measurement after it.
+ *
+ *   MUTABLE AND *NOT* RE-MEASURED, deliberately, with the reason:
+ *     · 9 (no owning run's recorded worktree still exists on disk). A tree could be
+ *       recreated between mint and delete, but gate 4/5's fresh listing sees any tree git
+ *       knows about and gate 10's fresh `/proc` sees anything running in one, so the
+ *       remaining case is an empty directory with nothing running in it and no git
+ *       registration — which holds no work. Credit this gate with nothing today anyway: 0
+ *       of 291 rows carry a `worktree` (see the gate).
+ *     · 11 (the salvage) is not re-measured because it is a WRITE performed at delete time;
+ *       there is nothing earlier to go stale.
+ *
+ *   IMMUTABLE FOR THE LIFE OF A CANDIDATE, so freshness is not a question:
+ *     · 2 (the ref is under `refs/heads/trident/`) — a ref does not change its own name.
+ *     · 6 (this sweep's own detach memory) — a fact about what this sweep did.
+ *     · 7 (at least one row names the branch) — rows are not deleted by the dispatch path,
+ *       and a row APPEARING is gate 8's question, which is re-measured.
+ *     · the sha — pinned by the CAS itself, which is what makes 13 atomic rather than
+ *       merely ordered.
+ *
+ *   MEASURED ONCE, GLOBALLY, AND NOT PER REF:
+ *     · 1 (`/proc` is readable). The sweep aborts wholesale when it is not. Since round 15
+ *       an unreadable `/proc` at DELETE time also refuses, per ref — the same posture
+ *       applied at the second measurement rather than only the first.
+ *     · 3 (the two listings answered for this repo) — re-asked by `refClaimedNow`'s own
+ *       reads, which refuse when they fail.
  */
 
 import {
@@ -1049,7 +1093,8 @@ function refPresence(result: HostCommandResult): 'present' | 'absent' | 'unknown
 
 /**
  * IS ANYTHING CLAIMING THIS REF RIGHT NOW? Re-measured from scratch — a fresh worktree
- * listing and a fresh store read — rather than from the snapshots the per-ref gates use.
+ * listing, a fresh store read AND a fresh `/proc` snapshot — rather than from the snapshots
+ * the per-ref gates use.
  *
  * WHY THIS EXISTS (#547 round 3, cross-model gate). The delete is an atomic
  * compare-and-swap on the ref's VALUE, and that is all it is. A new run can claim the
@@ -1058,6 +1103,19 @@ function refPresence(result: HostCommandResult): 'present' | 'absent' | 'unknown
  * branch a live run is standing on is deleted. `update-ref -d` will not refuse a
  * checked-out branch (this suite measures that deliberately), which is what makes the race
  * bite rather than fail closed.
+ *
+ * WHY `/proc` IS RE-READ HERE (#547 round 15). It was not, and that was the asymmetry: this
+ * function refreshed the HOLDER questions and the OWNER rows and reused the sweep's one-time
+ * liveness snapshot for the PROCESS question, so gate 10 was historical while 4, 5 and 12 were
+ * current. Repro: mint a candidate for a terminal owner whose recorded worktree is an ordinary
+ * directory with nothing running in it, then start a process whose cwd is under that directory
+ * before the delete. The fresh listing shows no linked worktree, the owner is still terminal,
+ * the candidate is genuinely minted — and the ref is deleted beneath a now-live process.
+ *
+ * AN ATTESTATION PROVES THE GATES RAN; IT DOES NOT PROVE THEY STILL HOLD. Provenance is not
+ * currency. The mint's map answers "were these inputs gated?" and cannot answer "is that still
+ * the case?", so every gate whose subject can change between mint and delete has to be measured
+ * again here. The freshness audit in the module header says which those are.
  *
  * Returns a reason when something claims it, null when nothing provably does. A read that
  * FAILS returns a reason too: an unanswered question is not an absence of claimants.
@@ -1107,6 +1165,21 @@ async function refClaimedNow(
   }
   const live = owners.find((owner) => owner.branch === short && !isTerminalPhase(owner.phase))
   if (live !== undefined) return `a run in phase '${live.phase}' claims it`
+
+  // GATE 10, RE-MEASURED. A process can start inside an owning run's recorded worktree between
+  // the sweep's snapshot and this moment — the tree is an ordinary directory, so nothing about
+  // the holder listing or the phase changes when something begins running in it.
+  //
+  // AN UNREADABLE `/proc` REFUSES, which is gate 1's posture applied at the second measurement
+  // rather than only at the first. The sweep aborts wholesale when `/proc` cannot be read
+  // (`skipped_no_liveness`); if it becomes unreadable between then and now, the question "is
+  // anything running in there" has no answer, and an unanswered question is never an absence.
+  const processCwds = snapshotProcessCwds(opts.proc_root ?? '/proc')
+  if (processCwds === null) return 'liveness-unreadable: /proc could not be read at delete time'
+  const busy = owners.find((owner) => owner.branch === short && ownerProcessLive(owner, processCwds))
+  if (busy !== undefined) {
+    return `a process stands in ${busy.worktree ?? busy.workflow_run_id ?? '?'}`
+  }
   return null
 }
 

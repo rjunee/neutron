@@ -47,7 +47,9 @@ probe to refuse on an unreadable listing, proven BEFORE deletion is re-enabled.
 ### WHAT THIS SHIPS, AND WHAT IT DELIBERATELY DOES NOT
 
 **THIS IS A PREPARATORY CHANGE, AND #547 STAYS OPEN.** What ships makes the deletion possible and
-provably safe to enable; it does not enable it. Stale `trident/*` refs still survive their runs after
+safe to enable ONCE #635 LANDS; it does not enable it, and it does not by itself make the deletion
+safe (see "which gates are current" below — the gates prove they RAN, and #635 is what eliminates the
+outcome they cannot). Stale `trident/*` refs still survive their runs after
 this merges, and the next launch of those cards still re-enters them — the failure #547 describes is
 unchanged until #635 lands and the deletion is turned on. The issue closes with the PR that turns it
 on, and this record is a record of the half that can be built safely first, not of a fix.
@@ -243,7 +245,7 @@ are not advice to a caller but the thing its argument attests to. The 2026-09-01
    orchestrator writes `worktree: null`. Kept because it is correct and costs nothing the day that
    column is populated, not because it is load-bearing now.
 10. No live process stands in an owning run's worktree, and none stands in a path bearing its
-   `workflow_run_id`. The race is real — the row goes terminal while the detached workflow is still
+   `workflow_run_id` — **re-measured at delete time since round 15**, see below. The race is real — the row goes terminal while the detached workflow is still
    running — but **this gate cannot fire today either.** The worktree half is dead for the same
    reason as gate 7; the generation half compares a 36-character run UUID against
    `wf_<8hex>-<3hex>-<n>` basenames, measured 0 of 17 matches, because they are different
@@ -305,9 +307,9 @@ any floor still leaves the same interleaving on the other side of it.
 
 SO A DETECTED CLAIM IS REPAIRED RATHER THAN RACED:
 
-  * GATE 12 re-measures holders and live owners from scratch immediately before the delete. This is
-    the ordinary case, and it means the destructive act is never performed at all when a claim has
-    already landed.
+  * GATE 12 re-measures holders, live owners AND PROCESS LIVENESS from scratch immediately before the
+    delete. This is the ordinary case, and it means the destructive act is never performed at all when
+    a claim has already landed.
   * GATE 14 takes the SAME measurement again afterwards, and a claim that appeared puts the ref back
     at exactly the sha it had, with a bounded create-only retry. Git offers no primitive that compares
     a HOLDER and unlinks a ref in one operation — `update-ref --stdin` refuses `verify` + `delete` on
@@ -482,6 +484,52 @@ indistinguishable from a search that was wrong. The stale clause also carried th
 only the stale token: it said the sweep "records what it *would* reap", which is the overclaim the
 rename existed to retire. Fixing the identifier without fixing the sentence would have left the
 document wrong in the way that mattered.
+
+### AN ATTESTATION PROVES THE GATES RAN; IT DOES NOT PROVE THEY STILL HOLD
+
+**Provenance is not currency.** This is the third layer of the same problem, and the only one that no
+amount of care about the token itself can reach. Round 12 asked whether the destructive path could be
+reached without minting. Round 13 asked whether the token named every input the operation consumes.
+This round asks the question neither of those can: **is what it proved still true?**
+
+`ownerProcessLive` — gate 10 — was evaluated only while minting, against the sweep's one-time `/proc`
+snapshot. `refClaimedNow` exists precisely because things mutate between the gates and the delete; it
+refreshed the HOLDER listing and the OWNER rows and skipped the PROCESS question. There was no reason
+for the asymmetry, and it was not a design decision — it was an omission wearing one.
+
+THE REPRO. Mint a candidate for a terminal owner whose recorded worktree is an ordinary directory with
+nothing running in it. Then start a process whose cwd is under that directory, before the delete. The
+fresh holder listing shows no linked worktree (an ordinary directory is not a worktree git knows about);
+the owner row is still terminal; the candidate is genuinely minted, for the right repository, at the
+right sha — and the ref is deleted beneath a now-live process. With the re-measurement removed the
+suite prints `event=worktree_reaper_ref_deleted` for exactly that case.
+
+WHY THIS IS NOT THE OPPOSITE OF ROUND 12'S ARGUMENT, which said that re-running gates 12-13 in a DRY
+sweep adds the appearance of rigour and no rigour. That reasoning turned on nothing having mutated in
+between: the same inputs re-derive the same answer. Here something HAS happened — that is the entire
+reason `refClaimedNow` exists — so a second measurement is a different measurement, not a repeat of
+the first. The test is not "have I already measured this" but **"can the subject have changed since I
+measured it"**.
+
+SO EVERY GATE NOW CARRIES A FRESHNESS CLASSIFICATION, in the module header beside the three-route
+`.ok` classification, because the two answer the same kind of question about different axes: that one
+says which decisions need three values, this one says which gates are CURRENT and which are merely
+HISTORICAL. Four are mutable and re-measured (4, 5, 8, 10); two are mutable and deliberately not, with
+the reason written down (9, whose remaining case is an empty unregistered directory holding no work;
+11, which is itself a write); four are immutable for a candidate's life (2, 6, 7, and the sha, pinned
+by the CAS); and two are global (1 and 3, now refused per-ref at delete time as well). A gate that is
+merely historical is a gate that was true once, and the person enabling deletion is entitled to know
+which is which without re-deriving it.
+
+AN UNREADABLE `/proc` AT DELETE TIME REFUSES, which is gate 1's posture applied at the second
+measurement rather than only at the first. The sweep aborts wholesale when `/proc` cannot be read; if
+it stops being readable afterwards, "is anything running in there" has no answer, and an unanswered
+question has never been an absence in this module.
+
+WHAT THE ALTERNATIVE WOULD HAVE BOUGHT, and why it was not taken: making candidates single-use and
+inseparable from a liveness snapshot. A snapshot bound to the candidate is still a snapshot — it
+narrows the window between measurement and delete rather than closing it, and it would have encoded
+the wrong model, that a candidate is a promise about the world rather than a record of a check.
 
 ### An extraction for testability can create an unguarded destructive primitive
 
@@ -674,6 +722,16 @@ unreadable-measurement refusals have their own case; and the restore classificat
 adversarial shape for EACH half of the EEXIST predicate — a fatal exit carrying a different message,
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
+
+FRESHNESS HAS FIVE CASES OF ITS OWN, paired as always: a process appearing after minting stops the
+delete, an owner that stays dead still deletes (or the first is satisfied by a boundary that refuses
+whenever a recorded directory exists), the GENERATION witness is seen at delete time too, a `/proc`
+that becomes unreadable between mint and delete refuses, and the header's freshness audit is pinned —
+including a check that the re-measurement it describes is really inside `refClaimedNow`, with a
+positive control against the slice reaching the sweep's own gate-10 call instead. Three mutations:
+dropping the re-measurement reds four cases and DELETES the ref beneath the live process; reading an
+unreadable `/proc` as "nobody home" reds one; dropping gate 10's generation witness reds three,
+two of them pre-existing.
 
 THE DESTRUCTIVE BOUNDARY HAS ITS OWN THIRTEEN CASES and its own thirteen mutations, every negative paired with
 a complement so no refusal can be satisfied by a boundary that refuses everything. Within one

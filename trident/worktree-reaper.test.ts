@@ -512,6 +512,33 @@ async function seedRef(repo: string, branch: string, marker: string): Promise<st
 }
 
 /**
+ * A zeroed report, for the cases that call the destructive half directly.
+ *
+ * Shared rather than re-declared per describe: the shape is the module's, so one copy means one
+ * place to update when a field is added and no chance of two cases disagreeing about the start
+ * state they are asserting against.
+ */
+function emptyReapReport(): WorktreeReapReport {
+  return {
+    repos_swept: 0,
+    candidates: 0,
+    live_skipped: 0,
+    detached: [],
+    removed: [],
+    preserved: [],
+    protected_nonterminal: [],
+    skipped_no_liveness: false,
+    refs_examined: 0,
+    refs_deleted: [],
+    refs_kept: [],
+    refs_stood_down: 0,
+    refs_restored: [],
+    refs_restore_failed: [],
+    refs_candidates: [],
+  }
+}
+
+/**
  * The canonical spelling of a repository path, which is what a minted candidate carries.
  *
  * Asserted through `realpathSync` rather than against the raw path, so these cases do not
@@ -2922,23 +2949,7 @@ describe('branch-ref reap — the backlog sweep (#547)', () => {
  */
 describe('the destructive boundary refuses what the gates did not mint (#547)', () => {
   const budget = (): { attempts: number } => ({ attempts: 0 })
-  const emptyReport = (): WorktreeReapReport => ({
-    repos_swept: 0,
-    candidates: 0,
-    live_skipped: 0,
-    detached: [],
-    removed: [],
-    preserved: [],
-    protected_nonterminal: [],
-    skipped_no_liveness: false,
-    refs_examined: 0,
-    refs_deleted: [],
-    refs_kept: [],
-    refs_stood_down: 0,
-    refs_restored: [],
-    refs_restore_failed: [],
-    refs_candidates: [],
-  })
+  const emptyReport = emptyReapReport
 
   // `makeProc` creates the directory, so it is called ONCE per repo and the result reused.
   const opts = (repo: string, proc: string): Parameters<typeof deleteReapableRef>[0] => ({
@@ -3075,23 +3086,7 @@ describe('the destructive boundary refuses what the gates did not mint (#547)', 
  * that breaks users rather than only the direction that rejects.
  */
 describe('the attestation covers the repository too, and both object formats (#547)', () => {
-  const emptyReport = (): WorktreeReapReport => ({
-    repos_swept: 0,
-    candidates: 0,
-    live_skipped: 0,
-    detached: [],
-    removed: [],
-    preserved: [],
-    protected_nonterminal: [],
-    skipped_no_liveness: false,
-    refs_examined: 0,
-    refs_deleted: [],
-    refs_kept: [],
-    refs_stood_down: 0,
-    refs_restored: [],
-    refs_restore_failed: [],
-    refs_candidates: [],
-  })
+  const emptyReport = emptyReapReport
 
   test('a candidate minted in one repo cannot delete the same ref in another', async () => {
     const branch = 'trident/same-name-same-sha'
@@ -3415,4 +3410,173 @@ describe('a sweep spanning two repositories reaps in each of them (#547)', () =>
     expect(await refExists(second.repo, ref(free))).toBe(false)
     expect(keptReasonFor(report, ref(held))).toStartWith('held-by-worktree:')
   }, 120_000)
+})
+
+/**
+ * FRESHNESS: AN ATTESTATION PROVES THE GATES RAN, NOT THAT THEY STILL HOLD (#547 round 15).
+ *
+ * `refClaimedNow` refreshed the holder listing and the owner rows and reused the sweep's
+ * one-time `/proc` snapshot, so gate 10 was HISTORICAL while 4, 5 and 8 were current. A
+ * process that starts inside an owning run's recorded worktree after the sweep changes nothing
+ * about the holder listing (an ordinary directory is not a worktree git knows) and nothing
+ * about the phase (the row is still terminal) — so the candidate stays genuinely minted and the
+ * ref was deleted beneath it.
+ */
+describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
+  /** An owning run whose recorded worktree is an ordinary directory: no git registration. */
+  async function mintedWithARecordedTree(
+    marker: string,
+  ): Promise<{
+    repo: string
+    proc: string
+    branch: string
+    sha: string
+    tree: string
+    ownerRow: TridentBranchOwner
+    opts: Parameters<typeof deleteReapableRef>[0]
+    minted: ReapableCandidate
+  }> {
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = `trident/${marker}`
+    const sha = await seedRef(repo, branch, marker)
+    // The run's recorded tree, which must NOT exist at mint time or gate 9 keeps the ref.
+    const tree = join(root, `wf_${marker}-1`)
+    const ownerRow = owner(branch, { phase: 'failed', worktree: tree })
+    const opts = {
+      store: stubStore(repo, [], [ownerRow]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    }
+    const sweep = await sweepTridentWorktrees(opts)
+    return { repo, proc, branch, sha, tree, ownerRow, opts, minted: onlyCandidate(sweep) }
+  }
+
+  test('a process that appears AFTER minting stops the delete', async () => {
+    const m = await mintedWithARecordedTree('liveness-after-mint')
+
+    // The recorded tree comes into existence and something starts running in it — after the
+    // gates, before the delete. No worktree is registered and the row is still terminal.
+    mkdirSync(m.tree, { recursive: true })
+    addProcCwd(m.proc, 9101, m.tree)
+
+    const report = emptyReapReport()
+    await deleteReapableRef(m.opts, m.repo, m.minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(keptReasonFor(report, ref(m.branch))).toBe(
+      `claim-appeared: a process stands in ${m.tree}`,
+    )
+    expect(await refExists(m.repo, ref(m.branch))).toBe(true)
+    // THE SALVAGE IS ALREADY WRITTEN AT THIS POINT, and that is the real ordering rather than
+    // an oversight: gate 11 precedes the claim probe, because the tip must be preserved before
+    // anything is attempted. A refusal at gate 12 therefore leaves a salvage behind, which is
+    // harmless (create-only, named for the sha it carries, outside `refs/heads`) and is one of
+    // the reasons the deferral ships ZERO writes rather than "writes that do no harm".
+    expect(await git(m.repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe(
+      `${SALVAGE_REF_PREFIX}liveness-after-mint/${m.sha}`,
+    )
+  }, 60_000)
+
+  test('THE COMPLEMENT: an owner that stays dead still deletes', async () => {
+    // Without this the case above is satisfied by a boundary that refuses everything once a
+    // recorded worktree exists. Same shape, same recorded tree, no process in it.
+    const m = await mintedWithARecordedTree('liveness-stays-dead')
+    mkdirSync(m.tree, { recursive: true })
+    addProcCwd(m.proc, 9102, join(m.repo, '.claude'))
+
+    const report = emptyReapReport()
+    await deleteReapableRef(m.opts, m.repo, m.minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([
+      {
+        ref: ref(m.branch),
+        sha: m.sha,
+        salvage: `${SALVAGE_REF_PREFIX}liveness-stays-dead/${m.sha}`,
+      },
+    ])
+    expect(await refExists(m.repo, ref(m.branch))).toBe(false)
+  }, 60_000)
+
+  test('a process under the GENERATION path is seen at delete time too', async () => {
+    // Gate 10's second witness, re-measured: a cwd bearing the run's `workflow_run_id`, which
+    // is what catches a build whose worktree the row never recorded.
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/generation-after-mint'
+    const sha = await seedRef(repo, branch, 'genafter')
+    const generation = 'wf_abcdef12-999-3'
+    const opts = {
+      store: stubStore(repo, [], [owner(branch, { phase: 'stopped', workflow_run_id: generation })]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    }
+    const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+
+    const late = join(root, generation)
+    mkdirSync(late, { recursive: true })
+    addProcCwd(proc, 9103, late)
+
+    const report = emptyReapReport()
+    await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(keptReasonFor(report, ref(branch))).toBe(`claim-appeared: a process stands in ${generation}`)
+    expect(await refExists(repo, ref(branch))).toBe(true)
+  }, 60_000)
+
+  test('a /proc that becomes UNREADABLE between mint and delete refuses', async () => {
+    // Gate 1's posture at the SECOND measurement. The sweep aborts wholesale when `/proc`
+    // cannot be read; if it stops being readable afterwards, "is anything running in there"
+    // has no answer, and an unanswered question is never an absence of claimants.
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/proc-vanishes'
+    const sha = await seedRef(repo, branch, 'procgone')
+    const opts = {
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    }
+    const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+
+    rmSync(proc, { recursive: true, force: true })
+
+    const report = emptyReapReport()
+    await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(keptReasonFor(report, ref(branch))).toBe(
+      'claim-appeared: liveness-unreadable: /proc could not be read at delete time',
+    )
+    expect(await refExists(repo, ref(branch))).toBe(true)
+    // Salvage first, claim probe second — see the note in the case above.
+    expect(await git(repo, 'for-each-ref', '--format=%(refname)', SALVAGE_REF_PREFIX)).toBe(
+      `${SALVAGE_REF_PREFIX}proc-vanishes/${sha}`,
+    )
+  }, 60_000)
+
+  test('the freshness audit in the header names gate 10 as re-measured', () => {
+    // The list the next person reads before enabling deletion. Pinned because its whole value
+    // is being accurate about which gates are current, and a stale list is worse than none.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    const audit = source.slice(
+      source.indexOf('WHICH GATES ARE CURRENT AND WHICH ARE HISTORICAL'),
+      source.indexOf('import {'),
+    )
+    expect(audit).not.toBe('')
+    expect(audit).toContain('MUTABLE AND RE-MEASURED')
+    expect(audit).toContain('RE-MEASURED SINCE ROUND 15')
+    expect(audit).toContain('An attestation proves the gates ran'.toUpperCase())
+    // And the re-measurement it describes is really in `refClaimedNow`, not just claimed here.
+    const probe = source.slice(
+      source.indexOf('async function refClaimedNow('),
+      source.indexOf('async function reapBranchRefs('),
+    )
+    expect(probe).toContain('snapshotProcessCwds(')
+    expect(probe).toContain('ownerProcessLive(')
+    // POSITIVE CONTROL: the sweep's own gate-10 call is a DIFFERENT site, so finding these in
+    // the probe cannot be the loop's copy being matched by a too-wide slice.
+    expect(probe).not.toContain('async function reapBranchRefs(')
+  })
 })
