@@ -753,6 +753,30 @@ same way `second.port === first.port` was true because the fixture supplied both
 the same way the acceptance passed because the helper registered a session. Each time
 the fix was to assert against something the code does not get to choose.
 
+### Making registration grant a credential moved a leak I had to go and close
+
+`spawnSession` registered the session ~200 lines before it spawned. That was harmless
+when registration was a session-id entry and the id was worthless on its own. This
+change makes registration grant a CREDENTIAL — so every throw in between (config
+writes, argv assembly, env merge) now stranded a standing authorization with no process
+behind it, and left the config carrying that credential in plaintext on disk.
+
+**A narrowing can create a leak somewhere else.** The credential is strictly better than
+what it replaced, and it moved the failure mode rather than removing it, because the
+lifetime of the grant was never the thing being reasoned about at the registration site.
+
+Registration now sits in the smallest window that works — the statement before the
+spawn, since the child can POST the moment it starts and an unregistered credential
+would be refused — and the spawn is guarded: on a throw, `unregisterIf` (not
+`unregister`, so a concurrent respawn already holding the id is not evicted by our
+failure) plus `unlinkSessionConfigs`, then rethrow.
+
+The test is the gate's own repro and it is effect-based: a host that captures `argv`,
+reads `SINK_TOKEN` out of the real `--mcp-config` it was handed, and then throws. After
+the turn drains, the config is gone and that credential gets 401 from the live sink.
+Reading the token before the throw is load-bearing — the cleanup deletes the file it
+comes from. Both halves mutated separately, each reds on its own.
+
 ### The lock this change introduced was not held to the standard the token was
 
 `readSinkToken` was given `O_NOFOLLOW` and a same-fd `fstat` because a token path is

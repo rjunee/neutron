@@ -272,7 +272,6 @@ async function spawnSession(
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env)
-  sink.register(sessionId, session)
 
   // Pre-seed the first-run trust + bypass-permissions acceptance so the
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
@@ -478,7 +477,23 @@ async function spawnSession(
   // this child can never refresh a different registry or a respawned successor.
   let liveHandle: LiveProcessHandle | undefined
 
-  const child = ptyHost.spawn(argv, {
+  // REGISTER IMMEDIATELY BEFORE THE SPAWN, AND UNDO IT IF THE SPAWN THROWS.
+  //
+  // Registration now grants a credential (`byCredential`), not merely a session-id
+  // entry, so a registration whose child never exists is a standing authorization with
+  // nothing behind it — and the config carrying that credential is already on disk. It
+  // used to sit ~200 lines earlier, where every throw in between (config writes, argv
+  // assembly, env merge) stranded one.
+  //
+  // It cannot move AFTER the spawn: the child can POST the moment it starts, and an
+  // unregistered credential would be refused. So it sits in the smallest window that
+  // works — the statement before — and the spawn is guarded, `unregisterIf` so a
+  // concurrent respawn that already re-registered this id is not evicted by our
+  // failure.
+  sink.register(sessionId, session)
+  let child: ReturnType<typeof ptyHost.spawn>
+  try {
+    child = ptyHost.spawn(argv, {
     cwd,
     env: childEnv,
     onData: (chunk) => {
@@ -598,6 +613,15 @@ async function spawnSession(
       }
     }
   }))
+  } catch (e) {
+    // The spawn never produced a child, so the registration it was made for must not
+    // outlive it. `unregisterIf` rather than `unregister`: a concurrent respawn may
+    // already hold this session id, and evicting ITS credential would turn our failure
+    // into a second one. The configs go too — they carry the credential in plaintext.
+    sink.unregisterIf(sessionId, session)
+    unlinkSessionConfigs(session)
+    throw e
+  }
 
   // Post-spawn assertion: child alive → /channel-ready (transport attached) →
   // HTTP /health → /channel-bound (MCP handshake complete).

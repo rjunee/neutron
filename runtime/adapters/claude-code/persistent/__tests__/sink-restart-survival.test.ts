@@ -13,7 +13,14 @@
  * So the central case here (`sequential sink instances`) is written as a restart:
  * start a sink, take its coordinates the way a spawn would, STOP it, start a
  * second one against the same state, and require that the second binds the same
- * port and accepts the FIRST one's token.
+ * port and RE-DERIVES the same per-child credential from the persisted root.
+ *
+ * It does NOT require the second to accept a survivor: it does not, and the case
+ * asserts that 401. Authorization runs credential -> session and a restarted sink has
+ * registered nothing, so re-adopting a survivor — RE-REGISTERING it, not merely
+ * reconnecting — is `ISSUES #539`. This header said "accepts the FIRST one's token"
+ * while the body below asserted the refusal, which is the drift this file is otherwise
+ * about.
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
