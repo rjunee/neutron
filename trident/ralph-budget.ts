@@ -32,11 +32,16 @@
  *     ordinary status-dot advance) and again on `done` to `upcoming`. The carry is
  *     gated on that link, so the next dispatch inherits nothing: same card, same
  *     slug, same branch, full fresh budget.
- *   - AN INTERVENING NON-GOVERNED RUN LAUNDERS THE SPEND. `carriedRalphBudget`
- *     answers null when either run is not governed, and `latestTerminalBySlug`
- *     returns only the LATEST terminal row — so one ralph-off dispatch between two
- *     governed ones drops the count entirely. That row is present and readable; it
- *     is simply not governed, which is why it is not a "gap in the chain".
+ *   - AN INTERVENING NON-GOVERNED RUN LAUNDERS THE SPEND — and the mechanism is the
+ *     LINK MOVING, not a lookup picking a row. Every successful dispatch rebinds the
+ *     card to its new run (`board-dispatch.ts:1574`), so one ralph-off dispatch makes
+ *     that row what `linked_run_id` names; the ladder loads it by that exact id and
+ *     `carriedRalphBudget` answers null on `run.ralph !== true`
+ *     (`run-disposition.ts:298`). An earlier version of this bullet blamed
+ *     `latestTerminalBySlug` returning the latest terminal row, which WAS the mechanism
+ *     until the prior stopped being resolved by slug — the phenomenon is unchanged and
+ *     the cause named for it had become fiction. That row is present and readable; it is
+ *     simply not governed, which is why it is not a "gap in the chain".
  *
  * Making the bound genuinely card-level is `#629`, not this file. What this file
  * guarantees is narrower and worth stating exactly: WHEN a governed re-dispatch

@@ -214,9 +214,13 @@ export function terminalRunDisposition(
  * The spend rides the card's `linked_run_id`, and one ordinary status-dot advance off
  * the `failed` lane NULLs that link (`work-board/store.ts`), so the next dispatch
  * inherits nothing — same card, same slug, same branch, full fresh budget. An
- * intervening NON-GOVERNED run launders it the same way, because this function answers
- * null when either run is ungoverned and `latestTerminalBySlug` returns only the latest
- * terminal row. Holding the spend on the card is `#629`.
+ * intervening NON-GOVERNED run launders it a different way: every successful dispatch
+ * rebinds the card to its new run (`board-dispatch.ts:1574`), so one ralph-off dispatch
+ * makes that row what the link names, and this function then answers null on
+ * `run.ralph !== true` (below). The cause is the link moving, NOT a lookup choosing the
+ * newest row — that was the mechanism until the prior stopped being resolved by slug,
+ * and this sentence went on naming it for a round afterwards. Holding the spend on the
+ * card is `#629`.
  *
  * AN EARLIER VERSION OF THIS PARAGRAPH SAID SOMETHING NOW FALSE, and it is corrected
  * here rather than quietly deleted because the reason it went stale is the point. It

@@ -16,16 +16,34 @@
  * landed on the wrong iteration of the same piece of work. The count and its cap now
  * travel together.
  *
- * WHAT THIS DOES *NOT* CLOSE, pinned as a test rather than left in prose (see
- * "THE LIMIT" below). It does NOT make `max_ralph_rounds` a bound on the CARD. A run
- * that EXHAUSTS the loop dies with `inner_checkpoint = 'ralph-task-built'`
- * (`refireNextRalphTask`'s cap branch goes through `failedRun`, which does not touch
- * the checkpoint), that name is not review-capable, so the exhausted row classifies
- * `died-before-build` and seeds NOTHING — the next dispatch is a fresh build with a
- * fresh budget. Pressing ▶ repeatedly still buys iterations; it now costs one
- * exhaustion cycle per press instead of none. The row is recreated by every dispatch,
- * so any per-row counter is one reset away by construction; holding the spend on the
- * CARD is the durable fix and is a different change.
+ * AN EXHAUSTED RUN NO LONGER GETS A FRESH BUDGET, and an earlier version of this header
+ * said it did — describing the behaviour this file's own "an EXHAUSTED ralph run does keep
+ * its spend" test asserts the opposite of. It was true when written: the carry was gated
+ * on the commit seed, so an exhausted row (which dies at `inner_checkpoint =
+ * 'ralph-task-built'`, not review-capable, therefore `died-before-build`) seeded nothing
+ * and inherited nothing. Decoupling the budget from the seed made it false. A FIX
+ * INVALIDATES THE EXPLANATIONS OF THE BUG IT FIXES.
+ *
+ * WHAT THIS DOES *NOT* CLOSE, pinned as tests rather than left in prose (see "THE LIMIT"
+ * below). It does NOT make `max_ralph_rounds` a bound on the CARD, because the carry is
+ * gated on `item.linked_run_id` and three things move or invalidate that link. Each
+ * mechanism re-derived from the ladder as it now stands:
+ *
+ *   - THE LINK IS CLEARED BY ONE CLICK. `work-board/store.ts` NULLs `linked_run_id` when
+ *     a card leaves the `failed` lane and again on `done → upcoming`, so
+ *     `cardsPriorRun === ''` and the ladder takes `card_names_no_run`
+ *     (`board-dispatch.ts:1282`) — no prior, no carry.
+ *   - AN INTERVENING NON-GOVERNED RUN BECOMES THE PRIOR. Every successful dispatch
+ *     rebinds the card to its new run (`board-dispatch.ts:1574`), so one ralph-off
+ *     dispatch makes THAT row what the link names; `carriedRalphBudget` then answers null
+ *     on `run.ralph !== true` (`run-disposition.ts:298`). The spend is not lost to a
+ *     lookup — it is lost because the card now points somewhere else.
+ *   - A DISPATCH WITH NO CARD AT ALL. `onboarding/overnight/register.ts` creates governed
+ *     runs with no board item, so there is never a link to inherit through.
+ *
+ * The row is recreated by every dispatch and the link is one click from gone, so a
+ * per-row counter is one reset away by construction; holding the spend on the CARD is the
+ * durable fix and is `#629`.
  *
  * This file drives the REAL `dispatchBoardBoundBuild` against the REAL store and pins
  * both directions — the carry on proof, the fresh start (and its logged reason)
@@ -1357,10 +1375,14 @@ describe('THE LIMIT — what this change does NOT close, pinned so it cannot be 
   test('a NON-GOVERNED run in between LAUNDERS the whole spend', async () => {
     // A SECOND DOOR, and it is not the "gap in the chain" #629 already names: the
     // intervening row is PRESENT, terminal and perfectly readable — it is simply not
-    // governed, so `carriedRalphBudget` answers null on `run.ralph !== true` and the
-    // spend is gone. Measured: a card at 20/20, one dispatch with ralph off (born at 0,
-    // non-governed), that row dies, `latestTerminalBySlug` returns IT, and the next
-    // governed dispatch starts at 0/20.
+    // governed. THE MECHANISM, re-derived after the prior lookup changed: every successful
+    // dispatch rebinds the card to its new run (`board-dispatch.ts:1574`), so the ralph-off
+    // dispatch makes that row what `linked_run_id` names; the ladder loads it by that exact
+    // id and `carriedRalphBudget` then answers null on `run.ralph !== true`
+    // (`run-disposition.ts:298`). It is NOT that a slug lookup picked the newest row — that
+    // was the mechanism before the prior was resolved by link, and naming it now would be
+    // fiction. Measured: a card at 20/20, one ralph-off dispatch, that row dies, and the
+    // next governed dispatch starts at 0/20.
     // RED-mutation: none needed to make this fail — it asserts the CURRENT limit. It
     // reds if someone accumulates the spend over the card's history instead of reading
     // one prior row, which is exactly what #629 asks for; at that point this test should

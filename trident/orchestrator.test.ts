@@ -4418,10 +4418,13 @@ describe('orchestrator — RALPH RE-FIRE (#362): multi-task build re-fires per t
     const BASE40 = 'c'.repeat(40)
     const TASK = 'seeded at cap through the real dispatch chokepoint'
 
-    // A governed prior AT its cap, built-but-never-reviewed on an unmoved tip. The SLUG
-    // must be the one the chokepoint will derive from the task text, or
-    // `latestTerminalBySlug` finds no prior and the dispatch is an ordinary fresh one —
-    // which is how the first version of this test silently stopped testing anything.
+    // A governed prior AT its cap, built-but-never-reviewed on an unmoved tip. The slug is
+    // still derived from the task text, but NOT because the prior is found that way any
+    // more — the dispatch loads it by the card's `linked_run_id`. It matters because the
+    // BRANCH comes from the slug, and the seed's head-equality proof is taken against that
+    // branch. (When this comment was written the prior WAS resolved by slug, and a
+    // mismatched slug was how the first version of this test silently stopped testing
+    // anything; the lookup changed and the reason had to be re-derived.)
     const SLUG = slugifyTask(TASK)
     const BRANCH = `trident/${SLUG}`
     const prior = await createRun({

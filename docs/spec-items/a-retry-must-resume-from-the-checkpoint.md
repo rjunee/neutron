@@ -91,8 +91,11 @@ lane (`nextStatus('failed') → 'upcoming'`, the ordinary status-dot advance) an
 same card, same slug, same title, same branch, nothing re-cut. Two other doors need the
 slug lost (`onboarding/overnight/register.ts` creates governed runs with no card; a
 re-cut card gets a new slug), and an **intervening non-governed run** launders the spend
-outright — that row is present and readable, just not governed, so `carriedRalphBudget`
-answers null and the next governed dispatch starts at zero. Earlier drafts of this
+outright: every successful dispatch rebinds the card to its new run
+(`board-dispatch.ts:1574`), so one ralph-off dispatch makes that row what `linked_run_id`
+names, and `carriedRalphBudget` then answers null on `run.ralph !== true`
+(`run-disposition.ts:298`). That row is present and readable — just not governed — so it
+is not a "gap in the chain"; the spend is lost because the card points somewhere else. Earlier drafts of this
 paragraph named only the two slug-losing doors, which made the limit sound far narrower
 than it is.
 

@@ -151,10 +151,16 @@ rather than quietly applied.
 
 A fourth door, and it is not the "gap in the chain" `#629` already names: AN INTERVENING
 NON-GOVERNED RUN LAUNDERS THE WHOLE SPEND. Measured: a card at 20/20, one dispatch with
-ralph off (row born at 0, non-governed), that row dies, `latestTerminalBySlug` returns
-IT, and the next governed dispatch is 0/20. That row is present, terminal and perfectly
-readable — it is simply not governed, so `carriedRalphBudget` answers null on
-`run.ralph !== true`. A present row is not a gap. The spend is also read from ONE prior
+ralph off (row born at 0, non-governed), that row dies, and the next governed dispatch is
+0/20. THE MECHANISM, re-derived after the prior lookup changed: every successful dispatch
+rebinds the card to its new run (`board-dispatch.ts:1574`), so the ralph-off row is what
+`linked_run_id` names; the ladder loads it by that exact id and `carriedRalphBudget`
+answers null on `run.ralph !== true` (`run-disposition.ts:298`). The spend is not lost to
+a lookup — it is lost because the card now points somewhere else. This paragraph blamed
+`latestTerminalBySlug` returning the latest terminal row, which WAS the cause until the
+same change replaced that lookup; the phenomenon survived and the explanation did not.
+That row is present, terminal and perfectly readable — it is simply not governed. A
+present row is not a gap. The spend is also read from ONE prior
 row rather than accumulated, so a real gap loses everything before it. The row is recreated by every dispatch, so a per-row counter is one reset away
 by construction; holding the spend on the card is the durable fix. `#629` carries the
 measurement. All three of the spec item's acceptance boxes are UNTICKED and the item
@@ -228,8 +234,43 @@ Measured rather than assumed: `code_trident_runs` is STRICT with both columns
 infinities and fractionals ("cannot store REAL value in INTEGER"). The PERSISTED surface
 is therefore negatives and unsafe magnitudes; those are covered through the real
 database, and the three sqlite cannot store are covered through the real dispatch
-chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
+chokepoint with the row supplied by an overridden `get` — the exact key the decision now
+uses; that fixture originally overrode `latestTerminalBySlug` and had to move when the
+lookup did, which is the same blast radius one layer down. Layered, not
 duplicated, and not pretending the schema is weaker than it is.
+
+**THE BLAST RADIUS OF A CORRECTION INCLUDES EVERY SENTENCE THAT EXPLAINED THE OLD
+BEHAVIOUR — INCLUDING THE SENTENCES THE SAME CHANGE JUST WROTE.** A fix invalidates the
+explanations of the bug it fixes, and this lane produced two clean instances in one round.
+Replacing the slug lookup with the card's link falsified (a) this file's own test-header
+paragraph, which said an exhausted `ralph-task-built` retry gets "a fresh budget" —
+twenty lines above a test asserting it keeps its spend — and (b) five sentences across
+three files and the PR body that named `latestTerminalBySlug` picking the newest row as
+the cause of non-governed laundering. The phenomenon is real; that cause became fiction
+the moment the lookup changed. Re-derived from the ladder as it now stands: every
+successful dispatch REBINDS the card to its new run (`board-dispatch.ts:1574`), so the
+ralph-off row is what `linked_run_id` names, and `carriedRalphBudget` answers null on
+`run.ralph !== true` (`run-disposition.ts:298`). The spend is not lost to a lookup — it is
+lost because the card points somewhere else.
+
+Both were repaired by re-deriving, not by deletion: each sentence existed because somebody
+needed to know why the reset happens, and a deleted explanation leaves the next reader to
+guess.
+
+THE SWEEP, WITH ITS DENOMINATOR, because a sweep whose denominator is unstated cannot be
+told from having fixed only what was pointed at. The axis was semantic rather than
+lexical — any sentence saying a budget resets, is inherited, is fresh or is laundered, or
+naming WHY — across all ten touched files plus the PR body: **336 raw matches, narrowed to
+159 candidate claims, all 159 read against the current ladder, 10 rewritten.** The 149
+left alone divide into claims still true (the link-clearing escape, the overnight
+registrar, a re-cut card) and claims correctly framed as HISTORY ("was true when
+written", "until the prior stopped being resolved by slug"), which are the useful ones and
+must not be flattened into the present tense.
+
+Three sweeps, three axes, each finding what the last could not: the PHRASE across whole
+documents (three stale scope statements), then CAUSAL claims worded differently (these
+ten), and before both, comments against the code beneath them. The axis is the thing that
+has to widen; the tool is always grep.
 
 **A GUARD DOWNSTREAM OF A LOSSY LOOKUP CANNOT RECOVER WHAT THE LOOKUP DISCARDED.** The
 ladder resolved the prior with `latestTerminalBySlug(project, slug)` — `ORDER BY
