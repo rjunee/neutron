@@ -435,6 +435,11 @@ async function seedRef(repo: string, branch: string, marker: string): Promise<st
   return sha
 }
 
+/** The full ref for a short branch name, so the tests read the way the module does. */
+function ref(branch: string): string {
+  return `refs/heads/${branch}`
+}
+
 /** Every spelling of "delete this ref" a sweep could reach for. */
 function isADelete(cmd: readonly string[]): boolean {
   const joined = cmd.join(' ')
@@ -1890,6 +1895,96 @@ describe('branch-ref reap — the refusals (#547)', () => {
       JSON.stringify(report.refs_kept),
     ).toBe(true)
     expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  // THE PRESENCE READ IS KEYED ON THE EXIT CODE, NOT ON `ok`, and all four classes are
+  // exercised against the same code path. Measured on git 2.43: a ref that resolves exits 0,
+  // one that does not exits 1, a hard failure exits 128 — so exit 1 is the ONLY value that
+  // means absent, and `!ok` folds 1 and 128 together. The 128 case is the one that recorded a
+  // DELETION with no evidence the ref was gone.
+  //
+  // The pairing matters as much as the refusals: without the exit-1 and the
+  // ordinary-success cases below, a guard that stood down on EVERYTHING would satisfy the
+  // 128 case on its own.
+  for (const shape of [
+    {
+      what: 'exit 1 (absent) → the reap is real and IS recorded',
+      result: { ok: false, stdout: '', stderr: '', exit_code: 1 },
+      expect: 'deleted' as const,
+    },
+    {
+      what: 'exit 0 (present) → nothing was deleted, reported as kept',
+      result: { ok: true, stdout: 'TIP\n', stderr: '', exit_code: 0 },
+      expect: 'present' as const,
+    },
+    {
+      what: 'exit 128 (hard error) → indeterminate, never a deletion',
+      result: { ok: false, stdout: '', stderr: 'fatal: permission denied', exit_code: 128 },
+      expect: 'unknown' as const,
+    },
+  ]) {
+    test(`after an indeterminate delete, ${shape.what}`, async () => {
+      const { root, repo } = await makeRepo()
+      const branch = 'trident/presence-by-exit-code'
+      const sha = await seedRef(repo, branch, 'presence')
+      let attempted = false
+
+      const report = await sweepTridentWorktrees({
+        store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+        run_host: async (cmd, cwd) => {
+          if (!attempted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+            attempted = true
+            // Really delete it, so the ref's actual state cannot be what the assertions
+            // below are reading — only the stubbed presence answer can be.
+            await spawnCapture(cmd, cwd)
+            return { ok: false, stdout: '', stderr: 'killed by watchdog', exit_code: 143, timed_out: true }
+          }
+          if (attempted && cmd.includes('rev-parse') && cmd.includes(ref(branch))) {
+            return { ...shape.result, stdout: shape.result.stdout.replace('TIP', sha) }
+          }
+          return spawnCapture(cmd, cwd)
+        },
+        proc_root: makeProc(root),
+      })
+
+      expect(attempted).toBe(true)
+      if (shape.expect === 'deleted') {
+        expect(report.refs_deleted.map((e) => e.ref)).toContain(ref(branch))
+        expect(report.refs_stood_down).toBe(0)
+      } else {
+        expect(report.refs_deleted, JSON.stringify(report.refs_kept)).toEqual([])
+        const kept = report.refs_kept.find((k) => k.ref === ref(branch))
+        expect(kept?.reason, JSON.stringify(report.refs_kept)).toStartWith(
+          shape.expect === 'present' ? 'delete-timed-out:' : 'delete-indeterminate:',
+        )
+        // Only the UNKNOWN class is a stand-down; a present ref is an ordinary refusal.
+        expect(report.refs_stood_down).toBe(shape.expect === 'unknown' ? 1 : 0)
+      }
+    }, 60_000)
+  }
+
+  test('an ORDINARY successful delete is still recorded, with no presence read at all', async () => {
+    // The other half of the pairing: the exit-code classification must not have turned the
+    // normal path into a stand-down. A delete that reports success is not re-read — there is
+    // nothing indeterminate about it.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/ordinary-delete'
+    const sha = await seedRef(repo, branch, 'ordinary')
+    let presenceReads = 0
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (cmd.includes('rev-parse') && cmd.includes(ref(branch))) presenceReads += 1
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([{ ref: ref(branch), sha, salvage: `refs/trident-reaped/ordinary-delete/${sha}` }])
+    expect(report.refs_stood_down).toBe(0)
+    expect(presenceReads).toBe(0)
+    expect(await refExists(repo, ref(branch))).toBe(false)
   }, 60_000)
 
   test('a timeout whose ref cannot be RE-READ is unknown, and unknown is not a deletion', async () => {

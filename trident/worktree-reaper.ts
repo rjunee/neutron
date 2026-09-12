@@ -33,6 +33,42 @@
  * in-band terminal transition reaps within a tick; everything else reaps within the
  * 15-minute cadence or at the next boot (`immediate: true`).
  *
+ * ── "FALSE" AND "UNKNOWN" MUST NEVER SHARE A BRANCH ─────────────────────────────
+ *
+ * Three review rounds produced three versions of ONE mistake: a boolean `ok` deciding a
+ * question git answers with an EXIT CODE. Round 4's `refAlreadyExists` needed exit 128 AND
+ * the message, not `!ok`. Round 6's delete needed success/timeout/other, not `!ok`. Round 7's
+ * presence read needed exit 0/1/anything-else, not `!ok` — and until it did, a `fatal:
+ * permission denied` recorded a DELETION with no evidence the ref was gone. Each fix was
+ * right and each left the same latent shape next door, because `ok` collapses "the thing is
+ * false" with "I could not find out", and on a destructive path those must take different
+ * branches.
+ *
+ * THE TEST FOR WHETHER TWO VALUES ARE ENOUGH: does every failure class take the SAME branch,
+ * and is that branch the REFUSING one? If yes, `ok` is fine and collapsing costs nothing. If
+ * the branches differ — or if one of them is the destructive one — the decision must be keyed
+ * on the value git actually returned. Every `.ok` in this module, classified:
+ *
+ *   TWO-VALUED, AND CORRECTLY SO — every failure class refuses identically:
+ *     · `worktree list --porcelain` in the worktree pass → repo-unenumerable, skip the repo.
+ *     · `checkout --detach` → preserve the worktree.
+ *     · `worktree list -z` in `refClaimedNow` → answers "claimed", i.e. refuse the delete.
+ *     · `for-each-ref` → refs-unenumerable, stand down.
+ *     · `worktree list -z` for the holder map → holders-unenumerable, stand down.
+ *     · `update-ref <salvage> <sha> ''` → does not decide; falls through to a MEASUREMENT.
+ *     · `rev-parse --verify --quiet <salvage>` + sha compare → absent (exit 1) and error
+ *       (128) both mean "the salvage is not proven to hold the tip", and both refuse. Same
+ *       command as the presence read below, different question, and two values genuinely suffice.
+ *     · `!deleted.ok` gating the presence read → decides only WHETHER TO MEASURE, not what
+ *       the outcome was.
+ *
+ *   THREE-VALUED, NECESSARILY — the branches differ and one of them is destructive:
+ *     · the delete: success / TIMED OUT (indeterminate) / refused (`deleted.timed_out`).
+ *     · the presence read after an indeterminate delete: present / absent / unknown
+ *       (`refPresence`, keyed on exit 0 / 1 / anything else).
+ *     · the salvage restore: succeeded / refused because the ref EXISTS / failed for any
+ *       other reason, which leaves a live claimant's HEAD dangling (`refAlreadyExists`).
+ *
  * ── THE EVIDENCE GUARD — FOURTEEN CHECKS, SAFER THAN THE 2026-09-01 INCIDENT ──────
  *
  * `docs/as-built/wrong-base-guard-prints-a-destructi.md` records a guard that
@@ -701,6 +737,36 @@ function refAlreadyExists(result: { stdout: string; stderr: string; exit_code: n
 }
 
 /**
+ * DOES THIS REF EXIST? Three answers, keyed on `git rev-parse --verify --quiet`'s EXIT CODE
+ * and never on a boolean.
+ *
+ * MEASURED on git 2.43: a ref that resolves exits **0**; one that does not exits **1**; a
+ * hard failure — not a repository, an unreadable ref database — exits **128**. So exit 1 is
+ * the ONLY value that means absent, and `ok` cannot express that: it folds 1 and 128 into
+ * one `false`, which on this path is the difference between "the reap is real" and "I have no
+ * idea what happened".
+ *
+ * WHY THIS FUNCTION EXISTS AT ALL (#547 round 7, and the third instance of one mistake).
+ * The caller previously read presence as `after.ok && stdout !== ''` and treated everything
+ * else as absent, so `{ok:false, exit_code:128}` — a real git error — recorded a DELETION
+ * with no evidence the ref was gone. Round 4 made the same mistake with `refAlreadyExists`
+ * (`!ok` instead of exit 128 plus the message) and round 6 made it with the delete itself
+ * (`!ok` instead of present/absent/unknown). See the module header: on a destructive path
+ * "false" and "unknown" must never share a branch, and a boolean result type is what makes
+ * them share one.
+ *
+ * `1` also covers a ref that exists but does not RESOLVE — a corrupt ref file reads as exit 1
+ * (measured). For this caller's question that is the right reading: an unusable ref is not a
+ * ref the sweep left standing. The refs here come from `for-each-ref`, so a malformed name
+ * (also exit 1) cannot reach it.
+ */
+function refPresence(result: HostCommandResult): 'present' | 'absent' | 'unknown' {
+  if (result.exit_code === 0) return 'present'
+  if (result.exit_code === 1) return 'absent'
+  return 'unknown'
+}
+
+/**
  * IS ANYTHING CLAIMING THIS REF RIGHT NOW? Re-measured from scratch — a fresh worktree
  * listing and a fresh store read — rather than from the snapshots the per-ref gates use.
  *
@@ -1212,20 +1278,19 @@ async function reapBranchRefs(
         report.refs_stood_down += 1
         continue
       }
-      const stillThere = after.ok && after.stdout.trim() !== ''
-      if (stillThere) {
+      // THE ANSWER IS KEYED ON THE EXIT CODE, not on `ok`. See `refPresence`.
+      const presence = refPresence(after)
+      if (presence === 'present') {
         report.refs_kept.push({
           ref,
           reason: `delete-timed-out: the ref is STILL PRESENT at ${after.stdout.trim()}, so nothing was deleted`,
         })
         continue
       }
-      if (!after.ok && after.stdout.trim() === '' && after.exit_code === 0) {
-        // `--verify --quiet` exits 1 for an absent ref, so ok:false with exit 0 is a shape
-        // git does not produce; treat an unreadable answer as unknown rather than absent.
+      if (presence === 'unknown') {
         report.refs_kept.push({
           ref,
-          reason: 'delete-indeterminate: the delete timed out and the ref did not read as present or absent',
+          reason: `delete-indeterminate: the delete timed out and the ref did not read as present or absent (${hostText(after)})`,
         })
         report.refs_stood_down += 1
         continue

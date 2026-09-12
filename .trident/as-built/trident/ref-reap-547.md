@@ -25,6 +25,36 @@ the workflow's own process is alive. A run reaped by the hang watchdog, cancelle
 that already fires on every path, was built to never delete a branch: the ref WAS the rescue copy
 of a failed run's commits (`.trident/plans/trident/nothing-ever-reaps-a-trident-worktr.md`).
 
+### The generalisation, which outlived the specific fixes
+
+**ON A DESTRUCTIVE PATH, "FALSE" AND "UNKNOWN" MUST NEVER SHARE A BRANCH — AND A BOOLEAN RESULT TYPE
+IS WHAT MAKES THEM SHARE ONE.** This is stated first because it is the transferable part; everything
+below it is one module's instances of it.
+
+Three review rounds produced three versions of a single mistake, each time a boolean `ok` deciding a
+question git answers with an exit code:
+
+| round | the decision | what `ok` collapsed | what it needed |
+|---|---|---|---|
+| 4 | did the create-only salvage refuse because the ref exists? | "already exists" with every other failure | exit **128** AND the message |
+| 6 | did the delete happen? | "refused" with "timed out, so I cannot tell" | success / timeout / other |
+| 7 | is the ref there now? | "absent" with "`fatal: permission denied`" | exit **0** / **1** / anything else |
+
+Round 7's is the one that shows the cost plainly: a hard git error read as *absent*, so the sweep
+recorded a **deletion it had no evidence for**. Each of the three fixes was correct and each left the
+same latent shape next door, because the type carried one bit where the domain has three states. A
+`HostCommandResult` exposes `exit_code`; `ok` is a convenience over it, and a convenience is the wrong
+thing to branch a destructive decision on.
+
+THE TEST FOR WHETHER TWO VALUES SUFFICE, which is the part to carry to the next module: **does every
+failure class take the SAME branch, and is that branch the refusing one?** If yes, collapsing costs
+nothing and `ok` is right. If the branches differ — or if one of them is the destructive one — the
+decision must be keyed on the value the tool actually returned. Applied to this module, 8 of the 11
+`.ok` decisions are legitimately two-valued (every failure refuses identically) and 3 are necessarily
+three-valued; the full classification is in the module header so it can be checked against the code
+rather than taken on trust. It is the same discipline `#628` applied to its cap — absent → default,
+valid → honour, invalid → refuse, as three classes keyed on the value and not on truthiness.
+
 ### What shipped
 
 **The reap is state-driven, not hooked onto each terminal path.** `sweepTridentWorktrees`
@@ -303,6 +333,11 @@ A guard that must sample two things it does not own, in sequence, to decide abou
 question its position cannot answer; the component that owns the state can usually answer the same
 question with one call and no window. Probe-tightening buys probability, and the honest way to record
 probability is as a residue rather than as a guarantee.
+
+AND ITS SIBLING, from the same lane: a guard can also be on the right side of the boundary and still
+be wrong because its RESULT TYPE is too small. The boundary question is about position; the
+false-versus-unknown question is about representation. Both end the same way — a destructive action
+taken on evidence that was never established.
 
 ### Coverage
 
