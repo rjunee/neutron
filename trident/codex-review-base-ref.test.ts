@@ -40,23 +40,35 @@ async function git(repo: string, ...args: string[]): Promise<string> {
 }
 
 /**
- * The promotion block, lifted out of the shipped wrapper: from the `BASE_REF=` assignment
- * to the `fi` that closes the `if`. Asserted non-trivial, so a refactor that moves the
- * block fails loudly here instead of leaving these tests exercising an empty string.
+ * The base-ref block PLUS the resolvability guard, lifted out of the shipped wrapper — the
+ * qualification `if/elif` chain, then the guard that refuses a base naming no commit. The
+ * guard lives beside the diff rather than beside the chain (putting it next to the chain made
+ * it preempt the documented GRACEFUL exit 10/11), so it is spliced on here.
+ *
+ * THE EXTRACTION USED TO STOP AT THE FIRST `fi`, which is why `'no-such-branch'` could be
+ * asserted as "kept verbatim" for a whole round: whatever refuses an unresolvable base is not
+ * in that slice, so the tests never ran it. **An extraction boundary is a claim about what is
+ * under test**, and this one was quietly narrower than the behaviour it was named for.
  */
 function promotionBlock(): string {
   const src = readFileSync(SCRIPT, 'utf8')
   const start = src.indexOf('BASE_REF="${1:-main}"')
   expect(start).toBeGreaterThan(-1)
-  const fi = src.indexOf('\nfi\n', start)
-  expect(fi).toBeGreaterThan(start)
-  const block = src.slice(start, fi + 4)
+  const chainEnd = src.indexOf(': "${CODEX_HOME:=}"', start)
+  expect(chainEnd).toBeGreaterThan(start)
+  const guardStart = src.indexOf('if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}"', chainEnd)
+  expect(guardStart).toBeGreaterThan(chainEnd)
+  const guardEnd = src.indexOf('\n  fi\n', guardStart)
+  expect(guardEnd).toBeGreaterThan(guardStart)
+  const block = src.slice(start, chainEnd) + src.slice(guardStart, guardEnd + 6)
   // It must actually contain the promotion, or these tests prove nothing about it.
   expect(block).toContain('refs/remotes/origin/${BASE_REF}')
   // The FULLY QUALIFIED form, which is what the block verifies one line above. It stored the
   // shorthand `origin/${BASE_REF}` until round seventeen, and a tag named `origin/main` wins
   // that name in git's disambiguation order — so the promotion resolved to the tag.
   expect(block).toContain('BASE_REF="refs/remotes/origin/${BASE_REF}"')
+  // …and the guard that makes an unresolvable base a REFUSAL rather than an empty review.
+  expect(block).toContain('does not name a commit in this repository')
   return block
 }
 
@@ -205,16 +217,45 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     expect(await promote(w.repo, 'main')).toBe('refs/remotes/origin/main')
   })
 
-  test('every other kind of argument is kept VERBATIM', async () => {
+  test('every other kind of argument that RESOLVES is kept VERBATIM', async () => {
     const w = await seedWorld()
+    // HEAD NEEDS A PARENT for `HEAD~1` to be a resolvable argument, and the fixture leaves
+    // HEAD at the root commit. Found by the new guard REFUSING `HEAD~1` here — the fixture
+    // was supplying an unresolvable value and the old "kept verbatim" assertion could not
+    // tell that from a resolvable one, which is the same fixture-supplies-the-claim shape
+    // this round is about.
+    await git(w.repo, 'switch', '-q', '-c', 'head-probe', w.remote)
     for (const arg of [
       w.remote, // a 40-hex sha
       'origin/main', // already qualified — `origin/origin/main` must not be reached for
       'HEAD~1', // a revision expression, not a ref name
-      'no-such-branch', // a name with nothing behind it
+      'refs/tags/release', // an explicitly qualified tag: the caller's own choice
     ]) {
       expect({ arg, got: await promote(w.repo, arg) }).toEqual({ arg, got: arg })
     }
+  })
+
+  test('AN UNRESOLVABLE BASE IS REFUSED — an empty diff reads as "no findings"', async () => {
+    // THE BEHAVIOURAL DEFECT THIS TEST USED TO ENSHRINE. `'no-such-branch'` was in the
+    // verbatim list above, and nothing downstream stopped it: the wrapper runs
+    // `set -uo pipefail` — NOT `set -e` — and read its diff as
+    // `FULL_DIFF=$(git diff … 2>/dev/null)` with no status check, so a fatal left FULL_DIFF
+    // EMPTY and execution continued into codex with nothing to review.
+    //
+    // **A REVIEW THAT CANNOT SEE APPROVES EVERYTHING.** An empty diff is indistinguishable
+    // from a diff with no findings, which is the same shape as a gate whose disk filled up
+    // returning empty output with no error: a check that could not run reads exactly like a
+    // check that passed, and both fail in the safe-looking direction.
+    const w = await seedWorld()
+    for (const arg of ['no-such-branch', 'a'.repeat(40), 'refs/tags/no-such-tag']) {
+      const res = await runBlock(w.repo, arg)
+      expect({ arg, ok: res.ok, stdout: res.stdout }).toEqual({ arg, ok: false, stdout: '' })
+      expect(res.stderr).toContain('does not name a commit')
+    }
+    // THE COMPLEMENT, so this is not "refuse everything": the resolvable siblings still pass.
+    expect(await promote(w.repo, 'main')).toBe('refs/remotes/origin/main')
+    await git(w.repo, 'switch', '-q', '-c', 'head-probe', w.remote)
+    expect(await promote(w.repo, 'HEAD~1')).toBe('HEAD~1')
   })
 
   test('a local branch with NO remote counterpart is QUALIFIED — the fallback, same rigour', async () => {

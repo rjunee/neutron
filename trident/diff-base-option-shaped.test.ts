@@ -632,6 +632,16 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       needle: 'DIFF_SRC=',
       why: 'a label recorded for the trailer; the invocation is the line above it',
     },
+    {
+      file: 'codex-review.sh',
+      needle: 'does not name a commit in this repository',
+      why: 'the refusal MESSAGE naming the range it will not run — prose, never argv',
+    },
+    {
+      file: 'codex-review.sh',
+      needle: 'could not read the diff',
+      why: "the diff-failure MESSAGE quoting the range git rejected — prose, never argv",
+    },
   ]
 
   /**
@@ -645,7 +655,7 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
     { file: 'inner-workflow.mjs', line: 2449, why: 'the plan probe branch log — a shell command composed for a prompt' },
     { file: 'inner-workflow.mjs', line: 5286, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 821, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { file: 'codex-review.sh', line: 337, why: 'shell: the standalone reviewer builds its own diff' },
+    { file: 'codex-review.sh', line: 365, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {
@@ -752,7 +762,9 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
       'mutation-claim-artifact.ts': 3,
       // Two shell wrapper commands plus the trailer label.
       'codex-build.sh': 1,
-      'codex-review.sh': 2,
+      // Four: the invocation, the trailer label, and the two refusal messages that quote the
+      // range they are refusing to run.
+      'codex-review.sh': 4,
     })
     // Named explicitly, because an empty key is easy to misread as "not scanned".
     for (const gone of ['orchestrator.ts', 'merge.ts', 'mutation-prover.ts', 'git-range.ts']) {

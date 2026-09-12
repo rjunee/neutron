@@ -91,10 +91,22 @@ function buildRangeLine(): string {
 /** `codex-review.sh`'s own diff line, same treatment. */
 function reviewRangeLine(): string {
   const src = readFileSync(REVIEW_SH, 'utf8')
-  const line = src.split('\n').find((l) => l.includes('FULL_DIFF=$(git diff --end-of-options'))
-  expect(line).toBeDefined()
-  const found = (line as string).trim()
+  // THE WHOLE STATEMENT, not one line: the diff now captures its own failure, so the read is
+  // an `if ! FULL_DIFF=$(…); then … exit 3; fi` block. A one-line extractor would have
+  // silently dropped the status check and gone on testing the happy path.
+  const start = src.indexOf('DIFF_ERR_FILE=$(mktemp')
+  expect(start).toBeGreaterThan(-1)
+  const end = src.indexOf('rm -f "$DIFF_ERR_FILE"', src.indexOf('exit 3', start))
+  expect(end).toBeGreaterThan(start)
+  const found = src
+    .slice(start, end + 'rm -f "$DIFF_ERR_FILE"'.length)
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l !== '' && !l.startsWith('#'))
+    .join('\n')
   expect(found).toContain('"${BASE_REF}..HEAD"')
+  // …and the failure path, which is the half a line-based extraction could not see.
+  expect(found).toContain('exit 3')
   return found
 }
 

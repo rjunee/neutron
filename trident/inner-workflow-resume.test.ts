@@ -331,11 +331,12 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     // reviewers every commit merged into the base since. Measured at 149 files where the
     // branch changed 30. `trident/review-diff-base-realgit.test.ts` proves the effect
     // against real git with a deliberately stale local ref; this pins the composed form.
-    // UNPINNED: the base is a shell substitution that prefers `origin/<base>` and falls
-    // back to the bare name ONLY when that ref does not resolve — the same in local mode
-    // as in pr mode, because `merge_mode: 'local'` means the outer loop merges locally,
-    // not that the repository has no remote. Pinned here as the composed text; the
-    // real-git suite asserts what it RESOLVES TO and the files it produces.
+    // UNPINNED: the base is a shell substitution that prefers `refs/remotes/origin/<base>`
+    // and falls back to `refs/heads/<base>` — BOTH FULLY QUALIFIED, never a bare name, which
+    // is the arm round nineteen removed. The same in local mode as in pr mode, because
+    // `merge_mode: 'local'` means the outer loop merges locally, not that the repository has
+    // no remote. Pinned here as the composed text; the real-git suite asserts what it
+    // RESOLVES TO and the files it produces.
     for (const pr of [true, false]) {
       const cmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr }), 'resume-diff')
       expect({ pr, resolves: cmd.includes("printf %s 'refs/remotes/origin/main' || printf %s 'refs/heads/main'") }).toEqual({ pr, resolves: true })

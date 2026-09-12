@@ -110,7 +110,7 @@ function loadCodexBridgePrompts(): { build: string; collect: string; wait: strin
     '/harness/trident/checkpoint.sh',
     'trident/prompt-pin',
     'main',
-    "'origin/main'",
+    "'refs/remotes/origin/main'",
     'pr',
     '/codex-home',
     '',
@@ -842,11 +842,14 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       'codexHome',
       'codexReviewSh',
       'baseBranch',
-      // The base `diffBase` CHOSE (#546) — what the wrapper's standalone
-      // `git diff <base>..HEAD` fallback is given: the pin, else `origin/<base>` when that
-      // ref resolves, else the bare name, which is legitimate. (Read "never the bare local
-      // branch name" until the round-thirteen absolutes sweep; what never happens is the
-      // wrapper choosing a base of its own.)
+      // The base slot the wrapper argv carries (#546). **THIS TEST SUPPLIES THE VALUE**; it
+      // measures the SPLICE, not the resolution — what `diffBase` actually composes is
+      // asserted in `review-diff-base-realgit.test.ts` and the parity table, against real git.
+      // The value used here is production-shaped on purpose: a sha, or a FULLY QUALIFIED ref
+      // (`refs/remotes/origin/<base>`, else `refs/heads/<base>`). It was `'origin/main'` here
+      // for three rounds after production stopped producing shorthands — a fixture asserting
+      // the old contract with a value it supplied itself, which is why the stale comment above
+      // it read as true.
       'diffBase',
       'NO_INTERACTIVE_RULE',
       'REDIRECT_RULE',
@@ -872,7 +875,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
       '/harness/trident/codex-review.sh',
       'main',
       // PRE-QUOTED by `diffBase`, which is what the wrapper argv receives verbatim.
-      "'origin/main'",
+      "'refs/remotes/origin/main'",
       '',
       '',
       '',
@@ -914,7 +917,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     // its own quoting intact (a broken prefix would swallow the rest of the line).
     expect(command).toContain(
       "NEUTRON_CODEX_REVIEW_STAGE_RUN_ID='heartbeat-env-pin' CODEX_HOME='/codex-home' " +
-        "NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' bash '/harness/trident/codex-review.sh' 'origin/main'",
+        "NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' bash '/harness/trident/codex-review.sh' 'refs/remotes/origin/main'",
     )
   })
 
@@ -927,7 +930,7 @@ describe('inner-workflow.mjs — codex cross-model review panelist', () => {
     expect(command).not.toContain('NEUTRON_CODEX_REVIEW_STAGE_DB')
     expect(command).toContain(
       "CODEX_HOME='/codex-home' NEUTRON_CODEX_DIFF_FILE='/tmp/some-diff.diff' " +
-        "bash '/harness/trident/codex-review.sh' 'origin/main'",
+        "bash '/harness/trident/codex-review.sh' 'refs/remotes/origin/main'",
     )
   })
 

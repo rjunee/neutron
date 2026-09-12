@@ -76,8 +76,10 @@ BASE_REF="${1:-main}"
 #     treatment as the primary arm: it runs in the degraded world (fresh clone, no remote,
 #     detached CI checkout), which is where a stray tag is likeliest and least noticed.
 # Anything else is kept VERBATIM, because it is the caller's own EXPLICIT choice rather than a
-# bare word git will resolve for them: a 40-hex sha, `origin/<x>`, `refs/tags/<x>`, `HEAD~1`,
-# and a name that resolves to nothing at all (git refuses that one out loud).
+# bare word git will resolve for them: a 40-hex sha, `origin/<x>`, `refs/tags/<x>`, `HEAD~1`.
+# A value that resolves to NOTHING is then refused by the guard below — git does NOT refuse it
+# out loud here, which is what this comment used to claim: the diff's stderr was discarded and
+# the empty result read as "no findings".
 if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
   # AMBIGUOUS — REFUSED, not passed through. This case was "left alone" until round
@@ -331,10 +333,41 @@ if [ -n "${NEUTRON_CODEX_DIFF_FILE:-}" ] && [ -f "$NEUTRON_CODEX_DIFF_FILE" ]; t
   FULL_DIFF=$(<"$NEUTRON_CODEX_DIFF_FILE")
   DIFF_SRC="$NEUTRON_CODEX_DIFF_FILE"
 else
+# WHATEVER THE BASE-REF BLOCK ENDED UP WITH MUST NAME A COMMIT — including the values it keeps
+  # VERBATIM. An unresolvable base (`no-such-branch`, a sha that is not in this repo, a
+  # `refs/tags/<x>` that does not exist) used to pass straight through, and the diff below
+  # then failed into an EMPTY `FULL_DIFF` with its stderr discarded — so codex was handed
+  # nothing to review and returned clean. **A REVIEW THAT CANNOT SEE APPROVES EVERYTHING**,
+  # and an empty diff is indistinguishable from a diff with no findings. That is the same
+  # shape as a gate whose disk filled up returning empty output with no error: a check that
+  # could not run reads exactly like a check that passed, and both fail in the safe-looking
+  # direction.
+  if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+    # CARRIES THE SAME MARKER the empty-diff refusal below emits, because this IS that case —
+    # caught earlier, where the cause can still be named. A consumer greps for the marker.
+    printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' does not name a commit in this repository, so the diff ${BASE_REF}..HEAD would be EMPTY — nothing to review. DEFERRED — do NOT treat as an approval." >&2
+    exit 3
+  fi
+  # PLACED HERE, not up beside the qualification block: there it ran before the CODEX_HOME /
+  # auth checks and turned a documented GRACEFUL exit 10/11 ("no codex configured") into a 3.
+  # This is the point of use, which is also where the value's resolvability starts to matter.
   # `--end-of-options`: this wrapper takes an operator-supplied `[base-ref]`, so an
   # option-shaped value can genuinely arrive here. Without the marker
   # `git diff "--output=<path>..HEAD"` writes that file and exits 0 (measured, git 2.43).
-  FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD" 2>/dev/null)
+  #
+  # AND THE FAILURE IS THE SIGNAL, so it is no longer discarded. This read
+  # `2>/dev/null` with no status check, under `set -uo pipefail` — NOT `set -e` — so a
+  # failed diff left `FULL_DIFF` empty and execution continued into codex with nothing to
+  # review. `2>/dev/null` on a command whose failure is the signal is the specific mistake:
+  # git's stderr is the only thing that knows. stderr goes to a file rather than into
+  # `FULL_DIFF` so a warning can never be mistaken for diff text.
+  DIFF_ERR_FILE=$(mktemp "${TMPDIR:-/tmp}/codex-review-diff-err.XXXXXX")
+  if ! FULL_DIFF=$(git diff --end-of-options "${BASE_REF}..HEAD" 2>"$DIFF_ERR_FILE"); then
+    printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: could not read the diff '${BASE_REF}..HEAD' — $(tr '\n' ' ' < "$DIFF_ERR_FILE")— nothing to review. DEFERRED — do NOT treat as an approval." >&2
+    rm -f "$DIFF_ERR_FILE"
+    exit 3
+  fi
+  rm -f "$DIFF_ERR_FILE"
   DIFF_SRC="${BASE_REF}..HEAD"
 fi
 DIFF=$(printf '%s\n' "$FULL_DIFF" | head -n "$DIFF_LINE_LIMIT")

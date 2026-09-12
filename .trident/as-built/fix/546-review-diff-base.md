@@ -232,6 +232,56 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-two: a review that cannot see approves everything
+
+**The first behavioural finding in six rounds, and the worst one.** `codex-review.sh` left an
+unresolvable argument unchanged, then read its diff as `FULL_DIFF=$(git diff … 2>/dev/null)`
+with no status check — under `set -uo pipefail`, **not** `set -e`. Measured:
+
+    set -uo pipefail; FULL_DIFF=$(git diff --end-of-options no-such-branch..HEAD 2>/dev/null)
+    → continued:[]  exit=0
+
+So a standalone review against a base that names nothing ran codex on an EMPTY diff, found
+nothing, and returned clean. **A REVIEW THAT CANNOT SEE APPROVES EVERYTHING** — an empty diff
+is indistinguishable from a diff with no findings. It is the same shape as a gate whose disk
+fills up returning empty output with no error: a check that could not run reads exactly like a
+check that passed, and both fail in the safe-looking direction.
+
+**`2>/dev/null` on a command whose failure IS the signal is the specific mistake.** git's
+stderr was the only thing that knew. Two guards now:
+
+* the base-ref block's result must name a commit (`rev-parse --verify`), or exit 3 — placed
+  beside the DIFF rather than beside the qualification chain, because up there it preempted
+  the documented graceful exit 10/11 for "no codex configured";
+* the diff captures its own status, with stderr to a file so a warning can never be mistaken
+  for diff text; a failure is exit 3, quoting what git said.
+
+Both refusals carry `CODEX_REVIEW_EMPTY_DIFF`, which is the marker the workflow already greps
+for — this IS that case, caught earlier, where the cause can still be named.
+
+**And a test ENSHRINED it**: `'no-such-branch'` sat in the "kept VERBATIM" list. Its extractor
+stopped at the first `fi`, so whatever refused an unresolvable base was never in the slice —
+**an extraction boundary is a claim about what is under test**, and that one was quietly
+narrower than the behaviour it was named for. Fixed, and the new boundary is asserted to
+contain the guard.
+
+The new guard also caught **my own fixture** supplying an unresolvable `HEAD~1` (the seed
+leaves HEAD at the root commit) while the old assertion called it "kept verbatim" — the
+fixture-supplies-the-claim pattern again, this time found by the code rather than by review.
+
+**TESTS ARE DOCUMENTS TOO, and they are the ones that assert.** Three sweeps have each widened
+the domain — the documents I was named, then the tree by phrase, then by the thing — and each
+time the next instalment was the domain rather than the terms. This one found four stale test
+comments and, worse, a bridge test INJECTING `'origin/main'` and asserting it flowed through
+while its comment described it as "the base `diffBase` CHOSE". Production stopped producing
+shorthands in round seventeen. The value is now production-shaped, and the comment says plainly
+that the test supplies it and measures the SPLICE, not the resolution.
+
+Verified for the extended domain: every asserted base value in the suite — argv, composed
+shell word, `resolvedBase`, `promote` — is a sha or a fully qualified ref. The only bare `main`
+left in an assertion is `detectBaseBranch`'s OUTPUT, which is the binding's input, not its
+answer.
+
 ### Round twenty-one: a claim can be restated in words the grep does not contain
 
 Round twenty's sweep read 137 hits and changed 22, and still missed three live sites — because

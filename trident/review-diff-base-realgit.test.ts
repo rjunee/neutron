@@ -33,10 +33,11 @@
  * had already abandoned — a new narrative carrying an old rule, which is harder to spot
  * than a stale comment left behind, because nothing about it looks unmaintained.
  *
- * The rule the cases actually encode: `origin/<base>` whenever `refs/remotes/origin/<base>`
- * resolves, IN EITHER MERGE MODE, and the bare name only when it does not — asserted here
- * by three fixtures that differ in the REF, not in the mode (no remote at all, a configured
- * origin whose base ref is missing, and both modes against a resolving one).
+ * The rule the cases actually encode: `refs/remotes/origin/<base>` whenever that ref resolves,
+ * IN EITHER MERGE MODE, and `refs/heads/<base>` when it does not — both fully qualified, never
+ * a bare name (round nineteen). Asserted here by fixtures that differ in the REF, not in the
+ * mode: no remote at all, a configured origin whose base ref is missing, a tag colliding with
+ * each of the two answers, and both modes against a resolving one.
  *
  * ── REAL GIT, AND THE REAL COMMAND ────────────────────────────────────
  * Nothing here is mocked except the Workflow runtime's `agent()` seam, and that
