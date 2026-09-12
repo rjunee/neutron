@@ -488,6 +488,10 @@ export class HerdrHost implements PtyHost {
     let viewportRows: number | undefined
     let viewportReadAt = 0
     let warnedShortWindow = false
+    /** Said once: the viewport is a GUESS rather than a measurement. */
+    let warnedViewportAssumed = false
+    /** Said once: a successful read carried no usable text. */
+    let warnedMalformedRead = false
     let warnedForRows: number | undefined
     const refreshMs = this.deps.viewportRefreshMs ?? HERDR_VIEWPORT_REFRESH_MS
     while (!hasExited()) {
@@ -516,7 +520,25 @@ export class HerdrHost implements PtyHost {
       // CLAMPED to the server's hard cap — see `herdrReadWindow`. A viewport at or
       // past `cap - wanted` (799) cannot carry the full detector window, and that
       // is said out loud ONCE rather than surfacing later as a short read.
+      // THE FALLBACK IS A GUESS, AND IT LOOKS EXACTLY LIKE A MEASUREMENT.
+      // `viewportRows ?? 120` yields a value indistinguishable from a pane that
+      // really is 120 rows, so "we could not read the geometry" and "the geometry is
+      // 120" were the same state — and the consequence is silent: on a 400-row pane
+      // the window is sized for 120, every read comes back short, and positional
+      // detectors see less than they were written for with nothing anywhere saying
+      // why. The fallback STAYS (a REPL whose geometry cannot be read must still
+      // poll), but it is no longer mute.
+      const viewportIsAssumed = viewportRows === undefined
       const effectiveRows = viewportRows ?? HERDR_VIEWPORT_ROWS_FALLBACK
+      if (viewportIsAssumed && !warnedViewportAssumed) {
+        warnedViewportAssumed = true
+        process.stderr.write(
+          `[herdr-host] pane ${paneId}: could not read viewport_rows — ASSUMING ` +
+            `${HERDR_VIEWPORT_ROWS_FALLBACK}. This is a guess, not a measurement: if the pane is ` +
+            `taller, every read is short by the difference and positional detectors see less than ` +
+            `the ${HERDR_READ_WINDOW_LINES} lines they are written against.\n`,
+        )
+      }
       const win = herdrReadWindow(effectiveRows)
       if (win.belowDetectorWindow && (!warnedShortWindow || warnedForRows !== effectiveRows)) {
         // Once per DISTINCT geometry, not once per process: a pane resized into a
@@ -541,7 +563,24 @@ export class HerdrHost implements PtyHost {
           format: 'text',
         })) as unknown as { read?: HerdrPaneRead }
         const read = r.read
-        if (read !== undefined && typeof read.text === 'string') text = read.text
+        if (read !== undefined && typeof read.text === 'string') {
+          text = read.text
+        } else if (!warnedMalformedRead) {
+          // The CALL SUCCEEDED and the payload was unusable — which is neither a
+          // failed read nor a screen. Leaving `text` undefined is right (see below:
+          // an unknown must not be delivered as an empty screen), but doing it
+          // silently means a server whose reply shape drifted would poll forever
+          // delivering nothing, looking exactly like a permanently idle REPL. The
+          // protocol-version gate catches a declared change; this catches a
+          // same-version one.
+          warnedMalformedRead = true
+          process.stderr.write(
+            `[herdr-host] pane ${paneId}: pane.read SUCCEEDED but carried no usable text ` +
+              `(read=${read === undefined ? 'absent' : `text:${typeof read.text}`}). Delivering ` +
+              `nothing rather than an empty screen. If this persists the reply shape has ` +
+              `changed under a protocol version that did not.\n`,
+          )
+        }
       } catch {
         // A read that FAILED tells us nothing about the screen. Drop it — do NOT
         // synthesize an empty snapshot, which would erase the ring's record of a

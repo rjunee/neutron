@@ -509,6 +509,22 @@ describe('herdr client framing', () => {
     ['an event whose data is an array', '{"event":"pane_exited","data":[]}'],
     ['an event whose data is a bare string', '{"event":"pane_exited","data":"w1:p1"}'],
     ['an event whose data is a bare number', '{"event":"pane_exited","data":0}'],
+    // THE REPLY OUTCOME, the same requirement on the other envelope. Presence of the
+    // key was the whole check, so a WRONG-TYPED outcome slipped through and then lost
+    // its identity in the dispatcher: `asObject('refused')` is `undefined`, the error
+    // branch was skipped, and the call RESOLVED with `{}`. A `pane.close` the server
+    // refused, reported to `kill()` as acknowledged.
+    ['a reply whose error is a bare string', '{"id":"n1","error":"refused"}'],
+    ['a reply whose error is null', '{"id":"n1","error":null}'],
+    ['a reply whose error is an array', '{"id":"n1","error":[]}'],
+    ['a reply whose error is a bare number', '{"id":"n1","error":7}'],
+    ['a reply whose result is a bare string', '{"id":"n1","result":"ok"}'],
+    ['a reply whose result is null', '{"id":"n1","result":null}'],
+    ['a reply whose result is an array', '{"id":"n1","result":[]}'],
+    ['a reply whose result is a bare boolean', '{"id":"n1","result":true}'],
+    // BOTH outcomes. Not harmlessly redundant: it means we cannot tell whether the
+    // call succeeded, which is the single thing the caller asked.
+    ['a reply carrying BOTH result and error', '{"id":"n1","result":{},"error":{"code":"x"}}'],
   ] as [string, string][]) {
     it(`a frame of ${label} tears the transport down, and never throws`, async () => {
       // The RPC clock is set far out ON PURPOSE. With a short one, a client that
@@ -547,13 +563,22 @@ describe('herdr client framing', () => {
     const ok = client.call('pane.get', {})
     feed(client, '{"id":"n1","result":{"type":"ok"}}\n')
     expect(await ok).toEqual({ type: 'ok' })
+    // AND AN EMPTY `result` IS A REAL SUCCESS, the reply-path twin of the `data:{}`
+    // case below. `{}` used to be the value the client INVENTED when it could not
+    // read an outcome, which is precisely why it must stay a legitimate one here:
+    // requiring "a usable outcome" must not become "a non-empty outcome", or a
+    // server that acknowledges with no fields starts failing.
+    const empty = client.call('pane.send_keys', {})
+    feed(client, '{"id":"n2","result":{}}\n')
+    expect(await empty).toEqual({})
+    expect(client.isClosed()).toBe(false)
     // A reply with `error` — including the measured `id: ""` shape.
     const bad = client.call('pane.read', {}).then(() => undefined, (e: unknown) => e as Error)
     feed(client, '{"id":"","error":{"code":"invalid_request","message":"nope"}}\n')
     expect((await bad)!.message).toContain('invalid_request')
     expect(client.isClosed()).toBe(false)
     // An event. `subscribe` issues its own rpc, so its reply has to be fed before it
-    // resolves — the ids are sequential, and this is the third call.
+    // resolves — the ids are sequential, and this is the fourth call.
     // Collected rather than overwritten: every delivery is kept, so "the second event
     // arrived with an empty object" is distinguishable from "the second event never
     // arrived and the first is still sitting in the variable".
@@ -561,7 +586,7 @@ describe('herdr client framing', () => {
     const sub = client.subscribe('pane_exited', { type: 'pane.exited' }, (d) => {
       seen.push(d)
     })
-    feed(client, '{"id":"n3","result":{"type":"ok"}}\n')
+    feed(client, '{"id":"n4","result":{"type":"ok"}}\n')
     await sub
     feed(client, '{"event":"pane_exited","data":{"pane_id":"w1:p1"}}\n')
     expect(seen).toEqual([{ pane_id: 'w1:p1' }])

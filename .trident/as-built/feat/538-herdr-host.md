@@ -787,6 +787,10 @@ The sweep also taught me something about my own grep. My first pattern
 seventeen. **A grep is only as good as its guess at the vocabulary** — the absence-claim
 discipline says a grep finding nothing proves nothing without a positive control, and
 this is its sibling: a grep finding *something* does not prove it found *everything*.
+**A completeness claim is only as wide as the instrument that checks it** — the same
+defect as #638's coverage test keyed to a single spelling of an identifier, which is
+why the surviving-hits check is now written as a criterion the reader can re-run rather
+than a count I once got right.
 
 Three outcomes, all legitimate, and the reason not to blanket-edit:
 
@@ -845,6 +849,93 @@ regenerating produced a byte-identical file. That the diff was empty is the poin
 recording, not the reassurance: reading correctly and being the renderer's output are two
 different properties, and only the second one is what the gate tests. Regenerate, then
 assert drift is zero.
+
+### `{}` was the representation of "nothing usable" — three doors, one defect
+
+Review r11, and the third appearance closed the argument about what these three bugs
+have in common.
+
+**A refused RPC was reported as a successful one.** The reply envelope was validated as
+`typeof o['id'] === 'string' && ('result' in o || 'error' in o)` — the PRESENCE of a key,
+with no check on what it held and no objection to both. So
+`{"id":"n1","error":"refused"}` passed: `error` is a string, which the protocol never
+sends. The dispatcher then did `asObject(env.error)`, got `undefined` for a string,
+SKIPPED the error branch, and fell through to `p.resolve(asObject(env.result) ?? {})` —
+`result` was absent, so the call **resolved successfully with `{}`**. A `pane.close` or
+`pane.send_keys` the server refused, handed to `kill()` as an acknowledgement.
+
+Put the three side by side and the cause is one sentence:
+
+| Door | The coercion | What it destroyed |
+|---|---|---|
+| `kill()` (r9) | `.finally()` settles either way | a failed close became a clean exit |
+| event `data` (r10) | `asObject(o['data']) ?? {}` | a malformed frame became an empty event |
+| reply outcome (r11) | `asObject(env.result) ?? {}` | a refused call became an empty success |
+
+**`{}` was being used as the representation of "nothing usable", and `{}` is
+indistinguishable from a legitimate empty success.** An unknown must never be spelled
+the same way as a known — which is the repo's own *false and unknown must not share a
+branch*, arriving a third time in a costume I did not recognise until it was pointed out.
+
+The fix requires exactly one outcome and validates its shape, and then does something
+the previous two rounds did not: it makes the invariant **the compiler's** rather than a
+comment's. The reply envelope is now discriminated on `ok`, so the success path has no
+default to write — with `result`/`error` both optional, TypeScript still demanded a
+`?? {}` for a state the validator had already excluded, and that unreachable default is
+precisely the shape being removed. A defence that relies on everyone remembering an
+invariant is one refactor from being the bug again.
+
+Eleven mutations. M76 restores the presence-only check (reddens nine cases at once);
+M77 accepts both outcomes; M78 is the over-strict twin, rejecting a legitimately empty
+`result:{}` — which must stay valid for exactly the reason the bug existed, since `{}`
+is what the client used to invent. M79a–M79d and M80a–M80d leak one wrong-typed shape
+each, and every one reddens only its own row.
+
+### The sweep this earned, made general rather than a third instance-hunt
+
+Having hunted this defect three times by instance, the fourth had to be found by
+*class*: every place in the client, host, protocol, ring and signatures that turns an
+absent or wrong-typed value into a default, asked one question — **is the default
+distinguishable from a legitimate value of that type?**
+
+**36 sites examined, 4 changed.**
+
+Two changed by deletion (the reply path above: the validator and the dispatcher's
+`?? {}`, which no longer exists). Two kept their default but stopped being silent,
+because in both the fallback is genuinely needed and genuinely indistinguishable:
+
+- **`viewportRows ?? HERDR_VIEWPORT_ROWS_FALLBACK`.** 120 assumed looks exactly like 120
+  measured. A REPL whose geometry cannot be read must still poll, so the fallback stays
+  — but on a 400-row pane it sizes every read for 120, each read comes back short, and
+  positional detectors see less than the 200 lines they are written against with nothing
+  anywhere saying why. It now says so once. The control measures a real **120**, the
+  fallback's own value, so the pair cannot pass by warning unconditionally.
+- **A `pane.read` that SUCCEEDS with an unusable payload.** Neither an error nor an
+  answer, and the two-branch code put it in the wrong one by omission. Leaving the screen
+  `undefined` was already right — the ring must not receive an empty screen, which would
+  erase a dead REPL's last output — but doing it silently means a drifted reply shape is
+  indistinguishable from a permanently idle REPL. The protocol-version gate catches a
+  *declared* change; this catches a same-version one. Paired with a control proving the
+  skip is not a latch: a client that gave up after one bad payload would pass the first
+  case and never poll again.
+
+The 32 left alone are configuration and dependency defaults (`opts.rpcTimeoutMs ??
+HERDR_RPC_TIMEOUT_MS`, `options.cwd ?? process.cwd()`), casts already followed by a
+`typeof` check on the field actually used, and boolean conditions that are not coercions
+at all. In each the default IS the contractually correct meaning of "absent". One
+deserves naming because I had to check rather than assume: `typeof err.code === 'string'
+? err.code : 'unknown'` is a silent default by the letter of the test, but nothing in the
+tree ever compares a code to `'unknown'` — the only code branched on is
+`HERDR_PANE_NOT_FOUND` (`herdr-host.ts:605`, with the grep's positive control) — and the
+message still carries `JSON.stringify(err)`, so no information is lost and the
+reject-versus-resolve decision cannot flip. It is a diagnostic label, not a decision
+input.
+
+The fake gained the third lever to make any of this testable: `failMethod` (it errors),
+`holdMethod` (it is slow), and now **`malformMethod` (it answers with something unusable)**.
+That set is complete in the way the per-method fix was not — a successful call with an
+unusable payload is its own class, and it is exactly how a same-version shape drift
+arrives.
 
 ### Mutation table
 
@@ -930,6 +1021,18 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M71 | the fake ignores injected per-method failures | RED 4 |
 | M72 | a successful `pane.close` does not record the closure in the fake | RED 2 |
 | M73 | the fake's `holdMethod` does not actually hold | RED 1 |
+| M76 | restore the presence-only outcome check (the original defect) | RED 9 |
+| M77 | accept BOTH `result` and `error` | RED 1 |
+| M78 | PAIR: over-strict — reject a legitimately empty `result:{}` | RED 1 (the control) |
+| M79a–M79d | accept ONLY a string / null / array / number `error` | RED 1 each, its own row |
+| M80a–M80d | accept ONLY a string / null / array / boolean `result` | RED 1 each, its own row |
+| M81 | the assumed viewport is silent again | RED 1 |
+| M81b | PAIR: warn even when the viewport WAS measured | RED 1 (the control) |
+| M82 | warn on every poll instead of once | RED 1 |
+| M83 | a malformed read is delivered as an EMPTY screen | RED 2 |
+| M83b | PAIR: a malformed read latches, so the loop never recovers | RED 2 |
+| M84 | the malformed read is silent again | RED 1 |
+| M85 | the fake ignores `malformMethod` | RED 2 |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

@@ -381,6 +381,102 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     expect(child.exitCause?.()).toBe('pane-exited')
   })
 
+  it('an ASSUMED viewport says so — a guess must not look like a measurement', async () => {
+    // `viewportRows ?? 120` produces a value indistinguishable from a pane that
+    // really is 120 rows, so "could not read the geometry" and "the geometry is 120"
+    // were one state. The consequence is silent and positional: on a taller pane
+    // every read comes back short and detectors see less than they are written for.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      errs.push(String(c))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const server = new FakeHerdrServer({ paneId: 'w9:pGuess' })
+      server.viewportRows = null // pane.get answers with no scroll geometry
+      const { child, screens } = await spawnWithFake(server)
+      await until(() => screens.length >= 1, 'first screen')
+      await until(() => server.callsTo('pane.read').length >= 3, 'several polls')
+      child.kill()
+    } finally {
+      process.stderr.write = realWrite
+    }
+    const said = errs.filter((e) => e.includes('ASSUMING'))
+    // Said, and said ONCE — a per-poll warning at 5ms would bury the log it is
+    // supposed to inform.
+    expect(said.length).toBe(1)
+    expect(said[0]).toContain('could not read viewport_rows')
+  })
+
+  it('CONTROL — a MEASURED viewport says nothing, so the warning carries information', async () => {
+    // Without this, the assertion above is satisfied by warning unconditionally,
+    // which tells a reader nothing about whether the geometry was read.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      errs.push(String(c))
+      return true
+    }) as typeof process.stderr.write
+    try {
+      const server = new FakeHerdrServer({ paneId: 'w9:pMeasured' })
+      server.viewportRows = 120 // the SAME number the fallback would have guessed
+      const { child, screens } = await spawnWithFake(server)
+      await until(() => screens.length >= 1, 'first screen')
+      await until(() => server.callsTo('pane.read').length >= 3, 'several polls')
+      child.kill()
+    } finally {
+      process.stderr.write = realWrite
+    }
+    // 120 measured must be distinguishable from 120 assumed — that is the entire
+    // point, and picking the fallback's own value is what makes the pair sharp.
+    expect(errs.filter((e) => e.includes('ASSUMING'))).toEqual([])
+  })
+
+  it('a SUCCESSFUL read with an unusable payload delivers nothing, and says so', async () => {
+    // Neither an error nor an answer. Leaving the screen undefined is right — an
+    // unknown must not be delivered as an empty screen — but doing it silently makes
+    // a drifted reply shape look exactly like a permanently idle REPL.
+    const errs: string[] = []
+    const realWrite = process.stderr.write.bind(process.stderr)
+    process.stderr.write = ((c: unknown): boolean => {
+      errs.push(String(c))
+      return true
+    }) as typeof process.stderr.write
+    let delivered: string[] = []
+    try {
+      const server = new FakeHerdrServer({ paneId: 'w9:pMalformed' })
+      server.malformMethod('pane.read', { read: { pane_id: 'w9:pMalformed', text: 42 } })
+      const { child, screens } = await spawnWithFake(server)
+      await until(() => server.callsTo('pane.read').length >= 3, 'several polls')
+      delivered = screens
+      child.kill()
+    } finally {
+      process.stderr.write = realWrite
+    }
+    // NOTHING delivered — not an empty screen, which would erase a dead REPL's last
+    // output from the ring and drop a detector latch.
+    expect(delivered).toEqual([])
+    const said = errs.filter((e) => e.includes('no usable text'))
+    expect(said.length).toBe(1)
+    expect(said[0]).toContain('text:number')
+  })
+
+  it('CONTROL — the malformed read RECOVERS when the payload becomes usable', async () => {
+    // Proves the malformed branch is a skip and not a latch: a client that gave up
+    // after one bad payload would pass the case above and never poll again.
+    const server = new FakeHerdrServer({ paneId: 'w9:pRecover' })
+    server.malformMethod('pane.read', { read: { pane_id: 'w9:pRecover', text: null } })
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 2, 'bad polls')
+    expect(screens).toEqual([])
+    server.clearMalformed('pane.read')
+    server.screen = 'back at the prompt'
+    await until(() => screens.length >= 1, 'recovered screen')
+    expect(screens.at(-1)).toBe('back at the prompt')
+    child.kill()
+  })
+
   it('exitCause is undefined while the child is alive — it never guesses', async () => {
     const server = new FakeHerdrServer()
     server.screen = 'alive'

@@ -84,6 +84,27 @@ export class FakeHerdrServer implements HerdrRpc {
     this.failures.delete(method)
   }
 
+  private readonly malformed = new Map<string, Record<string, unknown>>()
+
+  /**
+   * Make `method` SUCCEED while returning `payload` instead of its real reply.
+   *
+   * The third lever, and the set is now complete: a call can fail
+   * ({@link failMethod}), be slow ({@link holdMethod}), or answer with something the
+   * caller cannot use. That last one is its own class — a successful RPC with an
+   * unusable payload is neither an error nor an answer, and code that has only two
+   * branches puts it in the wrong one. It is exactly how a same-version reply-shape
+   * drift would arrive.
+   */
+  malformMethod(method: string, payload: Record<string, unknown>): void {
+    this.malformed.set(method, payload)
+  }
+
+  /** Stop malforming `method`. */
+  clearMalformed(method: string): void {
+    this.malformed.delete(method)
+  }
+
   private readonly holds = new Map<string, Promise<void>>()
 
   /**
@@ -142,6 +163,9 @@ export class FakeHerdrServer implements HerdrRpc {
     // made to fail without this fake growing a flag per method.
     const injected = this.failures.get(method)
     if (injected !== undefined) throw injected
+    // A malformed reply is a SUCCESS, so it is returned rather than thrown.
+    const bad = this.malformed.get(method)
+    if (bad !== undefined) return bad
     switch (method) {
       case 'ping':
         return { type: 'pong', version: '0.8.2', protocol: 20 }

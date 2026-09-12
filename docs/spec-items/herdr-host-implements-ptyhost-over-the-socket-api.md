@@ -364,6 +364,39 @@ not-new. That is accepted and recorded here rather than hidden.
       misleading and gets corrected. A blanket find-and-replace fails this criterion
       by destroying the second category.
       verify: `grep -rniE 'bun[-. ]?terminal|Bun-native|Bun PTY|Bun\.spawn\(\{ ?terminal' --include='*.ts' --include='*.md' .` — every surviving hit is an archive, an explicitly dated historical note, or unrelated to the REPL backend
+- [ ] **A reply carries EXACTLY ONE well-formed outcome.** `result` and `error` must
+      each be a plain object; a primitive, `null`, an array, a missing outcome, and BOTH
+      outcomes present all reach the malformed-frame teardown. Presence of the key is
+      not a criterion — that was the defect: a string `error` passed the presence check,
+      failed the object conversion in the dispatcher, skipped the error branch and
+      RESOLVED the call with `{}`, so a refused `pane.close` was reported to `kill()` as
+      acknowledged. Each shape listed and mutated individually, and paired with the
+      control that an EMPTY `result:{}` stays a valid success — `{}` is what the client
+      used to invent, so requiring "a usable outcome" must not become "a non-empty
+      outcome". The invariant must be carried by the TYPE (a discriminated outcome), not
+      by a comment: if the success path can still be written with a `?? {}` fallback,
+      the next refactor restores the bug.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **No coercion turns an unknown into a value indistinguishable from a real one.**
+      Swept by class, not by instance: every `??`, `||` and unchecked cast in the client,
+      host, protocol, ring and signatures, each asked whether its default could be
+      confused with a legitimate value of that type. Where a default is genuinely needed
+      and genuinely ambiguous it stays and becomes AUDIBLE exactly once — the assumed
+      viewport (120 guessed is indistinguishable from 120 measured) and a `pane.read`
+      that succeeds with an unusable payload. Both need the pair: a control that a
+      MEASURED viewport of the fallback's own value says nothing, and a control that the
+      malformed-read skip is not a latch (the loop recovers when the payload becomes
+      usable). A criterion that only checks the warning appears is satisfied by warning
+      unconditionally, which carries no information.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **The fake can fail, stall, AND answer unusably.** `failMethod`, `holdMethod` and
+      `malformMethod` are first-class per-method levers, because each corresponds to a
+      requirement class that is otherwise untestable and therefore silently unmet — a
+      successful call with an unusable payload is not an error and not an answer, and it
+      is how a same-version reply-shape drift arrives. Each lever must itself be mutated:
+      if disabling it changes no test, the tests that depend on it were passing for some
+      other reason.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/`
 - [ ] **A frame that PARSES but matches no envelope is torn down.** "Malformed" must
       be defined by the protocol's requirement, not by the parser throwing: `null`,
       `[]`, `{}`, bare primitives, an id with no outcome and an outcome with no id all

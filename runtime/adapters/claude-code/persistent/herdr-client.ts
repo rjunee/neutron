@@ -81,7 +81,13 @@ export interface HerdrRpc {
  */
 type Envelope =
   | { readonly kind: 'event'; readonly event: string; readonly data: Record<string, unknown> }
-  | { readonly kind: 'reply'; readonly id: string; readonly result: unknown; readonly error: unknown }
+  // DISCRIMINATED, so "exactly one outcome" is a fact the COMPILER enforces rather
+  // than a comment the dispatcher has to remember. With `result`/`error` both
+  // optional, the success path needed a `?? {}` fallback for a state the validator
+  // had already excluded — and that unreachable default is exactly the shape this
+  // whole change is removing. There is now no default to write.
+  | { readonly kind: 'reply'; readonly id: string; readonly ok: true; readonly result: Record<string, unknown> }
+  | { readonly kind: 'reply'; readonly id: string; readonly ok: false; readonly error: Record<string, unknown> }
 
 /** A plain (non-null, non-array) object, or `undefined`. */
 function asObject(v: unknown): Record<string, unknown> | undefined {
@@ -121,10 +127,42 @@ function classifyEnvelope(parsed: unknown): Envelope | undefined {
     if (data === undefined) return undefined
     return { kind: 'event', event: o['event'], data }
   }
-  // A reply must carry an id AND one of the two outcomes. `id: ''` is legitimate —
-  // the server sends it when it could not parse our request well enough to echo one.
-  if (typeof o['id'] === 'string' && ('result' in o || 'error' in o)) {
-    return { kind: 'reply', id: o['id'], result: o['result'], error: o['error'] }
+  // A reply must carry an id AND EXACTLY ONE well-formed outcome. `id: ''` is
+  // legitimate — the server sends it when it could not parse our request well enough
+  // to echo one.
+  //
+  // THE DEFECT THIS REPLACES — the third appearance of one mistake. The test was
+  // `('result' in o || 'error' in o)`: PRESENCE of a key, with no check on what it
+  // held and no objection to both. So `{"id":"n1","error":"refused"}` — a string
+  // error, which the protocol never sends — was accepted as a valid reply; `asObject`
+  // in the dispatcher then turned it into `undefined`, the error branch was skipped,
+  // and the request RESOLVED SUCCESSFULLY with `{}`. A `pane.close` the server
+  // REFUSED was reported to `kill()` as acknowledged.
+  //
+  // That is the same defect as the failed close, one layer down — through the
+  // transport instead of the promise — and the same defect as the event `data`
+  // coercion, through a third door. The common cause is worth stating plainly:
+  // `{}` WAS BEING USED AS THE REPRESENTATION OF "NOTHING USABLE", and `{}` is
+  // indistinguishable from a legitimate empty success. An unknown must never be
+  // spelled the same way as a known.
+  //
+  // So: exactly one outcome, and it must be a plain object. `result: {}` is a real
+  // empty success and stays valid; a primitive, `null`, an array, a missing outcome,
+  // or BOTH outcomes are all unknowns and must reach the teardown.
+  if (typeof o['id'] === 'string') {
+    const hasResult = 'result' in o
+    const hasError = 'error' in o
+    // Exactly one. Both is not "helpfully redundant" — it means we cannot tell
+    // whether the call succeeded, which is the one thing the caller asked.
+    if (hasResult === hasError) return undefined
+    if (hasResult) {
+      const result = asObject(o['result'])
+      if (result === undefined) return undefined
+      return { kind: 'reply', id: o['id'], ok: true, result }
+    }
+    const error = asObject(o['error'])
+    if (error === undefined) return undefined
+    return { kind: 'reply', id: o['id'], ok: false, error }
   }
   return undefined
 }
@@ -302,7 +340,10 @@ export class HerdrClient implements HerdrRpc {
       return
     }
     const id = env.id
-    const err = asObject(env.error) as { code?: unknown; message?: unknown } | undefined
+    // Already validated by `classifyEnvelope`: exactly one outcome, and a plain
+    // object. No `asObject` here — re-deriving it was how a refused call became a
+    // successful one, because a failed conversion silently selected the success path.
+    const err = env.ok ? undefined : (env.error as { code?: unknown; message?: unknown })
     const p = this.pending.get(id)
     if (p === undefined) {
       // No such request in flight. This is the `id: ""` case a malformed request
@@ -329,7 +370,12 @@ export class HerdrClient implements HerdrRpc {
       )
       return
     }
-    p.resolve(asObject(env.result) ?? {})
+    // No fallback, and none is reachable: `env.ok` is the validator's guarantee, so
+    // the success path has a real object or this line does not run. The `?? {}` that
+    // used to stand here is what made "no usable result" and "an empty success" the
+    // same value.
+    if (!env.ok) return
+    p.resolve(env.result)
   }
 
   private failAll(err: Error): void {
