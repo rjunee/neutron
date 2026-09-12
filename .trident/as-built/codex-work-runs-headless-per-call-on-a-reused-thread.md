@@ -145,9 +145,11 @@ the meter's resolution too.
   read as rhetoric rather than as a boundary on the recommendation; it reached the
   acceptance criteria only when the gate pointed at it. **A finding that helps
   reject option A is often also a constraint on option B** — the spec item now
-  carries the positive contract (one owner per thread id, per-lane fan-out, the
-  second caller waits on a bounded per-thread queue, and a conflict that arrives
-  anyway is a distinct typed outcome per #542/#576) and a test with both halves.
+  carries the positive contract (one owner per thread id, per-lane fan-out,
+  in-process overlap waiting on a bounded per-thread queue, cross-process overlap
+  returning the typed conflict at once, and every conflict distinct per #542/#576) and
+  a test that spawns two real processes. That contract took a further round of its own
+  — see "When the prose already knew and the criterion did not" below.
 
   **And the correction then contradicted itself inside the same change.** The spec
   item was fixed to say the lock survives while this record's own Decisions Log
@@ -194,6 +196,47 @@ seat (`slotHome`, `:401`) and one per project override (`codexProjectHome`,
 labouring to make safe. The item now says *one account, one home, and no materialising of
 credentials by copy, hard link or symlink* — and the whole class of finding is gone
 rather than fixed a fourth time. **The diff got smaller.**
+
+### When the prose already knew and the criterion did not
+
+The concurrency contract promised, unconditionally, that a second caller **waits** — and
+acknowledged two sentences later that the queue is per-process while the lock is codex's,
+per-`CODEX_HOME`. Acceptance tested in-process serialization, and separately *injected* a
+writer-lock error. Nothing drove two real adapter processes sharing a thread id. So an
+implementation that queues in-process and fails every cross-process overlap satisfied
+every criterion while contradicting the promise.
+
+**The promise and its exception sat in adjacent sentences and neither contradicted the
+other loudly enough to notice.** An identical construction appeared in another lane the
+same day (#577: "concurrent replacement converges", full stop, beside code documenting an
+interleaving that cannot converge without a lock). Two subsystems, two authors, one shape
+— which makes it structural rather than careless, and the mechanism is worth naming: **a
+criterion gets read as a summary of the prose above it rather than as its own claim**, so
+a condition stated in that prose is felt to be covered without ever being asserted.
+
+Resolved by deciding the contract instead of describing both halves, and the design
+already implied the answer. One thread id per lane means **cross-process overlap on one id
+is a design violation, not a supported case** — so in-process overlap waits on the
+per-thread queue, and cross-process overlap returns the typed conflict *immediately*.
+Waiting there would mean blocking on another process's lock with no shared primitive and
+no bound; there is nothing to wait on. Two conditional promises, both true, both testable,
+and the unconditional one is gone.
+
+And the test changed shape, for the reason the `--strict-config` sentinel did: acceptance
+now spawns **two real adapter processes** sharing a `CODEX_HOME` and a thread id. Forcing
+a writer-lock error tests the handling of a symptom the test injected; two processes test
+whether the symptom arises at all.
+
+**This is a fourth audit question, and it points at documentation rather than
+environment.** The path verified in the spike was single-process, so the criterion
+inherited a boundary the prose had already named: *what does this criterion assume that
+the surrounding text has already contradicted?* The full set, in the order they were
+learned:
+
+1. What is the weakest implementation that passes this? — *permits too much*
+2. What would the correct implementation necessarily do that this forbids? — *permits too little*
+3. What does this criterion assume about how the system behaves, and have I measured it? — *true only in an environment that does not exist*
+4. What does this criterion assume that the surrounding prose has already contradicted? — *the document disagrees with itself*
 
 ### The third audit question
 
