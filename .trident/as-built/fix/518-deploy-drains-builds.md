@@ -24,7 +24,7 @@ Worse, the ONE class of child certain to be hosting a live build reported nothin
 A child is quarantined precisely because it still hosts running workflows (the eviction
 guard deferred its reaping), and `shutdownQuarantinedChildren` deleted its map entry
 before killing it — which makes the `child.exited` hook `quarantineChild` installs return
-early (`spawn.ts:848`). Every deploy killed those silently.
+early (`spawn.ts:906`). Every deploy killed those silently.
 
 ### The choice the spec item demanded, and why it is what it is
 
@@ -83,7 +83,7 @@ only moment it knows is just before. So it writes it down.
 - **Both shutdown sites report.** `shutdownAllPersistentRepls` (`pool.ts`) resolves the
   owning options through `supervisedBySessionKey` — the same map the watchdog resolves a
   crash sink through, populated by the production adapter for every REPL whose instance home
-  resolves (`adapters/claude-code/index.ts:509`) — and reports before each kill, with one
+  resolves (`adapters/claude-code/index.ts:533`) — and reports before each kill, with one
   timestamp for the whole teardown. `shutdownQuarantinedChildren` (`spawn.ts`) now reports
   too. An unregistered key writes a stderr line naming what could not be told, rather than
   dying silently.
@@ -162,7 +162,7 @@ was the death likeliest to matter and the one left with no record at all.
 
 *Marking at quarantine time is unsound, not merely awkward.* `sweepQuarantinedChildren`
 terminates a quarantined child on the ROUTINE drain once its hosted work finishes
-(`spawn.ts:868-873`). A marker written at quarantine time would attribute that ordinary reap
+(`spawn.ts:926-931`). A marker written at quarantine time would attribute that ordinary reap
 to a deploy, so the option needs the marker to mean something weaker than it says. Rejected on
 correctness, not cost.
 
@@ -186,7 +186,7 @@ must outlive the generation it describes, which is the whole reason it exists.
 
 **And it closes a hole older than this item.** `probeLauncherGenerationAlive` matched only
 `record.child_generation` (`supervision.ts:1058`), which a replacement spawn overwrites
-(`spawn.ts:675`) — so a quarantined generation has never been locatable in the registry, and
+(`spawn.ts:733`) — so a quarantined generation has never been locatable in the registry, and
 its build waited out the 90-minute reaper with no reason ever delivered. This change did not
 remove that recoverability; it added a claim that assumed it, and now supplies it.
 
@@ -614,7 +614,7 @@ that an UNDELIVERED report still leaves the edge open and the next tick does rep
 ### Deferred deliberately: the tombstone's last-writer-wins
 
 `crashRunningByLauncher` overwrites `failure_reason` unconditionally on conflict
-(`trident/store.ts:1102-1105`), so when two detectors disagree the last to arrive wins — and it
+(`trident/store.ts:1314-1317`), so when two detectors disagree the last to arrive wins — and it
 is frequently the least informed. Filed as its own item rather than fixed here: neither
 "last writer wins" nor "first writer wins" is correct (a better later report must still be
 able to replace a worse earlier one), so the field needs an argued precedence over reason
@@ -622,9 +622,9 @@ kinds, and `crashRunningByLauncher` is the shared tombstone for every launcher-d
 rather than anything specific to deploy attribution.
 
 Measured reachability, so the deferral is informed rather than convenient: the run row's own
-reason update is guarded by `subagent_status = 'running'` (`trident/store.ts:1118`) and the
+reason update is guarded by `subagent_status = 'running'` (`trident/store.ts:1330`) and the
 pull half skips terminal runs (`trident/tick.ts:648`) — but `saveIfActive`'s veto path re-reads
-the tombstone and stamps it onto the row (`trident/store.ts:1719-1730`), guarded only by the
+the tombstone and stamps it onto the row (`trident/store.ts:1931-1942`), guarded only by the
 CALLER'S SNAPSHOT of `subagent_status`, not by the row's current value, so an
 overwrite can reach a row given that race. This change closes the duplicate-report routes into
 it, which makes it a sharp edge behind a race rather than an everyday path.

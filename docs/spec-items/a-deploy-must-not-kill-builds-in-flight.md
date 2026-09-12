@@ -187,7 +187,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   earlier revision closed it only when the report was an ATTRIBUTION, so a successfully
   delivered `cause: 'unknown'` left it open and the next watchdog tick reported the same
   death again as `cause: 'child-died'` — which `crashRunningByLauncher` writes over the
-  tombstone unconditionally (`trident/store.ts:1102-1105`). `delivered` and `attributed` are
+  tombstone unconditionally (`trident/store.ts:1314-1317`). `delivered` and `attributed` are
   different facts: telling the owner something is not telling the owner it was a deploy, and
   only the first closes the edge. The generalisation, because this is round 4's conflation
   arriving in a third state: `unknown` was not a possible value when that condition was
@@ -204,7 +204,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   running workflows, so that was the death likeliest to matter and the one with no record at
   all. Measured before choosing: marking at quarantine time is UNSOUND, not merely awkward —
   `sweepQuarantinedChildren` terminates a quarantined child on the ROUTINE drain
-  (`spawn.ts:868-873`), which that marker would then attribute to a deploy. So the row now
+  (`spawn.ts:926-931`), which that marker would then attribute to a deploy. So the row now
   keeps a bounded LIST keyed by generation, and both readers look their own generation up.
   This is cheaper than it sounds and is not a database migration: the registry is a JSON file
   and its parser checks four fields and tolerates extras, so old and new builds interoperate
@@ -213,7 +213,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   entry cannot be read as describing the current child, which makes the invariant those
   guards defended a property of the shape. And it closes a hole that predates this item:
   `probeLauncherGenerationAlive` matched only `record.child_generation`
-  (`supervision.ts:1058`), which a replacement spawn overwrites (`spawn.ts:675`), so a
+  (`supervision.ts:1058`), which a replacement spawn overwrites (`spawn.ts:733`), so a
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control
@@ -263,5 +263,5 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
-  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:848`). Every
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:906`). Every
   deploy killed those silently.
