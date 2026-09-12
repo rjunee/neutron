@@ -435,3 +435,139 @@ describe('T6 — lifecycle: unwired is byte-identical, wired is a visible third 
     expect(latchOnly.describeAll().map((d) => d.name)).toEqual(['trident', 'trident-watch'])
   })
 })
+
+/**
+ * T6 (#518) — THE PULL HALF MUST NOT CALL A DEPLOY A CRASH.
+ *
+ * The liveness probe answers `'killed-by-gateway-shutdown'` when the durable REPL
+ * registry records that the owning gateway terminated this exact generation on its way
+ * down — a service restart, which is what a deploy ends with. Same reaping as `'dead'`
+ * (the build really is gone); a different sentence, because the owner reading "inner
+ * workflow launcher crashed" for a build his own deploy killed goes looking for a bug
+ * that was never there.
+ */
+describe('T6 — a gateway-shutdown death is reported as a deploy, and only that death is', () => {
+  test('the latched reason names the deploy and never says the launcher crashed', async () => {
+    // RED-mutation: drop the `killed-by-gateway-shutdown` arm of the reason ternary in
+    // `livenessBody`. The run is still latched, and it is latched with the crash
+    // sentence — exactly the defect the spec item names.
+    const { latch, calls } = recordingLatch()
+    const { probe } = fixedProbe('killed-by-gateway-shutdown')
+    await seedInFlight('deploy-killed', 'gen-deployed')
+    const loop = new TridentTickLoop({
+      store,
+      step: idleStep,
+      probe_launcher_alive: probe,
+      latch_launcher_dead: latch,
+    })
+
+    await loop.runLivenessOnce()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.key).toBe('gen-deployed')
+    const reason = calls[0]?.reason ?? ''
+    expect(reason).toContain('killed by a gateway restart or deploy')
+    expect(reason).toContain('launcher-liveness-probe')
+    expect(reason).not.toContain('crashed')
+    // Still names the generation — the reason has to stay checkable evidence.
+    expect(reason).toContain('gen-depl')
+    // And the reason must stay free of the tokens `delivery.ts` routes on.
+    expect(reason.toLowerCase()).not.toContain('exhausted')
+    expect(reason.toLowerCase()).not.toContain('stalled')
+  })
+
+  test('THE COMPLEMENT — a plain dead launcher still gets the crash sentence', async () => {
+    // A change that answered "a deploy" to every death would pass the case above and
+    // be worthless. RED-mutation: make the reason ternary unconditional — this reddens
+    // while the deploy case above stays green.
+    const { latch, calls } = recordingLatch()
+    const { probe } = fixedProbe('dead')
+    await seedInFlight('plain-dead', 'gen-crashed')
+    const loop = new TridentTickLoop({
+      store,
+      step: idleStep,
+      probe_launcher_alive: probe,
+      latch_launcher_dead: latch,
+    })
+
+    await loop.runLivenessOnce()
+
+    expect(calls).toHaveLength(1)
+    const reason = calls[0]?.reason ?? ''
+    expect(reason).toContain('inner workflow launcher crashed')
+    expect(reason).toContain('external liveness probe')
+    expect(reason).not.toContain('deploy')
+  })
+
+  test('the run row itself carries the deploy reason, not just the tombstone', async () => {
+    const { probe } = fixedProbe('killed-by-gateway-shutdown')
+    await seedInFlight('deploy-row', 'gen-row')
+    const loop = new TridentTickLoop({
+      store,
+      step: idleStep,
+      probe_launcher_alive: probe,
+      latch_launcher_dead: (key, reason) => store.crashRunningByLauncher(key, reason),
+    })
+
+    await loop.runLivenessOnce()
+
+    const after = store.get('deploy-row')!
+    expect(after.subagent_status).toBe('crashed')
+    // The build is NOT declared terminal by the probe — a dead launcher is not a dead
+    // build, and that property is unchanged by the attribution.
+    expect(after.phase).toBe('ralph-task')
+    expect(after.failure_reason ?? '').toContain('deploy')
+    expect(after.failure_reason ?? '').not.toContain('crashed')
+  })
+
+  test('dead-cause-undetermined is reaped, and its reason asserts NEITHER a deploy nor a crash', async () => {
+    // THE THIRD DEAD-FLAVOURED VERDICT. The launcher is positively gone and the durable
+    // record says the shutdown did not kill it, so neither confident sentence is
+    // available. Folding it into `'dead'` would have the tick compose "inner workflow
+    // launcher crashed" for a fault nobody observed.
+    //
+    // RED-mutation: drop the `dead-cause-undetermined` arm of the reason ternary in
+    // `livenessBody`. The run is still reaped — and reaped with the crash sentence.
+    const { latch, calls } = recordingLatch()
+    const { probe } = fixedProbe('dead-cause-undetermined')
+    await seedInFlight('undetermined-launcher', 'gen-undet')
+    const loop = new TridentTickLoop({
+      store,
+      step: idleStep,
+      probe_launcher_alive: probe,
+      latch_launcher_dead: latch,
+    })
+
+    await loop.runLivenessOnce()
+
+    expect(calls).toHaveLength(1)
+    expect(calls[0]?.key).toBe('gen-undet')
+    const reason = calls[0]?.reason ?? ''
+    expect(reason).toContain('cause NOT established')
+    expect(reason).toContain('gen-unde')
+    // Not a crash verdict...
+    expect(reason).not.toContain('crashed')
+    // ...and not a deploy either.
+    expect(reason).not.toContain('killed by a gateway restart or deploy')
+    // And still free of the tokens `delivery.ts` routes on.
+    expect(reason.toLowerCase()).not.toContain('exhausted')
+    expect(reason.toLowerCase()).not.toContain('stalled')
+  })
+
+  test('alive and unknown still change nothing — the attribution did not widen the trigger', async () => {
+    for (const answer of ['alive', 'unknown'] as const) {
+      const { latch, calls } = recordingLatch()
+      const { probe } = fixedProbe(answer)
+      await seedInFlight(`untouched-${answer}`, `gen-${answer}`)
+      const loop = new TridentTickLoop({
+        store,
+        step: idleStep,
+        probe_launcher_alive: probe,
+        latch_launcher_dead: latch,
+      })
+      await loop.runLivenessOnce()
+      expect(calls).toEqual([])
+      expect(store.get(`untouched-${answer}`)?.subagent_status).toBe('running')
+    }
+  })
+})

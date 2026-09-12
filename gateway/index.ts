@@ -1032,11 +1032,18 @@ export async function boot(options: BootOptions = {}): Promise<BootHandle> {
     // runs). Continuity is unaffected — the next turn `--resume`s the
     // captured session transcript.
     //
-    // Timing note (Argus PR#438 minor 9): worst case this drain can
-    // exceed the unit's TimeoutStopSec=30 (one wedged spawn promise can
-    // hold the pool walk for the spawn timeout, ~40 s) — acceptable under
-    // systemd because the cgroup SIGKILL fires at the deadline and reaps
-    // whatever the drain hadn't reached. On NON-systemd deployments there
+    // Timing note (Argus PR#438 minor 9, revised #518): worst case this
+    // drain USED to exceed the unit's TimeoutStopSec=30, because the pool
+    // walk awaited each entry in turn and one wedged spawn promise could
+    // hold it for the spawn timeout (~40 s) — which cost every child
+    // BEHIND it the durable record of its own deploy kill. The walk now
+    // reads settled entries synchronously and handles them first, and
+    // gives the unsettled ones one shared bounded wait
+    // (SHUTDOWN_PENDING_SPAWN_GRACE_MS), so the drain's budget is bounded
+    // by its own phases (~2 s exits + ~2 s pending spawns + ~5 s
+    // reporting) rather than by the slowest spawn. The cgroup SIGKILL is
+    // still the guarantee layer at the deadline for anything left. On
+    // NON-systemd deployments there
     // is no such backstop and a SIGTERM-ignoring `claude` gets no
     // per-child KILL escalation from this loop — a self-host orphan there
     // is bounded by the dev-channel's exit-on-transport-close (same PR)

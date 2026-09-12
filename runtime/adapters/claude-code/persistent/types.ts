@@ -148,6 +148,44 @@ export interface RecoveredReply {
   instance_slug?: string
 }
 
+/**
+ * WHY the pooled child that hosted detached work is gone (#518). The consumer
+ * composes the durable failure reason from this, so the discriminant is a FIELD
+ * rather than a phrase to be pattern-matched out of `detail`.
+ *
+ *   - `'child-died'` — the child's process ended and we did not ask it to: the
+ *     supervision watchdog found the pid dead, or the pool evicted an
+ *     abandon-poisoned child. A fault, positively attributed.
+ *   - `'gateway-shutdown'` — THE GATEWAY KILLED IT, on its way down
+ *     (`shutdownAllPersistentRepls` from the SIGTERM handler: a service restart
+ *     or a deploy). Nothing was wrong with the child or the build. Claimed ONLY
+ *     for a child observed ALIVE at the moment the shutdown reached it.
+ *   - `'unknown'` — the child is gone and we CANNOT SAY whether this shutdown
+ *     killed it. The case that forces this member to exist: a child that died of
+ *     a genuine fault moments before teardown is then "killed" by teardown's
+ *     idempotent `kill()`, and attributing that to the deploy would bury a real
+ *     fault where nobody investigates it.
+ *
+ * The three must never collapse, and the two ways of collapsing them are the SAME
+ * defect — an attribution not entitled to its confidence. A deploy reported as a
+ * crash is the whole of spec item `a-deploy-must-not-kill-builds-in-flight`; a
+ * crash reported as a deploy is that defect pointing the other way, and worse for
+ * the owner, because a fault absorbed into "a deploy did it" is a fault nobody
+ * looks at. `'unknown'` exists so "cannot tell" never rides in either branch.
+ */
+export type ChildCrashCause = 'child-died' | 'gateway-shutdown' | 'unknown'
+
+/** The durable child-death edge handed to `onChildCrash`. */
+export interface ChildCrashInfo {
+  sessionKey: string
+  /** The dead child's `child_generation` — what owns the detached work. */
+  generationKey: string
+  /** Why it is gone. See {@link ChildCrashCause}. */
+  cause: ChildCrashCause
+  /** Human-readable evidence for the cause, composed at the observation site. */
+  detail: string
+}
+
 /** Options to construct a persistent-REPL substrate. Superset of the retired
  *  `ClaudeCodeSubstrateOptions` so the flip-sites pass the same opts bag. */
 export interface PersistentReplSubstrateOptions {
@@ -198,7 +236,7 @@ export interface PersistentReplSubstrateOptions {
   /** Called when the crash watchdog observes that this substrate's pooled child
    *  exited. Runtime consumers use this durable failure edge to reap detached
    *  work owned by the dead child. */
-  onChildCrash?: (info: { sessionKey: string; generationKey: string; detail: string }) => void | Promise<void>
+  onChildCrash?: (info: ChildCrashInfo) => void | Promise<void>
   /** THE EVICTION GUARD. Consulted by `getOrSpawnSession` BEFORE it evicts an
    *  abandon-poisoned warm child: how many live, in-process workloads (trident
    *  inner workflows — the Argus panel, the arbiter, the terminal/cleanup steps

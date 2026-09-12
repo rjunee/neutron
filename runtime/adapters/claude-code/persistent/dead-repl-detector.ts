@@ -31,6 +31,19 @@ export type WedgeVerdict =
 export type WedgeReason =
   /** A pooled session exists but its child has exited — strongest signal. */
   | 'pid-dead'
+  /** The child has exited AND the registry records that a gateway shutdown
+   *  deliberately terminated THIS generation (#518): a service restart or a
+   *  deploy, not a fault. Same recovery as `pid-dead` (respawn), a different
+   *  SENTENCE — the detail this verdict carries is what the durable crash sink
+   *  reports, and "pooled child exited" for a death we caused is the true-but-
+   *  wrong sentence the spec item exists to delete. */
+  | 'pid-dead-gateway-shutdown'
+  /** The child has exited AND the registry records that the shutdown REACHED this
+   *  generation but did not kill it — it was already gone, or its liveness could not be
+   *  sampled. The death is real and its cause was never established. A third value for
+   *  a third state: without it `undetermined` shares `pid-dead` with an ordinary crash,
+   *  and the honest uncertainty is reported as a confident fault. */
+  | 'pid-dead-cause-undetermined'
   /** Child looks alive but the dev-channel `/health` is dead. */
   | 'no-port-listener'
   /** No pooled child AND never reached ready AND `/health` dead — a stale
@@ -52,6 +65,12 @@ export interface ReplWedgeProbe {
   /** The registry believes this session reached `/health` at some point
    *  (`first_ready_at` set) — disambiguates "never came up" from "went silent". */
   ccReady: boolean
+  /** #518 — what the gateway shutdown established about THIS generation, from the
+   *  registry row (`observationOf`). Only consulted on the dead-child branch: it
+   *  explains a death, it never creates one, so a stale or forged record on a LIVE
+   *  child changes nothing. Absent ⇒ the shutdown never reached this generation ⇒ the
+   *  pre-#518 verdict exactly, an ordinary crash. */
+  shutdownObserved?: 'alive-and-killed' | 'alive-when-reached' | 'already-gone' | 'could-not-sample'
 }
 
 /**
@@ -62,6 +81,9 @@ export interface ReplWedgeProbe {
  *   hasChild  childAlive  healthOk  ccReady  verdict
  *   --------  ----------  --------  -------  --------------------------------
  *   yes       no          -         -        wedged: 'pid-dead'
+ *                                             ...or 'pid-dead-gateway-shutdown' /
+ *                                             'pid-dead-cause-undetermined', per
+ *                                             `shutdownObserved`
  *   yes       yes         no        -        wedged: 'no-port-listener'
  *   yes       yes         yes       -        not wedged
  *   no        -           yes       -        not wedged (health is positive)
@@ -74,6 +96,37 @@ export interface ReplWedgeProbe {
 export function detectReplWedged(probe: ReplWedgeProbe): WedgeVerdict {
   if (probe.hasChild) {
     if (!probe.childAlive) {
+      // #518 — WHAT THE SHUTDOWN ESTABLISHED, in three states rather than two. The
+      // recovery is identical for all of them (`decideWedgeAction` branches on
+      // `wedged`, never on which dead-child reason); what changes is the sentence the
+      // durable crash sink stores.
+      if (probe.shutdownObserved === 'alive-and-killed') {
+        return {
+          wedged: true,
+          reason: 'pid-dead-gateway-shutdown',
+          detail: 'pooled child terminated by its own gateway shutting down (a service restart or a deploy)',
+        }
+      }
+      if (
+        probe.shutdownObserved === 'already-gone' ||
+        probe.shutdownObserved === 'could-not-sample' ||
+        probe.shutdownObserved === 'alive-when-reached'
+      ) {
+        // The shutdown REACHED this child and did not kill it. The death is real; its
+        // cause was never established, and saying so is the whole point of the third
+        // value — an earlier revision had no way to record this, so the retry reported
+        // it as `pooled child exited`, a fault nobody observed.
+        return {
+          wedged: true,
+          reason: 'pid-dead-cause-undetermined',
+          detail:
+            probe.shutdownObserved === 'already-gone'
+              ? 'pooled child was ALREADY gone when its gateway shut down, so the shutdown did not end it; what did is UNDETERMINED'
+              : probe.shutdownObserved === 'alive-when-reached'
+                ? 'pooled child was alive when its gateway shut down and the shutdown COULD NOT TERMINATE it; whether the shutdown ended it is UNDETERMINED'
+                : "pooled child's liveness could not be read when its gateway shut down, so whether the shutdown ended it is UNDETERMINED",
+        }
+      }
       return { wedged: true, reason: 'pid-dead', detail: 'pooled child exited' }
     }
     if (!probe.healthOk) {
@@ -95,15 +148,28 @@ export function detectReplWedged(probe: ReplWedgeProbe): WedgeVerdict {
   }
 }
 
+/** The operator-facing symptom for each wedge reason, authored once so the two
+ *  alert bodies below cannot drift. A gateway-shutdown kill reads as what it is:
+ *  the process is dead AND we are the ones who killed it. */
+function wedgeSymptom(reason: WedgeReason): string {
+  switch (reason) {
+    case 'pid-dead':
+      return 'process dead'
+    case 'pid-dead-gateway-shutdown':
+      return 'process terminated by a gateway restart/deploy'
+    case 'pid-dead-cause-undetermined':
+      return 'process dead, cause not established'
+    case 'no-port-listener':
+      return 'dev-channel silent'
+    case 'no-pid-no-listener':
+      return 'no live signals'
+  }
+}
+
 /** Canonical alert body for a detected wedge. Lifted from Nova; the operator
  *  endpoint is `POST /admin/respawn-session?session=<key>`. */
 export function buildWedgeAlertText(args: { sessionKey: string; reason: WedgeReason }): string {
-  const symptom =
-    args.reason === 'pid-dead'
-      ? 'process dead'
-      : args.reason === 'no-port-listener'
-        ? 'dev-channel silent'
-        : 'no live signals'
+  const symptom = wedgeSymptom(args.reason)
   return (
     `\u{26A0}\u{FE0F} REPL \`${args.sessionKey}\` appears wedged (${symptom} — ` +
     `spawn failed silently). Auto-recovery in progress... or send ` +
@@ -113,12 +179,7 @@ export function buildWedgeAlertText(args: { sessionKey: string; reason: WedgeRea
 
 /** Cap-hit variant: wedged AND the respawn cap tripped → auto-recovery OFF. */
 export function buildWedgeCapHitAlertText(args: { sessionKey: string; reason: WedgeReason }): string {
-  const symptom =
-    args.reason === 'pid-dead'
-      ? 'process dead'
-      : args.reason === 'no-port-listener'
-        ? 'dev-channel silent'
-        : 'no live signals'
+  const symptom = wedgeSymptom(args.reason)
   return (
     `\u{1F6A8} REPL \`${args.sessionKey}\` wedged (${symptom}) AND respawn cap-hit ` +
     `— auto-recovery DISABLED. Force-recover via ` +

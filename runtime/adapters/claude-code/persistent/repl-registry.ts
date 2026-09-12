@@ -48,8 +48,126 @@ import { createLogger } from '@neutronai/logger'
 import { readFileSync, writeFileSync } from 'node:fs'
 import { atomicWriteFileSync } from '../../../atomic-write.ts'
 import { registryLockPath, withFlockSync } from './registry-lock.ts'
+import type { ProcessIdentity } from './process-identity.ts'
 
 const log = createLogger('repl-registry')
+
+/**
+ * How long a gateway-shutdown kill entry is retained.
+ *
+ * THE RETENTION RULE IS AGE, NOT COUNT, and that correction matters. An earlier revision
+ * kept the newest 16 entries and justified the number by trident's two-hour in-flight
+ * ceiling — but a time ceiling bounds DURATION while a count cap is driven by RESTART
+ * RATE, and nothing ties the two. Sixteen restarts on one session key inside the window
+ * evicted a generation that still owned a running build, whose attribution was then
+ * unrecoverable: the stranding the whole change exists to prevent, caused by the cap
+ * meant to be harmless.
+ *
+ * So the entry that can still be referenced is the entry that is kept. Reachability is
+ * bounded by trident's hard in-flight ceiling — `DEFAULT_MAX_INFLIGHT_MS`, 2 h in
+ * `trident/liveness.ts` — because no run can be in flight longer than that, so no entry
+ * older than it can be asked about. Doubled here for margin, since the coupling is
+ * documented rather than enforced (the runtime band may not import trident) and a
+ * retention window that is slightly too generous costs kilobytes while one that is too
+ * short costs a build's failure reason.
+ */
+export const GATEWAY_SHUTDOWN_KILL_RETENTION_MS = 4 * 60 * 60_000
+
+/**
+ * AN ALARM THRESHOLD, NOT A CAP. Nothing is evicted for crossing it.
+ *
+ * It used to slice the row down to this many entries, which contradicted the sentence
+ * directly above it: with more than this many entries all genuinely inside the retention
+ * window, the "backstop" became the PRIMARY rule and discarded the oldest still-live
+ * attribution — exactly the loss this whole mechanism exists to prevent, under exactly
+ * the load that makes it likely.
+ *
+ * It does not need to evict, because THE AGE RULE ALREADY BOUNDS GROWTH: every entry
+ * outside `GATEWAY_SHUTDOWN_KILL_RETENTION_MS` is released, so the most a row can hold is
+ * the number of shutdowns that landed on one session key inside that window. Crossing
+ * this threshold therefore means something pathological is restarting the key — roughly a
+ * restart a minute, sustained for hours — which is a thing to SAY rather than a thing to
+ * paper over by dropping evidence. The crash-loop guard (`restart-rate.ts`) is what exists
+ * to catch the cause.
+ */
+export const GATEWAY_SHUTDOWN_KILL_ALARM_COUNT = 256
+
+/**
+ * WHAT THE SHUTDOWN OBSERVED about one generation when it reached it.
+ *
+ * THREE VALUES FOR THREE STATES, and the third is why this field exists. The domain
+ * is: we killed it / it was already gone / we could not tell — plus a FOURTH state,
+ * "the shutdown never reached this generation at all", which is the ABSENCE of an
+ * entry. An earlier revision encoded the domain as entry-present vs entry-absent, so
+ * `undetermined` shared its representation with `ordinary crash`, and the next tick
+ * read it as the neighbour it resembled: a confident `child-died`. A field that cannot
+ * express "I looked and could not tell" has that state read as whichever neighbour it
+ * looks like, and here that was the worst one.
+ */
+export type GatewayShutdownObservation =
+  /** Observed ALIVE when the shutdown reached it, and the kill then RETURNED. A deploy
+   *  killed it. The only value that attributes a death to the shutdown. */
+  | 'alive-and-killed'
+  /**
+   * Observed ALIVE when the shutdown reached it, and what the kill did is NOT
+   * ESTABLISHED — it threw, or this process stopped before it could record the outcome.
+   *
+   * THE PRE-KILL STATE, and it exists so that no record written before the act can
+   * assert the act. `alive-and-killed` is only ever reached by
+   * {@link confirmShutdownKill} AFTER `kill()` returns; until then the row says this,
+   * which is true at the moment it is written and attributes nothing. A process that
+   * dies mid-shutdown therefore leaves an honest "cause not established" rather than
+   * either silence or a deploy claim nothing performed.
+   */
+  | 'alive-when-reached'
+  /** Already gone when the shutdown reached it — so the shutdown did NOT kill it, and
+   *  nothing here establishes what did. */
+  | 'already-gone'
+  /** The liveness probe itself failed: we could not even look. Distinct from
+   *  `already-gone`, because "it was dead" and "I could not check" are different
+   *  facts and only one is an observation. */
+  | 'could-not-sample'
+
+/** One child generation the gateway shutdown reached on this session key. */
+export interface GatewayShutdownKillEntry {
+  /** The `child_generation` this entry is about. */
+  generation: string
+  /** What the shutdown established about it. REQUIRED: an entry whose `observed` is
+   *  absent or unrecognised is refused by `gatewayShutdownKillEntryFor` and is evidence
+   *  of nothing. Optional in the TYPE only because a row read off disk is not a trusted
+   *  type boundary — the validator, not the type, is what enforces it. */
+  observed?: GatewayShutdownObservation
+  /** Epoch ms the kill was recorded — before the kill, by the process making it. */
+  at: number
+  /** The OS pid of that generation's child.
+   *
+   *  CARRIED SO A LATER READER CAN CONFIRM THE DEATH INSTEAD OF TAKING THIS ENTRY'S
+   *  WORD FOR IT. The entry is written BEFORE `kill()`, and `kill()` can throw or the
+   *  process can die between the two — so the entry records that we INTENDED to kill a
+   *  child we had observed alive, which attributes a death without establishing one.
+   *  The only thing that knows whether the kill landed is the process table, and for a
+   *  SUPERSEDED generation the row's own `pid` field belongs to the replacement, so
+   *  the pid has to travel with the entry or the confirmation is impossible.
+   *
+   *  Absent on an entry written before this field existed: a reader that cannot
+   *  confirm reports UNKNOWN rather than assuming either way. */
+  pid?: number
+  /**
+   * WHICH PROCESS THAT PID WAS, sampled from the kernel before the kill.
+   *
+   * A pid on its own is an identifier, not a handle. This entry stays eligible for four
+   * hours ({@link GATEWAY_SHUTDOWN_KILL_RETENTION_MS}) and pids are recycled well inside
+   * that on a busy box, so a later reader asking `process.kill(pid, 0)` may be asking
+   * about a stranger and cannot tell. `start_ticks` + `boot_id` is the pair the kernel
+   * maintains that a recycled pid cannot reproduce — see `process-identity.ts`.
+   *
+   * Absent where it could not be sampled (no `/proc`: macOS self-host, a container
+   * without it) or on an entry from a build before the field existed. A reader without
+   * it can still establish a DEATH, but it must not ATTRIBUTE one — the pid look cannot
+   * be tied to the process this entry describes.
+   */
+  identity?: ProcessIdentity
+}
 
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
@@ -85,10 +203,65 @@ export interface ReplRegistryRecord {
   /** Epoch ms the hard cap tripped — auto-recovery OFF until an operator clears
    *  it via the admin endpoint. */
   capped_at?: number
-  /** Epoch ms after the durable child-crash sink committed for this PID edge. */
+  /** Epoch ms at which THIS PID EDGE'S CRASH REPORT WAS CLOSED — i.e. the edge has
+   *  been reported and must not be reported a second time. Read by the supervision
+   *  watchdog, which skips its crash-sink call when this is set
+   *  (`supervision.ts`), and cleared by `spawn.ts` when a new child generation is
+   *  written so the next edge reports freely.
+   *
+   *  TWO WRITERS, and BOTH write it only after a sink call has actually committed:
+   *    - the supervision watchdog, after its durable child-crash sink returned;
+   *    - the gateway-shutdown kill path (`gateway-shutdown-kill.ts`
+   *      → `closeCrashReportEdge`), after its own sink call returned.
+   *  It is never set when no sink is wired, and never when a sink threw or was
+   *  abandoned on a timeout: no report happened, so the edge stays OPEN and the next
+   *  boot is free to report the death. That is what makes the shutdown marker a
+   *  backstop rather than a decoration.
+   *
+   *  IT IS KEYED ON WHETHER A REPORT WAS DELIVERED, NEVER ON WHAT THE REPORT SAID.
+   *  A delivered `cause: 'unknown'` ("the launcher is gone and nobody established
+   *  why") closes this edge exactly as a delivered deploy attribution does — the
+   *  report happened and it said what was true. An earlier revision closed it only
+   *  for the attributed case, so an honest undetermined report left the edge open and
+   *  the next tick reported the same death again as a confident `child-died`, which
+   *  `crashRunningByLauncher` writes over the tombstone unconditionally. Telling the
+   *  owner something and telling the owner it was a deploy are different facts, and
+   *  only the first one closes this.
+   *
+   *  The name is for the EDGE, not for the sink, because the watchdog reads it to
+   *  answer "is there anything left to say about this death" — but the two are no
+   *  longer in tension. An earlier revision of the shutdown path did close this
+   *  alongside the marker, before its report, and this docblock described that; both
+   *  the behaviour and the sentence were wrong, and the behaviour was fixed first. */
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string
+  /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
+   *  REACHED (`shutdownAllPersistentRepls`, from the SIGTERM handler: a service restart
+   *  or a deploy). Written just before each kill, read back so the death is reported as
+   *  what was actually established — a deploy, or an honest "cause not established" —
+   *  instead of a bare crash. See {@link GatewayShutdownObservation}: an entry records
+   *  WHAT WAS OBSERVED, so an undetermined outcome is durable rather than sharing its
+   *  representation with an ordinary crash.
+   *
+   *  A LIST, KEYED BY GENERATION, AND THAT IS THE POINT. One teardown reaches two
+   *  generations on one session key: the POOLED child, and a QUARANTINED child that
+   *  held this key until a replacement spawned over it. A single scalar pair could
+   *  hold only one of them, so the other's death had nowhere durable to go — and a
+   *  quarantined child is quarantined precisely BECAUSE it still hosts running
+   *  workflows, which makes it the death that matters most.
+   *
+   *  It also makes the staleness question structural instead of enforced: an entry
+   *  names its own generation, so an entry for a superseded child can never be read
+   *  as describing the current one. `spawn.ts` therefore does NOT clear this on a
+   *  respawn — it must outlive the generation it describes, which is the whole
+   *  reason it exists.
+   *
+   *  Growth is bounded by the retention window, not by a count: one entry
+   *  accrues per shutdown that killed a child on this key, and the only consumer is
+   *  a still-in-flight build asking about its own launcher — bounded by trident's
+   *  2-hour in-flight ceiling, so older entries are unreachable by construction. */
+  killed_by_gateway_shutdown?: GatewayShutdownKillEntry[]
 }
 
 /** All records keyed by `sessionKey`. */
