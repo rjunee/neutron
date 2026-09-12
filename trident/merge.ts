@@ -381,7 +381,22 @@ export async function diffBaseRef(
   }
   // THE PROBE IS INVOKED HERE AND NOWHERE ELSE — after the pin, after both refusals, on
   // the one arm whose answer depends on it.
-  return (await origin_base_resolves()) ? `origin/${name}` : name
+  // THE FULLY QUALIFIED REF, because that is the one `originBaseResolves` verified.
+  //
+  // This returned the shorthand `origin/<name>` for sixteen rounds while verifying
+  // `refs/remotes/origin/<name>^{commit}` — a value verified in one form and returned in
+  // another has not been verified, and the gap between the two forms is exactly where the
+  // ambiguity lives. Git permits a TAG named `origin/main`, and its disambiguation order
+  // prefers `refs/tags/` over `refs/remotes/`. MEASURED on git 2.43 with both refs present:
+  //
+  //   git diff --name-only origin/main..HEAD              → warning on stderr, EXIT 0, 2 files
+  //   git diff --name-only refs/remotes/origin/main..HEAD → exit 0, 1 file (the right answer)
+  //
+  // So the shorthand does not fail — it silently resolves to the TAG and inflates the diff,
+  // which is #546's own defect arriving through the RETURN FORM. The warning goes to stderr,
+  // which both wrappers send to /dev/null. Same shape as `fstat` on a path instead of on the
+  // descriptor you hold.
+  return (await origin_base_resolves()) ? `refs/remotes/origin/${name}` : name
 }
 
 /**

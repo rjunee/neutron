@@ -308,10 +308,43 @@ describe('the review diff is taken against the resolved base, not the stale loca
     const out = await runResumeDiff(w, { pr: true })
 
     // THE RESOLUTION, as a value — which ref the substitution actually picked…
-    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('origin/main')
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/remotes/origin/main')
     // …and THE OUTCOME, which is the claim that matters: one file, named. `bytes > 0`
     // because 0 is how `writeResumeDiff` reports failure, and a command that silently
     // did nothing would otherwise satisfy a file-list assertion over an empty diff.
+    expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
+    expect(out.bytes).toBeGreaterThan(0)
+  })
+
+  test('A TAG NAMED `origin/main` DOES NOT CAPTURE THE BASE — the shorthand would have', async () => {
+    // THE LAST FORM OF THIS DEFECT, and it arrived through the RETURN VALUE rather than the
+    // resolution. `diffBaseRef` and the workflow substitution both VERIFY
+    // `refs/remotes/origin/<base>^{commit}` and used to hand back the shorthand
+    // `origin/<base>`. Git permits a tag called `origin/main`, and its disambiguation order
+    // prefers `refs/tags/` over `refs/remotes/` — so the shorthand names a ref nobody checked.
+    //
+    // MEASURED HERE, not argued: the tag is planted at the STALE base, so if the shorthand
+    // wins, the range is the stale one and the reviewer reads five files. git does not even
+    // fail — it prints `warning: refname 'origin/main' is ambiguous.` on stderr and EXITS 0,
+    // and the wrappers send stderr to /dev/null. A value verified in one form and returned in
+    // another has not been verified.
+    const w = await seedWorld('tag-collision')
+    await git(w.consumer, 'tag', 'origin/main', w.staleBase)
+    // The collision is real in THIS repository, or the test proves nothing: both refs exist
+    // and they point at different commits.
+    expect(await git(w.consumer, 'rev-parse', 'refs/tags/origin/main')).toBe(w.staleBase)
+    expect(await git(w.consumer, 'rev-parse', 'refs/remotes/origin/main')).toBe(w.currentBase)
+
+    // THE TWO ANSWERS DIFFER, which is what makes the assertion below load-bearing: the
+    // shorthand resolves to the TAG and names five files; the qualified ref names one.
+    expect(await filesInRange(w.consumer, `origin/main..${w.head}`)).toEqual(
+      [BRANCH_FILE, ...w.staleFiles].sort(),
+    )
+    expect(await filesInRange(w.consumer, `refs/remotes/origin/main..${w.head}`)).toEqual([BRANCH_FILE])
+
+    // …and the workflow composes the qualified one, so the review is unaffected by the tag.
+    const out = await runResumeDiff(w, { pr: true })
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/remotes/origin/main')
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
     expect(out.bytes).toBeGreaterThan(0)
   })
@@ -348,7 +381,7 @@ describe('the review diff is taken against the resolved base, not the stale loca
     const w = await seedWorld('local-with-remote')
     const out = await runResumeDiff(w, { pr: false })
 
-    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('origin/main')
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/remotes/origin/main')
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
     expect(out.bytes).toBeGreaterThan(0)
 
@@ -436,7 +469,7 @@ describe('the review diff is taken against the resolved base, not the stale loca
     await git(w.consumer, 'merge', '-q', '--ff-only', 'origin/main')
 
     const out = await runResumeDiff(w, { pr: true })
-    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('origin/main')
+    expect(await resolvedBase(w.consumer, out.resumeDiffCommand)).toBe('refs/remotes/origin/main')
     expect(filesInDiffFile(out.diffFile)).toEqual([BRANCH_FILE])
   })
 })

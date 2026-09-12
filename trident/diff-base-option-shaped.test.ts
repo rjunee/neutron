@@ -257,9 +257,9 @@ describe('the BINDING refuses an option-shaped base — it is not routed past', 
   })
 
   test('THE COMPLEMENT: an ordinary name is unaffected in both directions', async () => {
-    expect(await diffBaseRef('main', null, probe(true))).toBe('origin/main')
+    expect(await diffBaseRef('main', null, probe(true))).toBe('refs/remotes/origin/main')
     expect(await diffBaseRef('main', null, probe(false))).toBe('main')
-    expect(await diffBaseRef('release/1.x', null, probe(true))).toBe('origin/release/1.x')
+    expect(await diffBaseRef('release/1.x', null, probe(true))).toBe('refs/remotes/origin/release/1.x')
   })
 
   test('THE PROBE IS NOT EVEN CALLED when the pin is valid — asserted as an ABSENT side effect', async () => {
@@ -353,7 +353,7 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     await git(w.repo, 'update-ref', 'refs/remotes/origin/main', w.base)
     for (const mergeMode of ['pr', 'local'] as const) {
       const got = await bothAgree(w, { baseBranch: 'main', originResolves: true, mergeMode })
-      expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'origin/main', mjs: 'origin/main' })
+      expect({ mergeMode, ...got }).toEqual({ mergeMode, ts: 'refs/remotes/origin/main', mjs: 'refs/remotes/origin/main' })
     }
   })
 
@@ -408,7 +408,7 @@ describe('THE TWO IMPLEMENTATIONS OF THE RULE AGREE — a parity table', () => {
     // THE COMPLEMENT, so this is not just "everything throws": the same name unpadded is
     // answered, identically, by both — in the same fixture, where `origin/main` resolves.
     const got = await bothAgree(w, { baseBranch: 'main', originResolves: true })
-    expect(got).toEqual({ ts: 'origin/main', mjs: 'origin/main' })
+    expect(got).toEqual({ ts: 'refs/remotes/origin/main', mjs: 'refs/remotes/origin/main' })
     // …and a PIN still wins over a padded name in both, because the pin is read first.
     const sha = 'f'.repeat(40)
     expect(await diffBaseRef(' main ', sha, probe(false))).toBe(sha)
@@ -514,12 +514,12 @@ describe('AN UNSHIELDED GIT REV-RANGE IS UNCONSTRUCTIBLE IN TYPESCRIPT — and t
    * enumerate them, not a reason to exempt them.
    */
   const OUT_OF_REACH: ReadonlyArray<{ file: string; line: number; why: string }> = [
-    { file: 'inner-workflow.mjs', line: 1572, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
-    { file: 'inner-workflow.mjs', line: 2306, why: "the planner's resume inspection hint — also a prompt" },
-    { file: 'inner-workflow.mjs', line: 2412, why: 'the plan probe branch log — a shell command composed for a prompt' },
-    { file: 'inner-workflow.mjs', line: 5249, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
+    { file: 'inner-workflow.mjs', line: 1578, why: "the forge contract's example diff — a command in a PROMPT, run by the agent" },
+    { file: 'inner-workflow.mjs', line: 2312, why: "the planner's resume inspection hint — also a prompt" },
+    { file: 'inner-workflow.mjs', line: 2424, why: 'the plan probe branch log — a shell command composed for a prompt' },
+    { file: 'inner-workflow.mjs', line: 5261, why: 'the resume diff — a shell command the workflow hands to `agent()` to run' },
     { file: 'codex-build.sh', line: 819, why: 'shell: the wrapper regenerates the branch diff when a build committed and wrote none' },
-    { file: 'codex-review.sh', line: 300, why: 'shell: the standalone reviewer builds its own diff' },
+    { file: 'codex-review.sh', line: 304, why: 'shell: the standalone reviewer builds its own diff' },
   ]
 
   interface Hit {

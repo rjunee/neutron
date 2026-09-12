@@ -123,7 +123,13 @@ The resolution order is evidence-first, and is the same at every site:
 
 1. the **launch-pinned base sha** — the commit `origin/<base>` held when the launcher observed it
    and cut the build branch. A sha cannot go stale, and it IS the cut point;
-2. **`origin/<base>` whenever that ref resolves, in EITHER merge mode** — the remote-tracking
+2. **`refs/remotes/origin/<base>` whenever that ref resolves, in EITHER merge mode** — fully
+   qualified, because that is the ref the probe verified. The shorthand `origin/<base>` names a
+   DIFFERENT thing when a tag of that name exists: git prefers `refs/tags/` over
+   `refs/remotes/`, so `origin/main..HEAD` silently resolves to the tag — measured on git 2.43
+   as two files where the qualified form gives one, with a stderr warning and exit 0, and both
+   wrappers send that stderr to `/dev/null`. **A value verified in one form and returned in
+   another has not been verified.** The remote-tracking
    ref. In pr mode the launch path fetches `+refs/heads/<base>:refs/remotes/origin/<base>` and
    refuses to start the build if that fetch or its rev-parse fails, so it exists and is as fresh
    as launch; in local mode it is preferred too, whenever the repository has one;

@@ -338,7 +338,7 @@ describe('mid-loop resume — the head UNCHANGED fast paths actually SKIP work',
     // real-git suite asserts what it RESOLVES TO and the files it produces.
     for (const pr of [true, false]) {
       const cmd = promptFor(await runResume({ checkpoint: 'forge-done', recordedHead: RECORDED, pr }), 'resume-diff')
-      expect({ pr, resolves: cmd.includes("printf %s 'origin/main' || printf %s 'main'") }).toEqual({ pr, resolves: true })
+      expect({ pr, resolves: cmd.includes("printf %s 'refs/remotes/origin/main' || printf %s 'main'") }).toEqual({ pr, resolves: true })
       // …and never the bare local name as a literal operand.
       expect(cmd).not.toContain(`git diff 'main'..'${RECORDED}'`)
     }

@@ -53,7 +53,10 @@ function promotionBlock(): string {
   const block = src.slice(start, fi + 4)
   // It must actually contain the promotion, or these tests prove nothing about it.
   expect(block).toContain('refs/remotes/origin/${BASE_REF}')
-  expect(block).toContain('BASE_REF="origin/${BASE_REF}"')
+  // The FULLY QUALIFIED form, which is what the block verifies one line above. It stored the
+  // shorthand `origin/${BASE_REF}` until round seventeen, and a tag named `origin/main` wins
+  // that name in git's disambiguation order — so the promotion resolved to the tag.
+  expect(block).toContain('BASE_REF="refs/remotes/origin/${BASE_REF}"')
   return block
 }
 
@@ -110,11 +113,36 @@ async function seedWorld(): Promise<World> {
 describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () => {
   test('a LOCAL BRANCH with a remote counterpart is promoted — the case this is for', async () => {
     const w = await seedWorld()
-    expect(await promote(w.repo, 'main')).toBe('origin/main')
+    expect(await promote(w.repo, 'main')).toBe('refs/remotes/origin/main')
     // Pinned as the COMMIT, not just the name: promotion is only worth anything if the
     // ref it picks resolves somewhere different from the one it refused.
     expect(await git(w.repo, 'rev-parse', await promote(w.repo, 'main'))).toBe(w.remote)
     expect(await git(w.repo, 'rev-parse', 'main')).toBe(w.local)
+  })
+
+  test('A TAG NAMED `origin/main` DOES NOT CAPTURE THE PROMOTED REF — the return form', async () => {
+    // THE COLLISION AGAINST THE RETURNED FORM, not against the argument. The block verifies
+    // `refs/remotes/origin/main^{commit}` and used to STORE the shorthand `origin/main` —
+    // and git prefers `refs/tags/` over `refs/remotes/` when disambiguating, so a tag by that
+    // name silently captured the base the wrapper had just proved. Measured on git 2.43: the
+    // shorthand resolves to the tag with only a `warning: refname … is ambiguous` on stderr
+    // and exit 0, and this wrapper sends its diff's stderr to /dev/null.
+    //
+    // The sibling test above covers a tag named `release` — a collision against the ARGUMENT.
+    // This is the other end: same mechanism, the value the check hands back.
+    const w = await seedWorld()
+    await git(w.repo, 'tag', 'origin/main', w.local)
+    // The collision is real here, and the two names disagree — or this proves nothing.
+    expect(await git(w.repo, 'rev-parse', 'refs/tags/origin/main')).toBe(w.local)
+    expect(await git(w.repo, 'rev-parse', 'refs/remotes/origin/main')).toBe(w.remote)
+
+    const promoted = await promote(w.repo, 'main')
+    expect(promoted).toBe('refs/remotes/origin/main')
+    // THE COMMIT, which is the claim: the promoted ref resolves to the REMOTE tip even with
+    // the tag present. The shorthand would resolve to `w.local` — asserted here so the
+    // difference is a measured value, not an argument about git's precedence rules.
+    expect(await git(w.repo, 'rev-parse', promoted)).toBe(w.remote)
+    expect(await git(w.repo, 'rev-parse', 'origin/main')).toBe(w.local)
   })
 
   test('A TAG IS NOT PROMOTED, even when origin/<same-name> exists — the regression', async () => {

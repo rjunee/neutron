@@ -74,7 +74,11 @@ BASE_REF="${1:-main}"
 if git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
   && ! git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/remotes/origin/${BASE_REF}^{commit}" >/dev/null 2>&1; then
-  BASE_REF="origin/${BASE_REF}"
+  # THE REF THAT WAS VERIFIED, fully qualified. Storing `origin/${BASE_REF}` after verifying
+  # `refs/remotes/origin/${BASE_REF}` left a gap a tag named `origin/main` walks straight
+  # into: git prefers refs/tags/ over refs/remotes/ and resolves the shorthand to the TAG,
+  # with a stderr warning this script sends to /dev/null and exit 0.
+  BASE_REF="refs/remotes/origin/${BASE_REF}"
 fi
 : "${CODEX_HOME:=}"
 # How many lines of diff to hand codex — mirror Argus's oversized-diff guard so a

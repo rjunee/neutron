@@ -1054,13 +1054,13 @@ describe('AS-BUILT: fresh forge contracts use the launcher-pinned base', () => {
     // mode the bare name outright — `merge_mode: 'local'` means the outer loop merges
     // locally, not that the repository has no remote, and the review-diff fixture shows
     // that mistake costing five files where the branch changed one.
-    expect(prompt).toContain("printf %s 'origin/main' || printf %s 'main'")
+    expect(prompt).toContain("printf %s 'refs/remotes/origin/main' || printf %s 'main'")
     expect(prompt).not.toContain('git diff main..HEAD')
   })
 
   test('PR MODE, unpinned: the same resolution — the preference is not git-mode dependent', async () => {
     const prompt = forgeBuildPrompt((await runWorkflow('', { mergeMode: 'pr' })).captured)
-    expect(prompt).toContain("printf %s 'origin/main' || printf %s 'main'")
+    expect(prompt).toContain("printf %s 'refs/remotes/origin/main' || printf %s 'main'")
     expect(prompt).not.toContain('git diff main..HEAD')
   })
 })

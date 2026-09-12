@@ -37,7 +37,7 @@ not touch; and #546 — reviewers reading 149 files where the branch changed 30.
 
 ### It had already been fixed twice, as a call site
 
-`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5416` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
+`probeCiBase` (`trident/inner-workflow.mjs:5247` on the tree this branch was cut from; `:5428` on this branch's final tree — this record outlives the branch, so both are given, each with the tree it was measured on, because every round that edits this file moves them: round twelve moved this one by 39 lines)
 and the plan probe's `branchLogBase` (`:2229`) were already resolving the base, while the
 resume diff (`:5078`) and the forge contract's reviewer diff (`:1426`) in the same file
 still composed the bare name. The issue's line numbers matched the box's *stale* local
@@ -218,6 +218,50 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round seventeen: the resolution was correct and then discarded at the return statement
+
+`diffBaseRef` verified `refs/remotes/origin/<name>^{commit}` and returned the shorthand
+`origin/<name>`. The workflow substitution rev-parsed the qualified ref and `printf`'d the
+short one. `codex-review.sh` verified qualified and stored short. Three places, one shape:
+**a value verified in one form and returned in another has not been verified**, and the gap
+between the two forms is exactly where the ambiguity lives.
+
+Git permits a tag named `origin/main`, and its disambiguation order prefers `refs/tags/` over
+`refs/remotes/`. MEASURED on git 2.43 with both refs present and pointing at different commits:
+
+    git diff --name-only origin/main..HEAD               → warning on stderr, EXIT 0, 2 files
+    git rev-list --count origin/main..HEAD               → warning on stderr, EXIT 0, "2"
+    git diff --name-only refs/remotes/origin/main..HEAD  → exit 0, 1 file
+
+**It does not fail — it silently resolves to the TAG and inflates the diff**, which is #546's
+own defect arriving through the return form at the last mile of the PR that fixes it. The
+warning goes to stderr, and both wrappers send stderr to `/dev/null`.
+
+All four sites now return the qualified ref: `diffBaseRef`, the `.mjs` substitution,
+`codex-review.sh`'s promotion, and `branchLogBase` — the last of which never verified anything
+(it is unconditional by design) but carried the same ambiguity for free, and an unresolvable
+`refs/remotes/origin/<base>` degrades its `|| true` log exactly as an unresolvable
+`origin/<base>` did.
+
+**The collision tests had the wrong end of the name.** `codex-review-base-ref.test.ts` covered
+a tag named `release` — a collision against the ARGUMENT. The collision that mattered here is
+against the RETURNED form, `refs/tags/origin/main`, and nothing covered it. Both ends are
+covered now, each pinning the COMMIT: a workflow-level fixture where the tag sits at the stale
+base (shorthand → five files, qualified → one) and a wrapper-level one where the promoted ref
+must resolve to the remote tip with the tag present. Mutations: restoring the shorthand in the
+TS binding reds 3, in the `.mjs` reds 4 including the new tag test, in the wrapper reds 5.
+
+**And the sweep earned its place the same round it was written into the banner**: this
+round's comments moved `probeCiBase` from `:5416` to `:5428` and the resume range from
+`:5249` to `:5261`. Running the sweep LAST caught both — six lines of new comment is all it
+takes, and the round that writes the comment is the round that invalidates the number.
+
+**Eighteen assertions pinned the old value and were repointed with the new one stated as a
+value** — the substitution's `printf`, the parity table, the realgit resolutions, the plan
+probe, the wrapper promotion, the cross-model argv. And `OUT_OF_REACH`'s six `file:line`
+entries moved with the comments this round added; the test caught that itself, which is the
+whole argument for citations that live inside assertions.
+
 ### Round sixteen: a claim of reconciliation is what stops the next reader checking
 
 Three final-tree citations in this record were wrong by a **uniform six lines**, in a document
@@ -249,8 +293,12 @@ The banner now says the sweep runs LAST, because that is the only time the claim
 
 **And one citation shape that cannot drift**: `diff-base-option-shaped.test.ts`'s
 `OUT_OF_REACH` list carries the six surviving ranges as `file:line` entries and then asserts
-them against what the scan actually found. A `file:line` in an executable assertion is
-re-derived on every run; one in prose is re-derived when someone remembers.
+them against what the scan actually found. **A `file:line` in an executable assertion is
+re-derived on every run; one in prose is re-derived when someone remembers.** That is the
+durable form of this whole class, and round seventeen demonstrated it within one round: the
+comments added to `inner-workflow.mjs` moved four of those six lines, and the test failed
+immediately and named them — while the five prose citations of the round before had drifted
+silently for six rounds.
 
 ### Round sixteen (b): the instrument under suspicion got fixed; the one written beside it did not
 
@@ -924,7 +972,7 @@ fallback (the bare name is kept when `origin/<base>` does not resolve — prefix
 
 **Mutation, re-measured in the round-twelve pass:** restoring `${shSingleQuote(baseBranch)}`
 at `writeResumeDiff` fails **5 of the 9** tests in that file, and the gate reports it at
-`inner-workflow.mjs:5249`. The agreement/complement tests stay green, which is what they
+`inner-workflow.mjs:5261`. The agreement/complement tests stay green, which is what they
 are for.
 
 > Round nine measured the same mutation at `:5202` and round eight at `:5119`; each was true

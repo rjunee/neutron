@@ -1490,7 +1490,13 @@ function unpinnedDiffBase() {
   // the result went unused on the refusing paths, but it put the composition outside the only
   // scope that has checked its input. Composing it here is the same principle as the rest of
   // #546: narrow the scope in which an unvalidated base name can exist.
-  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
+  // The substitution PRINTS THE REF IT VERIFIED — `refs/remotes/origin/<base>`, not the
+  // shorthand `origin/<base>`. Both halves used to disagree: it rev-parsed the qualified ref
+  // and printed the short one. Git allows a tag named `origin/main` and prefers `refs/tags/`
+  // over `refs/remotes/` when disambiguating, so the shorthand silently resolves to the TAG —
+  // measured on git 2.43 as two files where the qualified form gives one, with only a stderr
+  // warning and exit 0, and this command's stderr goes to /dev/null.
+  return `"$(git rev-parse --verify -q ${shSingleQuote(`refs/remotes/origin/${baseBranch}^{commit}`)} >/dev/null 2>&1 && printf %s ${shSingleQuote(`refs/remotes/origin/${baseBranch}`)} || printf %s ${shSingleQuote(baseBranch)})"`
 }
 
 const diffBase =
@@ -2393,7 +2399,13 @@ const planProbeRef = isPr ? `origin/${forgeBranch}` : forgeBranch
 // breaking it: that is why this one can be unconditional where `diffBase` cannot.
 // Pinned by `inner-workflow-plan-next.test.ts` — "local mode probes the local ref, which
 // is the authority there" asserts BOTH halves of this split.
-const branchLogBase = `origin/${baseBranch}`
+// FULLY QUALIFIED for the same reason `diffBase` is (round seventeen): a tag named
+// `origin/<base>` wins over the remote-tracking ref in git's disambiguation order, so the
+// shorthand silently excludes the wrong commits from this window. This one never verified
+// anything — it is unconditional by design, and an unresolvable `refs/remotes/origin/<base>`
+// degrades the log exactly as an unresolvable `origin/<base>` did (`|| true`) — so the change
+// costs nothing and removes the ambiguity.
+const branchLogBase = `refs/remotes/origin/${baseBranch}`
 
 function planProbePrompt() {
   const planPath = `${planProbeRef}:.trident/plans/${forgeBranch}.md`
