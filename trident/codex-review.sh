@@ -97,6 +97,19 @@ elif git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null
   # into: git prefers refs/tags/ over refs/remotes/ and resolves the shorthand to the TAG,
   # with a stderr warning this script sends to /dev/null and exit 0.
   BASE_REF="refs/remotes/origin/${BASE_REF}"
+elif [[ "$BASE_REF" == origin/* ]] \
+  && git rev-parse --verify --quiet "refs/remotes/${BASE_REF}^{commit}" >/dev/null 2>&1; then
+  # `origin/<x>` IS NOT QUALIFIED — it only looks it. This arm is the round-twenty-three
+  # finding: the chain recognised a bare branch name and kept everything WITH A SLASH
+  # verbatim, on the reading that a slash means the caller already said which ref they meant.
+  # It does not. `origin/main` is a shorthand git resolves across namespaces, and
+  # `refs/tags/origin/main` WINS: measured on git 2.43 with both refs present, a review
+  # against `origin/main` read two files where the remote-tracking ref's answer was none.
+  #
+  # AHEAD OF THE TAG-ONLY ARM ON PURPOSE. `origin/main` has no `refs/heads/origin/main`, so
+  # the tag-only arm would otherwise claim it and refuse — reading "the operator meant the tag"
+  # from a name whose whole shape says remote-tracking ref. Order is the disambiguation here.
+  BASE_REF="refs/remotes/${BASE_REF}"
 elif ! git rev-parse --verify --quiet "refs/heads/${BASE_REF}^{commit}" >/dev/null 2>&1 \
   && git rev-parse --verify --quiet "refs/tags/${BASE_REF}" >/dev/null 2>&1; then
   # TAG-ONLY — REFUSED. A bare name that resolves ONLY as a tag is not a base branch, and it
@@ -342,6 +355,35 @@ else
   # shape as a gate whose disk filled up returning empty output with no error: a check that
   # could not run reads exactly like a check that passed, and both fail in the safe-looking
   # direction.
+  # THE SHAPE ASSERTION — the one point where the value meets the command.
+  #
+  # EVERY VALUE THAT REACHES A GIT REV-RANGE IS A FULL OBJECT NAME OR BEGINS WITH `refs/`.
+  # Nothing else. "Contains a slash" is not "fully qualified": `origin/main` is a shorthand
+  # git disambiguates by its own precedence, which prefers TAGS, so `refs/tags/origin/main`
+  # captures it. That was the fourth position of one defect on this branch — the qualified
+  # path, the `refs/heads` fallback, the no-ref fallback, and then the argument nobody
+  # qualified because it LOOKED qualified.
+  #
+  # Asserting the SHAPE here rather than trusting the classifier above is what ends the
+  # sequence: this is about what git RECEIVES, not about which arm produced it, so a
+  # classifier mistake can no longer reach the command. A `HEAD`-rooted expression is
+  # resolved to an object name rather than refused — it is unambiguous (no namespace lookup)
+  # and an operator's legitimate way to say "one before the tip".
+  case "$BASE_REF" in
+    refs/*) : ;;
+    HEAD | HEAD[~^]*)
+      if ! BASE_REF=$(git rev-parse --verify --quiet "${BASE_REF}^{commit}"); then
+        printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' does not resolve, so the diff would be EMPTY — nothing to review. DEFERRED — do NOT treat as an approval." >&2
+        exit 3
+      fi
+      ;;
+    *)
+      if [[ ! "$BASE_REF" =~ ^[0-9a-f]{40}$ ]]; then
+        printf '%s\n' "CODEX_REVIEW_EMPTY_DIFF: base ref '${BASE_REF}' is a SHORTHAND, not a ref — git would resolve it across namespaces and a tag of that name would win. Pass refs/heads/<x>, refs/remotes/origin/<x>, refs/tags/<x> or a 40-hex commit. DEFERRED — do NOT treat as an approval." >&2
+        exit 3
+      fi
+      ;;
+  esac
   if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}" >/dev/null 2>&1; then
     # CARRIES THE SAME MARKER the empty-diff refusal below emits, because this IS that case —
     # caught earlier, where the cause can still be named. A consumer greps for the marker.

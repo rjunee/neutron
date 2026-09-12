@@ -232,6 +232,44 @@ against the rollup's 17. The authoritative read is the PR's own rollup —
 `gh pr view <n> --json mergeStateStatus,statusCheckRollup` — never one workflow's
 conclusion.
 
+### Round twenty-three: "contains a slash" is not "fully qualified"
+
+The fourth position of one defect, and the first in the wrapper's ARGUMENT path rather than its
+return path. The qualification chain recognised a bare local branch and kept everything else
+that resolved verbatim — with `'origin/main'` listed in the tests under "already qualified".
+**It is not qualified. It only looks it.** Measured on git 2.43 with a tag and a
+remote-tracking ref of that name:
+
+    git rev-parse origin/main                 → the TAG
+    git diff --name-only origin/main..HEAD    → two files
+    git diff --name-only refs/remotes/origin/main..HEAD → none
+
+So `codex-review.sh origin/main` reviewed the wrong range and exited 0 — the silent wrong
+answer, arriving through the argument nobody qualified because it looked qualified. **The
+CLASSIFIER was the defect**: only `refs/` prefixes and object names are unambiguous; everything
+else is a shorthand git disambiguates by rules that prefer tags.
+
+**So the rule stopped being about paths and became a property of the VALUE**, asserted where the
+value meets the command:
+
+> **Every value that reaches a git rev-range is a full object name or begins with `refs/`.**
+
+That has no next position to hide in, because it is about what git RECEIVES rather than about
+which caller produced it — the four previous terminating conditions were each about a path, and
+each was outlived by the defect moving one step. The wrapper now qualifies `origin/<x>` to
+`refs/remotes/origin/<x>` (ahead of the tag-only arm, since order is the disambiguation there),
+resolves a `HEAD`-rooted expression to an object name, and REFUSES anything else — with the
+refusals split into two honest classes: about the DIFF (shorthand, unresolvable → carries
+`CODEX_REVIEW_EMPTY_DIFF`) and about the ARGUMENT'S KIND (ambiguous, tag-only → says what is
+wrong with the argument). Both are exit 3.
+
+Mutations: dropping the `origin/<x>` arm reds 2; dropping the shape assertion reds 4.
+
+And the extraction boundary moved again with the code — it now begins at the shape `case`, not
+at the resolvability guard that follows it, because **an extraction boundary is a claim about
+what is under test** and one that started after the property would assert over a slice missing
+the property it is named for.
+
 ### Round twenty-two: a review that cannot see approves everything
 
 **The first behavioural finding in six rounds, and the worst one.** `codex-review.sh` left an

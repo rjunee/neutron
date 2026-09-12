@@ -7,9 +7,18 @@ cutover: true
 issue_ref: "#546"
 ---
 
-**Every rev-range base resolves to the launch-pinned sha; else to `refs/remotes/origin/<base>`
-when that ref resolves to a commit; else to `refs/heads/<base>` when THAT resolves; else it is
-REFUSED.** No arm hands back a bare name. Every arm names the ref it verified: a shorthand is a
+**EVERY VALUE THAT REACHES A GIT REV-RANGE IS A FULL OBJECT NAME OR BEGINS WITH `refs/`.**
+Nothing else — that is the property, and it is about what git RECEIVES rather than about which
+caller produced it, which is what makes it exhaustive where four earlier statements of the rule
+were enumerations of paths. **"Contains a slash" is not "fully qualified":** `origin/main` is a
+shorthand git disambiguates by its own precedence, which prefers TAGS, so `refs/tags/origin/main`
+captures it.
+
+Concretely: every rev-range base resolves to the launch-pinned sha; else to
+`refs/remotes/origin/<base>` when that ref resolves to a commit; else to `refs/heads/<base>` when
+THAT resolves; else it is REFUSED. No arm hands back a bare name, and the standalone wrapper
+asserts the SHAPE at the point where the value meets the command, so a classifier mistake
+upstream cannot reach git. Every arm names the ref it verified: a shorthand is a
 different thing from the ref it looks like, because git permits `refs/tags/origin/main` and
 `refs/tags/main`, prefers tags when disambiguating, and resolves a bare word against every
 namespace — so an unqualified base is a base nobody chose.

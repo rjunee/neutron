@@ -56,9 +56,13 @@ function promotionBlock(): string {
   expect(start).toBeGreaterThan(-1)
   const chainEnd = src.indexOf(': "${CODEX_HOME:=}"', start)
   expect(chainEnd).toBeGreaterThan(start)
-  const guardStart = src.indexOf('if ! git rev-parse --verify --quiet "${BASE_REF}^{commit}"', chainEnd)
+  // FROM THE SHAPE ASSERTION, not from the resolvability guard that follows it: the shape
+  // `case` is what makes "every value reaching a rev-range is an object name or refs/…" true,
+  // and an extraction that began after it would assert over a slice missing the property it
+  // is named for — the same mistake as stopping at the first `fi`.
+  const guardStart = src.indexOf('case "$BASE_REF" in', chainEnd)
   expect(guardStart).toBeGreaterThan(chainEnd)
-  const guardEnd = src.indexOf('\n  fi\n', guardStart)
+  const guardEnd = src.indexOf('\n  fi\n', src.indexOf('does not name a commit in this repository', guardStart))
   expect(guardEnd).toBeGreaterThan(guardStart)
   const block = src.slice(start, chainEnd) + src.slice(guardStart, guardEnd + 6)
   // It must actually contain the promotion, or these tests prove nothing about it.
@@ -69,6 +73,8 @@ function promotionBlock(): string {
   expect(block).toContain('BASE_REF="refs/remotes/origin/${BASE_REF}"')
   // …and the guard that makes an unresolvable base a REFUSAL rather than an empty review.
   expect(block).toContain('does not name a commit in this repository')
+  // …and the SHAPE assertion, the property this file's last test is about.
+  expect(block).toContain('is a SHORTHAND, not a ref')
   return block
 }
 
@@ -226,12 +232,51 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     // this round is about.
     await git(w.repo, 'switch', '-q', '-c', 'head-probe', w.remote)
     for (const arg of [
-      w.remote, // a 40-hex sha
-      'origin/main', // already qualified — `origin/origin/main` must not be reached for
-      'HEAD~1', // a revision expression, not a ref name
+      w.remote, // a 40-hex sha — a full object name
       'refs/tags/release', // an explicitly qualified tag: the caller's own choice
     ]) {
       expect({ arg, got: await promote(w.repo, arg) }).toEqual({ arg, got: arg })
+    }
+    // `HEAD~1` is RESOLVED to an object name rather than kept as text: it is unambiguous (no
+    // namespace lookup), so it needs no refusal — but the value that reaches git must still
+    // be an object name or a `refs/` path.
+    expect(await promote(w.repo, 'HEAD~1')).toBe(await git(w.repo, 'rev-parse', 'HEAD~1'))
+  })
+
+  test('`origin/main` IS NOT QUALIFIED — it is a shorthand a tag outranks', async () => {
+    // THE FOURTH POSITION OF ONE DEFECT, and the one that hid behind a classifier: this
+    // argument was in the "kept VERBATIM" list as "already qualified". It is not — a slash
+    // is not a namespace. Measured on git 2.43 with both refs present, `origin/main` resolves
+    // to the TAG, so the review would have run against the wrong commit and exited 0.
+    const w = await seedWorld()
+    await git(w.repo, 'tag', 'origin/main', w.local)
+    expect(await git(w.repo, 'rev-parse', 'refs/tags/origin/main')).toBe(w.local)
+    expect(await git(w.repo, 'rev-parse', 'refs/remotes/origin/main')).toBe(w.remote)
+    // The bare shorthand resolves to the tag — the wrong commit…
+    expect(await git(w.repo, 'rev-parse', 'origin/main')).toBe(w.local)
+    // …and the wrapper hands git the remote-tracking ref instead, which resolves to the right
+    // one. Asserted as the COMMIT, because the two names differ only in what they resolve to.
+    const got = await promote(w.repo, 'origin/main')
+    expect(got).toBe('refs/remotes/origin/main')
+    expect(await git(w.repo, 'rev-parse', got)).toBe(w.remote)
+  })
+
+  test('THE SHAPE PROPERTY: what reaches git is an object name or begins with refs/', async () => {
+    // THE TERMINATING CONDITION, asserted as a property of the VALUE rather than as a list of
+    // inputs — which is what makes it exhaustive. A classifier mistake upstream can no longer
+    // reach the command, because this is about what git receives.
+    const w = await seedWorld()
+    await git(w.repo, 'branch', 'solo', w.local)
+    await git(w.repo, 'switch', '-q', '-c', 'head-probe', w.remote)
+    for (const arg of ['main', 'solo', 'origin/main', 'HEAD~1', 'refs/tags/release', w.remote]) {
+      const got = await promote(w.repo, arg)
+      const shaped = got.startsWith('refs/') || /^[0-9a-f]{40}$/.test(got)
+      expect({ arg, got, shaped }).toEqual({ arg, got, shaped: true })
+    }
+    // …and the inputs that CANNOT be given that shape are refused rather than passed on.
+    for (const arg of ['no-such-branch', 'release']) {
+      const res = await runBlock(w.repo, arg)
+      expect({ arg, ok: res.ok }).toEqual({ arg, ok: false })
     }
   })
 
@@ -247,7 +292,23 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     // returning empty output with no error: a check that could not run reads exactly like a
     // check that passed, and both fail in the safe-looking direction.
     const w = await seedWorld()
-    for (const arg of ['no-such-branch', 'a'.repeat(40), 'refs/tags/no-such-tag']) {
+    // FOUR REFUSALS IN TWO CLASSES, and which fires is itself the property. The two about the
+    // DIFF — a shorthand that cannot be given the required shape, and a well-shaped value that
+    // names nothing — carry `CODEX_REVIEW_EMPTY_DIFF`, because the consequence is an empty diff
+    // and the marker is what stops that reading as "no findings". The two about the ARGUMENT's
+    // KIND — ambiguous, and tag-only — say what is wrong with the argument instead; they are
+    // still exit 3 (DEFERRED), which is the contract a caller acts on.
+    for (const arg of ['no-such-branch']) {
+      const res = await runBlock(w.repo, arg)
+      expect({ arg, ok: res.ok, stdout: res.stdout }).toEqual({ arg, ok: false, stdout: '' })
+      expect(res.stderr).toContain('CODEX_REVIEW_EMPTY_DIFF')
+    }
+    for (const arg of ['release']) {
+      const res = await runBlock(w.repo, arg)
+      expect({ arg, ok: res.ok, stdout: res.stdout }).toEqual({ arg, ok: false, stdout: '' })
+      expect(res.stderr).toContain('a tag is not a base branch')
+    }
+    for (const arg of ['a'.repeat(40), 'refs/tags/no-such-tag', 'refs/heads/no-such-branch']) {
       const res = await runBlock(w.repo, arg)
       expect({ arg, ok: res.ok, stdout: res.stdout }).toEqual({ arg, ok: false, stdout: '' })
       expect(res.stderr).toContain('does not name a commit')
@@ -255,7 +316,9 @@ describe('codex-review.sh promotes a base ref BY KIND, not by string shape', () 
     // THE COMPLEMENT, so this is not "refuse everything": the resolvable siblings still pass.
     expect(await promote(w.repo, 'main')).toBe('refs/remotes/origin/main')
     await git(w.repo, 'switch', '-q', '-c', 'head-probe', w.remote)
-    expect(await promote(w.repo, 'HEAD~1')).toBe('HEAD~1')
+    // RESOLVED to an object name, not kept as text: `HEAD~1` is unambiguous but it is neither
+    // a `refs/` path nor an object name, and the shape property admits only those two.
+    expect(await promote(w.repo, 'HEAD~1')).toBe(await git(w.repo, 'rev-parse', 'HEAD~1'))
   })
 
   test('a local branch with NO remote counterpart is QUALIFIED — the fallback, same rigour', async () => {
