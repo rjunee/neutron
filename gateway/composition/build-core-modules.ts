@@ -851,10 +851,15 @@ export function buildCoreModules(
         // LIFT THE REF-REAP LATCH once the rescue has had its turn, however it went. The
         // sweep is best-effort and swallows its own failures, so `finally` and `then`
         // behave the same here; `finally` says the latch is about the rescue being OVER,
-        // not about it succeeding. `void` because module init must not await it.
-        void stranded_sweep.finally(() => {
-          strandedSweepSettled = true
-        })
+        // not about it succeeding. Not awaited, because module init must not block on a
+        // rescue talking to a remote — and through `fireAndForget` rather than a bare
+        // `void`, so a rejection is logged instead of taking the process down.
+        fireAndForget(
+          'trident_ref_reap_latch',
+          stranded_sweep.finally(() => {
+            strandedSweepSettled = true
+          }),
+        )
         // `drain` is spread conditionally, matching the line below: under
         // exactOptionalPropertyTypes an explicit `drain: undefined` is NOT
         // assignable to `drain?: () => Promise<void>`, which is what reddened
