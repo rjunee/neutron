@@ -1850,6 +1850,82 @@ describe('branch-ref reap — the refusals (#547)', () => {
     expect(await git(claimant, 'rev-parse', 'HEAD')).toBe(sha)
   }, 60_000)
 
+  test('A TIMEOUT BEFORE THE LOCK COMMITTED is not recorded as a deletion', async () => {
+    // THE HALF THE FIRST TIMEOUT TEST MISSED, and the one that produced a false report.
+    // Making a timeout indeterminate rather than a refusal was right; what was wrong was
+    // what happened next — the indeterminate path fell through and appended to
+    // `refs_deleted` because the claim probe found no claimant. "Nobody is standing on this
+    // ref" is a different question from "does this ref still exist". `deleted.ok` was false
+    // and the report said the ref was reaped.
+    //
+    // Here the watchdog kill lands BEFORE the ref lock commits: the delete never runs, the
+    // ref is untouched, and there is no claimant either — so nothing but measuring the ref
+    // can tell the two timeout orderings apart.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/timeout-before-commit'
+    const sha = await seedRef(repo, branch, 'beforecommit')
+    let attempted = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!attempted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          attempted = true
+          // The command is NEVER run: killed before it took the lock.
+          return { ok: false, stdout: '', stderr: 'killed by watchdog', exit_code: 143, timed_out: true }
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(attempted).toBe(true)
+    // THE REPORT MUST NOT CLAIM A DELETION, and the ref must still be there.
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_restored).toEqual([])
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('delete-timed-out:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
+  test('a timeout whose ref cannot be RE-READ is unknown, and unknown is not a deletion', async () => {
+    // The third answer. A rev-parse that will not answer leaves the outcome unmeasured, and
+    // an unmeasured outcome is not a deletion — it is a stand-down, so it is also logged.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/timeout-unreadable'
+    const sha = await seedRef(repo, branch, 'unreadable')
+    let attempted = false
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: async (cmd, cwd) => {
+        if (!attempted && /update-ref (--no-deref )?-d/.test(cmd.join(' '))) {
+          attempted = true
+          return { ok: false, stdout: '', stderr: 'killed by watchdog', exit_code: 143, timed_out: true }
+        }
+        if (attempted && cmd.includes('rev-parse') && cmd.includes(`refs/heads/${branch}`)) {
+          throw new Error('the ref database is unreadable')
+        }
+        return spawnCapture(cmd, cwd)
+      },
+      proc_root: makeProc(root),
+    })
+
+    expect(report.refs_deleted).toEqual([])
+    expect(report.refs_stood_down).toBeGreaterThan(0)
+    expect(
+      report.refs_kept.some(
+        (k) => k.ref === `refs/heads/${branch}` && k.reason.startsWith('delete-indeterminate:'),
+      ),
+      JSON.stringify(report.refs_kept),
+    ).toBe(true)
+    expect(await git(repo, 'rev-parse', `refs/heads/${branch}`)).toBe(sha)
+  }, 60_000)
+
   test('a salvage that cannot be written blocks the delete', async () => {
     // Only the salvage WRITE is broken, not the delete: a stub that broke both would let
     // the ref survive for the wrong reason and prove nothing about the ordering.

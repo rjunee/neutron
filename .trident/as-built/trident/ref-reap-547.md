@@ -135,15 +135,43 @@ A RETENTION FLOOR DOES NOT CLOSE IT EITHER, and it is worth saying why rather th
 it: the race is not about age. A dispatch can claim a slug whose owners went terminal weeks ago, so
 any floor still leaves the same interleaving on the other side of it.
 
-SO THE OUTCOME IS MADE CORRECT INSTEAD OF THE WINDOW MADE SMALL, which is the property that matters:
+SO A DETECTED CLAIM IS REPAIRED RATHER THAN RACED:
 
-  * GATE 9a re-measures holders and live owners from scratch immediately before the delete. This is
+  * GATE 12 re-measures holders and live owners from scratch immediately before the delete. This is
     the ordinary case, and it means the destructive act is never performed at all when a claim has
     already landed.
-  * GATE 9b takes the SAME measurement again afterwards, and a claim that appeared puts the ref back
-    at exactly the sha it had. Git offers no primitive that compares a HOLDER and unlinks a ref in one
-    operation — `update-ref --stdin` refuses `verify` + `delete` on one ref — so the one remaining
-    interleaving is REPAIRED rather than raced.
+  * GATE 14 takes the SAME measurement again afterwards, and a claim that appeared puts the ref back
+    at exactly the sha it had, with a bounded create-only retry. Git offers no primitive that compares
+    a HOLDER and unlinks a ref in one operation — `update-ref --stdin` refuses `verify` + `delete` on
+    one ref — so a detected claim is repaired instead of raced.
+
+WHAT THAT DOES **NOT** GUARANTEE, said plainly, because an earlier draft of this section claimed the
+outcome was correct for EVERY interleaving and that claim was false. `refClaimedNow` takes a git
+snapshot and a store snapshot, both AFTER the delete. A concurrent `git worktree add` that has already
+resolved the branch but appears in NEITHER snapshot yet reads as "no claimant" — so the ref stays
+deleted and that claimant finishes with a dangling symbolic HEAD, which nothing in this module
+repairs. What IS guaranteed, and what is not:
+
+  * THE COMMITS ARE NEVER LOST. The salvage ref holds the tip before any delete is attempted, so
+    `git rev-list --all` still reaches it and the printed `git branch <name> <sha>` works. This is the
+    property the whole design rests on and it holds for every interleaving.
+  * A DETECTED CLAIMANT IS RESTORED, at the identical sha, create-only, retried a bounded number of
+    times.
+  * AN UNDETECTED CLAIMANT — one that resolved the branch between the probe's two snapshots — IS LEFT
+    WITH A DANGLING HEAD. Measured: `git symbolic-ref HEAD` still names the deleted branch,
+    `git rev-parse --verify HEAD` fails with "Needed a single revision", `git status` says "No commits
+    yet", the index is intact, and the next commit is PARENTLESS — so its PR reads as a whole-tree
+    diff against unrelated history.
+
+That window is not closed here and deliberately so. Two separate git invocations cannot atomically
+observe "nobody holds this ref" and delete it, so every additional probe narrows the window while
+making the code assert a guarantee it still does not have. The fix that ELIMINATES the outcome rather
+than reducing its probability is on the CLAIMANT's side — a run whose HEAD symref does not resolve
+must refuse to commit — because that side can observe the condition definitively with one
+`rev-parse --verify HEAD`, with no race and no snapshot, and it covers interleavings nobody has
+enumerated. Filed as **#635** against the cutover milestone rather than built here, with acceptance in
+`docs/spec-items/a-run-whose-head-does-not-resolve-must-refuse-to-commit.md` — bidirectional, because
+a guard that refuses every commit satisfies "refuses an unresolvable HEAD" on its own.
 
 The repair is lossless, which is what makes it an answer and not a hedge: the sha is unchanged by
 construction (the CAS proved it, and the salvage ref already holds it), so the claimant's worktree
@@ -260,6 +288,21 @@ which was true for the one round in which `git branch -D` was still the primitiv
 atomicity fix there are ZERO occurrences of `'-D'`: the delete is lowercase `git update-ref -d`, and
 the source assertions ban `'branch', '-D'` and the bare `'-D'` flag outright while requiring exactly
 one `'update-ref', '-d'`. A record that describes the round before last is worse than no record.
+
+### The transferable pattern
+
+FOUR ROUNDS OF THIS REVIEW WERE SPENT NARROWING A RACE THAT CANNOT BE CLOSED FROM THIS SIDE OF IT.
+Rounds 2, 3 and 4 each found a real defect in the reap's ownership checking and each was fixed by
+adding another probe; round 5's remaining window is the same shape, and a sixth probe would narrow it
+again without closing it. The fix that eliminates the outcome — rather than reducing its probability —
+lives in the component that can observe the condition without a race: the claimant, which can ask
+`git rev-parse --verify HEAD` about its own worktree and get a definitive answer.
+
+So: WHEN A GUARD NEEDS A THIRD PROBE, THE QUESTION IS WHETHER IT IS ON THE WRONG SIDE OF THE BOUNDARY.
+A guard that must sample two things it does not own, in sequence, to decide about a third is asking a
+question its position cannot answer; the component that owns the state can usually answer the same
+question with one call and no window. Probe-tightening buys probability, and the honest way to record
+probability is as a residue rather than as a guarantee.
 
 ### Coverage
 

@@ -1185,6 +1185,54 @@ async function reapBranchRefs(
       continue
     }
 
+    // AN INDETERMINATE DELETE IS MEASURED, NEVER INFERRED (#547 round 6). Making a timeout
+    // indeterminate rather than a refusal was right, but the indeterminate path then fell
+    // through to here and recorded a DELETION on the strength of gate 14 finding no
+    // claimant — which is a different question entirely. "Nobody is standing on this ref"
+    // does not say whether the ref still exists. `deleted.ok` was false, and the report
+    // said the ref was reaped.
+    //
+    // So when the delete did not report success, ask git what the ref is now. Absent means
+    // the kill landed after the lock committed and the reap is real; present means the kill
+    // landed BEFORE it and nothing was deleted, which is a kept ref and is reported as one.
+    // A rev-parse that will not answer either leaves the outcome unknown, and an unknown
+    // outcome is not a deletion.
+    if (!deleted.ok) {
+      let after
+      try {
+        after = await opts.run_host(
+          ['git', '-C', repo, 'rev-parse', '--verify', '--quiet', ref],
+          repo,
+        )
+      } catch (error) {
+        report.refs_kept.push({
+          ref,
+          reason: `delete-indeterminate: the delete timed out and the ref could not be re-read (${errText(error)})`,
+        })
+        report.refs_stood_down += 1
+        continue
+      }
+      const stillThere = after.ok && after.stdout.trim() !== ''
+      if (stillThere) {
+        report.refs_kept.push({
+          ref,
+          reason: `delete-timed-out: the ref is STILL PRESENT at ${after.stdout.trim()}, so nothing was deleted`,
+        })
+        continue
+      }
+      if (!after.ok && after.stdout.trim() === '' && after.exit_code === 0) {
+        // `--verify --quiet` exits 1 for an absent ref, so ok:false with exit 0 is a shape
+        // git does not produce; treat an unreadable answer as unknown rather than absent.
+        report.refs_kept.push({
+          ref,
+          reason: 'delete-indeterminate: the delete timed out and the ref did not read as present or absent',
+        })
+        report.refs_stood_down += 1
+        continue
+      }
+      log.warn('worktree_reaper_ref_deleted_after_timeout', { repo, ref, sha, salvage })
+    }
+
     report.refs_deleted.push({ ref, sha, salvage })
     log.info('worktree_reaper_ref_deleted', { repo, ref, sha, salvage })
   }
