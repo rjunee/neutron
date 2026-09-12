@@ -35,6 +35,32 @@
  *   - trident's external launcher-liveness probe, which would otherwise latch
  *     `inner workflow launcher crashed`.
  *
+ * ── ONLY FOR A CHILD WE ACTUALLY KILLED ──────────────────────────────────────
+ * `shutdownAllPersistentRepls` calls `kill()`, which is IDEMPOTENT AFTER EXIT
+ * (`pty-host.ts`). So teardown "kills" a child that died of a genuine fault
+ * moments earlier just as readily as a live one, and attributing that to the
+ * deploy would be this module's own defect running backwards — a fault absorbed
+ * into "a deploy did it" is a fault nobody investigates, which is worse for the
+ * owner than the bare-crash report this change exists to replace.
+ *
+ * So liveness is SAMPLED FIRST ({@link sampleLivenessBeforeShutdownKill}) and
+ * `'gateway-shutdown'` is claimed ONLY for a child observed alive. A child already
+ * gone, or one whose liveness could not be sampled at all, is reported
+ * `cause: 'unknown'` — never `'gateway-shutdown'`, and never `'child-died'`
+ * either, because we did not observe what killed it. `deploy` and `cannot tell`
+ * do not share a branch.
+ *
+ * THE RESIDUE, STATED RATHER THAN PAPERED OVER. `hasExited()` is a sample, so a
+ * child that exits in the window between the sample and the `kill()` is still
+ * bucketed `'gateway-shutdown'`. That window is a scheduler tick or two and it is
+ * irreducible with the signals a `PtyChild` exposes: `wasKilledByUs` answers WHO
+ * signalled, not WHEN it died, and our own `kill()` settles `exited` too, so no
+ * post-kill read can separate the two. The remaining error therefore lands in the
+ * UNSAFE direction (a fault read as a deploy) rather than the safe one, for a
+ * window of microseconds — narrowed from the whole teardown, which is what the
+ * unsampled version had. It is named here because a bounded misattribution
+ * somebody can find beats an unbounded one nobody knows about.
+ *
  * ── GENERATION-SCOPED, DELIBERATELY ──────────────────────────────────────────
  * The registry row is keyed by pool session key and OUTLIVES the child, so a
  * marker left on the row would go on excusing deaths forever: the next child's
@@ -44,6 +70,22 @@
  * fields when it writes a new generation, the same way it drops the crash edge —
  * belt and braces, because this is the mutation that would make the reporting
  * lie in the one direction the spec item forbids (a fault credited to a deploy).
+ *
+ * ── AND THE ROW IS SCOPED TOO, WHICH IS A SEPARATE CLAIM ─────────────────────
+ * The marker is per-generation; the ROW it lives in is per SESSION KEY, and one
+ * teardown can reach two generations on one key — the pooled child, and a
+ * QUARANTINED child that used to hold that key before a fresh spawn took it over.
+ * Writing both would leave the row naming one generation and the marker naming the
+ * other: attribution then fails AND `child_crash_notified_at` stays set, killing
+ * the durable backstop in precisely the case it exists for (the direct sink
+ * throwing).
+ *
+ * {@link markKilledByGatewayShutdown} therefore REFUSES to mark a generation the
+ * row does not currently name. Nothing is lost by refusing: both next-boot
+ * consumers look the row up and match on its CURRENT `child_generation`
+ * (`wasKilledByGatewayShutdown`, `probeLauncherGenerationAlive`), so a marker for a
+ * superseded generation could never have been read back — writing it could only
+ * ever have destroyed a usable one. The refusal is reported, not silent.
  *
  * ── WHAT THIS IS NOT ─────────────────────────────────────────────────────────
  * It is not a drain, and it does not keep the workflow alive. Surviving the
@@ -55,6 +97,36 @@
 
 import { getRecord, patchRecord, type ReplRegistryRecord } from './repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
+
+/**
+ * What could be established about a child at the moment the shutdown reached it.
+ *
+ *   - `'alive'`           — it had not exited; the shutdown's `kill()` is the cause.
+ *   - `'already-gone'`    — it was already gone; the shutdown did NOT kill it, and
+ *                           we did not observe what did.
+ *   - `'could-not-sample'`— the liveness probe itself failed. Distinct from
+ *                           `'already-gone'`, because "it was dead" and "I could
+ *                           not look" are different facts and only one of them is
+ *                           an observation.
+ */
+export type ShutdownLivenessSample = 'alive' | 'already-gone' | 'could-not-sample'
+
+/**
+ * Sample a child's liveness before the shutdown kills it. Pure over the injected
+ * probe so both arms are directly testable.
+ *
+ * A THROW IS NOT A DEATH AND NOT A LIFE. `ReplSession.hasChildExited` treats a
+ * session with no attached child as exited, which is right for this question (we
+ * cannot have killed a child that was never there), but a probe that throws has
+ * established nothing and says so.
+ */
+export function sampleLivenessBeforeShutdownKill(hasExited: () => boolean): ShutdownLivenessSample {
+  try {
+    return hasExited() ? 'already-gone' : 'alive'
+  } catch {
+    return 'could-not-sample'
+  }
+}
 
 /**
  * Did a gateway shutdown deliberately terminate the child this row CURRENTLY
@@ -93,6 +165,20 @@ export function gatewayShutdownKillDetail(at: number): string {
 }
 
 /**
+ * The sentence for a child the shutdown reached but did not demonstrably kill. It
+ * states what was observed and refuses the two confident readings either side of
+ * it: this is not claimed as a deploy, and it is not claimed as a fault.
+ */
+export function undeterminedShutdownDetail(liveness: ShutdownLivenessSample, at: number): string {
+  const when = new Date(at).toISOString()
+  return liveness === 'could-not-sample'
+    ? `its launcher's liveness could not be read when the gateway shut down at ${when}, ` +
+        `so whether the shutdown ended it is UNDETERMINED — not established as a deploy, not established as a fault`
+    : `its launcher was ALREADY gone when the gateway shut down at ${when}, so the shutdown did not end it; ` +
+        `what did is UNDETERMINED — not established as a deploy, not established as a fault`
+}
+
+/**
  * Record the deliberate kill on the durable registry row, BEFORE the child is
  * killed — after it, the process may not get another scheduler turn.
  *
@@ -120,6 +206,15 @@ export function markKilledByGatewayShutdown(
   at: number,
 ): boolean {
   try {
+    // THE ROW MUST ALREADY NAME THIS GENERATION. One teardown can reach two
+    // generations on one session key (the pooled child, and a quarantined child that
+    // held the key before a fresh spawn took it over) and they share this row. A
+    // write for a generation the row has moved past would leave the row naming one
+    // and the marker naming the other — attribution then fails AND
+    // `child_crash_notified_at` stays set, which disables the next boot's backstop in
+    // the one case it exists for. Refusing costs nothing: both consumers match on the
+    // row's CURRENT `child_generation`, so such a marker was never readable anyway.
+    if (getRecord(registryPath, sessionKey)?.child_generation !== childGeneration) return false
     patchRecord(registryPath, sessionKey, {
       killed_by_gateway_shutdown_generation: childGeneration,
       killed_by_gateway_shutdown_at: at,
@@ -147,17 +242,35 @@ export async function reportGatewayShutdownKill(
   sessionKey: string,
   childGeneration: string,
   at: number,
+  liveness: ShutdownLivenessSample,
 ): Promise<void> {
-  if (options.replRegistryPath !== undefined) {
-    markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
+  // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
+  // ALIVE was killed by this shutdown; anything else is reported as undetermined.
+  const attributed = liveness === 'alive'
+  if (attributed && options.replRegistryPath !== undefined) {
+    // The marker is an EXCUSE for a death, so it is written only where the death is
+    // ours to own. Writing it for a child that was already gone would excuse a fault,
+    // and it also closes the crash edge — which would silence the next boot's honest
+    // report of the very fault we are refusing to claim.
+    const marked = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
+    if (!marked) {
+      // Refused (the row has moved on to another generation) or unwritable. The live
+      // sink call below still goes out; the DURABLE backstop does not, and a
+      // best-effort write that quietly did nothing is the silence this module exists
+      // to remove.
+      process.stderr.write(
+        `[repl] gateway shutdown could not record the durable marker for generation=${childGeneration.slice(0, 8)} ` +
+          `(the registry row names a different generation, or could not be written) — the live report was still sent\n`,
+      )
+    }
   }
   if (options.onChildCrash === undefined) return
   try {
     await options.onChildCrash({
       sessionKey,
       generationKey: childGeneration,
-      cause: 'gateway-shutdown',
-      detail: gatewayShutdownKillDetail(at),
+      cause: attributed ? 'gateway-shutdown' : 'unknown',
+      detail: attributed ? gatewayShutdownKillDetail(at) : undeterminedShutdownDetail(liveness, at),
     })
   } catch (err) {
     process.stderr.write(

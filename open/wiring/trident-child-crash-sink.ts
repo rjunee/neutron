@@ -22,14 +22,20 @@
  *     pool evicted an abandon-poisoned child. The stored reason stays the #240
  *     crash sentence: what was observed (crash time, gateway boot time) with no
  *     claim about cause.
+ *   - `cause: 'unknown'` — the launcher is gone and NOBODY ESTABLISHED WHY: it was
+ *     already dead when the shutdown reached it, or its liveness could not be read.
+ *     Its own sentence, because folding it into either neighbour is the same defect
+ *     as the one this file exists to fix. Folded into the deploy arm it would bury a
+ *     real fault ("a deploy did it" is a fault nobody investigates); folded into the
+ *     crash arm it would assert a fault nobody observed.
  *
  * A change that reported EVERYTHING as a deploy would satisfy the first bullet
- * and be worthless. The second is what makes the first mean anything, and it is
+ * and be worthless. The others are what make the first mean anything, and they are
  * the criterion the spec item states negatively: the 08-10 23:30 and 08-11 06:04
  * crashes have no checkout near them and must not be attributed to a deploy.
  */
 
-import { deployRestartKillReason } from '@neutronai/trident/deploy-kill-reason.ts'
+import { deployRestartKillReason, undeterminedLauncherDeathReason } from '@neutronai/trident/deploy-kill-reason.ts'
 import type { ChildCrashInfo } from '@neutronai/runtime/adapters/claude-code/index.ts'
 
 /** The one store call this sink makes — `TridentRunStore.crashRunningByLauncher`. */
@@ -78,6 +84,16 @@ export function buildTridentChildCrashSink(
           detail,
           observedAt: observed,
         }),
+      )
+      return
+    }
+    // NOBODY ESTABLISHED WHY. Not a deploy (the shutdown did not demonstrably end it)
+    // and not a crash verdict (we observed no fault) — the third branch exists so
+    // "cannot tell" never rides in either of the confident ones.
+    if (cause === 'unknown') {
+      await deps.latch(
+        generationKey,
+        undeterminedLauncherDeathReason({ generationKey, detail, observedAt: observed }),
       )
       return
     }

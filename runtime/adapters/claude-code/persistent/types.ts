@@ -155,16 +155,25 @@ export interface RecoveredReply {
  *
  *   - `'child-died'` — the child's process ended and we did not ask it to: the
  *     supervision watchdog found the pid dead, or the pool evicted an
- *     abandon-poisoned child. A fault.
+ *     abandon-poisoned child. A fault, positively attributed.
  *   - `'gateway-shutdown'` — THE GATEWAY KILLED IT, on its way down
  *     (`shutdownAllPersistentRepls` from the SIGTERM handler: a service restart
- *     or a deploy). Nothing was wrong with the child or the build.
+ *     or a deploy). Nothing was wrong with the child or the build. Claimed ONLY
+ *     for a child observed ALIVE at the moment the shutdown reached it.
+ *   - `'unknown'` — the child is gone and we CANNOT SAY whether this shutdown
+ *     killed it. The case that forces this member to exist: a child that died of
+ *     a genuine fault moments before teardown is then "killed" by teardown's
+ *     idempotent `kill()`, and attributing that to the deploy would bury a real
+ *     fault where nobody investigates it.
  *
- * The two must never collapse: a deploy reported as a crash was the whole of
- * spec item `a-deploy-must-not-kill-builds-in-flight`, and a crash reported as a
- * deploy would be the same defect pointing the other way.
+ * The three must never collapse, and the two ways of collapsing them are the SAME
+ * defect — an attribution not entitled to its confidence. A deploy reported as a
+ * crash is the whole of spec item `a-deploy-must-not-kill-builds-in-flight`; a
+ * crash reported as a deploy is that defect pointing the other way, and worse for
+ * the owner, because a fault absorbed into "a deploy did it" is a fault nobody
+ * looks at. `'unknown'` exists so "cannot tell" never rides in either branch.
  */
-export type ChildCrashCause = 'child-died' | 'gateway-shutdown'
+export type ChildCrashCause = 'child-died' | 'gateway-shutdown' | 'unknown'
 
 /** The durable child-death edge handed to `onChildCrash`. */
 export interface ChildCrashInfo {

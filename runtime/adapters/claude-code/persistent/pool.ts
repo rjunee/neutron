@@ -11,7 +11,7 @@ import { EventChannel } from './event-channel.ts'
 import { type PendingRespawnEntry, enqueuePendingRespawn } from './pending-respawns-queue.ts'
 import { REPL_DEBUG, activeModelWatchdogs, activeWatchdogs, childByKey, cwdDriftAlertState, cwdDriftRespawnState, ephemeralSessions, pendingChildKills, pool, respawnGates, sink, supervisedBySessionKey, wedgeAlertState } from './pool-state.ts'
 import { getRecord } from './repl-registry.ts'
-import { reportGatewayShutdownKill } from './gateway-shutdown-kill.ts'
+import { reportGatewayShutdownKill, sampleLivenessBeforeShutdownKill } from './gateway-shutdown-kill.ts'
 import { randomUUID } from 'node:crypto'
 import { normalizePtyText } from './pty-text.ts'
 import { CONTEXT_RESET_COMMAND, DEFAULT_IDLE_MAX_MS, DEFAULT_IDLE_QUIET_MS, DEFAULT_TURN_ABSOLUTE_CEILING_MS, DEFAULT_TURN_INACTIVITY_MS, REPL_LIVENESS_KEEPALIVE_MS, SESSION_KEY_SEP, runOutputScan } from './signatures.ts'
@@ -937,7 +937,18 @@ export async function shutdownAllPersistentRepls(): Promise<void> {
       // whole change exists to remove.
       const owner = supervisedBySessionKey.get(key)
       if (owner !== undefined) {
-        await reportGatewayShutdownKill(owner, key, session.childGeneration, shutdownAt)
+        // SAMPLED BEFORE THE KILL, because `kill()` is idempotent after exit
+        // (`pty-host.ts`): teardown "kills" a child that died of a real fault moments
+        // earlier exactly as readily as a live one, and calling that a deploy buries a
+        // fault where nobody investigates it. Only an observed-alive child is
+        // attributed to this shutdown.
+        await reportGatewayShutdownKill(
+          owner,
+          key,
+          session.childGeneration,
+          shutdownAt,
+          sampleLivenessBeforeShutdownKill(() => session.hasChildExited()),
+        )
       } else {
         process.stderr.write(
           `[repl] gateway shutdown killing generation=${session.childGeneration.slice(0, 8)} with NO registered owning substrate — nothing could be told it was a restart/deploy rather than a crash\n`,

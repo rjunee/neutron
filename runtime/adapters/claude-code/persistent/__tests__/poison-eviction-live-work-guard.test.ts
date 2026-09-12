@@ -48,6 +48,7 @@ import {
 } from '../persistent-repl-substrate.ts'
 import { quarantinedChildCount, sweepQuarantinedChildren } from '../spawn.ts'
 import { markKilledByGatewayShutdown, wasKilledByGatewayShutdown } from '../gateway-shutdown-kill.ts'
+import { childByKey } from '../pool-state.ts'
 import { loadRegistry, patchRecord } from '../repl-registry.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -497,14 +498,19 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
     // crashed — reported by the NEXT boot as "pooled child exited".
     const { host, childAlive, messagesSeen } = makeWedgeOnceHost()
     const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-shutdown-')), 'repl-registry.json')
-    const seen: Array<{ cause: string; generation: string; killedAlready: boolean }> = []
+    const seen: Array<{ cause: string; generation: string; detail: string; killedAlready: boolean }> = []
     const options = opts(host, {
       replRegistryPath: registryPath,
       onChildCrash: (info) => {
         // ORDER IS THE CLAIM, not just the call: the report has to be written while the
         // child is still alive, because after the kill this process may get no further
         // turn and the gateway closes its database moments later.
-        seen.push({ cause: info.cause, generation: info.generationKey, killedAlready: !childAlive(1) })
+        seen.push({
+          cause: info.cause,
+          generation: info.generationKey,
+          detail: info.detail,
+          killedAlready: !childAlive(1),
+        })
       },
     })
     registerSupervisedSubstrate(options)
@@ -520,6 +526,7 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
     expect(seen).toHaveLength(1)
     expect(seen[0]?.cause).toBe('gateway-shutdown')
     expect(seen[0]?.killedAlready).toBe(false)
+    expect(seen[0]?.detail).toContain('deploy')
     // And the durable marker is on the row for the next boot's watchdog, naming the
     // generation it describes.
     const record = Object.values(loadRegistry(registryPath))[0]
@@ -582,6 +589,26 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
     expect(seen.every((s) => s.detail.includes('deploy'))).toBe(true)
     expect(seen.some((s) => s.detail.includes('pooled child exited'))).toBe(false)
     expect(childAlive(1)).toBe(false)
+
+    // AND NOW THE DURABLE HALF, which the emitted callbacks say nothing about. The two
+    // generations SHARE ONE session-keyed registry row, and the quarantined write lands
+    // SECOND (`pool.ts` walks the pool before `shutdownQuarantinedChildren`). Asserting
+    // only the callbacks left this unverified while reading as though it were covered.
+    //
+    // RED-mutation: drop the `child_generation !== childGeneration` guard in
+    // `markKilledByGatewayShutdown`. The quarantined write then replaces the pooled
+    // one, so the row names the POOLED generation beside a marker naming the
+    // QUARANTINED one — `wasKilledByGatewayShutdown` goes false, the next boot
+    // attributes nothing, and `child_crash_notified_at` is left set so the watchdog
+    // will not even fire the honest bare report. The backstop breaks in both halves at
+    // once, in exactly the case it exists for.
+    const finalRow = loadRegistry(registryPath)[Object.keys(loadRegistry(registryPath))[0] as string]
+    expect(finalRow?.child_generation).toBe(pooledGeneration)
+    expect(finalRow?.killed_by_gateway_shutdown_generation).toBe(pooledGeneration)
+    expect(finalRow?.killed_by_gateway_shutdown_at).toBeGreaterThan(0)
+    expect(wasKilledByGatewayShutdown(finalRow)).toBe(true)
+    // The edge is closed for the generation the row describes, and for that one only.
+    expect(finalRow?.child_crash_notified_at).toBe(finalRow?.killed_by_gateway_shutdown_at)
   })
 
   it('THE COMPLEMENT — an eviction with NO live work still reports cause child-died', async () => {
@@ -641,5 +668,56 @@ describe('a fresh spawn does not inherit the previous generation\'s excuse (#518
     expect(after?.child_crash_notified_at).toBeUndefined()
     // And the probe therefore reports the NEW generation honestly if it dies.
     expect(wasKilledByGatewayShutdown(after)).toBe(false)
+  })
+})
+
+describe('a child that was ALREADY DEAD when teardown arrived is not a deploy kill (#518)', () => {
+  it('reports cause unknown, writes no marker, and leaves the crash edge open', async () => {
+    // THE MISATTRIBUTION THIS PR ALMOST SHIPPED. `kill()` is idempotent after exit, so
+    // teardown "kills" a child that died of a genuine fault moments earlier exactly as
+    // readily as a live one. Reporting that as a deploy is the PR's own thesis running
+    // backwards, and it is the worse direction: a bare crash for a deploy sends the
+    // owner after a bug that is not there, but a deploy for a real fault stops him
+    // looking at a bug that is.
+    //
+    // RED-mutation: in `reportGatewayShutdownKill`, make `attributed` unconditionally
+    // true. This reddens while the live-child case above stays green.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-already-dead-')), 'repl-registry.json')
+    const seen: Array<{ cause: string; detail: string }> = []
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      onChildCrash: (info) => {
+        seen.push({ cause: info.cause, detail: info.detail })
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+
+    // The child dies on its own, BEFORE teardown — the fault this must not absorb. The
+    // session stays in the pool, which is precisely how the race reaches the shutdown
+    // walk (the watchdog is stopped first, so nothing has reported it yet).
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    const deadGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+    childByKey.get(key)?.kill()
+    await waitUntil(() => !childAlive(1))
+
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]?.cause).toBe('unknown')
+    expect(seen[0]?.detail).toContain('UNDETERMINED')
+    expect(seen[0]?.detail).not.toContain('a service restart or a deploy')
+
+    const row = loadRegistry(registryPath)[key]
+    // NO EXCUSE ON DISK for a death we did not cause...
+    expect(row?.killed_by_gateway_shutdown_generation).toBeUndefined()
+    expect(wasKilledByGatewayShutdown(row)).toBe(false)
+    // ...and the edge is LEFT OPEN so the next boot's watchdog still reports the fault
+    // honestly. Closing it here would silence the very death we refused to claim.
+    // RED-mutation: stamp `child_crash_notified_at` on the unattributed path.
+    expect(row?.child_crash_notified_at).toBeUndefined()
+    expect(deadGeneration).toBeDefined()
   })
 })

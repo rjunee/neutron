@@ -36,7 +36,7 @@
  * specifiers stay valid.
  */
 
-import { isDeployRestartKillReason } from './deploy-kill-reason.ts'
+import { isDeployRestartKillReason, isUndeterminedLauncherDeathReason } from './deploy-kill-reason.ts'
 import type { InlineChoice, OutgoingMessage, Topic } from '@neutronai/channels/types.ts'
 import { deriveInfraBlock } from './infra-block.ts'
 import { isPublishedUnreviewedReason } from './fire-evidence.ts'
@@ -744,6 +744,23 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
   // ahead of every token branch because the reason embeds the observation site's
   // evidence sentence, and a plain-token fall-through would answer a deploy with hang
   // or review copy.
+  // AND THE CASE WHERE NOBODY ESTABLISHED WHY (#518). A child that died of a genuine
+  // fault moments before a teardown is "killed" by that teardown's idempotent kill();
+  // the shutdown path refuses to claim it either way. `klass` is honestly `'unknown'`
+  // — we do not know — but the SUMMARY must say which unknown, because the fallback
+  // arm at the bottom only prints an authored reason while it stays under 200
+  // characters and otherwise degrades to "The build did not complete.", which tells
+  // the owner nothing about a build whose launcher vanished. Checked before the deploy
+  // branch so the two can never be confused by a shared substring.
+  if (isUndeterminedLauncherDeathReason(reason)) {
+    return {
+      klass: 'unknown',
+      summary:
+        'The build stopped because the process running it is gone, and I could not establish why \u2014 it was not the reviewer rejecting the work, and I cannot tell you a deploy did it either.',
+      input_needed: `${saved} ${retry}`,
+    }
+  }
+
   if (isDeployRestartKillReason(reason)) {
     return {
       klass: 'deploy-restart',

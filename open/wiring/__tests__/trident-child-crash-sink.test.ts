@@ -53,7 +53,7 @@ const BOOTED = new Date('2026-08-13T04:05:40.000Z')
 function sink(): (info: {
   sessionKey: string
   generationKey: string
-  cause: 'child-died' | 'gateway-shutdown'
+  cause: 'child-died' | 'gateway-shutdown' | 'unknown'
   detail: string
 }) => Promise<void> {
   return buildTridentChildCrashSink({
@@ -228,5 +228,64 @@ describe('the tombstone cannot be overwritten back into a crash', () => {
     // it: `crashRunningByLauncher`'s UPDATE is predicated on `subagent_status='running'`.
     await s({ sessionKey: 'k', generationKey: 'gen-z', cause: 'child-died', detail: 'pooled child exited' })
     expect(store.get('deploy-4')?.failure_reason).toBe(afterDeploy)
+  })
+})
+
+describe('an UNDETERMINED death is neither a deploy nor a crash verdict', () => {
+  test('cause unknown stores a reason that claims neither', async () => {
+    // The third branch exists because a child that died of a genuine fault moments
+    // before teardown is then "killed" by teardown's idempotent `kill()`. Folding that
+    // into the deploy arm buries a real fault where nobody investigates it; folding it
+    // into the crash arm asserts a fault nobody observed. Both are the same defect as
+    // the one this file fixes — an attribution not entitled to its confidence.
+    //
+    // RED-mutation: delete the `cause === 'unknown'` arm in the sink. The reason then
+    // becomes the #240 crash sentence, asserting a fault that was never established.
+    await seedRunning('undetermined-1', 'gen-maybe')
+    await sink()({
+      sessionKey: 'k',
+      generationKey: 'gen-maybe',
+      cause: 'unknown',
+      detail: 'its launcher was ALREADY gone when the gateway shut down, so the shutdown did not end it; what did is UNDETERMINED',
+    })
+
+    const row = store.get('undetermined-1')
+    expect(row?.subagent_status).toBe('crashed')
+    const reason = row?.failure_reason ?? ''
+    // Not a deploy: the classifier must not announce this as one.
+    expect(reason).not.toContain('killed by a gateway restart or deploy')
+    // Not a crash verdict either.
+    expect(reason).not.toContain('inner workflow child crashed')
+    // What it IS: gone, cause not established, generation named.
+    expect(reason).toContain('cause NOT established')
+    expect(reason).toContain('gen-mayb')
+  })
+
+  test('and the owner is NOT told a deploy did it', async () => {
+    // RED-mutation: have `undeterminedLauncherDeathReason` include
+    // `DEPLOY_RESTART_KILL_MARKER` — `interpretFailure` would then announce an
+    // undetermined death as a deploy and the whole distinction becomes decorative.
+    await seedRunning('undetermined-2', 'gen-maybe-2')
+    await sink()({
+      sessionKey: 'k',
+      generationKey: 'gen-maybe-2',
+      cause: 'unknown',
+      detail: 'its launcher\'s liveness could not be read when the gateway shut down, so whether the shutdown ended it is UNDETERMINED',
+    })
+    const interp = interpretFailure(store.get('undetermined-2')!)
+    expect(interp.klass).not.toBe('deploy-restart')
+    // `unknown` is the honest class — we do not know — but the SUMMARY has to say WHICH
+    // unknown. The first cut relied on the fallback arm printing the authored reason
+    // verbatim, which it only does under 200 characters; this reason crossed the line
+    // and the owner got "The build did not complete." about a build whose launcher had
+    // vanished. RED-mutation: delete the `isUndeterminedLauncherDeathReason` branch in
+    // `delivery.ts` and that generic sentence comes back.
+    expect(interp.klass).toBe('unknown')
+    expect(interp.summary).not.toBe('The build did not complete.')
+    expect(interp.summary).toContain('the process running it is gone')
+    expect(interp.summary).toContain('could not establish why')
+    // It refuses BOTH confident readings, in the owner's own copy.
+    expect(interp.summary).toContain('cannot tell you a deploy did it')
+    expect(interp.input_needed).toContain('Reply to retry')
   })
 })

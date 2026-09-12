@@ -34,7 +34,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       - **Drain/defer cannot work while the REPL is in the gateway's cgroup.** A deploy ends
         in `systemctl restart`; the unit is `KillMode=control-group`, so every descendant is
         SIGKILLed at `TimeoutStopSec` regardless of what our polite layer decides
-        (`gateway/index.ts:1035-1043` says so in as many words). A `hostsLiveWork` gate on
+        (`gateway/index.ts:1026-1038` says so in as many words). A `hostsLiveWork` gate on
         `shutdownAllPersistentRepls` would therefore *report* a deferral it cannot deliver.
       - **Nothing here can make a survivor useful either.** `orphan-adoption.ts` is
         adopt-or-kill and only kills — verdicts `killed|not-ours|dead|no-pid`
@@ -61,7 +61,18 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - [x] **The two unexplained crashes (08-10 23:30, 08-11 06:04) have no checkout near them and
       are NOT closed by this fix. A change that claims them fails review.** Nothing in this
       change correlates a death with a deploy: attribution exists ONLY where the gateway
-      wrote the marker itself, generation-scoped. Every deploy case is paired with its
+      wrote the marker itself, generation-scoped, AND only for a child observed ALIVE at the
+      moment the shutdown reached it (`gateway-shutdown-kill.ts` →
+      `sampleLivenessBeforeShutdownKill`). That last clause is load-bearing and was missing
+      from the first cut: `kill()` is idempotent after exit (`pty-host.ts:46`), so teardown
+      "kills" a child that died of a real fault moments earlier just as readily as a live
+      one, and reporting THAT as a deploy is this item's own defect running backwards — the
+      worse direction, because a fault absorbed into "a deploy did it" is a fault nobody
+      investigates. A child already gone, or one whose liveness could not be read, is
+      reported `cause: 'unknown'`: not a deploy, and not a crash verdict either. Checks:
+      `__tests__/gateway-shutdown-kill.test.ts` ("only a child observed ALIVE is attributed
+      to the shutdown", both arms) and `__tests__/poison-eviction-live-work-guard.test.ts`
+      ("a child that was ALREADY DEAD when teardown arrived is not a deploy kill"). Every deploy case is paired with its
       complement, and the mutation run confirms the pair is real — making the deploy arm
       unconditional reddens
       `trident-child-crash-sink.test.ts` ("THE COMPLEMENT — a genuine crash with no deploy
@@ -84,10 +95,21 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:898`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:957`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- The marker being generation-scoped did not make it ROW-scoped, and an earlier revision of
+  this change asserted the stronger claim. One teardown reaches two generations on one
+  session key — the pooled child, and a QUARANTINED child that held the key before a fresh
+  spawn took it over — and they share one registry row (`pool.ts:945`, then `pool.ts:968`).
+  The later write replaced the earlier one, leaving the row naming one generation and the
+  marker naming the other: attribution then fails AND `child_crash_notified_at` stays set,
+  disabling the next boot's backstop in exactly the case it exists for (the direct sink
+  throwing). `markKilledByGatewayShutdown` now refuses to mark a generation the row does not
+  currently name, which costs nothing — both consumers match on the row's CURRENT
+  `child_generation`, so such a marker could never have been read back — and the refusal is
+  reported rather than silent.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
-  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:838`). Every
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:846`). Every
   deploy killed those silently.

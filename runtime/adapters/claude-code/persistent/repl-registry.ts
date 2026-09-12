@@ -85,7 +85,21 @@ export interface ReplRegistryRecord {
   /** Epoch ms the hard cap tripped — auto-recovery OFF until an operator clears
    *  it via the admin endpoint. */
   capped_at?: number
-  /** Epoch ms after the durable child-crash sink committed for this PID edge. */
+  /** Epoch ms at which THIS PID EDGE'S CRASH REPORT WAS CLOSED — i.e. the edge has
+   *  been reported and must not be reported a second time. Read by the supervision
+   *  watchdog, which skips its crash-sink call when this is set
+   *  (`supervision.ts`), and cleared by `spawn.ts` when a new child generation is
+   *  written so the next edge reports freely.
+   *
+   *  TWO WRITERS, and the distinction matters to anyone reasoning from this field:
+   *    - the watchdog, AFTER its durable child-crash sink committed for the edge;
+   *    - the gateway-shutdown kill path (`gateway-shutdown-kill.ts`), which closes
+   *      the edge alongside the marker below because it has just reported the edge
+   *      itself — and which therefore sets this with no sink wired at all.
+   *  It is deliberately NOT named for the sink: the earlier wording said "after the
+   *  durable child-crash sink committed", which the second writer falsifies, and a
+   *  field whose plain reading is false is worse than one that is merely terse
+   *  (`GLOSSARY.md` → "Names whose plain reading is false"). */
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string

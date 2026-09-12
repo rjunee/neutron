@@ -26,7 +26,7 @@ import type { PtyChild } from './pty-host.ts'
 import { RATE_LIMIT_BANNER_SEVERITIES, createRateLimitBannerDetector } from './rate-limit-banner.ts'
 import { createAuthFailureDetector } from './auth-failure-signature.ts'
 import { type ReplRegistryRecord, getRecord, patchRecord, withRegistry } from './repl-registry.ts'
-import { reportGatewayShutdownKill } from './gateway-shutdown-kill.ts'
+import { reportGatewayShutdownKill, sampleLivenessBeforeShutdownKill } from './gateway-shutdown-kill.ts'
 import { resolveRespawnStrategy } from './respawn-strategy.ts'
 import { createResumePickerDetector } from './resume-picker-detector.ts'
 import { captureSession, makeJsonlExistsProbe } from './session-capture.ts'
@@ -947,7 +947,16 @@ export async function sweepQuarantinedChildren(): Promise<number> {
 export async function shutdownQuarantinedChildren(shutdownAt: number = Date.now()): Promise<void> {
   for (const [generation, entry] of [...quarantinedChildren]) {
     quarantinedChildren.delete(generation)
-    await reportGatewayShutdownKill(entry.options, entry.sessionKey, generation, shutdownAt)
+    // Sampled BEFORE the kill, for the reason `gateway-shutdown-kill.ts` gives: a
+    // quarantined child can also have died on its own while we were keeping it alive
+    // for its hosted work, and that death is not this deploy's to claim.
+    await reportGatewayShutdownKill(
+      entry.options,
+      entry.sessionKey,
+      generation,
+      shutdownAt,
+      sampleLivenessBeforeShutdownKill(() => entry.session.hasChildExited()),
+    )
     try {
       entry.session.child.kill()
     } catch {

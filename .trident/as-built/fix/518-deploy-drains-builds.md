@@ -10,7 +10,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:898`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:957`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -24,7 +24,7 @@ Worse, the ONE class of child certain to be hosting a live build reported nothin
 A child is quarantined precisely because it still hosts running workflows (the eviction
 guard deferred its reaping), and `shutdownQuarantinedChildren` deleted its map entry
 before killing it — which makes the `child.exited` hook `quarantineChild` installs return
-early (`spawn.ts:838`). Every deploy killed those silently.
+early (`spawn.ts:846`). Every deploy killed those silently.
 
 ### The choice the spec item demanded, and why it is what it is
 
@@ -33,7 +33,7 @@ launcher's restart. The architecture rules.
 
 **Drain/defer cannot work from inside this process.** A deploy ends in
 `systemctl restart`; the unit is `KillMode=control-group`, so every descendant is SIGKILLed
-at `TimeoutStopSec` no matter what the polite layer decides — `gateway/index.ts:1035-1043`
+at `TimeoutStopSec` no matter what the polite layer decides — `gateway/index.ts:1026-1038`
 already writes that down. A `hostsLiveWork` gate on the shutdown loop would report a
 deferral it could not deliver, and would reopen the 632-orphan / 19 GB risk that call site
 exists to close on non-systemd hosts.
@@ -74,7 +74,7 @@ only moment it knows is just before. So it writes it down.
   recorded.
 - **`ChildCrashInfo` gains `cause: 'child-died' | 'gateway-shutdown'`** (`persistent/types.ts`),
   re-exported at the adapter boundary. The literal shape was declared in THREE places; the
-  third copy (`gateway/wiring/build-llm-call-substrate.ts:386`) is why the discriminant did
+  third copy (`gateway/wiring/build-llm-call-substrate.ts:391`) is why the discriminant did
   not reach its consumer on the first attempt, and it now imports the type instead.
 - **Both shutdown sites report.** `shutdownAllPersistentRepls` (`pool.ts`) resolves the
   owning options through `supervisedBySessionKey` — the same map the watchdog resolves a
@@ -101,6 +101,52 @@ only moment it knows is just before. So it writes it down.
   way to test it was to retype its composition in the test, which asserts that a copy of
   the code does what the copy does. The wiring passes this function; the test calls this
   function.
+
+### Attribution is claimed only where it was earned
+
+Two corrections found in review, both the same defect as the original one and both pointing
+the other way — an attribution not entitled to its confidence.
+
+**A child that was already dead is not a deploy kill.** `kill()` is idempotent after exit
+(`pty-host.ts:46`), so teardown "kills" a child that died of a genuine fault moments earlier
+exactly as readily as a live one. The first cut reported before sampling anything, so that
+fault was attributed to the deploy — this PR's own thesis running backwards, and the worse
+direction of it: a bare crash for a deploy sends the owner after a bug that is not there, but
+a deploy for a real fault stops him looking at a bug that is. Liveness is now sampled first
+(`sampleLivenessBeforeShutdownKill`) and `'gateway-shutdown'` is claimed only for a child
+observed alive. Anything else — already gone, or liveness unreadable — is `cause: 'unknown'`,
+a third member added precisely so `deploy` and `cannot tell` never share a branch. It writes
+no marker (an excuse on disk for a death we did not cause) and leaves `child_crash_notified_at`
+OPEN, so the next boot still reports the fault honestly.
+
+The residue is stated rather than papered over: `hasExited()` is a sample, so a child exiting
+between the sample and the `kill()` still lands in the deploy bucket. That window is a
+scheduler tick and it is irreducible with what a `PtyChild` exposes — `wasKilledByUs` answers
+*who* signalled, not *when* it died, and our own `kill()` settles `exited` too, so no post-kill
+read separates them. The remaining error is in the unsafe direction for microseconds, narrowed
+from the whole teardown; it is named in the module header because a bounded misattribution
+somebody can find beats an unbounded one nobody knows about.
+
+**The marker was generation-scoped; the row it lives in was not.** One teardown reaches two
+generations on one session key — the pooled child, and a quarantined child that held the key
+before a fresh spawn took it over — and they share one registry row (`pool.ts:945`, then
+`pool.ts:968`). The later write replaced the earlier one, so the row named one generation
+beside a marker naming the other: attribution failed AND `child_crash_notified_at` stayed set,
+disabling the next boot's backstop in exactly the case it exists for. `markKilledByGatewayShutdown`
+now refuses a generation the row does not currently name — free, because both consumers match
+on the row's CURRENT `child_generation`, so such a marker was never readable — and says so on
+stderr rather than failing quietly.
+
+The multi-generation test asserted only the emitted callbacks while reading as though it
+covered the durable half; it now asserts the final registry row.
+
+### The owner's copy cannot depend on a length accident
+
+The undetermined reason first relied on `interpretFailure`'s fallback arm, which prints an
+authored reason verbatim only while it stays under 200 characters. This one crossed the line,
+so the owner was handed "The build did not complete." about a build whose launcher had
+vanished — the silence this whole change is against. It now carries its own authored marker
+and an explicit branch. The class stays honestly `'unknown'`; only the sentence is specific.
 
 ### Two things this deliberately does NOT do
 
@@ -132,10 +178,24 @@ next boot's watchdog would have laundered the deploy attribution away.
 
 ### Measured
 
-18 mutations applied one at a time, each reverted after: **18 red, 0 survivors.** Every
+26 mutations applied one at a time, each reverted after: **26 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
+
+Two entries in that table are worth their own sentence, because the mutation run found them
+rather than confirming them:
+
+- **M15** (delete the quarantine report) initially SURVIVED. The assertion said "at least one
+  report, all of them deploys", which the *pooled* child's report satisfied on its own. It now
+  names the quarantined generation explicitly.
+- **M8** (have `markKilledByGatewayShutdown` return `true` instead of reading the row back)
+  survived once the row-scoping guard landed, because the guard now returns first for every
+  case the test could construct. The read-back is NOT redundant — it still catches a save
+  `withRegistry` skips inside the lock on a whole-file read error, which the guard cannot see
+  — but there is no injection seam to reach that path, so M8 was retargeted at the property
+  the read-back actually owns: with the write turned into a no-op, the function must report
+  false rather than claim success.
 
 `scripts/ci/typecheck-all.sh` (51 tsconfigs), `scripts/ci/lint.sh`,
 `scripts/ci/depcruise.sh`, `scripts/ci/leak-gate.sh` and the partitioned test suite all

@@ -71,6 +71,44 @@ export function deployRestartKillReason(parts: DeployKillReasonParts): string {
   )
 }
 
+/**
+ * The reason for a launcher that is gone where the cause could NOT be established —
+ * a child already dead when the shutdown reached it, or one whose liveness could not
+ * be read at all (`ChildCrashCause` `'unknown'`).
+ *
+ * It must not contain {@link DEPLOY_RESTART_KILL_MARKER}, or the classifier would
+ * announce an undetermined death as a deploy and this whole distinction would be
+ * decorative. It equally must not read as a crash verdict: the build's launcher is
+ * gone, nobody established why, and that is what it says.
+ *
+ * It carries its OWN marker rather than relying on the `unknown` fallback's verbatim
+ * printing. That fallback only prints an authored reason while it stays under 200
+ * characters, and the first cut of this reason crossed the line — so the owner was
+ * handed "The build did not complete.", which is the silence this whole change is
+ * against. An honesty property must not depend on a length coincidence a later
+ * reword can undo: `delivery.ts` matches {@link UNDETERMINED_LAUNCHER_DEATH_MARKER}
+ * and says the uncertainty out loud. THE TWO HALVES MUST MOVE TOGETHER.
+ */
+export function undeterminedLauncherDeathReason(parts: {
+  generationKey: string
+  detail: string
+  observedAt: Date
+}): string {
+  return (
+    `inner workflow ${UNDETERMINED_LAUNCHER_DEATH_MARKER}: ${parts.detail} ` +
+    `(generation ${parts.generationKey.slice(0, 8)}, at ${parts.observedAt.toISOString()})`
+  )
+}
+
+/** The authored token every undetermined-launcher-death reason carries, and the only
+ *  thing `interpretFailure` matches on for that class. Never reword one half alone. */
+export const UNDETERMINED_LAUNCHER_DEATH_MARKER = 'launcher is gone, cause NOT established'
+
+/** Was this stored reason authored by {@link undeterminedLauncherDeathReason}? */
+export function isUndeterminedLauncherDeathReason(reason: string): boolean {
+  return reason.toLowerCase().includes(UNDETERMINED_LAUNCHER_DEATH_MARKER.toLowerCase())
+}
+
 /** Was this stored reason authored by {@link deployRestartKillReason}? The
  *  classifier's single question — a lowercase-insensitive substring check, the
  *  same shape `delivery.ts` uses for its other authored markers. */
