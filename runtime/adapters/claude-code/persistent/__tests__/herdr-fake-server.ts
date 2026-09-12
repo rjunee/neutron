@@ -105,7 +105,7 @@ export class FakeHerdrServer implements HerdrRpc {
     this.malformed.delete(method)
   }
 
-  private readonly holds = new Map<string, Promise<void>>()
+  private readonly holds = new Map<string, { promise: Promise<void>; fail: (e: Error) => void }>()
 
   /**
    * Make `method` HANG until the returned function is called. Latency is as real as
@@ -116,15 +116,24 @@ export class FakeHerdrServer implements HerdrRpc {
    */
   holdMethod(method: string): () => void {
     let release: () => void = () => {}
-    this.holds.set(
-      method,
-      new Promise<void>((res) => {
-        release = () => {
-          this.holds.delete(method)
-          res()
-        }
-      }),
-    )
+    let fail: (e: Error) => void = () => {}
+    const promise = new Promise<void>((res, rej) => {
+      release = () => {
+        this.holds.delete(method)
+        res()
+      }
+      fail = (e: Error) => {
+        this.holds.delete(method)
+        rej(e)
+      }
+    })
+    // The rejection path must exist because THE REAL TRANSPORT HAS IT: `close()` on
+    // the real client runs `failAll`, so every in-flight RPC rejects. A fake whose
+    // held call quietly succeeds after the connection closed cannot reproduce the
+    // most interesting ordering there is — a request outliving the socket it was
+    // sent on — and the code that mishandles it looks correct under test.
+    promise.catch(() => {})
+    this.holds.set(method, { promise, fail })
     return release
   }
 
@@ -158,7 +167,7 @@ export class FakeHerdrServer implements HerdrRpc {
     // Held BEFORE the failure check, so a method can be made slow, slow-then-failing,
     // or simply failing.
     const hold = this.holds.get(method)
-    if (hold !== undefined) await hold
+    if (hold !== undefined) await hold.promise
     // Injected failure BEFORE any method-specific behaviour, so every method can be
     // made to fail without this fake growing a flag per method.
     const injected = this.failures.get(method)
@@ -255,6 +264,14 @@ export class FakeHerdrServer implements HerdrRpc {
 
   close(): void {
     this.closed = true
+    // FAIL EVERY IN-FLIGHT CALL, exactly as the real client's teardown does
+    // (`herdr-client.ts` `failAll`). Closing a connection does not leave the
+    // requests already on it in limbo — it ends them, and code downstream has to
+    // cope with a rejection arriving for a call it made before the close.
+    for (const { fail } of [...this.holds.values()]) {
+      fail(new Error('fake-herdr: connection closed with a call in flight'))
+    }
+    this.holds.clear()
   }
 }
 

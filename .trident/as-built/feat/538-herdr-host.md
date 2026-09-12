@@ -937,6 +937,61 @@ That set is complete in the way the per-method fix was not — a successful call
 unusable payload is its own class, and it is exactly how a same-version shape drift
 arrives.
 
+### The rule all three defects violate: once settled, a terminal state is immutable
+
+Review r12, and it names the thing the other two were instances of.
+
+**A cleanup path rewrote a correct answer after the fact.** `settleExit` closes the
+client (`herdr-host.ts`), and closing the real client runs `failAll` — so every RPC
+still in flight rejects, INCLUDING the `pane.close` we ourselves issued. The rejection
+handler then reset `terminating` unconditionally. Sequence: `kill()` → `pane_exited`
+arrives → the exit settles as ours → the client closes → our own close rejects as a
+consequence → `wasKilledByUs()` flips from **true to false**, after the child had
+already settled. With no exit codes anywhere in herdr that flag is the whole
+crash-vs-recycle discriminator, so a deliberate recycle was rewritten into an apparent
+crash — by a handler that never asked whether the question was still open.
+
+The rejection is not even evidence. Once `exited` is true the pane IS gone, so the
+handler's own message — "the pane was NOT closed" — would have been a false statement
+about a dead pane. The handler is only meaningful while the child is still alive, which
+is exactly the condition under which clearing the flag is the truth.
+
+Put beside the other two, the three stop being three bugs:
+
+| | What it did to the terminal state |
+|---|---|
+| r9 — `kill()` settling from `.finally()` | settled the WRONG outcome |
+| r11 — `asObject(result) ?? {}` | settled an UNKNOWN as an empty success |
+| r12 — the unconditional reset | UN-SETTLED a correct answer |
+
+**Once a terminal state is settled, no later path may rewrite it.** Every one of the
+three is that sentence violated from a different direction, and each cost a review round
+because I fixed the instance rather than the sentence. The r10 sweep found the third by
+class instead of by instance and was right to; this is the same move applied to
+*ordering* rather than to *values*.
+
+**The test was measuring an intermediate state.** It asserted at the point the close was
+still held and never awaited the rejection handler — so the last writer to the value
+under test ran after the last read of it. An assertion taken before the final handler
+runs is not a measurement of the outcome; it is a measurement of a moment. It now
+releases the held call, drains a macrotask turn, and asserts again.
+
+**And the fake hid it — the fourth time.** Its `close()` only set a flag, so a held call
+released after the connection closed quietly SUCCEEDED; the real client's `close()` runs
+`failAll` and rejects it. The combined mutation is the proof and is worth recording
+precisely: with the host defect restored AND the forgiving fake, **the test passes** —
+zero failures, bug present. The fake is the enabling condition, not a convenience. So
+`close()` now fails every in-flight call, because a connection closing does not leave
+the requests on it in limbo; it ends them, and the code downstream has to cope with a
+rejection arriving for a call it made before the close.
+
+That is the general form of the hazard the #537 lane hit from the other side: **a fixture
+that performs the step under test turns a missing implementation into a passing test**,
+and a fixture that *refuses to perform a step reality performs* turns a real defect into
+a passing test. Both are the fixture deciding the outcome. I checked this test's
+arrangement against it: the fake only EMITS `pane_exited` — the host's own subscription
+handler is what settles — and nothing in the arrangement writes the flag being asserted.
+
 ### Mutation table
 
 Every guard was mutated and every mutation reddened. Run against the named suites.
@@ -1033,6 +1088,11 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M83b | PAIR: a malformed read latches, so the loop never recovers | RED 2 |
 | M84 | the malformed read is silent again | RED 1 |
 | M85 | the fake ignores `malformMethod` | RED 2 |
+| M86 | restore the UNCONDITIONAL reset (the reported defect) | RED 1 |
+| M86b | PAIR: never clear the flag, even while the child is ALIVE | RED 1 |
+| M87 | reset first, then guard — ordering inverted | RED 1 |
+| M88 | the fake stops failing in-flight calls on close | SURVIVED alone — see M88b |
+| M88b | M88 **combined** with the host defect restored | GREEN with the bug present: the fake is the enabling condition |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

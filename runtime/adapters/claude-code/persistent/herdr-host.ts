@@ -362,6 +362,24 @@ export class HerdrHost implements PtyHost {
             // truth and what RE-ARMS the ladder: `hasExited()` stays false, the
             // grace race times out, and `kill('SIGKILL')` runs a second, bounded
             // attempt. Escalation is the retry.
+            // ONCE A TERMINAL STATE IS SETTLED, NO LATER PATH MAY REWRITE IT.
+            //
+            // THE DEFECT THIS REPLACES: this reset was unconditional. `settleExit`
+            // CLOSES THE CLIENT (see it above), which rejects every still-pending
+            // RPC — including the `pane.close` we ourselves issued. So the sequence
+            // `kill()` → `pane_exited` arrives → exit settles → client closes →
+            // our close rejects → this handler runs flipped `wasKilledByUs()` from
+            // true to FALSE, *after* the child had already settled. With no exit
+            // codes anywhere in herdr that flag is the entire crash-vs-recycle
+            // discriminator, so a deliberate recycle was rewritten into an apparent
+            // crash by a cleanup path that never asked whether the question was
+            // still open.
+            //
+            // And the rejection is not even evidence: once `exited` is true the pane
+            // IS gone, so "the pane was NOT closed" would be a false statement about
+            // a dead pane. The whole handler is only meaningful while the child is
+            // still alive — which is exactly when clearing the flag is the truth.
+            if (exited) return
             terminating = false
             process.stderr.write(
               `[herdr-host] pane ${paneId}: pane.close FAILED (${e instanceof Error ? e.message : String(e)}) — the pane was ` +

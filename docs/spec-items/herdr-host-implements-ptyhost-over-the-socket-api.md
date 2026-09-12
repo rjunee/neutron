@@ -250,6 +250,19 @@ not-new. That is accepted and recorded here rather than hidden.
       calls and a pane that is actually closed. Control: a successful close settles,
       latches, and closes.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
+- [ ] **A settled terminal state is IMMUTABLE.** No later path may rewrite `exitCause`,
+      `hasExited()` or `wasKilledByUs()` once the exit has settled — including the
+      rejection of an RPC that the settlement itself caused, since `settleExit` closes
+      the client and closing it fails every call still in flight. The assertion must be
+      taken AFTER the last handler runs: releasing the held call and draining a macrotask
+      turn, then re-asserting. Asserting while the call is still held measures an
+      intermediate state and passes with the defect present. Pair it with the case that
+      the flag DOES still clear while the child is unsettled, or "immutable" is satisfied
+      by never clearing it at all — which re-breaks the failed-close requirement above.
+      Note the fake must fail in-flight calls on `close()` as the real transport does; a
+      forgiving fake makes this defect invisible (verified: host defect plus forgiving
+      fake is green).
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **A `pane_exited` arriving while OUR close is in flight is ours.** With the close
       genuinely held mid-flight, an exit event must classify as intentional
       (`wasKilledByUs()` true); with no kill in flight the same event must classify as

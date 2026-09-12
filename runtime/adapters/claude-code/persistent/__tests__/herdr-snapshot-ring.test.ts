@@ -368,7 +368,25 @@ describe('herdr bridge — the transport dying is terminal, and is not a child e
     // and report a session we deliberately ended.
     expect(child.wasKilledByUs?.()).toBe(true)
     expect(child.exitCause?.()).toBe('pane-exited')
+
+    // AND IT MUST STILL BE TRUE AFTER THE IN-FLIGHT CLOSE SETTLES.
+    //
+    // This is where the assertions used to stop, and stopping here measured an
+    // INTERMEDIATE STATE. `settleExit` closes the client, which rejects the
+    // `pane.close` still in flight; that rejection handler then ran and reset the
+    // flag, flipping `wasKilledByUs()` from true to false AFTER the child had
+    // already settled. The old test never saw it because it asserted before
+    // releasing the close and never awaited the rejection handler — so the last
+    // writer to the value under test ran after the last read of it.
     releaseClose()
+    // Let every queued continuation run: the rejection handler is several microtasks
+    // downstream of the close, and a macrotask turn drains all of them. Without this
+    // the assertion below races the very handler it exists to catch.
+    await Bun.sleep(5)
+    await Promise.resolve()
+    expect(child.wasKilledByUs?.()).toBe(true)
+    expect(child.exitCause?.()).toBe('pane-exited')
+    expect(child.hasExited()).toBe(true)
   })
 
   it('CONTROL for the race — a pane_exited with NO kill in flight is a crash', async () => {
