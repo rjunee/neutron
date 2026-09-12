@@ -1066,6 +1066,34 @@ not-new. That is accepted and recorded here rather than hidden.
       across MULTIPLE deliveries so the limit is on what has gathered rather than on any
       one chunk.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
+- [ ] **A child that dies BEFORE `beginOutput()` strands nothing.** `settleExit`
+      cancelled the gate's fail-open timer and did not release the gate — and the poll
+      loop is parked on `await outputGate`, whose only two resolvers are `beginOutput()`
+      and that timer. So spawn, never wire the consumer, `kill()`, let `pane.close`
+      succeed: the loop stayed pending FOREVER, holding its closure over the host and
+      client after the child was gone. THE OBLIGATION WAS TO THE TASK; THE TIMER WAS ONLY
+      ITS INSTRUMENT — the same shape as `pane_not_found` landing in the unknown branch
+      and the SIGINT latch: a cleanup path that handles the object it can see and not the
+      one that object was standing in for. The docblock on the timer names this exact
+      scenario and the code discharged half of it.
+      THE FIX MUST NOT TRADE A STRANDED TASK FOR A SPURIOUS CALL: releasing lets the loop
+      run, so its first act has to be observing the exit and returning rather than
+      reading a pane that is already closed. Asserted (no `pane.read`, no fail-open
+      warning), not assumed.
+      IT HAS NO OTHER OUTWARD SIGN, which is why the host reports the loop's completion
+      through a test-only seam: the child settles either way, no read is issued either
+      way, and the warning is cancelled on both paths — the ONLY difference is whether
+      the task is still pending, so that is what is made observable. The control is the
+      ordinary order still gating, or "release on exit" is satisfied by releasing at
+      spawn, which removes the gate entirely.
+      HERDR-ONLY, AND THAT IS AN ANSWER RATHER THAN AN OMISSION: `BunTerminalHost` has
+      the same gate concept but NOTHING AWAITS IT — its gate holds the `onScreen` CALL,
+      not a task — and its timer is deliberately left armed across the exit, so the same
+      input delivers the dead child's last screen late and loudly instead of stranding
+      anything. Putting this in the conformance table would need an observable on a host
+      with nothing to observe, which is the vacuous-for-one-participant shape that table's
+      own rule forbids.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-snapshot-ring.test.ts`
 - [ ] **No screen is delivered before the caller's consumer can exist.** The host must
       not poll at all until `beginOutput()`, and the criterion is **a first screen that
       already carries a detector signature, with the scanner registered after `spawn`

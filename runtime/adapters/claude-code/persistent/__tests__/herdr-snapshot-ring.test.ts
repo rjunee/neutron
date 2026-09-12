@@ -538,6 +538,72 @@ describe('the stderr capture restores unconditionally', () => {
 })
 
 describe('the producer does not start before its consumer can exist', () => {
+  // KILL BEFORE `beginOutput()` — a lifecycle ORDER the suite never encoded, because
+  // every case here wires the consumer first, which is the happy order production takes.
+  //
+  // `settleExit` cancelled the gate's fail-open timer and did not release the gate. The
+  // poll loop is parked on `await outputGate`, and the gate's only two resolvers are
+  // `beginOutput()` and that timer — so a child that died before the caller ever called
+  // `beginOutput()` left the loop pending FOREVER, holding its closure over the host and
+  // client after the child was gone. The obligation was to the TASK; the timer was only
+  // its instrument.
+  //
+  // IT HAS NO OTHER OUTWARD SIGN, which is why the host reports the loop's completion:
+  // the child settles either way, no read is issued either way, and the warning is
+  // cancelled on both paths. The only difference is whether the task is still pending.
+  it('a child killed BEFORE beginOutput() does not strand the poll loop', async () => {
+    const server = new FakeHerdrServer({ paneId: 'w9:pNoGate' })
+    let pollExited = false
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+      outputGateMaxMs: 60_000, // long, so the FAIL-OPEN timer cannot be what frees it
+      onPollExit: () => {
+        pollExited = true
+      },
+    })
+    const errs = await withCapturedStderr(async () => {
+      const child = await host.spawn(['claude'], { cwd: '/tmp', env: {} })
+      // `beginOutput()` is DELIBERATELY never called — the consumer was never wired.
+      child.kill()
+      expect(await child.exited).toBeNull()
+      await until(() => pollExited, 'the poll loop returning')
+    })
+    expect(pollExited).toBe(true)
+    // AND IT DID NOT TRADE A STRANDED TASK FOR A SPURIOUS CALL. Releasing the gate lets
+    // the loop run, so its first act must be to observe the exit and return — not to
+    // read a pane that is already closed.
+    expect(server.callsTo('pane.read')).toEqual([])
+    expect(errs.filter((e) => e.includes('beginOutput() was not called'))).toEqual([])
+  })
+
+  it('CONTROL — the ordinary order still gates: no screen before beginOutput()', async () => {
+    // Or "release on exit" is satisfied by releasing on spawn, which removes the gate.
+    const server = new FakeHerdrServer({ paneId: 'w9:pOrder' })
+    server.screen = 'startup prompt'
+    const screens: string[] = []
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+      outputGateMaxMs: 60_000,
+    })
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (sc) => screens.push(sc),
+    })
+    await Bun.sleep(40)
+    expect(screens).toEqual([])
+    expect(server.callsTo('pane.read')).toEqual([])
+    child.beginOutput?.()
+    await until(() => screens.includes('startup prompt'), 'released by the caller')
+    child.kill()
+  })
+
   it('NO screen is delivered until beginOutput() releases the gate', async () => {
     // `spawn` is async, so the caller cannot wire the consumer until it resolves. A
     // host that polls before returning can deliver the FIRST screen to a consumer

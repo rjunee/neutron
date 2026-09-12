@@ -120,6 +120,9 @@ export interface HerdrHostDeps {
   /** How long to wait for herdr to report a pid. Defaults to
    *  {@link HERDR_PID_WAIT_MS}; a test shortens it so the refusal path is fast. */
   pidWaitMs?: number
+  /** Called when the poll loop RETURNS. Tests only; production never passes it. See the
+   *  `.finally` in `spawn` for why a task's completion needs its own observable. */
+  onPollExit?: () => void
 }
 
 /**
@@ -223,6 +226,10 @@ export class HerdrHost implements PtyHost {
      *  can clear it: a child that dies during startup, before `beginOutput()` is ever
      *  called, must not leave a pending timer behind. */
     let gateTimer: ReturnType<typeof setTimeout> | undefined
+    /** Release the output gate. Assigned when the gate below is constructed; declared
+     *  here so {@link settleExit} can call it — see the note there for why cancelling
+     *  the timer alone is not enough. */
+    let releaseOutput: () => void = () => {}
     /** Terminal state, exactly once — first cause wins. Always resolves `null`: no
      *  exit code exists anywhere in herdr. */
     const settleExit = (cause: PtyExitCause): void => {
@@ -237,7 +244,25 @@ export class HerdrHost implements PtyHost {
         }
       }
       exitResolve(null)
+      // CANCEL THE TIMER *AND* RELEASE THE GATE. Cancelling alone strands the poll
+      // loop: it is parked on `await outputGate`, and the gate's only two resolvers are
+      // `beginOutput()` and this timer — so a child that dies before the caller ever
+      // calls `beginOutput()` (spawn, kill, a `pane.close` that succeeds) left the loop
+      // pending FOREVER, holding its closure over the host and client after the child
+      // was gone.
+      //
+      // THE OBLIGATION WAS TO THE TASK; THE TIMER WAS ONLY ITS INSTRUMENT. The docblock
+      // above names exactly this scenario and the code discharged half of it — the same
+      // shape as `pane_not_found` landing in the unknown branch and the SIGINT latch: a
+      // cleanup path that handles the object it can see and not the one that object was
+      // standing in for.
+      //
+      // Releasing is safe rather than merely convenient: the loop's first statement
+      // after the gate is `while (!hasExited())`, and `exited` is already true here, so
+      // it returns without issuing a read. Checked rather than assumed — the fix must
+      // not trade a stranded task for a spurious call against a closed pane.
       if (gateTimer !== undefined) clearTimeout(gateTimer)
+      releaseOutput()
     }
 
     // NO SUBSCRIPTION. A `pane.exited` event needs a connection that outlives a
@@ -253,7 +278,6 @@ export class HerdrHost implements PtyHost {
     // wired the consumer, which it cannot do until this `spawn` resolves. See
     // `PtyChild.beginOutput`: the first screen is precisely where a trust prompt
     // lives, and snapshot-replace never re-delivers it.
-    let releaseOutput: () => void = () => {}
     let released = false
     const outputGate = new Promise<void>((res) => {
       releaseOutput = () => {
@@ -287,7 +311,15 @@ export class HerdrHost implements PtyHost {
         () => exited,
         settleExit,
         outputGate,
-      ),
+      ).finally(() => {
+        // OBSERVABLE COMPLETION, so "the poll operation settles" is assertable rather
+        // than believed. Production never passes this; it exists because the defect
+        // above — a task parked forever on a gate nobody will open — has no other
+        // outward sign: the child still settles, no read is issued either way, and the
+        // warning is cancelled on both paths. The only difference is whether the task
+        // is still pending, so that is what the seam reports.
+        this.deps.onPollExit?.()
+      }),
     )
 
     // ACTUATIONS ARE SERIALISED, AND THIS IS A COST OF ONE CONNECTION PER REQUEST.

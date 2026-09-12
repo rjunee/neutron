@@ -1527,6 +1527,47 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### The obligation was to the task; the timer was only its instrument
+
+`settleExit` cancelled the output gate's fail-open timer and did not release the gate.
+The poll loop is parked on `await outputGate`, and that gate has exactly two resolvers:
+`beginOutput()` and the timer just cancelled. So a child that died before the caller ever
+wired its consumer — spawn, `kill()`, a `pane.close` that succeeds — left the loop pending
+FOREVER, holding its closure over the host and the client after the child was gone.
+
+The docblock on that timer names this exact scenario: *"a child that dies during startup,
+before `beginOutput()` is ever called, must not leave a pending timer behind."* The code
+discharged half of it. **The obligation was to the TASK; the timer was only its
+instrument** — the third appearance this round of a cleanup path that handles the object
+it can see and not the one that object was standing in for, after `pane_not_found` landing
+in the unknown branch and the SIGINT latch.
+
+Releasing is the fix, and it had to be checked rather than assumed: the loop's first
+statement after the gate is `while (!hasExited())`, and `exited` is already true by then,
+so it returns without reading. M223 mutates that guard away and reddens — **the fix must
+not trade a stranded task for a spurious call against a closed pane**, and that half is
+asserted, not argued.
+
+**It has no other outward sign, which is why the host now reports the loop's completion.**
+The child settles either way; no read is issued either way; the warning is cancelled on
+both paths. The only difference between defect and fix is whether a task is still
+pending — so that is what the seam makes observable, and the test is falsifiable rather
+than believed. Production never passes the callback, and unlike the protocol-gate `if`,
+its presence changes nothing about behaviour.
+
+**Ten rounds did not see it because the conformance suite encodes the happy wiring order
+as if it were the only one**: every case calls `beginOutput()` before `kill()`. The new
+case is kill-before-`beginOutput()`.
+
+**Does `BunTerminalHost` have an equivalent?** No, and the reason is structural rather
+than lucky: it has the same gate concept, but NOTHING AWAITS IT — its gate holds the
+`onScreen` CALL, not a task — and its timer is deliberately left armed across the exit
+(last round's fix), so the same input delivers the dead child's last screen late and
+loudly rather than stranding anything. That is also why this case did NOT go into the
+conformance table: it would need an observable on a host that has nothing to observe,
+which is exactly the vacuous-for-one-participant shape that table's own rule forbids.
+**A lifecycle order can be shared while its evidence is not.**
+
 ### A gate the instrument cannot reach
 
 `HerdrHost.spawn` verified the protocol only when no `connect` dependency was injected:
@@ -2710,6 +2751,9 @@ Run against the named suites.
 | M218 | the version gate is removed entirely | RED 3 |
 | M219 | PAIR: the gate becomes a floor (`<`) instead of equality | RED 3 |
 | M220 | the gate runs AFTER `layout.apply` — a pane behind a rejected spawn | RED 1, and only the no-pane case |
+| M221 | the gate's timer is cancelled but the gate is not released (the defect) | RED 1 |
+| M222 | PAIR: the gate is released at SPAWN — there is no gate | RED 6 |
+| M223 | the poll loop does not re-check `hasExited()` before its first read | RED 1 — the "no spurious call" half |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |
