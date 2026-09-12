@@ -73,10 +73,27 @@ restore downstream the bare complaint the gate removed upstream).
 `trident/escalation-block.ts` is the ONE deriver, built as the sibling of `infra-block.ts`
 and with the same three-condition gate (`phase === 'failed'`, `harvested_at !== null` for
 the stale-result hazard, and a decoded escalation whose kind MATCHES the decoded
-`block_kind`). Three surfaces read the distinction through it and none re-implements it:
-the chat line (`🛑 … build BLOCKED, not failed`, under its own glyph — every other class
-keeps its ❌ byte-identical), the stored `failure_reason` (`escalationStopSentence`,
-replacing the generic "…without Argus APPROVE" catch-all), and the card's lane.
+`block_kind`). TWO READERS go through it and neither re-implements it: the chat line
+(`🛑 … build BLOCKED, not failed`, under its own glyph — every other class keeps its ❌
+byte-identical) and the card's lane.
+
+THE THIRD SURFACE — the stored `failure_reason` — SHARES ONE CONDITION AND NOT THE OTHER
+TWO, and the distinction is a boundary rather than a gap. `orchestrator.ts` composes that
+sentence while BUILDING the terminal row, upstream of both `phase === 'failed'` and
+`harvested_at`, which it is itself about to make true; calling the full deriver there would
+return `null` on every real escalation and the sentence would never fire. What it genuinely
+shares is condition 3, now exported as `escalationKindAgrees` and called by both, so the
+kind/payload rule has exactly ONE spelling rather than two that must be remembered
+together. A test pins that a half-written escalation is refused identically on both sides,
+with a control proving both still accept a whole one; mutating either caller off the shared
+function turns it red.
+
+An earlier draft of this record claimed three surfaces read the deriver and named
+`run-progress.ts` as one of them. It does not, and it SHOULD NOT: it reports what the RUN
+did, and the run genuinely ended in the `failed` phase, while blockedness is a fact about
+the CARD. Teaching the run payload to also say "blocked" would put a second source of truth
+for one distinction on one surface — the drift this module exists to prevent — so every
+board renderer asks the LANE first and lets the run refine it instead.
 
 Migration `0140` adds a sixth `work_board_items.status`: `blocked`. It is RUN-DRIVEN and
 NOT client-writable (the agent tool and the HTTP surface keep their four values) and it is

@@ -40,11 +40,28 @@
  * is the strictly worse error — it tells the owner to go unblock something when the
  * build is simply broken — so the ambiguous cases fall that way.
  *
- * THE ONE DERIVER, exactly as `deriveInfraBlock` is. `trident/delivery.ts` (the chat
- * result), `trident/run-progress.ts` (the board payload) and `trident/board-reconcile.ts`
- * (the card's lane) all read the distinction through this function. None re-implements
- * the gate: three copies would drift, and the three surfaces would then disagree about
- * whether the owner is looking at something blocked or something broken.
+ * THE ONE DERIVER FOR READERS, exactly as `deriveInfraBlock` is. `trident/delivery.ts`
+ * (the chat result) and `trident/board-reconcile.ts` (the card's lane) read the
+ * distinction through this function and neither re-implements the gate: two copies would
+ * drift, and the two surfaces would then disagree about whether the owner is looking at
+ * something blocked or something broken.
+ *
+ * THE WRITER CANNOT USE IT, AND THAT IS NOT A GAP. `orchestrator.ts` composes the
+ * `failure_reason` (`innerTerminalFailureReason` → `escalationStopSentence`) at the moment
+ * it BUILDS the terminal row — upstream of both conditions 1 and 2, which it is itself
+ * about to make true. `phase` is not yet `failed` and `harvested_at` is stamped by
+ * `applyResult`, so calling this function there would return `null` on every real
+ * escalation and the sentence would never fire. What the writer genuinely shares with the
+ * reader is condition 3 alone, and it is exported as `escalationKindAgrees` so there is
+ * still exactly ONE spelling of the rule rather than two that must be remembered together.
+ *
+ * `trident/run-progress.ts` IS NOT A CONSUMER, DELIBERATELY. It reports what the RUN did,
+ * and the run genuinely ended in the `failed` phase; blockedness is a fact about the CARD,
+ * written to its lane by `board-reconcile` through this deriver. Teaching the run payload
+ * to also say "blocked" would put a second source of truth for the same distinction on the
+ * same surface — the drift this module exists to prevent — so every board renderer instead
+ * asks the LANE first and lets the run refine it (`stepTag`, `dotState`, `runNotice` and
+ * `summarize`, in both clients).
  *
  * IT DERIVES A FACT, NEVER AN ACTION. Nothing here returns a card to move, a position
  * to move it to, or any other board mutation — the RUN reports and the ORCHESTRATOR
@@ -52,7 +69,7 @@
  * work with no judgement in between.
  */
 
-import type { EscalationKind, InnerEscalation } from './inner-loop.ts'
+import type { EscalationKind, InnerEscalation, InnerResult } from './inner-loop.ts'
 import { parseInnerResult } from './inner-loop.ts'
 import type { TridentRun } from './store.ts'
 
@@ -85,11 +102,7 @@ export function deriveEscalationBlock(
   if (result === null) return null
   const escalation: InnerEscalation | null = result.escalation
   if (escalation === null) return null
-  // THE KIND AND THE PAYLOAD MUST AGREE. `block_kind` is what the outer loop routes on;
-  // the payload is what it reports. A result whose routing kind and payload kind differ
-  // was not written by one decision, and guessing which half is right is exactly the
-  // kind of repair that turns a bug into a silently wrong owner-facing sentence.
-  if (result.block_kind !== escalation.kind) return null
+  if (!escalationKindAgrees(result)) return null
   return {
     kind: escalation.kind,
     whatIsMissing: escalation.whatIsMissing,
@@ -97,6 +110,27 @@ export function deriveEscalationBlock(
     evidence: escalation.evidence,
     round: escalation.round,
   }
+}
+
+/**
+ * CONDITION 3 ON ITS OWN — THE KIND AND THE PAYLOAD MUST AGREE.
+ *
+ * `block_kind` is what the outer loop routes on; the payload is what it reports. A result
+ * carrying one without the other is a HALF-WRITTEN escalation, not an escalation, and
+ * guessing which half is right is exactly the repair that turns a bug into a silently
+ * wrong owner-facing sentence.
+ *
+ * Exported because the READER (`deriveEscalationBlock`, above) and the WRITER
+ * (`orchestrator.innerTerminalFailureReason`, which composes the stored `failure_reason`
+ * before the row is harvested and so cannot use the full gate) must apply the SAME rule.
+ * They differ only in the two conditions that are about a STORED row; they must not differ
+ * in this one, because a sentence quoting a claim whose routing kind says something else
+ * is wrong on either side of the boundary.
+ */
+export function escalationKindAgrees(
+  result: Pick<InnerResult, 'block_kind' | 'escalation'>,
+): boolean {
+  return result.escalation !== null && result.block_kind === result.escalation.kind
 }
 
 /**

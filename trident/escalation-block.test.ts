@@ -22,7 +22,11 @@ import { ProjectDb } from '@neutronai/persistence/index.ts'
 import { WorkBoardStore } from '@neutronai/work-board/store.ts'
 import { buildBoardReconcileObserver } from './board-reconcile.ts'
 import { composeTerminalDelivery, interpretFailure } from './delivery.ts'
-import { deriveEscalationBlock, escalationStopSentence } from './escalation-block.ts'
+import {
+  deriveEscalationBlock,
+  escalationKindAgrees,
+  escalationStopSentence,
+} from './escalation-block.ts'
 import { parseInnerEscalation, parseInnerResult } from './inner-loop.ts'
 import { innerTerminalFailureReason, recordedTerminalVerdict } from './orchestrator.ts'
 import { makeTridentRun } from './testing/make-trident-run.ts'
@@ -222,6 +226,36 @@ describe('the OWNER sees two different words', () => {
     expect(reason).toContain('BLOCKED')
     // The sentence this replaced named the one thing that is NOT the story here.
     expect(reason).not.toContain('without Argus APPROVE')
+  })
+
+  test('HEADLINE: the READER and the WRITER apply ONE agreement rule, not two copies', () => {
+    // The architecture claim, asserted rather than described. `deriveEscalationBlock`
+    // (which a READER calls on a stored, harvested row) and `innerTerminalFailureReason`
+    // (which the WRITER calls while COMPOSING that row, upstream of both `phase='failed'`
+    // and `harvested_at`) cannot share the whole gate — the full one returns null on every
+    // real escalation at composition time. They CAN and must share condition 3, and this
+    // pins that they do: a half-written escalation is refused identically on both sides.
+    const half = escalatedRun({
+      // The routing kind and the payload kind disagree — one decision did not write this.
+      inner_result: escalatingResult({ blockKind: 'design-gap' }),
+    })
+    const halfResult = parseInnerResult(half.inner_result)!
+    expect(escalationKindAgrees(halfResult)).toBe(false)
+    // the READER refuses it…
+    expect(deriveEscalationBlock(half)).toBeNull()
+    // …and the WRITER falls back to the generic sentence rather than quoting a claim
+    // whose routing kind says something else.
+    const halfReason = innerTerminalFailureReason(half, halfResult)
+    expect(halfReason).not.toContain('BLOCKED')
+    expect(halfReason).toContain('without Argus APPROVE')
+
+    // CONTROL: when they DO agree, both sides accept — so the assertions above are the
+    // shared rule refusing, not either side having stopped working.
+    const whole = escalatedRun({})
+    const wholeResult = parseInnerResult(whole.inner_result)!
+    expect(escalationKindAgrees(wholeResult)).toBe(true)
+    expect(deriveEscalationBlock(whole)).not.toBeNull()
+    expect(innerTerminalFailureReason(whole, wholeResult)).toContain('BLOCKED')
   })
 
   test('an escalation is a REVIEWED verdict — never REVIEW_NOT_RUN', () => {

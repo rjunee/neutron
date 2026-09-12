@@ -108,7 +108,7 @@ import {
   type MergeConflictResolver,
   type RunHostCommand,
 } from './merge.ts'
-import { escalationStopSentence } from './escalation-block.ts'
+import { escalationKindAgrees, escalationStopSentence } from './escalation-block.ts'
 import { infraDeathSentence } from './infra-block.ts'
 import { runLeakGatePreflight, type LeakPreflightFixer } from './leak-preflight.ts'
 import { ARGUS_DIFF_LINE_LIMIT } from './prompts.ts'
@@ -2189,10 +2189,17 @@ export function innerTerminalFailureReason(
   // owner is told the build "ended without Argus APPROVE" about a run that stopped
   // DELIBERATELY and said exactly why.
   //
-  // GATED ON THE KIND AND THE PAYLOAD AGREEING, the same pairing `deriveEscalationBlock`
-  // requires, so a result carrying half an escalation keeps the generic sentence instead of
-  // quoting a claim whose routing kind says something else.
-  if (result.escalation !== null && result.block_kind === result.escalation.kind) {
+  // GATED THROUGH `escalationKindAgrees` — the SAME function `deriveEscalationBlock` uses,
+  // not a second copy of its rule. A result carrying half an escalation keeps the generic
+  // sentence instead of quoting a claim whose routing kind says something else.
+  //
+  // ONLY that condition is shared, and the reason is a boundary rather than an oversight:
+  // the deriver also requires `phase === 'failed'` and `harvested_at !== null`, both of
+  // which are facts about a STORED, harvested row. This function runs at the moment the
+  // terminal row is COMPOSED — it is what makes those two true — so the full gate would
+  // return `null` on every real escalation here and the sentence would never fire. The one
+  // rule both sides must agree on is exported; the two that only a reader can ask are not.
+  if (escalationKindAgrees(result) && result.escalation !== null) {
     return escalationStopSentence(result.escalation, ceiling)
   }
   if (result.terminal_cause !== null && (result.block_kind === 'infra-only' || result.block_kind === null)) {
