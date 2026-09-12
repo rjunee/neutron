@@ -34,6 +34,35 @@ import {
   type WaitFactory,
 } from '../gateway-shutdown-kill.ts'
 import { detectReplWedged } from '../dead-repl-detector.ts'
+import { probeLauncherGenerationAlive } from '../supervision.ts'
+
+/**
+ * A REAL process behind the pid, because the record is only as good as what a later reader
+ * can do with it. An invented pid has no `/proc` entry, so nothing is sampled, so the
+ * next-boot probe takes the unverifiable path — and a case built that way asserts the
+ * recovery while exercising the fallback. Spawn it, stamp it, kill it: the shutdown's own
+ * order.
+ */
+function realChild(): { pid: number; die: () => Promise<void>; kill: () => void } {
+  const proc = Bun.spawn(['sleep', '30'], { stdin: 'ignore', stdout: 'ignore', stderr: 'ignore' })
+  const kill = (): void => {
+    try {
+      proc.kill('SIGKILL')
+    } catch {
+      /* already gone */
+    }
+  }
+  return {
+    pid: proc.pid,
+    // Reaped, or the pid outlives its process as a zombie and every identity check sees it
+    // alive. Production does not have that: the next gateway is not the dead child's parent.
+    die: async () => {
+      kill()
+      await proc.exited
+    },
+    kill,
+  }
+}
 
 /** A bound that is already up — and that still HAS a `cancel`, because a fake without
  *  one cannot show the code takes its bound back. */
@@ -938,13 +967,15 @@ describe('what the owner gets when BOTH channels fail', () => {
       },
     } as PersistentReplSubstrateOptions
 
-    const report = recordGatewayShutdownKill(options, KEY, 'gen-live', 1_000, 'alive', 4242)
+    const child = realChild()
+    const report = recordGatewayShutdownKill(options, KEY, 'gen-live', 1_000, 'alive', child.pid)
     expect(report.durablyRecorded).toBe('alive-when-reached')
 
     // The registry row is lost before the kill can be confirmed — the one way the
     // authoritative write still fails now that it no longer depends on the journal entry.
     removeRecord(path, KEY)
     confirmShutdownKill(report, { killed: true })
+    await child.die()
 
     // The report knows the truth; the DISK does not, and it says so rather than promising.
     expect(report.observed).toBe('alive-and-killed')
@@ -962,11 +993,52 @@ describe('what the owner gets when BOTH channels fail', () => {
     // bare crash. This is the guarantee the spec item now states, rather than the one it
     // used to claim.
     expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')).toBeUndefined()
+    // THE ACTUAL NEXT-BOOT PROBE, not a fixture carrying the answer: with the row gone
+    // there is nothing to confirm the death against, so the pull half declines to
+    // conclude — and the push-side detector, given the absence it would really see,
+    // reports the bare crash the spec item's degraded guarantee admits to.
+    expect(probeLauncherGenerationAlive('gen-live', path)).toBe('unknown')
     expect(detectReplWedged({ hasChild: true, childAlive: false, healthOk: false, ccReady: true })).toMatchObject({
       wedged: true,
       reason: 'pid-dead',
       detail: 'pooled child exited',
     })
+  })
+
+  it('a journal entry from a build with no identity field is FILLED IN, not left unusable', async () => {
+    // The rolling-restart shape: the provisional entry was written by an older build, so it
+    // carries a pid and no identity. The confirming write has the identity — it sampled it
+    // — and must supply what the older entry could not, or the surviving record is again a
+    // record nothing can read.
+    //
+    // RED-mutation: drop the fill (`{ ...e, observed }` only). The entry keeps its pid, the
+    // probe cannot verify it, and the deploy goes unnamed.
+    const path = registryPath()
+    seed(path)
+    const child = realChild()
+    try {
+      patchRecord(path, KEY, { pid: child.pid })
+      const report = recordGatewayShutdownKill(
+        { substrate_instance_id: 'x', cwd: '/repo', replRegistryPath: path } as PersistentReplSubstrateOptions,
+        KEY,
+        'gen-live',
+        1_000,
+        'alive',
+        child.pid,
+      )
+      // Rewrite the journal entry the way the older build would have left it: pid, no identity.
+      const entry = gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')
+      patchRecord(path, KEY, {
+        killed_by_gateway_shutdown: [{ generation: 'gen-live', at: entry?.at as number, observed: 'alive-when-reached', pid: child.pid }],
+      })
+      confirmShutdownKill(report, { killed: true })
+      await child.die()
+
+      expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')?.identity).toBeDefined()
+      expect(probeLauncherGenerationAlive('gen-live', path)).toBe('killed-by-gateway-shutdown')
+    } finally {
+      child.kill()
+    }
   })
 
   it('durable record KEPT + live report lost → the next boot names the deploy', async () => {
@@ -987,27 +1059,39 @@ describe('what the owner gets when BOTH channels fail', () => {
       },
     } as PersistentReplSubstrateOptions
 
-    const report = recordGatewayShutdownKill(options, KEY, 'gen-live', 1_000, 'alive', 4242)
-    // The journal entry is lost, but the row survives — the authoritative write stands on
-    // its own now, so the confirmed outcome still lands.
-    patchRecord(path, KEY, { killed_by_gateway_shutdown: [] })
-    confirmShutdownKill(report, { killed: true })
+    const child = realChild()
+    try {
+      patchRecord(path, KEY, { pid: child.pid })
+      const report = recordGatewayShutdownKill(options, KEY, 'gen-live', 1_000, 'alive', child.pid)
+      // The journal entry is lost, but the row survives — the authoritative write stands on
+      // its own now, so the confirmed outcome still lands.
+      patchRecord(path, KEY, { killed_by_gateway_shutdown: [] })
+      confirmShutdownKill(report, { killed: true })
+      // And the child really dies, as it does in a shutdown.
+      await child.die()
 
-    expect(report.durablyRecorded).toBe('alive-and-killed')
-    await captureStderr(() =>
-      deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, wait: instantWait }),
-    )
-    // The next boot reads the record and names the deploy, with no live report at all.
-    expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
-    expect(
-      detectReplWedged({
-        hasChild: true,
-        childAlive: false,
-        healthOk: false,
-        ccReady: true,
-        shutdownObserved: 'alive-and-killed',
-      }),
-    ).toMatchObject({ wedged: true, reason: 'pid-dead-gateway-shutdown' })
+      expect(report.durablyRecorded).toBe('alive-and-killed')
+      await captureStderr(() =>
+        deliverShutdownKillReports([report], { perSinkMs: 1, phaseBudgetMs: 10, wait: instantWait }),
+      )
+      expect(wasKilledByGatewayShutdown(getRecord(path, KEY))).toBe(true)
+
+      // THE NEXT BOOT'S OWN PROBE DERIVES THE ATTRIBUTION — the previous version of this
+      // case handed `shutdownObserved: 'alive-and-killed'` straight to `detectReplWedged`,
+      // so the fixture supplied the value whose derivation is the thing under test. It
+      // passed while the reconstructed entry carried a pid and NO identity, which is
+      // exactly the state in which this probe cannot attribute anything.
+      //
+      // RED-mutation: drop `identity` from the confirmed entry in
+      // `promoteGatewayShutdownObservation`. The record still survives, every write still
+      // reports success, and this answers `dead-cause-undetermined` — the guarantee in the
+      // spec item failing with nothing on any channel saying so.
+      expect(probeLauncherGenerationAlive('gen-live', path)).toBe('killed-by-gateway-shutdown')
+      // The identity is on the record, not merely implied by the answer above.
+      expect(gatewayShutdownKillEntryFor(getRecord(path, KEY), 'gen-live')?.identity).toBeDefined()
+    } finally {
+      child.kill()
+    }
   })
 
   it('an UNBACKED report is attempted before a backed one — the only channel it has left', async () => {

@@ -429,6 +429,9 @@ export function confirmShutdownKill(
     'alive-and-killed',
     report.at,
     report.pid,
+    // AND THE IDENTITY, for the same reason the pid travels: the confirmed entry is what a
+    // later reader confirms this death against, and a pid with no identity is a number.
+    report.identity,
     // The same reference probe the record path uses, so both writes ask the same question.
     report.options.hostsLiveWork === undefined
       ? undefined
@@ -461,6 +464,7 @@ function promoteGatewayShutdownObservation(
   observed: GatewayShutdownObservation,
   at: number,
   pid?: number,
+  identity?: ProcessIdentity,
   stillReferenced?: (generation: string) => boolean,
 ): boolean {
   try {
@@ -478,6 +482,13 @@ function promoteGatewayShutdownObservation(
       at,
       observed,
       ...(typeof pid === 'number' && pid > 0 ? { pid } : {}),
+      // THE IDENTITY IS PART OF THE AUTHORITATIVE WRITE, not a detail the provisional
+      // entry was carrying for it. Without it this record survives the loss of the
+      // journal and is then unusable: the next boot cannot tie the absent pid to our
+      // child, so it reports the death with the cause undetermined — which is the
+      // guarantee in the spec item ("attribution survives while the durable channel
+      // survives") failing while every write claimed success.
+      ...(identity !== undefined ? { identity } : {}),
     }
     const seen = prior.some((e) => e?.generation === childGeneration)
     // ONE RETENTION RULE, applied wherever entries are written. The append branch used to
@@ -485,7 +496,15 @@ function promoteGatewayShutdownObservation(
     // had just released — two writes obeying two rules, which is also what let a mutation
     // that collapsed retention survive: the second write put back what the first dropped.
     const entries = seen
-      ? prior.map((e) => (e?.generation === childGeneration ? { ...e, observed } : e))
+      ? prior.map((e) =>
+          e?.generation === childGeneration
+            ? // The journal entry's own identity wins where it has one — it was sampled by
+              // the same shutdown for the same generation. Ours FILLS IT IN where the
+              // entry predates the field, and never overwrites: an entry's identity
+              // belongs to the process that entry is about.
+              { ...e, observed, ...(e.identity === undefined && identity !== undefined ? { identity } : {}) }
+            : e,
+        )
       : pruneGatewayShutdownKills([...prior, confirmed], at, stillReferenced)
     patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
     // READ BACK, because `patchRecord` is a silent no-op for an absent row and
@@ -736,6 +755,18 @@ export interface PendingShutdownKillReport {
   /** The dead child's OS pid, recorded so the death can be confirmed later. */
   pid?: number
   /**
+   * WHICH PROCESS THAT PID WAS, sampled pre-kill — and carried on the report because the
+   * CONFIRMED write needs it too, not only the provisional one.
+   *
+   * The authoritative write reconstructs its entry from this report rather than from the
+   * journal entry, which may be gone. Reconstructing it with the pid alone produced a
+   * record that survived and was USELESS: the next boot's probe found no identity, could
+   * not tie the absent pid to our child, and reported `dead-cause-undetermined` for a
+   * death the shutdown had confirmed. A record that survives without the thing that makes
+   * it readable is not a surviving record.
+   */
+  identity?: ProcessIdentity
+  /**
    * What the shutdown has established SO FAR. Starts at the pre-kill observation and is
    * promoted to `'alive-and-killed'` by {@link confirmShutdownKill} once `kill()` has
    * returned — never before.
@@ -866,6 +897,10 @@ export function recordGatewayShutdownKill(
     liveness,
     durablyRecorded,
     ...(typeof pid === 'number' && pid > 0 ? { pid } : {}),
+    // CARRIED FORWARD, so `confirmShutdownKill` can write it again. The sample happens
+    // once, pre-kill, because afterwards the pid may be free and a free pid cannot say
+    // which process used to hold it.
+    ...(identity !== undefined ? { identity } : {}),
   }
 }
 

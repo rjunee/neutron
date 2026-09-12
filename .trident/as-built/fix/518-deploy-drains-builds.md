@@ -433,6 +433,30 @@ why nothing inside this process can change that while the REPL lives in the gate
 cgroup. So the PR carries no `Closes`, the issue stays open against the drain/survive half
 (#538/#539), and criteria 1 and 2 stay unticked.
 
+### A record that survives without the thing that makes it readable
+
+The authoritative write was made independent of the journal entry — the right fix — and
+reconstructed its entry from the report with the pid alone. So in exactly the case that fix
+exists for, a lost journal entry, the surviving record carried a number and nothing that
+says which process the number was. The next boot's probe classified it `unverifiable`, found
+the pid absent, and reported `dead-cause-undetermined` for a death the shutdown had
+CONFIRMED — while the promotion returned true, the report said `alive-and-killed`, and the
+spec item promised that attribution survives whenever the durable channel does.
+
+The identity now travels on `PendingShutdownKillReport` (sampled once, pre-kill, because
+afterwards the pid may be free) and into the confirmed upsert. Where the journal entry
+exists but predates the field — a rolling restart from an older build — the confirming write
+FILLS IT IN and never overwrites: an entry's identity belongs to the process that entry is
+about.
+
+WHY THE SEQUENCE TEST COULD NOT SEE IT, which is the part worth keeping: after deleting the
+provisional entry it handed `shutdownObserved: 'alive-and-killed'` to `detectReplWedged`
+directly. The fixture supplied the value whose DERIVATION was the thing under test, so a
+case named for a sequence tested one step of it and passed on a record no reader could use.
+Both cases now drive the real next-boot probe (`probeLauncherGenerationAlive`) against a
+real, killed process — an invented pid has no `/proc` entry, so nothing is sampled and the
+case would have asserted the recovery while exercising the unverifiable fallback.
+
 ### An honest value, delivered down a channel that lies
 
 The report for a child whose kill did not land carried `cause: 'unknown'` — accurate, and
@@ -606,7 +630,8 @@ So: **both halves.** Strengthen what is actually mine, and untick.
 an entry that must still be there. It previously bailed when the pre-kill entry was missing
 or the array malformed, which made the CONFIRMED outcome depend on the PROVISIONAL one
 surviving — two ways to lose a record where the act justifies one. The journal is a
-journal; the post-exit write is authoritative and stands alone.
+journal; the post-exit write is authoritative and stands alone — and it carries the
+PROCESS IDENTITY as well as the pid, which round 18 had to add: see below.
 
 **And the live channel stops being interchangeable when it is the only one.** A report
 whose durable record does not match it is delivered FIRST. That costs nothing — no extra
@@ -907,7 +932,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-93 mutations applied one at a time, each reverted after: **93 red, 0 survivors.** Every
+95 mutations applied one at a time, each reverted after: **95 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

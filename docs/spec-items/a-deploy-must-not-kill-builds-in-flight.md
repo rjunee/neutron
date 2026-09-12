@@ -73,7 +73,13 @@ disappears.
       - A deploy-caused death is **never** reported as a bare crash **when either channel
         survives** — and they fail independently. The durable record is written before the
         kill and no longer depends on the journal entry surviving, so the confirmed outcome
-        lands even if the pre-kill entry is gone; the live report is attempted for every
+        lands even if the pre-kill entry is gone — CARRYING THE PROCESS IDENTITY, not only
+        the pid. The reconstructed entry used to carry the pid alone, which made this
+        sentence false in the exact case it is about: the record survived and the next
+        boot's probe could not tie the absent pid to our child, so it reported the death
+        with the cause undetermined. A record that survives without the thing that makes it
+        readable is not a surviving record, and the case now drives the real probe rather
+        than handing the derived observation to the detector; the live report is attempted for every
         child; and a report whose durable record does NOT match it is attempted FIRST,
         because that live attempt is then its only channel.
       - Where the attribution cannot be established, the death is reported as **cause not
@@ -159,6 +165,15 @@ disappears.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:993`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- THE RECOVERY PATH DROPPED THE ONE FIELD THAT MAKES RECOVERY POSSIBLE. `confirmShutdownKill`
+  reconstructs a lost journal entry from the report and passed only the pid, so the
+  surviving record could not be verified on the next boot and a confirmed deploy kill was
+  reported as cause-undetermined — the guarantee above failing while every write reported
+  success. The identity now travels on the report and into the authoritative upsert, and
+  fills in an older entry that has none. The case that missed it handed
+  `shutdownObserved: 'alive-and-killed'` straight to `detectReplWedged`: the fixture
+  supplying the value whose derivation was the thing under test, which is how a test named
+  for a sequence tested a step.
 - AN HONEST VALUE WAS DELIVERED DOWN A CHANNEL THAT LIES, and it inverted this item's own
   subject. A child whose kill did not land was reported with `cause: 'unknown'` — accurate
   — to `onChildCrash`, whose production sink latches `crashRunningByLauncher` and marks
