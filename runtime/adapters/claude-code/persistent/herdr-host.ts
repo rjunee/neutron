@@ -1,9 +1,10 @@
 /**
  * herdr-host.ts — the `PtyHost` backend: herdr is the REPL container.
  *
- * § herdr step 2b. Replaces the in-process Bun-native backend
- * (`Bun.spawn({ terminal })`, `bun-terminal-host.ts`), which is
- * deleted rather than flagged off. The lifted lifecycle/supervision logic still
+ * § herdr step 2b. The WIRED backend, replacing the in-process Bun-native one
+ * (`Bun.spawn({ terminal })`, `bun-terminal-host.ts`) as the default — that host is
+ * kept as an injectable option rather than deleted, and `pty-host.ts` records where
+ * the two diverge. The lifted lifecycle/supervision logic still
  * talks only to `PtyHost`; the two places that interface had to change to admit an
  * out-of-process terminal (async `spawn`, and `onData` becoming `onScreen`) are
  * documented in `pty-host.ts` with the reasoning.

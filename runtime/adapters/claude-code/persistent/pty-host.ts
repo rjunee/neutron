@@ -7,10 +7,29 @@
  * Sprint-2 watchdogs) talks ONLY to `PtyHost` — never to a specific multiplexer
  * or PTY library. That keeps the substrate portable.
  *
- * § herdr step 2b — THE BACKEND IS NOW OUT-OF-PROCESS. The single backend is
- * `herdr-host.ts`: herdr is the REPL container, reached over its unix-socket API.
- * The previous in-process Bun-native backend (`Bun.spawn({ terminal })`) is gone,
- * not flagged off. Two parts of this interface changed as a direct consequence,
+ * § herdr step 2b — THE WIRED BACKEND IS NOW OUT-OF-PROCESS. `spawn.ts` resolves
+ * `options.ptyHost ?? herdrHost`: herdr is the REPL container, reached over its
+ * unix-socket API, and it is the ONLY wired default. The in-process Bun-native
+ * backend (`bun-terminal-host.ts`, `Bun.spawn({ terminal })`) is KEPT as an option
+ * reachable by injecting it at that seam — kept compiling, contract-complete and
+ * tested, but deliberately not exposed through a user-facing chooser.
+ *
+ * THE TWO BACKENDS ARE NOT INTERCHANGEABLE. Read this before assuming a caller that
+ * works on one works on the other; `bun-terminal-host.ts` states the same list from
+ * its own side, and the spec item names the one defect the divergence creates:
+ *
+ *  • EXIT CODES exist under Bun and NOWHERE in herdr. Everything below that says
+ *    `exited` is always `null` is true OF HERDR — the Bun host resolves a real
+ *    kernel status. Crash-versus-recycle collapses onto `wasKilledByUs` only on the
+ *    herdr path.
+ *  • EXIT DETECTION is a push under Bun (`proc.exited` settles) and a POLL under
+ *    herdr (`pane.read` answering a typed `pane_not_found`), so herdr learns of an
+ *    exit on the tick after it happens rather than at the instant it does.
+ *  • `onScreen` is a RENDERED pane under herdr and an ACCUMULATION of the byte
+ *    stream under Bun. Both satisfy snapshot-replace, but only herdr's collapses an
+ *    Ink repaint: under Bun a repaint really is new bytes.
+ *
+ * Two parts of this interface changed as a direct consequence of the herdr backend,
  * and both changed rather than being quietly reinterpreted:
  *
  *  • `spawn` is ASYNC. Creating the terminal is now a socket round trip, so the
@@ -36,9 +55,13 @@
 import type { Key } from './keystrokes.ts'
 
 /**
- * WHY a child became terminal. herdr reports no exit status (see
- * {@link PtyChild.exited}), so this is the only thing that distinguishes the routes
- * — and one of them is not a child event at all.
+ * WHY a child became terminal, IN HERDR'S TERMS. herdr reports no exit status (see
+ * {@link PtyChild.exited}), so this is the only thing that distinguishes its routes.
+ *
+ * THE BUN BACKEND DOES NOT PROVIDE IT, deliberately: both values name herdr
+ * mechanisms, and "the pane does not exist" cannot happen to an in-process pty, which
+ * reports a real exit code instead. `exitCause` is optional and `undefined` there
+ * means "not known" — the truth — rather than a default.
  *
  *  - `closed-by-us`   — we closed the pane (evict / respawn / cancel / shutdown).
  *  - `pane-vanished`  — herdr positively reports the pane does not exist, which is
@@ -127,7 +150,9 @@ export interface PtyChild {
   /**
    * Resolves when the child exits.
    *
-   * ALWAYS `null` UNDER HERDR, BECAUSE NO EXIT CODES EXIST THERE. herdr's
+   * ALWAYS `null` UNDER HERDR, BECAUSE NO EXIT CODES EXIST THERE — and a REAL kernel
+   * status under `bun-terminal-host.ts`, which is the sharpest difference between the
+   * two backends. herdr's
    * `pane.exited` carries exactly `{pane_id, workspace_id}` — there is no exit
    * status anywhere in its API. `null` is this interface's existing "terminated,
    * no code" value and is the only honest answer; it is also the only one that

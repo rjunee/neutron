@@ -1513,6 +1513,82 @@ I checked the live server afterwards: four panes, all the owner's own `claude` a
 timed-out spawns cleaned up after themselves — which is the `abandonPane` obligation from
 an earlier round doing exactly its job, observed in the wild rather than in a fake.
 
+### SCOPE REVERSAL: the in-process backend is kept as an option, not deleted
+
+This item began as a hard delete — "`bun-terminal-host.ts` is deleted, not left beside
+the new one; no feature flag, no dual code path" — and sixteen commits on this branch
+are that change. The owner has since decided to keep the in-process backend selectable,
+and #540 is being rewritten from "delete the in-process PTY host" to "make the substrate
+selectable". **Recorded prominently because it reverses a stated hard rule of this
+tree**, and because the next reader will otherwise find a file the earlier half of this
+record says was deleted.
+
+What was NOT done, deliberately: no user-facing chooser. herdr stays the only wired
+default (`spawn.ts`: `options.ptyHost ?? herdrHost`), and the Bun host is reached by
+injecting it at that seam. A switch between a proven path and an unproven one hides
+which is which; the option is preserved at near-zero cost, not exercised.
+
+**Three adaptations, not two.** The interface had moved twice while the file was gone:
+`spawn` became `Promise<PtyChild>` (already-resolved here — the pid exists the moment
+`Bun.spawn` returns) and `submitLine` became required. The third was not in the brief and
+is the one that would have been a silent defect: `onData` had become `onScreen`, and
+`PtyRing.replace` OVERWRITES with each delivery. Forwarding one byte chunk per call would
+therefore erase all previous output every time, with the ring looking perfectly alive and
+holding the last few bytes. The host accumulates instead.
+
+Two details of that accumulation are the branch's own lessons reappearing. It decodes
+with a STREAMING `TextDecoder`, because `stripPtyNoise` cuts at byte level and can leave
+a chunk ending mid-character — the same defect fixed in the herdr client's inbound
+framing. And it trims on a LINE boundary rather than a character count, because a
+character cut would have to reason about surrogate pairs, which is the bytes-versus-units
+lesson from `pty-ring.ts`.
+
+**`submitLine` is implemented honestly rather than faked.** `submitCommand` refuses a
+child without it because a detached write cannot support a claim about its effect — which
+under herdr is literally true, since `pane.send_text` types without firing. Here the seam
+is a local pty fd: a write that accepts every byte HAS delivered them to the kernel, and
+`\r` on a pty genuinely submits, so "the bytes reached the child's terminal" is a fact
+this host can assert and a short write is a fact it can refuse on. What it still cannot
+assert is that the REPL acted on the line — no backend can, and the contract does not ask.
+
+**One defect fixed rather than restored.** The old file latched `wasKilledByUs` on ANY
+signal including SIGINT. That is the same defect the herdr backend was fixed for, and it
+is the same defect here even though this backend has exit codes, because `spawn.ts`
+evaluates `!killedByUs && exitCode !== 0` and a true flag short-circuits the code
+entirely. SIGINT now records `wasInterruptedByUs`.
+
+**The divergence is named, because it is the real cost.** Exit codes exist under Bun and
+nowhere in herdr; exit is a push under Bun and a poll under herdr; `onScreen` is a
+rendered pane under herdr and an accumulation under Bun. The last one has a consequence
+that is a genuine defect and is written into the spec item rather than hidden:
+`textSince` collapses an Ink repaint under herdr (the pane is redrawn; the multiset
+difference is empty) and CANNOT under Bun, where a repaint really is new bytes. The Bun
+path is no worse than it was before this item — the old byte-counter ring had the same
+limitation, documented — but it does not get the fix. Swept for others: nothing
+downstream consumes `exitCause` or `resize`, so their absence on one backend narrows
+nothing today.
+
+**And the deletion sweep had to be re-derived, for the third time on this PR — in the
+opposite direction.** The earlier rounds corrected every document that still mandated the
+Bun host. Reversing the deletion made those corrections the stale ones: `AGENTS.md` was
+left asserting "there is no second backend and no flag to select one, so do not write
+code against it" — false, in the file the next agent in that directory reads first. Also
+corrected: `types.ts` ("is deleted; there is no second backend"), `pty-noise.ts` ("which
+is GONE"), `herdr-host.ts`'s header, and `pty-host.ts`, which claimed a single backend
+throughout. A claim about the tree has to be re-derived whenever the tree moves, and that
+includes moving BACK.
+
+**Three mutation survivors, each recorded with what absorbed it.** M159: a pty ECHOES
+typed text, so the text appears on screen whether or not Enter was ever sent — the reader
+was changed from `cat` to one that emits only on a complete line, and it reddens. M160: a
+real pty does not short-write, and this host deliberately exposes no injection seam for
+`Bun.Terminal`, so the guard's failure mode cannot be produced from outside; it stays a
+defensive check with no case, said out loud rather than covered by a test that would only
+test a fake. M161: the trim never runs at test volumes, so mutating its newline
+preservation alone changes nothing — M162 runs the trim AND removes the preservation and
+reddens, while M162b runs the trim with the preservation KEPT and stays green, which is
+what identifies the preservation rather than the condition as the load-bearing half.
+
 ### The third cost of one connection per request: the deadline had to cover connecting
 
 With a persistent connection, connecting happened ONCE at startup and every call was
@@ -1965,6 +2041,14 @@ Every guard was mutated and every mutation reddened. Run against the named suite
 | M153 | the connect is awaited again instead of raced against the deadline | RED 1 |
 | M154 | a socket arriving after the deadline is abandoned | SURVIVED (no case) → RED 1 |
 | M155 | PAIR: the deferred close fires for a socket that arrived IN TIME | RED 4 (a double close) |
+| M156 | `onScreen` forwards each CHUNK instead of the accumulation | RED 1 |
+| M157 | SIGINT latches `wasKilledByUs` again (the restored file's old behaviour) | RED 1 |
+| M158 | `submitLine` no-ops after exit instead of refusing | RED 1 |
+| M159 | `submitLine` sends the text and never the Enter | SURVIVED — a pty ECHOES, so the text appears unsubmitted → reader changed to emit only on a complete line → RED 1 |
+| M160 | a SHORT write is accepted as delivered | SURVIVED — a real pty does not short-write, and this host deliberately has no injection seam |
+| M161 | the trim's trailing-newline preservation is removed | SURVIVED — the trim never runs at test volumes |
+| M162 | COMBINED: the trim always runs AND drops the trailing newline | RED 1 |
+| M162b | CONTROL OF THE COMBINATION: the trim always runs, preservation KEPT | GREEN — so the preservation is the load-bearing half, not the condition |
 | M74 | restore `?? {}` — coerce any non-object `data` to an empty object | RED 5 |
 | M74b | PAIR: over-strict — reject a genuinely EMPTY `data:{}` too | RED 1 (the control) |
 | M75a | accept ONLY an absent `data` | RED 1 (its own case) |

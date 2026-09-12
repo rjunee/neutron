@@ -16,9 +16,11 @@
  *
  * Ported as-is so Nova's `pty-spawn.test.ts` split-chunk ESC-buffering cases port
  * verbatim (see `__tests__/pty-noise.test.ts`). That port was made against the
- * in-process Bun-native backend, which is GONE (herdr step 2b) — the strip
- * discipline is unchanged, but what it now strips is a herdr pane's rendered
- * screen, delivered by `herdr-host.ts` rather than a raw byte stream.
+ * in-process Bun-native backend, which is no longer the WIRED one (herdr step 2b).
+ * The strip discipline is unchanged and both backends use it, but what it strips
+ * differs: a herdr pane's rendered screen under `herdr-host.ts`, and the raw byte
+ * stream it was written against under `bun-terminal-host.ts`, which is kept as an
+ * injectable option.
  */
 
 /**

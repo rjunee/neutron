@@ -1,0 +1,282 @@
+/**
+ * bun-terminal-host.ts — the IN-PROCESS `PtyHost` backend: Bun's native PTY.
+ *
+ * `new Bun.Terminal({ cols, rows, data })` + `Bun.spawn(argv, { terminal })` attaches
+ * a real PTY to the child (the child sees `process.stdout.isTTY === true`). No native
+ * module, no `dlopen`, no `tmux -CC` TTY-coercion. POSIX-only (Linux + macOS). Bun
+ * floor ≥ 1.3.5, when `Bun.Terminal` landed.
+ *
+ * NOT THE DEFAULT, AND NOT WIRED TO A CHOOSER. `spawn.ts` resolves
+ * `options.ptyHost ?? herdrHost`: herdr is the only wired backend, and this one is
+ * reached by INJECTING it at that seam. It is kept compiling, contract-complete and
+ * tested so the option survives at near-zero cost — not so that it is exercised.
+ * Building a user-facing switch between a proven path and an unproven one would hide
+ * which is which, and that is a decision for after the herdr path is verified live.
+ *
+ * THE TWO BACKENDS ARE NOT INTERCHANGEABLE, and the differences are not incidental —
+ * each is something herdr genuinely cannot express. Stated here and in the spec item
+ * so the next reader does not assume parity:
+ *
+ *  1. EXIT CODES. This host has real kernel exit codes (`proc.exited` resolves the
+ *     child's status). herdr has none anywhere in its API, so under `HerdrHost`
+ *     `exited` always resolves `null` and crash-versus-recycle collapses ENTIRELY onto
+ *     `wasKilledByUs`. Code that reads the exit code is strictly better informed here;
+ *     code that relies on it is code that only works here.
+ *  2. EXIT DETECTION. This host is TOLD: `proc.exited` settles. `HerdrHost` polls
+ *     `pane.read` and concludes from a typed `pane_not_found`, so its exit is
+ *     discovered on the tick after it becomes true rather than at the instant it does.
+ *  3. `onScreen`. `HerdrHost` synthesizes it by polling a rendered pane. This host has
+ *     the byte stream and derives the screen from it — see {@link BunTerminalHost} for
+ *     why that means ACCUMULATING rather than forwarding each chunk.
+ *
+ * `exitCause` is deliberately NOT provided here. Its two values (`'closed-by-us'`,
+ * `'pane-vanished'`) name herdr's routes, and "the pane does not exist" has no meaning
+ * for an in-process PTY. It is optional on the interface, and `undefined` there means
+ * "not known" — which is the truth — whereas answering `'pane-vanished'` for a process
+ * that exited normally would be a claim about a mechanism this backend does not have.
+ */
+
+import { stripPtyNoise, newDcsStripState, type DcsStripState } from './pty-noise.ts'
+import { encodeKey, encodeKeys, type Key } from './keystrokes.ts'
+import { bottomNLines } from './pty-ring.ts'
+import type { PtyChild, PtyHost, PtySpawnOpts } from './pty-host.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+
+/**
+ * How much accumulated output this host keeps as "the screen", in LINES.
+ *
+ * Bounded in lines rather than characters on purpose: a character cut would have to
+ * decide what to do about a surrogate pair, and the whole point of the byte-versus-unit
+ * lesson on this branch is that a bound measured in the wrong unit is a bug waiting to
+ * be found. A line boundary can never fall inside a character. The consumer
+ * (`PtyRing`) applies its own byte cap on top, so this only has to be finite.
+ */
+const SCREEN_LINES = 2000
+
+/** Only walk the accumulation when it is plausibly over the cap: splitting on every
+ *  chunk would make a cheap append quadratic, which is the defect this branch removed
+ *  from the herdr client's inbound buffer. 200 bytes/line is generous. */
+const SCREEN_TRIM_AT_CHARS = SCREEN_LINES * 200
+
+/** Minimal shape of `Bun.Terminal` we consume (kept narrow so the file type-
+ *  checks even where the ambient Bun types lag the runtime). */
+interface BunTerminalLike {
+  write(data: string | ArrayBufferView): number
+  resize(cols: number, rows: number): void
+  close(): void
+}
+interface BunTerminalCtor {
+  new (opts: {
+    cols?: number
+    rows?: number
+    data?: (term: BunTerminalLike, bytes: Uint8Array) => void
+    exit?: (term: BunTerminalLike, code: number, signal: string | null) => void
+  }): BunTerminalLike
+}
+interface BunSpawnedLike {
+  readonly pid: number
+  readonly exited: Promise<number | null>
+  readonly exitCode: number | null
+  kill(signal?: NodeJS.Signals | number): void
+}
+
+const BunTerminal = (Bun as unknown as { Terminal: BunTerminalCtor }).Terminal
+const bunSpawn = (
+  Bun as unknown as { spawn: (opts: Record<string, unknown>) => BunSpawnedLike }
+).spawn
+
+/** Drop `undefined`-valued keys so the child sees only real env vars (the
+ *  auth-scrub contract relies on the caller passing `KEY: undefined` to mean
+ *  "unset" — we honour that by not forwarding it). */
+function compactEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(env)) {
+    if (v !== undefined) out[k] = v
+  }
+  return out
+}
+
+export class BunTerminalHost implements PtyHost {
+  /**
+   * `async` ONLY to satisfy the interface, and that is worth saying rather than
+   * hiding: `PtyHost.spawn` became `Promise<PtyChild>` because creating a herdr pane
+   * is a socket round trip and a synchronous `spawn` would hand back a child whose
+   * `pid` reads 0 while supervision probes it. Here the pid exists the moment
+   * `Bun.spawn` returns, so the promise is already resolved. Widening the interface
+   * for the backend that needs it costs this one nothing.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await
+  async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
+    if (argv.length === 0) {
+      throw new Error('bun-terminal-host: argv must be non-empty')
+    }
+    const stripState: DcsStripState = newDcsStripState()
+    let exited = false
+    // Set the instant WE signal the child with a TERMINAL signal, so the spawn exit
+    // handler can distinguish a crash from an expected recycle.
+    let killedByUs = false
+    // An INTERRUPT is not a termination, and it gets its own flag for the reason the
+    // herdr backend learned the hard way: `wasKilledByUs` is what licenses a 'clean'
+    // exit verdict, so latching it on a SIGINT leaves the child ALIVE and flagged as
+    // intentionally terminated, and every later crash reads as a routine recycle. The
+    // old version of this file latched on any signal. It is the same defect here even
+    // though this backend has exit codes, because `spawn.ts` evaluates
+    // `!killedByUs && exitCode !== 0` — a true flag short-circuits the code entirely.
+    let interruptedByUs = false
+    let exitResolve: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      exitResolve = res
+    })
+
+    // THE SCREEN IS ACCUMULATED, NOT FORWARDED. `onScreen` promises the consumer a
+    // WHOLE current screen, and `PtyRing` REPLACES its contents with each delivery.
+    // Handing it one byte chunk at a time would therefore make every delivery erase
+    // all previous output — the exact inverse of the old `onData` contract, and
+    // silently: the ring would look alive and hold only the last few bytes.
+    let screen = ''
+    // A STREAMING decoder. `stripPtyNoise` removes escape sequences at the BYTE level,
+    // so a stripped chunk can end mid-character; decoding each chunk independently
+    // turns that into U+FFFD pairs while everything downstream still looks like text.
+    const decoder = new TextDecoder('utf-8')
+
+    const terminal = new BunTerminal({
+      cols: opts.cols ?? 120,
+      rows: opts.rows ?? 40,
+      data: (_t, bytes) => {
+        if (opts.onScreen === undefined) return
+        const clean = stripPtyNoise(bytes, stripState)
+        if (clean.length === 0) return
+        const text = decoder.decode(clean, { stream: true })
+        if (text === '') return // the chunk was a partial character; wait for the rest
+        screen += text
+        if (screen.length > SCREEN_TRIM_AT_CHARS) {
+          // PRESERVE THE TRAILING NEWLINE. `bottomNLines` deliberately drops one (a
+          // trailing newline is not an empty last line), which is right for a finished
+          // capture and WRONG for a running accumulation: dropping it would join the
+          // last line to whatever the next chunk brings.
+          const openLine = !screen.endsWith('\n')
+          const kept = bottomNLines(screen, SCREEN_LINES)
+          screen = openLine ? kept : `${kept}\n`
+        }
+        opts.onScreen(screen)
+      },
+    })
+
+    const proc = bunSpawn({
+      cmd: argv,
+      cwd: opts.cwd,
+      env: compactEnv(opts.env),
+      terminal,
+    })
+
+    // Surface the real subprocess exit (the Terminal `exit` cb reports PTY
+    // lifecycle, not the child exit code — per Bun docs we use proc.exited).
+    fireAndForget(
+      'bun-terminal-host.exit',
+      proc.exited.then((code) => {
+        exited = true
+        try {
+          terminal.close()
+        } catch {
+          // best-effort
+        }
+        if (opts.onExit !== undefined) opts.onExit(code)
+        exitResolve(code)
+      }),
+    )
+
+    /** Hand `data` to the PTY, and REPORT whether the kernel took all of it. */
+    const writeAll = (data: string | Uint8Array, what: string): void => {
+      const expected = typeof data === 'string' ? Buffer.byteLength(data, 'utf8') : data.length
+      const written = terminal.write(data)
+      if (written < expected) {
+        throw new Error(
+          `bun-terminal-host: short write of ${what} — the pty accepted ${written} of ` +
+            `${expected} bytes, so the command was not fully delivered.`,
+        )
+      }
+    }
+
+    const child: PtyChild = {
+      pid: proc.pid,
+      write(data) {
+        if (exited) return
+        terminal.write(data)
+      },
+      writeKey(key: Key) {
+        if (exited) return
+        terminal.write(encodeKey(key))
+      },
+      writeKeys(keys: readonly Key[]) {
+        if (exited) return
+        if (keys.length === 0) return
+        terminal.write(encodeKeys(keys))
+      },
+      /**
+       * THE HONEST ACKNOWLEDGEMENT THIS BACKEND CAN ACTUALLY MAKE, and no more.
+       *
+       * `submitCommand` refuses a child without this method because a detached write
+       * cannot support a claim about its effect. Under herdr that is literally true:
+       * `pane.send_text` types without firing, and a frame handed to a socket may be
+       * refused, so only a round trip can tell a delivered command from a lost one.
+       *
+       * Here the seam is a local pty fd. A `terminal.write` that accepts every byte
+       * HAS delivered them to the kernel, and `\r` on a pty genuinely submits — so
+       * "the bytes reached the child's terminal" is a fact this host can assert
+       * synchronously, and a short write is a fact it can refuse on. What it still
+       * CANNOT assert is that the REPL acted on the line; no backend can, and
+       * `submitLine`'s contract does not ask for it.
+       *
+       * So this is deliberately not a fabricated round trip. It is the strongest
+       * true statement available on this substrate, which is why the two backends'
+       * implementations look so different for the same method.
+       */
+      // eslint-disable-next-line @typescript-eslint/require-await
+      async submitLine(command: string): Promise<void> {
+        if (exited) {
+          throw new Error(
+            `bun-terminal-host: submitLine(${JSON.stringify(command)}) after exit — the child is ` +
+              'gone, so the command was not submitted.',
+          )
+        }
+        // TEXT FIRST, THEN THE SUBMIT, each checked: an unacknowledged text followed
+        // by a blind Enter submits whatever was already at the prompt.
+        if (command !== '') writeAll(command, JSON.stringify(command))
+        writeAll(encodeKey('enter'), "the 'enter' key")
+      },
+      resize(cols, rows) {
+        if (exited) return
+        try {
+          terminal.resize(cols, rows)
+        } catch {
+          // best-effort; terminal may have closed
+        }
+      },
+      kill(signal) {
+        if (exited) return
+        // CLASSIFY BEFORE LATCHING — see `interruptedByUs` above.
+        const asInt = signal === 'SIGINT' || signal === 2
+        if (asInt) interruptedByUs = true
+        else killedByUs = true
+        try {
+          proc.kill(signal)
+        } catch {
+          // already gone
+        }
+      },
+      exited: exitedPromise,
+      hasExited: () => exited,
+      wasKilledByUs: () => killedByUs,
+      wasInterruptedByUs: () => interruptedByUs,
+      /** No gate to release: this host has the byte stream from the moment the child
+       *  is spawned, and nothing is polled. Present so a caller can call it
+       *  unconditionally on either backend. */
+      beginOutput: () => {},
+    }
+    return child
+  }
+}
+
+/** The in-process POSIX backend, reachable by injection at `spawn.ts`'s
+ *  `options.ptyHost` seam. NOT the default — see this file's header. */
+export const bunTerminalHost: PtyHost = new BunTerminalHost()

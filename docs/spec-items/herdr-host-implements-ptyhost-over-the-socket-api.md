@@ -7,10 +7,26 @@ cutover: true
 legacy_ref: "GitHub issue #538 (herdr step 2b)"
 ---
 
-The in-process `Bun.Terminal` backend (`bun-terminal-host.ts`) is replaced by a
-`HerdrHost` implementing the same `PtyHost` interface over herdr's unix-socket
-API. `bun-terminal-host.ts` is **deleted**, not left beside the new backend: no
-feature flag, no dual code path.
+A `HerdrHost` implements the `PtyHost` interface over herdr's unix-socket API and
+becomes the **only wired backend**: `spawn.ts` resolves `options.ptyHost ?? herdrHost`.
+
+**SCOPE CHANGE, 2026-09-12, and it reverses the original framing of this item.** This
+item first required `bun-terminal-host.ts` to be DELETED — no flag, no dual path — and
+that is what the first sixteen commits on the branch did. The owner has since decided to
+keep the in-process backend as a selectable option, and #540 is being rewritten from
+"delete the in-process PTY host" to "make the substrate selectable". So the file is
+restored, adapted to the interface as it now stands, and kept tested — but **not wired to
+a chooser**, because a switch between a proven path and an unproven one hides which is
+which. The option is preserved at near-zero cost; it is not exercised. A user-facing
+selector is explicitly OUT of scope here and waits on the herdr path being verified live
+on the instance.
+
+**THE TWO BACKENDS ARE NOT INTERCHANGEABLE**, and that is the real cost of keeping both.
+Stated here, in `pty-host.ts` and in `bun-terminal-host.ts` so no reader assumes parity:
+exit codes exist under Bun and nowhere in herdr; exit is a push under Bun and a poll
+under herdr; and `onScreen` is a rendered pane under herdr but an accumulation of the
+byte stream under Bun. The acceptance criterion below names the one behavioural defect
+that divergence creates rather than hiding it.
 
 ## The central design problem: what scopes a turn when the ring is a screen
 
@@ -124,11 +140,47 @@ not-new. That is accepted and recorded here rather than hidden.
 
 ## Acceptance
 
-- [ ] `bun-terminal-host.ts` is gone, with no second backend beside `HerdrHost`.
-      A grep proving absence needs its positive control in the same run, or it
-      proves nothing.
-      verify: `rg -n "bun-terminal-host|BunTerminalHost" --type ts` finds nothing
-      while `rg -n "herdr-host" --type ts` finds the new backend.
+- [ ] **`HerdrHost` is the only WIRED backend, and `bun-terminal-host.ts` is kept as an
+      injectable option — compiling, contract-complete and TESTED.** Not deleted (the
+      scope change above), and not put behind a chooser either. What makes the option
+      live rather than a supported-looking dead export — the failure this branch has now
+      removed twice — is that the contract it claims is asserted: a real pty, a real pid,
+      a REAL exit code, an accumulating `onScreen`, an honest `submitLine`, and the
+      SIGINT-does-not-latch rule.
+      THREE ADAPTATIONS, each named because each is a divergence:
+      (a) `spawn` is `Promise<PtyChild>` — already-resolved here, since the pid exists
+      the moment `Bun.spawn` returns; the interface widened for the backend that needed
+      it and this one pays nothing.
+      (b) `submitLine` is implemented HONESTLY, not faked. A local pty write that accepts
+      every byte HAS delivered them to the kernel and `\r` on a pty genuinely submits, so
+      a short write is refusable and a delivered line is assertable — whereas herdr's
+      `pane.send_text` types without firing, which is the entire reason the acknowledged
+      seam exists. Neither backend claims the REPL acted on the line.
+      (c) `onScreen` ACCUMULATES. `PtyRing.replace` overwrites with each delivery, so
+      forwarding one byte chunk per call would erase all previous output every time —
+      silently, with the ring looking alive and holding the last few bytes. The
+      accumulation is trimmed on a LINE boundary (a character cut would have to reason
+      about surrogate pairs) and decoded with a STREAMING decoder, because `stripPtyNoise`
+      cuts at byte level and can leave a chunk ending mid-character.
+      `exitCause` is deliberately ABSENT under Bun: both its values name herdr mechanisms,
+      and `undefined` means "not known", which is the truth.
+      verify: `bun test runtime/adapters/claude-code/persistent/__tests__/bun-terminal-host.test.ts`
+      and `rg -n "ptyHost \?\?" runtime/adapters/claude-code/persistent/spawn.ts` shows
+      `herdrHost` as the sole default.
+- [ ] **The divergence that is a DEFECT is named, not papered over.** Keeping two
+      backends means a caller can work on one and not the other, and one case is real:
+      `PtyRing.textSince` is an order-preserving multiset difference against a baseline
+      SCREEN. Under herdr an Ink repaint redraws the same pane and the difference is
+      empty — which is the whole reason snapshot-replace was taken over diff-append.
+      Under Bun a repaint genuinely emits new bytes, so the same repaint reads as new
+      output and a detector scoped per turn can see it again. The Bun path is therefore
+      no WORSE than it was before this item (the old byte-counter ring had the same
+      limitation, documented), but it does not get the fix. Anything that depends on
+      repaint collapsing works on herdr only.
+      Also asserted-by-absence rather than assumed: nothing downstream consumes
+      `exitCause` or `resize`, so their absence on one backend narrows nothing today.
+      verify: `rg -n "exitCause|\.resize\(" --type ts runtime/ | grep -v __tests__`
+      finds only the two host files and the interface — no consumer.
 - [ ] The client `ping`s and **fails loudly** on a protocol mismatch, naming both
       the expected and the received number. A client with no check at all passes
       the matching case, so assert the **mismatch** case separately: a stub server
@@ -611,18 +663,26 @@ not-new. That is accepted and recorded here rather than hidden.
       Recorded rather than dropped so the rule is not re-learned from the same defect.
       verify: `bun test runtime/adapters/claude-code/persistent/__tests__/herdr-protocol-gate.test.ts`
       — the fifteen envelope cases plus the empty-result control are where the rule lives now.
-- [ ] **No document still mandates the deleted backend.** Deleting a backend is
-      narrowing a guard, so every document asserting the old rule is fixed in the same
-      change — above all the per-directory `runtime/adapters/claude-code/AGENTS.md`,
-      which is injected into the next agent's context and whose "It MUST spawn…"
-      sentence named the Bun-native PTY. The sweep must be decided PER FILE, because
-      three outcomes are all legitimate and different: a live reference to a deleted
-      backend is a defect; a dated historical statement (an archive, a `HISTORICAL
-      NOTE`, a record of where a bug was reproduced) is correct AS HISTORY and must
-      survive; a docstring describing a mechanism its own body no longer uses is
-      misleading and gets corrected. A blanket find-and-replace fails this criterion
-      by destroying the second category.
-      verify: `grep -rniE 'bun[-. ]?terminal|Bun-native|Bun PTY|Bun\.spawn\(\{ ?terminal' --include='*.ts' --include='*.md' .` — every surviving hit is an archive, an explicitly dated historical note, or unrelated to the REPL backend
+- [ ] **No document mandates a backend that is not the wired one — in EITHER direction.**
+      Changing which backend is wired is narrowing a guard, so every document asserting
+      the old rule is fixed in the same change — above all the per-directory
+      `runtime/adapters/claude-code/AGENTS.md`, which is injected into the next agent's
+      context and whose "It MUST spawn…" sentence named the Bun-native PTY. The sweep
+      must be decided PER FILE, because three outcomes are all legitimate and different:
+      a live reference to a backend that is not wired is a defect; a dated historical
+      statement (an archive, a `HISTORICAL NOTE`, a record of where a bug was reproduced)
+      is correct AS HISTORY and must survive; a docstring describing a mechanism its own
+      body no longer uses is misleading and gets corrected. A blanket find-and-replace
+      fails this criterion by destroying the second category.
+      RE-DERIVED AFTER THE SCOPE CHANGE, which is the point of stating it this way: the
+      first pass corrected every document that still mandated the Bun host, and then the
+      deletion was reversed — so `AGENTS.md` was left carrying "there is no second
+      backend and no flag to select one, so do not write code against it", which is now
+      false in a file the next agent reads first. Corrected to say what is actually true:
+      herdr is the only WIRED default, the Bun host is an injectable option, write
+      against `PtyHost` and never against either by name, and the two are not
+      interchangeable.
+      verify: `grep -rniE 'bun[-. ]?terminal|Bun-native|Bun PTY|Bun\.spawn\(\{ ?terminal' --include='*.ts' --include='*.md' .` — every surviving hit is the restored backend and its test, an archive, an explicitly dated historical note, or the divergence note; none asserts either backend is the sole one
 - [ ] **A reply carries EXACTLY ONE well-formed outcome.** `result` and `error` must
       each be a plain object; a primitive, `null`, an array, a missing outcome, and BOTH
       outcomes present all reach the malformed-frame teardown. Presence of the key is
