@@ -61,18 +61,31 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('dead')
   })
 
-  it('a marker for a SUPERSEDED generation does not excuse the current one', () => {
-    // The registry row outlives the child. RED-mutation: drop the generation equality
-    // in `wasKilledByGatewayShutdown` and a fresh child's genuine crash is reported as
-    // a deploy — the negative criterion, failing.
+  it('a superseded generation does not excuse the current one — but IS still findable', () => {
+    // Two claims, and they used to be in tension because the row held one marker.
+    //
+    // (a) The NEW child's genuine crash is not excused by the old child's kill. RED-
+    //     mutation: have `wasKilledByGatewayShutdown` ignore which generation an entry
+    //     names — the negative criterion, failing.
     const path = registry()
     markKilledByGatewayShutdown(path, KEY, 'gen-1', 1_755_000_000_000)
-    // The session respawned: a new generation, a new dead pid, the old marker behind.
     patchRecord(path, KEY, { child_generation: 'gen-2', pid: DEAD_PID })
     expect(probeLauncherGenerationAlive('gen-2', path)).toBe('dead')
-    // ...and the superseded generation is not in the registry at all any more, so it is
-    // 'unknown' — absence is never death.
-    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('unknown')
+
+    // (b) The SUPERSEDED generation is still attributable, which is new and is the
+    //     point: this is exactly the shape of a QUARANTINED child once its replacement
+    //     has spawned over the session key, and it is the child most likely to have
+    //     been hosting live work. It used to answer 'unknown' and its build waited out
+    //     the 90-minute reaper.
+    //
+    //     This is NOT "absence read as death" — the rule that arm still obeys. It is a
+    //     POSITIVE record, written by the process that did the killing, before it did
+    //     it. RED-mutation: delete the entry scan in `probeLauncherGenerationAlive` and
+    //     this returns to 'unknown'.
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('killed-by-gateway-shutdown')
+
+    // And a generation nobody ever recorded is still 'unknown' — absence, unchanged.
+    expect(probeLauncherGenerationAlive('gen-never-seen', path)).toBe('unknown')
   })
 
   it('a LIVE pid is alive, marker or no marker — the marker never manufactures a death', () => {

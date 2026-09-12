@@ -98,8 +98,28 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The spec item's own framing — *"Restarting the instance's service SIGTERMs that REPL"* —
   understates it. The REPL does not die of signal propagation: the gateway's SIGTERM
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
-  pool and calls `session.child.kill()` (`pool.ts:974`) on every warm child. We kill it
+  pool and calls `session.child.kill()` (`pool.ts:992`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- TWO CORRECT FIXES LEFT A HOLE BETWEEN THEM, and it swallowed exactly the child that
+  matters most. The row-scoping refusal (round 2) and the best-effort delivery phase (round 4)
+  were each right, and together they meant a QUARANTINED generation — not the row's current
+  one, because a replacement spawned over it — had its marker refused while its report was
+  still queued. If that report failed, timed out or was skipped, delivery said the next boot
+  would recover it from a marker that did not exist. A child is quarantined *because* it hosts
+  running workflows, so that was the death likeliest to matter and the one with no record at
+  all. Measured before choosing: marking at quarantine time is UNSOUND, not merely awkward —
+  `sweepQuarantinedChildren` terminates a quarantined child on the ROUTINE drain
+  (`spawn.ts:868-873`), which that marker would then attribute to a deploy. So the row now
+  keeps a bounded LIST keyed by generation, and both readers look their own generation up.
+  This is cheaper than it sounds and is not a database migration: the registry is a JSON file
+  and its parser checks four fields and tolerates extras, so old and new builds interoperate
+  in both directions. It also DELETES the round-2 refusal guard and the clear-on-respawn
+  rather than adding machinery beside them — an entry names its own generation, so a stale
+  entry cannot be read as describing the current child, which makes the invariant those
+  guards defended a property of the shape. And it closes a hole that predates this item:
+  `probeLauncherGenerationAlive` matched only `record.child_generation`
+  (`supervision.ts:1026`), which a replacement spawn overwrites (`spawn.ts:675`), so a
+  quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control
   (systemd SIGKILLs the cgroup at `TimeoutStopSec`, `gateway/index.ts:1026-1038`), and an
@@ -144,5 +164,5 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
 - The site most certain to be hosting a live build reported NOTHING at all. A quarantined
   child is out of the pool *because* it still hosts running workflows, and
   `shutdownQuarantinedChildren` deleted its map entry before killing it, which made the
-  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:850`). Every
+  `child.exited` hook `quarantineChild` installs return early (`spawn.ts:848`). Every
   deploy killed those silently.

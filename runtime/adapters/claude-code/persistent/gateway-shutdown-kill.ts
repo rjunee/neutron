@@ -97,26 +97,34 @@
  * marker left on the row would go on excusing deaths forever: the next child's
  * genuine crash would be reported as a deploy. The marker therefore names the
  * exact `child_generation` it applies to and {@link wasKilledByGatewayShutdown}
- * demands equality with the row's CURRENT generation. `spawn.ts` also drops both
- * fields when it writes a new generation, the same way it drops the crash edge —
- * belt and braces, because this is the mutation that would make the reporting
- * lie in the one direction the spec item forbids (a fault credited to a deploy).
+ * asks whether the row's CURRENT `child_generation` has an entry, so an entry for a
+ * superseded child answers false by construction — the mutation that would make the
+ * reporting lie in the one direction the spec item forbids (a fault credited to a
+ * deploy) is unrepresentable rather than guarded against.
  *
- * ── AND THE ROW IS SCOPED TOO, WHICH IS A SEPARATE CLAIM ─────────────────────
+ * ── AND THE ROW HOLDS EVERY GENERATION IT KILLED, NOT JUST THE CURRENT ONE ───
  * The marker is per-generation; the ROW it lives in is per SESSION KEY, and one
- * teardown can reach two generations on one key — the pooled child, and a
- * QUARANTINED child that used to hold that key before a fresh spawn took it over.
- * Writing both would leave the row naming one generation and the marker naming the
- * other: attribution then fails AND `child_crash_notified_at` stays set, killing
- * the durable backstop in precisely the case it exists for (the direct sink
- * throwing).
+ * teardown reaches two generations on one key — the pooled child, and a QUARANTINED
+ * child that held the key until a replacement spawned over it.
  *
- * {@link markKilledByGatewayShutdown} therefore REFUSES to mark a generation the
- * row does not currently name. Nothing is lost by refusing: both next-boot
- * consumers look the row up and match on its CURRENT `child_generation`
- * (`wasKilledByGatewayShutdown`, `probeLauncherGenerationAlive`), so a marker for a
- * superseded generation could never have been read back — writing it could only
- * ever have destroyed a usable one. The refusal is reported, not silent.
+ * An earlier revision stored a single generation per row and REFUSED to mark any
+ * other, which stopped the two from overwriting each other but left the quarantined
+ * generation with nowhere durable to go: the row named only the newer pooled child,
+ * so that death was neither delivered (if its live report failed) nor recoverable.
+ * That is the worst place to lose one — a child is quarantined precisely BECAUSE it
+ * still hosts running workflows.
+ *
+ * So the row keeps a bounded LIST keyed by generation
+ * (`ReplRegistryRecord.killed_by_gateway_shutdown`). Every generation this shutdown
+ * killed gets its own entry, and both readers look their generation up:
+ * {@link wasKilledByGatewayShutdown} asks about the row's CURRENT child (the
+ * watchdog's question) and `probeLauncherGenerationAlive` asks about an ARBITRARY
+ * generation (trident's question, and the one a quarantined child needs).
+ *
+ * This also makes staleness structural rather than enforced. An entry names its own
+ * generation, so it can never be read as describing a different child — which is why
+ * the refusal guard and `spawn.ts`'s clear-on-respawn are both gone: the invariant
+ * they defended is now a property of the shape.
  *
  * ── WHAT THIS IS NOT ─────────────────────────────────────────────────────────
  * It is not a drain, and it does not keep the workflow alive. Surviving the
@@ -126,7 +134,13 @@
  * this module is why the owner is TOLD that a deploy killed it.
  */
 
-import { getRecord, patchRecord, type ReplRegistryRecord } from './repl-registry.ts'
+import {
+  GATEWAY_SHUTDOWN_KILL_HISTORY,
+  getRecord,
+  patchRecord,
+  type GatewayShutdownKillEntry,
+  type ReplRegistryRecord,
+} from './repl-registry.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 
 /**
@@ -167,18 +181,42 @@ export function sampleLivenessBeforeShutdownKill(hasExited: () => boolean): Shut
  */
 export function wasKilledByGatewayShutdown(record: ReplRegistryRecord | undefined): boolean {
   if (record === undefined) return false
-  const marked = record.killed_by_gateway_shutdown_generation
-  if (typeof marked !== 'string' || marked.length === 0) return false
-  return marked === record.child_generation
+  const current = record.child_generation
+  if (typeof current !== 'string' || current.length === 0) return false
+  return gatewayShutdownKillEntryFor(record, current) !== undefined
+}
+
+/**
+ * The entry for an ARBITRARY generation on this row, or undefined.
+ *
+ * The generation is matched exactly and must be non-empty: two empty strings are
+ * equal, so a bare comparison would read a half-written row as a deploy kill.
+ */
+export function gatewayShutdownKillEntryFor(
+  record: ReplRegistryRecord | undefined,
+  generation: string,
+): GatewayShutdownKillEntry | undefined {
+  if (record === undefined || typeof generation !== 'string' || generation.length === 0) return undefined
+  const entries = record.killed_by_gateway_shutdown
+  if (!Array.isArray(entries)) return undefined
+  // Rows survive upgrades and are not a trusted type boundary — a malformed entry
+  // must not become positive evidence that we killed something.
+  return entries.find(
+    (e) =>
+      e !== null &&
+      typeof e === 'object' &&
+      e.generation === generation &&
+      typeof e.at === 'number' &&
+      Number.isFinite(e.at),
+  )
 }
 
 /** Epoch ms the marker was written, or undefined when the row carries no live
  *  marker. Returns undefined for a stale (superseded-generation) marker, so a
  *  caller can never quote a timestamp that does not describe this child. */
 export function gatewayShutdownKillAt(record: ReplRegistryRecord | undefined): number | undefined {
-  if (!wasKilledByGatewayShutdown(record)) return undefined
-  const at = record?.killed_by_gateway_shutdown_at
-  return typeof at === 'number' && Number.isFinite(at) ? at : undefined
+  const current = record?.child_generation
+  return current === undefined ? undefined : gatewayShutdownKillEntryFor(record, current)?.at
 }
 
 /**
@@ -239,21 +277,23 @@ export function markKilledByGatewayShutdown(
   childGeneration: string,
   at: number,
 ): boolean {
+  if (typeof childGeneration !== 'string' || childGeneration.length === 0) return false
   try {
-    // THE ROW MUST ALREADY NAME THIS GENERATION. One teardown can reach two
-    // generations on one session key (the pooled child, and a quarantined child that
-    // held the key before a fresh spawn took it over) and they share this row. A
-    // write for a generation the row has moved past would leave the row naming one
-    // and the marker naming the other — attribution then fails AND
-    // `child_crash_notified_at` stays set, which disables the next boot's backstop in
-    // the one case it exists for. Refusing costs nothing: both consumers match on the
-    // row's CURRENT `child_generation`, so such a marker was never readable anyway.
-    if (getRecord(registryPath, sessionKey)?.child_generation !== childGeneration) return false
-    patchRecord(registryPath, sessionKey, {
-      killed_by_gateway_shutdown_generation: childGeneration,
-      killed_by_gateway_shutdown_at: at,
-    })
-    return wasKilledByGatewayShutdown(getRecord(registryPath, sessionKey))
+    // APPEND, KEYED BY GENERATION. Any generation this session key had killed gets an
+    // entry, including a QUARANTINED one the row no longer names — that child is the
+    // likeliest of all to be hosting live work, and a single-slot marker had nowhere
+    // to put it. Entries are idempotent per generation (a re-mark keeps the first
+    // timestamp: the kill happened once) and bounded to the newest
+    // GATEWAY_SHUTDOWN_KILL_HISTORY.
+    const existing = getRecord(registryPath, sessionKey)
+    if (existing === undefined) return false
+    const prior = Array.isArray(existing.killed_by_gateway_shutdown) ? existing.killed_by_gateway_shutdown : []
+    const entries =
+      gatewayShutdownKillEntryFor(existing, childGeneration) !== undefined
+        ? prior
+        : [...prior, { generation: childGeneration, at }].slice(-GATEWAY_SHUTDOWN_KILL_HISTORY)
+    patchRecord(registryPath, sessionKey, { killed_by_gateway_shutdown: entries })
+    return gatewayShutdownKillEntryFor(getRecord(registryPath, sessionKey), childGeneration) !== undefined
   } catch {
     return false
   }
@@ -318,6 +358,11 @@ export interface PendingShutdownKillReport {
   /** True when the shutdown demonstrably killed a live child. */
   attributed: boolean
   liveness: ShutdownLivenessSample
+  /** Whether a DURABLE record of this kill is on disk. The delivery phase says the
+   *  next boot will recover an undelivered report, and that promise is only true when
+   *  this is true — a promise that quietly does not apply to a subset is worse than a
+   *  narrower promise, so the subset is carried here rather than assumed away. */
+  durablyRecorded: boolean
 }
 
 /**
@@ -342,25 +387,27 @@ export function recordGatewayShutdownKill(
   // ATTRIBUTION FOLLOWS THE OBSERVATION, not the call site. Only a child observed
   // ALIVE was killed by this shutdown; anything else is reported as undetermined.
   const attributed = liveness === 'alive'
+  let durablyRecorded = false
   if (attributed && options.replRegistryPath !== undefined) {
     // The marker is an EXCUSE for a death, so it is written only where the death is
     // ours to own. Writing it for a child that was already gone would excuse a fault,
     // and it would also close the crash edge — silencing the next boot's honest
     // report of the very fault we are refusing to claim.
-    const marked = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
-    if (!marked) {
-      // Refused (the row has moved on to another generation) or unwritable. A
-      // best-effort write that quietly did nothing is the silence this module exists
-      // to remove, so it is said out loud.
+    durablyRecorded = markKilledByGatewayShutdown(options.replRegistryPath, sessionKey, childGeneration, at)
+    if (!durablyRecorded) {
+      // The row is gone, or unwritable. A best-effort write that quietly did nothing is
+      // the silence this module exists to remove, so it is said out loud — AND carried
+      // on the report, so the delivery phase cannot promise a recovery that has nothing
+      // to recover from.
       process.stderr.write(
         `[repl] gateway shutdown could not record the durable marker for generation=${childGeneration.slice(0, 8)} ` +
-          `(the registry row names a different generation, or could not be written) — this death will be reported ` +
-          `by the live sink only, if that lands\n`,
+          `(no registry row for this session, or it could not be written) — this death is reported by the live ` +
+          `sink ONLY, and is lost if that does not land\n`,
       )
     }
   }
   if (options.onChildCrash === undefined) return null
-  return { options, sessionKey, childGeneration, at, attributed, liveness }
+  return { options, sessionKey, childGeneration, at, attributed, liveness, durablyRecorded }
 }
 
 /**
@@ -382,6 +429,20 @@ export function recordGatewayShutdownKill(
  * Returns a per-outcome tally rather than `void` — a phase that delivered nothing
  * must be distinguishable from one that delivered everything.
  */
+/**
+ * What an undelivered report actually costs, per report.
+ *
+ * The delivery phase is best-effort BECAUSE a durable record sits behind it — but
+ * that is a property of the individual report, not of the phase. A report with no
+ * record behind it is the only one this module can genuinely lose, and it says so
+ * instead of repeating the reassurance that applies to its neighbours.
+ */
+function recoveryConsequence(report: PendingShutdownKillReport): string {
+  return report.durablyRecorded
+    ? 'the next boot reports it from the durable record'
+    : 'and NOTHING durable records this death — it is lost'
+}
+
 export async function deliverShutdownKillReports(
   reports: readonly PendingShutdownKillReport[],
   opts: { perSinkMs?: number; phaseBudgetMs?: number; now?: () => number } = {},
@@ -400,7 +461,7 @@ export async function deliverShutdownKillReports(
       tally.skipped += 1
       process.stderr.write(
         `[repl] gateway shutdown reporting budget spent — generation=${report.childGeneration.slice(0, 8)} ` +
-          `was not reported live; the next boot reports it from the durable marker\n`,
+          `was not reported live; ${recoveryConsequence(report)}\n`,
       )
       continue
     }
@@ -432,7 +493,7 @@ export async function deliverShutdownKillReports(
       tally.failed += 1
       process.stderr.write(
         `[repl] onChildCrash sink threw on gateway-shutdown kill generation=${report.childGeneration.slice(0, 8)}: ${String(err)} ` +
-          `— the next boot reports it from the durable marker\n`,
+          `— ${recoveryConsequence(report)}\n`,
       )
       continue
     }
@@ -440,7 +501,7 @@ export async function deliverShutdownKillReports(
       tally.timedOut += 1
       process.stderr.write(
         `[repl] onChildCrash sink did not answer within ${budget}ms for generation=${report.childGeneration.slice(0, 8)} ` +
-          `— abandoned; the next boot reports it from the durable marker\n`,
+          `— abandoned; ${recoveryConsequence(report)}\n`,
       )
       continue
     }

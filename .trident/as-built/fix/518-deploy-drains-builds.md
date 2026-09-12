@@ -10,7 +10,7 @@ REPL the gateway owns (`cc-trident-fire-<owner>-<repo>`, composed in
 `open/wiring/substrates.ts`). The spec item says a service restart "SIGTERMs that REPL",
 which understates it — the gateway's own SIGTERM handler calls
 `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the pool and calls
-`session.child.kill()` on every warm child (`pool.ts:974`). We kill it. Three of five
+`session.child.kill()` on every warm child (`pool.ts:992`). We kill it. Three of five
 recorded `trident_launcher_crashes` landed 18–28 s after a deploy's vendor checkout, and
 the 08-13 deploy rolled trident's own merge: a build that lands killed the builds still
 running, at the rate the pipeline succeeded.
@@ -24,7 +24,7 @@ Worse, the ONE class of child certain to be hosting a live build reported nothin
 A child is quarantined precisely because it still hosts running workflows (the eviction
 guard deferred its reaping), and `shutdownQuarantinedChildren` deleted its map entry
 before killing it — which makes the `child.exited` hook `quarantineChild` installs return
-early (`spawn.ts:850`). Every deploy killed those silently.
+early (`spawn.ts:848`). Every deploy killed those silently.
 
 ### The choice the spec item demanded, and why it is what it is
 
@@ -139,6 +139,58 @@ stderr rather than failing quietly.
 
 The multi-generation test asserted only the emitted callbacks while reading as though it
 covered the durable half; it now asserts the final registry row.
+
+### Two correct fixes, and the hole between them
+
+The round-2 row-scoping refusal and the round-4 best-effort delivery phase were each right,
+and their interaction was not. A QUARANTINED child's generation is by definition not the
+session-keyed row's current one — a replacement spawned over it — so
+`markKilledByGatewayShutdown` REFUSED its marker, working exactly as designed, while
+`shutdownQuarantinedChildren` still queued its report. If that report failed, timed out, or
+was skipped by the phase budget, delivery said the next boot would recover it from a marker
+that did not exist. A child is quarantined *because* it still hosts running workflows, so that
+was the death likeliest to matter and the one left with no record at all.
+
+**Measured before choosing, because the options were not equally reachable.**
+
+*Marking at quarantine time is unsound, not merely awkward.* `sweepQuarantinedChildren`
+terminates a quarantined child on the ROUTINE drain once its hosted work finishes
+(`spawn.ts:868-873`). A marker written at quarantine time would attribute that ordinary reap
+to a deploy, so the option needs the marker to mean something weaker than it says. Rejected on
+correctness, not cost.
+
+*Narrowing the claim* was honest but re-opened the silence for precisely these children.
+
+*The durable per-generation record* is the shape the delivery claim already assumed, and it
+measured far smaller than "a schema change and its migration" implies: the registry is a JSON
+file (`atomicWriteFileSync`), not a table, so there is no migration; `isMinimalRecord` checks
+four fields and tolerates unknown ones, so old and new builds interoperate in both directions
+during a rolling restart; and it touched 8 production references.
+
+**It removes machinery rather than adding it.** `killed_by_gateway_shutdown` is now a bounded
+list of `{generation, at}`, and both readers look up by generation —
+`wasKilledByGatewayShutdown` asks about the row's current child (the watchdog's question) and
+`probeLauncherGenerationAlive` asks about an arbitrary one (trident's question, and the one a
+quarantined child needs). Because an entry names its own generation, a stale entry cannot be
+read as describing the current child — so the round-2 refusal guard and `spawn.ts`'s
+clear-on-respawn are both DELETED, and the invariant they defended is a property of the shape
+instead of a rule enforced in two places. The clear-on-respawn had to go regardless: the entry
+must outlive the generation it describes, which is the whole reason it exists.
+
+**And it closes a hole older than this item.** `probeLauncherGenerationAlive` matched only
+`record.child_generation` (`supervision.ts:1026`), which a replacement spawn overwrites
+(`spawn.ts:675`) — so a quarantined generation has never been locatable in the registry, and
+its build waited out the 90-minute reaper with no reason ever delivered. This change did not
+remove that recoverability; it added a claim that assumed it, and now supplies it.
+
+The entry scan is positive evidence, not absence read as death: it is a record that WE
+terminated that generation, written by the process that did it, before it did it. A generation
+nobody recorded still answers `unknown`.
+
+**The delivery claim is now conditional.** `PendingShutdownKillReport` carries
+`durablyRecorded`, and the operator line for an undelivered report says either "the next boot
+reports it from the durable record" or "and NOTHING durable records this death — it is lost".
+A promise that quietly does not apply to a subset is worse than a narrower promise.
 
 ### The premise that was missing, and the three defects that shared it
 
@@ -270,7 +322,7 @@ next boot's watchdog would have laundered the deploy attribution away.
 
 ### Measured
 
-35 mutations applied one at a time, each reverted after: **35 red, 0 survivors.** Every
+39 mutations applied one at a time, each reverted after: **39 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.
@@ -281,6 +333,13 @@ rather than confirming them:
 - **M15** (delete the quarantine report) initially SURVIVED. The assertion said "at least one
   report, all of them deploys", which the *pooled* child's report satisfied on its own. It now
   names the quarantined generation explicitly.
+- Three mutations were RETIRED rather than retargeted: M18, M22 and M23 targeted the
+  round-2 refusal guard and clear-on-respawn, which the per-generation list deletes. A
+  mutation for a guard that no longer exists is not coverage, and keeping the guards alive to
+  preserve a count would have been the tail wagging the dog. The properties they protected are
+  now covered by M36 (single-slot marker restored → the quarantined generation disappears),
+  M40 (spawn clears the history → the quarantined record is lost) and M39 (the probe matches
+  any entry rather than this generation → absence read as attribution).
 - **M31** (drop the per-phase clamp) survived its first version, and that is what established
   the paragraph above: the clamp changes no count, so only an elapsed-time assertion can kill
   it. Retargeted with a justified opt-out rather than left unfalsifiable.

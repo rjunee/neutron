@@ -18,7 +18,7 @@ import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnR
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
 import { type ReplWedgeProbe, buildWedgeAlertText, buildWedgeCapHitAlertText, buildWedgeRecoveryInProgressText, decideWedgeAction, detectReplWedged } from './dead-repl-detector.ts'
 import { dispatchWedgeRespawn } from './dead-repl-respawn-dispatch.ts'
-import { gatewayShutdownKillAt, wasKilledByGatewayShutdown } from './gateway-shutdown-kill.ts'
+import { gatewayShutdownKillAt, gatewayShutdownKillEntryFor, wasKilledByGatewayShutdown } from './gateway-shutdown-kill.ts'
 import { DEFAULT_CWD_DRIFT_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS, RESPAWN_CAP_MAX, RESPAWN_CAP_WINDOW_MS, RESPAWN_IN_FLIGHT_TTL_MS, defaultIsPidAlive, resolveTranscriptProjectsDir } from './signatures.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
 import { type ReplSession, httpHealth, terminateChild, terminatePidGracefully } from './repl-session.ts'
@@ -1042,6 +1042,19 @@ export function probeLauncherGenerationAlive(
         // it while shutting down; a stale marker for a superseded generation is
         // refused by `wasKilledByGatewayShutdown` and the answer stays 'dead'.
         return gatewayShutdownKillAt(record) !== undefined ? 'killed-by-gateway-shutdown' : 'dead'
+      }
+    }
+    // NOT THE CURRENT GENERATION OF ANY ROW — which is exactly what a QUARANTINED
+    // child looks like once its replacement has spawned over the session key. The
+    // pid loop above cannot answer for it (the row's pid belongs to the replacement),
+    // but a gateway-shutdown entry is BETTER evidence than a pid probe: it is a
+    // record that WE terminated that generation, written by the process that did it,
+    // before it did it. Without this the quarantined child — the one quarantined
+    // precisely BECAUSE it hosts live work — stays 'unknown' forever and its build
+    // waits out the 90-minute reaper.
+    for (const record of Object.values(loadRegistry(replRegistryPath))) {
+      if (gatewayShutdownKillEntryFor(record, generationKey) !== undefined) {
+        return 'killed-by-gateway-shutdown'
       }
     }
     return 'unknown'

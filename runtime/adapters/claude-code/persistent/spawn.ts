@@ -743,13 +743,11 @@ async function spawnSession(
         const {
           respawn_in_flight_at: _drop,
           child_crash_notified_at: _oldCrashEdge,
-          // #518 — and the gateway-shutdown-kill marker, which describes the
-          // generation we are replacing. `wasKilledByGatewayShutdown` already
-          // refuses a marker that names a superseded generation, but a row that
-          // never carries a stale one cannot be misread at all: the mutation this
-          // guards is a GENUINE crash of the new child credited to a deploy.
-          killed_by_gateway_shutdown_generation: _oldShutdownKillGeneration,
-          killed_by_gateway_shutdown_at: _oldShutdownKillAt,
+          // #518 — `killed_by_gateway_shutdown` is DELIBERATELY NOT DROPPED HERE. It
+          // is keyed by generation, so an entry for the child we are replacing can
+          // never be read as describing this one, and it has to outlive that child:
+          // a QUARANTINED generation is superseded by this very write, and its entry
+          // is the only durable record that a deploy killed it.
           ...merged
         } = prev ? { ...prev, ...record } : record
         registry[sessionKey] = merged

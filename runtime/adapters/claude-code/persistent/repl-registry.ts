@@ -51,6 +51,18 @@ import { registryLockPath, withFlockSync } from './registry-lock.ts'
 
 const log = createLogger('repl-registry')
 
+/** How many gateway-shutdown kill entries a row retains. See the field's docblock
+ *  for why a small bound is sufficient rather than merely convenient. */
+export const GATEWAY_SHUTDOWN_KILL_HISTORY = 16
+
+/** One child generation this session key had terminated by a gateway shutdown. */
+export interface GatewayShutdownKillEntry {
+  /** The `child_generation` that was killed. */
+  generation: string
+  /** Epoch ms the kill was recorded — before the kill, by the process making it. */
+  at: number
+}
+
 /** One persisted REPL supervision row. */
 export interface ReplRegistryRecord {
   /** Pool key — opaque; follows S3 re-namespacing. */
@@ -108,15 +120,29 @@ export interface ReplRegistryRecord {
   child_crash_notified_at?: number
   /** Unique ownership token for this spawned child incarnation. */
   child_generation?: string
-  /** #518 — the `child_generation` a GATEWAY SHUTDOWN deliberately terminated
-   *  (`shutdownAllPersistentRepls`, reached from the SIGTERM handler: a service
-   *  restart or a deploy). Written just before the kill, read on the next boot so
-   *  the death is reported as the deploy it was instead of a bare crash. Names the
-   *  generation because this row outlives the child: see
-   *  `gateway-shutdown-kill.ts` → `wasKilledByGatewayShutdown`. */
-  killed_by_gateway_shutdown_generation?: string
-  /** #518 — epoch ms the shutdown kill above was recorded. */
-  killed_by_gateway_shutdown_at?: number
+  /** #518 — every child generation on this session key that a GATEWAY SHUTDOWN
+   *  deliberately terminated (`shutdownAllPersistentRepls`, reached from the SIGTERM
+   *  handler: a service restart or a deploy). Written just before each kill, read
+   *  back so the death is reported as the deploy it was instead of a bare crash.
+   *
+   *  A LIST, KEYED BY GENERATION, AND THAT IS THE POINT. One teardown reaches two
+   *  generations on one session key: the POOLED child, and a QUARANTINED child that
+   *  held this key until a replacement spawned over it. A single scalar pair could
+   *  hold only one of them, so the other's death had nowhere durable to go — and a
+   *  quarantined child is quarantined precisely BECAUSE it still hosts running
+   *  workflows, which makes it the death that matters most.
+   *
+   *  It also makes the staleness question structural instead of enforced: an entry
+   *  names its own generation, so an entry for a superseded child can never be read
+   *  as describing the current one. `spawn.ts` therefore does NOT clear this on a
+   *  respawn — it must outlive the generation it describes, which is the whole
+   *  reason it exists.
+   *
+   *  Bounded to {@link GATEWAY_SHUTDOWN_KILL_HISTORY} newest entries: one entry
+   *  accrues per shutdown that killed a child on this key, and the only consumer is
+   *  a still-in-flight build asking about its own launcher — bounded by trident's
+   *  2-hour in-flight ceiling, so older entries are unreachable by construction. */
+  killed_by_gateway_shutdown?: GatewayShutdownKillEntry[]
 }
 
 /** All records keyed by `sessionKey`. */

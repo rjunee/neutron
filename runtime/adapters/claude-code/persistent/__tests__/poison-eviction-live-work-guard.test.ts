@@ -54,7 +54,12 @@ import {
   type PendingShutdownKillReport,
 } from '../gateway-shutdown-kill.ts'
 import { childByKey } from '../pool-state.ts'
-import { runReplWatchdogTick } from '../supervision.ts'
+import type { ReplRegistryRecord } from '../repl-registry.ts'
+
+/** The generations a row records as killed by a gateway shutdown. */
+const killedGenerations = (record: ReplRegistryRecord | undefined): string[] =>
+  (record?.killed_by_gateway_shutdown ?? []).map((e) => e.generation)
+import { probeLauncherGenerationAlive, runReplWatchdogTick } from '../supervision.ts'
 import { loadRegistry, patchRecord } from '../repl-registry.ts'
 import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -519,9 +524,9 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
           // marker is ALREADY on disk by the time the live report is attempted. The
           // report is the optional half and runs last, so it must never be the thing
           // that puts the marker there.
-          markedAlready:
-            loadRegistry(registryPath)[Object.keys(loadRegistry(registryPath))[0] as string]
-              ?.killed_by_gateway_shutdown_generation === info.generationKey,
+          markedAlready: killedGenerations(
+            loadRegistry(registryPath)[Object.keys(loadRegistry(registryPath))[0] as string],
+          ).includes(info.generationKey),
         })
       },
     })
@@ -550,8 +555,7 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
     // And the durable marker is on the row for the next boot's watchdog, naming the
     // generation it describes.
     const record = Object.values(loadRegistry(registryPath))[0]
-    expect(record?.killed_by_gateway_shutdown_generation).toBe(seen[0]?.generation)
-    expect(record?.killed_by_gateway_shutdown_at).toBeGreaterThan(0)
+    expect(killedGenerations(record)).toEqual([seen[0]!.generation])
     // The crash edge is stamped too, so the next boot does not fire a SECOND, bare
     // notification that would overwrite the deploy attribution in the store.
     expect(record?.child_crash_notified_at).toBeGreaterThan(0)
@@ -624,11 +628,15 @@ describe('a gateway shutdown reports its own kills as a deploy, never as a crash
     // once, in exactly the case it exists for.
     const finalRow = loadRegistry(registryPath)[Object.keys(loadRegistry(registryPath))[0] as string]
     expect(finalRow?.child_generation).toBe(pooledGeneration)
-    expect(finalRow?.killed_by_gateway_shutdown_generation).toBe(pooledGeneration)
-    expect(finalRow?.killed_by_gateway_shutdown_at).toBeGreaterThan(0)
+    // BOTH generations are durably recorded on the one session-keyed row. The
+    // quarantined one is no longer the row's current generation — a replacement
+    // spawned over it — and a single-slot marker therefore had nowhere to put it.
+    // RED-mutation: restore the single-slot write; the quarantined generation
+    // disappears and this reddens.
+    expect(killedGenerations(finalRow).sort()).toEqual([pooledGeneration, quarantinedGeneration].sort())
     expect(wasKilledByGatewayShutdown(finalRow)).toBe(true)
     // The edge is closed for the generation the row describes, and for that one only.
-    expect(finalRow?.child_crash_notified_at).toBe(finalRow?.killed_by_gateway_shutdown_at)
+    expect(finalRow?.child_crash_notified_at).toBeGreaterThan(0)
   })
 
   it('THE COMPLEMENT — an eviction with NO live work still reports cause child-died', async () => {
@@ -683,10 +691,15 @@ describe('a fresh spawn does not inherit the previous generation\'s excuse (#518
 
     const after = loadRegistry(registryPath)[key]
     expect(after?.child_generation).not.toBe(firstGeneration)
-    expect(after?.killed_by_gateway_shutdown_generation).toBeUndefined()
-    expect(after?.killed_by_gateway_shutdown_at).toBeUndefined()
+    // The old generation's entry SURVIVES the respawn — deliberately. It is keyed by
+    // generation, so it cannot be read as describing the new child, and it is the only
+    // durable record that a deploy killed the old one. RED-mutation: drop it in
+    // `spawn.ts`'s registry merge, as an earlier revision did, and a quarantined
+    // generation loses its only durable record.
+    expect(killedGenerations(after)).toEqual([firstGeneration as string])
+    // The crash edge IS still cleared, because it describes the pid edge, not the kill.
     expect(after?.child_crash_notified_at).toBeUndefined()
-    // And the probe therefore reports the NEW generation honestly if it dies.
+    // And the NEW generation is reported honestly if it dies — no inherited excuse.
     expect(wasKilledByGatewayShutdown(after)).toBe(false)
   })
 })
@@ -732,7 +745,7 @@ describe('a child that was ALREADY DEAD when teardown arrived is not a deploy ki
 
     const row = loadRegistry(registryPath)[key]
     // NO EXCUSE ON DISK for a death we did not cause...
-    expect(row?.killed_by_gateway_shutdown_generation).toBeUndefined()
+    expect(killedGenerations(row)).toEqual([])
     expect(wasKilledByGatewayShutdown(row)).toBe(false)
     // ...and the edge is LEFT OPEN so the next boot's watchdog still reports the fault
     // honestly. Closing it here would silence the very death we refused to claim.
@@ -788,7 +801,7 @@ describe('the durable backstop actually backs up a failed report (#518)', () => 
 
     const afterShutdown = loadRegistry(registryPath)[key]
     // The attribution survived: it is a fact about the kill, written before it.
-    expect(afterShutdown?.killed_by_gateway_shutdown_generation).toBe(generation)
+    expect(killedGenerations(afterShutdown)).toEqual([generation])
     // And the crash edge is OPEN, because nothing was reported. This is the assertion
     // the first cut failed: a tombstone must not be written before the thing it
     // attests to.
@@ -913,8 +926,8 @@ describe('no child’s marker or kill sits behind another child’s sink (#518)'
 
     // BOTH children are MARKED — which is what lets the next boot attribute them even
     // though one report never landed and the other may have been abandoned.
-    expect(loadRegistry(registryA)[keyA]?.killed_by_gateway_shutdown_generation).toBe(genA)
-    expect(loadRegistry(registryB)[keyB]?.killed_by_gateway_shutdown_generation).toBe(genB)
+    expect(killedGenerations(loadRegistry(registryA)[keyA])).toEqual([genA])
+    expect(killedGenerations(loadRegistry(registryB)[keyB])).toEqual([genB])
 
     // The hung sink never committed, so ITS edge stays open for the next boot.
     expect(loadRegistry(registryA)[keyA]?.child_crash_notified_at).toBeUndefined()
@@ -960,6 +973,7 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
     at: 1_000,
     attributed: true,
     liveness: 'alive',
+    durablyRecorded: true,
   })
 
   it('one hung sink is abandoned and the NEXT report still goes out', async () => {
@@ -1040,5 +1054,119 @@ describe('deliverShutdownKillReports is bounded per sink AND across the phase', 
     expect(result.failed).toBe(1)
     expect(result.delivered).toBe(1)
     expect(seen).toEqual(['ok'])
+  })
+})
+
+/**
+ * #518 — THE INTERSECTION NEITHER EXISTING TEST VISITED: a QUARANTINED child whose
+ * live report does not land, recovered across a restart.
+ *
+ * The quarantine cases used an always-successful sink; the throwing and hung-sink
+ * cases covered pooled children only. In between sat the case that matters most — a
+ * child is quarantined precisely BECAUSE it hosts running workflows — and it was the
+ * one with no durable record, because the row is session-keyed and a replacement
+ * generation had already spawned over it.
+ */
+describe('a quarantined child whose report fails is still recoverable on the next boot', () => {
+  it('sink throws → the quarantined generation is durably recorded and the probe finds it', async () => {
+    // RED-mutation: restore the single-slot marker (refuse any generation the row does
+    // not currently name). The quarantined generation then has NO durable record, the
+    // probe answers 'unknown', and its build waits out the 90-minute reaper with no
+    // reason ever delivered — which is the silence this whole change exists to remove,
+    // reappearing for the one child most likely to be hosting real work.
+    const { host, messagesSeen, childAlive } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-quarantine-fail-')), 'repl-registry.json')
+    const options = opts(host, {
+      replRegistryPath: registryPath,
+      hostsLiveWork: () => 3,
+      onChildCrash: () => {
+        throw new Error('sqlite busy')
+      },
+    })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+
+    // Turn 1 poisons child #1; turn 2 quarantines it (it hosts live work) and spawns a
+    // replacement, which rewrites the session-keyed row with a NEW generation.
+    await abandonFirstTurn(sub, messagesSeen)
+    const key = Object.keys(loadRegistry(registryPath))[0] as string
+    const quarantinedGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+    await captureStderr(() => drain(sub.start(spec('turn-2'))))
+    expect(quarantinedChildCount()).toBe(1)
+    const pooledGeneration = loadRegistry(registryPath)[key]?.child_generation as string
+    expect(pooledGeneration).not.toBe(quarantinedGeneration)
+    expect(childAlive(1)).toBe(true)
+
+    // The deploy. Every sink call throws, so nothing is delivered live.
+    await captureStderr(() => shutdownAllPersistentRepls())
+    expect(childAlive(1)).toBe(false)
+
+    // BOTH generations are durably recorded on the one row — the pooled child the row
+    // names, and the quarantined child it does not.
+    const row = loadRegistry(registryPath)[key]
+    expect(killedGenerations(row).sort()).toEqual([pooledGeneration, quarantinedGeneration].sort())
+
+    // AND THE PROBE FINDS THE QUARANTINED ONE, which is what a still-running build on
+    // that launcher asks. Before this it answered 'unknown' forever.
+    expect(probeLauncherGenerationAlive(quarantinedGeneration, registryPath)).toBe('killed-by-gateway-shutdown')
+    // The pooled generation answers the same way, by its own entry.
+    expect(probeLauncherGenerationAlive(pooledGeneration, registryPath)).toBe('killed-by-gateway-shutdown')
+    // Nothing was delivered live, so no edge was closed: the next boot is free to report.
+    expect(row?.child_crash_notified_at).toBeUndefined()
+  })
+
+  it('THE COMPLEMENT — a generation no shutdown killed is still unknown, not a deploy', async () => {
+    // The recovery arm must not turn "I have never heard of this" into an attribution.
+    // RED-mutation: have the entry scan return `killed-by-gateway-shutdown` whenever the
+    // row has ANY entry, rather than one naming this generation.
+    const { host, messagesSeen } = makeWedgeOnceHost()
+    const registryPath = join(mkdtempSync(join(tmpdir(), 'neutron-quarantine-ok-')), 'repl-registry.json')
+    const options = opts(host, { replRegistryPath: registryPath, hostsLiveWork: () => 3 })
+    registerSupervisedSubstrate(options)
+    const sub = createPersistentReplSubstrate(options)
+    await abandonFirstTurn(sub, messagesSeen)
+    await captureStderr(() => drain(sub.start(spec('turn-2'))))
+    await captureStderr(() => shutdownAllPersistentRepls())
+
+    expect(probeLauncherGenerationAlive('a-generation-nobody-killed', registryPath)).toBe('unknown')
+  })
+})
+
+describe('an undelivered report does not promise a recovery it cannot make', () => {
+  it('says the death is LOST when nothing durable records it, and not otherwise', async () => {
+    // The delivery phase is best-effort because a durable record sits behind it — but
+    // that is a property of the individual report. A report with no record behind it is
+    // the only one this module can truly lose, and the operator line must say so rather
+    // than repeat the reassurance that applies to its neighbours.
+    //
+    // RED-mutation: hard-code `recoveryConsequence` to the durable sentence — the
+    // undurable case then claims a recovery with nothing to recover from, which is the
+    // promise-that-does-not-apply-to-a-subset this asserts against.
+    const hung = (): Promise<void> => new Promise<void>(() => {})
+    const base = {
+      options: { substrate_instance_id: 'x', cwd: '/x', onChildCrash: hung } as PersistentReplSubstrateOptions,
+      at: 1_000,
+      attributed: true,
+      liveness: 'alive' as const,
+    }
+    const { lines } = await captureStderr(() =>
+      deliverShutdownKillReports(
+        [
+          { ...base, sessionKey: 'k1', childGeneration: 'gen-durable', durablyRecorded: true },
+          { ...base, sessionKey: 'k2', childGeneration: 'gen-lost', durablyRecorded: false },
+        ],
+        { perSinkMs: 5, phaseBudgetMs: 5_000 },
+      ),
+    )
+    const all = lines.join('')
+    expect(all).toContain('gen-dura')
+    expect(all).toContain('gen-lost')
+    // The one with a record behind it promises the recovery...
+    const durableLine = lines.find((l) => l.includes('gen-dura')) ?? ''
+    expect(durableLine).toContain('the next boot reports it from the durable record')
+    // ...and the one without says it is lost, rather than promising the same thing.
+    const lostLine = lines.find((l) => l.includes('gen-lost')) ?? ''
+    expect(lostLine).toContain('NOTHING durable records this death')
+    expect(lostLine).not.toContain('the next boot reports it from the durable record')
   })
 })
