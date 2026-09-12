@@ -31,9 +31,11 @@
  * scratch.
  *
  * AND, ON A SEPARATE GATE, IT CARRIES THE CARD'S RALPH SPEND (#519) — `ralph_round`
- * together with the cap it is measured against, `min(prior, this dispatch)`, so a
- * governed run that died MID-budget keeps its count and its plan-refresh cadence
- * instead of restarting them. The gate is the board link alone
+ * together with the cap it is measured against, `min(prior, this dispatch)` — for ANY
+ * governed prior the card names, EXHAUSTED included, since the gate is the link and not
+ * the disposition. A run that died mid-budget keeps its count and its plan-refresh
+ * cadence instead of restarting them; a run that died at its cap stays at its cap. The
+ * gate is the board link alone
  * (`item.linked_run_id`), not the commit proof: identity is what the link
  * establishes, and a budget carry is monotone — `min` can only tighten a bound,
  * never authorise work — so a task-text edit past the slug's 35th character does not
@@ -102,6 +104,7 @@ import { ensureProjectBuildWorkspace } from './build-workspace.ts'
 import { builtButNeverReviewedSeed, carriedRalphBudget } from './run-disposition.ts'
 import { detectBaseBranch } from './merge.ts'
 import { slugifyTask } from './slugify-task.ts'
+import { isTerminalPhase } from './state-machine.ts'
 import type { DispatchHoldInput, DispatchHoldPayload, DispatchHoldStore } from './dispatch-holds.ts'
 import { deriveClaimedPaths } from './claimed-paths.ts'
 import { defaultBranchHolderProbe, type BranchHolderProbe } from './fire-evidence-probes.ts'
@@ -1177,12 +1180,17 @@ export async function dispatchBoardBoundBuild(
   // emitted once, after the last await, so the line reports the decision that was
   // actually made rather than one it was heading for.
   let seedReason = 'no_prior_terminal_run'
+  // DIAGNOSTIC ONLY — never the decision. `latestTerminalBySlug` answers "is there ANY
+  // prior for this work", which is the right question for a log line and the WRONG one
+  // for "is there a prior THIS CARD is bound to": it orders by `started_at DESC LIMIT 1`
+  // over a slug that `slugifyTask` TRUNCATES at 35 characters, so a colliding card's
+  // newer run wins. See `namedPrior` below for why that mattered.
+  const anyPriorForThisWork = deps.store.latestTerminalBySlug(deps.project_slug, slug)
   // THE CARD'S RALPH BUDGET, carried separately from the commit and gated on the
   // STRONG identity alone — see `carriedRalphBudget` (run-disposition.ts). Null for
   // every dispatch that has no governed prior to inherit from, which is the
   // pre-existing shape.
   let budget: { ralph_round: number; max_ralph_rounds: number } | null = null
-  const prior = deps.store.latestTerminalBySlug(deps.project_slug, slug)
   // THE SLUG IS NOT AN IDENTITY. `slugifyTask` truncates at 35 characters, so two
   // DIFFERENT cards whose titles agree on their first 35 slugged characters share
   // a slug — and therefore share `trident/<slug>` as a branch. Without a seed the
@@ -1219,6 +1227,34 @@ export async function dispatchBoardBoundBuild(
   // intact. The saving is claimed only when the board itself says whose commit is
   // being adopted.
   const cardsPriorRun = typeof item.linked_run_id === 'string' ? item.linked_run_id.trim() : ''
+
+  // THE PRIOR IS THE RUN THE CARD NAMES, LOADED BY ITS ID (final gate, blocker 1).
+  //
+  // It used to be `latestTerminalBySlug(project, slug)` — and then the ladder compared
+  // that row's id against `linked_run_id`. So the decision was resolved through a LOSSY
+  // DERIVED key and then checked against the EXACT key it had never used. Measured
+  // consequence: card A links run A; a colliding card B (same first 35 slugged
+  // characters, hence the same slug) produces a NEWER terminal run; retrying card A
+  // compares its link against run B, takes `card_names_a_different_run`, and resets A to
+  // a fresh budget. The exact defect this change exists to prevent, reached through the
+  // lookup instead of through the comparison.
+  //
+  // THE TASK-TEXT COMPARISON DOES NOT SAVE IT, and that is the part worth remembering:
+  // it defeats the 35-character collision for SEEDING, because it runs after the row is
+  // chosen. Here the collision happens BEFORE any comparison, in the row selection — and
+  // a guard downstream of a lossy lookup cannot recover what the lookup discarded.
+  //
+  // `linked_run_id` is an exact key that `attachRun` alone writes, so it is loaded
+  // directly. What it may point at that is still unusable is enumerated in the ladder
+  // below, each with its own reason rather than one catch-all.
+  //
+  // ONE COPY OF THE USABILITY RULE. An earlier draft computed `prior` here with the same
+  // three predicates the ladder below applies, so mutating either copy was INERT — the
+  // two-copies pattern this change has been removing everywhere else, reintroduced in the
+  // fix for it. `prior` is now assigned ONLY in the ladder's final arm, so the ladder is
+  // the single author of "usable" and every arm is observable.
+  const namedPrior = cardsPriorRun === '' ? null : deps.store.get(cardsPriorRun)
+  let prior: TridentRun | null = null
   //
   // THE LADDER ASKS THE STRONG QUESTION FIRST, and the order is the fix for a
   // MEASURED defect (adversarial review, P2). It used to compare the task text
@@ -1238,13 +1274,24 @@ export async function dispatchBoardBoundBuild(
   // carry under-authorises; a wrong commit carry authorises. This repo takes the
   // under-authorising side, so the weak proxy does not get to veto the strong
   // identity for a value that cannot authorise anything.
-  if (prior === null) {
-    seedReason = 'no_prior_terminal_run'
-  } else if (cardsPriorRun === '') {
+  //
+  // EACH UNUSABLE SHAPE GETS ITS OWN REASON rather than one catch-all, because the
+  // operator action differs: a cleared link is a status-dot advance, an unknown id is a
+  // deleted row, a live run is something to wait for, and another project's run is a
+  // wiring fault.
+  if (cardsPriorRun === '') {
     seedReason = 'card_names_no_run'
-  } else if (cardsPriorRun !== prior.id) {
+  } else if (namedPrior === null) {
+    seedReason = 'card_names_an_unknown_run'
+  } else if (namedPrior.project_slug !== deps.project_slug) {
     seedReason = 'card_names_a_different_run'
+  } else if (!isTerminalPhase(namedPrior.phase)) {
+    seedReason = 'card_names_a_live_run'
   } else {
+    // THE ONLY PLACE `prior` IS SET. Past all four arms the named run exists, belongs to
+    // this project and is terminal, so it is the prior — and nothing below has to re-check
+    // any of that.
+    prior = namedPrior
     // PAST THE LINK CHECK THIS CARD *IS* THIS RUN'S CARD, so the budget travels and
     // nothing below can veto it. `deps.max_ralph_rounds` is passed as the CEILING for
     // the carried cap — never as a gate on the carried ROUND, which is the mistake an
@@ -1493,12 +1540,22 @@ export async function dispatchBoardBoundBuild(
     // grep to find out what a retry inherited, reporting a retry that never happened.
     // Reading the values off the ROW rather than off `seed`/`budget` closes the other
     // half of that: the line now states what was WRITTEN, not what was intended.
-    if (prior !== null) {
+    if (prior !== null || cardsPriorRun !== '' || anyPriorForThisWork !== null) {
       log.info('dispatch_resume_seed', {
         project: deps.project_slug,
         item: board_item_id,
         branch,
-        prior_run_id: prior.id,
+        // WHAT THE CARD NAMES, WHAT WAS USED, AND WHAT ELSE EXISTS — three different
+        // facts, three fields. Collapsing them into one `prior_run_id` is part of why the
+        // slug-collision defect read as an ordinary "different run" refusal in the logs:
+        // the line could not show that the row it refused on was not the row the card
+        // named.
+        card_names: cardsPriorRun === '' ? null : cardsPriorRun,
+        prior_run_id: prior?.id ?? null,
+        other_prior_for_slug:
+          anyPriorForThisWork !== null && anyPriorForThisWork.id !== (prior?.id ?? '')
+            ? anyPriorForThisWork.id
+            : null,
         run: run.id,
         reason: seedReason,
         checkpoint: run.inner_checkpoint,

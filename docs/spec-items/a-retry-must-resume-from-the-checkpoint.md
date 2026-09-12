@@ -24,7 +24,9 @@ ticks were wrong**; the measurements below are why. The item stays `open`.
 - [ ] A retry carries the dead run's `inner_checkpoint` and `ralph_round` forward, OR states
       plainly on the card that it will not. Silence fails; a new run row with
       `inner_checkpoint = null` and `ralph_round = 0` and no card text is the defect.
-      **PARTIAL.** The carrying branch holds only for a MID-BUDGET run (below); the
+      **PARTIAL.** The carrying branch is delivered — the BUDGET half for any governed
+      prior the card names, exhausted included, and the CHECKPOINT half for a
+      review-capable checkpoint on an unmoved tip (see "The scope" below). The
       *card-text* branch, which is what a refusal needs, is not delivered at all —
       there is no board surface to write it to.
 - [ ] Planning and review tokens are not re-spent on a resume that had a checkpoint to

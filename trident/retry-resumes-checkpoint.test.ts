@@ -1,5 +1,10 @@
 /**
- * A RE-DISPATCH OF A MID-BUDGET RUN KEEPS ITS RALPH COUNT (#519).
+ * A RE-DISPATCH KEEPS THE CARD'S RALPH COUNT (#519).
+ *
+ * The two halves are different widths, and this header said only the narrower one for
+ * several rounds: the BUDGET carry covers any governed prior the card names, EXHAUSTED
+ * included; COMPLETE CHECKPOINT RESUMPTION needs a review-capable checkpoint on an unmoved
+ * tip.
  *
  * WHAT THIS CLOSES, exactly. A governed run that died at `fix-round-N` or
  * `outer-published:*` with iterations LEFT used to be re-dispatched onto a row at
@@ -457,8 +462,8 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     // pins that the round cannot arrive by a different door.
     // RED-mutation: let an absent/mismatched link fall back to the task text alone and
     // a card that cannot show it owns the run inherits its budget position.
-    const prior = await priorRun({ ralph_round: 4 })
-    cardLink = 'some-other-run'
+    await priorRun({ ralph_round: 4 })
+    cardLink = 'some-other-run' // an id no row carries
 
     const { result, seedLine } = await dispatchRecording(async () => HEAD)
 
@@ -466,8 +471,30 @@ describe('a re-dispatch with no provable prior state starts FRESH, and says why'
     if (!result.ok) return
     expect(result.run.ralph_round).toBe(0)
     expect(result.run.inner_checkpoint).toBeNull()
-    expect(seedLine).toContain('reason=card_names_a_different_run')
-    expect(seedLine).toContain(`prior_run_id=${prior.id}`)
+    // Each unusable shape has its OWN reason: an id no row carries is not the same
+    // operator situation as a run belonging to another project.
+    expect(seedLine).toContain('reason=card_names_an_unknown_run')
+    expect(seedLine).toContain('card_names=some-other-run')
+    expect(seedLine).toContain('prior_run_id=null')
+
+    // THE COMPLEMENT: a card naming a run that EXISTS but is genuinely not this
+    // project's still refuses, under its own reason.
+    cardLink = null
+    const OTHER = 'other project card — rebuild the importer'
+    const elsewhere = await store.create({
+      slug: slugifyTask(OTHER), project_slug: 'some-other-project', repo_path: tmp,
+      task: OTHER, ralph: true, max_ralph_rounds: 20,
+    })
+    await store.update(elsewhere.id, { phase: 'failed', ralph_round: 9 })
+    await priorRun({ task: OTHER, ralph_round: 4 })
+    cardLink = elsewhere.id
+    const crossProject = await dispatchRecording(async () => HEAD, { task: OTHER })
+    expect(crossProject.result.ok).toBe(true)
+    if (!crossProject.result.ok) return
+    expect(crossProject.result.run.ralph_round).toBe(0)
+    expect(crossProject.seedLine).toContain('reason=card_names_a_different_run')
+    expect(crossProject.seedLine).toContain('prior_run_id=null')
+    expect(crossProject.seedLine).toContain(`card_names=${elsewhere.id}`)
 
     // POSITIVE CONTROL — a SEPARATE card (its own slug, so its own branch and its own
     // prior row) with the same prior shape and the same tip, whose link is present: it
@@ -732,14 +759,17 @@ describe('AN EDGE-VALUE ROUND IS NOT AN UNSET ROUND — the counter, as a peer o
       cardLink = null
       const task = `in-memory corrupt ${String(bad)} — rebuild the importer`
       const prior = await priorRun({ task, ralph_round: 4 })
+      // OVERRIDE `get`, NOT `latestTerminalBySlug` — dispatch resolves the prior by the
+      // card's exact `linked_run_id` now, so the slug lookup is diagnostic only and
+      // injecting there would silently stop reaching the decision. A fixture aimed at the
+      // seam the code USED to use is the same class of stale as a comment.
       const corrupting = Object.create(store) as TridentRunStore
-      const real = store.latestTerminalBySlug.bind(store)
-      ;(corrupting as unknown as Record<string, unknown>)['latestTerminalBySlug'] = (
-        project: string,
-        slug: string,
-      ) => {
-        const row = real(project, slug)
-        return row === null ? null : { ...row, ralph_round: bad as unknown as number }
+      const realGet = store.get.bind(store)
+      ;(corrupting as unknown as Record<string, unknown>)['get'] = (id: string) => {
+        const row = realGet(id)
+        return row === null || id !== prior.id
+          ? row
+          : { ...row, ralph_round: bad as unknown as number }
       }
 
       // `log.warn` routes to console.WARN, not console.log — the refusal is a warning,
@@ -1205,6 +1235,95 @@ describe('LOCAL merge-mode over a REAL git repo, with the REAL branch-tip reader
     expect(seedLine).toContain('reason=branch_tip_unreadable_or_absent')
     expect(result.run.ralph_round).toBe(4) // identity is the link, not the branch
     expect(ghCalls).toBe('')
+  })
+})
+
+describe('THE PRIOR IS THE RUN THE CARD NAMES, not the newest row sharing its slug', () => {
+  /**
+   * THE BOUNDARY EVERY FIXTURE IN THIS FILE DELIBERATELY AVOIDED. Each of them ensures
+   * DISTINCT slugs — there is even a test asserting that they are distinct — so the
+   * 35-character truncation this lane has cited repeatedly was the one thing nothing
+   * exercised.
+   *
+   * It matters because the collision happens BEFORE any comparison. `latestTerminalBySlug`
+   * orders by `started_at DESC LIMIT 1`, so a colliding card's NEWER terminal run was the
+   * row selected, and the ladder then compared THAT row's id against `linked_run_id` and
+   * took `card_names_a_different_run` — resetting the budget of a card whose own prior was
+   * sitting in the table. The task-text comparison does not save it: that runs after the
+   * row is chosen, and a guard downstream of a lossy lookup cannot recover what the lookup
+   * discarded.
+   */
+  test('a colliding NEWER run from another card does not cost this card its budget', async () => {
+    // RED-mutation: resolve the prior with `latestTerminalBySlug(project, slug)` again —
+    // the budget comes back 0 with `reason=card_names_a_different_run`, which is the
+    // measured defect.
+    const PREFIX = 'throughput blocker trident dispatch'
+    const CARD_A = `${PREFIX} keeps its own budget`
+    const CARD_B = `${PREFIX} collides on the truncated slug`
+    // Precondition, asserted rather than assumed: these really do collide.
+    expect(slugifyTask(CARD_B)).toBe(slugifyTask(CARD_A))
+    expect(CARD_B).not.toBe(CARD_A)
+
+    // Card A's own prior, governed and mid-budget.
+    const priorA = await priorRun({ task: CARD_A, ralph_round: 7, max_ralph_rounds: 20 })
+    // Card B's prior lands LATER, so it is what the slug lookup returns.
+    const priorB = await store.create({
+      slug: slugifyTask(CARD_B), project_slug: 'proj-1', repo_path: tmp, task: CARD_B,
+      branch: BRANCH, ralph: true, max_ralph_rounds: 20,
+    })
+    await store.update(priorB.id, {
+      phase: 'failed', inner_checkpoint: 'fix-round-9', inner_checkpoint_head: HEAD,
+      inner_verdict: 'REVIEW_NOT_RUN', base_sha: BASE, ralph_round: 2,
+    })
+    expect(store.latestTerminalBySlug('proj-1', slugifyTask(CARD_A))!.id).toBe(priorB.id)
+
+    // Card A retries, naming ITS OWN run.
+    cardLink = priorA.id
+    const { result, seedLine } = await dispatchRecording(async () => HEAD, { task: CARD_A })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    // A's budget, not B's, and not a reset.
+    expect(result.run.ralph_round).toBe(7)
+    expect(seedLine).toContain(`prior_run_id=${priorA.id}`)
+    expect(seedLine).toContain('reason=resumed')
+    // …and the line SAYS another prior exists for this slug, which is the diagnostic the
+    // old single-field log could not express.
+    expect(seedLine).toContain(`other_prior_for_slug=${priorB.id}`)
+    expect(seedLine).not.toContain('card_names_a_different_run')
+  })
+
+  test('and a card naming a run that is still LIVE inherits nothing, under its own reason', async () => {
+    // The other thing an exact-key lookup must still refuse: the named run has not
+    // finished, so its budget is not final and nothing may be inherited from it.
+    // RED-mutation: drop the `isTerminalPhase(namedPrior.phase)` arm and a live run's
+    // counter is adopted mid-flight.
+    // THE LIVE RUN CARRIES A DIFFERENT SLUG, and that is the only way this arm is
+    // reachable: `createIfClaimsAvailable`'s live-holder check matches on project+slug as
+    // well as branch, so a live run under the DISPATCH's own slug is refused as
+    // `branch_live` long before the prior is consulted. A card that was RE-TITLED while
+    // its run was in flight is exactly this shape — the link still names the old run, whose
+    // slug came from the old text.
+    const task = 'live prior card — rebuild the importer'
+    const live = await store.create({
+      slug: slugifyTask('an older title this card used to have'),
+      project_slug: 'proj-1', repo_path: tmp, task,
+      branch: 'trident/live-prior-elsewhere', ralph: true, max_ralph_rounds: 20,
+    })
+    await store.update(live.id, { phase: 'ralph-task', ralph_round: 6 })
+    cardLink = live.id
+
+    const { result, seedLine } = await dispatchRecording(async () => HEAD, { task })
+
+    expect(result.ok).toBe(true)
+    if (!result.ok) return
+    expect(result.run.ralph_round).toBe(0)
+    expect(seedLine).toContain('reason=card_names_a_live_run')
+    // `prior_run_id` means "the row the decision USED" — nothing was, so it is null. This
+    // is what makes the terminal check observable: without it, dropping the check left the
+    // field pointing at a live run and no test noticed.
+    expect(seedLine).toContain('prior_run_id=null')
+    expect(seedLine).toContain(`card_names=${live.id}`)
   })
 })
 

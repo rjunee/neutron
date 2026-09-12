@@ -38,7 +38,15 @@ without over- or under-claiming — and that fourth correction had to be made in
 places, because the under-claim had been written into the as-built, the spec item and a
 `run-disposition.ts` docblock. The sweep that caught the first two was over COMMENTS in
 touched files; the record and the spec item are not comments, and were not in it. A scope
-statement lives wherever it was written, not only in code. The history below is recorded because the wrong versions
+statement lives wherever it was written, not only in code.
+
+AND A FIFTH ROUND FOUND THREE MORE, because that sweep had been for the phrase in the
+places it had been pointed at rather than across the whole document. Grepping every
+document for the phrase itself turned up the spec item's own acceptance note (one line
+above the paragraph corrected the round before), `board-dispatch.ts`'s header — which a
+previous round had read and passed — and the TEST FILE's own title. The lesson generalises
+past scope statements: grep the phrase, not the line, and re-grep the documents already
+believed clean. The history below is recorded because the wrong versions
 are the useful part.
 
 *Round 1 — the guard that inverted the change.* The carry required `round < max`
@@ -222,6 +230,34 @@ is therefore negatives and unsafe magnitudes; those are covered through the real
 database, and the three sqlite cannot store are covered through the real dispatch
 chokepoint with the row supplied by an overridden `latestTerminalBySlug`. Layered, not
 duplicated, and not pretending the schema is weaker than it is.
+
+**A GUARD DOWNSTREAM OF A LOSSY LOOKUP CANNOT RECOVER WHAT THE LOOKUP DISCARDED.** The
+ladder resolved the prior with `latestTerminalBySlug(project, slug)` — `ORDER BY
+started_at DESC LIMIT 1` over a slug `slugifyTask` TRUNCATES at 35 characters — and then
+compared that row's id against `linked_run_id`. So the decision was reached through a
+LOSSY DERIVED key and checked against the EXACT key it had never used. Measured: card A
+links run A; a colliding card B produces a NEWER terminal run under the same slug;
+retrying card A compares its link against run B, takes `card_names_a_different_run`, and
+resets A to a fresh budget. The defect this change exists to prevent, reached through the
+lookup rather than through the comparison.
+
+The task-text comparison does NOT save it, and that distinction is the transferable part:
+that comparison defeats the 35-character collision for SEEDING because it runs after the
+row is chosen. Here the collision happens BEFORE any comparison, in the selection. The
+card already names the run — `linked_run_id` is an exact key that `attachRun` alone writes
+— so the prior is now loaded by it, and `latestTerminalBySlug` is kept for what it is
+actually shaped for: the DIAGNOSTIC question "is there any prior for this work at all",
+reported as its own log field so a collision is visible instead of masquerading as a
+different-card refusal.
+
+AND THE FIXTURES HAD BEEN AVOIDING IT ON PURPOSE. Every test in the file ensures DISTINCT
+slugs — there is a test asserting that they are distinct — so the one boundary this lane
+had cited repeatedly was the one nothing exercised. Citing a hazard is not covering it.
+
+THE FIRST FIX REINTRODUCED THE TWO-COPIES PATTERN INSIDE THE FIX FOR IT: `prior` was
+computed with the same three predicates the ladder applies, so mutating either copy was
+inert and two mutations passed. The ladder is now the single author of "usable" and
+assigns `prior` in its final arm.
 
 **THE RULE I APPLY TO FIX A CLAIM IS A CLAIM TOO, AND IT NEEDS APPLYING EVERYWHERE THE
 OLD RULE REACHED — INCLUDING THE NEIGHBOURING ARM OF THE SAME `if`.** Five times on this
@@ -474,3 +510,11 @@ are three test files, and no production reader parses the string at all — `pha
 'failed'` is what production routes on, identically on all three arms. Words that assert
 completeness or provenance — "is a property of", "cannot", "always", "spent", "inherited"
 — each need a line behind them or they get narrowed, and two of them here did not.
+
+**KNOWING A FACT AND HAVING IT AVAILABLE AT THE MOMENT IT BEARS ARE DIFFERENT THINGS.**
+The sharpest instance in this lane: the arm-3 orchestrator fixture was BUILT on "a null
+checkpoint means not-recorded, not did-not-happen" — that is the whole reason a terminal
+result can land with no checkpoint behind it, and the test depended on it — while code
+asserting the opposite ("this run built nothing") sat two lines away in the same function
+and survived another full round. The fact was not missing; it was not in hand when the
+neighbouring arm was read.
