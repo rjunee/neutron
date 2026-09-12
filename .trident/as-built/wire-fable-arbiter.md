@@ -1,6 +1,7 @@
 ## 2026-09-12 — the Fable arbiter gets a production call site, at the one merge hold it can actually see (#541)
 
-`buildFableArbiter` (`trident/arbiter.ts:173`) was 297 lines of built, unit-tested,
+`buildFableArbiter` (`trident/arbiter.ts:173` **as this branch found it** — the file has
+since been rewritten, and it is `:195` now) was 297 lines of built, unit-tested,
 re-exported (`trident/index.ts:137`) gate that **nothing constructed**. A whole-tree
 search for call sites outside `trident/arbiter.test.ts` returned the definition and
 the re-export and nothing else. `SPEC.md` § Decisions Log 2026-09-11 lists the arbiter
@@ -17,11 +18,13 @@ written for — *"resolver fails → arbiter decides → only then chat"*. The s
 - `arbitrateConflict()` in `merge.ts` asks ONE question with a two-option set
   (`CONFLICT_ARBITRATION_OPTIONS`: `retry-resolution` | `stop`) and never throws.
 - A `retry-resolution` decision re-enters the rebase loop WITHOUT advancing it, so the
-  same conflicted commit goes back to the resolver carrying the arbiter's reasoning as
-  the new `guidance` field on `MergeConflictResolver`. `MAX_CONFLICT_ROUNDS` still
-  bounds the loop; the arbiter's own per-run cap bounds how often it can ask.
-- Guidance is cleared the moment a round resolves: the next commit's conflict is a
-  different pair of sides, and stale guidance would describe the wrong one.
+  same conflicted commit goes back to the resolver — **carrying NOTHING the arbiter wrote**.
+  There is no `guidance` field: an earlier draft threaded the arbiter's reasoning into the
+  resolver's prompt, and that was removed as a privilege-escalation path (the resolver holds
+  Edit/Write/Bash and a GitHub credential, so an untrusted judge's prose would be steering a
+  more privileged agent). What the decision buys is the ROUND, not a better brief for it —
+  see "The channel out of the arbiter, closed rather than filtered" below. `MAX_CONFLICT_ROUNDS`
+  still bounds the loop; the arbiter's own per-run cap bounds how often it can ask.
 - **Every other outcome — `unavailable`, `owner-only`, `stop`, an option that was never
   offered, an arbiter that throws, no arbiter wired — falls through to the identical
   `rebase --abort` + `TridentMergeConflictEscalation(resolver question)` the owner has
@@ -29,7 +32,7 @@ written for — *"resolver fails → arbiter decides → only then chat"*. The s
   cannot guess, and cannot change the text the owner reads.
 
 Composition, following `resolve_conflict`'s path exactly: `open/composer.ts` builds it
-on `makeEphemeralSubstrate('cc-trident-arbiter')` per `arbiter.ts:155`, gated on the
+on `makeEphemeralSubstrate('cc-trident-arbiter')` per `arbiter.ts:177`, gated on the
 same live-credential predicate as the resolver; `gateway/composition/input/misc-input.ts`
 DECLARES the `arbitrate` key (an undeclared key is silently dropped — the
 `resolve_phase_models` failure mode); `gateway/composition/build-core-modules.ts`
@@ -45,7 +48,7 @@ choose?
 - **Base-drift holds** (`merge.ts` `baseDriftHoldMessage`, both the assessable and the
   unassessable branch, and the three throws that use it). The only alternative to
   holding is landing a combination no reviewer saw. That is a review waiver, and
-  `arbiter.ts:66-91` keeps `approve`/`merge`/`skip-review`/`bypass-review`/`self-approve`
+  `arbiter.ts:78-84` keeps `approve`/`merge`/`skip-review`/`bypass-review`/`self-approve`
   out of any set an arbiter selects from *structurally*. Renaming the same authority
   would defeat the boundary, not satisfy it.
 - **The dirty merge-worktree refusal** (`provisionRunWorktree`). The only alternative is
@@ -54,13 +57,13 @@ choose?
   as the intended trade that keeps failing until a human looks.
 - **PR-mode: GitHub would not name the base** / **the head lives in a fork.** The
   missing fact is in a GitHub API response, not in the tree. The arbiter's prompt
-  confines every path it may read to `input.repo_path` (`arbiter.ts:134`), so it would
+  confines every path it may read to `input.repo_path` (`arbiter.ts:240`), so it would
   be adjudicating something it cannot see — worse than not being asked. (As of round 8 it
   inspects nothing at all: it sees only what the caller folds into the evidence.)
 
 Also left: `rebaseOntoObservedBase`'s replay-path conflict in `orchestrator.ts`. It is a
 genuine candidate (its tree holds the markers too) but a different seam in a different
-file; one seam per change. And `on_infra_retry` (`orchestrator.ts:387`), which is the
+file; one seam per change. And `on_infra_retry` (`orchestrator.ts:408`), which is the
 other never-passed production option — issue #535 owns it, and this change does not
 silently expand into it.
 
@@ -782,6 +785,65 @@ construction* — it took a record with too *many* fields, whose `meta[2]` is a 
 make only that clause load-bearing. **A guard that is only ever exercised through a stronger
 neighbouring guard is not tested, and mutation is the only thing that says so.**
 
+### ROUND 16 — `prompt_bytes` claimed a delivery that never happened
+
+**The seam measured the prompt it WOULD send, then reported that length on paths where the
+substrate was never started.** `buildFableArbiter` has three returns above the `AgentSpec`:
+an unusable option set, a spent per-run invocation cap, and an owner-only question. On each,
+zero prompts reach the model — yet `arbitrateConflict` classified the result as `decided`
+with the precomputed size, and the arbitration line logged it. `SPEC.md` calls that field
+"the byte length of the exact prompt string the arbiter received", so the line asserted a
+delivery that did not occur.
+
+**Same structure as the cap removed in round 14, which is why the same reasoning applies.**
+That cap was deleted because the guarantee is about the *seam* rather than the mechanism, and
+M70 pinned it by inserting a *different* mechanism in the same place. `prompt_bytes` is a claim
+about what reached the model, and the early return is a path where **the honest value is absent
+rather than computed**.
+
+**ABSENCE, NOT ZERO.** A `0` would read as a measurement of an empty prompt; the fact is that
+there was no prompt to measure. Those are different, and collapsing them is the round-12
+defect expressed in a single field — a name promising more than it computed. The key is
+therefore **omitted from the log line**, and the type is `number | null` rather than `number`.
+
+**What the seam can actually establish, stated rather than assumed.** It cannot observe
+substrate starts — that happens inside the arbiter. The one sound inference available is that
+a `decision` is reachable only after the substrate produced terminal marker text, which
+requires a turn, which requires the prompt. So `prompt_bytes` rides a `decision` and nothing
+else: `owner-only` is returned by a question check before any spec exists, and `unavailable`
+covers both a turn that failed *after* being sent and one that never started — the seam cannot
+tell which, so it says nothing rather than guessing. **Unknown is not a number.**
+
+**The route in is real, which matters for the fixture.** The question is built from a fixed
+template with the branch name folded into it, so an ordinary branch — `feat-budget-flush` —
+puts the word `budget` into the text, and that is one of the money patterns
+`isOwnerOnlyQuestion` screens for. No contrived input was needed to reach the path.
+
+**Two mutations, both red**, and the second is the one that matters:
+
+| # | mutation | result |
+|---|---|---|
+| M80 | report the precomputed size regardless of outcome | **red** |
+| M81 | report `0` instead of omitting the field | **red** |
+
+M81 is the detector for the distinction itself: a test that merely asserted "the field is not
+wrong" would pass for `prompt_bytes=0`. The assertion is that the key is **absent**, with a
+non-vacuity check that the line still carries its other size fields — otherwise deleting the
+field entirely would satisfy it.
+
+**Also corrected this round, and it is the same defect in prose.** The record's "What is
+wired" section — a CURRENT-STATE heading — still said a granted retry carries the arbiter's
+reasoning as a `guidance` field on `MergeConflictResolver`, and a second bullet described that
+field's lifecycle. No such field exists: the channel was removed as a privilege-escalation path
+and the record says so four hundred lines later. **A later paragraph does not fix a
+current-state heading** — a reader who stops at "What is wired" has been told something false,
+and the correction has to live where the claim is. And while checking it I swept every
+`file:line` citation in the record against the tree: four had drifted when rounds 13-15 deleted
+~400 lines (`arbiter.ts:155`→`:177`, `:66-91`→`:78-84`, `:134`→`:240`,
+`orchestrator.ts:387`→`:408`), and the one genuinely historical citation is now marked as
+"as this branch found it". **A citation is a claim, and deleting code invalidates claims
+about line numbers exactly as it invalidates claims about behaviour.**
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -1022,7 +1084,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Seventy-nine mutations reverted one at a time, each proved a test red. Eight survived a
+Eighty-one mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

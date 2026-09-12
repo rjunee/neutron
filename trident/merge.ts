@@ -2176,7 +2176,25 @@ async function sideHistory(
  */
 export type ArbiterNotAskedWhy = 'over-budget' | 'evidence-unreadable'
 type ArbitrationAttempt =
-  | { kind: 'decided'; outcome: ArbitrationOutcome; prompt_bytes: number }
+  | {
+      kind: 'decided'
+      outcome: ArbitrationOutcome
+      /**
+       * The bytes that DEMONSTRABLY reached the model, or `null` when this seam cannot
+       * establish that they did (#541 round 16).
+       *
+       * NOT the prompt we would have sent — `arbitrate` has three returns that precede any
+       * `AgentSpec` existing: unusable options, the per-run invocation cap, and an
+       * owner-only question. On those paths the substrate is never started, so reporting
+       * the precomputed length claims a turn that did not happen.
+       *
+       * `null` rather than `0`, because ZERO BYTES AND NO PROMPT ARE DIFFERENT FACTS and a
+       * metric that spells them the same way is the overclaim this lane keeps deleting. The
+       * field is OMITTED from the log line when it is null, so the absence is visible rather
+       * than rendered as a number that reads like a measurement.
+       */
+      prompt_bytes: number | null
+    }
   | { kind: 'not-asked'; why: ArbiterNotAskedWhy }
 
 async function arbitrateConflict(
@@ -2290,10 +2308,16 @@ async function arbitrateConflict(
       return {
         kind: 'decided',
         outcome: { kind: 'unavailable', reason: 'the arbiter returned a malformed outcome' },
-        prompt_bytes,
+        prompt_bytes: null,
       }
     }
-    return { kind: 'decided', outcome, prompt_bytes }
+    // ONLY A `decision` PROVES THE PROMPT WAS DELIVERED, and that is an inference this seam
+    // can actually make: a decision is reachable only after the substrate produced terminal
+    // marker text, which requires a turn, which requires the prompt. `owner-only` is returned
+    // by a question check BEFORE any spec is built, and `unavailable` covers both a turn that
+    // failed after being sent and one that never started — the seam cannot see which. Anything
+    // this function cannot establish is reported as absent, never as a number.
+    return { kind: 'decided', outcome, prompt_bytes: outcome.kind === 'decision' ? prompt_bytes : null }
   } catch (error) {
     // A THROWING arbiter is an unavailable arbiter. `buildFableArbiter` already
     // degrades internally, but this seam must hold for any injected arbiter too:
@@ -2305,7 +2329,7 @@ async function arbitrateConflict(
         kind: 'unavailable',
         reason: error instanceof Error ? error.message : 'the arbiter threw',
       },
-      prompt_bytes,
+      prompt_bytes: null,
     }
   }
 }
@@ -2417,7 +2441,7 @@ async function rebaseBranchOntoBase(
   // this mechanism earns its cost is how often a granted retry actually RESOLVED.
   let awaitingRetryOutcome = false
   // The size of the conflict the granted retry was about, held until that round reports.
-  let retrySize: Record<string, number | boolean> = {}
+  let retrySize: Record<string, number | string> = {}
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
   let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
   let rounds = 0
@@ -2592,9 +2616,14 @@ async function rebaseBranchOntoBase(
       // because there is no truncation: the two states are "the judge saw all of this" and
       // "the judge was not asked", and the second is counted by
       // `merge_conflict_arbiter_oversize` above.
-      const sizeFields = {
+      // THE FIELD IS OMITTED WHEN UNKNOWN, not zeroed (#541 round 16). A `0` here would be
+      // read as a measured size — and on the owner-only path the substrate was never started,
+      // so there is no size to report at all. An absent key says that; a zero lies about it.
+      const sizeFields: Record<string, number | string> = {
         conflict_files: conflicted.length,
-        prompt_bytes: attempt?.kind === 'decided' ? attempt.prompt_bytes : 0,
+        ...(attempt?.kind === 'decided' && attempt.prompt_bytes !== null
+          ? { prompt_bytes: attempt.prompt_bytes }
+          : {}),
       }
       if (attempt?.kind === 'decided') {
         arbitrationsThisRebase++

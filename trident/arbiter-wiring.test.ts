@@ -1767,6 +1767,70 @@ describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "s
     expect(arbitration).not.toContain('genuinely ambiguous')
   })
 
+  test('AN OWNER-ONLY VERDICT STARTS NO SUBSTRATE, AND REPORTS NO PROMPT SIZE', async () => {
+    // `buildFableArbiter` returns for an owner-only question BEFORE any `AgentSpec` exists —
+    // the check sits above the spec, alongside the unusable-options and invocation-cap
+    // returns. The seam had already computed the prompt it WOULD send, and logged that length
+    // as `prompt_bytes` on a turn where the substrate received nothing at all. `SPEC.md` calls
+    // that field "the byte length of the exact prompt string the arbiter received", so the
+    // line asserted a delivery that never happened.
+    //
+    // THE FIX IS ABSENCE, NOT ZERO. Zero bytes and no prompt are different facts, and a metric
+    // that spells them the same way is the overclaim this lane keeps deleting — the round-12
+    // defect in one field. The key is omitted entirely, so a reader sees "not reported" rather
+    // than a number that looks measured.
+    //
+    // AND THE ROUTE IN IS REAL, not a contrived question. The seam builds its question from a
+    // fixed template with the BRANCH NAME folded into it, so an ordinary branch name can make
+    // that question match `isOwnerOnlyQuestion`: `feat-budget-flush` puts the word `budget`
+    // — one of the money patterns — into the text, bounded by hyphens, which `\b` matches.
+    // Nothing here is contrived; this is a branch someone would really push.
+    const run = localRun('feat-budget-flush')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('flush.ts')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('diff\n-x\n+y\n')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    // THE REAL ARBITER over a substrate that records every start, so "no prompt was sent" is
+    // observed rather than assumed from the outcome kind.
+    const { arbitrate, specs } = capturingArbiter(CONFLICT_ARBITER_RETRY_OPTION)
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate,
+    })
+    const lines = await captureLogs(async () => {
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    // 1. NOTHING WAS SENT. The substrate was never started, so no prompt existed.
+    expect(specs.length, 'an owner-only question must not start a substrate').toBe(0)
+    // 2. The tier still records the consultation and its verdict — the denominator is real.
+    const line = lines.find((l) => l.includes('merge_conflict_arbitration')) ?? ''
+    expect(line, 'the arbitration is still recorded').not.toBe('')
+    expect(line).toContain('verdict=owner-only')
+    // 3. AND IT CLAIMS NO PROMPT SIZE. Absent, not zero: asserting `prompt_bytes=0` would pass
+    //    for an implementation that reported a measurement of nothing.
+    expect(line, 'no prompt reached the model, so no size may be reported').not.toContain('prompt_bytes')
+    // 4. Not vacuous — the field IS emitted when a decision proves a turn happened. Without
+    //    this, deleting the field entirely would satisfy assertion 3.
+    expect(
+      (lines.find((l) => l.includes('merge_conflict_arbitration')) ?? '').includes('conflict_files='),
+      'the other size fields still ride the line',
+    ).toBe(true)
+  })
+
   test('no arbitration is logged when the arbiter is never consulted', async () => {
     // The positive control for the three above: these lines appear because an
     // arbitration happened, not because the merge path emits them regardless.
