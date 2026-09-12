@@ -526,13 +526,24 @@ export const MAX_RESTORE_ATTEMPTS = 3
 /**
  * The single named reason the sweep does not delete anything (#635). One constant, one
  * non-call-site, so "why is nothing being reaped" has exactly one answer to find.
+ *
+ * IT SAYS CANDIDATE, NOT REAPABLE, AND THAT IS THE POINT (#547 round 18). It used to open
+ * "every gate passed and this ref IS reapable", which is the overclaim this change spent
+ * sixteen rounds eliminating from its documents — surviving in the one place the documents
+ * never covered: THE STRING AN OPERATOR IS HANDED AT RUNTIME. The sweep evaluates gates 1-10.
+ * Gates 11-14 run only at deletion time and any of them can still refuse — a salvage the host
+ * rejects makes a ref a permanent candidate that is never deletable. An operator told a ref
+ * "IS reapable", then watching it survive, concludes the reaper is broken; the reaper is right
+ * and the sentence was wrong. A reason string is not commentary, it is the product.
  */
 export const DEFERRED_PENDING_CLAIMANT_GUARD =
-  'deferred-pending-claimant-guard: every gate passed and this ref IS reapable, but the reap ' +
-  'performs no deletions until #635 lands (a run whose HEAD does not resolve must refuse to ' +
-  'commit). Nothing deletes these refs today, so shipping the write before its guard would ' +
-  'introduce a destructive operation ahead of the only check that can settle its failure mode ' +
-  'without a race.'
+  'deferred-pending-claimant-guard: this ref is a CANDIDATE — it passed gates 1-10, which is an ' +
+  'upper bound rather than a decision: gates 11-14 (the salvage, the re-measured claim probe, the ' +
+  'compare-and-swap and the repair) are evaluated only at deletion time and any of them can still ' +
+  'refuse. The reap performs no deletions at all until #635 lands (a run whose HEAD does not ' +
+  'resolve must refuse to commit). Nothing deletes these refs today, so shipping the write before ' +
+  'its guard would introduce a destructive operation ahead of the only check that can settle its ' +
+  'failure mode without a race.'
 
 /**
  * REF RETENTION IS DELIBERATELY ZERO, unlike the 24 h a worktree gets. A worktree can
@@ -1448,7 +1459,9 @@ async function reapBranchRefs(
     // ───────────────────────────────────────────────────────────────────────────────
     // THE DELETION IS DEFERRED TO #635, AND THIS IS THE ONE PLACE THAT SAYS SO.
     //
-    // Every gate above has passed, so this ref IS reapable and is reported as such. The
+    // Gates 1-10 above have passed, so this ref is a CANDIDATE and is reported as one — not
+    // "reapable", because gates 11-14 are evaluated only at deletion time and any of them can
+    // still refuse (see the field's own note, and the deferral reason pushed just below). The
     // destructive half lives in `deleteReapableRef` and the sweep does not call it — one
     // non-call, named here, and #635 turns this branch into that call.
     //

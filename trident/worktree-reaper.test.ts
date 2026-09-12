@@ -2663,6 +2663,72 @@ describe('branch-ref reap — the deletion is DEFERRED to #635 (#547)', () => {
     expect(report.refs_candidates.length).toBeGreaterThan(report.refs_deleted.length)
   }, 60_000)
 
+  test('the REASON AN OPERATOR READS says candidate, not reapable', async () => {
+    // THE ASSERTION THAT WAS MISSING (#547 round 18). The rename tests below inspect the field
+    // NAME and the source text; none of them ever read the emitted VALUE. That is exactly how a
+    // user-visible string drifts while the suite stays green: the field was renamed
+    // `refs_reapable` -> `refs_candidates` and every document was corrected, while the reason
+    // handed to an operator still opened "every gate passed and this ref IS reapable".
+    //
+    // So this reads the string out of a REAL sweep's report, not out of the constant, and pins
+    // both directions: the claim it must make, and the claims it must not.
+    const { root, repo } = await makeRepo()
+    const branch = 'trident/operator-facing-reason'
+    await seedRef(repo, branch, 'operatorreason')
+
+    const report = await sweepTridentWorktrees({
+      store: stubStore(repo, [], [owner(branch, { phase: 'failed' })]),
+      run_host: spawnCapture,
+      proc_root: makeProc(root),
+    })
+
+    const emitted = report.refs_kept.filter((k) => k.ref === ref(branch)).map((k) => k.reason)
+    expect(emitted).toHaveLength(1)
+    const reason = emitted[0] ?? ''
+    // It came from the sweep, not from the test importing a constant.
+    expect(reason).toBe(DEFERRED_PENDING_CLAIMANT_GUARD)
+
+    // WHAT IT MUST SAY: candidate, the gate range, and that the range is an upper bound.
+    expect(reason).toContain('CANDIDATE')
+    expect(reason).toContain('gates 1-10')
+    expect(reason).toContain('upper bound')
+    expect(reason).toContain('#635')
+
+    // WHAT IT MUST NOT SAY. Each of these is a claim the sweep has not established, and the
+    // first two are the exact words that shipped.
+    for (const overclaim of [
+      'IS reapable',
+      'every gate passed',
+      'all gates passed',
+      'all fourteen',
+      'will be deleted',
+      'would be deleted',
+    ]) {
+      expect(reason.toLowerCase(), overclaim).not.toContain(overclaim.toLowerCase())
+    }
+  }, 60_000)
+
+  test('NO emitted reason in the module claims a ref is reapable or will be deleted', () => {
+    // The generalisation, because fixing one string is not a guard. Every `reason:` literal in
+    // the module is scanned for the overclaiming phrases — a new refusal reason that says "will
+    // be deleted" reds here even though no existing test mentions it.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    // The emitted strings only: reason literals plus the deferral constant's own text. Comments
+    // are deliberately out of scope — two of them quote the retired wording to explain it.
+    const reasonLines = source
+      .split('\n')
+      .filter((line) => /reason:|^  '(deferred|deferred-pending)/.test(line) || /^\s+'[a-z-]+: /.test(line))
+      .filter((line) => !/^\s*(\*|\/\/)/.test(line))
+    expect(reasonLines.length).toBeGreaterThan(20)
+    for (const line of reasonLines) {
+      for (const overclaim of ['IS reapable', 'every gate passed', 'all gates passed']) {
+        expect(line, line.trim()).not.toContain(overclaim)
+      }
+    }
+    // POSITIVE CONTROL on the scan: the phrase is detectable by this method when present.
+    expect(["  reason: 'x IS reapable'"].some((l) => l.includes('IS reapable'))).toBe(true)
+  })
+
   test('the field and the log line both say CANDIDATE, not reapable', () => {
     // The rename is the fix, so it is pinned. A field called `refs_reapable` promised that
     // gates 11-14 had been evaluated; nothing in a dry sweep can evaluate them, and the name

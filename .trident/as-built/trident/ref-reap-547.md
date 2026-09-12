@@ -554,6 +554,47 @@ inseparable from a liveness snapshot. A snapshot bound to the candidate is still
 narrows the window between measurement and delete rather than closing it, and it would have encoded
 the wrong model, that a candidate is a promise about the world rather than a record of a check.
 
+### THE LAST PLACE AN OVERCLAIM HIDES IS THE STRING THE OPERATOR IS HANDED
+
+Four rounds swept documents for the claim that a candidate "would be deleted" — the field name, the
+module header, this record, the #635 comment, the spec item, SPEC-adjacent prose. The overclaim
+survived all four in the one place none of them looked: `DEFERRED_PENDING_CLAIMANT_GUARD`, the reason
+string pushed into `refs_kept` for every deferred ref, which opened **"every gate passed and this ref
+IS reapable"**. The sweep evaluates gates 1-10. A salvage the host rejects makes a ref a permanent
+candidate that is never deletable — the record said so explicitly while the runtime string said the
+opposite.
+
+WHY THIS IS THE WORST INSTANCE RATHER THAN THE SMALLEST. Every earlier site was read by someone
+choosing to read it. This one is *delivered*: an operator asking "why is nothing being reaped" is
+handed it, unprompted, and an operator told a ref IS reapable and then watching it survive concludes
+THE REAPER IS BROKEN. The reaper is correct; the sentence is wrong; the operator's next action is to
+debug working code. **A reason string is not commentary about the product, it is the product.**
+
+AND THE TESTS COULD NOT HAVE CAUGHT IT, BY CONSTRUCTION. The rename had thorough coverage: the field
+name is asserted, the source text is asserted, the absence of `refs_reapable` is asserted with a
+positive control. Every one of those inspects a NAME or a SOURCE SUBSTRING. None ever read the emitted
+VALUE. That is the precise shape by which a user-visible string drifts while a suite stays green — the
+tests were about the identifier, and the defect was in the sentence. The new assertion takes the reason
+out of a real sweep's report and pins both directions: what it must say (candidate, the gate range, that
+the range is an upper bound) and what it must never (the two phrases that shipped, plus "will/would be
+deleted" and "all fourteen"). A second test generalises it over every `reason:` literal in the module,
+so a NEW refusal reason that overclaims reds without anyone adding a case for it — proven by mutating
+an unrelated reason (`deletion limit reached`) to carry the phrase.
+
+THE INVENTORY, BECAUSE "I GREPPED" IS NOT A MEASUREMENT. 77 sites across the four code files this
+branch touches matched "emits a reason or logs an event"; 71 of them actually build a string (the other
+6 are `failure_reason` field declarations in `store.ts`). The reaper module holds 48 of them — 27
+distinct refusal-reason prefixes and 8 log events. **Exactly one emitted string carried the overclaim,
+and one comment repeated it.** Both are fixed; the two surviving occurrences of the phrase in the module
+are the prose that quotes the retired wording in order to explain it.
+
+WHAT THE FOUR DOCUMENT SWEEPS HAD IN COMMON, and it is the transferable part: the denominator was
+always *documents*. Prose, headers, records, acceptance criteria — artefacts a person reads on purpose.
+Strings were never in it. **When a claim is being retired, the set to sweep is every artefact that
+ASSERTS it, and runtime output asserts it to the one audience that cannot check it against the code.**
+Grep the phrase across emitted strings before the prose, not after: the prose has readers who can
+notice; a log line has an operator who will act.
+
 ### EVERY CELL OF A CLASSIFICATION IS A CLAIM NEEDING ITS OWN EVIDENCE
 
 The freshness audit above was the right structure — the right question, asked of all fourteen gates,
@@ -800,6 +841,13 @@ unreadable-measurement refusals have their own case; and the restore classificat
 adversarial shape for EACH half of the EEXIST predicate — a fatal exit carrying a different message,
 and a non-fatal exit carrying the EEXIST message — since real git answers both together and either
 half alone would classify the real case correctly while mis-classifying a failure.
+
+THE OPERATOR-FACING REASON HAS TWO CASES: the string taken out of a real sweep's report must say
+candidate, the gate range and "upper bound" and must contain none of six overclaiming phrases; and no
+`reason:` literal anywhere in the module may carry them, which reds when an unrelated reason is mutated
+to. Three mutations: the exact shipped wording restored reds both; a version that keeps "CANDIDATE" but
+drops the gate range and the bound reds the first; an overclaim added to `deletion limit reached` reds
+the second.
 
 FRESHNESS HAS NINE CASES OF ITS OWN, paired as always: a process appearing after minting stops the
 delete, an owner that stays dead still deletes (or the first is satisfied by a boundary that refuses
