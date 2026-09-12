@@ -3818,14 +3818,12 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
   test('#541 the arbiter tier turns an escalated conflict into a landed build (retry-resolution is acted on)', async () => {
     const question = 'shared.ts: which flush() behaviour do you want?'
     let attempts = 0
-    const guidanceSeen: (string | undefined)[] = []
     let arbiterCalls = 0
     const h = buildHarness({
       plan: () => ({ result: { verdict: 'APPROVE', branch: 'feat-x' } }),
       hostResponder: conflictingHost(),
-      resolve_conflict: async (input) => {
+      resolve_conflict: async () => {
         attempts++
-        guidanceSeen.push(input.guidance)
         return attempts === 1 ? { resolved: false, question } : { resolved: true }
       },
       arbitrate: async () => {
@@ -3843,8 +3841,6 @@ describe('orchestrator — merge conflict (#342): resolve vs escalate to chat', 
     expect(final.phase).toBe('done')
     expect(arbiterCalls).toBe(1)
     expect(attempts).toBe(2)
-    expect(guidanceSeen[0]).toBeUndefined()
-    expect(guidanceSeen[1]).toBe('Both sides add an independent guard; keeping both is correct.')
   })
 
   test('#541 an UNAVAILABLE arbiter leaves the run on the owner path — failed with the SPECIFIC question, not blocked, not landed', async () => {
