@@ -12,7 +12,7 @@ Running log of what shipped, newest first. One entry per merged change.
 > Two things enforce the freeze. `trident/as-built-appender.ts` promotes a staged
 > `.trident/as-built/**` entry to `docs/as-built/<slug>.md` rather than folding it
 > in here (`promoteInScratch`, `trident/as-built-appender.ts:161`), and
-> `scripts/ci/as-built-write-guard.sh:213` FAILS any branch whose base…head diff
+> `scripts/ci/as-built-write-guard.sh:226` FAILS any branch whose base…head diff
 > touches this path.
 
 ## 2026-09-01 — switching back into a conversation lands at the bottom again
