@@ -663,12 +663,27 @@ reader trusting it concludes the gate is absent and either re-fixes it or builds
 the assumption those routes are unauthenticated. The more accurate such a comment was,
 the more convincing it is once it is wrong.
 
-It now states what ships — the token authenticates the CHANNEL, a registered session
-authorizes the ACTION, every route is gated ahead of dispatch — and keeps the
-reasoning, which is the durable part: a per-process token was revoked by every restart
-and a durable one is not, so the credential had to be narrowed as it was lengthened.
-It also keeps what is still OPEN, so the paragraph cannot be read as a clean bill: the
-sink checks that a caller names a session it drives, not that it names its OWN. The
+It was corrected then to say the token authenticates the CHANNEL and a registered
+session authorizes the ACTION, keeping the durable reasoning — a per-process token was
+revoked by every restart and a durable one is not, so the credential had to be narrowed
+as it was lengthened — and keeping what was then still OPEN: the sink checked that a
+caller named a session it drives, not that it named its OWN.
+
+**And then this very section went stale, in the round that closed that gap.** The
+credential -> session change made the corrected header wrong again: authorization is no
+longer "a registered session authorizes the action", the body's `session_id` is
+advisory, and the open gap the paragraph carefully preserved had been closed by the same
+PR. A cross-model round caught it — the header still describing the session-id gate as
+current and the per-session token as future work, and *this record asserting the header
+had been fixed*. So the species has a fifth variety and it is the sharpest one: **a
+record of a correction, outliving the correction it records.** The claim "it now states
+X" is a claim about the tree at a moment, and it decays exactly like the comment it was
+written to fix — with the extra cost that a reader checking whether the documentation is
+current finds a note saying it was already checked.
+
+The header now describes credential -> session, and the still-open clause names the
+residual that actually survives (same-uid read access to the child's own 0600 config),
+not one that was closed. The
 same sweep found one more of the species in code — `createTokenIfAbsent`'s header
 still said `rename` was "still right for REPLACING an untrusted file, where clobbering
 is the point", which the quarantine publish had already made false.

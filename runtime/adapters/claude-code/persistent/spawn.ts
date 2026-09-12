@@ -128,8 +128,12 @@ async function spawnSession(
   // process umask (no mode argument at all) — and it carries the MCP sink TOKEN
   // in plaintext. Any same-uid process could read it and then dispatch tools
   // against the bridge. A 0700 per-spawn directory plus 0600 files keeps the
-  // token owner-readable; the wider bridge-auth fix (per-session token, session
-  // check before dispatch) is tracked separately.
+  // token owner-readable. The wider bridge-auth fix that sentence used to defer —
+  // a per-session token plus a check before dispatch — SHIPPED with ISSUES #537:
+  // each child is handed `HMAC(root token, childGeneration)` in this very directory
+  // and the sink authorizes credential -> session (`pool-state.ts`, `ReplSink.handle`).
+  // So what these modes protect is no longer a fleet-wide secret but this child's own
+  // credential, which is a smaller blast radius and the same discipline.
   //
   // RE-EXAMINED UNDER A PERSISTED TOKEN (ISSUES #537). The token these files carry
   // is no longer minted per gateway process — it is loaded from a 0600 file in the

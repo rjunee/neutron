@@ -42,9 +42,15 @@
  * one gateway lifetime, whereas this file's token is worth every lifetime until
  * the file is removed. That widening is a DELIBERATE trade for restart survival,
  * not something this module eliminates. What it does do is keep the blast radius
- * as small as a file can be: owner-only (0600) with a mode the file is CREATED
- * with (never chmod'd after the fact — a later tighten cannot un-expose bytes
- * another local user may already have read), never inside a working tree (it
+ * as small as a file can be: owner-only at every instant — `open` is given 0600,
+ * which a umask can only NARROW (0600 under `umask 0277` lands as 0400), and
+ * `stageFreshToken` then normalises with `fchmod` on the descriptor it already
+ * HOLDS, never on a path, so there is no window for a swap and the mode is never
+ * group- or world-accessible even momentarily. The property that matters is that
+ * last clause, not the absence of a chmod: a later TIGHTEN would be the unsafe
+ * shape, because it cannot un-expose bytes another local user may already have
+ * read, and nothing here ever starts wider and narrows. It is never inside a
+ * working tree (it
  * lives in the same `<home>/.neutron` state dir as the REPL registry), refused
  * and re-minted if it is ever found group/world-accessible, and refused and
  * re-minted if it is a symlink or too short to be a real secret.
@@ -57,9 +63,13 @@
  * durable token does not revoke. You cannot make a credential longer-lived without
  * making it narrower, and this module made one longer-lived.
  *
- * WHAT SHIPS (`pool-state.ts`'s `ReplSink.handle`): every POST is token-gated, and
- * then EVERY ROUTE — `/tools`, `/tool-call` and `/activity` included — is refused
- * unless it names a session this process is currently driving. `/tools` and
+ * WHAT SHIPS (`pool-state.ts`'s `ReplSink.handle`): authorization runs
+ * CREDENTIAL -> SESSION. Every POST must present a per-child credential —
+ * `HMAC(root token, childGeneration)`, handed only into that child's own 0600
+ * config — and the sink DERIVES which session it belongs to. The body's
+ * `session_id` is advisory: it never grants anything, because a session id is an
+ * IDENTIFIER and not a credential. EVERY ROUTE — `/tools`, `/tool-call` and
+ * `/activity` included — is behind that lookup. `/tools` and
  * `/tool-call` used to be answered AHEAD of that lookup, because they dispatch
  * against the process-global `ReplToolBridge` and carry no in-flight turn; true, and
  * beside the point, because the bridge is the most privileged thing the sink can
@@ -70,10 +80,18 @@
  * `spawnSession` registers the session BEFORE it spawns the child, so what is
  * refused is a call from a dying, evicted or orphaned one.
  *
- * WHAT IS STILL OPEN, so this paragraph is not read as a clean bill: the sink checks
- * that a caller names a session it drives, not that it names its OWN. A per-session
- * token — the work `spawn.ts`'s owner-only note defers — is what closes that, and
- * the acceptance criteria live in
+ * THAT GAP IS NOW CLOSED, and this paragraph records it rather than still promising
+ * it: the sink used to check that a caller named a session it drives, not that it
+ * named its OWN, and the per-session token this note deferred is the credential
+ * described above. `spawn.ts` derives and writes it per child. A previous revision
+ * of this header still described the session-id gate as current and the credential
+ * as future work, which is the more expensive half of the same mistake — a reader
+ * would have believed the weaker design was what shipped.
+ *
+ * WHAT IS STILL OPEN, so this is not read as a clean bill: same-uid read access
+ * defeats it. The credential lives in the child's own config (dir 0700, files 0600)
+ * and in its process env, so anything running as the owner's uid that can read
+ * those can impersonate that child. The acceptance criteria live in
  * `docs/spec-items/a-repl-must-survive-its-gateways-restart.md`.
  *
  * REUSE NOTE. `open/persisted-secret.ts` implements this same discipline. It
