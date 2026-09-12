@@ -2002,6 +2002,40 @@ export type ConflictEvidence =
   | { kind: 'binary' }
 
 /**
+ * THE CEILING ON HOW MUCH WE *DO*, as opposed to how much we keep (#541 round 25).
+ *
+ * The 12 KiB prompt budget is a DISPLAY bound, and it was being enforced after the content had
+ * already been read: a two-sided diff and a one-sided blob were captured in full and the byte
+ * count checked afterwards, so a repository-controlled multi-gigabyte blob was materialised in
+ * memory before `over-budget` came back. **A limit on how much you keep is not a limit on how
+ * much you do**, and checking after the fact cannot bound what the check had to consume.
+ *
+ * So the two limits are separate because their jobs are different. This one is MEMORY SAFETY
+ * and is deliberately far larger than the display budget: a 200 KiB source file with a
+ * three-line conflict has a tiny diff, and refusing it because the FILE is bigger than 12 KiB
+ * would make the tier inert for most real conflicts. 8 MiB is well above any file a text judge
+ * could be shown a diff of and well below anything that threatens the process.
+ *
+ * It is checked with `git cat-file -s`, which reports a blob's size WITHOUT reading it, against
+ * the shas `unmergedStages` already parsed — so the bound costs one cheap call per side and
+ * never requires the bytes it is protecting against.
+ */
+const ARBITER_COLLECTION_BYTES_MAX = 8 * 1024 * 1024
+
+/** A blob's size in bytes without reading it, or `null` if git would not say. */
+async function blobSize(run_host: RunHostCommand, repo: string, sha: string): Promise<number | null> {
+  let res: HostCommandResult
+  try {
+    res = await run_host(['git', '-C', repo, 'cat-file', '-s', sha], repo)
+  } catch {
+    return null
+  }
+  if (!res.ok) return null
+  const size = Number(res.stdout.trim())
+  return Number.isInteger(size) && size >= 0 ? size : null
+}
+
+/**
  * WHICH CONFLICT STAGES EXIST, per path — the positive evidence that separates a one-sided
  * conflict from a read this code could not perform (#541 round 15).
  *
@@ -2141,6 +2175,9 @@ export async function conflictEvidence(
         body = `${QUOTE}(no two-sided diff: neither side has a version of this path)`
       } else {
         const blob = stage.get(side === 'BASE' ? 2 : 3) ?? ''
+        const size = await blobSize(run_host, repo, blob)
+        if (size === null) return { kind: 'unreadable', why: 'blob' }
+        if (size > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'over-budget' }
         let res: HostCommandResult
         try {
           res = await run_host(['git', '-C', repo, 'cat-file', 'blob', blob], repo)
@@ -2178,6 +2215,14 @@ export async function conflictEvidence(
       // column means binary. Matching the sentence instead would be prose-parsing — and a TEXT
       // file whose contents happen to include the line `Binary files a and b differ` would
       // then be misclassified, which is the same mistake one layer up.
+      // BEFORE ANY CONTENT IS READ. Both stages exist here, so both shas are known; a side
+      // larger than the collection ceiling cannot produce a showable diff and must not be
+      // fetched to find that out.
+      for (const stageNo of [2, 3] as const) {
+        const size = await blobSize(run_host, repo, stage.get(stageNo) ?? '')
+        if (size === null) return { kind: 'unreadable', why: 'blob' }
+        if (size > ARBITER_COLLECTION_BYTES_MAX) return { kind: 'over-budget' }
+      }
       let stat: HostCommandResult
       try {
         stat = await run_host(
@@ -2253,7 +2298,12 @@ async function sideHistory(
         '-c',
         'core.quotePath=false',
         'log',
-        `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE}`,
+        // ONE MORE THAN WE SHOW, so whether the cap actually BIT is established rather than
+        // assumed (#541 round 25). Receiving N+1 records is positive evidence that older
+        // commits exist; receiving N or fewer proves this is the whole history. Without the
+        // extra record the code could only say "up to N", and the completeness claim would
+        // have to hedge on every branch instead of only the ones that are really bounded.
+        `--max-count=${MAX_HISTORY_COMMITS_PER_SIDE + 1}`,
         '--no-color',
         '--no-decorate',
         '-s',
@@ -2298,7 +2348,9 @@ async function sideHistory(
   // that is parsing; dropping whatever happens to look blank is guessing.
   const framed = res.stdout.split('\u0000')
   while (framed.length > 0 && framed[framed.length - 1] === '') framed.pop()
-  const records = framed.map((record) => quoteLine(record))
+  // The extra record is asked for to DETECT the bound, never to show it.
+  const moreExist = framed.length > MAX_HISTORY_COMMITS_PER_SIDE
+  const records = framed.slice(0, MAX_HISTORY_COMMITS_PER_SIDE).map((record) => quoteLine(record))
   let used = 0
   for (const record of records) {
     used += Buffer.byteLength(`${record}\n`, 'utf8')
@@ -2312,7 +2364,13 @@ async function sideHistory(
   // nothing. That is the same distinction as the one-sided conflict two rounds ago — an
   // established emptiness is evidence; an unasked question is not.
   if (folded.length === 0) return { kind: 'present', text: '(no commits in range)' }
-  return { kind: 'present', text: folded }
+  return moreExist
+    ? {
+        kind: 'present',
+        text: folded,
+        bounded: `the commit histories show the ${MAX_HISTORY_COMMITS_PER_SIDE} most recent commits per side`,
+      }
+    : { kind: 'present', text: folded }
 }
 
 /**
@@ -2326,7 +2384,14 @@ async function sideHistory(
  * is readable", and every one ended at a prompt asserting completeness. That is a property of
  * the module, not four slips.
  */
-type EvidencePart = { kind: 'present'; text: string } | { kind: 'missing'; why: ArbiterNotAskedWhy }
+type EvidencePart =
+  /**
+   * `bounded` names a limit this code CHOSE and that actually bit — it is absent when the part
+   * is everything there was (#541 round 25). A cap you chose is still an omission, and a claim
+   * that denies it is false whoever wrote the cap.
+   */
+  | { kind: 'present'; text: string; bounded?: string }
+  | { kind: 'missing'; why: ArbiterNotAskedWhy }
 
 /**
  * WHERE EVERY TRANSFORMATION THAT CAN DROP SOMETHING REPORTS IT.
@@ -2388,6 +2453,20 @@ export function assembleEvidence(
   // of this defect arrived as a new cap nobody re-audited. It is unit-tested directly for that
   // reason; a guard with no detector is a comment.
   if (shortened.any()) return { missing: 'evidence-truncated' }
+  // THE CLAIM IS DERIVED FROM WHICH PARTS ARE BOUNDED (#541 round 25). `--max-count` asks git
+  // for the 20 most recent commits, so a branch with 21 has one the judge will not see — and
+  // the sentence said "nothing has been left out". Disclosing the limit in the HEADING is good
+  // and is not the same as the claim being true.
+  //
+  // NARROWING THE CLAIM RATHER THAN REFUSING, and the reason is what each part is FOR. The
+  // conflict is what the judge rules on and stays all-or-nothing: complete, or we do not ask.
+  // The histories are corroboration — WHY each side exists — bounded to whole commit records at
+  // a granularity git enforces. Treating a 21-commit branch as an incomplete part would refuse
+  // ordinary work outright while removing nothing the judge needs, which trades a false claim
+  // for an inert tier. So the sentence names exactly what is complete and what is bounded, and
+  // it is COMPUTED from the parts rather than written as a constant — otherwise it is the same
+  // defect with better wording.
+  const bounded = sections.filter((x) => x.part.kind === 'present' && x.part.bounded !== undefined)
   const body = sections
     .map((section) => `${section.heading}\n${section.part.kind === 'present' ? section.part.text : ''}`)
     .join('\n\n')
@@ -2399,10 +2478,18 @@ export function assembleEvidence(
       `side says is in the diffs; WHY each side exists is in the commit histories.\n\n` +
       // THE CLAIM, MADE HERE BECAUSE THIS IS WHERE IT IS KNOWN. Every section above was
       // checked `present` on the way to this line; a `missing` one returned before it.
-      `EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE: nothing below has been shortened, ` +
-      `summarised or left out, and no part of it was omitted because it could not be read. If ` +
-      `it is still not enough to decide, that is a fact about the conflict rather than about ` +
-      `what you were shown — stop and escalate.\n\n${body}`,
+      (bounded.length === 0
+        ? `EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE: nothing below has been ` +
+          `shortened, summarised or left out, and no part of it was omitted because it could ` +
+          `not be read.`
+        : `THE CONFLICT BELOW IS PRESENT AND COMPLETE: nothing in it has been shortened, ` +
+          `summarised or left out, and no part of it was omitted because it could not be read. ` +
+          `THESE PARTS ARE BOUNDED and older material beyond the stated limit is not shown: ` +
+          `${bounded
+            .map((x) => (x.part.kind === 'present' ? (x.part.bounded ?? '') : ''))
+            .join('; ')}. Nothing else has been left out.`) +
+      ` If it is still not enough to decide, that is a fact about the conflict rather than ` +
+      `about what you were shown — stop and escalate.\n\n${body}`,
   }
 }
 
@@ -2987,6 +3074,19 @@ async function rebaseBranchOntoBase(
             verifiable: fingerprintBefore !== null && fingerprintAfter !== null,
             action:
               'the arbiter changed the conflicted worktree (or the change could not be ruled out); its retry was REFUSED and the conflict escalated unchanged',
+          })
+          // AND THE BET IS CLOSED OUT, NOT DROPPED (#541 round 25). The arbitration line above
+          // already recorded `decision=retry`; the retry is only ACCEPTED after the integrity
+          // gate, and a refusal used to leave no outcome event at all. `SPEC.md` measures this
+          // tier on resolved-versus-escalated, so a rejection that vanishes makes the ratio
+          // report better than reality — the one number the owner is being asked to judge this
+          // feature on, biased by its own failures going unrecorded.
+          log.info('merge_conflict_arbiter_retry_outcome', {
+            run: run.id,
+            branch,
+            base,
+            outcome: 'refused-integrity',
+            ...sizeFields,
           })
         }
         if (untouched) {

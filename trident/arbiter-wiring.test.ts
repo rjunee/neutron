@@ -1217,6 +1217,116 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(quoted[2]).toContain('aaa2 two')
   })
 
+  test('A RETRY REFUSED BY THE INTEGRITY GATE IS STILL REPORTED — the ratio keeps its failures', async () => {
+    // THE ARBITRATION LINE ALREADY SAID `decision=retry`. The retry is only ACCEPTED after the
+    // worktree fingerprint is compared, and a refusal used to leave NO outcome event at all —
+    // so the rejection simply vanished from a ratio that `SPEC.md` uses to decide whether this
+    // tier earns its cost. A measurement that drops its own failures reports better than
+    // reality, and this is the number the owner is being asked to judge the feature on.
+    const run = localRun('feat-refused')
+    const wt = wtOf('/shared', run)
+    let reported = 0
+    // FLIPPED INSIDE THE ARBITER CALL, so the tree demonstrably moves DURING the turn rather
+    // than on some incidental probe ordering — the gate's actual subject.
+    let arbiterRan = false
+    const host: RunHostCommand = async (cmd) => {
+      if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok('aaa1 x\n\u0000')
+      if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+      if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+      if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+      if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+      // THE TREE MOVES UNDER THE ARBITER: the fingerprint's `status` probe answers differently
+      // before and after, so the integrity gate refuses the retry it was about to grant.
+      if (cmd.includes('status')) return ok(arbiterRan ? ' M f.ts' : '')
+      const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (own && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict')
+      }
+      return ok()
+    }
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate: async () => {
+        arbiterRan = true
+        return { kind: 'decision', option_id: CONFLICT_ARBITER_RETRY_OPTION, reasoning: 'additive' }
+      },
+    })
+    const lines = await captureLogs(async () => {
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+    })
+    // The decision was recorded as a retry…
+    expect(lines.find((l) => l.includes('merge_conflict_arbitration')) ?? '').toContain('decision=retry')
+    // …AND THE BET IS CLOSED OUT, so the ratio's denominator keeps the rejection. The
+    // `refused-integrity` value is itself the proof the gate fired — it is emitted on no other
+    // path. (The gate's own `merge_conflict_arbiter_mutated_tree` is a `log.warn`, which this
+    // harness does not capture; asserting on it here would have been asserting on the harness.)
+    const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome')) ?? ''
+    expect(outcome, 'a refused retry must still report an outcome').not.toBe('')
+    expect(outcome).toContain('outcome=refused-integrity')
+  })
+
+  test('THE 20/21 BOUNDARY: the claim narrows exactly when the cap actually bites', async () => {
+    // THE CAP IS DELIBERATE AND THE CLAIM DENIED IT. `--max-count` asks for a fixed number of
+    // commits, so a branch with one more has a commit the judge never sees, while the sentence
+    // said "nothing has been left out". Disclosing the limit in the heading is good and is NOT
+    // the same as the claim being true.
+    //
+    // Both sides of the boundary are driven, because a test at only one of them cannot tell a
+    // correct rule from a constant: at N the claim must stay absolute, at N+1 it must narrow.
+    const histories = (n: number): string =>
+      Array.from({ length: n }, (_, k) => `c${k} subject ${k}`).join('\u0000') + '\u0000'
+    const promptFor = async (n: number): Promise<string> => {
+      const run = localRun(`feat-cap-${n}`)
+      const wt = wtOf('/shared', run)
+      let reported = 0
+      const host: RunHostCommand = async (cmd) => {
+        if (cmd.includes('log') && cmd.some((a) => a.startsWith('--max-count'))) return ok(histories(n))
+        if (isUnmergedQuery(cmd)) return unmergedIndex('f.ts')
+        if (cmd.includes('cat-file') && cmd.includes('-s')) return ok('64')
+        if (cmd.includes('--numstat')) return ok(`1${String.fromCharCode(9)}1${String.fromCharCode(9)}f.ts\n`)
+        if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('f.ts')
+        if (cmd.some((a) => a.startsWith(':2:'))) return ok('-x\n+y\n')
+        const own = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+        if (own && reported < 1) {
+          reported++
+          return fail('CONFLICT (content): Merge conflict')
+        }
+        return ok()
+      }
+      const { arbitrate, specs } = capturingArbiter('stop')
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+        arbitrate,
+      })
+      await cleanupAfterMerge(run, deps).catch(() => {})
+      expect(specs.length, `n=${n}: the judge was asked`).toBe(1)
+      return specs[0]?.prompt ?? ''
+    }
+
+    // EXACTLY AT THE CAP: this IS the whole history, so the claim stays absolute.
+    const atCap = await promptFor(MAX_HISTORY_COMMITS_PER_SIDE)
+    expect(atCap).toContain('EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE')
+    expect(atCap).not.toContain('THESE PARTS ARE BOUNDED')
+
+    // ONE PAST IT: a commit exists that the judge will not see, so the claim narrows — and
+    // still asserts the CONFLICT is complete, which is what it rules on.
+    const past = await promptFor(MAX_HISTORY_COMMITS_PER_SIDE + 1)
+    expect(past).toContain('THE CONFLICT BELOW IS PRESENT AND COMPLETE')
+    expect(past).toContain('THESE PARTS ARE BOUNDED')
+    expect(past).toContain(`the ${MAX_HISTORY_COMMITS_PER_SIDE} most recent commits per side`)
+    expect(past).not.toContain('EVERY PART OF THIS EVIDENCE IS PRESENT AND COMPLETE')
+    // The extra record is asked for to DETECT the bound, never shown.
+    const block = past.slice(past.indexOf('NOT ON `main`:'), past.indexOf('UP TO 20 MOST RECENT COMMITS ON `main`'))
+    expect(block.split('\n').filter((l) => l.startsWith('| ')).length).toBe(MAX_HISTORY_COMMITS_PER_SIDE)
+  })
+
   test('END TO END: a commit message keeps its trailing whitespace in AgentSpec.prompt', async () => {
     // THE AD-HOC `.replace(/\s+$/, '')` THIS REPLACES was invisible to the truncation channel —
     // which is the channel's boundary, and the reason the audit in the change record enumerates
@@ -1360,6 +1470,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       onBlob?: () => HostCommandResult | never
       onNumstat?: () => HostCommandResult | never
       onLog?: () => HostCommandResult | never
+      blobSize?: () => HostCommandResult | never
       listingOk?: boolean
       stages?: readonly number[]
     }
@@ -1475,6 +1586,10 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       { name: 'the listing succeeds but is empty', conflicted: '' },
       // A CALLER-CONTROLLED FIELD THAT GETS SHORTENED. Present, but not all of it.
       { name: 'a filename past the fold cap', conflicted: `${'D'.repeat(60_000)}.ts` },
+      // THE COLLECTION CEILING: a side too large to read at all. Refused BEFORE the content is
+      // fetched, so the bound is on what we do and not only on what we keep.
+      { name: 'a blob past the collection ceiling', conflicted: 'a.ts', blobSize: () => ok(String(9 * 1024 * 1024)) },
+      { name: 'the blob size is unreadable', conflicted: 'a.ts', blobSize: () => fail('fatal: bad object') },
       { name: 'git log exits non-zero', conflicted: 'a.ts', onLog: () => fail('fatal: bad revision') },
       {
         name: 'git log throws',
@@ -1507,6 +1622,13 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
         }
         if (cmd.includes('--numstat')) {
           return shape.onNumstat === undefined ? ok('3\t1\ta.ts\n') : shape.onNumstat()
+        }
+        // `cat-file -s` reports a SIZE and is the collection ceiling's pre-check (#541 round
+        // 25); `cat-file blob` reads content. A stub that conflates them answers the size query
+        // with prose, which is not a size — the same "a host that cannot answer cannot test the
+        // path" lesson as the conflicted-file listing.
+        if (cmd.includes('cat-file') && cmd.includes('-s')) {
+          return shape.blobSize === undefined ? ok('64') : shape.blobSize()
         }
         if (cmd.includes('cat-file')) {
           return shape.onBlob === undefined ? ok('the surviving side\n') : shape.onBlob()
@@ -1578,6 +1700,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       'the conflicted-file listing fails',
       'the listing succeeds but is empty',
       'a filename past the fold cap',
+      'a blob past the collection ceiling',
+      'the blob size is unreadable',
     ]) {
       expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
     }
@@ -1589,6 +1713,8 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
     expect(kinds['numstat exits non-zero']).toBe('unreadable')
     expect(kinds['the conflicted-file listing fails']).toBe('unreadable')
     expect(kinds['the listing succeeds but is empty']).toBe('unreadable')
+    expect(kinds['a blob past the collection ceiling']).toBe('over-budget')
+    expect(kinds['the blob size is unreadable']).toBe('unreadable')
     expect(kinds['enormous diff']).toBe('over-budget')
   })
 
@@ -1851,7 +1977,11 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
     // number actually passed to git is what makes a hand-written "20 most recent" in the
     // prose fail, which is the only way that drift could be introduced.
     expect(counts.length, 'git was given a --max-count on both sides').toBe(2)
-    for (const count of counts) expect(count).toBe(MAX_HISTORY_COMMITS_PER_SIDE)
+    // GIT IS ASKED FOR ONE MORE THAN IS SHOWN, deliberately: the extra record is how the code
+    // establishes whether the cap actually BIT rather than assuming it did, so the completeness
+    // claim can hedge only on branches that are really bounded (#541 round 25). The anti-drift
+    // property is unchanged — both numbers are still derived from the one constant.
+    for (const count of counts) expect(count).toBe(MAX_HISTORY_COMMITS_PER_SIDE + 1)
     // EVERY HEADING, NOT "SOME HEADING". A `toContain` here passes while one of the two
     // sides drifts, because the other side still supplies the matching substring — verified
     // by mutation: hardcoding the branch heading's number left the suite green. Both stated

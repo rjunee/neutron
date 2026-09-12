@@ -1330,6 +1330,18 @@ exceptions.**
 | 12 | `arbiterPrompt` | evidence `split('\n').map(sanitiseForPrompt).join('\n')` | **lossless**: split/join identity plus the length-preserving substitution — see below |
 | 13 | `arbiterPrompt` | `fold(question / task / options)` | **capped, and outside the claim's scope**: the completeness sentence is about THE EVIDENCE; these are prompt framing. A cut here also forces the caller's over-budget refusal, since the cap IS the budget |
 
+**THE AUDIT'S THIRD CLAUSE, added in round 25: it must cover the COLLECTION COMMANDS AND THE
+DELIBERATE CAPS, not only the string transformations.** An audit of transformations missed a cap
+because **a cap is not a transformation — it is a request**. So for each site the question is not
+"does this alter text" but **"can this produce less than everything"**, and that catches three
+kinds the first pass did not:
+
+| # | site | kind | disposition |
+|---|---|---|---|
+| 14 | `sideHistory` `--max-count` | a **request** for less | **disclosed and derived**: git is asked for N+1 to establish whether the cap BIT, N are shown, and the part is marked `bounded` — so `assembleEvidence` narrows the claim exactly when a commit really is being withheld (round 25) |
+| 15 | `conflictEvidence` two-sided diff | a **collection** with no ceiling | **bounded before reading**: both stage blobs are sized with `cat-file -s` against `ARBITER_COLLECTION_BYTES_MAX` before any content is fetched |
+| 16 | `conflictEvidence` one-sided blob | a **collection** with no ceiling | same |
+
 **Item 12 changed in this round as a consequence of the audit.** `arbiterPrompt` was folding
 evidence lines through the CAPPED fold and discarding the `truncated` flag — an unrouted
 shortener that the audit found and the two blockers did not name. It could not have reached the
@@ -1353,6 +1365,54 @@ lane has watched fail nine times.
 | M112 | the history strips trailing whitespace again | **red** (end-to-end, against `AgentSpec.prompt`) |
 | M113 | the framing parse drops any blank-looking record | survived → **red** |
 | M114 | the final assembler caps the evidence again | **green — expected, reasoning above** |
+
+### ROUND 25 — a cap you chose is still an omission
+
+**Eleven, and the cleanest of the series because the omission is DELIBERATE.** `--max-count`
+asks git for the 20 most recent commits; for a branch with 21, the claim "nothing has been left
+out" is false. Disclosing the limit in the heading is good and **is not the same as the claim
+being true**.
+
+**I took the narrow-the-claim exit rather than the refuse-the-part exit, and the reason is what
+each part is FOR.** The conflict is what the judge rules on and stays all-or-nothing — complete,
+or we do not ask. The histories are corroboration, bounded to whole commit records at a
+granularity git enforces. Treating a 21-commit branch as an incomplete part would **refuse
+ordinary work outright** while removing nothing the judge needs: it trades a false claim for an
+inert tier, which is the same bad bargain in the other direction. So the sentence now names
+exactly what is complete and what is bounded — and it is **computed from the parts**, because a
+narrower constant is the same defect with better wording.
+
+**And whether the cap bit is ESTABLISHED, not assumed.** git is asked for N+1 records; receiving
+N+1 is positive evidence that older commits exist, and the extra one is used to detect the bound
+and never shown. Without it the claim would have to hedge on every branch instead of only the
+bounded ones, which is its own kind of dishonesty — a warning that is always on says nothing.
+The boundary is driven on **both** sides, because a test at only one cannot tell a correct rule
+from a constant.
+
+**Twelve: the budget was enforced after materialising unbounded output.** Two-sided diffs and
+one-sided blobs were read in full and the byte count checked afterwards, so a repository-
+controlled multi-gigabyte blob was in memory before `over-budget` came back. **A limit on how
+much you keep is not a limit on how much you do**, and checking after the fact cannot bound what
+the check had to consume. Both sides are now sized with `cat-file -s` — which reports a blob's
+size WITHOUT reading it, against shas already parsed — before any content is fetched. The
+ceiling is deliberately far larger than the display budget (8 MiB vs 12 KiB) because their jobs
+differ: a 200 KiB file with a three-line conflict has a tiny diff, and refusing it for the
+file's size would make the tier inert for most real conflicts.
+
+**Thirteen: rejected retries vanished from the ratio.** The arbitration line records
+`decision=retry`; the retry is only ACCEPTED after the integrity gate; a refusal left no outcome
+event at all. `SPEC.md` measures this tier on resolved-versus-escalated, so **a measurement that
+drops its own failures reports better than reality** — and this is the number the owner is being
+asked to judge the feature on. A refused retry now emits `outcome=refused-integrity`, which is
+emitted on no other path and is therefore also the proof the gate fired.
+
+**Five mutations, all red:** the claim ignoring bounded parts; the history never reporting the
+cap; the detection record being shown rather than used to detect; the collection ceiling
+removed; a refused retry emitting nothing.
+
+**And the as-built said 13 tests where the file has 80.** Counted on the final tree with
+`bun test <file>`, and the section now says where the number came from. A count is a claim, and
+it decayed for twenty rounds because nothing re-took it.
 
 ### THREE OF SEVEN WERE PINNED BY TESTS I WROTE
 
@@ -1538,7 +1598,16 @@ DIFFERENT file than the drift overlaps, which still holds.
 
 ### Tests
 
-`trident/arbiter-wiring.test.ts` (13) drives the composed merge path: the qualifying
+**Counts below are from `bun test <file>` on the FINAL tree of this branch, not from when the
+section was written** — the earlier "(13)" was the count on the day that sentence was typed and
+had been wrong for twenty rounds. A count is a claim like any other, and this lane's own rule
+applies to it: state where it came from, and re-take it at the end.
+
+`trident/arbiter-wiring.test.ts` (**80**), `trident/merge-realgit.test.ts` (**32**),
+`trident/arbiter.test.ts` (**18**) and `trident/__tests__/arbiter-tool-gate.e2e.test.ts`
+(**6**, opt-in behind `NEUTRON_PTY_E2E`).
+
+`trident/arbiter-wiring.test.ts` drives the composed merge path: the qualifying
 hold reaches the arbiter and its selection lands the run; `stop`/`owner-only`/
 `unavailable`/an unwired arbiter/a throwing arbiter/an unoffered option all reach the
 owner unchanged and neither block nor resolve; guidance is scoped to its commit; the
@@ -1608,7 +1677,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-One hundred and fourteen mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
+One hundred and nineteen mutations reverted one at a time; all but one proved a test red, and the survivor is labelled with its reasoning. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
