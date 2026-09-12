@@ -121,9 +121,12 @@
  *     and the sweep correctly returns having done nothing rather than standing down.
  *
  *   `git rev-parse --verify --quiet <ref>` — EXIT 0 WITH EMPTY STDOUT IS IMPOSSIBLE. A ref
- *     that verified prints its sha. The presence read keys on the exit code and treats
- *     anything that is not 0-or-1 as unknown; the salvage verify compares the sha, so an empty
- *     stdout can never equal the tip and refuses.
+ *     that verified prints its sha, so SINCE ROUND 20 the presence read requires a full object
+ *     name in stdout before it will answer "present": exit 0 with empty or malformed output is
+ *     an impossible success and stands the ref down as indeterminate. Until then this very
+ *     paragraph named the impossibility while the function below ignored it — the rule was
+ *     written down and not consulted. Anything that is not exit 0-or-1 is unknown too, and the
+ *     salvage verify compares the sha, so an empty stdout can never equal the tip there either.
  *
  *   `git update-ref` (all forms) — produces no stdout to parse; its outcome is the exit code,
  *     which the two classifications above already cover.
@@ -807,7 +810,12 @@ function hostText(result: { stderr: string; stdout: string; exit_code: number })
 }
 
 function errText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
+  // NEVER THE EMPTY STRING (#547 round 20). These land in operator-facing reasons, and a reason
+  // that trails off after "unreadable: " teaches an operator to distrust the tool — the same
+  // complaint as "STILL PRESENT at " with nothing after it. `new Error('')` and a stringified
+  // empty value both reach here, so the fallback names the shape instead of rendering nothing.
+  const text = error instanceof Error ? error.message : String(error)
+  return text.trim() === '' ? `a ${error instanceof Error ? error.name : typeof error} with no message` : text
 }
 
 function candidateAgeMs(path: string, now: number): number | null {
@@ -1138,9 +1146,20 @@ function refAlreadyExists(result: { stdout: string; stderr: string; exit_code: n
  * (also exit 1) cannot reach it.
  */
 function refPresence(result: HostCommandResult): 'present' | 'absent' | 'unknown' {
-  if (result.exit_code === 0) return 'present'
   if (result.exit_code === 1) return 'absent'
-  return 'unknown'
+  if (result.exit_code !== 0) return 'unknown'
+  // EXIT 0 IS NOT A PRESENCE CLAIM UNTIL THE OUTPUT SAYS SO (#547 round 20). A ref that
+  // verified PRINTS ITS OBJECT NAME — the module header has said so since the impossible-output
+  // audit — and this function keyed on the exit code alone, so a success with empty or
+  // malformed stdout rode the branch reserved for a definite answer. The operator's own
+  // sentence then read "the ref is STILL PRESENT at " with nothing after it, and the sweep
+  // declined to count a stand-down, all on no evidence the ref exists at all.
+  //
+  // THIS IS THE THIRD ROUTE ARRIVING THROUGH THE READER RATHER THAN THE MEASUREMENT: a command
+  // that succeeded while saying something impossible is an UNKNOWN. "Exit 0 means present" was
+  // true of every case anyone had in mind, which is the same shape as the retracted gate-9
+  // cell — every clause true, the conclusion false, because the leftover was assumed harmless.
+  return FULL_OBJECT_NAME.test(result.stdout.trim()) ? 'present' : 'unknown'
 }
 
 /**
@@ -1244,7 +1263,7 @@ async function refClaimedNow(
   if (processCwds === null) return 'liveness-unreadable: /proc could not be read at delete time'
   const busy = named.find((owner) => ownerProcessLive(owner, processCwds))
   if (busy !== undefined) {
-    return `a process stands in ${busy.worktree ?? busy.workflow_run_id ?? '?'}`
+    return `a process stands in ${busy.worktree || busy.workflow_run_id || '(an owning run with no recorded path)'}`
   }
 
   // WHY GATE 9 IS CHECKED AFTER GATE 10 HERE, where the sweep asks them the other way round: a
@@ -1271,7 +1290,7 @@ async function refClaimedNow(
     (owner) => owner.worktree !== null && owner.worktree !== '' && existsSync(owner.worktree),
   )
   if (standing !== undefined) {
-    return `the run's recorded worktree exists at ${standing.worktree ?? ''}`
+    return `the run's recorded worktree exists at ${standing.worktree || '(an owning run with no recorded path)'}`
   }
 
   return null
@@ -1483,14 +1502,14 @@ async function reapBranchRefs(
       (owner) => owner.worktree !== null && owner.worktree !== '' && existsSync(owner.worktree),
     )
     if (standing !== undefined) {
-      report.refs_kept.push({ ref, reason: `run-worktree-present: ${standing.worktree ?? ''}` })
+      report.refs_kept.push({ ref, reason: `run-worktree-present: ${standing.worktree || '(an owning run with no recorded path)'}` })
       continue
     }
     const busy = claimants.find((owner) => ownerProcessLive(owner, processCwds))
     if (busy !== undefined) {
       report.refs_kept.push({
         ref,
-        reason: `run-process-live: a process stands in ${busy.worktree ?? busy.workflow_run_id ?? '?'}`,
+        reason: `run-process-live: a process stands in ${busy.worktree || busy.workflow_run_id || '(an owning run with no recorded path)'}`,
       })
       continue
     }
@@ -1851,9 +1870,15 @@ export async function deleteReapableRef(
     // THE ANSWER IS KEYED ON THE EXIT CODE, not on `ok`. See `refPresence`.
     const presence = refPresence(after)
     if (presence === 'present') {
+      // `present` now GUARANTEES a full object name (see `refPresence`), so this sentence can
+      // never render "STILL PRESENT at " with nothing after it. A tip that moved is still the
+      // ref being present — nothing was deleted — but it is said out loud rather than papered
+      // over by printing whatever the read happened to contain.
+      const seen = after.stdout.trim()
+      const at = seen === sha ? `at ${seen}` : `at ${seen}, which is NOT the ${sha} we expected`
       report.refs_kept.push({
         ref,
-        reason: `delete-timed-out: the ref is STILL PRESENT at ${after.stdout.trim()}, so nothing was deleted`,
+        reason: `delete-timed-out: the ref is STILL PRESENT ${at}, so nothing was deleted`,
       })
       return
     }

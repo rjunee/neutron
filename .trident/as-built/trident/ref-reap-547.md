@@ -554,6 +554,53 @@ inseparable from a liveness snapshot. A snapshot bound to the candidate is still
 narrows the window between measurement and delete rather than closing it, and it would have encoded
 the wrong model, that a candidate is a promise about the world rather than a record of a check.
 
+### THE RULE WAS WRITTEN DOWN AND THE FUNCTION DID NOT CONSULT IT
+
+The impossible-output audit in the module header says, in as many words, that `git rev-parse
+--verify --quiet <ref>` exiting 0 with empty stdout is IMPOSSIBLE and must read as unknown. The
+paragraph then described the presence read as keying on the exit code — which is what it did.
+`refPresence` returned `present` for every exit 0 without looking at stdout, so a success saying
+something impossible rode the branch reserved for a definite answer: the report read **"the ref is
+STILL PRESENT at , so nothing was deleted"** — an empty object name in the operator's own sentence
+— and declined to count a stand-down, on no evidence the ref existed at all.
+
+**A DOCUMENTED RULE IS NOT AN ENFORCED ONE.** This file had already paid for the three-route
+lesson four separate times, written the classification down, and then shipped a reader that the
+classification did not reach. The audit even recorded the violation as the design, which is worse
+than silence: it made the gap look considered. The three-state tests only ever exercised exit 0
+WITH the expected object name, so the boundary was unreached — the same shape as the gate-9 test
+that asserted the unsafe side, one layer along.
+
+"EXIT 0 MEANS PRESENT" WAS TRUE OF EVERY CASE ANYONE HAD IN MIND, which is the retracted gate-9
+cell again: every clause true, the conclusion false, because the leftover was assumed harmless.
+The fix is the same shape too — require the evidence rather than infer it: `present` now demands a
+full object name, so the three-state answer is keyed on what git SAID and not merely on the fact
+that it returned.
+
+SWEEPING THE REST OF THE MODULE, because finding this class twice in one file is a reason to count
+rather than to hope. **17** exit-code/`ok` decision sites examined. **6** read a command that
+produces parseable stdout — three `worktree list`, one `for-each-ref`, two `rev-parse` — and the
+other 11 read commands with no stdout to misread (`update-ref` ×5, `checkout --detach`, `worktree
+prune`, plus formatting and gating helpers), where the exit code genuinely is the whole answer. Of
+the six: all three `worktree list` sites already guard on the PARSE RESULT (zero records refuses,
+verified by reading each); `for-each-ref`'s zero records are legitimate, not impossible; the
+salvage verify already compares stdout to the expected sha. **One changed** — the presence read.
+
+AND THE OPERATOR STRINGS, swept for the same defect one level out: can any of them render an empty
+value? Two more, neither reachable through the case that exposed them. `${busy.worktree ??
+busy.workflow_run_id ?? '?'}` uses `??`, which substitutes only for NULL — so an owner row whose
+`worktree` is the EMPTY STRING falls straight through it, and since gate 10's first witness skips
+such a row while the GENERATION witness still matches, the reason read "a process stands in " with
+nothing after it. `||` is the correct operator when the job is to render something. And `errText`
+returned `error.message` unguarded, so a thrown `Error('')` would trail a reason off after
+"unreadable: ". **Three empty renders found, three closed, each mutation-proven.**
+
+THE TRANSFERABLE PART: **an empty interpolation is a claim with its evidence deleted.** "STILL
+PRESENT at " is not a smaller version of a correct sentence, it is a confident sentence whose
+subject never arrived — and it is the cheapest possible signal that the value was never checked.
+Grepping interpolations for what happens when the value is empty is a five-minute sweep that found
+a destructive-path defect and two latent ones.
+
 ### A LEFTOVER-CASE ARGUMENT ASSUMES THE LEFTOVER CANNOT GROW
 
 Gate 9 — no owning run's recorded worktree exists on disk — was filed in the freshness audit as

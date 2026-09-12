@@ -2053,8 +2053,36 @@ describe('branch-ref reap — the refusals (#547)', () => {
     },
     {
       what: 'exit 128 (hard error) → indeterminate, never a deletion',
-      result: { ok: false, stdout: '', stderr: 'fatal: permission denied', exit_code: 128 },
+      result: { ok: false, stdout: '', stderr: '', exit_code: 128 },
       expect: 'unknown' as const,
+    },
+    // EXIT 0 IS NOT A PRESENCE CLAIM UNTIL THE OUTPUT SAYS SO (#547 round 20). The three cases
+    // above only ever exercised exit 0 WITH the expected object name, so the boundary where a
+    // success says something impossible was unreached — and `refPresence` keyed on the exit
+    // code alone, reporting "STILL PRESENT at " with an empty object name in the operator's own
+    // sentence, on no evidence the ref existed.
+    {
+      what: 'exit 0 with EMPTY stdout → impossible success, stands down rather than claiming presence',
+      result: { ok: true, stdout: '', stderr: '', exit_code: 0 },
+      expect: 'unknown' as const,
+    },
+    {
+      what: 'exit 0 with stdout that is not an object name → impossible success, stands down',
+      result: { ok: true, stdout: 'HEAD\n', stderr: '', exit_code: 0 },
+      expect: 'unknown' as const,
+    },
+    {
+      what: 'exit 0 with an ABBREVIATED sha → still not a full object name, stands down',
+      result: { ok: true, stdout: 'deadbeef\n', stderr: '', exit_code: 0 },
+      expect: 'unknown' as const,
+    },
+    {
+      // The complement that keeps the shape check from becoming "refuse unless it matches":
+      // a ref that exists at a DIFFERENT tip is genuinely present, and the reason says so.
+      what: 'exit 0 with a different full object name → present, and the mismatch is named',
+      result: { ok: true, stdout: `${'b'.repeat(40)}\n`, stderr: '', exit_code: 0 },
+      expect: 'present' as const,
+      reasonContains: 'which is NOT the',
     },
   ]) {
     test(`after an indeterminate delete, ${shape.what}`, async () => {
@@ -2088,11 +2116,23 @@ describe('branch-ref reap — the refusals (#547)', () => {
       } else {
         expect(report.refs_deleted, JSON.stringify(report.refs_kept)).toEqual([])
         const kept = keptReasonFor(report, ref(branch))
+        // Narrowed rather than cast: `keptReasonFor` returns `string | undefined`, and a
+        // missing reason is itself a failure worth naming before anything is read off it.
+        if (kept === undefined) throw new Error(`no kept reason: ${JSON.stringify(report.refs_kept)}`)
         expect(kept, JSON.stringify(report.refs_kept)).toStartWith(
           shape.expect === 'present' ? 'delete-timed-out:' : 'delete-indeterminate:',
         )
         // Only the UNKNOWN class is a stand-down; a present ref is an ordinary refusal.
         expect(report.refs_stood_down).toBe(shape.expect === 'unknown' ? 1 : 0)
+        if ('reasonContains' in shape && shape.reasonContains !== undefined) {
+          expect(kept).toContain(shape.reasonContains)
+        }
+        // THE OPERATOR SENTENCE CAN NEVER RENDER AN EMPTY VALUE. "STILL PRESENT at " with
+        // nothing after it is what taught this round that a presence claim was being made
+        // without evidence, so it is asserted on every shape rather than only the one that
+        // produced it.
+        expect(kept).not.toMatch(/PRESENT at\s*(,|$)/)
+        expect(kept.trimEnd()).not.toEndWith('at')
       }
     }, 60_000)
   }
@@ -3776,6 +3816,53 @@ describe('gate 10 is re-measured at delete time, not remembered (#547)', () => {
     // POSITIVE CONTROL on the read: a string that must be there, so "not found" cannot mean
     // "wrong file" or "unreadable".
     expect(store).toContain('listBranchOwners')
+  })
+
+  test('an owner with an EMPTY recorded path never renders a blank reason', async () => {
+    // THE SECOND EMPTY-RENDER PATH (#547 round 20), found by sweeping the operator strings after
+    // "STILL PRESENT at " turned up. `??` only substitutes for null, so an owner row whose
+    // `worktree` is the EMPTY STRING fell through it: gate 10's first witness skips such a row,
+    // the GENERATION witness still matches, and the reason then read "a process stands in " with
+    // nothing after it. `||` is the correct operator when the job is to render something.
+    const { root, repo } = await makeRepo()
+    const proc = makeProc(root)
+    const branch = 'trident/empty-recorded-path'
+    const sha = await seedRef(repo, branch, 'emptypath')
+    const generation = 'wf_feedface-111-2'
+    const opts = {
+      store: stubStore(repo, [], [
+        owner(branch, { phase: 'failed', worktree: '', workflow_run_id: generation }),
+      ]),
+      run_host: spawnCapture,
+      proc_root: proc,
+    }
+    const minted = onlyCandidate(await sweepTridentWorktrees(opts))
+
+    const live = join(root, generation)
+    mkdirSync(live, { recursive: true })
+    addProcCwd(proc, 9104, live)
+
+    const report = emptyReapReport()
+    await deleteReapableRef(opts, repo, minted, report, { attempts: 0 })
+
+    expect(report.refs_deleted).toEqual([])
+    const kept = keptReasonFor(report, ref(branch))
+    // The refusal is right; what is asserted here is that it SAYS something.
+    expect(kept).toContain('a process stands in')
+    expect(kept).not.toMatch(/stands in\s*$/)
+    expect(kept).toContain(generation)
+    expect(await refExists(repo, ref(branch))).toBe(true)
+    expect(sha).toHaveLength(40)
+  }, 60_000)
+
+  test('errText never interpolates to nothing', () => {
+    // The third path the sweep turned up: a thrown Error with an empty message would have
+    // trailed a reason off after "unreadable: ". Asserted through the reason-building helper
+    // rather than by reading the code, since that is how it reaches an operator.
+    const source = readFileSync(new URL('./worktree-reaper.ts', import.meta.url), 'utf8')
+    expect(source).toContain('with no message')
+    // POSITIVE CONTROL: the guard is on the TRIMMED text, so whitespace-only counts as empty.
+    expect(source).toContain("text.trim() === ''")
   })
 
   test('the freshness audit in the header names gate 10 as re-measured', () => {
