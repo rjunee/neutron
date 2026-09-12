@@ -329,6 +329,12 @@ export async function diffBaseRef(
   // turns that fatal into an EMPTY diff, i.e. the "unbuilt branch" signal. So the padded
   // name is refused here for the same reason the empty one is: downstream it becomes a
   // plausible wrong answer rather than a failure.
+  //
+  // AND THE ONLY SOURCE OF ONE IS CONFIGURATION. `detectBaseBranch` trims its own
+  // `symbolic-ref` output (`:191`-`:195`) and falls back to the literal `main`, so the
+  // detected path cannot produce a padded name; `opts.base_branch` can, and
+  // `resolveBase()` returns it verbatim. So this refusal narrows exactly one input and
+  // leaves the automatic path untouched.
   if (base_branch !== base_branch.trim()) {
     throw new TridentPaddedBaseError(base_branch)
   }
