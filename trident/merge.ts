@@ -57,6 +57,7 @@
  * unpinnable merge is exactly the unreviewable merge this prevents).
  */
 
+import { createHash } from 'node:crypto'
 import { existsSync, realpathSync } from 'node:fs'
 import { join } from 'node:path'
 
@@ -1670,6 +1671,98 @@ async function listConflictedFiles(run_host: RunHostCommand, repo: string): Prom
 }
 
 /**
+ * Is this actually an `ArbitrationOutcome`? (#541 review round 2.)
+ *
+ * `verdict?.kind` guarded the OBJECT being absent. It did nothing about malformed
+ * FIELDS, and the type annotation is a compile-time promise that an injected
+ * arbiter — or a future one whose parser changes — is under no obligation to keep.
+ * `{kind:'decision', option_id:'retry-resolution', reasoning:null}` type-checks
+ * nowhere and arrives anyway: `reasoning.trim()` then threw a TypeError from the
+ * retry branch, which is OUTSIDE `arbitrateConflict`'s catch — so the rebase was
+ * never aborted and the owner got a stack trace instead of the resolver's specific
+ * question. Exactly the outcome the unoffered-option guard exists to prevent,
+ * reached through a field instead of through the object.
+ *
+ * So the shape is checked ONCE, at the boundary, and everything downstream may
+ * then trust it. Narrow and total: every arm's every field, `kind` included.
+ */
+function isArbitrationOutcome(value: unknown): value is ArbitrationOutcome {
+  if (typeof value !== 'object' || value === null) return false
+  const v = value as Record<string, unknown>
+  switch (v['kind']) {
+    case 'decision':
+      return typeof v['option_id'] === 'string' && typeof v['reasoning'] === 'string'
+    case 'owner-only':
+      return typeof v['question'] === 'string'
+    case 'unavailable':
+      return typeof v['reason'] === 'string'
+    default:
+      return false
+  }
+}
+
+/**
+ * A fingerprint of everything in `wt` that could become part of the merge — the
+ * INTEGRITY BASELINE for an arbitration (#541 review round 2).
+ *
+ * WHY THIS EXISTS. Withholding the GitHub credential stops the arbiter PUSHING; it
+ * does nothing about the CALLER pushing the arbiter's edits. The arbiter turn runs
+ * with unrestricted `Bash` under `--dangerously-skip-permissions`, rooted in the
+ * LIVE conflicted worktree — the tree whose contents become the commit — so a
+ * prompt-injected turn could edit and stage files, return `retry-resolution`, and
+ * have the caller resolve, continue the rebase and land them. The injection vector
+ * is in the same turn: the evidence embeds the Forge-authored resolver question.
+ *
+ * WHY NOT AN ENFORCED READ-ONLY TURN, which would be strictly better. The knobs
+ * that would deny writes are `permission_mode` and `sandbox`, and
+ * `gateway/wiring/substrate-profiles.ts` is explicit that they are SHAPE-ONLY at
+ * Step 0 — "Do NOT add `permission_mode` / `sandbox` RUNTIME behaviour here —
+ * those have no `ClaudeCodeSubstrateOptions` field yet and wiring them is a later
+ * phase (B / D)" — and its frozen-shape test asserts every profile carries exactly
+ * three fields. Wiring them is a substrate-factory migration, not a fix to this
+ * seam. So this seam enforces the property it needs with what it has: it does not
+ * PREVENT the write, it makes the write UNABLE TO LAND.
+ *
+ * WHAT IT COVERS. `status --porcelain -uall` catches added, deleted, renamed and
+ * newly-untracked paths and every status transition; `diff` catches unstaged
+ * content edits (including to an unmerged path, which is what a conflicted file
+ * is); `diff --cached` catches anything `git add`ed. Content, not just status —
+ * editing a `UU` file leaves it `UU`, so a status probe alone would miss the one
+ * mutation that matters most.
+ *
+ * EXPORTED FOR A REAL-GIT TEST, and that is not a convenience. Every scripted-host
+ * test above proves the SEAM consults this function; none of them proves the function
+ * can actually SEE an edit — if the probe set were wrong (say `diff` showed nothing for
+ * an unmerged path) all of them would stay green while the guard detected nothing in
+ * production. `merge-realgit.test.ts` drives it against a real conflicted worktree.
+ *
+ * @returns the fingerprint, or `null` when it could not be taken — which callers
+ *          MUST treat as "changed", because an unverifiable tree is exactly the
+ *          case this guard exists for.
+ */
+export async function worktreeFingerprint(run_host: RunHostCommand, wt: string): Promise<string | null> {
+  const probes: string[][] = [
+    ['git', '-C', wt, '-c', 'core.quotePath=false', 'status', '--porcelain', '-z', '--untracked-files=all'],
+    ['git', '-C', wt, '-c', 'core.quotePath=false', 'diff'],
+    ['git', '-C', wt, '-c', 'core.quotePath=false', 'diff', '--cached'],
+  ]
+  const h = createHash('sha256')
+  for (const probe of probes) {
+    let res: HostCommandResult
+    try {
+      res = await run_host(probe, wt)
+    } catch {
+      return null
+    }
+    if (!res.ok) return null
+    // NUL-delimited so two probes cannot be confused for one another's output.
+    h.update(res.stdout)
+    h.update('\u0000')
+  }
+  return h.digest('hex')
+}
+
+/**
  * The reasoning an arbiter decision carries, or `undefined` when there is nothing
  * worth threading into the next resolver turn (#541).
  *
@@ -1723,7 +1816,7 @@ async function arbitrateConflict(
   }
   const files = ctx.conflicted.length > 0 ? ctx.conflicted.join(', ') : '(unnamed)'
   try {
-    return await arbitrate({
+    const outcome: unknown = await arbitrate({
       run: ctx.run,
       repo_path: ctx.repo,
       question:
@@ -1738,6 +1831,12 @@ async function arbitrateConflict(
         `(\`git log\`/\`git show\` on \`${ctx.branch}\` and \`${ctx.base}\`) before deciding.`,
       options: [...CONFLICT_ARBITRATION_OPTIONS],
     })
+    // A MALFORMED OUTCOME IS AN UNAVAILABLE ARBITER, decided here where the catch
+    // still covers us rather than by a field access three lines into the caller.
+    if (!isArbitrationOutcome(outcome)) {
+      return { kind: 'unavailable', reason: 'the arbiter returned a malformed outcome' }
+    }
+    return outcome
   } catch (error) {
     // A THROWING arbiter is an unavailable arbiter. `buildFableArbiter` already
     // degrades internally, but this seam must hold for any injected arbiter too:
@@ -1900,21 +1999,64 @@ async function rebaseBranchOntoBase(
       // — all of them fall through to the identical abort + escalate the owner
       // has had all along. That is the property that makes wiring this safe: the
       // arbiter can only ever ADD one retry, never block a run and never guess.
-      const verdict = await arbitrateConflict(arbitrate, {
-        run,
-        repo,
-        base,
-        branch,
-        conflicted,
-        resolver_question: outcome.question,
-      })
+      //
+      // DO NOT ASK ON THE LAST PERMITTED ROUND. `rounds` was spent by THIS pass, so
+      // a retry needs one more — and at `rounds === MAX_CONFLICT_ROUNDS` there is
+      // none. Asking anyway was strictly harmful in three ways at once: it burned a
+      // model turn whose answer could not be acted on, it `continue`d into the cap
+      // guard, and the cap guard's generic message REPLACED `outcome.question` —
+      // throwing away the one specific thing the owner needed. Never offer a retry
+      // this loop cannot honour.
+      const roundsRemain = rounds < MAX_CONFLICT_ROUNDS
+      // THE INTEGRITY BASELINE, taken AFTER the resolver has finished mutating and
+      // immediately before the arbiter turn, so the only thing that can move it is
+      // the arbiter.
+      const fingerprintBefore = roundsRemain ? await worktreeFingerprint(run_host, repo) : null
+      const verdict: ArbitrationOutcome = roundsRemain
+        ? await arbitrateConflict(arbitrate, {
+            run,
+            repo,
+            base,
+            branch,
+            conflicted,
+            resolver_question: outcome.question,
+          })
+        : {
+            kind: 'unavailable',
+            reason: `no resolver round remains within the cap (${MAX_CONFLICT_ROUNDS})`,
+          }
       // `verdict?.kind`, NOT `verdict.kind`. `arbitrateConflict` cannot return
       // null, but an INJECTED arbiter that resolves to undefined would throw here
       // — OUTSIDE that function's try — escaping `rebaseBranchOntoBase` with no
       // `rebase --abort` and replacing the owner's specific question with a
       // TypeError. That is precisely the outcome the unoffered-option guard below
       // exists to prevent, so it must not be reachable one line earlier.
-      if (verdict?.kind === 'decision' && verdict.option_id === CONFLICT_ARBITER_RETRY_OPTION) {
+      if (verdict.kind === 'decision' && verdict.option_id === CONFLICT_ARBITER_RETRY_OPTION) {
+        // THE ARBITER MAY NOT HAVE TOUCHED THE TREE. It is a JUDGE: it selects, and
+        // the caller applies. But it runs with unrestricted `Bash` in the live
+        // conflicted worktree — the tree that becomes the commit — so "it only
+        // selected" has to be VERIFIED, not assumed, or a prompt-injected turn's
+        // edits ride the retry straight into the merge. Any change, or a baseline we
+        // could not establish, refuses the retry and falls through to the owner path
+        // below with the resolver's own question intact. Fail-closed: the cost of a
+        // false positive is one lost retry; the cost of a false negative is landing
+        // code nothing reviewed.
+        const fingerprintAfter = await worktreeFingerprint(run_host, repo)
+        const untouched =
+          fingerprintBefore !== null &&
+          fingerprintAfter !== null &&
+          fingerprintBefore === fingerprintAfter
+        if (!untouched) {
+          log.warn('merge_conflict_arbiter_mutated_tree', {
+            run: run.id,
+            branch,
+            base,
+            verifiable: fingerprintBefore !== null && fingerprintAfter !== null,
+            action:
+              'the arbiter changed the conflicted worktree (or the change could not be ruled out); its retry was REFUSED and the conflict escalated unchanged',
+          })
+        }
+        if (untouched) {
         // Re-enter the loop WITHOUT advancing the rebase: `res` still holds the
         // same conflicted result, so the next iteration re-reads the unresolved
         // set and re-dispatches the resolver against the same commit — carrying
@@ -1951,6 +2093,7 @@ async function rebaseBranchOntoBase(
         guidance = reasoned
         arbiterRetries++
         continue
+        }
       }
       await abortRebase(run_host, repo, base)
       throw new TridentMergeConflictEscalation(outcome.question)

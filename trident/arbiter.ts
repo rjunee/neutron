@@ -123,15 +123,29 @@ export const ARBITER_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Bash'] as const
  * runs unprompted. "Read-only" is a CONTRACT stated in `arbiterPrompt` and
  * nothing more.
  *
- * WHAT ACTUALLY BOUNDS IT is the substrate profile, not this list and not the
- * prompt. `PROFILE_ARBITER` (`gateway/wiring/substrate-profiles.ts`) withholds
- * the GitHub credential, so the authority `FORBIDDEN_OPTION_IDS` excludes from
- * the option set — approve, merge, waive review — is also absent from the
- * environment: there is no `GH_TOKEN` and no credential helper for `gh pr merge`
- * or `git push` to use. What remains reachable is local mutation inside the
- * throwaway per-run worktree the turn is rooted at, which the caller tears down.
- * Making THAT structural needs the reserved `permission_mode`/`sandbox` knobs;
- * until they are applied, this docblock states the gap instead of hiding it.
+ * WHAT BOUNDS IT IS NOT THIS LIST AND NOT THE PROMPT — it is two things outside
+ * this file, and it took two review rounds to get both:
+ *
+ *  1. `PROFILE_ARBITER` (`gateway/wiring/substrate-profiles.ts`) withholds the
+ *     GitHub credential, so the authority `FORBIDDEN_OPTION_IDS` excludes from the
+ *     option set — approve, merge, waive review — is absent from the ENVIRONMENT
+ *     too: no `GH_TOKEN`, no credential helper for `gh pr merge` or `git push`.
+ *  2. THE CALLER VERIFIES THE TREE DID NOT MOVE. Point 1 alone was not enough, and
+ *     the reason is worth stating exactly, because the first version of this
+ *     docblock got it wrong: it called the turn's cwd a "throwaway worktree" whose
+ *     local mutation therefore did not matter. That tree is not throwaway. It is
+ *     the run's conflicted merge worktree — the tree whose contents BECOME the
+ *     commit. Withholding the credential stops the arbiter pushing; it does nothing
+ *     about the caller pushing the arbiter's edits. So `merge.ts` fingerprints the
+ *     worktree immediately before and after each arbitration and refuses to act on
+ *     a decision when anything moved (or when it could not be checked).
+ *
+ * An enforced read-only turn would be better than a verification after the fact.
+ * `permission_mode` and `sandbox` are the knobs, and `substrate-profiles.ts` is
+ * explicit that both are shape-only at Step 0 with runtime behaviour deferred to a
+ * later phase — so until that lands, the integrity check is where this property is
+ * actually enforced, and this docblock names the gap rather than implying the tool
+ * list closes it.
  */
 const ARBITER_TOOLS: AgentSpec['tools'] = ARBITER_TOOL_NAMES.map((name) => ({
   name,

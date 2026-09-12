@@ -451,13 +451,24 @@ describe('#541 — MAX_CONFLICT_ROUNDS is the bound on arbiter-directed retries'
       },
     })
 
-    // IT TERMINATES, and by the OWNER path — not by the tripwire above.
+    // IT TERMINATES, and by the OWNER path — not by the tripwire above. And the
+    // owner gets the RESOLVER'S OWN SPECIFIC QUESTION, which is the substantive
+    // half: the generic cap message used to replace it here, throwing away the one
+    // thing the owner needed in order to answer.
     await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
       name: 'TridentMergeConflictEscalation',
+      question: RESOLVER_QUESTION,
     })
-    // And it terminates AT THE CAP — not at the cap plus retries, and not later.
+    // It terminates AT THE CAP — not at the cap plus retries, and not later.
     expect(resolverCalls).toBe(MAX_CONFLICT_ROUNDS)
-    expect(arbiterCalls).toBe(MAX_CONFLICT_ROUNDS)
+    // THE BOUNDARY, not the off-by-one this assertion used to encode. The last
+    // permitted round has no further round to offer, so the arbiter is NOT asked:
+    // asking would burn a model turn on an answer that cannot be honoured and then
+    // discard the resolver's question on the way past the cap guard. One fewer
+    // arbitration than rounds is the correct count, and it is spelled as a relation
+    // to the cap rather than as the literal 11.
+    expect(arbiterCalls).toBe(MAX_CONFLICT_ROUNDS - 1)
+    expect(arbiterCalls).toBeLessThan(resolverCalls)
     // Still the owner path: rebase aborted, nothing landed.
     expect(calls.some((c) => c === `git -C ${wt} rebase --abort`)).toBe(true)
     expect(calls.some((c) => c.includes('merge --no-ff'))).toBe(false)
@@ -497,33 +508,42 @@ describe('#541 — MAX_CONFLICT_ROUNDS is the bound on arbiter-directed retries'
     expect(resolverCalls).toBeLessThanOrEqual(MAX_CONFLICT_ROUNDS)
   })
 
-  test('cap exhaustion AFTER arbiter retries does not prescribe a manual rebase for a single commit', async () => {
-    // The pre-#541 message read "conflicts across more than 12 commits — it needs
-    // a manual rebase", which is the wrong remedy when twelve rounds were twelve
-    // second opinions on ONE commit.
+  test('the cap-exhaustion message names retries when retries happened, and never prescribes a manual rebase for them', async () => {
+    // The generic cap message is reachable ONLY by exhausting rounds on ADVANCING
+    // commits now — a retry on the final round no longer reaches it, because the
+    // final round is not offered one. So this drives the shape that does: one
+    // escalation retried successfully, then eleven advancing commits that each
+    // conflict, until the loop-entry cap trips.
+    //
+    // The pre-#541 wording ("conflicts across more than 12 commits — it needs a
+    // manual rebase") is right for a long history and wrong the moment any of those
+    // rounds was a second opinion, so the message has to say which happened.
     const run = localRun('feat-msg')
     const wt = wtOf('/shared', run)
     const { host } = conflictingHost(wt, Number.MAX_SAFE_INTEGER)
     let resolverCalls = 0
+    let arbiterCalls = 0
     const deps = buildMergeCleanupDeps(host, {
       base_branch: 'main',
       resolve_conflict: async () => {
         resolverCalls++
-        // Same tripwire as the bound test above: an unbounded loop must fail by
-        // name here too, or one un-tripwired test hangs the whole file and hides
-        // which guard actually broke.
         if (resolverCalls > MAX_CONFLICT_ROUNDS) {
           throw new Error(
             `unbounded conflict loop: the resolver was dispatched ${resolverCalls} times, past MAX_CONFLICT_ROUNDS=${MAX_CONFLICT_ROUNDS}`,
           )
         }
-        return { resolved: false, question: RESOLVER_QUESTION }
+        // Escalate once (so one arbiter retry happens), then resolve every round —
+        // each `rebase --continue` conflicts again, marching to the cap.
+        return resolverCalls === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
       },
-      arbitrate: async () => ({
-        kind: 'decision',
-        option_id: CONFLICT_ARBITER_RETRY_OPTION,
-        reasoning: 'keep both guards',
-      }),
+      arbitrate: async () => {
+        arbiterCalls++
+        return {
+          kind: 'decision',
+          option_id: CONFLICT_ARBITER_RETRY_OPTION,
+          reasoning: 'both sides add an independent guard',
+        }
+      },
     })
     let message = ''
     try {
@@ -531,9 +551,41 @@ describe('#541 — MAX_CONFLICT_ROUNDS is the bound on arbiter-directed retries'
     } catch (err) {
       message = err instanceof Error ? err.message : String(err)
     }
+    // Exactly one arbitration, and it was honoured (the retry resolved).
+    expect(arbiterCalls).toBe(1)
+    expect(resolverCalls).toBe(MAX_CONFLICT_ROUNDS)
+    // The message names what happened rather than prescribing the wrong remedy.
     expect(message).not.toContain('manual rebase')
     expect(message).toContain('conflict-resolution attempts')
     expect(message).toContain('second opinion')
+  })
+
+  test('a cap exhausted with NO arbiter retries still gets the plain many-commits remedy', async () => {
+    // The control for the message split above: without a second opinion the
+    // original wording is the correct one, and this is what keeps the new branch
+    // from swallowing it.
+    const run = localRun('feat-plain')
+    const wt = wtOf('/shared', run)
+    const { host } = conflictingHost(wt, Number.MAX_SAFE_INTEGER)
+    let resolverCalls = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        resolverCalls++
+        if (resolverCalls > MAX_CONFLICT_ROUNDS) throw new Error('unbounded conflict loop')
+        return { resolved: true }
+      },
+      // No arbiter at all — nothing to retry, so the count is pure commits.
+    })
+    let message = ''
+    try {
+      await cleanupAfterMerge(run, deps)
+    } catch (err) {
+      message = err instanceof Error ? err.message : String(err)
+    }
+    expect(message).toContain('manual rebase')
+    expect(message).toContain(`more than ${MAX_CONFLICT_ROUNDS} commits`)
+    expect(message).not.toContain('second opinion')
   })
 })
 
@@ -561,9 +613,13 @@ describe('#541 — model-authored text crossing the seam is defanged and capped'
     await cleanupAfterMerge(run, deps)
     const guidance = seenGuidance[1]
     expect(guidance).toBeDefined()
-    // Capped far below what the arbiter handed over — the seam does not rely on
-    // `arbiter.ts` having capped it upstream.
-    expect(guidance!.length).toBeLessThan(1_000)
+    // BOUNDED BY **THIS** SEAM'S CAP, not by another layer's. The first version of
+    // this assertion said `< 1_000`, which is `arbiter.ts`'s own reasoning cap — so
+    // it would have stayed green if this seam's fold disappeared entirely and the
+    // upstream cap took over, which is the exact thing the test exists to deny.
+    // `foldEvidence` keeps the last EVIDENCE_PROSE_MAX (300) characters behind one
+    // ellipsis, so 301 is the real ceiling and anything looser is borrowed.
+    expect(guidance!.length).toBeLessThanOrEqual(301)
     expect(guidance!.length).toBeLessThan(HUGE.length)
   })
 
@@ -727,6 +783,206 @@ describe('#541 — the holds that do NOT qualify still go STRAIGHT to the owner'
     expect(resolverCalls).toBe(0)
     expect(arbiterCalls).toBe(0)
   })
+})
+
+describe('#541 — an ARBITER-SIDE MUTATION cannot ride the retry into the merge', () => {
+  /**
+   * THE BOUNDARY THE CREDENTIAL FIX DOES NOT CLOSE. Withholding `GH_TOKEN` stops the
+   * arbiter PUSHING. It does nothing about the CALLER pushing the arbiter's edits:
+   * the turn has unrestricted `Bash` under `--dangerously-skip-permissions`, rooted
+   * in the LIVE conflicted worktree — the tree whose contents become the commit — so
+   * a prompt-injected arbiter could edit and stage files, answer
+   * `retry-resolution`, and have the caller resolve, continue the rebase and land
+   * them. The injection vector is in the same turn: the evidence embeds the
+   * Forge-authored resolver question.
+   *
+   * An enforced read-only turn would be strictly better, but `permission_mode` and
+   * `sandbox` are SHAPE-ONLY at Step 0 and `substrate-profiles.ts` explicitly forbids
+   * giving them runtime behaviour there. So the seam verifies instead of trusting:
+   * the worktree is fingerprinted immediately before the arbitration and again after,
+   * and a retry is only honoured if nothing moved.
+   *
+   * A HOST THAT REPORTS A CHANGED TREE is how that is driven here — the fingerprint
+   * is exactly `status --porcelain` + `diff` + `diff --cached`, so a host whose
+   * `diff` output differs across the arbitration is indistinguishable from an
+   * arbiter that edited a file, which is the point.
+   */
+  function treeChangingHost(
+    wt: string,
+    opts: { changeOnArbitration?: boolean; failFingerprint?: boolean } = {},
+  ): { host: RunHostCommand; calls: string[]; arbitrated: { yes: boolean } } {
+    const calls: string[] = []
+    const arbitrated = { yes: false }
+    let reported = 0
+    const host: RunHostCommand = async (cmd) => {
+      const j = cmd.join(' ')
+      calls.push(j)
+      // The fingerprint probes. `diff` (no --cached, no --diff-filter) is the one
+      // that carries working-tree CONTENT.
+      const isPlainDiff =
+        cmd.includes('diff') &&
+        !cmd.includes('--cached') &&
+        !cmd.includes('--diff-filter=U') &&
+        !cmd.includes('--name-only') &&
+        !cmd.includes('--name-status')
+      if (isPlainDiff) {
+        if (opts.failFingerprint === true) return fail('cannot read the tree')
+        // After the arbiter has been consulted, the tree reads differently.
+        return ok(
+          opts.changeOnArbitration === true && arbitrated.yes
+            ? '--- a/flush.ts\n+++ b/flush.ts\n+AN EDIT THE ARBITER MADE\n'
+            : '--- a/flush.ts\n+++ b/flush.ts\n+original\n',
+        )
+      }
+      if (cmd.includes('status') && cmd.includes('--porcelain')) return ok('UU flush.ts\u0000')
+      if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok('flush.ts')
+      const ownRebase = cmd.includes(wt) && cmd.includes('rebase') && !cmd.includes('--abort')
+      if (ownRebase && reported < 1) {
+        reported++
+        return fail('CONFLICT (content): Merge conflict in flush.ts')
+      }
+      return ok()
+    }
+    return { host, calls, arbitrated }
+  }
+
+  test('an arbiter that CHANGES the worktree has its retry REFUSED, and nothing it touched is merged', async () => {
+    const run = localRun('feat-mutator')
+    const wt = wtOf('/shared', run)
+    const { host, calls, arbitrated } = treeChangingHost(wt, { changeOnArbitration: true })
+    let attempts = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return { resolved: false, question: RESOLVER_QUESTION }
+      },
+      arbitrate: async () => {
+        // The mutation happens DURING the turn, which is exactly when a real one would.
+        arbitrated.yes = true
+        return {
+          kind: 'decision',
+          option_id: CONFLICT_ARBITER_RETRY_OPTION,
+          reasoning: 'trust me, I fixed it',
+        }
+      },
+    })
+
+    await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+      name: 'TridentMergeConflictEscalation',
+      question: RESOLVER_QUESTION,
+    })
+    // THE RETRY WAS REFUSED: the resolver was never re-dispatched, so nothing the
+    // arbiter staged was ever resolved-over, committed or merged.
+    expect(attempts).toBe(1)
+    expect(calls.some((c) => c === `git -C ${wt} rebase --abort`)).toBe(true)
+    expect(calls.some((c) => c.includes('merge --no-ff'))).toBe(false)
+    expect(calls.some((c) => c.includes('branch -D'))).toBe(false)
+  })
+
+  test('a fingerprint that cannot be taken is treated as CHANGED (fail-closed)', async () => {
+    // An unverifiable tree is precisely the case this guard exists for, so it must
+    // refuse rather than assume the arbiter behaved.
+    const run = localRun('feat-unverifiable')
+    const wt = wtOf('/shared', run)
+    const { host, calls } = treeChangingHost(wt, { failFingerprint: true })
+    let attempts = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return { resolved: false, question: RESOLVER_QUESTION }
+      },
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'looks mechanical',
+      }),
+    })
+    await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+      name: 'TridentMergeConflictEscalation',
+      question: RESOLVER_QUESTION,
+    })
+    expect(attempts).toBe(1)
+    expect(calls.some((c) => c === `git -C ${wt} rebase --abort`)).toBe(true)
+  })
+
+  test('an arbiter that leaves the tree ALONE is still honoured (the guard is not a blanket refusal)', async () => {
+    // The control. Without this, a fingerprint that never matches would satisfy the
+    // two tests above while disabling the feature entirely.
+    const run = localRun('feat-clean-judge')
+    const wt = wtOf('/shared', run)
+    const { host, calls, arbitrated } = treeChangingHost(wt, { changeOnArbitration: false })
+    let attempts = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return attempts === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
+      },
+      arbitrate: async () => {
+        arbitrated.yes = true
+        return {
+          kind: 'decision',
+          option_id: CONFLICT_ARBITER_RETRY_OPTION,
+          reasoning: 'both sides add an independent guard',
+        }
+      },
+    })
+    await cleanupAfterMerge(run, deps)
+    expect(attempts).toBe(2)
+    expect(calls.some((c) => c.startsWith('git -C /shared merge --no-ff feat-clean-judge'))).toBe(true)
+  })
+})
+
+describe('#541 — a MALFORMED arbiter outcome degrades to unavailable, never to a TypeError', () => {
+  /**
+   * `verdict?.kind` guarded the object being absent. It did nothing about malformed
+   * FIELDS: `{kind:'decision', option_id:'retry-resolution', reasoning:null}` reached
+   * `reasoning.trim()` in the retry branch and threw a TypeError OUTSIDE
+   * `arbitrateConflict`'s catch — so the rebase was never aborted and the owner got a
+   * stack trace instead of the specific question. The shape is now validated once, at
+   * the boundary, where the catch still covers it.
+   */
+  const malformed: { name: string; outcome: unknown }[] = [
+    { name: 'reasoning is null', outcome: { kind: 'decision', option_id: 'retry-resolution', reasoning: null } },
+    { name: 'reasoning is a number', outcome: { kind: 'decision', option_id: 'retry-resolution', reasoning: 7 } },
+    { name: 'reasoning is an object', outcome: { kind: 'decision', option_id: 'retry-resolution', reasoning: {} } },
+    { name: 'reasoning is missing', outcome: { kind: 'decision', option_id: 'retry-resolution' } },
+    { name: 'option_id is null', outcome: { kind: 'decision', option_id: null, reasoning: 'x' } },
+    { name: 'kind is unknown', outcome: { kind: 'retry', option_id: 'retry-resolution', reasoning: 'x' } },
+    { name: 'owner-only with no question', outcome: { kind: 'owner-only' } },
+    { name: 'unavailable with a non-string reason', outcome: { kind: 'unavailable', reason: 12 } },
+    { name: 'outcome is null', outcome: null },
+    { name: 'outcome is a string', outcome: 'retry-resolution' },
+    { name: 'outcome is an array', outcome: [] },
+  ]
+
+  for (const c of malformed) {
+    test(`${c.name} → the rebase IS aborted and the owner keeps the resolver question`, async () => {
+      const run = localRun('feat-malformed')
+      const wt = wtOf('/shared', run)
+      const { host, calls } = conflictingHost(wt, 1)
+      let attempts = 0
+      const deps = buildMergeCleanupDeps(host, {
+        base_branch: 'main',
+        resolve_conflict: async () => {
+          attempts++
+          return { resolved: false, question: RESOLVER_QUESTION }
+        },
+        arbitrate: (async () => c.outcome) as unknown as TridentArbiter,
+      })
+      // NOT a TypeError, and NOT a stack trace: the owner's specific question.
+      await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
+        name: 'TridentMergeConflictEscalation',
+        question: RESOLVER_QUESTION,
+      })
+      expect(attempts).toBe(1)
+      // The abort is the half a TypeError used to skip entirely.
+      expect(calls.some((c2) => c2 === `git -C ${wt} rebase --abort`)).toBe(true)
+      expect(calls.some((c2) => c2.includes('merge --no-ff'))).toBe(false)
+    })
+  }
 })
 
 describe('#541 — a RETRIED conflict that resolves also discharges its #542 drift coverage', () => {

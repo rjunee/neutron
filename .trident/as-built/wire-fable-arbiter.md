@@ -80,11 +80,30 @@ escalation question, written by another bounded agent.
 leak fixer earns for a turn that EDITS files, i.e. strictly less restricted than this
 one. It is registered in the frozen-shape guard so flipping it back fails a test.
 
-WHAT THAT DOES NOT FIX, recorded rather than hidden: `skip_permissions: true` still
-means the declared `Bash` is ungated, so "read-only" remains a prompt contract, not an
-enforced property. `permission_mode` and `sandbox` are the knobs that would make it
-structural and both are RESERVED (not applied by the factory). `arbiter.ts`'s tool-surface
-docblock used to say "read-only Bash" as though it were checked; it now states the gap.
+THE CREDENTIAL WAS NECESSARY AND NOT SUFFICIENT, which the cross-model gate caught and
+my first write-up got wrong. I recorded the residual risk as "local mutation inside the
+throwaway worktree", and that reasoning was false: the arbiter runs in the run's LIVE
+conflicted merge worktree — the tree whose contents become the commit. Withholding
+`GH_TOKEN` stops the arbiter pushing; it does nothing about the CALLER pushing the
+arbiter's edits. With unrestricted `Bash` under `--dangerously-skip-permissions`, a
+prompt-injected turn (the injection vector is in the same turn — the evidence embeds the
+Forge-authored resolver question) could edit and stage files, answer `retry-resolution`,
+and have the caller resolve, continue the rebase and land them.
+
+So the caller VERIFIES rather than trusts. `worktreeFingerprint` hashes
+`status --porcelain -uall` + `diff` + `diff --cached` immediately before the arbitration
+and again after; a retry is honoured only if nothing moved. Content, not just status —
+editing a `UU` file leaves it `UU`, so a status probe alone would miss the mutation that
+matters most. Fail-closed: a fingerprint that cannot be taken counts as CHANGED, because
+an unverifiable tree is exactly the case the guard exists for.
+
+WHY NOT AN ENFORCED READ-ONLY TURN, which would be strictly better: `permission_mode`
+and `sandbox` are the knobs, and `substrate-profiles.ts` states in its header "Do NOT add
+`permission_mode` / `sandbox` RUNTIME behaviour here — those have no
+`ClaudeCodeSubstrateOptions` field yet and wiring them is a later phase (B / D)", with a
+frozen-shape test asserting every profile carries exactly three fields. Wiring them is a
+substrate-factory migration, not a fix to this seam. Both docblocks now say where the
+property is actually enforced instead of implying the tool list closes it.
 
 ### Two more things this change owes the reader
 
@@ -126,8 +145,61 @@ arbiter was consulted and acted on. That test exists because the source-text ass
 supplements stays GREEN when the composition assignment is moved behind `if (false)`,
 which is the exact hole a string match cannot see.
 
-Fifteen mutations were reverted one at a time and each proved a test red. Four survived
-their first attempt and each produced a new test: guidance commit-scoping, the
-orchestrator thread, the MAX_CONFLICT_ROUNDS bound, and the never-reset round counter.
-The last two are the loop's only bound, so their tests carry a tripwire that fails by
-name at round 13 rather than letting an unbounded loop hang the suite.
+### Two more boundary defects the cross-model gate found
+
+**A malformed accepted decision escaped without aborting the rebase.** `verdict?.kind`
+covered an absent OBJECT; it did nothing about malformed FIELDS.
+`{kind:'decision', option_id:'retry-resolution', reasoning:null}` reached
+`reasoning.trim()` in the retry branch and threw a TypeError *after*
+`arbitrateConflict`'s catch had returned — skipping `abortRebase` and replacing the
+owner's specific question with a stack trace, which is the exact outcome the
+unoffered-option guard exists to prevent, reached through a field instead of the object.
+`isArbitrationOutcome` now validates every arm's every field once, at the boundary, where
+the catch still covers it; eleven malformed shapes are tested.
+
+**The last permitted arbitration could not be acted on, and a test encoded the
+off-by-one.** The round cap is checked at loop entry and the round is spent before
+resolution, so at round 12 an escalation still invoked the arbiter; a `retry-resolution`
+then `continue`d straight into the cap guard, whose generic message DISCARDED
+`outcome.question` — the one thing the owner needed. The arbiter is no longer asked when
+no round remains, so that path now escalates with the resolver's own question. The test
+that asserted 12 resolver calls and 12 arbiter calls was encoding the bug as correct; it
+now asserts the boundary (`MAX_CONFLICT_ROUNDS - 1` arbitrations, spelled as a relation to
+the cap) and that the specific question survives.
+
+I audited the rest of that file for the same shape, as asked, and found one more: a
+guidance-length assertion of `< 1_000` — which is `arbiter.ts`'s cap, not this seam's. It
+would have stayed green if this seam's fold disappeared and the upstream cap took over.
+Tightened to the real ceiling (301 = `EVIDENCE_PROSE_MAX` + ellipsis) and
+mutation-verified. The arbiter-invocation-cap test and the shared-round-budget test were
+both checked and are genuine boundary tests (cap and cap+1; budget derived from the test's
+own input), so they stand.
+
+### The fingerprint is pinned against REAL git, not against my own stub
+
+The scripted-host tests prove the seam CONSULTS `worktreeFingerprint` and refuses a retry
+when it moves. None of them proves the function can see anything — they script the `diff`
+output themselves. If the probe set were wrong (if `git diff` printed nothing for an
+unmerged path, which is the single case that matters most, since a conflicted file is what
+the arbiter is looking at) every one of those tests would stay green while the guard
+detected nothing in production. That is the same unfalsifiable shape the guard exists to
+prevent, so `merge-realgit.test.ts` drives it against a real conflicted worktree: an edit
+to a `UU` file changes it (while the status letter does not — which is why it hashes
+content), a `git add` changes it, a new untracked file changes it, and reading nothing
+leaves it identical.
+
+Each probe is independently mutation-verified. The staged probe needed a second attempt:
+dropping `diff --cached` left the test green, because staging also empties the UNSTAGED
+diff, so the other probe caught it. The case only `diff --cached` can see is re-staging
+DIFFERENT content over an already-staged resolution — status letters unchanged, unstaged
+diff empty both times — which is precisely what an arbiter smuggling an edit into the
+merge would leave behind. That case is now asserted, and dropping the probe is red.
+
+### Mutations
+
+Twenty-six mutations reverted one at a time, each proved a test red. Eight survived a
+first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
+the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
+profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a
+tripwire that fails by name at round 13 rather than letting an unbounded loop hang the
+suite — a timeout is a worse signal than a named error.

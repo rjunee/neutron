@@ -28,6 +28,7 @@ import { cleanupAfterMerge } from './git-mode.ts'
 import {
   buildMergeCleanupDeps,
   runWorktreePath,
+  worktreeFingerprint,
   TridentBaseDriftHold,
   TridentMergeConflictEscalation,
   TridentMergeError,
@@ -844,4 +845,87 @@ describe('REAL git — a dirty lingering build worktree is PRESERVED (#541)', ()
     // The operator's real scratch file in the shared checkout was never touched.
     expect(existsSync(join(repo, 'operator-scratch.txt'))).toBe(true)
   }, 30_000)
+})
+
+describe('REAL git — the arbiter integrity baseline actually SEES a mutation (#541)', () => {
+  /**
+   * WHY THIS IS A REAL-GIT TEST. The scripted-host tests in `arbiter-wiring.test.ts`
+   * prove the merge seam CONSULTS `worktreeFingerprint` and refuses a retry when the
+   * value changes. None of them proves the function can see anything: they script the
+   * `diff` output themselves. If the probe set were wrong — if `git diff` printed
+   * nothing for an unmerged path, which is the single most important case, since a
+   * conflicted file is what the arbiter is looking at — every one of those tests would
+   * stay green while the guard detected nothing in production. That is the same
+   * unfalsifiable shape the guard itself exists to prevent, so the probe set is
+   * pinned against real git here.
+   */
+  test('editing a conflicted file changes the fingerprint; touching nothing leaves it identical', async () => {
+    const repo = await makeBaseRepo()
+    // Two incompatible edits to README.md so a rebase leaves a real `UU` path.
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.fp-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'feat-side\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edit')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'main-side\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main edit')
+
+    await git(repo, 'checkout', '-q', 'feat')
+    const reb = await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(reb.ok).toBe(false)
+    // A genuinely unmerged path — the state the arbiter turn is rooted in.
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('README.md')
+
+    const before = await worktreeFingerprint(spawnCapture, repo)
+    expect(before).not.toBeNull()
+
+    // IDEMPOTENT: a turn that only READ leaves the fingerprint identical, or the
+    // guard would refuse every retry and the feature would be dead while green.
+    expect(await worktreeFingerprint(spawnCapture, repo)).toBe(before)
+
+    // AN EDIT IS SEEN — and note the status letter does NOT change (still UU), which
+    // is exactly why the fingerprint hashes CONTENT and not just `status`.
+    writeFileSync(join(repo, 'README.md'), 'an edit the arbiter made\n')
+    const afterEdit = await worktreeFingerprint(spawnCapture, repo)
+    expect(afterEdit).not.toBeNull()
+    expect(afterEdit).not.toBe(before)
+
+    // A `git add` IS SEEN TOO.
+    await git(repo, 'add', 'README.md')
+    const afterStage = await worktreeFingerprint(spawnCapture, repo)
+    expect(afterStage).not.toBe(before)
+    expect(afterStage).not.toBe(afterEdit)
+
+    // THE STAGED PROBE, ISOLATED. The step above does not actually prove
+    // `diff --cached` is pulling its weight: staging also empties the UNSTAGED diff,
+    // so the change is visible to the other probe and dropping `--cached` left this
+    // test green (verified by mutation). This is the case only `diff --cached` can
+    // see — re-staging DIFFERENT content over an already-staged resolution. The
+    // status letters do not move (`M ` before and after) and the unstaged diff is
+    // empty both times; the only difference is the staged CONTENT, which is exactly
+    // what an arbiter smuggling an edit into the merge would leave behind.
+    const statusBeforeRestage = await gitOut(repo, 'status', '--porcelain')
+    const unstagedBeforeRestage = await gitOut(repo, 'diff')
+    writeFileSync(join(repo, 'README.md'), 'different staged content\n')
+    await git(repo, 'add', 'README.md')
+    expect(await gitOut(repo, 'status', '--porcelain')).toBe(statusBeforeRestage)
+    expect(await gitOut(repo, 'diff')).toBe(unstagedBeforeRestage)
+    const afterRestage = await worktreeFingerprint(spawnCapture, repo)
+    expect(afterRestage).not.toBe(afterStage)
+
+    // And a brand-new untracked file is seen (`status --untracked-files=all`).
+    writeFileSync(join(repo, 'smuggled.ts'), 'export const x = 1\n')
+    expect(await worktreeFingerprint(spawnCapture, repo)).not.toBe(afterRestage)
+
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a path that is not a git worktree fingerprints as null (fail-closed input)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'trident-fp-nonrepo-'))
+    created.push(dir)
+    expect(await worktreeFingerprint(spawnCapture, dir)).toBeNull()
+  }, 20_000)
 })

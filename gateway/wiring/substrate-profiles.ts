@@ -327,12 +327,19 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
  * MORE restricted than the leak fixer: the fixer edits files and `git add`s them, the arbiter is
  * only supposed to read.
  *
- * WHAT THIS DOES NOT DO, STATED PLAINLY. `skip_permissions: true` still means
- * `--dangerously-skip-permissions`, so the declared `Bash` is UNGATED and "read-only Bash" remains
- * a CONTRACT in the prompt rather than an enforced property — a defecting turn can still write
- * inside its own throwaway worktree. `permission_mode` and `sandbox` are the knobs that would make
- * it structural and both are RESERVED (not applied by the factory today), so this profile closes
- * the reach that leaves the machine and names the reach that does not.
+ * WHAT THIS DOES NOT DO, STATED PLAINLY — AND WHO CLOSES IT INSTEAD.
+ * `skip_permissions: true` still means `--dangerously-skip-permissions`, so the declared `Bash`
+ * is UNGATED and "read-only" remains a CONTRACT in the prompt rather than an enforced property.
+ * A defecting turn can still WRITE, and the tree it writes to is NOT a throwaway — it is the
+ * run's conflicted merge worktree, whose contents become the commit. Dropping the credential
+ * stops this turn pushing; it does nothing about its CALLER pushing its edits.
+ *
+ * That half is enforced at the call site instead: `trident/merge.ts` fingerprints the worktree
+ * immediately before and after every arbitration (`worktreeFingerprint`) and refuses to act on
+ * the decision if anything moved, or if the check could not be made. `permission_mode` and
+ * `sandbox` would make it structural here rather than downstream, and both are deliberately
+ * shape-only at Step 0 (see the file header) — so this profile closes the reach that leaves the
+ * machine, and the caller closes the reach that stays on it.
  *
  * Site: `open/composer.ts` (`cc-trident-arbiter` via `makeEphemeralSubstrate`).
  */
