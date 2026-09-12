@@ -1943,6 +1943,13 @@ export type ConflictEvidence =
   | { kind: 'complete'; body: string }
   | { kind: 'over-budget' }
   | { kind: 'unreadable'; why: 'index' | 'not-in-index' | 'diff' | 'blob' }
+  /**
+   * BINARY: established, and unshowable. Its own arm rather than `unreadable`, because the two
+   * are different facts and the kill criterion has to tell them apart — a repo whose conflicts
+   * are images says something quite different about this tier's reach than a repo whose git
+   * reads are failing. Nothing here could be "fixed" by reading harder.
+   */
+  | { kind: 'binary' }
 
 /**
  * WHICH CONFLICT STAGES EXIST, per path — the positive evidence that separates a one-sided
@@ -1959,6 +1966,19 @@ export type ConflictEvidence =
  * instead of N. Format, verified against real git: `<mode> <sha> <stage>\t<path>`, NUL
  * terminated under `-z`, so no path can forge a record boundary.
  */
+/**
+ * Git's own verdict that a diff pair is binary, read from `--numstat` rather than from the
+ * `Binary files … differ` sentence (#541 round 18). Format is `<added>\t<deleted>\t<path>`,
+ * and git writes `-` in both numeric columns when it declines to produce a textual diff.
+ */
+function isBinaryNumstat(stdout: string): boolean {
+  for (const line of stdout.split('\n')) {
+    if (line.trim().length === 0) continue
+    if (line.split('\t')[0] === '-') return true
+  }
+  return false
+}
+
 async function unmergedStages(
   run_host: RunHostCommand,
   repo: string,
@@ -2064,12 +2084,45 @@ export async function conflictEvidence(
         // The index says this object exists, so a failure to read it means we did not
         // establish the conflict — not that the side is empty.
         if (!res.ok) return { kind: 'unreadable', why: 'blob' }
+        // AND THE SURVIVING SIDE MIGHT NOT BE TEXT EITHER. Without this, a deleted-or-modified
+        // PNG went through `quoteAll`, where `defang` turns its bytes into a wall of spaces —
+        // binary laundered into something that LOOKS like evidence. `--numstat` is not
+        // available here (there is only one blob, not a pair), so this uses git's own binary
+        // heuristic directly: a NUL byte in the content. It fails toward not-asking, which is
+        // the safe direction — a UTF-16 text file would escalate rather than be shown wrongly.
+        if (res.stdout.includes('\u0000')) return { kind: 'binary' }
         const other = side === 'BASE' ? 'branch' : 'base'
         body =
           `${QUOTE}(no two-sided diff: only the ${side}'s version of this path exists — the ` +
           `${other} deleted or never added it. Its full content follows.)\n${quoteAll(res.stdout)}`
       }
     } else {
+      // IS THIS PAIR EVEN TEXT? ASK GIT, DO NOT READ ITS PROSE (#541 round 18).
+      //
+      // `git diff` exits 0 for two differing BINARY blobs and prints only `Binary files … and
+      // … differ` — verified against this repository's own PNGs. So `ok && stdout.length > 0`,
+      // which had been standing in for "the diff is readable", is satisfied by output that
+      // contains none of the conflict: the judge would be handed a one-line notice and told
+      // the evidence was complete. THIRD VARIANT OF ONE SENTENCE ON THIS BRANCH — AN EXIT CODE
+      // IS NOT THE EVIDENCE. First a failed read was mapped to complete, then a one-sided
+      // conflict was described rather than shown, now a successful-but-contentless diff is
+      // passed through as content.
+      //
+      // `--numstat` is git's OWN determination in machine-readable form: `-` in the added
+      // column means binary. Matching the sentence instead would be prose-parsing — and a TEXT
+      // file whose contents happen to include the line `Binary files a and b differ` would
+      // then be misclassified, which is the same mistake one layer up.
+      let stat: HostCommandResult
+      try {
+        stat = await run_host(
+          ['git', '-C', repo, '-c', 'core.quotePath=false', 'diff', '--numstat', '--no-color', `:2:${path}`, `:3:${path}`],
+          repo,
+        )
+      } catch {
+        return { kind: 'unreadable', why: 'diff' }
+      }
+      if (!stat.ok) return { kind: 'unreadable', why: 'diff' }
+      if (isBinaryNumstat(stat.stdout)) return { kind: 'binary' }
       let res: HostCommandResult
       try {
         res = await run_host(
@@ -2201,7 +2254,7 @@ async function sideHistory(
  * the first says the arbiter's useful range is narrow, the second says something is broken.
  * One event with a discriminator, not two events and not one blurred count.
  */
-export type ArbiterNotAskedWhy = 'over-budget' | 'evidence-unreadable'
+export type ArbiterNotAskedWhy = 'over-budget' | 'evidence-unreadable' | 'evidence-binary'
 type ArbitrationAttempt =
   | {
       kind: 'decided'
@@ -2282,6 +2335,10 @@ async function arbitrateConflict(
   // not read it", so a failed read reached the judge under an assurance that nothing had been
   // left out. Both refusals land on the same escalation as an unwired arbiter.
   if (hunks.kind === 'unreadable') return { kind: 'not-asked', why: 'evidence-unreadable' }
+  // ESTABLISHED BUT UNSHOWABLE. Counted apart from both siblings: "too big to show", "could
+  // not be read" and "has no text to show" are three different things to learn about where
+  // this tier can reach, and collapsing them would hide whichever one actually dominates.
+  if (hunks.kind === 'binary') return { kind: 'not-asked', why: 'evidence-binary' }
   if (hunks.kind === 'over-budget') return { kind: 'not-asked', why: 'over-budget' }
   const branchHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.base}..${ctx.branch}`)
   const baseHistory = await sideHistory(ctx.run_host, ctx.repo, `${ctx.branch}..${ctx.base}`)
@@ -2649,7 +2706,9 @@ async function rebaseBranchOntoBase(
                 reason:
                   attempt.why === 'over-budget'
                     ? `the arbiter's prompt would exceed its ${ARBITER_PROMPT_BYTES_MAX}-byte budget, so the conflict could not be shown completely`
-                    : 'the conflict could not be read, so there was nothing complete to show the arbiter',
+                    : attempt.why === 'evidence-binary'
+                      ? 'the conflict is in binary content, which cannot be shown to a text judge'
+                      : 'the conflict could not be read, so there was nothing complete to show the arbiter',
               }
             : attempt.outcome
       // THE SIZE DIMENSION OF THE KILL CRITERION (#541 rounds 10 and 13). This tier's

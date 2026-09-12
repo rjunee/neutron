@@ -1114,6 +1114,7 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       onIndex?: () => HostCommandResult | never
       onDiff?: () => HostCommandResult | never
       onBlob?: () => HostCommandResult | never
+      onNumstat?: () => HostCommandResult | never
       stages?: readonly number[]
     }
     const shapes: Shape[] = [
@@ -1211,6 +1212,14 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       { name: 'index lists a DIFFERENT path', conflicted: 'a.ts', onIndex: () => index('other.ts') },
       { name: 'index lists no paths at all', conflicted: 'a.ts', onIndex: () => ok('') },
       { name: 'enormous diff', conflicted: 'a.ts', onDiff: () => ok(`diff\n${'-L'.repeat(40_000)}\n`) },
+      {
+        // GIT EXITS 0 AND PRINTS NO CONTENT. The diff below would sail through `ok && stdout`.
+        name: 'binary pair',
+        conflicted: 'a.ts',
+        onNumstat: () => ok('-\t-\ta.ts\n'),
+        onDiff: () => ok('Binary files a/x and b/y differ\n'),
+      },
+      { name: 'numstat exits non-zero', conflicted: 'a.ts', onNumstat: () => fail('fatal: bad object') },
     ]
 
     const asked: Record<string, boolean> = {}
@@ -1225,6 +1234,9 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
           return shape.onIndex === undefined ? index(shape.conflicted, shape.stages) : shape.onIndex()
         }
         if (cmd.includes('diff') && cmd.includes('--diff-filter=U')) return ok(shape.conflicted)
+        if (cmd.includes('--numstat')) {
+          return shape.onNumstat === undefined ? ok('3\t1\ta.ts\n') : shape.onNumstat()
+        }
         if (cmd.includes('cat-file')) {
           return shape.onBlob === undefined ? ok('the surviving side\n') : shape.onBlob()
         }
@@ -1285,12 +1297,17 @@ describe('#541 — THE CONFLICT ITSELF reaches the arbiter (not just metadata ab
       'one-sided, surviving blob unreadable',
       'one-sided, surviving blob read throws',
       'enormous diff',
+      'binary pair',
+      'numstat exits non-zero',
     ]) {
       expect(asked[name], `${name}: the judge must NOT be asked`).toBe(false)
     }
     // And every refusal names itself, so `unreadable` and `over-budget` never blur together.
     expect(kinds['diff exits non-zero']).toBe('unreadable')
     expect(kinds['one-sided, surviving blob unreadable']).toBe('unreadable')
+    // Established-but-unshowable is its OWN kind, never blurred into "could not read".
+    expect(kinds['binary pair']).toBe('binary')
+    expect(kinds['numstat exits non-zero']).toBe('unreadable')
     expect(kinds['enormous diff']).toBe('over-budget')
   })
 

@@ -927,6 +927,74 @@ field.
 | M85 | the invocation counter moves back above the owner-only screen | **red** |
 | M86 | scalars fold at the 300-character prose cap again | **red, 2 tests** |
 
+### ROUND 18 — a binary conflict shown as a one-line notice
+
+**Third variant of one sentence on this branch: AN EXIT CODE IS NOT THE EVIDENCE.**
+
+| round | the shape |
+|---|---|
+| 15 | a **failed** read was mapped to `complete` |
+| 17 | a **one-sided** conflict was described rather than shown |
+| 18 | a **successful, contentless** diff was passed through as content |
+
+`git diff` exits **0** for two differing binary blobs and prints only
+`Binary files a/<sha> and b/<sha> differ`. Verified against this repository's own PNGs before
+writing a line of the fix:
+
+```
+git diff --no-color <png-blob-a> <png-blob-b>
+→ Binary files a/1226e625… and b/745d69f7… differ     exit=0
+```
+
+So `ok && stdout.length > 0` — which had been standing in for *"the diff is readable"* — is
+satisfied by output containing none of the conflict. The judge would be handed a one-line
+notice under a prompt that says **THE EVIDENCE BELOW IS COMPLETE**, and could grant a retry
+having seen neither version.
+
+**Binary gets its own arm**, not `unreadable`. The conflict IS established — we know both
+sides exist and differ — it simply has no rendering a text judge could weigh. Those are
+different facts, and the kill criterion has to tell them apart: a repo whose conflicts are
+images says something quite different about this tier's reach than a repo whose git reads are
+failing, and nothing in the binary case could be fixed by reading harder. `{kind:'binary'}` →
+`not-asked why='evidence-binary'`, counted beside *too big* and *could not read*.
+
+**DETECTION ASKS GIT, IT DOES NOT PARSE GIT'S PROSE.** `--numstat` writes `-` in both numeric
+columns when git declines a textual diff — the machine-readable form of the same verdict. The
+naive implementation matches the `Binary files … differ` sentence in the diff output, and a
+**text file whose own contents include that line** is then silently reclassified as binary and
+never arbitrated again: the identical mistake one layer up, reading prose where a machine
+signal exists. That is the reasoning behind the ls-files decision two rounds earlier, applied
+to the same question in a different place, and there is now a real-git control pinning it —
+mutating the detector to prose-matching kills **exactly that one test**, which is how I know
+it earns its place rather than merely passing.
+
+**The one-sided path needed a second signal**, since `--numstat` takes a pair and a
+modify/delete has one blob. It uses git's other heuristic — a NUL byte in the content —
+checked BEFORE folding, because `defang` turns a PNG's bytes into a wall of spaces: binary
+laundered into something that *looks* like evidence. It fails toward not-asking, which is the
+safe direction; a UTF-16 text file escalates rather than being shown wrongly.
+
+**Four mutations, all red, each on a different guard:**
+
+| # | mutation | killed by |
+|---|---|---|
+| M87 | two-sided binary passes through as content | seam property + real-git binary |
+| M88 | one-sided binary folded into the prompt | real-git one-sided binary |
+| M89 | a `--numstat` failure treated as "not binary" rather than unknown | seam property |
+| M90 | detector matches the prose instead of asking `--numstat` | **the text-content control, alone** |
+
+### Rebase note — and what CI's three reds actually were
+
+`#547`/`#606`, `#651` and `#652` landed mid-round. **All three CI failures had one cause**, and
+it is worth writing down because two of them looked independent: `#651` added an
+`as-built-staging-floor-guard` requiring a tracked `.trident/as-built/.gitkeep`, my branch was
+cut before it, `layering` ran the guard directly, **`shard 8/8` ran the same guard's own
+self-test** (`check-governed-repo-attributes (subprocess) > this repo … passes its own gate`),
+and `test` is the aggregator that fails when any shard does. One staleness, three red checks.
+The rebase brought the floors; both failing gates were then reproduced locally and pass —
+`GUARD_BASE_SHA`/`GUARD_HEAD_SHA` let the guard run outside CI, which is how it should have
+been checked in the first place.
+
 ### THE PATTERN, named because it recurred four times
 
 Every failed control in this lane was **correct in the dimension measured and wrong in
@@ -1167,7 +1235,7 @@ merge would leave behind. That case is now asserted, and dropping the probe is r
 
 ### Mutations
 
-Eighty-six mutations reverted one at a time, each proved a test red. Eight survived a
+Ninety mutations reverted one at a time, each proved a test red. Eight survived a
 first attempt and each produced a test: guidance commit-scoping, the orchestrator thread,
 the MAX_CONFLICT_ROUNDS bound, the never-reset round counter, the composer profile, the
 profile's own grant, the borrowed guidance cap, and the staged half of the fingerprint. The two loop-bound tests carry a

@@ -1038,6 +1038,110 @@ describe('REAL git — the arbiter is actually SHOWN both sides of the conflict 
     await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
   }, 30_000)
 
+  test('a REAL BINARY conflict is never passed off as shown evidence', async () => {
+    // THE FINDING TURNS ENTIRELY ON WHAT GIT EMITS, so this is real git and not a stub.
+    // Verified against this repository's own PNGs before writing the fix: `git diff` between
+    // two differing binary blobs EXITS 0 and prints only
+    //   `Binary files a/<sha> and b/<sha> differ`
+    // — no content at all. `ok && stdout.length > 0` had been standing in for "the diff is
+    // readable", and a binary blob satisfies both while telling you nothing, so the judge
+    // would have been handed a one-line notice under a prompt promising the conflict was
+    // shown complete.
+    //
+    // Third variant of one sentence on this branch: AN EXIT CODE IS NOT THE EVIDENCE.
+    const repo = await makeBaseRepo()
+    // Two PNG-signature files differing after the header — NUL bytes early, which is exactly
+    // git's own binary heuristic.
+    const png = (tail: string): Buffer =>
+      Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]), Buffer.from(tail)])
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.bin-feat')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'logo.png'), png('FEAT-SIDE-PIXELS'))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat logo')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'logo.png'), png('MAIN-SIDE-PIXELS'))
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main logo')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    expect(await gitOut(repo, 'diff', '--name-only', '--diff-filter=U')).toContain('logo.png')
+
+    // THE PREMISE, ASSERTED: git really does succeed here while producing no content. If this
+    // ever stops being true the test below is measuring something else.
+    const raw = await spawnCapture(
+      ['git', '-C', repo, 'diff', '--no-color', ':2:logo.png', ':3:logo.png'],
+      repo,
+    )
+    expect(raw.ok, 'git exits 0 on a binary pair').toBe(true)
+    expect(raw.stdout).toContain('Binary files')
+    expect(raw.stdout).not.toContain('FEAT-SIDE-PIXELS')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['logo.png'])
+    expect(evidence.kind).toBe('binary')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a ONE-SIDED binary conflict is not laundered into pseudo-text either', async () => {
+    // The surviving side of a modify/delete is read with `cat-file` and quoted, and `defang`
+    // would turn a PNG's bytes into a wall of spaces — binary made to LOOK like evidence.
+    // `--numstat` cannot help here (one blob, not a pair), so this uses git's own heuristic:
+    // a NUL byte in the content.
+    const repo = await makeBaseRepo()
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00]),
+      Buffer.from('ONLY-ON-THE-BRANCH'),
+    ])
+    writeFileSync(join(repo, 'art.png'), png)
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'base art')
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.bin-one')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'art.png'), Buffer.concat([png, Buffer.from('-EDITED')]))
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat edits art')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    await git(repo, 'rm', '-q', 'art.png')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main deletes art')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+    const stages = await gitOut(repo, 'ls-files', '--unmerged', '--', 'art.png')
+    expect(stages).not.toContain('\t2\t')
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['art.png'])
+    expect(evidence.kind).toBe('binary')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
+  test('a TEXT file whose CONTENT says "Binary files ... differ" is still shown', async () => {
+    // THE CONTROL FOR THE DETECTOR, and the reason it asks `--numstat` instead of matching the
+    // sentence: a text file may legitimately contain that line — this repository's own test
+    // files now do. Prose-matching would classify it binary and silently stop arbitrating on
+    // it, which is the same mistake as trusting the exit code, one layer up.
+    const repo = await makeBaseRepo()
+    await git(repo, 'branch', 'feat', 'main')
+    const fwt = join(repo, '.bin-text')
+    await git(repo, 'worktree', 'add', '-q', fwt, 'feat')
+    writeFileSync(join(fwt, 'README.md'), 'Binary files a/x and b/y differ\nFEAT-TEXT-TOKEN\n')
+    await git(fwt, 'add', '.')
+    await git(fwt, ...GIT_ID, 'commit', '-q', '-m', 'feat text')
+    await git(repo, 'worktree', 'remove', '--force', fwt)
+    writeFileSync(join(repo, 'README.md'), 'Binary files a/x and b/y differ\nMAIN-TEXT-TOKEN\n')
+    await git(repo, 'add', '.')
+    await git(repo, ...GIT_ID, 'commit', '-q', '-m', 'main text')
+    await git(repo, 'checkout', '-q', 'feat')
+    await spawnCapture(['git', '-C', repo, ...GIT_ID, 'rebase', 'main'], repo)
+
+    const evidence = await conflictEvidence(spawnCapture, repo, ['README.md'])
+    expect(evidence.kind).toBe('complete')
+    const body = evidence.kind === 'complete' ? evidence.body : ''
+    expect(body).toContain('FEAT-TEXT-TOKEN')
+    expect(body).toContain('MAIN-TEXT-TOKEN')
+    await spawnCapture(['git', '-C', repo, 'rebase', '--abort'], repo)
+  }, 30_000)
+
   test('a path the INDEX does not list as unmerged is UNKNOWN, never complete', async () => {
     // The old fixture's real subject, now named and asserted correctly. Our own two views of
     // the tree disagree — the caller says this path is conflicted, the index does not list it
