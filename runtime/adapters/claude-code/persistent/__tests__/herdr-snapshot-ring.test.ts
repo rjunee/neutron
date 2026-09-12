@@ -1,0 +1,590 @@
+/**
+ * herdr-snapshot-ring.test.ts — the polling bridge that stands in for a raw output
+ * stream, and the three things it has to get right.
+ *
+ * THE DEFECT THESE ARE WRITTEN AGAINST. A polling bridge that returns the right
+ * text for a steady screen tells you nothing: almost any implementation does that.
+ * So every case here VARIES THE PANE — cleared, changing faster than the poll,
+ * gone mid-read — and asserts that the result changes with it.
+ *
+ * Case by case, "what would a wrong implementation get right?":
+ *  • Fires on every tick instead of on change: gets the screen TEXT right always,
+ *    and breaks the idle gate. Caught by counting deliveries on a steady pane.
+ *  • `try { read } catch { deliver('') }`: gets a steady pane and a cleared pane
+ *    right, and erases a dead REPL's last output. Caught by the pair of cases that
+ *    distinguish a FAILED read from a SUCCESSFUL empty one — either case alone is
+ *    satisfied by the wrong implementation.
+ *  • Appends instead of replaces: gets a growing pane right and never drops a
+ *    detector latch. Caught by the falling-edge case.
+ */
+
+import { describe, expect, it } from 'bun:test'
+import { HerdrHost } from '../herdr-host.ts'
+import { PtyRing } from '../pty-ring.ts'
+import { OutputScanner } from '../output-scan.ts'
+import { FakeHerdrServer, until } from './herdr-fake-server.ts'
+import type { PtyChild } from '../pty-host.ts'
+
+/** Spawn against a fake server with a fast poll, collecting delivered screens. */
+async function spawnWithFake(
+  server: FakeHerdrServer,
+  pollIntervalMs = 5,
+): Promise<{ child: PtyChild; screens: string[]; exits: (number | null)[] }> {
+  const screens: string[] = []
+  const exits: (number | null)[] = []
+  const host = new HerdrHost({
+    connect: async () => server,
+    pollIntervalMs,
+    sleep: (ms) => Bun.sleep(ms),
+    workspaceId: 'w9',
+  })
+  const child = await host.spawn(['claude', '--session-id', 's1'], {
+    cwd: '/tmp',
+    env: { PATH: '/usr/bin', DROP_ME: undefined },
+    onScreen: (s) => screens.push(s),
+    onExit: (c) => exits.push(c),
+  })
+  // Release the output gate, exactly as the production caller does after wiring its
+  // consumer (`spawn.ts`). Until this the host does not poll at all.
+  child.beginOutput?.()
+  return { child, screens, exits }
+}
+
+describe('herdr bridge — deliver only on CHANGE', () => {
+  it('a STEADY screen is delivered once, no matter how many times it is polled', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'idle at the prompt'
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => screens.length >= 1, 'first screen')
+    // Let many polls go by with the screen unchanged.
+    await until(() => server.callsTo('pane.read').length >= 8, 'several polls')
+    child.kill()
+    // THE ASSERTION THAT MATTERS: polls ≫ deliveries. If `onScreen` fired per poll,
+    // `lastDataAt` would never go stale and `waitForReplIdle`'s 900 ms quiet window
+    // could never be satisfied, so every prompt inject would wait out the cap.
+    expect(server.callsTo('pane.read').length).toBeGreaterThanOrEqual(8)
+    expect(screens).toEqual(['idle at the prompt'])
+  })
+
+  it('a pane changing on every poll is delivered on every change', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'tick 0'
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => screens.length >= 1, 'first screen')
+    for (let i = 1; i <= 5; i++) {
+      server.screen = `tick ${i}`
+      await until(() => screens.includes(`tick ${i}`), `tick ${i}`)
+    }
+    child.kill()
+    expect(screens).toEqual(['tick 0', 'tick 1', 'tick 2', 'tick 3', 'tick 4', 'tick 5'])
+  })
+
+  it('a screen that changes and changes BACK is delivered each time', async () => {
+    // The change filter compares against the LAST delivered screen, not against a
+    // set of everything seen — a spinner alternating between two frames is real
+    // activity and must keep the idle clock alive.
+    const server = new FakeHerdrServer()
+    server.screen = 'A'
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => screens.length >= 1, 'A')
+    server.screen = 'B'
+    await until(() => screens.length >= 2, 'B')
+    server.screen = 'A'
+    await until(() => screens.length >= 3, 'A again')
+    child.kill()
+    expect(screens.slice(0, 3)).toEqual(['A', 'B', 'A'])
+  })
+})
+
+describe('herdr bridge — a failed read is NOT an empty screen', () => {
+  it('a SUCCESSFUL empty read IS delivered — a cleared pane must reach the ring', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = '❯ 1. Yes\n  2. No'
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => screens.length >= 1, 'menu')
+    server.screen = '' // the pane was cleared; the read still succeeds
+    await until(() => screens.includes(''), 'cleared screen delivered')
+    child.kill()
+    expect(screens).toContain('')
+  })
+
+  it('a FAILED read is dropped — the ring keeps a dead REPL\'s last output', async () => {
+    // A pane VANISHES on exit, taking its output with it, so the ring is the only
+    // record of what the REPL last printed. This is the case that separates a real
+    // implementation from `try { read } catch { deliver('') }`, which the case above
+    // would also satisfy.
+    const server = new FakeHerdrServer()
+    const ring = new PtyRing()
+    const screens: string[] = []
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+    })
+    server.screen = 'FINAL WORDS before the crash'
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (s) => {
+        screens.push(s)
+        ring.replace(s)
+      },
+    })
+    child.beginOutput?.()
+    await until(() => ring.text().includes('FINAL WORDS'), 'last output in the ring')
+
+    // The pane dies. Deliberately WITHOUT a `pane_exited` event: the event would
+    // settle the child before the next poll and mask the error path, so the test
+    // would then be pinning the event rather than the read handling it claims to.
+    // Reads fail and herdr forgets the pane — the shape a vanished pane presents.
+    server.readFails = true
+    server.paneGone = true
+    expect(await child.exited).toBeNull()
+
+    // The record SURVIVED. An implementation that delivered '' on a read error
+    // would have wiped it here — and would look correct on every other case.
+    expect(ring.text()).toBe('FINAL WORDS before the crash')
+    expect(screens.at(-1)).toBe('FINAL WORDS before the crash')
+    expect(screens).not.toContain('')
+  })
+
+  it('a run of failing reads with the pane still present does NOT deliver anything', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'still here'
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => screens.length >= 1, 'first screen')
+    // Reads fail, but `pane.get` still answers — the pane is alive, just unreadable.
+    server.readFails = true
+    await until(() => server.callsTo('pane.read').length >= 6, 'several failed reads')
+    expect(screens).toEqual(['still here'])
+    expect(child.hasExited()).toBe(false)
+    child.kill()
+  })
+
+  it('failing reads AND a vanished pane settle the child as exited', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'x'
+    const { child, exits } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    // No `pane_exited` event at all — only the pane ceasing to exist. The loop must
+    // still conclude, or a dead REPL is supervised forever as if it were alive.
+    server.readFails = true
+    server.paneGone = true
+    expect(await child.exited).toBeNull()
+    expect(child.hasExited()).toBe(true)
+    expect(exits).toEqual([null])
+  })
+})
+
+describe('a failed question is not a negative answer', () => {
+  it('a TRANSIENT rpc failure does NOT settle the child as vanished', async () => {
+    // THE DEFECT. `paneIsGone` returned true for EVERY `pane.get` rejection, so a
+    // timeout or a temporary server error was read as proof the pane had gone — a
+    // live REPL recycled and stamped `'pane-vanished'`, a claim nothing observed.
+    // A rejection measures the CALL, not the pane.
+    const server = new FakeHerdrServer()
+    server.screen = 'still alive'
+    const { child, exits } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+
+    // Both `pane.read` and `pane.get` now fail — untyped, i.e. the question failed.
+    server.transientFailure = true
+    await until(() => server.callsTo('pane.get').length >= 2, 'several failed questions')
+
+    expect(child.hasExited()).toBe(false)
+    expect(child.exitCause?.()).toBeUndefined()
+    expect(exits).toEqual([])
+    child.kill()
+  })
+
+  it('it RECOVERS when the transient failure clears — nothing was concluded', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'before'
+    const { child, screens } = await spawnWithFake(server)
+    await until(() => screens.includes('before'), 'before')
+    server.transientFailure = true
+    await until(() => server.callsTo('pane.get').length >= 2, 'failures')
+    server.transientFailure = false
+    server.screen = 'after'
+    await until(() => screens.includes('after'), 'recovered')
+    expect(child.hasExited()).toBe(false)
+    child.kill()
+  })
+
+  it('CONTROL — a TYPED pane_not_found IS proof, and does settle', async () => {
+    // The other direction: strictness must not make the definite case undecidable.
+    const server = new FakeHerdrServer()
+    server.screen = 'x'
+    const { child } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.readFails = true
+    server.paneGone = true // now the errors carry `pane_not_found`
+    expect(await child.exited).toBeNull()
+    expect(child.exitCause?.()).toBe('pane-vanished')
+  })
+})
+
+describe('herdr bridge — the transport dying is terminal, and is not a child exit', () => {
+  it('a socket close settles the child, instead of leaving it forever alive', async () => {
+    // THE FOURTH ROUTE, and the only one that is not a child event. `pane_exited`,
+    // `pane.close` and a vanished pane all say something about the process; a dead
+    // transport says nothing about it at all — what died is the channel we would
+    // learn through. An earlier version simply returned from the poll loop here, so
+    // `exited` never resolved, `hasExited()` stayed false, and the pool went on
+    // handing out a REPL it could no longer observe or drive.
+    const server = new FakeHerdrServer()
+    server.screen = 'alive'
+    const { child, exits } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    expect(child.hasExited()).toBe(false)
+
+    // The transport dies. NO `pane_exited` is emitted — the child is, as far as
+    // anyone knows, still running.
+    server.close()
+
+    expect(await child.exited).toBeNull()
+    expect(child.hasExited()).toBe(true)
+    expect(exits).toEqual([null])
+  })
+
+  it('names transport loss as the CAUSE, so it is never read as an observed exit', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'alive'
+    const { child } = await spawnWithFake(server)
+    await until(() => server.callsTo('pane.read').length >= 1, 'first poll')
+    server.close()
+    await child.exited
+    // Terminal, but NOT evidence the process ended. A caller that needs to tell the
+    // routes apart can; one that cannot is not silently told "the child exited".
+    expect(child.exitCause?.()).toBe('transport-lost')
+    expect(child.wasKilledByUs?.()).toBe(false)
+  })
+
+  it('the other three routes keep their own causes — the four are distinguishable', async () => {
+    // Without this, `exitCause` could return a constant and the test above passes.
+    const a = new FakeHerdrServer({ paneId: 'w9:pA' })
+    const ca = (await spawnWithFake(a)).child
+    a.exitPane()
+    await ca.exited
+    expect(ca.exitCause?.()).toBe('pane-exited')
+
+    const b = new FakeHerdrServer({ paneId: 'w9:pB' })
+    const cb = (await spawnWithFake(b)).child
+    cb.kill()
+    await cb.exited
+    expect(cb.exitCause?.()).toBe('closed-by-us')
+
+    const c = new FakeHerdrServer({ paneId: 'w9:pC' })
+    const cc = (await spawnWithFake(c)).child
+    await until(() => c.callsTo('pane.read').length >= 1, 'first poll')
+    c.readFails = true
+    c.paneGone = true
+    await cc.exited
+    expect(cc.exitCause?.()).toBe('pane-vanished')
+
+    // All four distinct — a constant would collapse them.
+    expect(new Set([ca.exitCause?.(), cb.exitCause?.(), cc.exitCause?.()]).size).toBe(3)
+  })
+
+  it('exitCause is undefined while the child is alive — it never guesses', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'alive'
+    const { child } = await spawnWithFake(server)
+    expect(child.exitCause?.()).toBeUndefined()
+    child.kill()
+  })
+})
+
+describe('the producer does not start before its consumer can exist', () => {
+  it('NO screen is delivered until beginOutput() releases the gate', async () => {
+    // `spawn` is async, so the caller cannot wire the consumer until it resolves. A
+    // host that polls before returning can deliver the FIRST screen to a consumer
+    // that cannot act on it — and snapshot-replace never re-delivers an unchanged
+    // screen, so it is lost for the life of the child.
+    const server = new FakeHerdrServer()
+    server.screen = 'first screen'
+    const screens: string[] = []
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+    })
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (sc) => screens.push(sc),
+    })
+    // The host has not even READ yet: polling at all would mutate the ring and stamp
+    // `lastDataAt` behind a consumer that is not ready.
+    await Bun.sleep(40)
+    expect(screens).toEqual([])
+    expect(server.callsTo('pane.read')).toEqual([])
+
+    child.beginOutput?.()
+    await until(() => screens.length >= 1, 'the first screen, after the gate')
+    // AND IT IS THE FIRST SCREEN — not a later one that happened to differ.
+    expect(screens[0]).toBe('first screen')
+    child.kill()
+  })
+
+  it('A FIRST SCREEN CARRYING A DETECTOR SIGNATURE IS SCANNED', async () => {
+    // The case the old tests could not construct, because they attached the scanner
+    // before anything was delivered. Here the scanner is wired AFTER `spawn` resolves
+    // — exactly as `spawn.ts` does — and the pane's very first screen already holds a
+    // trust prompt. Before the gate this screen arrived unscanned and, being
+    // unchanged thereafter, was never delivered again: a REPL alive and polling,
+    // waiting forever on a prompt nobody saw.
+    const server = new FakeHerdrServer()
+    server.screen = 'Do you trust the files in this folder?\n❯ 1. Yes\n  2. No'
+    const ring = new PtyRing()
+    const scanner = new OutputScanner()
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+    })
+    const fired: string[] = []
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (sc) => {
+        ring.replace(sc)
+        for (const f of scanner.scan(ring.text(), Date.now())) fired.push(f.id)
+      },
+    })
+    // Wiring happens HERE — after the await, which is the only place it can. The
+    // deliberate sleep WIDENS the window on purpose: `spawn.ts` wires synchronously
+    // after its await, so with an immediately-resolving fake the race is tight enough
+    // that a test without this passes even when the gate is removed (mutation M58
+    // reddened only one case until this was added). A caller doing any async work
+    // before wiring is the realistic worst case, and it is the requirement — not the
+    // narrowness of one caller's window — that has to be pinned.
+    await Bun.sleep(30)
+    scanner.register({ id: 'trust', bottomN: 24, present: (ctx) => /❯1\.Yes/.test(ctx.normalized) })
+    child.beginOutput?.()
+
+    await until(() => fired.includes('trust'), 'the first screen was scanned')
+    expect(fired).toEqual(['trust'])
+    child.kill()
+  })
+
+  it('the gate FAILS OPEN, loudly — a forgotten call delivers late, never never', async () => {
+    // Withholding output forever is worse than delivering it late: a REPL whose
+    // screens never reach the detectors is wedged silently and looks idle. So the
+    // gate is an ordering device, not a permission.
+    const server = new FakeHerdrServer()
+    server.screen = 'eventually'
+    const screens: string[] = []
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+      outputGateMaxMs: 30, // the production bound is 5s
+    })
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (sc) => screens.push(sc),
+    })
+    // beginOutput() is DELIBERATELY not called.
+    await until(() => screens.includes('eventually'), 'released by the fail-open timer')
+    child.kill()
+  })
+
+  it('beginOutput() is idempotent', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'x'
+    const { child } = await spawnWithFake(server) // already released once
+    expect(() => {
+      child.beginOutput?.()
+      child.beginOutput?.()
+    }).not.toThrow()
+    child.kill()
+  })
+})
+
+describe('herdr bridge — the detector falling edge', () => {
+  it('a cleared pane drops a latched detector, which diff-append could not do', async () => {
+    // The invariant snapshot-replace was chosen FOR. `OutputScanner` clears a
+    // detector's latch when `present` goes false; a cleared menu appends nothing, so
+    // under diff-append `present` would stay true forever and the detector would be
+    // a one-shot for the life of the session.
+    const server = new FakeHerdrServer()
+    const ring = new PtyRing()
+    const scanner = new OutputScanner()
+    // `ctx.normalized` has ALL whitespace stripped (`normalizePtyText`), so the
+    // signature is contiguous — the same shape the real detectors use
+    // (`TOOL_USE_SELECTOR_RE` is `/❯1\.yes/i`).
+    scanner.register({ id: 'menu', bottomN: 24, present: (ctx) => /❯1\.Yes/.test(ctx.normalized) })
+
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(ms),
+      workspaceId: 'w9',
+    })
+    server.screen = 'doing work'
+    const child = await host.spawn(['claude'], {
+      cwd: '/tmp',
+      env: {},
+      onScreen: (s) => ring.replace(s),
+    })
+    child.beginOutput?.()
+    await until(() => ring.text() === 'doing work', 'initial screen')
+    expect(scanner.scan(ring.text(), 1000).map((f) => f.id)).toEqual([])
+
+    // The menu renders → rising edge fires.
+    server.screen = 'Do you want to proceed?\n❯ 1. Yes\n  2. No'
+    await until(() => ring.text().includes('1. Yes'), 'menu on screen')
+    expect(scanner.scan(ring.text(), 2000).map((f) => f.id)).toEqual(['menu'])
+    // Still present → latched, does not re-fire.
+    expect(scanner.scan(ring.text(), 3000).map((f) => f.id)).toEqual([])
+
+    // The menu is dismissed and the pane repaints WITHOUT it.
+    server.screen = 'proceeding with the work'
+    await until(() => !ring.text().includes('1. Yes'), 'menu cleared')
+    // The falling edge: `present` is false, so the latch drops.
+    expect(scanner.scan(ring.text(), 4000).map((f) => f.id)).toEqual([])
+
+    // A SECOND menu can therefore fire again — the whole point.
+    server.screen = 'Another question?\n❯ 1. Yes\n  2. No'
+    await until(() => ring.text().includes('1. Yes'), 'second menu')
+    expect(scanner.scan(ring.text(), 5000).map((f) => f.id)).toEqual(['menu'])
+
+    child.kill()
+  })
+})
+
+describe('herdr bridge — spawn refuses what it cannot supervise', () => {
+  it('spawns via layout.apply with the argv as `command`, and reads the pane id BACK', async () => {
+    const server = new FakeHerdrServer({ paneId: 'w9:pZZ' })
+    const { child } = await spawnWithFake(server)
+    const apply = server.callsTo('layout.apply')[0]!
+    const root = apply.params['root'] as Record<string, unknown>
+    expect(root['type']).toBe('pane')
+    // The argv is EXEC'd as a command, not shell-quoted and typed into a shell,
+    // which is what `agent.start` would have done.
+    expect(root['command']).toEqual(['claude', '--session-id', 's1'])
+    expect(root['cwd']).toBe('/tmp')
+    // `undefined` env values are DROPPED (the auth-scrub contract).
+    expect(root['env']).toEqual({ PATH: '/usr/bin' })
+    expect(apply.params['focus']).toBe(false) // never steal the owner's focus
+    // The id came from the REPLY. `layout.apply` mints new ids, so a host that
+    // assumed the tab/pane it asked for would be driving the wrong pane. The read is
+    // awaited rather than assumed: polling starts only once the output gate opens.
+    await until(() => server.callsTo('pane.read').length >= 1, 'a read')
+    expect(server.callsTo('pane.read')[0]!.params['pane_id']).toBe('w9:pZZ')
+    child.kill()
+  })
+
+  it('REFUSES the spawn when herdr never reports a pid, rather than inventing one', async () => {
+    // `pid` is load-bearing above the host: supervision probes it with
+    // `process.kill(pid, 0)` and the crashed-agent registry keys on `(name, pid)`.
+    // A placeholder would make every liveness probe answer about the wrong process.
+    const server = new FakeHerdrServer({ shellPid: null })
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      // Collapse the pid wait so the test does not sit out the real 5 s bound. A
+      // 1 ms sleep rather than a no-op: a zero-cost `await` never yields to a
+      // macrotask, so a no-op would starve the event loop instead of running fast.
+      sleep: (ms) => Bun.sleep(Math.min(ms, 1)),
+      pidWaitMs: 20,
+      workspaceId: 'w9',
+    })
+    const err = await host
+      .spawn(['claude'], { cwd: '/tmp', env: {} })
+      .then(() => undefined, (e: unknown) => e as Error)
+    expect(err).toBeDefined()
+    expect(err!.message).toContain('never reported a pid')
+    // And it hung up rather than leaking the connection.
+    expect(server.isClosed()).toBe(true)
+  })
+
+  it('reports the pid herdr gave, which for a layout.apply pane is the argv\'s own', async () => {
+    const server = new FakeHerdrServer({ shellPid: 90210 })
+    const { child } = await spawnWithFake(server)
+    expect(child.pid).toBe(90210)
+    child.kill()
+  })
+
+  it('CLOSES THE PANE when the pid never arrives — no orphan left running', async () => {
+    // THE OBLIGATION STARTS AT `layout.apply`, NOT AT A SUCCESSFUL SPAWN. The pane,
+    // and the `claude` process inside it, exists the moment that call returns. An
+    // init failure after that point used to close only the CONNECTION, so the caller
+    // got a rejected spawn while the process kept running unmanaged — and nothing
+    // held a record of it, because the pool never learned about a spawn that failed.
+    const server = new FakeHerdrServer({ shellPid: null })
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 1)),
+      pidWaitMs: 20,
+      workspaceId: 'w9',
+    })
+    await host.spawn(['claude'], { cwd: '/tmp', env: {} }).then(
+      () => undefined,
+      () => undefined,
+    )
+    const closes = server.callsTo('pane.close')
+    expect(closes.length).toBe(1)
+    expect(closes[0]!.params['pane_id']).toBe(server.paneId)
+    expect(server.isClosed()).toBe(true)
+  })
+
+  it('CLOSES THE PANE when the exit subscription fails', async () => {
+    // The second init failure after pane creation, and the one a fix aimed only at
+    // the pid path would miss.
+    const server = new FakeHerdrServer()
+    server.subscribeFails = true
+    const host = new HerdrHost({
+      connect: async () => server,
+      pollIntervalMs: 5,
+      sleep: (ms) => Bun.sleep(Math.min(ms, 1)),
+      workspaceId: 'w9',
+    })
+    const err = await host
+      .spawn(['claude'], { cwd: '/tmp', env: {} })
+      .then(() => undefined, (e: unknown) => e as Error)
+    expect(err).toBeDefined()
+    expect(server.callsTo('pane.close').length).toBe(1)
+    expect(server.isClosed()).toBe(true)
+  })
+
+  it('does NOT close a pane when layout.apply itself failed — there is none', async () => {
+    // The other direction: no pane was created, so there is no obligation. A cleanup
+    // that fired unconditionally would call `pane.close` on an id it never got.
+    const server = new FakeHerdrServer()
+    const original = server.call.bind(server)
+    server.call = async (m, pr) => {
+      if (m === 'layout.apply') throw new Error('fake-herdr: layout refused')
+      return original(m, pr)
+    }
+    const host = new HerdrHost({ connect: async () => server, workspaceId: 'w9' })
+    await host.spawn(['claude'], { cwd: '/tmp', env: {} }).then(
+      () => undefined,
+      () => undefined,
+    )
+    expect(server.callsTo('pane.close')).toEqual([])
+    expect(server.isClosed()).toBe(true)
+  })
+
+  it('a SUCCESSFUL spawn closes nothing — cleanup fires only on failure', async () => {
+    const server = new FakeHerdrServer()
+    server.screen = 'ok'
+    const { child } = await spawnWithFake(server)
+    expect(server.callsTo('pane.close')).toEqual([])
+    child.kill()
+  })
+
+  it('an empty argv is refused before any server call', async () => {
+    const server = new FakeHerdrServer()
+    const host = new HerdrHost({ connect: async () => server, workspaceId: 'w9' })
+    await expect(host.spawn([], { cwd: '/tmp', env: {} })).rejects.toThrow(/argv must be non-empty/)
+    expect(server.calls).toEqual([])
+  })
+})

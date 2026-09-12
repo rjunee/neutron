@@ -61,7 +61,7 @@ function makeWedgeThenHealthyHost(): {
   let spawns = 0
   let messages = 0
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const incarnation = spawns
       const pid = 410000 + spawns
@@ -215,7 +215,7 @@ describe('warm reused session — an abandoned/runaway turn must not poison the 
     // strictly scoped to the abandon path and does not churn the happy path.
     let spawns = 0
     const host: PtyHost = {
-      spawn(argv: string[]): PtyChild {
+      async spawn(argv: string[]): Promise<PtyChild> {
         spawns += 1
         const incarnation = spawns
         const pid = 420000 + spawns

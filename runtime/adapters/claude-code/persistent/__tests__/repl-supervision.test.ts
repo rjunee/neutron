@@ -90,7 +90,7 @@ function makeFakeReplHost(): {
   let dieArmed = true
   const delivered: string[] = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const rec = parseSpawn(argv)
       // Snapshot the prior child's liveness BEFORE this spawn is wired up.
       prevExitedAtSpawn.push(last?.hasExited() ?? false)
@@ -1189,7 +1189,7 @@ describe('S2 supervision — cross-incarnation turnId collision (Argus r6)', () 
 
     const children: PtyChild[] = []
     const host: PtyHost = {
-      spawn(argv) {
+      async spawn(argv): Promise<PtyChild> {
         const rec = parseSpawn(argv)
         sid = rec.sessionId
         spawnIndex += 1

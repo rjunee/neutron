@@ -28,10 +28,16 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { buildReplArgv } from '../build-repl-argv.ts'
 import { buildSettings } from '../build-settings.ts'
-import { BunTerminalHost } from '../bun-terminal-host.ts'
+import { HerdrHost } from '../herdr-host.ts'
+import type { PtyChild } from '../pty-host.ts'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
 
-const OPT_IN = process.env['NEUTRON_PTY_E2E'] === '1'
+// herdr is the REPL container now, so this needs a live herdr server as well as a
+// real `claude`. Both are opt-in facts about the machine, and neither is present
+// in CI — the test stays visible-but-skipped rather than silently passing.
+const OPT_IN =
+  process.env['NEUTRON_PTY_E2E'] === '1' &&
+  (process.env['HERDR_SOCKET_PATH'] ?? '') !== ''
 const CLAUDE_BIN =
   process.env['CLAUDE_BIN'] ??
   [join(process.env['HOME'] ?? '', '.local/bin/claude'), '/usr/local/bin/claude', '/opt/homebrew/bin/claude'].find(
@@ -166,21 +172,22 @@ async function runSpike(injectYesOnToolPrompt: boolean): Promise<SpikeResult> {
     skipPermissions: false,
   })
 
-  const host = new BunTerminalHost()
-  const chunks: Buffer[] = []
+  const host = new HerdrHost()
   let dismissed = false
   let toolUsePromptSeen = false
   let toolUseAnswered = false
-  let child: ReturnType<BunTerminalHost['spawn']> | null = null
+  let child: PtyChild | null = null
   let childExited = false
-  child = host.spawn(argv, {
+  child = await host.spawn(argv, {
     cwd: replRoot,
     env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
-    cols: 120,
-    rows: 40,
-    onData: (b) => {
-      chunks.push(Buffer.from(b))
-      const norm = normalize(Buffer.concat(chunks))
+    // A RENDERED SCREEN, not a chunk: herdr has no raw output stream, so each
+    // delivery is the pane's whole current screen (already ANSI-stripped by the
+    // server). Normalizing the screen itself replaces the old concat-the-chunks
+    // accumulation — and reads a CLEARED prompt correctly, which accumulation
+    // could not.
+    onScreen: (screen) => {
+      const norm = normalize(Buffer.from(screen, 'utf8'))
       if (!dismissed && DISCLAIMER_RE.test(norm)) {
         dismissed = true
         setTimeout(() => child?.writeKey?.('enter'), 400)

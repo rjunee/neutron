@@ -46,13 +46,19 @@ import { randomBytes } from 'node:crypto'
 
 import { buildReplArgv } from '@neutronai/runtime/adapters/claude-code/persistent/build-repl-argv.ts'
 import { buildSettings } from '@neutronai/runtime/adapters/claude-code/persistent/build-settings.ts'
-import { BunTerminalHost } from '@neutronai/runtime/adapters/claude-code/persistent/bun-terminal-host.ts'
+import { HerdrHost } from '@neutronai/runtime/adapters/claude-code/persistent/herdr-host.ts'
+import type { PtyChild } from '@neutronai/runtime/adapters/claude-code/persistent/pty-host.ts'
 import { ensureClaudeTrust } from '@neutronai/runtime/adapters/claude-code/persistent/ensure-claude-trust.ts'
 
 import { DEFAULT_AGENT_BASE_PROMPT } from '@neutronai/runtime/adapters/claude-code/persistent/signatures.ts'
 import { BUNDLED_RITUAL_DEFS, bundledTemplatePathFor } from './bundled-rituals.ts'
 
-const OPT_IN = process.env['NEUTRON_PTY_E2E'] === '1'
+// herdr is the REPL container now, so this needs a live herdr server as well as a
+// real `claude`. Both are opt-in facts about the machine, and neither is present
+// in CI — the test stays visible-but-skipped rather than silently passing.
+const OPT_IN =
+  process.env['NEUTRON_PTY_E2E'] === '1' &&
+  (process.env['HERDR_SOCKET_PATH'] ?? '') !== ''
 const CLAUDE_BIN =
   process.env['CLAUDE_BIN'] ??
   [join(process.env['HOME'] ?? '', '.local/bin/claude'), '/usr/local/bin/claude'].find((p) =>
@@ -209,20 +215,16 @@ async function runRitual(id: string, fixture: () => string = writeFixtureHome): 
     skipPermissions: true,
   })
 
-  const host = new BunTerminalHost()
-  const chunks: Buffer[] = []
+  const host = new HerdrHost()
   let dismissed = false
-  let child: ReturnType<BunTerminalHost['spawn']> | null = null
-  child = host.spawn(argv, {
+  let child: PtyChild | null = null
+  child = await host.spawn(argv, {
     cwd: fixtureHome,
     env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
-    cols: 120,
-    rows: 40,
-    onData: (b) => {
-      chunks.push(Buffer.from(b))
+    // A RENDERED SCREEN, not a chunk — see `pty-host.ts`.
+    onScreen: (screen) => {
       if (dismissed) return
-      const norm = Buffer.concat(chunks)
-        .toString('utf8')
+      const norm = screen
         // eslint-disable-next-line no-control-regex
         .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
         .replace(/\s+/g, '')

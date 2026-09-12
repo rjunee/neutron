@@ -39,7 +39,7 @@ afterEach(async () => {
 function makeEchoHost(): { host: PtyHost; spawnCount: () => number } {
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 100000 + spawns
       const i = argv.indexOf('--session-id')

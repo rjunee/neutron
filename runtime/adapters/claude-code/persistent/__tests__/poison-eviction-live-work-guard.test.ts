@@ -67,7 +67,7 @@ function makeWedgeOnceHost(): {
   const alive = new Map<number, () => boolean>()
   const argvs = new Map<number, string[]>()
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const incarnation = spawns
       argvs.set(incarnation, [...argv])

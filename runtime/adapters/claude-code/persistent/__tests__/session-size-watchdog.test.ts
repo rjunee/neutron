@@ -17,6 +17,7 @@ import {
   SIZE_CRITICAL_BYTES,
   COMPACT_SUMMARY_MARKER,
   type SizeSeverity,
+  COMPACT_COMMAND,
 } from '../session-size-watchdog.ts'
 import { encodeKey } from '../keystrokes.ts'
 import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
@@ -169,7 +170,23 @@ function makeHarness(sizes: () => number | null, isIdle?: () => boolean) {
 }
 
 /** The escape+/compact actuation a single auto-compaction emits, in order. */
-const COMPACT_WRITES = [`KEY:${encodeKey('escape')}`, '/compact\r']
+
+/**
+ * COMPLETED compactions: a `/compact` text write immediately followed by an `enter`
+ * key. Both halves required — under herdr `pane.send_text` does not submit, so a
+ * `/compact` with no following `enter` is a command typed at the prompt and never
+ * run. Counting the text alone would keep passing if the submit were dropped.
+ */
+const COMPACTS = (writes: readonly string[]): number => {
+  let n = 0
+  for (let i = 0; i < writes.length - 1; i++) {
+    if (writes[i] === COMPACT_COMMAND && writes[i + 1] === `KEY:${encodeKey('enter')}`) n += 1
+  }
+  return n
+}
+
+/** The full actuation sequence: escape, the command text, then the submit. */
+const COMPACT_WRITES = [`KEY:${encodeKey('escape')}`, COMPACT_COMMAND, `KEY:${encodeKey('enter')}`]
 
 describe('startSessionSizeWatchdog — tick wiring', () => {
   test('a post-compact size ≥5MB fires warn; ≥10MB fires critical', () => {
@@ -199,14 +216,14 @@ describe('startSessionSizeWatchdog — tick wiring', () => {
   })
 })
 
-describe('Compact action — escape then /compact\\r, fire-once + mid-compact lock', () => {
-  test('requestCompact issues escape THEN /compact\\r exactly once', () => {
+describe('Compact action — escape, /compact, then enter: fire-once + mid-compact lock', () => {
+  test('requestCompact issues escape, /compact, then the enter submit — exactly once', () => {
     const { wd, writes } = makeHarness(() => SIZE_WARN_BYTES)
     expect(wd.requestCompact()).toBe(true)
-    expect(writes).toEqual([`KEY:${encodeKey('escape')}`, '/compact\r'])
+    expect(writes).toEqual(COMPACT_WRITES)
     // A second press while mid-compact does NOT re-send (fire-once).
     expect(wd.requestCompact()).toBe(false)
-    expect(writes).toEqual([`KEY:${encodeKey('escape')}`, '/compact\r'])
+    expect(writes).toEqual(COMPACT_WRITES)
   })
 
   test('mid-compact lock suppresses warn during the grow-before-marker window', () => {
@@ -268,7 +285,7 @@ describe('Compact action — escape then /compact\\r, fire-once + mid-compact lo
     expect(wd.requestCompact()).toBe(false)
     advance(61_000) // past 2 min total → stale lock cleared on press, fires again
     expect(wd.requestCompact()).toBe(true)
-    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(2)
+    expect(COMPACTS(writes)).toBe(2)
   })
 
   test('debounce floor blocks a second actuation even after the lock clears', () => {
@@ -283,7 +300,7 @@ describe('Compact action — escape then /compact\\r, fire-once + mid-compact lo
     expect(wd.requestCompact()).toBe(false)
     advance(30_000) // now past the floor
     expect(wd.requestCompact()).toBe(true)
-    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(2)
+    expect(COMPACTS(writes)).toBe(2)
   })
 })
 
@@ -330,7 +347,7 @@ describe('idle-gated auto-compaction POLICY (gap #4) — close the wedge loop', 
     let size = SIZE_CRITICAL_BYTES
     const { wd, writes, advance } = makeHarness(() => size, () => true)
     wd.tick()
-    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(1)
+    expect(COMPACTS(writes)).toBe(1)
     // Compaction succeeds: post-compact size drops below warn → mid-compact lock
     // clears AND the outer auto-compact latch de-latches (size < critical).
     size = 1024
@@ -341,7 +358,7 @@ describe('idle-gated auto-compaction POLICY (gap #4) — close the wedge loop', 
     size = SIZE_CRITICAL_BYTES
     wd.tick()
     // A genuinely new critical episode → it auto-compacts a SECOND time.
-    expect(writes.filter((w) => w === '/compact\r')).toHaveLength(2)
+    expect(COMPACTS(writes)).toBe(2)
   })
 
   test('no isIdle wired → surface-only, never auto-compacts (button-gateway parity)', () => {

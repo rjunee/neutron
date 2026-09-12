@@ -10,6 +10,11 @@
  * an external signal we did not send) LEAVES the record marked `crashed` for the
  * detector to report once; a CLEAN (code 0) or intentional (`wasKilledByUs`)
  * termination unregisters outright.
+ *
+ * § herdr step 2b — the exit-CODE half of that classification no longer carries
+ * information. herdr reports no exit status at all, so the real host always
+ * resolves `null`; see the two `herdr shape` cases below, which are the same exit
+ * value with opposite verdicts.
  */
 
 import { describe, it, expect, afterEach } from 'bun:test'
@@ -44,7 +49,7 @@ function makeHost(): {
   let lastHasExited = false
   const PID = 4242
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const i = argv.indexOf('--session-id')
       const sid = (i >= 0 ? argv[i + 1] : argv[argv.indexOf('--resume') + 1]) as string
       const { port: sinkPort, token } = bakedChildSinkInfo(argv)
@@ -178,6 +183,61 @@ describe('crashed-agent watchdog — real spawn exit handler (F4)', () => {
     }
   })
 
+  // ── § herdr step 2b: THE ONLY EXIT SHAPE HERDR CAN PRODUCE ────────────────
+  // herdr has NO exit codes anywhere — `pane.exited` carries exactly
+  // `{pane_id, workspace_id}` — so the real host always resolves `exited` with
+  // `null`. These two cases are the same exit code with opposite verdicts, which is
+  // the whole claim: after this change `wasKilledByUs` carries the classification
+  // BY ITSELF and the exit-code half of the condition carries nothing. A test that
+  // only exercised code 0 vs code 1 would keep passing while the production
+  // substrate could produce neither.
+  it('herdr shape — a `null` exit NOT killed by us IS a crash', async () => {
+    const reg = new ProcessRegistry()
+    const clear = pushAmbientProcessRegistry(reg)
+    try {
+      const { host, exitLast } = makeHost()
+      const sub = createPersistentReplSubstrate(optsWith(host))
+      await drainOK(sub.start({ prompt: 'hi', tools: [], model_preference: ['claude-opus-4-7'] }))
+      expect(reg.size()).toBe(1)
+
+      // `null`, not a code: exactly what HerdrHost resolves on `pane_exited`.
+      exitLast(null)
+      await settle()
+
+      expect(reg.size()).toBe(0)
+      const pending = reg.listPendingCrashes()
+      expect(pending.length).toBe(1)
+      expect(pending[0]!.exit_status).toBe('crashed')
+    } finally {
+      clear()
+    }
+  })
+
+  it('herdr shape — the SAME `null` exit, killed by us, is NOT a crash', async () => {
+    const reg = new ProcessRegistry()
+    const clear = pushAmbientProcessRegistry(reg)
+    try {
+      const { host, killLast } = makeHost()
+      const sub = createPersistentReplSubstrate(optsWith(host))
+      await drainOK(sub.start({ prompt: 'hi', tools: [], model_preference: ['claude-opus-4-7'] }))
+      expect(reg.size()).toBe(1)
+
+      // Same exit VALUE as the case above; only `wasKilledByUs` differs.
+      killLast()
+      await settle()
+
+      expect(reg.size()).toBe(0)
+      expect(reg.listPendingCrashes().length).toBe(0)
+    } finally {
+      clear()
+    }
+  })
+
+  // A code-0 exit is retained as a guard on the CLASSIFIER, not as a shape the
+  // production host can still produce: under herdr nothing ever supplies a 0. It
+  // stays because `PtyHost` is meant to admit a backend on a substrate that reports
+  // exit status, and because deleting it would be the one edit that makes the
+  // classifier's code branch untested.
   it('a CLEAN exit (code 0) is unregistered — the detector reports nothing', async () => {
     const reg = new ProcessRegistry()
     const clear = pushAmbientProcessRegistry(reg)

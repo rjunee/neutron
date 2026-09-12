@@ -38,7 +38,7 @@ function makeCapturingHost(): { host: PtyHost; argvs: string[][] } {
   const argvs: string[][] = []
   let spawns = 0
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       argvs.push(argv)
       const pid = 300000 + spawns

@@ -1,0 +1,544 @@
+/**
+ * herdr-host.ts — the `PtyHost` backend: herdr is the REPL container.
+ *
+ * § herdr step 2b. Replaces the in-process `Bun.Terminal` backend, which is
+ * deleted rather than flagged off. The lifted lifecycle/supervision logic still
+ * talks only to `PtyHost`; the two places that interface had to change to admit an
+ * out-of-process terminal (async `spawn`, and `onData` becoming `onScreen`) are
+ * documented in `pty-host.ts` with the reasoning.
+ *
+ * SPAWN IS `layout.apply`, NOT `agent.start`. Verified against the live server:
+ * `LayoutNode` type `pane` carries `command: string[]` and genuinely execs —
+ * `pane.process_info` reported `shell_pid` EQUAL to the argv's own pid, with the
+ * argv itself as `foreground_processes[0]`, and `pane.read` returned only the
+ * program's output with no prompt and no echoed command line. `agent.start`
+ * shell-quotes the argv and TYPES it into a running shell, and its `kind` is a
+ * compiled-in enum, so it can neither run our argv faithfully nor admit `claude`
+ * as we configure it.
+ *
+ * `onScreen` IS SYNTHESIZED BY POLLING. herdr has no raw output stream: of its 91
+ * methods the only output-bearing subscription is `pane.output_matched`, which
+ * needs a pattern registered in advance. `pane.output_changed` is declared in the
+ * schema and is NOT usable — `events.subscribe` rejects it as an unknown variant
+ * and `events.wait` rejects it with `unsupported_event_wait_match` ("events.wait
+ * currently supports pane agent status matches"). Both measured on the wire. So
+ * the bridge polls `pane.read` and delivers a snapshot when it CHANGES.
+ *
+ * THREE THINGS THE POLL LOOP MUST GET RIGHT, each of which a naive loop gets
+ * wrong while still looking correct on a steady screen:
+ *
+ *  1. DELIVER ONLY ON CHANGE. `lastDataAt` drives the 900 ms idle gate that runs
+ *     before every prompt inject. A loop that fires every tick keeps `lastDataAt`
+ *     permanently fresh, so the REPL never reads as idle and every inject waits
+ *     out the defensive cap instead of the quiet window.
+ *  2. NEVER DELIVER A FAILED READ AS AN EMPTY SCREEN. A pane VANISHES on exit,
+ *     taking its output with it, so the ring is the only surviving record of a
+ *     dead REPL's last output. A read that ERRORS is dropped; a read that
+ *     SUCCEEDS and is empty is delivered, because that is a genuinely cleared
+ *     pane and the detector falling edge depends on seeing it.
+ *  3. ASK FOR `viewport_rows + wanted` LINES. `lines=N` counts blank viewport
+ *     rows BEFORE trimming: measured, a pane with three content lines under a
+ *     62-row viewport returned EMPTY for `recent_unwrapped lines=10` and all
+ *     three for `lines=200`.
+ *
+ * NO EXIT CODES EXIST ANYWHERE IN HERDR. `pane.exited` carries exactly
+ * `{pane_id, workspace_id}`, so `exited` resolves `null` and crash-vs-recycle
+ * collapses ENTIRELY onto `wasKilledByUs` — see `pty-host.ts`.
+ */
+
+import type { Key } from './keystrokes.ts'
+import type { PtyChild, PtyExitCause, PtyHost, PtySpawnOpts } from './pty-host.ts'
+import {
+  HERDR_POLL_INTERVAL_MS,
+  HERDR_READ_LINE_CAP,
+  HERDR_READ_SOURCE,
+  HERDR_READ_WINDOW_LINES,
+  HERDR_OUTPUT_GATE_MAX_MS,
+  HERDR_PANE_NOT_FOUND,
+  HERDR_VIEWPORT_REFRESH_MS,
+  HERDR_VIEWPORT_ROWS_FALLBACK,
+  herdrKeyNames,
+  herdrReadWindow,
+  type HerdrLayoutApply,
+  type HerdrPaneInfo,
+  type HerdrPaneRead,
+  type HerdrProcessInfo,
+} from './herdr-protocol.ts'
+import { connectHerdr, HerdrError, type HerdrRpc } from './herdr-client.ts'
+import { fireAndForget } from '@neutronai/logger/fire-and-forget.ts'
+
+/** How long to wait for herdr to report the spawned pane's pid before refusing
+ *  the spawn. A pane that has exec'd reports one within a poll or two; this is a
+ *  bound on a hung server, not a normal wait. */
+export const HERDR_PID_WAIT_MS = 5000
+
+/** The `label` put on the REPL's pane, so the owner can see what it is when they
+ *  attach. */
+export const HERDR_REPL_PANE_LABEL = 'neutron-repl'
+
+/** Drop `undefined`-valued keys so the child sees only real env vars (the
+ *  auth-scrub contract relies on the caller passing `KEY: undefined` to mean
+ *  "unset" — we honour that by not forwarding it). */
+function compactEnv(env: Record<string, string | undefined>): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, v] of Object.entries(env)) {
+    if (v !== undefined) out[k] = v
+  }
+  return out
+}
+
+/** Injectable seam so the host is testable without a live herdr server. */
+export interface HerdrHostDeps {
+  /** Open a protocol-verified connection. Defaults to {@link connectHerdr}, which
+   *  is where the protocol version is checked and where a mismatch throws. */
+  connect?: () => Promise<HerdrRpc>
+  /** Poll interval override (tests). Defaults to {@link HERDR_POLL_INTERVAL_MS}. */
+  pollIntervalMs?: number
+  /** How often to re-read the pane's viewport height. Defaults to
+   *  {@link HERDR_VIEWPORT_REFRESH_MS}; a test shortens it to observe a resize. */
+  viewportRefreshMs?: number
+  /** Sleep, so a test can drive the loop deterministically. */
+  sleep?: (ms: number) => Promise<void>
+  /** Workspace to place the REPL's tab in. Defaults to `$HERDR_WORKSPACE_ID`. */
+  workspaceId?: string
+  /** How long to wait for `beginOutput()` before releasing screens anyway, with a
+   *  warning. Defaults to {@link HERDR_OUTPUT_GATE_MAX_MS}. */
+  outputGateMaxMs?: number
+  /** How long to wait for herdr to report a pid. Defaults to
+   *  {@link HERDR_PID_WAIT_MS}; a test shortens it so the refusal path is fast. */
+  pidWaitMs?: number
+}
+
+/**
+ * A `PtyHost` whose terminal is a herdr pane.
+ *
+ * One herdr connection per `spawn`, so a REPL's poll loop and its `pane.exited`
+ * subscription live and die with that REPL and cannot be starved by another
+ * session's traffic.
+ */
+export class HerdrHost implements PtyHost {
+  constructor(private readonly deps: HerdrHostDeps = {}) {}
+
+  async spawn(argv: string[], opts: PtySpawnOpts): Promise<PtyChild> {
+    if (argv.length === 0) {
+      throw new Error('herdr-host: argv must be non-empty')
+    }
+    const pollMs = this.deps.pollIntervalMs ?? HERDR_POLL_INTERVAL_MS
+    const sleep = this.deps.sleep ?? ((ms: number) => Bun.sleep(ms))
+
+    // `connectHerdr` is where the protocol version is checked, and it THROWS on a
+    // mismatch. A spawn that cannot verify the protocol does not happen.
+    const client = await (this.deps.connect ?? (() => connectHerdr()))()
+
+    // THE CLEANUP OBLIGATION STARTS HERE, NOT AT THE END OF A SUCCESSFUL SPAWN.
+    // The pane — and the `claude` process in it — exists the moment `layout.apply`
+    // returns. Every initialization failure after that point must close it, or the
+    // caller gets a rejected spawn while the process keeps running unmanaged, with
+    // NOTHING holding a record of it: the pool never learned about a spawn that
+    // failed. That is an orphan manufactured in the constructor, on an error path,
+    // where nobody will ever look for it.
+    let paneId: string | undefined
+    let pid: number
+    try {
+      paneId = await this.applyLayout(client, argv, opts)
+      // The pid. Load-bearing above here: `supervision.ts` liveness-probes it with
+      // `process.kill(pid, 0)` and the crashed-agent registry keys entries on
+      // `(name, pid)`. herdr reports it as `shell_pid`, which is NULLABLE — and
+      // for a `layout.apply` pane it is the argv's OWN pid. If it never arrives we
+      // REFUSE the spawn rather than invent one: a child whose pid we cannot learn
+      // cannot be supervised, and a placeholder would make every liveness probe
+      // answer confidently about the wrong process.
+      const pidWaitMs = this.deps.pidWaitMs ?? HERDR_PID_WAIT_MS
+      const found = await this.awaitPid(client, paneId, sleep, pidWaitMs)
+      if (found === undefined) {
+        throw new Error(
+          `herdr-host: pane ${paneId} never reported a pid within ${pidWaitMs}ms — ` +
+            `refusing to return a child whose pid supervision cannot probe`,
+        )
+      }
+      pid = found
+    } catch (e) {
+      await this.abandonPane(client, paneId)
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+
+    let exited = false
+    // Set the instant WE signal the child (any intentional termination), so the
+    // exit handler can distinguish a crash from an expected recycle. With herdr
+    // this is the ONLY thing that can make that distinction — there are no exit
+    // codes — so it is load-bearing rather than an optimisation.
+    let killedByUs = false
+    // A transient intent, tracked separately from `killedByUs` so an interrupt can
+    // never be mistaken for a termination. See `pty-host.ts`.
+    let interruptedByUs = false
+    let exitResolve: (code: number | null) => void = () => {}
+    const exitedPromise = new Promise<number | null>((res) => {
+      exitResolve = res
+    })
+
+    let exitCause: PtyExitCause | undefined
+    /** The fail-open timer for the output gate, declared here so {@link settleExit}
+     *  can clear it: a child that dies during startup, before `beginOutput()` is ever
+     *  called, must not leave a pending timer behind. */
+    let gateTimer: ReturnType<typeof setTimeout> | undefined
+    /** Terminal state, exactly once — first cause wins. Always resolves `null`: no
+     *  exit code exists anywhere in herdr. */
+    const settleExit = (cause: PtyExitCause): void => {
+      if (exited) return
+      exited = true
+      exitCause = cause
+      if (opts.onExit !== undefined) {
+        try {
+          opts.onExit(null)
+        } catch {
+          // A throwing consumer must not break the exit path.
+        }
+      }
+      exitResolve(null)
+      if (gateTimer !== undefined) clearTimeout(gateTimer)
+      client.close()
+    }
+
+    // Subscribe BEFORE the first poll so an exit during startup is still observed.
+    try {
+      await client.subscribe('pane_exited', { type: 'pane.exited' }, (data) => {
+        if (data['pane_id'] === paneId) settleExit('pane-exited')
+      })
+    } catch (e) {
+      await this.abandonPane(client, paneId)
+      throw e instanceof Error ? e : new Error(String(e))
+    }
+
+    // THE OUTPUT GATE. The poll loop must not deliver a screen before the caller has
+    // wired the consumer, which it cannot do until this `spawn` resolves. See
+    // `PtyChild.beginOutput`: the first screen is precisely where a trust prompt
+    // lives, and snapshot-replace never re-delivers it.
+    let releaseOutput: () => void = () => {}
+    let released = false
+    const outputGate = new Promise<void>((res) => {
+      releaseOutput = () => {
+        if (released) return
+        released = true
+        res()
+      }
+    })
+    // Fail OPEN, loudly. The gate orders delivery; it does not authorise it. A caller
+    // that never calls `beginOutput()` would otherwise get a REPL that polls forever
+    // and scans nothing — silent, and indistinguishable from a healthy idle session.
+    gateTimer = setTimeout(() => {
+      if (released) return
+      process.stderr.write(
+        `[herdr-host] pane ${paneId}: beginOutput() was not called within ` +
+          `${this.deps.outputGateMaxMs ?? HERDR_OUTPUT_GATE_MAX_MS}ms — releasing screens anyway. This is a WIRING BUG in the ` +
+          `caller: screens delivered before its consumer exists cannot be scanned, and a ` +
+          `snapshot-replace ring never re-delivers an unchanged screen.\n`,
+      )
+      releaseOutput()
+    }, this.deps.outputGateMaxMs ?? HERDR_OUTPUT_GATE_MAX_MS)
+
+    fireAndForget(
+      'herdr-host.poll',
+      this.pollLoop(client, paneId, opts, pollMs, sleep, () => exited, settleExit, outputGate),
+    )
+
+    /** Issue a pane call, best-effort. No-op after exit (the interface's
+     *  "no-op-safe after exit" contract). */
+    const send = (label: string, method: string, params: Record<string, unknown>): void => {
+      if (exited) return
+      fireAndForget(label, client.call(method, params))
+    }
+
+    const child: PtyChild = {
+      pid,
+      write(data) {
+        const text = typeof data === 'string' ? data : Buffer.from(data).toString('utf8')
+        // `pane.send_text` NEVER SUBMITS — measured: a literal `\r` in the text
+        // does not fire at a prompt. Refusing the submit characters turns a silent
+        // no-op (the text typed and left sitting at the prompt, the turn hanging
+        // forever with no error anywhere) into a loud one, and names the sibling
+        // that does work. `writeKey('enter')` / `writeKeys` submit.
+        if (text.includes('\r') || text.includes('\n')) {
+          throw new Error(
+            'herdr-host: write() refuses a submit character (\\r or \\n) — herdr\'s pane.send_text ' +
+              'does not submit, so the text would be typed and left at the prompt with no error ' +
+              "anywhere. Send the text, then writeKey('enter').",
+          )
+        }
+        if (text === '') return
+        send('herdr-host.write', 'pane.send_text', { pane_id: paneId, text })
+      },
+      writeKey(key: Key) {
+        send('herdr-host.writeKey', 'pane.send_keys', { pane_id: paneId, keys: herdrKeyNames([key]) })
+      },
+      writeKeys(keys: readonly Key[]) {
+        if (keys.length === 0) return
+        send('herdr-host.writeKeys', 'pane.send_keys', { pane_id: paneId, keys: herdrKeyNames(keys) })
+      },
+      kill(signal) {
+        if (exited) return
+        // CLASSIFY BEFORE LATCHING. SIGINT is the one real signal herdr can deliver
+        // (`ctrl+c` on a pane raises a genuine one — measured), and it is an
+        // INTERRUPT: abandon the current turn, keep the child. Anything else means
+        // "end this process", and the only primitive for that is closing the pane —
+        // which destroys it, so no `pane_exited` follows and we settle locally.
+        const asInt = signal === 'SIGINT' || signal === 2
+        if (asInt) {
+          // ONLY A TERMINAL OPERATION MAY LATCH `killedByUs`. An earlier version set
+          // it here, before distinguishing the signal, and then returned without
+          // terminating anything — leaving the child ALIVE and flagged as
+          // intentionally-terminated. Because herdr has no exit codes,
+          // `wasKilledByUs` is the ENTIRE crash-vs-recycle discriminator
+          // (`spawn.ts`), so that one interrupt silently reclassified every later
+          // crash as a clean recycle for the rest of the child's life. A transient
+          // intent gets its own flag.
+          interruptedByUs = true
+          send('herdr-host.kill.sigint', 'pane.send_keys', { pane_id: paneId, keys: ['ctrl+c'] })
+          return
+        }
+        // Terminal from here: record the intent BEFORE signalling, so even a child
+        // that is already gone reads as an expected termination rather than a crash.
+        killedByUs = true
+        fireAndForget(
+          'herdr-host.kill.close',
+          client.call('pane.close', { pane_id: paneId }).finally(() => {
+            settleExit('closed-by-us')
+          }),
+        )
+      },
+      exited: exitedPromise,
+      hasExited: () => exited,
+      wasKilledByUs: () => killedByUs,
+      wasInterruptedByUs: () => interruptedByUs,
+      exitCause: () => exitCause,
+      beginOutput: () => {
+        clearTimeout(gateTimer)
+        releaseOutput()
+      },
+    }
+    return child
+  }
+
+  /**
+   * Create the pane that will run `argv`.
+   *
+   * THE IDS COME BACK CHANGED. `layout.apply` REPLACES a tab: measured, a request
+   * naming `w6:t2` was answered with `tab_id: w6:t3` and a fresh pane id. So we
+   * never point it at a tab anyone else is using — we let herdr make one — and we
+   * read the pane id out of the response rather than assuming anything we sent
+   * survived.
+   */
+  private async applyLayout(client: HerdrRpc, argv: string[], opts: PtySpawnOpts): Promise<string> {
+    const workspaceId = this.deps.workspaceId ?? process.env['HERDR_WORKSPACE_ID']
+    const params: Record<string, unknown> = {
+      // The owner's focus is theirs: they must be able to `herdr session attach`
+      // and find themselves where they left off, not yanked to a REPL pane.
+      focus: false,
+      root: {
+        type: 'pane',
+        command: argv,
+        cwd: opts.cwd,
+        env: compactEnv(opts.env),
+        label: HERDR_REPL_PANE_LABEL,
+      },
+    }
+    if (workspaceId !== undefined && workspaceId !== '') params['workspace_id'] = workspaceId
+    const applied = (await client.call('layout.apply', params)) as unknown as HerdrLayoutApply
+    const paneId = applied.layout?.root?.pane_id
+    if (typeof paneId !== 'string' || paneId === '') {
+      throw new Error(
+        `herdr-host: layout.apply returned no pane id: ${JSON.stringify(applied).slice(0, 300)}`,
+      )
+    }
+    return paneId
+  }
+
+  /**
+   * Tear down a pane we created but never handed to a caller, then drop the
+   * connection. Best-effort in both halves: a failing `pane.close` must not mask the
+   * error that caused the abandonment, and the connection closes either way.
+   *
+   * `paneId` is `undefined` when `layout.apply` itself failed — there is then no
+   * pane to close, and no obligation.
+   */
+  private async abandonPane(client: HerdrRpc, paneId: string | undefined): Promise<void> {
+    if (paneId !== undefined) {
+      try {
+        await client.call('pane.close', { pane_id: paneId })
+      } catch {
+        // Best-effort: the pane may already be gone, or the server unreachable —
+        // which is exactly when the spawn was failing anyway.
+      }
+    }
+    client.close()
+  }
+
+  /** Poll `pane.process_info` until herdr reports a pid for the pane. */
+  private async awaitPid(
+    client: HerdrRpc,
+    paneId: string,
+    sleep: (ms: number) => Promise<void>,
+    waitMs: number,
+  ): Promise<number | undefined> {
+    const deadline = Date.now() + waitMs
+    for (;;) {
+      try {
+        const info = (await client.call('pane.process_info', {
+          pane_id: paneId,
+        })) as unknown as { process_info?: HerdrProcessInfo }
+        const pi = info.process_info
+        const pid = pi?.shell_pid ?? pi?.foreground_processes?.[0]?.pid
+        if (typeof pid === 'number' && pid > 0) return pid
+      } catch {
+        // The pane may not be fully wired yet; keep trying until the deadline.
+      }
+      if (Date.now() >= deadline) return undefined
+      await sleep(100)
+    }
+  }
+
+  /**
+   * Poll `pane.read` and deliver a snapshot to `onScreen` WHEN IT CHANGES.
+   *
+   * The change filter is rule 1 in the class docstring, not an optimisation. The
+   * error handling is rule 2: a read that throws leaves the ring holding the last
+   * screen it saw, which for an exited pane is the only record of what the REPL
+   * last printed.
+   */
+  private async pollLoop(
+    client: HerdrRpc,
+    paneId: string,
+    opts: PtySpawnOpts,
+    pollMs: number,
+    sleep: (ms: number) => Promise<void>,
+    hasExited: () => boolean,
+    settleExit: (cause: PtyExitCause) => void,
+    outputGate: Promise<void>,
+  ): Promise<void> {
+    // BEFORE THE FIRST READ, not before the first delivery: polling at all would set
+    // `lastDataAt` and mutate the ring behind a consumer that cannot scan yet.
+    await outputGate
+    let last: string | undefined
+    let viewportRows: number | undefined
+    let viewportReadAt = 0
+    let warnedShortWindow = false
+    let warnedForRows: number | undefined
+    const refreshMs = this.deps.viewportRefreshMs ?? HERDR_VIEWPORT_REFRESH_MS
+    while (!hasExited()) {
+      if (client.isClosed()) {
+        // THE FOURTH ROUTE TO A TERMINAL CHILD, and the one that is not a child
+        // event: the transport died. Nothing about the process changed — the
+        // channel we would learn through vanished. Returning quietly here (what an
+        // earlier version did) left `exited` pending forever and `hasExited()`
+        // false, so the pool kept handing out a REPL it could no longer observe or
+        // drive. "I cannot observe the child" has to reach the SAME terminal
+        // handling as "the child exited"; only the CAUSE differs, and `exitCause`
+        // is what keeps the two from being confused.
+        settleExit('transport-lost')
+        return
+      }
+      // RE-READ THE GEOMETRY PERIODICALLY. A pane can be resized after the first
+      // read, and a stale height makes every request the wrong size — silently
+      // returning nothing at all when the pane grew. Not cached forever.
+      if (viewportRows === undefined || Date.now() - viewportReadAt >= refreshMs) {
+        const rows = await this.readViewportRows(client, paneId)
+        if (rows !== undefined) viewportRows = rows
+        viewportReadAt = Date.now()
+      }
+      // `viewport_rows + wanted`: blank viewport rows count toward `lines` BEFORE
+      // trimming, so a bare `wanted` returns EMPTY on a cleared pane (measured).
+      // CLAMPED to the server's hard cap — see `herdrReadWindow`. A viewport at or
+      // past `cap - wanted` (799) cannot carry the full detector window, and that
+      // is said out loud ONCE rather than surfacing later as a short read.
+      const effectiveRows = viewportRows ?? HERDR_VIEWPORT_ROWS_FALLBACK
+      const win = herdrReadWindow(effectiveRows)
+      if (win.belowDetectorWindow && (!warnedShortWindow || warnedForRows !== effectiveRows)) {
+        // Once per DISTINCT geometry, not once per process: a pane resized into a
+        // short window after an earlier warning is new information.
+        warnedShortWindow = true
+        warnedForRows = effectiveRows
+        process.stderr.write(
+          `[herdr-host] pane ${paneId}: viewport ${effectiveRows} rows ` +
+            `+ ${HERDR_READ_WINDOW_LINES} wanted exceeds the ${HERDR_READ_LINE_CAP}-line read cap; ` +
+            `requesting ${win.lines} and carrying ${win.contentAllowance} content lines. Positional ` +
+            `detectors written against ${HERDR_READ_WINDOW_LINES} lines may see less.\n`,
+        )
+      }
+      const lines = win.lines
+      let text: string | undefined
+      try {
+        const r = (await client.call('pane.read', {
+          pane_id: paneId,
+          source: HERDR_READ_SOURCE,
+          lines,
+          strip_ansi: true,
+          format: 'text',
+        })) as unknown as { read?: HerdrPaneRead }
+        const read = r.read
+        if (read !== undefined && typeof read.text === 'string') text = read.text
+      } catch {
+        // A read that FAILED tells us nothing about the screen. Drop it — do NOT
+        // synthesize an empty snapshot, which would erase the ring's record of a
+        // dead REPL's last output. Confirm death against the pane's existence
+        // rather than inferring it from one failed read.
+        if (await this.paneIsGone(client, paneId)) {
+          settleExit('pane-vanished')
+          return
+        }
+      }
+      // Deliver only a CHANGED screen. An empty-but-successful read IS a change
+      // worth delivering (a cleared pane), which is what lets a detector's latch
+      // fall.
+      if (text !== undefined && text !== last) {
+        last = text
+        if (opts.onScreen !== undefined) {
+          try {
+            opts.onScreen(text)
+          } catch {
+            // A throwing consumer must not kill the poll loop.
+          }
+        }
+      }
+      await sleep(pollMs)
+    }
+  }
+
+  /** The pane's viewport height, so reads can ask for `viewport_rows + wanted`. */
+  private async readViewportRows(client: HerdrRpc, paneId: string): Promise<number | undefined> {
+    try {
+      const r = (await client.call('pane.get', { pane_id: paneId })) as unknown as {
+        pane?: HerdrPaneInfo
+      }
+      const rows = r.pane?.scroll?.viewport_rows
+      return typeof rows === 'number' && rows > 0 ? rows : undefined
+    } catch {
+      return undefined
+    }
+  }
+
+  /** True ONLY when herdr positively reports the pane does not exist. A rejection
+   *  that does not carry {@link HERDR_PANE_NOT_FOUND} means the question failed, not
+   *  that the answer is no — see the body. Used to turn a failing read into a
+   *  DEFINITE exit, which it can only do when the exit is actually definite. */
+  private async paneIsGone(client: HerdrRpc, paneId: string): Promise<boolean> {
+    try {
+      await client.call('pane.get', { pane_id: paneId })
+      return false
+    } catch (e) {
+      // ONLY A TYPED not-found PROVES ABSENCE. Every other rejection — a timeout, a
+      // transient server error, a transport hiccup — is a failure of the QUESTION,
+      // and "I could not determine whether it is gone" is not "it is gone".
+      // Returning true for any rejection recycled live REPLs and stamped them
+      // `'pane-vanished'`, a claim nothing had observed.
+      //
+      // The cost of being strict here is that a pane we cannot ask about keeps being
+      // polled rather than being declared dead. That is the correct side to err on:
+      // the connection dying is already terminal via `'transport-lost'`, and a turn
+      // against an unresponsive REPL is ended by the inactivity watchdog above. What
+      // must not happen is a confident wrong answer.
+      return e instanceof HerdrError && e.code === HERDR_PANE_NOT_FOUND
+    }
+  }
+}
+
+/** Default singleton — herdr is the REPL container. */
+export const herdrHost: PtyHost = new HerdrHost()

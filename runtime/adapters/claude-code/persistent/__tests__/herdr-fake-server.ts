@@ -1,0 +1,172 @@
+/**
+ * herdr-fake-server.ts — a scripted stand-in for a herdr server, shared by the
+ * herdr host/client suites.
+ *
+ * Answers the handful of methods `HerdrHost` calls, records every request so a
+ * test can assert what actually went over the wire (the `lines` a read asked for,
+ * the key names a keystroke used), and lets a test make any method fail or a pane
+ * disappear. Deliberately NOT a general herdr emulator: it should only be able to
+ * answer what the host actually asks, so a host that started asking for something
+ * new fails loudly here rather than being silently accommodated.
+ */
+
+import { HerdrError, type HerdrEventHandler, type HerdrRpc } from '../herdr-client.ts'
+import { HERDR_PANE_NOT_FOUND } from '../herdr-protocol.ts'
+
+export interface FakeHerdrServerOpts {
+  /** Pane id `layout.apply` hands back. Defaults to a fixed id. */
+  paneId?: string
+  /** `viewport_rows` reported by `pane.get`. Defaults to 62 (the measured value
+   *  on the live server). `null` reports a pane with no scroll info. */
+  viewportRows?: number | null
+  /** `shell_pid` reported by `pane.process_info`. `null` means herdr never learns
+   *  one — the shape that must make a spawn REFUSE rather than invent a pid. */
+  shellPid?: number | null
+}
+
+export interface RecordedCall {
+  method: string
+  params: Record<string, unknown>
+}
+
+/** A scripted herdr server plus the levers a test needs over it. */
+export class FakeHerdrServer implements HerdrRpc {
+  readonly calls: RecordedCall[] = []
+  readonly paneId: string
+  private readonly handlers = new Map<string, Set<HerdrEventHandler>>()
+  private closed = false
+  /** MUTABLE: a pane can be resized at any time, and the bridge must notice. */
+  viewportRows: number | null
+  private shellPid: number | null
+  /** The pane's current screen, as `pane.read` will report it. */
+  screen = ''
+  /** When true, every `pane.read` REJECTS (a pane mid-teardown). */
+  readFails = false
+  /** When true, `pane.get` and `pane.read` reject with a TYPED `pane_not_found` —
+   *  herdr positively reports the pane does not exist. */
+  paneGone = false
+  /** When true, `pane.get` and `pane.read` reject with an UNTYPED transient error.
+   *  The pane is still there; the QUESTION failed. These must never be read as
+   *  absence. */
+  transientFailure = false
+  /** When set, `events.subscribe` REJECTS — an initialization failure AFTER the
+   *  pane already exists, which is where the leak lived. */
+  subscribeFails = false
+
+  constructor(opts: FakeHerdrServerOpts = {}) {
+    this.paneId = opts.paneId ?? 'w9:p1'
+    this.viewportRows = opts.viewportRows === undefined ? 62 : opts.viewportRows
+    this.shellPid = opts.shellPid === undefined ? 31337 : opts.shellPid
+  }
+
+  /** Every recorded call to `method`. */
+  callsTo(method: string): RecordedCall[] {
+    return this.calls.filter((c) => c.method === method)
+  }
+
+  /** Fire a subscription event at the host, as the real server would. */
+  emit(kind: string, data: Record<string, unknown>): void {
+    for (const h of [...(this.handlers.get(kind) ?? [])]) h(data)
+  }
+
+  /** The pane exits: herdr sends `pane_exited` and forgets the pane. Note what it
+   *  does NOT send — any exit status. */
+  exitPane(): void {
+    this.paneGone = true
+    this.readFails = true
+    this.emit('pane_exited', { type: 'pane_exited', pane_id: this.paneId, workspace_id: 'w9' })
+  }
+
+  async call(method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    this.calls.push({ method, params })
+    if (this.closed) throw new Error('fake-herdr: call on a closed connection')
+    switch (method) {
+      case 'ping':
+        return { type: 'pong', version: '0.8.2', protocol: 20 }
+      case 'layout.apply':
+        // The real server REPLACES the tab and mints new ids, so the host must read
+        // the pane id out of the reply. Hand back an id it could not have guessed.
+        return { layout: { workspace_id: 'w9', tab_id: 'w9:t7', root: { pane_id: this.paneId } } }
+      case 'pane.process_info':
+        return {
+          process_info:
+            this.shellPid === null
+              ? { pane_id: this.paneId }
+              : { pane_id: this.paneId, shell_pid: this.shellPid, foreground_processes: [] },
+        }
+      case 'pane.get':
+        if (this.transientFailure) throw new Error('fake-herdr: temporarily unavailable')
+        if (this.paneGone) throw new HerdrError(HERDR_PANE_NOT_FOUND, 'pane not found')
+        return {
+          pane: {
+            pane_id: this.paneId,
+            scroll: this.viewportRows === null ? null : { viewport_rows: this.viewportRows },
+          },
+        }
+      case 'pane.read': {
+        if (this.transientFailure) throw new Error('fake-herdr: temporarily unavailable')
+        if (this.readFails) {
+          throw this.paneGone
+            ? new HerdrError(HERDR_PANE_NOT_FOUND, 'pane not found')
+            : new Error('fake-herdr: read failed')
+        }
+        return {
+          read: {
+            pane_id: this.paneId,
+            source: String(params['source']),
+            text: this.screen,
+            // INERT, exactly as measured: hardcoded 0 on every read.
+            revision: 0,
+            truncated: false,
+          },
+        }
+      }
+      case 'events.subscribe':
+        if (this.subscribeFails) throw new Error('fake-herdr: subscribe refused')
+        return { type: 'ok' }
+      case 'pane.send_text':
+      case 'pane.send_keys':
+      case 'pane.close':
+        return { type: 'ok' }
+      default:
+        throw new Error(`fake-herdr: unscripted method '${method}' — the host asked for something new`)
+    }
+  }
+
+  async subscribe(
+    kind: string,
+    subscription: Record<string, unknown>,
+    handler: HerdrEventHandler,
+  ): Promise<() => void> {
+    this.calls.push({ method: 'events.subscribe', params: subscription })
+    if (this.closed) throw new Error('fake-herdr: subscribe on a closed connection')
+    if (this.subscribeFails) throw new Error('fake-herdr: subscribe refused')
+    let set = this.handlers.get(kind)
+    if (set === undefined) {
+      set = new Set()
+      this.handlers.set(kind, set)
+    }
+    set.add(handler)
+    return () => {
+      set?.delete(handler)
+    }
+  }
+
+  isClosed(): boolean {
+    return this.closed
+  }
+
+  close(): void {
+    this.closed = true
+  }
+}
+
+/** Wait until `cond()` holds, or throw. Polls on the real clock, so it works with
+ *  the host's own `sleep`. */
+export async function until(cond: () => boolean, label: string, timeoutMs = 2000): Promise<void> {
+  const deadline = Date.now() + timeoutMs
+  while (!cond()) {
+    if (Date.now() > deadline) throw new Error(`until: timed out waiting for ${label}`)
+    await Bun.sleep(5)
+  }
+}

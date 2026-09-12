@@ -25,10 +25,16 @@ import { join } from 'node:path'
 import { randomBytes } from 'node:crypto'
 import { buildReplArgv } from '../build-repl-argv.ts'
 import { buildSettings } from '../build-settings.ts'
-import { BunTerminalHost } from '../bun-terminal-host.ts'
+import { HerdrHost } from '../herdr-host.ts'
+import type { PtyChild } from '../pty-host.ts'
 import { ensureClaudeTrust } from '../ensure-claude-trust.ts'
 
-const OPT_IN = process.env['NEUTRON_PTY_E2E'] === '1'
+// herdr is the REPL container now, so this needs a live herdr server as well as a
+// real `claude`. Both are opt-in facts about the machine, and neither is present
+// in CI — the test stays visible-but-skipped rather than silently passing.
+const OPT_IN =
+  process.env['NEUTRON_PTY_E2E'] === '1' &&
+  (process.env['HERDR_SOCKET_PATH'] ?? '') !== ''
 const CLAUDE_BIN =
   process.env['CLAUDE_BIN'] ??
   [join(process.env['HOME'] ?? '', '.local/bin/claude'), '/usr/local/bin/claude'].find((p) =>
@@ -108,22 +114,20 @@ describe.skipIf(!OPT_IN)('dev-channel binds under a REAL PTY (P0 regression guar
       skipPermissions: true,
     })
 
-    const host = new BunTerminalHost()
-    const chunks: Buffer[] = []
+    const host = new HerdrHost()
     let dismissed = false
-    let child: ReturnType<BunTerminalHost['spawn']> | null = null
-    child = host.spawn(argv, {
+    let child: PtyChild | null = null
+    child = await host.spawn(argv, {
       cwd: cfgDir,
       env: { ...(process.env as Record<string, string>), MCP_CONNECTION_NONBLOCKING: 'false' },
-      cols: 120,
-      rows: 40,
-      onData: (b) => {
-        chunks.push(Buffer.from(b))
+      // A RENDERED SCREEN, not a chunk — see `pty-host.ts`. Each delivery is the
+      // pane's whole current screen, so the disclaimer check runs against the
+      // screen instead of an accumulation of chunks.
+      onScreen: (screen) => {
         if (dismissed) return
         // Dismiss the --dangerously-load-development-channels disclaimer the same
         // way the substrate's output scanner does (normalize ANSI + whitespace).
-        const norm = Buffer.concat(chunks)
-          .toString('utf8')
+        const norm = screen
           // eslint-disable-next-line no-control-regex
           .replace(/\x1b\[[0-9;?]*[A-Za-z]/g, '')
           .replace(/\s+/g, '')

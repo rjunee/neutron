@@ -333,7 +333,7 @@ function pendingPathFor(registryPath: string): string {
 function makeCrashHost(): { host: PtyHost } {
   let dieArmed = true
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const r = argv.indexOf('--resume')
       const s = argv.indexOf('--session-id')
       const sid = (r >= 0 ? argv[r + 1] : s >= 0 ? argv[s + 1] : undefined) as string

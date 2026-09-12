@@ -50,7 +50,7 @@ function makeGatedHost(): { host: PtyHost; releaseReply: () => void; pid: number
   let openGate: () => void = () => {}
   const gate = new Promise<void>((res) => (openGate = res))
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       const i = argv.indexOf('--session-id')
       const sid = (i >= 0 ? argv[i + 1] : argv[argv.indexOf('--resume') + 1]) as string
       const { port: sinkPort, token } = bakedChildSinkInfo(argv)

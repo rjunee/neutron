@@ -69,7 +69,7 @@ function makeEchoHost(): {
   let spawns = 0
   const spawned: SpawnedChild[] = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 100000 + spawns
       const i = argv.indexOf('--session-id')
@@ -303,7 +303,7 @@ function makeCrashHost(): ProbeHost {
   const spawned: { killed: () => boolean }[] = []
   const configs: { mcp: string; settings: string; existedAtSpawn: boolean }[] = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 200000 + spawns
       const i = argv.indexOf('--session-id')
@@ -482,7 +482,7 @@ function makeEchoHostCapturingConfigs(): ProbeHost {
   const spawned: { killed: () => boolean }[] = []
   const configs: { mcp: string; settings: string; existedAtSpawn: boolean }[] = []
   const host: PtyHost = {
-    spawn(argv: string[]): PtyChild {
+    async spawn(argv: string[]): Promise<PtyChild> {
       spawns += 1
       const pid = 300000 + spawns
       const i = argv.indexOf('--session-id')
