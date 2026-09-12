@@ -45,6 +45,17 @@ ROUTING — escalation goes to the ORCHESTRATOR (the project chat), never to a d
   REORDERS the Work Board so the dependency precedes the blocked card. This is the case `36b95167` was
   actually in, and it composes with the dependency-aware dispatch item — a card escalated this way must
   move to a visibly BLOCKED state, not sit in `upcoming` looking startable.
+  NARROWED 2026-09-12, WITH THE REASON (build `fix/review-loop-stop-and-escalate`). What ships is the
+  REPORT and the BLOCKED lane: the run posts the escalation into the project chat naming the sequencing
+  call and what it takes, the card moves to `blocked`, and the dispatch chokepoint REFUSES a blocked
+  card (`card_blocked`) so nothing re-dispatches it to relearn the block. The reorder itself stays the
+  orchestrator's own `work_board_reorder`, made and reported when it reads that message, and is NOT
+  automated — because automating it would require the RUN to identify which card is the dependency, and
+  the only thing the run can honestly produce is `whatIsMissing`, a sentence. Deriving a card id from
+  that sentence and acting on it is precisely the board mutation the GUARDRAIL below forbids: an
+  autonomous run would be reordering the owner's priorities off a model's prose with no judgement in
+  between. So the run reports and the orchestrator moves the card; the automation stops at the point
+  where it would have to guess.
 • a repeat finding AFTER the bounded re-plan → the orchestrator. The re-plan gets exactly one chance to
   prove it changed something.
 GUARDRAIL: the RUN reports; the ORCHESTRATOR decides. A build must never mutate the board itself, or an
@@ -96,10 +107,21 @@ Built on branch `fix/review-loop-stop-and-escalate`; record at
       escalation payload naming a card and a position is asserted inert, and a reconcile
       that obeys it turns two tests red.
 - [x] A card escalated as `missing-dependency` moves to a visibly BLOCKED state, not
-      `upcoming` looking startable.
+      `upcoming` looking startable, and BLOCKED means something at the dispatch boundary:
+      the chokepoint refuses it (`card_blocked`, not queued — nothing can re-test a
+      decision) and neither UI offers a play or retry control for it. Without that half
+      the lane is decoration: the next dispatch picks the card up and relearns the same
+      block, which is the loop this item closes inside the run, reopened one level out.
       `work_board_items.status = 'blocked'` (migration 0140) — run-driven, not
       client-writable, and ACTIVE rather than terminal: the card keeps its `sort_order` and
       never stamps `completed_at`, because it is unfinished work that is waiting.
 - [x] The round cap becomes the backstop rather than the primary exit, and the owner can
       see on the card that a build stopped because it was BLOCKED rather than because it
       FAILED — two different words, not one.
+- [x] NARROWED: the orchestrator's REORDER is reported, not automated. See the ROUTING
+      note above for the reason — the run can produce a sentence, not a card id, and
+      deriving one to act on is the board mutation the guardrail forbids. What is built
+      and asserted: the chat report names the sequencing call, the card lands in
+      `blocked`, and nothing re-dispatches it until a person or the orchestrator moves it
+      out. Ticking this without saying so would be the false-completion failure this very
+      item is about.

@@ -193,13 +193,25 @@ describe('the OWNER sees two different words', () => {
           }),
         }),
       ).input_needed
-    expect(advice('missing-dependency', 'card X must land first')).toContain('Sequence')
+    const dependency = advice('missing-dependency', 'card X must land first')
+    expect(dependency).toContain('SEQUENCING')
+    // THE ROUTING, IN WORDS. The run reports; the orchestrator decides — so the sentence
+    // has to name the call and what it takes, because "retry" alone is the one
+    // instruction that changes nothing while the chokepoint is refusing the card.
+    expect(dependency).toContain('reorder')
+    expect(dependency).toContain('spec it first')
     expect(advice('design-gap', 'the spec asked for it')).toContain('Decide the plan')
     // The arithmetic kind measured that fixing stopped working and asserts NOTHING about
     // why, so its advice must not pretend to know which of the other two it is.
     const arithmetic = advice('not-converging', 'the count stopped falling')
-    expect(arithmetic).not.toContain('Sequence')
+    expect(arithmetic).not.toContain('SEQUENCING')
     expect(arithmetic).not.toContain('Decide the plan')
+    // EVERY kind names the unblocking step, because none of them can be re-dispatched
+    // until the card leaves the blocked lane.
+    for (const text of [dependency, advice('design-gap', 'x'), arithmetic]) {
+      expect(text).toContain('BLOCKED')
+      expect(text).toContain('upcoming')
+    }
   })
 
   test('the stored failure reason is the escalation sentence, not the generic catch-all', () => {

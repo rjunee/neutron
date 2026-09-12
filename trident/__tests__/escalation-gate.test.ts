@@ -462,6 +462,16 @@ describe('the WIRING — the shipped loop actually consults the gate', () => {
     expect(WORKFLOW_SRC).toContain("withModel({ label: 'plan:fable', phase: 'Build', schema: PLAN_SCHEMA })")
   })
 
+  test('the re-plan may RAISE the executor model but never LOWER it', () => {
+    // `modelForTag` routes 'mechanical' to Sonnet/medium and everything else to
+    // Opus/high. Adopting the re-plan's tag wholesale let a re-plan DOWNGRADE the model
+    // on a run that had just proved hard enough to need re-planning — silently, and on
+    // the rounds whose APPROVE ships the change.
+    expect(WORKFLOW_SRC).toContain("if (rePlan.complexity === 'reasoning') complexityTag = rePlan.complexity")
+    // The bare assignment must be gone: it is the shape that could lower the tag.
+    expect(WORKFLOW_SRC).not.toContain('\n      complexityTag = rePlan.complexity')
+  })
+
   test('the re-plan is counted when AUTHORISED, so a second cannot be granted mid-flight', () => {
     expect(WORKFLOW_SRC).toContain('replansUsed += 1')
     expect(WORKFLOW_SRC).toContain('rePlanPending = true')

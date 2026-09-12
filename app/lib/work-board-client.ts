@@ -34,11 +34,41 @@ import {
 
 /** `archived` = SHELVED (migration 0130): deprioritised, off the active lane,
  *  and NEVER counted as completed — it is not a quieter `done`. */
-/** `blocked` (migration 0140) is RUN-DRIVEN and ACTIVE: a build stopped ON PURPOSE and
- *  reported why (the plan was wrong, a dependency is missing, the fix rounds stopped
- *  converging). It is deliberately a different word from `failed` — one needs a
- *  decision, the other needs a retry. */
-export type WorkBoardStatus = 'upcoming' | 'in_progress' | 'done' | 'failed' | 'archived' | 'blocked';
+/**
+ * THE CLOSED SET OF LANES, as ONE value that is both the compile-time claim and the
+ * runtime allowlist.
+ *
+ * These were two things — a `type` union and a hand-written chain of `status !== …`
+ * comparisons inside {@link parseWorkBoardItems} — and they drifted the moment a lane
+ * was added: 0130's `archived` and 0140's `blocked` widened the union while the parser
+ * kept rejecting them, so those cards did not render as shelved or blocked, they
+ * DISAPPEARED. A dropped card is worse than a mislabelled one, and the two surfaces had
+ * no way to disagree loudly. Deriving the type FROM the array means widening the set is
+ * one edit that necessarily moves both.
+ *
+ * `blocked` (migration 0140) — a build STOPPED ON PURPOSE and reported why. Run-driven
+ * and ACTIVE, and deliberately a different word from `failed`: one needs a decision, the
+ * other needs a retry.
+ */
+export const WORK_BOARD_STATUSES = [
+  'upcoming',
+  'in_progress',
+  'done',
+  'failed',
+  'archived',
+  'blocked',
+] as const;
+export type WorkBoardStatus = (typeof WORK_BOARD_STATUSES)[number];
+
+/**
+ * Is this a lane this client knows? The ONE runtime read of {@link WORK_BOARD_STATUSES},
+ * written as a type guard so the parser's narrowing comes from the same list the type
+ * does — a cast would let the two disagree again, one silent widening later.
+ */
+export function isWorkBoardStatus(value: unknown): value is WorkBoardStatus {
+  return typeof value === 'string' && (WORK_BOARD_STATUSES as readonly string[]).includes(value);
+}
+
 
 export interface WorkBoardItem {
   id: string;
@@ -277,12 +307,9 @@ export function parseWorkBoardItems(raw: unknown): WorkBoardItem[] {
     const status = r['status'];
     if (typeof id !== 'string' || id.length === 0) continue;
     if (typeof title !== 'string') continue;
-    if (
-      status !== 'upcoming' &&
-      status !== 'in_progress' &&
-      status !== 'done' &&
-      status !== 'failed'
-    )
+    // Read off the ONE list above — see its docblock for the two lanes a hand-written
+    // chain silently dropped.
+    if (!isWorkBoardStatus(status))
       continue;
     const run_progress = parseRunProgress(r['run_progress']);
     out.push({

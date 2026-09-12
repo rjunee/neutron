@@ -351,16 +351,33 @@ export function isLinkedRunning(item: WorkBoardItem): boolean {
  *   - inline work that writes nothing for 90 s (a long test/build run, a
  *     research turn) reads NOT active and ▶ comes back. That is a deliberate
  *     false negative: this is a HINT, never a lock, and nothing here blocks.
- * This helper keeps reading the wire field unchanged.
+ * This helper keeps reading the wire field unchanged. *
+ * AND `blocked` IS A FOURTH SUPPRESSOR, and unlike `inline_active` it IS a lock. A
+ * blocked card is one whose build STOPPED ON PURPOSE and reported why; the dispatch
+ * chokepoint refuses it outright (`trident/board-dispatch.ts`, `card_blocked`), so a ▶
+ * here could only produce that refusal. Offering a control that cannot work is worse
+ * than offering none: it reads as "try again", which is the one thing that changes
+ * nothing. Clearing the block is a status write the owner or the orchestrator makes
+ * deliberately, and the card is playable again the moment it is made.
  */
 export function canPlay(item: WorkBoardItem): boolean {
-  return item.status !== 'done' && !isLinkedRunning(item) && !item.inline_active;
+  return (
+    item.status !== 'done' &&
+    item.status !== 'blocked' &&
+    !isLinkedRunning(item) &&
+    !item.inline_active
+  );
 }
 
 /** ▶ vs ↻ — a card that carries a (now-detached) binding, a failed run, or a
  *  durable `status='failed'` lane RETRIES. The last check covers the runless
- *  failed card whose link was cleared by reconcile. */
+ *  failed card whose link was cleared by reconcile. *
+ *  A BLOCKED card is NEITHER. It keeps its `linked_run_id` (so the reported reason
+ *  stays reachable), which used to be enough to label it ↻ — telling the owner to retry
+ *  a card that the dispatch chokepoint will refuse. It is not a retry; it is a
+ *  decision. */
 export function isRetry(item: WorkBoardItem): boolean {
+  if (item.status === 'blocked') return false;
   if (item.linked_run_id !== null && item.linked_run_id.length > 0) return true;
   if (item.run_progress?.step_label === 'failed') return true;
   return item.status === 'failed';

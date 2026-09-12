@@ -116,6 +116,13 @@ export type WorkBoardStartResult =
         // the ▶ route answers with the refusal sentence rather than spawning a
         // lane that would die ~15 minutes later blaming the CLI.
         | 'executor_unavailable'
+        // THE CARD IS BLOCKED — a previous build stopped and escalated rather than
+        // iterating, and nothing has cleared it. Falls through to the 409 arm like the
+        // other refusals, so the ▶ route answers with the refusal sentence (which names
+        // the decision and the unblocking step) instead of starting a run that would
+        // reach the same block. Deliberately NOT grouped with 'held': a hold is waiting
+        // for a condition a sweep can re-test, and nothing can re-test a decision.
+        | 'card_blocked'
         | 'backend_error'
       message: string
     }

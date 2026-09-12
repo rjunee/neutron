@@ -86,6 +86,34 @@ ACTIVE — the card keeps its `sort_order`, stays in `listActive`, and never sta
 block). An escalation is also recorded as a REQUEST_CHANGES rather than REVIEW_NOT_RUN: a
 run only reaches one from a round a full panel judged.
 
+### BLOCKED means something at the dispatch boundary
+
+A lane that changes nothing where builds are started is decoration: the escalation would
+stop the fix loop inside the run and the next dispatch would pick the same card up and
+relearn the same block — the loop closed inside the run, reopened one level out. So the
+chokepoint (`trident/board-dispatch.ts`) REFUSES a blocked card with its own code,
+`card_blocked`, checked immediately after the item is found and before every other gate
+(the answer does not depend on the task text, a bound PR, or executor health). It is NOT
+queued, unlike `held`: a hold parks a dispatch whose blocker a sweep can re-test, and
+nothing can re-test a decision — a sweep that re-fired it would relearn the block on the
+orchestrator's behalf. Both UIs drop the ▶/↻ control for a blocked card (`canPlay` gains
+it as a fourth suppressor, and `isRetry` returns false for it even though the card keeps
+its `linked_run_id` so the reported reason stays reachable): a control that can only
+produce a refusal, labelled "retry", is worse than no control.
+
+### The reorder is reported, not automated — and the criterion says so
+
+The item's ROUTING requires the orchestrator to report in the project chat and REORDER
+the board. What ships is the REPORT and the lane. The reorder stays the orchestrator's own
+`work_board_reorder`, made when it reads the message, and the criterion was NARROWED in
+this PR with the reason rather than ticked over an unbuilt path: automating it would
+require the RUN to identify which card is the dependency, and the only thing the run can
+honestly produce is `whatIsMissing` — a sentence. Deriving a card id from model prose and
+acting on it is exactly the board mutation the guardrail forbids. The delivery sentence
+therefore names the sequencing call and what it takes (reorder the card if it exists; spec
+it first if it does not; move this card back to `upcoming`, which is the decision), so
+nothing is left to be discovered.
+
 ### The run reports; the orchestrator decides
 
 The inner workflow has no board access at all — `grep -cE "work_board|WorkBoardStore|sort_order|reorder\(" trident/inner-workflow.mjs`
@@ -98,6 +126,32 @@ payload is written. Both decoders on the path are allowlists that rebuild their 
 field by field, so extra keys in the payload (a card id, a position) never reach a caller.
 That is asserted with a hostile payload that names another card and a position, and
 mutation-checked: a reconcile that reads the raw JSON and obeys it turns both tests red.
+
+### The client decoders were the other half of "visibly blocked"
+
+Widening a TypeScript union is a compile-time claim; a parser's allowlist is the runtime
+one. Both client decoders (`parseWorkBoardItems`, web and app) still gated on
+`upcoming | in_progress | done | failed`, so a `blocked` card would not have rendered as
+blocked — it would have been DROPPED, which is strictly worse than the behaviour before
+the lane existed. The same drift had already eaten `archived` (0130). Both files now
+derive the type FROM a single `WORK_BOARD_STATUSES` array and read that array through one
+type guard, so widening the set is one edit that necessarily moves both, and
+`tests/integration/work-board-status-mirrors.test.ts` compares the two runtime lists
+against the CHECK constraint in the committed schema snapshot — the one statement of the
+set a database will actually enforce.
+
+### The wiring is executed, not grepped
+
+`trident/__tests__/escalation-e2e.test.ts` runs the shipped `inner-workflow.mjs` body
+through the same AsyncFunction harness `inner-workflow-assembly.test.ts` uses, with
+scripted review seats, and asserts what the run DID rather than what its source says: the
+round-2 stop with only one fix round ever dispatched and two panels paid for; EXACTLY ONE
+`plan:fable` seat across a run that declares a design gap three times; the re-planned
+execution spec arriving in the NEXT fix round's prompt (a marker the planner produces at
+run time, so it cannot be satisfied by a string that merely exists in the file); no fix
+round at all when the re-plan returns nothing; and a converging control run that is left
+alone and reaches its cap. A source-text assertion proves a string exists; it cannot prove
+a call happened with the right argument, which is the entire content of "wired".
 
 ### Decisions worth recording
 
@@ -114,6 +168,12 @@ mutation-checked: a reconcile that reads the raw JSON and obeys it turns both te
   it is the specific bounded remedy for exactly the condition the numbers detect and costs
   one planner seat rather than the round budget. It cannot be used to dodge the gate: it is
   available at most once, and a repeat finding after it goes to the orchestrator.
+- **A re-plan may RAISE the executor model but never lower it.** `modelForTag` routes
+  `'mechanical'` to Sonnet/medium and everything else to Opus/high, so adopting the
+  re-plan's tag wholesale let a re-plan DOWNGRADE the model on a run that had just proved
+  hard enough to need re-planning — silently, on the rounds whose APPROVE ships the
+  change. The asymmetry decides it: a wrong `'reasoning'` costs money, a wrong
+  `'mechanical'` ships worse code.
 - **The ledger records only rounds whose `blockKind` is `'code'`.** An infra-only or
   advisory-only round exits under its own kind and says nothing about the plan; folding one
   in would report a lane outage under a kind that asserts a design defect.

@@ -525,3 +525,41 @@ describe('row/rail lockstep — the row dot and the project rail dot must agree 
     expect(railDotKind(activity, false)).toBe('work');
   });
 });
+
+describe('a BLOCKED card offers neither play nor retry', () => {
+  // The lane exists so the owner can tell "this needs a decision" from "this broke".
+  // A ▶ on it would produce the dispatch chokepoint's `card_blocked` refusal, and a ↻
+  // would say "retry" — the one instruction that changes nothing here.
+  it('canPlay is false, and it is NOT because of a live run or inline activity', () => {
+    const blocked = item({ status: 'blocked', linked_run_id: null, inline_active: false });
+    expect(canPlay(blocked)).toBe(false);
+    // Named, so a future change that suppresses ▶ for some other reason does not make
+    // this test pass for the wrong one.
+    expect(isLinkedRunning(blocked)).toBe(false);
+    expect(blocked.inline_active).toBe(false);
+  });
+
+  it('isRetry is false EVEN THOUGH the card keeps its run link', () => {
+    // The link is kept on purpose — it is how the reported reason stays reachable — and
+    // it used to be sufficient on its own to label the card a retry.
+    const blocked = item({ status: 'blocked', linked_run_id: 'run-a' });
+    expect(blocked.linked_run_id).toBe('run-a');
+    expect(isRetry(blocked)).toBe(false);
+  });
+
+  it('CONTROL: a FAILED card with the same link is still playable and still a retry', () => {
+    const failed = item({ status: 'failed', linked_run_id: 'run-a' });
+    expect(canPlay(failed)).toBe(true);
+    expect(isRetry(failed)).toBe(true);
+  });
+
+  it('and the lane is labelled Blocked — a different word from Failed', () => {
+    expect(statusLabel('blocked')).toBe('Blocked');
+    expect(statusLabel('blocked')).not.toBe(statusLabel('failed'));
+  });
+
+  it('advancing a blocked card re-queues it rather than claiming it shipped', () => {
+    expect(nextStatus('blocked')).toBe('upcoming');
+    expect(nextStatus('blocked')).not.toBe('done');
+  });
+});

@@ -945,6 +945,76 @@ describe('WorkBoardTab (happy-dom)', () => {
     await act(async () => root.unmount())
   })
 
+  it('a BLOCKED card RENDERS, and offers NO play/retry control at all', async () => {
+    // Two failures in one fixture, both measured against the real render:
+    //  (1) the card must APPEAR. The decoders used to drop an unknown status, so a
+    //      blocked card vanished from the board — strictly worse than mislabelling it.
+    //  (2) it must offer NO ▶/↻. The dispatch chokepoint refuses a blocked card
+    //      (`card_blocked`), so the control could only produce that refusal, and '↻'
+    //      would read as "retry" — the one instruction that changes nothing here.
+    //
+    // THE RUN PROGRESS IS TERMINAL ON PURPOSE. A kept `linked_run_id` with NO
+    // run_progress makes `isLinkedRunning` true, which suppresses the control on its own
+    // — so a fixture without it passes whether or not the blocked lane is consulted at
+    // all (measured: it did). With a terminal run_progress the live-run suppressor is
+    // off, and the `blocked` lane is the only thing left that can remove the control.
+    const terminal: RunProgress = {
+      run_id: 'run-esc',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 2,
+      started_at: '2026-09-12T00:00:00Z',
+      last_advanced_at: '2026-09-12T00:01:00Z',
+      elapsed_ms: 60_000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency)',
+    }
+    const rows = [
+      item({ id: 'wb', title: 'Blocked on a dependency', status: 'blocked', linked_run_id: 'run-esc', run_progress: terminal }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    expect(container.textContent).toContain('Blocked on a dependency')
+    expect(container.querySelector('.cwb-btn-play')).toBeNull()
+
+    await act(async () => root.unmount())
+  })
+
+  it('CONTROL: the same card in the FAILED lane still renders its Retry control', async () => {
+    // Byte-for-byte the fixture above except the lane, so the ONLY thing that can
+    // account for the difference is the lane. Without it, deleting the play control
+    // outright would pass the test above.
+    const terminal: RunProgress = {
+      run_id: 'run-esc',
+      phase_label: 'failed',
+      step_label: 'failed',
+      round: 2,
+      started_at: '2026-09-12T00:00:00Z',
+      last_advanced_at: '2026-09-12T00:01:00Z',
+      elapsed_ms: 60_000,
+      stalled: false,
+      stalled_ms: null,
+      pr: null,
+      pr_url: null,
+      verdict: null,
+      failure_reason: 'build BLOCKED at round 2 of 10 (missing-dependency)',
+    }
+    const rows = [
+      item({ id: 'wb2', title: 'Broken build', status: 'failed', linked_run_id: 'run-esc', run_progress: terminal }),
+    ]
+    const { container, root, act } = await mount(listOf(rows))
+
+    const playBtn = container.querySelector('.cwb-btn-play') as HTMLButtonElement | null
+    expect(playBtn).not.toBeNull()
+    expect(playBtn!.getAttribute('aria-label')).toBe('Retry build')
+
+    await act(async () => root.unmount())
+  })
+
   it('failed card with no run_progress: static cwb-dot-failed dot + Retry build control (A)', async () => {
     // Fixture (A): status='failed', no linked_run_id, no run_progress.
     // isLinkedRunning → false (no binding); canPlay → true; isRetry → true (status='failed') → '↻' 'Retry build'.

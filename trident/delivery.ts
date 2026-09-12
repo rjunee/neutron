@@ -705,12 +705,22 @@ export function interpretFailure(run: TridentRun): FailureInterpretation {
     // dependency has to be sequenced ahead of this card, a design gap needs the card's
     // own spec decided, and the arithmetic kind measured that fixing stopped working and
     // asserts nothing about why — so its advice must not pretend to know.
+    // THE ADVICE NAMES THE DECISION AND WHO MAKES IT. This is the routing: the RUN
+    // reports here, and SEQUENCING is the orchestrator's call — so the sentence has to
+    // say what that call is and what it takes, not merely that something is wrong.
+    // "Retry" alone is the one instruction that changes nothing, and while the card is
+    // BLOCKED the dispatch chokepoint refuses it outright (`card_blocked`), so the
+    // unblocking step is named explicitly rather than left to be discovered.
+    const unblock =
+      'The card is BLOCKED, so a build cannot be dispatched against it until you move it back to ' +
+      'upcoming — that move is the decision, and it is yours to make and report.'
+    const intact = 'The build stopped on purpose; its branch and PR are intact.'
     const input_needed =
       escalated.kind === 'missing-dependency'
-        ? 'Sequence the missing work ahead of this card (or say it is out of scope), then retry. The card is BLOCKED, not failed — the build stopped on purpose and its branch and PR are intact.'
+        ? `SEQUENCING is the call here: put the missing work ahead of this card on the board (reorder it if the card already exists; if it does not, spec it first, then add it), or decide it is out of scope. ${unblock} ${intact}`
         : escalated.kind === 'design-gap'
-          ? 'Decide the plan — the reviewers say no amount of fixing this diff removes the finding. Update the card, then retry. The build stopped on purpose; its branch and PR are intact.'
-          : 'Review the findings and decide whether the plan is right before retrying: the build measured that its fix rounds had stopped converging, which says nothing about WHY. Its branch and PR are intact.'
+          ? `Decide the plan — the reviewers say no amount of fixing this diff removes the finding. Update the card's spec, then re-dispatch. ${unblock} ${intact}`
+          : `Read the findings and decide whether the plan is right before re-dispatching: the build measured that its fix rounds had stopped converging, which says nothing about WHY. ${unblock} ${intact}`
     return {
       klass: 'escalated',
       summary: `The build stopped and escalated at round ${escalated.round} rather than iterating on a plan that was not working: ${escalated.whatIsMissing}`,

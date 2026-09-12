@@ -8105,7 +8105,14 @@ ${task}${reflectionGuidance}`,
         log(`trident-v2 escalation: STOP at round ${round} kind=design-gap — ${escalation.evidence}`)
         break
       }
-      complexityTag = rePlan.complexity
+      // A RE-PLAN MAY RAISE THE EXECUTOR, NEVER LOWER IT. `modelForTag` routes
+      // 'mechanical' to Sonnet/medium and everything else to Opus/high, so adopting the
+      // tag wholesale let a re-plan DOWNGRADE the model on a run that had just proved
+      // hard enough to need re-planning — silently, and on the very rounds whose APPROVE
+      // ships the change. The asymmetry decides it: a wrong 'reasoning' costs money, a
+      // wrong 'mechanical' ships worse code. And the seat making the call is the same
+      // kind of seat that authored the plan the reviewers just rejected.
+      if (rePlan.complexity === 'reasoning') complexityTag = rePlan.complexity
       rePlanNote = `\n\nTHE PLAN WAS REVISED (round ${round}) because the review panel reported a DESIGN GAP: the previous plan itself asked for what they are flagging. Build the REVISED EXECUTION SPEC below, not the original task description, and REMOVE or REPLACE work the old plan asked for where the spec says so.\nREVISED EXECUTION SPEC:\n${rePlan.executionSpec}`
       log(`trident-v2 escalation: re-plan done — topTask="${rePlan.topTask}" complexity=${rePlan.complexity}`)
     }
