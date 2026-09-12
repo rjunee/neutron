@@ -146,7 +146,7 @@ test:
 
 ## Notes
 
-The reaper's residue is recorded honestly in `.trident/as-built/trident/ref-reap-547.md` — the
+The reaper's residue is recorded honestly in `docs/as-built/a-run-whose-head-does-not-resolve-must-refuse-to-commit.md` — the
 commits are never lost (the salvage ref holds the tip and `rev-list --all` reaches it), a detected
 claimant is restored, and an undetected one is left with a dangling HEAD that nothing in that module
 repairs. This item is what makes that residue harmless rather than merely documented.
