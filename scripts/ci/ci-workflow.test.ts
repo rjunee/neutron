@@ -1331,6 +1331,20 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
       return 'the top-level floor check is no longer asked of the head unconditionally'
     }
 
+    // THE DOMAIN, NOT JUST THE PREDICATE. The record-directory loop enumerates only
+    // directories holding a `.md` at the head, so on its own it cannot see a floor
+    // deleted from a record-LESS directory — a state `docs/as-built/README.md`
+    // forbids unconditionally, and one that fully resurrects the conflict, because
+    // the rename source is the MERGE BASE rather than the tip. The removal check is
+    // what covers that domain, and it needs the base's floors captured BEFORE the
+    // head tree overwrites the shared arrays.
+    if (!/declare -A BASE_FLOOR_DIRS/.test(source)) return 'the base floors are never captured'
+    if (!/BASE_FLOOR_DIRS\["\$dir"\]=1/.test(source)) return 'the base floors are captured but never filled'
+    if (!/for dir in "\$\{!BASE_FLOOR_DIRS\[@\]\}"/.test(source)) {
+      return 'the guard no longer checks every floor the base has'
+    }
+    if (!/\$\{#removed\[@\]\}" -gt 0/.test(source)) return 'a removed floor is not a failure'
+
     // "Not there" and "could not look" must stay different answers. `ls-tree`
     // succeeds with empty output for an absent path, so the exit code is the only
     // thing that can carry the unknown.
@@ -1433,6 +1447,18 @@ describe('as-built staging floor guard is wired into a gate the repo can own', (
           'if [ "$head_has_top_floor" = 0 ]; then',
           'if [ "$base_has_top_floor" = 1 ] && [ "$head_has_top_floor" = 0 ]; then',
         ),
+    ],
+    [
+      'the removal check stops enumerating the base floors — the record-less hole, restored',
+      (source) => source.replace('for dir in "${!BASE_FLOOR_DIRS[@]}"', 'for dir in "${!RECORD_DIRS[@]}"'),
+    ],
+    [
+      'a removed floor stops being a failure',
+      (source) => source.replace('if [ "${#removed[@]}" -gt 0 ]; then', 'if false; then'),
+    ],
+    [
+      'the base floors are never captured before the head read',
+      (source) => source.replace('for dir in "${!FLOOR_DIRS[@]}"; do BASE_FLOOR_DIRS["$dir"]=1; done', ':'),
     ],
     [
       'an unreadable tree becomes a pass',

@@ -96,6 +96,29 @@ letting only the BASE be absent. The general shape is worth keeping: an exemptio
 to let a guard install itself must name the side that is allowed to be wrong, because
 "either side" always includes the one that must not be.
 
+**THE SECOND SCOPE ERROR WAS THE MIRROR OF THE FIRST, AND IT IS THE MORE USEFUL PAIR.** The
+verdict loop walked only directories holding a record at the head, so deleting
+`.trident/as-built/feat/.gitkeep` while `feat/` held no `.md` exited 0 — under a rule
+`docs/as-built/README.md` states unconditionally and this record claimed the guard enforced.
+That is not a harmless cleanup of an empty directory: THE RENAME SOURCE IS THE MERGE BASE,
+NOT THE TIP. Measured — `feat/` holds a record, a promotion moves it to `docs/as-built/`
+with the floor keeping the directory alive, the floor is then deleted from the now
+record-less directory, and a concurrent branch staging `feat/b.md` merges to
+`CONFLICT (file location) ... suggesting it should perhaps be moved to docs/as-built/b.md`
+in full. A directory that looks empty today is still a rename source for every branch cut
+before it was drained. So the guard refuses the removal rather than the documentation being
+narrowed, and it cannot ever know when retiring a prefix is safe — it would have to know
+that no unmerged branch anywhere stages there.
+
+What the two findings share is the thing to check: the bootstrap exemption let a state
+through by making the PREDICATE false; this one let a state through by never enumerating
+the directory at all. A guard's coverage is the product of its predicate AND its domain,
+and a suite that only drives the predicate will report a guard sound over the states it
+cannot see. The guard's tests now sweep the domain explicitly — a floor deleted from a
+record-less directory, a prefix present only on the base side, a prefix present only on the
+head side floored and unfloored, a floor renamed within its own directory, and an untouched
+tree as the positive control that the harness can produce a pass at all.
+
 **WHAT THE TESTS PROVE, AND THEIR CONTROLS.**
 
   - `trident/as-built-staging-floor-realgit.test.ts` runs the four arms above with the

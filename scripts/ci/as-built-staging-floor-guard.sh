@@ -82,10 +82,18 @@
 #   GITHUB_EVENT_NAME               'pull_request' / 'merge_group' / 'push' / ...
 #   GITHUB_EVENT_PATH               the event payload the shas are read from
 #
-# EXIT: 0 = the PROPOSED TREE has a floor under `.trident/as-built/` and in every
-#           directory holding a staged record. The base is allowed to lack the
-#           top-level floor — that is the diff installing it — but the head is
-#           never allowed to, and that asymmetry is the whole bootstrap.
+# THREE QUESTIONS, AND THEY COVER DIFFERENT STATES ON PURPOSE. (1) Does the head
+# carry the top-level floor — always, with only the BASE allowed to be without it,
+# because that is the diff installing the rule. (2) Is every floor the base has
+# still there at the head, IN ANY DIRECTORY, record-holding or not — a floor
+# removed from a drained directory reopens the whole class, since the rename source
+# is the merge base rather than the tip. (3) Does every directory holding a record
+# at the head have a floor. Question 3 alone was the first shape of this guard, and
+# it cannot see the state question 2 catches, because it only ever enumerates
+# directories that currently hold a `.md`.
+#
+# EXIT: 0 = the PROPOSED TREE keeps every floor the base has, carries the top-level
+#           floor, and floors every directory that stages a record,
 #       1 = the branch proposes a directory that can empty,
 #       2 = missing/unresolvable input, or git could not be asked.
 
@@ -226,6 +234,11 @@ if ! read_tree "${GUARD_BASE_SHA}"; then
   echo "as-built-staging-floor-guard: could not read tree '${GUARD_BASE_SHA}'; the guard REFUSES to skip." >&2
   exit 2
 fi
+# THE BASE'S FLOORS ARE COPIED OUT BEFORE THE HEAD IS READ, because `read_tree`
+# reuses the arrays and the head's answer would otherwise erase the question. Every
+# one of these must still be a floor at the head — see the removal check below.
+declare -A BASE_FLOOR_DIRS=()
+for dir in "${!FLOOR_DIRS[@]}"; do BASE_FLOOR_DIRS["$dir"]=1; done
 base_has_top_floor=0
 [ -n "${FLOOR_DIRS[$STAGING_DIR]:-}" ] && base_has_top_floor=1
 
@@ -286,6 +299,57 @@ if [ "$head_has_top_floor" = 0 ]; then
   exit 1
 fi
 
+# NO FLOOR THAT EXISTS AT THE BASE MAY BE GONE AT THE HEAD — IN ANY DIRECTORY,
+# WHETHER OR NOT IT CURRENTLY HOLDS A RECORD.
+#
+# THE HOLE THIS CLOSES, AND WHY IT IS NOT A TIDINESS RULE. The loop below walks
+# only directories that hold a record at the head, so deleting
+# `.trident/as-built/feat/.gitkeep` while `feat/` held no `.md` exited 0 — over a
+# rule `docs/as-built/README.md` states unconditionally. It reads like a harmless
+# cleanup of an empty-looking directory and it is not, because THE RENAME SOURCE
+# IS THE MERGE BASE, NOT THE TIP. Measured: `feat/` holds a record, a promotion
+# moves it to docs/as-built/ (the floor keeping the directory alive), then the
+# floor is deleted from the now record-less directory — and a concurrent branch
+# staging `feat/b.md` merges to `CONFLICT (file location) ... suggesting it should
+# perhaps be moved to docs/as-built/b.md`, in full. Git diffs base against tip:
+# the record moved out, the floor vanished, the whole directory is gone, and the
+# rename is inferred exactly as before. A directory that looks empty today can
+# still be a rename source for every branch cut before it was drained.
+#
+# The guard therefore cannot know when retiring a prefix directory is safe — it
+# would have to know that no unmerged branch anywhere stages into it — so it
+# refuses, and an empty `.gitkeep` is a cheap thing to keep forever.
+#
+# THE SCOPE ERROR HERE IS THE MIRROR OF THE BOOTSTRAP ONE ABOVE. That one let a
+# state through by making the predicate false; this one let a state through by
+# never enumerating the directory at all. A guard's coverage is the product of its
+# predicate AND its domain, and a test suite that only drives the predicate will
+# report a guard sound over the states it cannot see.
+removed=()
+for dir in "${!BASE_FLOOR_DIRS[@]}"; do
+  [ "$dir" = "$STAGING_DIR" ] && continue # the top-level floor has its own check, above, with its own message
+  [ -n "${FLOOR_DIRS[$dir]:-}" ] || removed+=("$dir")
+done
+
+if [ "${#removed[@]}" -gt 0 ]; then
+  {
+    echo "as-built-staging-floor-guard: FAILED — this branch removes the floor from ${#removed[@]} directory(ies) that have one at the base:"
+    while IFS= read -r dir; do
+      echo "    ${dir}/ — restore ${dir}/${FLOOR_NAME}"
+    done < <(printf '%s\n' "${removed[@]}" | LC_ALL=C sort)
+    echo "A directory holding no record TODAY is not safe to un-floor. The rename source is the MERGE"
+    echo "BASE, not the tip: if a record was promoted out of that directory, every branch cut before"
+    echo "the promotion still sees the record there — and once the floor goes too, git reads the whole"
+    echo "directory as renamed to docs/as-built/ and those branches acquire 'CONFLICT (file location)"
+    echo "... suggesting it should perhaps be moved to docs/as-built/<name>.md', whose suggested"
+    echo "resolution writes a shard FROM A BRANCH. This guard cannot know that no unmerged branch"
+    echo "stages there, so it refuses; an empty ${FLOOR_NAME} costs nothing to keep."
+    echo "Restore it: git checkout ${GUARD_BASE_SHA} -- <path>"
+    echo "See docs/as-built/README.md."
+  } >&2
+  exit 1
+fi
+
 # EVERY DIRECTORY HOLDING A RECORD NEEDS ITS OWN FLOOR, because git decides
 # directory-rename detection per directory. `.trident/as-built/fix/` emptying is
 # the same defect as `.trident/as-built/` emptying, and in this repo it is the
@@ -319,4 +383,4 @@ if [ "$base_has_top_floor" = 0 ] && [ "$head_has_top_floor" = 1 ]; then
   echo "as-built-staging-floor-guard: the base carries no ${STAGING_DIR}/${FLOOR_NAME}, so this diff is the change that installs the staging floor. Every branch cut after it is vetoed for removing it." >&2
 fi
 
-echo "as-built-staging-floor-guard: OK — every directory staging a record in the proposed tree keeps a floor."
+echo "as-built-staging-floor-guard: OK — the proposed tree keeps every floor the base has, and floors every directory that stages a record."

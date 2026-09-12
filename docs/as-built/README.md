@@ -52,6 +52,17 @@ record staged into a directory that has none.** A CI guard refuses both mistakes
 `scripts/ci/check-governed-repo-attributes.ts`), so this section explains a rule
 the build already enforces rather than asking you to remember it.
 
+"Do not delete one" is unconditional, and the guard now enforces it that way: a
+floor may not be removed **even from a directory that holds no record today**.
+That looks like tidying an empty directory and is not, because the rename source
+is the **merge base**, not the tip — a directory whose record was promoted out
+still reads as a rename to every branch cut before the promotion, and deleting its
+floor completes the picture git needs. Measured: with the floor kept, such a
+branch merges clean; with the floor tidied away afterwards, it takes the
+`CONFLICT (file location)` in full. The guard cannot know that no unmerged branch
+stages into a directory, so it refuses; an empty `.gitkeep` costs nothing to
+keep.
+
 **What the floor prevents.** A promotion moves the last staged record out of a
 directory, that directory has no tracked file left, and git stops seeing it at
 all. The promotion commit is, file for file, a move out of that directory into

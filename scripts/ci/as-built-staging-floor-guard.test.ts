@@ -78,6 +78,7 @@ function runGuard(
 
 describe('as-built staging floor guard (real git)', () => {
   const repo = mkdtempSync(join(tmpdir(), 'staging-floor-guard-'))
+  const worlds: string[] = []
   let baseSha = ''
   let cleanSha = ''
   let deletesTopFloorSha = ''
@@ -145,6 +146,7 @@ describe('as-built staging floor guard (real git)', () => {
 
   afterAll(() => {
     rmSync(repo, { recursive: true, force: true })
+    for (const world of worlds) rmSync(world, { recursive: true, force: true })
   })
 
   test('a branch staging a record into a floored directory passes', () => {
@@ -176,9 +178,15 @@ describe('as-built staging floor guard (real git)', () => {
   }, 30_000)
 
   test('moving a floor OUT of its directory is refused, not just deleting it', () => {
+    // Reported as a REMOVAL rather than as a missing floor, and that is the more
+    // accurate of the two: the base had a floor here and the proposed tree does
+    // not, whatever the diff calls the operation. The directory happens to still
+    // hold a record, so the per-directory rule would also catch it — but the
+    // removal check is the one that catches it when the record is already gone.
     const result = runGuard(repo, baseSha, renamesFloorAwaySha)
     expect(result.status).toBe(1)
-    expect(result.stderr).toContain('.trident/as-built/fix/ — add .trident/as-built/fix/.gitkeep')
+    expect(result.stderr).toContain('.trident/as-built/fix/ — restore .trident/as-built/fix/.gitkeep')
+    expect(result.stdout).not.toContain('OK')
   }, 30_000)
 
   test('a .md file is not a floor, because the promoter promotes it', () => {
@@ -288,6 +296,123 @@ describe('as-built staging floor guard (real git)', () => {
       rmSync(neither, { recursive: true, force: true })
     }
   }, 30_000)
+
+  /**
+   * THE DOMAIN SWEEP.
+   *
+   * The cases above drive the guard's PREDICATE — given a directory, is it
+   * floored. They said nothing about its DOMAIN — which directories it looks at
+   * at all — and that is where the second scope error lived: the record-directory
+   * loop only enumerates directories holding a `.md` at the head, so deleting the
+   * floor from a record-LESS directory was invisible to it. A guard's coverage is
+   * the product of its predicate and its domain; these drive the domain.
+   *
+   * Every shape a staged-prefix directory can take across the two trees:
+   *   floored at base, floor deleted at head, no records      → REFUSED (the hole)
+   *   present only at base (whole directory deleted)          → REFUSED
+   *   present only at head, floored, no records               → allowed
+   *   present only at head, floored, with a record            → allowed
+   *   present only at head, UNfloored, with a record          → REFUSED (predicate)
+   */
+  describe('the domain: every shape a staged-prefix directory can take', () => {
+    /** base tree → head tree, as path/content maps; returns the guard's verdict. */
+    function verdict(label: string, base: Record<string, string>, head: Record<string, string>): GuardResult {
+      const world = mkdtempSync(join(tmpdir(), `staging-floor-domain-${label}-`))
+      worlds.push(world)
+      git(world, 'init', '-q', '--initial-branch=main')
+      for (const [path, body] of Object.entries(base)) write(world, path, body)
+      git(world, 'add', '-A')
+      commit(world, 'base')
+      const baseSha = git(world, 'rev-parse', 'HEAD')
+
+      git(world, 'switch', '-q', '-c', 'proposal', baseSha)
+      // Rebuild the staging tree from scratch so a path absent from `head` is a
+      // real deletion rather than something the fixture forgot to remove.
+      git(world, 'rm', '-r', '-q', '--ignore-unmatch', '.trident')
+      for (const [path, body] of Object.entries(head)) write(world, path, body)
+      write(world, 'code.ts', 'export const value = 2\n')
+      git(world, 'add', '-A')
+      commit(world, 'proposal')
+      return runGuard(world, baseSha, git(world, 'rev-parse', 'HEAD'))
+    }
+
+    const TOP = '.trident/as-built/.gitkeep'
+
+    test('a floor deleted from a RECORD-LESS directory is REFUSED — the hole', () => {
+      // Not a tidiness rule. The rename source is the MERGE BASE: `feat/` held a
+      // record, the promotion moved it to docs/as-built/, and every branch cut
+      // before that promotion still sees the record there. Delete the floor too
+      // and git reads the whole directory as renamed — measured, in full, with
+      // the same `CONFLICT (file location)` the fix exists to remove.
+      const result = verdict(
+        'recordless',
+        { [TOP]: '', '.trident/as-built/feat/.gitkeep': '' },
+        { [TOP]: '' },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/feat/ — restore .trident/as-built/feat/.gitkeep')
+      expect(result.stderr).toContain('rename source is the MERGE')
+      expect(result.stdout).not.toContain('OK')
+    }, 30_000)
+
+    test('a whole prefix directory present only at the BASE is REFUSED', () => {
+      const result = verdict(
+        'base-only',
+        { [TOP]: '', '.trident/as-built/docs/.gitkeep': '', '.trident/as-built/docs/a-record.md': RECORD },
+        { [TOP]: '' },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/docs/ — restore .trident/as-built/docs/.gitkeep')
+    }, 30_000)
+
+    test('a prefix directory present only at the HEAD, floored, is allowed — with or without a record', () => {
+      const floorOnly = verdict('head-only-empty', { [TOP]: '' }, { [TOP]: '', '.trident/as-built/spike/.gitkeep': '' })
+      expect(floorOnly.status).toBe(0)
+      expect(floorOnly.stdout).toContain('as-built-staging-floor-guard: OK')
+
+      const withRecord = verdict(
+        'head-only-record',
+        { [TOP]: '' },
+        { [TOP]: '', '.trident/as-built/spike/.gitkeep': '', '.trident/as-built/spike/a-record.md': RECORD },
+      )
+      expect(withRecord.status).toBe(0)
+      expect(withRecord.stdout).toContain('as-built-staging-floor-guard: OK')
+    }, 60_000)
+
+    test('a prefix directory present only at the HEAD, UNfloored, with a record is REFUSED', () => {
+      const result = verdict(
+        'head-only-unfloored',
+        { [TOP]: '' },
+        { [TOP]: '', '.trident/as-built/spike/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(1)
+      expect(result.stderr).toContain('.trident/as-built/spike/ — add .trident/as-built/spike/.gitkeep')
+    }, 30_000)
+
+    test('a floor MOVED WITHIN its directory still floors it', () => {
+      // The rule is a property of the directory, not of the filename. `.gitkeep`
+      // is the convention; what the promoter cannot carry away is the rule.
+      const result = verdict(
+        'renamed-within',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+        { [TOP]: '', '.trident/as-built/fix/.keep': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+    }, 30_000)
+
+    test('an untouched tree passes — the positive control for this whole harness', () => {
+      // Without this, every REFUSED case above could be the fixture builder
+      // failing rather than the guard judging.
+      const result = verdict(
+        'untouched',
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+        { [TOP]: '', '.trident/as-built/fix/.gitkeep': '', '.trident/as-built/fix/a-record.md': RECORD },
+      )
+      expect(result.status).toBe(0)
+      expect(result.stdout).toContain('as-built-staging-floor-guard: OK')
+    }, 30_000)
+  })
 
   test('missing either required SHA exits 2 rather than skipping', () => {
     const missingBase = runGuard(repo, undefined, cleanSha)
