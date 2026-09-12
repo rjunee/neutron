@@ -795,7 +795,7 @@ paperwork gap: the security behaviour below was KNOWINGLY ACCEPTED in this file'
 own header, and there was no document where that acceptance had to be written as a
 criterion and defended. It reached a reviewer instead.
 
-`docs/spec-items/a-repl-must-survive-its-gateways-restart.md` now carries both
+`docs/spec-items/durable-reply-sink-coordinates.md` now carries both
 boundaries — restart survival AND authorization — each bidirectional and each naming
 the check that verifies it, with the index regenerated. What follows is what the
 tests do.

@@ -92,7 +92,7 @@
  * defeats it. The credential lives in the child's own config (dir 0700, files 0600)
  * and in its process env, so anything running as the owner's uid that can read
  * those can impersonate that child. The acceptance criteria live in
- * `docs/spec-items/a-repl-must-survive-its-gateways-restart.md`.
+ * `docs/spec-items/durable-reply-sink-coordinates.md`.
  *
  * REUSE NOTE. `open/persisted-secret.ts` implements this same discipline. It
  * cannot be imported here — the `nobody-imports-composition` rule in

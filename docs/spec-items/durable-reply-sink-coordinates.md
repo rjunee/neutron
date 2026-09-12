@@ -1,5 +1,5 @@
 ---
-title: A REPL must survive its gateway's restart, and an orphan must not
+title: The sink's coordinates outlive the gateway, and an orphan must not
 group: platform
 status: open
 priority: P0
@@ -7,11 +7,26 @@ cutover: true
 legacy_ref: "ISSUES #537"
 ---
 
-**The linchpin of the herdr host.** A gateway restart must not strand the REPLs it
-was driving, and the credential that makes that possible must not become a standing
-grant for the children it no longer drives. Those two are one item because the
-second is created by the first: **you cannot make a credential longer-lived without
-making it narrower**, and #537 extends a lifetime.
+**The precondition for the herdr host, and deliberately not more than that.** A
+gateway restart must not strand the REPLs it was driving — and *this item does not
+deliver that*. It delivers the half without which the other half is impossible: the
+sink's coordinates (its port and its root token) survive the restart, so a new
+gateway can re-derive the exact credential a running child was baked with. Re-adopting
+that child — **RE-REGISTERING it, not merely reconnecting to it** — is `ISSUES #539`.
+Until #539 lands, a surviving bridge is refused with 401, and the acceptance criteria
+below assert that refusal rather than stepping around it.
+
+An earlier revision of this item was titled and opened as though it delivered survival
+itself. It did not, and the test met the stronger claim only because a helper
+registered a session on its way to deriving a credential. The item is renamed and
+rescoped rather than left to be read as shipped — a spec item whose headline outruns
+its implementation is the most expensive kind of wrong sentence in this tree, because
+the next reader builds on it.
+
+The second half **is** delivered here, and belongs with the first because the first
+creates it: the credential that makes re-derivation possible must not become a
+standing grant for children the gateway no longer drives. **You cannot make a
+credential longer-lived without making it narrower**, and #537 extends a lifetime.
 
 ## What was wrong
 

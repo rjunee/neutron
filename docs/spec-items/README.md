@@ -22,7 +22,7 @@ These are the items the harness-orchestrator cutover is gated on.
 - [`a-terminal-cause-on-every-terminal-path`](a-terminal-cause-on-every-terminal-path.md) — Emit a terminal cause on every terminal path, and report it
 - [`the-review-loop-must-stop-and-re-plan`](the-review-loop-must-stop-and-re-plan.md) — Stop and escalate a review loop instead of iterating on a bad plan
 - [`a-deploy-must-not-kill-builds-in-flight`](a-deploy-must-not-kill-builds-in-flight.md) — Stop a deploy from killing the builds still in flight
-- [`a-repl-must-survive-its-gateways-restart`](a-repl-must-survive-its-gateways-restart.md) — A REPL must survive its gateway's restart, and an orphan must not
+- [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) — The sink's coordinates outlive the gateway, and an orphan must not
 
 ## Not buildable yet
 
@@ -77,7 +77,7 @@ branch is cut (standard §3.1, §3.2).
 
 | Item | Title | Priority | Cutover |
 |---|---|---|---|
-| [`a-repl-must-survive-its-gateways-restart`](a-repl-must-survive-its-gateways-restart.md) | A REPL must survive its gateway's restart, and an orphan must not | P0 | yes |
+| [`durable-reply-sink-coordinates`](durable-reply-sink-coordinates.md) | The sink's coordinates outlive the gateway, and an orphan must not | P0 | yes |
 | [`live-agent-turn-must-know-the-owner-timezone`](live-agent-turn-must-know-the-owner-timezone.md) | Give the live agent turn the owner's timezone and local time | P1 | — |
 | [`project-code-repos-and-vault-split`](project-code-repos-and-vault-split.md) | Split a project into declared code repos and a versioned vault | P1 | — |
 | [`per-project-context-for-agent-tools`](per-project-context-for-agent-tools.md) | Scope agent tool state to the active project everywhere | P2 | — · needs-spec |
