@@ -112,9 +112,26 @@ export function isOwnerOnlyQuestion(question: string): boolean {
 export const ARBITER_TOOL_NAMES = ['Read', 'Glob', 'Grep', 'Bash'] as const
 
 /**
- * The arbiter is read-only, but it still needs an explicit inspection surface.
- * The #361/#175 lesson applies here too: an empty grant spawns a toolless
- * subprocess, so Read/Glob/Grep/read-only Bash must be declared explicitly.
+ * The arbiter's INSPECTION SURFACE. The #361/#175 lesson applies here too: an
+ * empty grant spawns a toolless subprocess, so Read/Glob/Grep/Bash must be
+ * declared explicitly or the turn cannot open a single conflicted file.
+ *
+ * `Bash` IS NOT ENFORCED READ-ONLY, AND THIS COMMENT USED TO IMPLY IT WAS. It
+ * said "read-only Bash", which named a property nothing checks: the surface is
+ * mapped straight onto the spawned REPL's `--tools` flag, and production spawns
+ * with `--dangerously-skip-permissions`, so every Bash command the turn writes
+ * runs unprompted. "Read-only" is a CONTRACT stated in `arbiterPrompt` and
+ * nothing more.
+ *
+ * WHAT ACTUALLY BOUNDS IT is the substrate profile, not this list and not the
+ * prompt. `PROFILE_ARBITER` (`gateway/wiring/substrate-profiles.ts`) withholds
+ * the GitHub credential, so the authority `FORBIDDEN_OPTION_IDS` excludes from
+ * the option set — approve, merge, waive review — is also absent from the
+ * environment: there is no `GH_TOKEN` and no credential helper for `gh pr merge`
+ * or `git push` to use. What remains reachable is local mutation inside the
+ * throwaway per-run worktree the turn is rooted at, which the caller tears down.
+ * Making THAT structural needs the reserved `permission_mode`/`sandbox` knobs;
+ * until they are applied, this docblock states the gap instead of hiding it.
  */
 const ARBITER_TOOLS: AgentSpec['tools'] = ARBITER_TOOL_NAMES.map((name) => ({
   name,

@@ -308,6 +308,44 @@ export const PROFILE_LEAK_FIXER: SubstrateProfile = {
 }
 
 /**
+ * The ARBITER substrate (`cc-trident-arbiter-*`) — the #541 build-escalation judge. Same
+ * disposable per-worktree shape as `PROFILE_EPHEMERAL`, MINUS the GitHub grant.
+ *
+ * WHY IT IS ITS OWN PROFILE, AND WHY THE CREDENTIAL IS THE KNOB THAT MATTERS. `trident/arbiter.ts`
+ * builds its whole safety argument on the arbiter being unable to approve or merge: the option set
+ * it selects from cannot even CONTAIN `approve`/`merge`/`skip-review` (`FORBIDDEN_OPTION_IDS`), and
+ * its outcome only ever SELECTS — the caller applies it. On `PROFILE_EPHEMERAL` that argument was
+ * false where it counts. The grant resolves to `GH_TOKEN` plus a git credential helper in the
+ * spawned env, and the turn carries `Bash`, so the actions excluded from the OPTION SET were
+ * available to the PROCESS: `gh pr merge`, `git push`, `gh api`. The only thing standing between
+ * them and a merge was a sentence in the prompt — and the arbiter's own evidence embeds text
+ * written by ANOTHER bounded agent (the conflict resolver's escalation question), so that sentence
+ * is exactly the wrong place to put the boundary.
+ *
+ * A judge that may not publish anything has no use for the credential that publishes everything.
+ * This is the `PROFILE_LEAK_FIXER` argument directly above, applied to a turn that is strictly
+ * MORE restricted than the leak fixer: the fixer edits files and `git add`s them, the arbiter is
+ * only supposed to read.
+ *
+ * WHAT THIS DOES NOT DO, STATED PLAINLY. `skip_permissions: true` still means
+ * `--dangerously-skip-permissions`, so the declared `Bash` is UNGATED and "read-only Bash" remains
+ * a CONTRACT in the prompt rather than an enforced property — a defecting turn can still write
+ * inside its own throwaway worktree. `permission_mode` and `sandbox` are the knobs that would make
+ * it structural and both are RESERVED (not applied by the factory today), so this profile closes
+ * the reach that leaves the machine and names the reach that does not.
+ *
+ * Site: `open/composer.ts` (`cc-trident-arbiter` via `makeEphemeralSubstrate`).
+ */
+export const PROFILE_ARBITER: SubstrateProfile = {
+  skip_permissions: true,
+  // it INSPECTS and SELECTS; the caller applies every decision. Nothing it is allowed to
+  // choose requires a credential, and everything the credential unlocks is forbidden to it.
+  github_credential: false,
+  // one bounded read-only judgement turn — the caller names its model (`[FABLE_MODEL]`).
+  frontier_model_floor: false,
+}
+
+/**
  * The Trident v2 FIRE seam substrate (`cc-trident-fire-*`) — a WARM (non-
  * ephemeral) per-repo REPL that invokes the native `Workflow` tool and survives
  * the launching turn's settle so the detached background workflow keeps running.

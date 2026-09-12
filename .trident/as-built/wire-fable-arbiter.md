@@ -63,6 +63,49 @@ file; one seam per change. And `on_infra_retry` (`orchestrator.ts:387`), which i
 other never-passed production option — issue #535 owns it, and this change does not
 silently expand into it.
 
+### The privilege boundary — the fix review forced
+
+The first version of this change passed the DEFAULT substrate profile, and that made
+the arbiter's whole safety argument false where it counted. `PROFILE_EPHEMERAL` sets
+`github_credential: true`, which resolves to `GH_TOKEN` plus a git credential helper in
+the spawned env, and the turn declares `Bash` under `--dangerously-skip-permissions` —
+so `approve`, `merge` and `skip-review` were excluded from the OPTION SET and fully
+available to the PROCESS via `gh pr merge` / `git push` / `gh api`. The only thing
+standing between them and a merge was a sentence in the prompt, and the injection
+vector is in the same turn: the arbiter's evidence embeds the conflict resolver's own
+escalation question, written by another bounded agent.
+
+`PROFILE_ARBITER` (`gateway/wiring/substrate-profiles.ts`) drops the grant, following
+`PROFILE_LEAK_FIXER`'s "CREDENTIAL-FREE BY PROFILE, not by prompt" rule — which the
+leak fixer earns for a turn that EDITS files, i.e. strictly less restricted than this
+one. It is registered in the frozen-shape guard so flipping it back fails a test.
+
+WHAT THAT DOES NOT FIX, recorded rather than hidden: `skip_permissions: true` still
+means the declared `Bash` is ungated, so "read-only" remains a prompt contract, not an
+enforced property. `permission_mode` and `sandbox` are the knobs that would make it
+structural and both are RESERVED (not applied by the factory). `arbiter.ts`'s tool-surface
+docblock used to say "read-only Bash" as though it were checked; it now states the gap.
+
+### Two more things this change owes the reader
+
+**It buys landed builds with wall-clock.** Arbiter and resolver each default to 8
+minutes and `cleanupAfterMerge` is awaited in the SERIAL tick sweep, so with the real
+cap of 3 the worst case is 7 model turns (~56 min) on a path that previously ended
+after one (~8 min). `orchestrator.ts`'s replay loop quantifies the same cost and
+concludes the opposite ("zero progress once is the answer"); the difference is that a
+retry here is not a repeat — a different agent read the tree and said why — and the
+bound is MAX_CONFLICT_ROUNDS, which retries spend and never reset. Both loops' comments
+now say this; the replay one used to assert an invariant this change breaks.
+
+**A successful retry also discharges part of the #542 base-drift hold.**
+`resolverCoveredPaths` subtracts a path the resolver was handed with both sides in
+context. Pre-#541 that was unreachable for an escalated conflict (the escalation threw
+first); a retry that RESOLVES now reaches the drift gate with those paths covered, so a
+merge can land where it previously held. The policy is unchanged — the resolver did see
+both sides — but it is a behaviour change on a review gate, so it is pinned by three
+tests: the baseline that still holds, the retry that lands, and a retry that resolves a
+DIFFERENT file than the drift overlaps, which still holds.
+
 ### Tests
 
 `trident/arbiter-wiring.test.ts` (13) drives the composed merge path: the qualifying
@@ -74,5 +117,17 @@ an `unavailable` the merge falls through on; the option set is non-empty and pas
 `assertArbitrableOptions`. The two non-qualifying holds assert the arbiter is called
 ZERO times. `trident/orchestrator.test.ts` adds the end-to-end pair (escalation → landed
 build; unavailable → `failed` with the specific question).
-`open/__tests__/trident-arbiter-wiring.test.ts` guards the three composition links on a
-real boot. Twelve mutations were reverted one at a time and each proved a test red.
+`open/__tests__/trident-arbiter-wiring.test.ts` guards the composition links on a real
+boot, and `gateway/composition/build-core-modules-trident-arbiter-wiring.test.ts` drives
+the REAL composed orchestrator (`buildCoreModules` → `tridentModule.init` →
+`buildTridentOrchestrator` → `buildMergeCleanupDeps`) through a real merge — reaching it
+via the mutation gate's genuine prose-only exemption rather than a stub — and asserts the
+arbiter was consulted and acted on. That test exists because the source-text assertion it
+supplements stays GREEN when the composition assignment is moved behind `if (false)`,
+which is the exact hole a string match cannot see.
+
+Fifteen mutations were reverted one at a time and each proved a test red. Four survived
+their first attempt and each produced a new test: guidance commit-scoping, the
+orchestrator thread, the MAX_CONFLICT_ROUNDS bound, and the never-reset round counter.
+The last two are the loop's only bound, so their tests carry a tripwire that fails by
+name at round 13 rather than letting an unbounded loop hang the suite.

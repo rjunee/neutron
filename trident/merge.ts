@@ -69,6 +69,11 @@ import type { TridentRun } from './store.ts'
 // `conflict-resolver.ts`, which imports `MergeConflictResolver` back out of THIS
 // file — a value import here would close that into a real require cycle.
 import type { ArbitrationOutcome, TridentArbiter } from './arbiter.ts'
+// The repo's defang + size-cap standard for any text that reaches a prompt, a log
+// or the owner (`wrong-base-remedy.ts`). Both strings crossing the arbiter seam are
+// model-authored: the resolver's escalation question and the arbiter's reasoning.
+// The back edge from that module is a TYPE import, so this closes no runtime cycle.
+import { foldEvidence } from './wrong-base-remedy.ts'
 
 export type RunHostCommand = EnvCapableHostRunner
 
@@ -1665,6 +1670,30 @@ async function listConflictedFiles(run_host: RunHostCommand, repo: string): Prom
 }
 
 /**
+ * The reasoning an arbiter decision carries, or `undefined` when there is nothing
+ * worth threading into the next resolver turn (#541).
+ *
+ * TWO THINGS ARE REJECTED. Empty/whitespace reasoning, and `arbiter.ts`'s own
+ * `(no reasoning reported)` placeholder — which is not a reason, it is the record
+ * of a missing one. Threading either tells the resolver "a judge looked at this
+ * and believes you can finish it" while giving it not one new fact, which is the
+ * shape of a prompt that produces a guess.
+ *
+ * What survives is FOLDED, not raw: `foldEvidence` defangs forgery codepoints and
+ * caps the length. `arbiter.ts` already caps reasoning at 1000 characters, and
+ * that is exactly the kind of upstream bound this repo has decided not to rely on
+ * — the seam distrusts the arbiter's option id and its outcome shape, so it has no
+ * business trusting its string lengths.
+ */
+const ARBITER_NO_REASONING = '(no reasoning reported)'
+function arbiterGuidance(reasoning: string): string | undefined {
+  const trimmed = reasoning.trim()
+  if (trimmed.length === 0 || trimmed === ARBITER_NO_REASONING) return undefined
+  const folded = foldEvidence(trimmed).trim()
+  return folded.length === 0 ? undefined : folded
+}
+
+/**
  * Ask the arbiter tier (#541) whether an escalated rebase conflict deserves one
  * more resolver round. NEVER THROWS and never returns anything but an
  * `ArbitrationOutcome`: an unwired arbiter is `unavailable`, and so is one that
@@ -1705,7 +1734,7 @@ async function arbitrateConflict(
       evidence:
         `Conflicted files (markers still present in your cwd): ${files}. The resolver was ` +
         `asked to keep both intents and stage the result; it reported instead: ` +
-        `"${ctx.resolver_question}". Read the conflicted files and the history of each side ` +
+        `"${foldEvidence(ctx.resolver_question)}". Read the conflicted files and the history of each side ` +
         `(\`git log\`/\`git show\` on \`${ctx.branch}\` and \`${ctx.base}\`) before deciding.`,
       options: [...CONFLICT_ARBITRATION_OPTIONS],
     })
@@ -1751,6 +1780,33 @@ async function abortRebase(run_host: RunHostCommand, repo: string, base: string)
  * not a review waiver. Every other hold in this file goes straight to the owner
  * and keeps doing so; see the exclusions recorded at `CONFLICT_ARBITRATION_OPTIONS`
  * and in the change record.
+ *
+ * IT BUYS LANDED BUILDS WITH WALL-CLOCK, AND THE TRADE IS DELIBERATE. The arbiter
+ * and the resolver each default to an 8-minute ceiling (`liveness.ts`
+ * DEFAULT_TIMEOUT_MS), and `cleanupAfterMerge` is awaited inside the SERIAL tick
+ * sweep — so nothing else in the process advances while this runs. With the real
+ * per-run cap of 3 arbitrations the worst case is 7 model turns, ~56 minutes, on a
+ * path that previously ended after the first resolver turn (~8 min).
+ *
+ * `orchestrator.ts`'s replay loop quantifies the same cost and draws the OPPOSITE
+ * conclusion — "zero progress once is the answer" — and the difference is not
+ * inconsistency, it is that the two loops have different evidence. There, one
+ * `git apply` means a round that leaves the same work undone will leave it undone
+ * twelve times, so a no-progress round predicts nothing but more no-progress
+ * rounds. Here a retry is not a repeat: a DIFFERENT agent read the tree and said
+ * why it believes a resolution exists, and that reasoning is the input the first
+ * turn did not have. The bound is what keeps the trade honest — the arbiter's own
+ * per-run cap, plus MAX_CONFLICT_ROUNDS, which retries spend and never reset.
+ *
+ * A SUCCESSFUL RETRY ALSO DISCHARGES PART OF THE #542 BASE-DRIFT HOLD, which is a
+ * consequence worth stating rather than discovering. `conflictedAll` (returned
+ * below) feeds `resolverCoveredPaths`, which subtracts a path from the drift hold
+ * when the resolver was handed it with both sides in context. On the pre-#541 path
+ * that was unreachable for an escalated conflict: the escalation threw before the
+ * drift gate ran. A retried conflict that RESOLVES now reaches that gate with its
+ * paths legitimately covered — the resolver did see both sides of those files, and
+ * a second turn on the same markers does not make that less true. The policy is
+ * unchanged; what changed is that the resolved-after-escalation case now exists.
  */
 async function rebaseBranchOntoBase(
   run_host: RunHostCommand,
@@ -1777,14 +1833,32 @@ async function rebaseBranchOntoBase(
   // Set ONLY by an arbiter that asked for another round (#541); cleared as soon
   // as a round resolves. Undefined on every first attempt at every commit.
   let guidance: string | undefined
+  // How many of the rounds above were arbiter-directed retries rather than fresh
+  // commits. Only used to tell the two cap-exhaustion shapes apart in the message.
+  let arbiterRetries = 0
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
   let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
   let rounds = 0
   while (!res.ok && isRebaseConflict(res)) {
+    // THE ROUND CAP IS THE ONLY BOUND ON THIS LOOP, AND #541 GAVE IT A SECOND JOB.
+    // Before the arbiter tier every iteration was a DIFFERENT commit that `git
+    // rebase --continue` had advanced onto, so `rounds` counted commits and the
+    // message below said so. An arbiter-directed retry re-enters WITHOUT advancing
+    // the rebase, so rounds can now pile up on ONE commit — which is exactly why
+    // `rounds` is never reset on that path (see the retry branch). Resetting it,
+    // or raising the cap for retries, would hand a resolver/arbiter pair an
+    // unbounded loop of 8-minute model turns inside the serial tick sweep.
     if (rounds >= MAX_CONFLICT_ROUNDS) {
       await abortRebase(run_host, repo, base)
+      // Say which of the two shapes actually happened. "Conflicts across more than
+      // 12 commits — needs a manual rebase" is the right remedy for a long history
+      // and the WRONG one for a single commit the resolver and arbiter passed back
+      // and forth twelve times; prescribing a rebase for that sends the reader to
+      // re-do work that was never the problem.
       throw new TridentMergeConflictEscalation(
-        `merging \`${branch}\` into \`${base}\` hit conflicts across more than ${MAX_CONFLICT_ROUNDS} commits — it needs a manual rebase before I can land it.`,
+        arbiterRetries > 0
+          ? `merging \`${branch}\` into \`${base}\` spent all ${MAX_CONFLICT_ROUNDS} of its conflict-resolution attempts (${arbiterRetries} of them re-tried on a second opinion) without reaching a clean result — the remaining conflict needs your call before I can land it.`
+          : `merging \`${branch}\` into \`${base}\` hit conflicts across more than ${MAX_CONFLICT_ROUNDS} commits — it needs a manual rebase before I can land it.`,
       )
     }
     rounds++
@@ -1834,21 +1908,48 @@ async function rebaseBranchOntoBase(
         conflicted,
         resolver_question: outcome.question,
       })
-      if (verdict.kind === 'decision' && verdict.option_id === CONFLICT_ARBITER_RETRY_OPTION) {
+      // `verdict?.kind`, NOT `verdict.kind`. `arbitrateConflict` cannot return
+      // null, but an INJECTED arbiter that resolves to undefined would throw here
+      // — OUTSIDE that function's try — escaping `rebaseBranchOntoBase` with no
+      // `rebase --abort` and replacing the owner's specific question with a
+      // TypeError. That is precisely the outcome the unoffered-option guard below
+      // exists to prevent, so it must not be reachable one line earlier.
+      if (verdict?.kind === 'decision' && verdict.option_id === CONFLICT_ARBITER_RETRY_OPTION) {
         // Re-enter the loop WITHOUT advancing the rebase: `res` still holds the
         // same conflicted result, so the next iteration re-reads the unresolved
         // set and re-dispatches the resolver against the same commit — carrying
-        // the arbiter's reasoning. `rounds` was already spent on this pass and
-        // the next one spends another, so MAX_CONFLICT_ROUNDS keeps bounding the
-        // loop exactly as before.
+        // the arbiter's reasoning. `rounds` was already spent on this pass and the
+        // next one spends another, and it is deliberately NOT reset: see the cap
+        // guard at the top of this loop for why resetting it would remove the only
+        // bound this path has.
+        //
+        // REASONING WITH NO CONTENT IS NOT THREADED. `arbiter.ts` substitutes the
+        // literal `(no reasoning reported)` when a decision arrives without any,
+        // and passing that into the resolver's prompt is pure pressure to try
+        // again carrying zero information — strictly worse than an unguided retry,
+        // which at least does not imply someone looked.
+        const reasoned = arbiterGuidance(verdict.reasoning)
+        // THE REASONING ITSELF IS NOT LOGGED, deliberately. It is model-authored
+        // prose, and the arbiter is handed an ABSOLUTE repo path it is invited to
+        // reason about — so the one text most likely to quote that path back is
+        // the one text that would otherwise be written verbatim into a durable
+        // log. Logs are outside the leak gate's scope (it scans files and commit
+        // messages), which makes this the one seam in this change where nothing
+        // downstream would catch it. `renderPaths` above is the sibling contract:
+        // bound what leaves the process, and never echo a path just because it is
+        // convenient. What a reader actually needs here is WHETHER a second
+        // opinion redirected the resolver and how much it said; the content is
+        // recoverable from the resolver prompt, which is where it is acted on.
         log.info('merge_conflict_arbiter_retry', {
           run: run.id,
           branch,
           base,
-          conflicted_files: conflicted.join(', '),
-          reasoning: verdict.reasoning,
+          conflicted_files: renderPaths(conflicted),
+          guided: reasoned !== undefined,
+          guidance_chars: reasoned === undefined ? 0 : reasoned.length,
         })
-        guidance = verdict.reasoning
+        guidance = reasoned
+        arbiterRetries++
         continue
       }
       await abortRebase(run_host, repo, base)

@@ -1872,7 +1872,11 @@ export async function rebaseOntoObservedBase(
           ...new Set([...(await readUnmerged()), ...(await stagedMarkerFiles([...everConflicted]))]),
         ]
         // EVERY ROUND MUST SHRINK THE SET. `rebaseBranchOntoBase` can afford 12 rounds because
-        // each one is a DIFFERENT commit that `git rebase --continue` advanced onto; here there is
+        // each one is USUALLY a different commit that `git rebase --continue` advanced onto —
+        // #541 made that "usually" rather than "always": an arbiter-directed retry there
+        // re-runs the resolver on the SAME commit, deliberately, because a second opinion
+        // supplies reasoning the first turn did not have. It still spends a round and never
+        // resets the counter, so the cap remains the bound. No such tier exists here; there is
         // exactly one apply, so a round that leaves the same work undone will leave it undone
         // twelve times. Each round is a real Forge turn bounded at 8 minutes, awaited inside the
         // serial tick sweep — so 12 no-progress rounds is ~96 minutes during which no other run in
