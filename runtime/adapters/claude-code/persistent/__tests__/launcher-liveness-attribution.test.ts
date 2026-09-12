@@ -53,6 +53,38 @@ describe('probeLauncherGenerationAlive — attribution, not invention', () => {
     expect(probeLauncherGenerationAlive('gen-1', path)).toBe('killed-by-gateway-shutdown')
   })
 
+  it('CURRENT generation, already-gone → dead-cause-undetermined, NOT a deploy', () => {
+    // THE BRANCH THE SUITE NEVER REACHED. Every undetermined case moved
+    // `child_generation` forward first, so they all exercised the HISTORICAL-entry scan
+    // and the current-row branch had no undetermined coverage at all. It was still
+    // asking "is there a timestamp?", so all three observations funnelled to a deploy
+    // kill and the owner was told a deploy killed a build that died on its own.
+    //
+    // RED-mutation: revert the current-row classification to the presence test
+    // (`gatewayShutdownKillAt(record) !== undefined ? 'killed-by-gateway-shutdown' :
+    // 'dead'`). This case reddens ON ITS OWN.
+    const path = registry()
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'already-gone', DEAD_PID)
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('dead-cause-undetermined')
+  })
+
+  it('CURRENT generation, could-not-sample → dead-cause-undetermined, NOT a deploy', () => {
+    // The second observation, asserted separately rather than in a loop with the first,
+    // so the mutation run shows each one killing the mutant individually.
+    const path = registry()
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'could-not-sample', DEAD_PID)
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('dead-cause-undetermined')
+  })
+
+  it('CURRENT generation, alive-and-killed → the deploy attribution is still earned', () => {
+    // The complement that keeps the two cases above meaningful: a child the shutdown DID
+    // kill is still attributed. RED-mutation: return `'dead-cause-undetermined'`
+    // unconditionally from the current-row branch.
+    const path = registry()
+    recordGatewayShutdownOutcome(path, KEY, 'gen-1', 1_755_000_000_000, 'alive-and-killed', DEAD_PID)
+    expect(probeLauncherGenerationAlive('gen-1', path)).toBe('killed-by-gateway-shutdown')
+  })
+
   it('THE COMPLEMENT — a dead pid with no marker is still just dead', () => {
     // The 08-10 / 08-11 shape: a launcher that died with nothing recorded near it.
     // RED-mutation: return 'killed-by-gateway-shutdown' unconditionally from the ESRCH

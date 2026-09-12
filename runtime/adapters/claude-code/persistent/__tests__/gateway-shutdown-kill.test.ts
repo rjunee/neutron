@@ -25,7 +25,6 @@ import {
   observationOf,
   sampleLivenessBeforeShutdownKill,
   undeterminedShutdownDetail,
-  gatewayShutdownKillAt,
   gatewayShutdownKillDetail,
   recordGatewayShutdownOutcome,
   reportGatewayShutdownKill,
@@ -75,7 +74,7 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
     recordGatewayShutdownOutcome(path, 'cc-trident-fire-o-abc /repo', 'gen-live', 1_700_000_000_000, 'alive-and-killed')
     const record = getRecord(path, 'cc-trident-fire-o-abc /repo')
     expect(wasKilledByGatewayShutdown(record)).toBe(true)
-    expect(gatewayShutdownKillAt(record)).toBe(1_700_000_000_000)
+    expect(killedAt(record, 'gen-live')).toBe(1_700_000_000_000)
   })
 
   it('FALSE for a marker naming a SUPERSEDED generation — a later crash is not a deploy', () => {
@@ -102,7 +101,6 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
     expect(record?.child_generation).toBe('gen-NEXT')
     // ...and is not read as describing the new child.
     expect(wasKilledByGatewayShutdown(record)).toBe(false)
-    expect(gatewayShutdownKillAt(record)).toBeUndefined()
   })
 
   it('false for an unmarked row, and for no row at all', () => {
@@ -110,7 +108,6 @@ describe('wasKilledByGatewayShutdown — the marker must describe THIS child', (
     seed(path)
     expect(wasKilledByGatewayShutdown(getRecord(path, 'cc-trident-fire-o-abc /repo'))).toBe(false)
     expect(wasKilledByGatewayShutdown(undefined)).toBe(false)
-    expect(gatewayShutdownKillAt(undefined)).toBeUndefined()
   })
 
   it('false when the marker is an empty string (a half-written row)', () => {
@@ -444,7 +441,7 @@ describe('the row records EVERY generation it killed, which is what a quarantine
     expect(killedAt(record, 'gen-QUARANTINED')).toBe(600)
     // The CURRENT child's answer is unchanged by the presence of the other entry.
     expect(wasKilledByGatewayShutdown(record)).toBe(true)
-    expect(gatewayShutdownKillAt(record)).toBe(500)
+    expect(killedAt(record, 'gen-live')).toBe(500)
     // And the superseded generation is findable on its own terms — the lookup a
     // quarantined child's build depends on.
     expect(gatewayShutdownKillEntryFor(record, 'gen-QUARANTINED')?.at).toBe(600)

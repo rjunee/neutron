@@ -82,7 +82,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
       AND ON THE READ SIDE, the same question asked of the record rather than the sample:
       a record ATTRIBUTES a death, it does not ESTABLISH one — it is written before
       `kill()`, which can throw, so the reader confirms the death against the pid the
-      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1101-1123`). A
+      entry carries and reports UNKNOWN when it cannot (`supervision.ts:1106-1128`). A
       revision that returned the attribution from the record alone would have crashed a
       run whose launcher was still alive. Checks:
       `__tests__/gateway-shutdown-kill.test.ts` ("only a child observed ALIVE is attributed
@@ -119,6 +119,18 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   handler calls `shutdownAllPersistentRepls` (`gateway/index.ts:1045`), which walks the
   pool and calls `session.child.kill()` (`pool.ts:996`) on every warm child. We kill it
   deliberately, which is precisely why the cause is knowable and can be recorded.
+- AUDITING FIELDS WAS THE WRONG DENOMINATOR — the readers are. Making the record three-valued
+  fixed the writers and left `probeLauncherGenerationAlive`'s CURRENT-row branch asking only
+  whether some entry carried a timestamp, so `already-gone` and `could-not-sample` both answered
+  `killed-by-gateway-shutdown`: the owner told a deploy killed a build that died on its own,
+  while the historical-entry branch four lines below classified correctly. Two readers of one
+  field, one updated. Re-audited over CALL SITES: **eleven readers checked, one defective** —
+  and two of the eleven ask about presence and are right to, because "does an entry exist" and
+  "did my write land" are genuinely two-valued questions. `gatewayShutdownKillAt` is DELETED
+  rather than fixed: `number | undefined` cannot express three observations, so the accessor's
+  type invited the misread and would have invited it again. The suite could not have caught
+  this — every undetermined case advanced `child_generation` first, so none reached the
+  current-row branch.
 - A TWO-VALUED DURABLE RECORD FOR A THREE-VALUED DOMAIN, which is the root the other
   findings on this item share. The record's vocabulary was *present* / *absent*; the domain is
   **killed-by-deploy**, **undetermined** and **ordinary crash**. So `undetermined` shared its
@@ -166,7 +178,7 @@ dies at all, and answers: we killed it. Fixing one does not fix the other.
   entry cannot be read as describing the current child, which makes the invariant those
   guards defended a property of the shape. And it closes a hole that predates this item:
   `probeLauncherGenerationAlive` matched only `record.child_generation`
-  (`supervision.ts:1062`), which a replacement spawn overwrites (`spawn.ts:675`), so a
+  (`supervision.ts:1058`), which a replacement spawn overwrites (`spawn.ts:675`), so a
   quarantined generation has never been locatable in the registry at all.
 - THE REPORTING WORK WAS ON THE CRITICAL PATH OF THE KILLING WORK, and that is the root the
   other two findings shared. Shutdown runs against a deadline this process does not control

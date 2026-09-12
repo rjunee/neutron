@@ -18,11 +18,7 @@ import { type RespawnDeps, type RespawnOutcome, type RespawnTrigger, type SpawnR
 import { type SessionSizeWatchdog, sessionJsonlPath } from './session-size-watchdog.ts'
 import { type ReplWedgeProbe, buildWedgeAlertText, buildWedgeCapHitAlertText, buildWedgeRecoveryInProgressText, decideWedgeAction, detectReplWedged } from './dead-repl-detector.ts'
 import { dispatchWedgeRespawn } from './dead-repl-respawn-dispatch.ts'
-import {
-  gatewayShutdownKillAt,
-  gatewayShutdownKillEntryFor,
-  observationOf,
-} from './gateway-shutdown-kill.ts'
+import { gatewayShutdownKillEntryFor, observationOf } from './gateway-shutdown-kill.ts'
 import type { GatewayShutdownObservation } from './repl-registry.ts'
 import { DEFAULT_CWD_DRIFT_INTERVAL_MS, DEFAULT_WATCHDOG_INTERVAL_MS, RESPAWN_CAP_MAX, RESPAWN_CAP_WINDOW_MS, RESPAWN_IN_FLIGHT_TTL_MS, defaultIsPidAlive, resolveTranscriptProjectsDir } from './signatures.ts'
 import type { PersistentReplSubstrateOptions } from './types.ts'
@@ -1073,11 +1069,20 @@ export function probeLauncherGenerationAlive(
         return 'alive'
       } catch (err) {
         if ((err as NodeJS.ErrnoException)?.code === 'EPERM') return 'alive'
-        // Dead, positively. Now — and only now — ask WHOSE doing it was. A
-        // generation-scoped marker for THIS child means the owning gateway killed
-        // it while shutting down; a stale marker for a superseded generation is
-        // refused by `wasKilledByGatewayShutdown` and the answer stays 'dead'.
-        return gatewayShutdownKillAt(record) !== undefined ? 'killed-by-gateway-shutdown' : 'dead'
+        // Dead, positively. Now — and only now — ask WHAT THE SHUTDOWN ESTABLISHED, and
+        // ask it the same way the historical-entry branch below does. This classifies
+        // through `observationOf`; an earlier revision asked only whether SOME entry
+        // carried a timestamp, so all three observations funnelled to
+        // `killed-by-gateway-shutdown` and the owner was told a deploy killed a build
+        // that had died on its own. Two readers of one field, one updated and one not.
+        //
+        // Absent ⇒ the shutdown never reached this generation ⇒ an ordinary crash.
+        const observed = observationFor(record)
+        return observed === undefined
+          ? 'dead'
+          : observed === 'alive-and-killed'
+            ? 'killed-by-gateway-shutdown'
+            : 'dead-cause-undetermined'
       }
     }
     // NOT THE CURRENT GENERATION OF ANY ROW — which is exactly what a QUARANTINED

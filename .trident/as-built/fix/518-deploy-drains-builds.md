@@ -185,7 +185,7 @@ instead of a rule enforced in two places. The clear-on-respawn had to go regardl
 must outlive the generation it describes, which is the whole reason it exists.
 
 **And it closes a hole older than this item.** `probeLauncherGenerationAlive` matched only
-`record.child_generation` (`supervision.ts:1062`), which a replacement spawn overwrites
+`record.child_generation` (`supervision.ts:1058`), which a replacement spawn overwrites
 (`spawn.ts:675`) — so a quarantined generation has never been locatable in the registry, and
 its build waited out the 90-minute reaper with no reason ever delivered. This change did not
 remove that recoverability; it added a claim that assumed it, and now supplies it.
@@ -359,7 +359,7 @@ sentence rather than laundering a bare one over it.
 **And the record never proves a death.** It is written before `kill()`, and `kill()` can
 throw, so an entry means "we intended to kill a child we had observed alive". The reader
 confirms the death against the pid the entry carries and answers UNKNOWN when it cannot
-(`supervision.ts:1101-1123`). Round 6's finding was this exact over-claim arriving on the read
+(`supervision.ts:1106-1128`). Round 6's finding was this exact over-claim arriving on the read
 side: round 3 refused to claim a deploy for a child that might already have been dead, and the
 per-generation scan then claimed a death for a child that might still be alive. Same missing
 question — *what does this record actually establish?*
@@ -412,6 +412,51 @@ attributed/reported conflation in one pass instead of three rounds.
 `markKilledByGatewayShutdown` is renamed `recordGatewayShutdownOutcome`, because a function
 named for killing that also records "already gone" is a name whose plain reading is false.
 
+### Auditing fields was the wrong denominator; the readers are
+
+The three-valued record fixed the writers and left a reader keyed on the old
+representation. `probeLauncherGenerationAlive`'s CURRENT-row branch asked only whether some
+entry carried a timestamp, so `already-gone` and `could-not-sample` both answered
+`killed-by-gateway-shutdown` — the owner told a deploy had killed a build that died on its
+own. The historical-entry branch, four lines below, already classified correctly. **Two
+readers of one field, one updated and one not.**
+
+The previous round's audit enumerated FIELDS and found three gaps. That denominator cannot
+catch this: the field was right, and a consumer of it was wrong. So the audit is redone over
+CALL SITES. **Eleven readers checked, one defective:**
+
+| reader | question it asks | verdict |
+|---|---|---|
+| `wasKilledByGatewayShutdown` | `observationOf(...) === 'alive-and-killed'` | ok |
+| `observationOf` | the classifier itself | ok |
+| `gatewayShutdownKillEntryFor` | locates an entry, does not classify | ok |
+| ~~`gatewayShutdownKillAt`~~ | "is there a timestamp?" | **DELETED — see below** |
+| `recordGatewayShutdownOutcome` idempotence check | "does an entry exist for this generation?" | ok — presence IS the question |
+| `recordGatewayShutdownOutcome` read-back | "did the write land?" | ok — presence IS the question |
+| `observationFor` (supervision) | delegates to `observationOf` | ok |
+| `probeReplLiveness` | feeds `shutdownObserved` through | ok |
+| `probeLauncherGenerationAlive`, current row | presence test | **THE DEFECT — fixed** |
+| `probeLauncherGenerationAlive`, historical scan | `observationOf(entry) === 'alive-and-killed'` | ok |
+| `detectReplWedged` | three arms over `shutdownObserved` | ok |
+
+Two of the eleven ask about presence and are RIGHT to: "does an entry already exist" and "did
+my write land" are genuinely two-valued questions. The distinction that matters is not
+presence-versus-classification, it is whether the question the caller is asking is itself
+three-valued.
+
+**`gatewayShutdownKillAt` is deleted rather than fixed, because its TYPE was the defect.**
+`number | undefined` cannot express three observations, so it invited the presence read from
+its caller — and would have invited it from the next one. Nothing in production wanted the
+timestamp. An accessor that collapses a three-valued domain into presence-or-absence is a trap
+with a return type; removing it removes the trap.
+
+**And the suite could not have caught it.** Every undetermined case advanced
+`child_generation` before probing, so all of them exercised the historical scan; the
+current-row branch had no undetermined coverage at all. Three cases added — `already-gone`,
+`could-not-sample`, and `alive-and-killed` as the complement — asserted separately rather than
+in a loop, so the mutation run shows each killing the mutant on its own (M55 reddens the first
+two individually; M56 reddens the complement).
+
 ### The edge is keyed on delivery, never on the verdict
 
 The crash edge records that a death's report HAPPENED. An earlier revision closed it only for
@@ -456,7 +501,7 @@ it, which makes it a sharp edge behind a race rather than an everyday path.
 
 ### Measured
 
-51 mutations applied one at a time, each reverted after: **51 red, 0 survivors.** Every
+53 mutations applied one at a time, each reverted after: **53 red, 0 survivors.** Every
 deploy-arm mutation is paired with its inverse (make the arm unconditional), and each
 inverse reddens a different test than the deletion does — the pairing is what makes the
 negative acceptance criteria checks rather than prose.

@@ -224,13 +224,16 @@ export function gatewayShutdownKillEntryFor(
   )
 }
 
-/** Epoch ms the marker was written, or undefined when the row carries no live
- *  marker. Returns undefined for a stale (superseded-generation) marker, so a
- *  caller can never quote a timestamp that does not describe this child. */
-export function gatewayShutdownKillAt(record: ReplRegistryRecord | undefined): number | undefined {
-  const current = record?.child_generation
-  return current === undefined ? undefined : gatewayShutdownKillEntryFor(record, current)?.at
-}
+/*
+ * `gatewayShutdownKillAt` DELETED (#518, round 9). It returned `number | undefined`,
+ * and that type cannot express three observations — so its one caller asked "is there
+ * a timestamp?" and read `already-gone` and `could-not-sample` as a deploy kill, telling
+ * the owner a deploy had killed a build that died on its own. The accessor's SHAPE was
+ * the defect, not just the caller: an accessor that collapses a three-valued domain into
+ * presence-or-absence invites exactly that read from the next caller too. Nothing in
+ * production needed the timestamp, so it is gone rather than fixed; classify through
+ * {@link observationOf}, and read `.at` off the entry if a timestamp is ever wanted.
+ */
 
 /**
  * The sentence every consumer of this edge uses, authored ONCE. It says what
