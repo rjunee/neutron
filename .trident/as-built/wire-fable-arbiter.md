@@ -118,6 +118,49 @@ If phase D lands a real sandbox, `Bash` could return under it and this becomes t
 belt-and-braces it should always have been. `permission_mode`/`sandbox` were never
 touched: shape-only at Step 0, and irrelevant to the mechanism that works.
 
+### WHAT THIS ACTUALLY BUYS — the honest accounting
+
+Read this before believing any earlier paragraph about the arbiter's value. It is thinner
+than the first version of this record claimed, and the difference is not presentational.
+
+**What the arbiter buys is ONE BIT: retry, or escalate to the owner.** Nothing more. The
+guidance channel — threading the arbiter's reasoning into the next resolver prompt — was
+deliberately removed, because the resolver holds `Edit/Write/Bash` and a GitHub
+credential, so passing an untrusted judge's prose into its prompt let that judge steer a
+more privileged agent. `foldEvidence` bounds length and strips control characters; it
+cannot strip intent from a sentence, and filtering prose for intent is not a thing that
+can be done. So the retry carries no new information into the round it buys.
+
+**What it costs, after the per-rebase ceiling:** one arbiter turn plus one resolver round,
+both bounded at 8 minutes, awaited inside the SERIAL tick sweep where nothing else in the
+process advances — roughly 16 minutes worst case. Before the ceiling it was three
+arbitrations, 7 model turns, ~56 minutes. That number could not be shipped beside
+`orchestrator.ts`'s replay loop, which quantifies ~96 minutes of the same kind of cost
+and concludes "zero progress once is the answer"; shipping the larger figure unargued
+would have made the codebase incoherent with itself. `MAX_ARBITRATIONS_PER_REBASE = 1` is
+frozen by a test that pins both the value and the behaviour, because a relation to the
+constant alone cannot detect a change to the constant — verified by mutation.
+
+**Why it ships anyway, and not on round 1's framing.** `SPEC.md`'s Decisions Log asserts
+the arbiter rule is among the gates "ahead of every shipped system surveyed" and that it
+stays through the pivot — while it had zero call sites. Leaving that open leaves the spec
+asserting something untrue. And the definition of done is a card reaching merged with
+nobody touching it, so any mechanism that converts an owner interrupt into an automatic
+retry is on-thesis provided its cost is bounded, which the ceiling is what fixes.
+
+**How we will know.** Two log lines make the bet measurable rather than a matter of
+faith: `merge_conflict_arbitration` records every arbitration and its classified decision
+(never the model's own text), and `merge_conflict_arbiter_retry_outcome` records whether
+the round it bought RESOLVED or escalated anyway. The resolved/escalated ratio is the one
+number that decides whether this tier keeps its place. An unwired arbiter is excluded
+from both — it is not an arbitration, and counting it would have padded the denominator
+of the only measurement that matters. That defect was in the first cut of the
+instrumentation and was caught by the control test asserting nothing is logged when no
+arbiter is consulted.
+
+If it proves worth little, the answer is to stop offering the retry rather than re-open
+the channel.
+
 ### The third channel IN: conflict filenames
 
 The resolver question and both histories were folded; the FILENAMES were interpolated
@@ -168,7 +211,17 @@ The tool grant was correct about the arbiter and blind to who it could ask. The 
 deletion was correct about prose and blind to a third input. The cap was correct about
 bytes and blind to meaning. Each measurement was real; the property claimed was not the
 one measured. The only thing that ever caught it was varying a parameter and watching the
-result change — which is also what caught the e2e arms passing by accident of argv order.
+result change — which is also what caught the e2e arms passing by accident of argv order,
+the oversized-filename test passing because the huge path happened to come last, and the
+frozen-ceiling gap where a relation to a constant could not detect the constant moving.
+Ten instances of a test passing for the wrong reason were found in this lane in one
+session, and mutation — not reading — found every one of them.
+
+Two smaller distinctions worth keeping from round 5. Folding **per name rather than over
+the join** is what stops one 60 KB path silently erasing its siblings; the joined form is
+bounded and defanged and still loses data. And a **heterogeneous fixture** is what makes
+a truncation bug visible at all: 400 KB of one repeated character satisfies every size
+assertion while hiding which end was kept.
 
 ### The channel out of the arbiter, closed rather than filtered
 

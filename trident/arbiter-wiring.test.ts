@@ -33,6 +33,7 @@ import {
   buildMergeCleanupDeps,
   CONFLICT_ARBITER_RETRY_OPTION,
   CONFLICT_ARBITRATION_OPTIONS,
+  MAX_ARBITRATIONS_PER_REBASE,
   MAX_CONFLICT_ROUNDS,
   type RunHostCommand,
 } from './merge.ts'
@@ -378,10 +379,39 @@ describe('#541 — MAX_CONFLICT_ROUNDS is the bound on arbiter-directed retries'
    * `orchestrator.ts` tells a reader every round is a different commit, which this
    * change deliberately makes false.
    */
-  test('an arbiter that ALWAYS retries and a resolver that ALWAYS escalates terminate at the cap, and the owner still gets the question', async () => {
-    const run = localRun('feat-forever')
+  test('the per-rebase ceiling is FROZEN at one, so raising it is a deliberate edit', () => {
+    // THE RELATION ALONE IS NOT ENOUGH, and that is worth spelling out because it was a
+    // real gap: the test below asserts `arbiterCalls === MAX_ARBITRATIONS_PER_REBASE`,
+    // which is right for tracking behaviour against the constant — and therefore CANNOT
+    // detect a change to the constant itself. Raising it to 3 left the whole suite green
+    // (verified by mutation), silently restoring the ~56-minute worst case this ceiling
+    // exists to prevent.
+    //
+    // So the value is pinned too, the same pairing `substrate-profiles.test.ts` uses for
+    // its frozen grants and `arbiter.test.ts` uses for the tool list: the literal catches
+    // a change to the constant, the relation catches the behaviour drifting from it.
+    // Neither is sufficient alone.
+    //
+    // Raising this means re-arguing the cost: each extra arbitration is an arbiter turn
+    // plus a resolver round, both 8-minute-bounded, inside the SERIAL tick sweep, bought
+    // for one more bit of information. `orchestrator.ts` calls ~96 minutes of that "zero
+    // progress once is the answer".
+    expect(MAX_ARBITRATIONS_PER_REBASE).toBe(1)
+  })
+
+  test(`the per-rebase ceiling allows exactly MAX_ARBITRATIONS_PER_REBASE arbitration(s), and a LATER escalation in the same rebase is not arbitrated`, async () => {
+    // THE WALL-CLOCK BOUND (round 6). An arbitration buys one bit — retry or escalate —
+    // and carries no information into the resolver, since the guidance channel was
+    // deliberately removed. Each one costs an arbiter turn plus a resolver round, both
+    // 8-minute-bounded, inside the SERIAL tick sweep. Three per rebase was ~56 minutes
+    // for three bits; `orchestrator.ts`'s replay loop calls ~96 minutes "zero progress
+    // once is the answer", so shipping the larger number beside that comment would be
+    // incoherent.
+    //
+    // Asserted as a RELATION to the constant, never the literal 1 — raising the ceiling
+    // should change what this test expects, not quietly satisfy it.
+    const run = localRun('feat-onearb')
     const wt = wtOf('/shared', run)
-    // Conflicts forever: every rebase and every --continue reports the conflict.
     const { host, calls } = conflictingHost(wt, Number.MAX_SAFE_INTEGER)
     let resolverCalls = 0
     let arbiterCalls = 0
@@ -389,10 +419,6 @@ describe('#541 — MAX_CONFLICT_ROUNDS is the bound on arbiter-directed retries'
       base_branch: 'main',
       resolve_conflict: async () => {
         resolverCalls++
-        // A TRIPWIRE, so a loop that is not bounded fails FAST AND LOUD instead of
-        // hanging the suite. Removing the cap, or resetting `rounds` on the retry
-        // path, both land here on call 13 — and a hung test is a worse signal than
-        // a named one, because CI reports it as a timeout rather than as this bug.
         if (resolverCalls > MAX_CONFLICT_ROUNDS) {
           throw new Error(
             `unbounded conflict loop: the resolver was dispatched ${resolverCalls} times, past MAX_CONFLICT_ROUNDS=${MAX_CONFLICT_ROUNDS}`,
@@ -400,73 +426,60 @@ describe('#541 — MAX_CONFLICT_ROUNDS is the bound on arbiter-directed retries'
         }
         return { resolved: false, question: RESOLVER_QUESTION }
       },
-      // No cap of its own — the arbiter always says "retry". The ONLY bound left
-      // is the round counter in `rebaseBranchOntoBase`.
+      // Always willing to retry. The ONLY thing stopping a second one is the ceiling.
       arbitrate: async () => {
         arbiterCalls++
         return {
           kind: 'decision',
           option_id: CONFLICT_ARBITER_RETRY_OPTION,
-          reasoning: 'keep both guards',
+          reasoning: 'look again',
         }
       },
     })
 
-    // IT TERMINATES, and by the OWNER path — not by the tripwire above. And the
-    // owner gets the RESOLVER'S OWN SPECIFIC QUESTION, which is the substantive
-    // half: the generic cap message used to replace it here, throwing away the one
-    // thing the owner needed in order to answer.
     await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
       name: 'TridentMergeConflictEscalation',
       question: RESOLVER_QUESTION,
     })
-    // It terminates AT THE CAP — not at the cap plus retries, and not later.
-    expect(resolverCalls).toBe(MAX_CONFLICT_ROUNDS)
-    // THE BOUNDARY, not the off-by-one this assertion used to encode. The last
-    // permitted round has no further round to offer, so the arbiter is NOT asked:
-    // asking would burn a model turn on an answer that cannot be honoured and then
-    // discard the resolver's question on the way past the cap guard. One fewer
-    // arbitration than rounds is the correct count, and it is spelled as a relation
-    // to the cap rather than as the literal 11.
-    expect(arbiterCalls).toBe(MAX_CONFLICT_ROUNDS - 1)
-    expect(arbiterCalls).toBeLessThan(resolverCalls)
-    // Still the owner path: rebase aborted, nothing landed.
+
+    // Exactly the ceiling — and the second escalation was NOT arbitrated, which is the
+    // behaviour under test rather than a by-product of the round cap.
+    expect(arbiterCalls).toBe(MAX_ARBITRATIONS_PER_REBASE)
+    // One resolver round per arbitration granted, plus the round that falls through.
+    expect(resolverCalls).toBe(MAX_ARBITRATIONS_PER_REBASE + 1)
+    // Far inside the round cap now: the ceiling binds first, which is the point.
+    expect(resolverCalls).toBeLessThan(MAX_CONFLICT_ROUNDS)
+    // Still the owner path, unchanged.
     expect(calls.some((c) => c === `git -C ${wt} rebase --abort`)).toBe(true)
     expect(calls.some((c) => c.includes('merge --no-ff'))).toBe(false)
   })
 
-  test('retries SPEND the shared round budget rather than getting their own', async () => {
-    // Half the budget burned on arbiter retries of ONE commit leaves only the
-    // other half for everything else — which is what "never reset" means. A
-    // `rounds = 0` on the retry path makes `resolverCalls` unbounded and this
-    // exact-count assertion is what catches it.
-    const run = localRun('feat-budget')
+  test('the round cap still bounds the loop when the arbiter tier is absent entirely', async () => {
+    // With the per-rebase ceiling at 1 the arbiter can no longer drive the loop to
+    // MAX_CONFLICT_ROUNDS, so the round cap needs its own unarbitrated case or its
+    // coverage would quietly depend on the ceiling's value. Resolver resolves every
+    // round, each `--continue` conflicts again: pure commit-marching to the cap.
+    const run = localRun('feat-roundcap')
     const wt = wtOf('/shared', run)
-    const { host } = conflictingHost(wt, Number.MAX_SAFE_INTEGER)
-    const RETRIES = 4
+    const { host, calls } = conflictingHost(wt, Number.MAX_SAFE_INTEGER)
     let resolverCalls = 0
-    let arbiterCalls = 0
     const deps = buildMergeCleanupDeps(host, {
       base_branch: 'main',
       resolve_conflict: async () => {
         resolverCalls++
-        return { resolved: false, question: RESOLVER_QUESTION }
-      },
-      arbitrate: async () => {
-        arbiterCalls++
-        // Retry for the first RETRIES calls, then stop asking.
-        return arbiterCalls <= RETRIES
-          ? { kind: 'decision', option_id: CONFLICT_ARBITER_RETRY_OPTION, reasoning: 'look again' }
-          : { kind: 'unavailable', reason: 'done trying' }
+        if (resolverCalls > MAX_CONFLICT_ROUNDS) {
+          throw new Error(
+            `unbounded conflict loop: the resolver was dispatched ${resolverCalls} times, past MAX_CONFLICT_ROUNDS=${MAX_CONFLICT_ROUNDS}`,
+          )
+        }
+        return { resolved: true }
       },
     })
     await expect(cleanupAfterMerge(run, deps)).rejects.toMatchObject({
       name: 'TridentMergeConflictEscalation',
-      question: RESOLVER_QUESTION,
     })
-    // RETRIES retries + the round that finally falls through = RETRIES + 1.
-    expect(resolverCalls).toBe(RETRIES + 1)
-    expect(resolverCalls).toBeLessThanOrEqual(MAX_CONFLICT_ROUNDS)
+    expect(resolverCalls).toBe(MAX_CONFLICT_ROUNDS)
+    expect(calls.some((c) => c === `git -C ${wt} rebase --abort`)).toBe(true)
   })
 
   test('the cap-exhaustion message names retries when retries happened, and never prescribes a manual rebase for them', async () => {
@@ -1017,6 +1030,129 @@ describe('#541 — the two sides\' HISTORY is collected BY THE CALLER, bounded a
       question: RESOLVER_QUESTION,
     })
     expect(seen[0]?.evidence).toContain('(history unavailable)')
+  })
+})
+
+describe('#541 — the bet is INSTRUMENTED, so "ship and measure" is not just "ship"', () => {
+  /**
+   * WHAT THIS TIER COSTS IS KNOWN; WHAT IT BUYS IS NOT, YET. An arbitration is one bit
+   * — retry or escalate — carrying no information into the resolver, bought with an
+   * arbiter turn plus a resolver round inside the serial tick sweep. Whether that trade
+   * is worth keeping turns on ONE number: how often a granted retry actually resolved.
+   * These pin that the number is emitted, because a mechanism shipped to be measured
+   * with no measurement is a mechanism shipped on faith.
+   *
+   * The logger's default sink is `console.log` for info lines, so capturing it is the
+   * seam — no production change to make the behaviour observable.
+   */
+  async function captureLogs(body: () => Promise<void>): Promise<string[]> {
+    const lines: string[] = []
+    const original = console.log
+    console.log = (...args: unknown[]): void => {
+      lines.push(args.map((a) => String(a)).join(' '))
+    }
+    try {
+      await body()
+    } finally {
+      console.log = original
+    }
+    return lines
+  }
+
+  test('a granted retry that RESOLVES is recorded as resolved, alongside the decision', async () => {
+    const run = localRun('feat-instr-ok')
+    const wt = wtOf('/shared', run)
+    const { host } = conflictingHost(wt, 1)
+    let attempts = 0
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => {
+        attempts++
+        return attempts === 1 ? { resolved: false, question: RESOLVER_QUESTION } : { resolved: true }
+      },
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'both sides are additive',
+      }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps)
+    })
+    const arbitration = lines.find((l) => l.includes('merge_conflict_arbitration'))
+    const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome'))
+    expect(arbitration).toBeDefined()
+    expect(arbitration).toContain('verdict=decision')
+    expect(arbitration).toContain('decision=retry')
+    expect(outcome).toBeDefined()
+    expect(outcome).toContain('outcome=resolved')
+    // NO MODEL-AUTHORED TEXT, the rule established when the reasoning stopped being
+    // logged: the arbiter's prose appears in neither line.
+    expect(arbitration).not.toContain('both sides are additive')
+    expect(outcome).not.toContain('both sides are additive')
+  })
+
+  test('a granted retry that ESCALATES ANYWAY is recorded as escalated — the denominator of the bet', async () => {
+    // The case that decides whether this tier earns its cost. If most granted retries
+    // land here, the honest response is to stop offering the retry.
+    const run = localRun('feat-instr-bad')
+    const wt = wtOf('/shared', run)
+    const { host } = conflictingHost(wt, Number.MAX_SAFE_INTEGER)
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate: async () => ({
+        kind: 'decision',
+        option_id: CONFLICT_ARBITER_RETRY_OPTION,
+        reasoning: 'look again',
+      }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    const outcome = lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome'))
+    expect(outcome).toBeDefined()
+    expect(outcome).toContain('outcome=escalated')
+  })
+
+  test('an arbitration that says STOP is recorded too, so the ratio has a denominator', async () => {
+    // A tier that mostly declines to retry is a different thing from one that mostly
+    // retries, and only logging every arbitration distinguishes them.
+    const run = localRun('feat-instr-stop')
+    const wt = wtOf('/shared', run)
+    const { host } = conflictingHost(wt, 1)
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      arbitrate: async () => ({ kind: 'decision', option_id: 'stop', reasoning: 'genuinely ambiguous' }),
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    const arbitration = lines.find((l) => l.includes('merge_conflict_arbitration'))
+    expect(arbitration).toBeDefined()
+    expect(arbitration).toContain('decision=stop-or-unoffered')
+    // No retry was granted, so there is no outcome line to pair with it.
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome'))).toBeUndefined()
+    expect(arbitration).not.toContain('genuinely ambiguous')
+  })
+
+  test('no arbitration is logged when the arbiter is never consulted', async () => {
+    // The positive control for the three above: these lines appear because an
+    // arbitration happened, not because the merge path emits them regardless.
+    const run = localRun('feat-instr-none')
+    const wt = wtOf('/shared', run)
+    const { host } = conflictingHost(wt, 1)
+    const deps = buildMergeCleanupDeps(host, {
+      base_branch: 'main',
+      resolve_conflict: async () => ({ resolved: false, question: RESOLVER_QUESTION }),
+      // No arbiter wired at all.
+    })
+    const lines = await captureLogs(async () => {
+      await cleanupAfterMerge(run, deps).catch(() => {})
+    })
+    expect(lines.find((l) => l.includes('merge_conflict_arbitration'))).toBeUndefined()
+    expect(lines.find((l) => l.includes('merge_conflict_arbiter_retry_outcome'))).toBeUndefined()
   })
 })
 

@@ -208,6 +208,32 @@ export const CONFLICT_ARBITRATION_OPTIONS = [
   },
 ] as const
 
+/**
+ * THE PER-REBASE ARBITRATION CEILING (#541 review round 6) — ONE, not the arbiter's
+ * own per-run cap of three.
+ *
+ * WHY ONE. What an arbitration buys is a single bit: retry, or escalate. It carries no
+ * information into the resolver — the guidance channel was deliberately removed, because
+ * passing the arbiter's prose let an untrusted judge write into a credentialed,
+ * write-capable prompt. Against that bit, each arbitration costs an arbiter turn plus a
+ * resolver round, both bounded at 8 minutes, awaited inside the SERIAL tick sweep where
+ * nothing else in the process advances. At three per rebase the worst case was 7 model
+ * turns, ~56 minutes.
+ *
+ * AND THIS REPO HAS ALREADY RULED ON THAT COST IN THE OPPOSITE DIRECTION.
+ * `orchestrator.ts`'s replay loop quantifies ~96 minutes for its own no-progress case and
+ * concludes "zero progress once is the answer". Shipping a 56-minute worst case beside
+ * that comment, unargued, would be incoherent. One arbitration bounds the addition to
+ * ~16 minutes and keeps nearly all the plausible value: if a second opinion is going to
+ * help, it is overwhelmingly likely to be the first one.
+ *
+ * THE ARBITER'S OWN `max_invocations_per_run` (default 3) STILL APPLIES, and the two
+ * bounds are not redundant: that one is the ceiling ACROSS a run, spanning every retry
+ * and every re-attempted merge; this one is the ceiling WITHIN a single
+ * `rebaseBranchOntoBase` call, which is where the serial wall-clock is spent.
+ */
+export const MAX_ARBITRATIONS_PER_REBASE = 1
+
 /** The only arbiter verdict at the conflict seam that changes what happens. */
 export const CONFLICT_ARBITER_RETRY_OPTION = CONFLICT_ARBITRATION_OPTIONS[0].id
 
@@ -2081,6 +2107,13 @@ async function rebaseBranchOntoBase(
   // How many of the rounds above were arbiter-directed retries rather than fresh
   // commits. Only used to tell the two cap-exhaustion shapes apart in the message.
   let arbiterRetries = 0
+  // Arbitrations spent in THIS rebase — the wall-clock bound (see
+  // MAX_ARBITRATIONS_PER_REBASE). Separate from the arbiter's own per-run budget.
+  let arbitrationsThisRebase = 0
+  // Set when an arbiter granted a retry, cleared when the NEXT resolver round reports
+  // back. It exists only to make the bet measurable: the one number that says whether
+  // this mechanism earns its cost is how often a granted retry actually RESOLVED.
+  let awaitingRetryOutcome = false
   must('git checkout branch', await run_host(['git', '-C', repo, 'checkout', branch], repo))
   let res = await run_host(['git', '-C', repo, 'rebase', base], repo)
   let rounds = 0
@@ -2133,6 +2166,20 @@ async function rebaseBranchOntoBase(
       run,
       conflicted_files: conflicted,
     })
+    // DID THE ARBITER'S BET PAY? Logged here, the moment the round it bought reports
+    // back, because this is the only point where both halves are known. Without it
+    // "ship and measure" is just "ship" — and the decision to keep or drop this whole
+    // tier rests on the resolved/escalated ratio this line produces. No model-authored
+    // text: the outcome is one of two words this file chooses.
+    if (awaitingRetryOutcome) {
+      log.info('merge_conflict_arbiter_retry_outcome', {
+        run: run.id,
+        branch,
+        base,
+        outcome: outcome.resolved ? 'resolved' : 'escalated',
+      })
+      awaitingRetryOutcome = false
+    }
     if (!outcome.resolved) {
       // ARBITER TIER (#541). The resolver gave up; ask the arbiter whether a
       // second, better-directed round can finish it. ONE bounded read-only turn,
@@ -2152,12 +2199,25 @@ async function rebaseBranchOntoBase(
       // guard, and the cap guard's generic message REPLACED `outcome.question` —
       // throwing away the one specific thing the owner needed. Never offer a retry
       // this loop cannot honour.
+      // TWO CEILINGS, both checked before a model turn is spent. `roundsRemain` stops
+      // us offering a retry the loop cannot honour (round 5); `arbitrationsRemain` is
+      // the wall-clock bound (round 6). Either one absent means no arbiter turn at all
+      // — not an arbiter turn whose answer we then discard.
       const roundsRemain = rounds < MAX_CONFLICT_ROUNDS
+      const arbitrationsRemain = arbitrationsThisRebase < MAX_ARBITRATIONS_PER_REBASE
+      // AN UNWIRED ARBITER IS NOT AN ARBITRATION. Without this clause the no-arbiter
+      // path — the overwhelmingly common one today — spent the per-rebase ceiling on a
+      // no-op AND emitted a `merge_conflict_arbitration` line with `verdict=unavailable`,
+      // which would have padded the denominator of the one ratio this instrumentation
+      // exists to produce. Caught by the control test that asserts nothing is logged
+      // when no arbiter is consulted; it also saves three git calls per conflict round
+      // on that path, since the fingerprint is no longer taken for nobody.
+      const mayArbitrate = arbitrate !== undefined && roundsRemain && arbitrationsRemain
       // THE INTEGRITY BASELINE, taken AFTER the resolver has finished mutating and
-      // immediately before the arbiter turn, so the only thing that can move it is
-      // the arbiter.
-      const fingerprintBefore = roundsRemain ? await worktreeFingerprint(run_host, repo) : null
-      const verdict: ArbitrationOutcome = roundsRemain
+      // immediately before the arbiter turn, so the only thing that can move it is the
+      // arbiter. Skipped entirely when no turn will run.
+      const fingerprintBefore = mayArbitrate ? await worktreeFingerprint(run_host, repo) : null
+      const verdict: ArbitrationOutcome = mayArbitrate
         ? await arbitrateConflict(arbitrate, {
             run,
             run_host,
@@ -2169,8 +2229,33 @@ async function rebaseBranchOntoBase(
           })
         : {
             kind: 'unavailable',
-            reason: `no resolver round remains within the cap (${MAX_CONFLICT_ROUNDS})`,
+            reason:
+              arbitrate === undefined
+                ? 'no arbiter is wired'
+                : roundsRemain
+                  ? `this rebase has already spent its ${MAX_ARBITRATIONS_PER_REBASE} arbitration(s)`
+                  : `no resolver round remains within the cap (${MAX_CONFLICT_ROUNDS})`,
           }
+      if (mayArbitrate) {
+        arbitrationsThisRebase++
+        // EVERY arbitration is recorded, not only the ones that grant a retry — a tier
+        // that mostly says "stop" is a different thing from one that mostly retries, and
+        // only the denominator distinguishes them. The decision is CLASSIFIED rather
+        // than echoed: `option_id` is a string the model chose, and this file does not
+        // put model-authored text into a durable log.
+        log.info('merge_conflict_arbitration', {
+          run: run.id,
+          branch,
+          base,
+          verdict: verdict.kind,
+          decision:
+            verdict.kind !== 'decision'
+              ? 'none'
+              : verdict.option_id === CONFLICT_ARBITER_RETRY_OPTION
+                ? 'retry'
+                : 'stop-or-unoffered',
+        })
+      }
       // `verdict?.kind`, NOT `verdict.kind`. `arbitrateConflict` cannot return
       // null, but an INJECTED arbiter that resolves to undefined would throw here
       // — OUTSIDE that function's try — escaping `rebaseBranchOntoBase` with no
@@ -2235,6 +2320,7 @@ async function rebaseBranchOntoBase(
           conflicted_files: renderPaths(conflicted),
         })
         arbiterRetries++
+        awaitingRetryOutcome = true
         continue
         }
       }
