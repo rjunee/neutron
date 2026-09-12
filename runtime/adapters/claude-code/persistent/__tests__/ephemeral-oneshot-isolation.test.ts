@@ -38,6 +38,7 @@ import {
   createPersistentReplSubstrate,
   drainPendingRespawns,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   registerSupervisedSubstrate,
   shutdownAllPersistentRepls,
   spawnEphemeralSession,
@@ -74,7 +75,7 @@ function makeEchoHost(): {
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
@@ -313,7 +314,7 @@ function makeCrashHost(): ProbeHost {
       // The substrate writes both temp configs SYNCHRONOUSLY before spawning, so
       // they exist on disk right now — captured to prove the later unlink.
       configs.push({ mcp, settings, existedAtSpawn: existsSync(mcp) && existsSync(settings) })
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
@@ -490,7 +491,7 @@ function makeEchoHostCapturingConfigs(): ProbeHost {
       const mcp = argv[argv.indexOf('--mcp-config') + 1] as string
       const settings = argv[argv.indexOf('--settings') + 1] as string
       configs.push({ mcp, settings, existedAtSpawn: existsSync(mcp) && existsSync(settings) })
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {

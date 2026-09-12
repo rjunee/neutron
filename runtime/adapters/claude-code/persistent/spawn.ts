@@ -43,7 +43,17 @@ async function spawnSession(
   spec: AgentSpec,
   resume?: ResumeDirective,
 ): Promise<ReplSession> {
-  sink.ensureStarted()
+  // ISSUES #537 — start the sink on its DERIVED-PER-INSTANCE port with its
+  // PERSISTED token, both keyed off this substrate's state dir (`sinkTokenPath`,
+  // derived with the rest of the durable REPL state by
+  // `deriveReplSupervisionPaths`; `sinkPort` overrides the derivation). Both coordinates are baked into the child below
+  // and in `buildSettings`, and the child can never be re-pointed — so they have
+  // to be values the NEXT gateway process reproduces. Idempotent: only the first
+  // call in this process binds.
+  await sink.ensureStarted({
+    ...(options.sinkPort !== undefined ? { port: options.sinkPort } : {}),
+    ...(options.sinkTokenPath !== undefined ? { tokenPath: options.sinkTokenPath } : {}),
+  })
   const cwd = options.cwd ?? process.cwd()
   const requestedModel = spec.model_preference[0]
   if (requestedModel === undefined) {
@@ -95,6 +105,21 @@ async function spawnSession(
   const toolsBridgePath = options.toolsBridgePath ?? DEFAULT_TOOLS_BRIDGE_PATH
   const appendSystemPromptFile = options.appendSystemPromptFile ?? DEFAULT_AGENT_BASE_PROMPT
 
+  // CONSTRUCT THE SESSION FIRST, because the child's own CREDENTIAL derives from it
+  // and has to be written into the config files below. It is registered further down,
+  // still BEFORE the spawn, so a fast `/channel-ready` POST can never race ahead of
+  // the sink registration (the original reason this block sat before the spawn).
+  const childGeneration = randomUUID()
+  const session = new ReplSession(sessionKey, childGeneration, sessionId, channelName, cwd)
+  // THE CREDENTIAL THIS CHILD WILL PRESENT — `HMAC(root token, childGeneration)`,
+  // derived by the sink so the value baked here and the value the sink authorizes
+  // cannot drift. It replaces the shared root token in every place the child is handed
+  // a secret: a child never sees the root, so it cannot compute a sibling's
+  // credential, and its own dies with this incarnation. See
+  // `sink-coordinates.ts`'s `deriveChildSinkToken` for why a session id could not do
+  // this job — it is an identifier, published to the process table by `--resume`.
+  const childToken = sink.credentialFor(session)
+
   // Per-session config files (mcp-config wires the dev-channel; settings wires
   // the enforce-reply Stop hook).
   //
@@ -103,8 +128,21 @@ async function spawnSession(
   // process umask (no mode argument at all) — and it carries the MCP sink TOKEN
   // in plaintext. Any same-uid process could read it and then dispatch tools
   // against the bridge. A 0700 per-spawn directory plus 0600 files keeps the
-  // token owner-readable; the wider bridge-auth fix (per-session token, session
-  // check before dispatch) is tracked separately.
+  // token owner-readable. The wider bridge-auth fix that sentence used to defer —
+  // a per-session token plus a check before dispatch — SHIPPED with ISSUES #537:
+  // each child is handed `HMAC(root token, childGeneration)` in this very directory
+  // and the sink authorizes credential -> session (`pool-state.ts`, `ReplSink.handle`).
+  // So what these modes protect is no longer a fleet-wide secret but this child's own
+  // credential, which is a smaller blast radius and the same discipline.
+  //
+  // RE-EXAMINED UNDER A PERSISTED TOKEN (ISSUES #537). The token these files carry
+  // is no longer minted per gateway process — it is loaded from a 0600 file in the
+  // instance state dir, so it is the same secret across restarts. The reasoning
+  // above therefore gets STRONGER, not weaker: these modes are what keep a
+  // now-long-lived secret owner-only, and nothing here is relaxed. What did change
+  // is the exposure WINDOW — from one process lifetime to indefinitely — a
+  // deliberate trade for letting a REPL outlive its gateway, spelled out in
+  // `sink-coordinates.ts`'s header where the token is loaded.
   const cfgDir = join(tmpdir(), `neutron-repl-${channelName}`)
   mkdirSync(cfgDir, { recursive: true, mode: 0o700 })
   const cfgBase = join(cfgDir, 'session')
@@ -125,7 +163,7 @@ async function spawnSession(
       args: [devChannelPath],
       env: {
         SINK_PORT: String(sink.port),
-        SINK_TOKEN: sink.token,
+        SINK_TOKEN: childToken,
         SESSION_ID: sessionId,
         CHANNEL_NAME: channelName,
       },
@@ -142,7 +180,7 @@ async function spawnSession(
         args: [toolsBridgePath],
         env: {
           SINK_PORT: String(sink.port),
-          SINK_TOKEN: sink.token,
+          SINK_TOKEN: childToken,
           SESSION_ID: sessionId,
           TOOLS_MANIFEST_PATH: toolsManifestPath,
           BRIDGE_SERVER_NAME: TOOLS_BRIDGE_SERVER_NAME,
@@ -176,8 +214,8 @@ async function spawnSession(
     // rather than by which single session used to carry it.
     ...(options.enableToolBridge === true
       ? {
-          todoSync: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
-          activityTap: { sinkPort: sink.port, sinkToken: sink.token, sessionId },
+          todoSync: { sinkPort: sink.port, sinkToken: childToken, sessionId },
+          activityTap: { sinkPort: sink.port, sinkToken: childToken, sessionId },
           pipelineGuard: {},
         }
       : {}),
@@ -217,10 +255,6 @@ async function spawnSession(
     ...(options.skip_permissions !== undefined ? { skipPermissions: options.skip_permissions } : {}),
   })
 
-  // Construct + register the session BEFORE spawning so a fast /channel-ready
-  // POST from the dev-channel can never race ahead of the sink registration.
-  const childGeneration = randomUUID()
-  const session = new ReplSession(sessionKey, childGeneration, sessionId, channelName, cwd)
   session.toolSurface = toolSurface.join(',')
   // Stamp the active project scope this REPL serves (folded into the pool key, so
   // it is stable for the session's whole lifetime). The `/tool-call` sink reads
@@ -238,7 +272,6 @@ async function spawnSession(
   // Stamp the auth fingerprint the child is being spawned with so the warm-reuse
   // freshness guard can evict on a same-credential-id token refresh (Codex r2 P1).
   session.authFingerprint = authFingerprintFor(options.env)
-  sink.register(sessionId, session)
 
   // Pre-seed the first-run trust + bypass-permissions acceptance so the
   // interactive REPL doesn't wedge on a blocking Ink dialog before it loads
@@ -444,7 +477,23 @@ async function spawnSession(
   // this child can never refresh a different registry or a respawned successor.
   let liveHandle: LiveProcessHandle | undefined
 
-  const child = ptyHost.spawn(argv, {
+  // REGISTER IMMEDIATELY BEFORE THE SPAWN, AND UNDO IT IF THE SPAWN THROWS.
+  //
+  // Registration now grants a credential (`byCredential`), not merely a session-id
+  // entry, so a registration whose child never exists is a standing authorization with
+  // nothing behind it — and the config carrying that credential is already on disk. It
+  // used to sit ~200 lines earlier, where every throw in between (config writes, argv
+  // assembly, env merge) stranded one.
+  //
+  // It cannot move AFTER the spawn: the child can POST the moment it starts, and an
+  // unregistered credential would be refused. So it sits in the smallest window that
+  // works — the statement before — and the spawn is guarded, `unregisterIf` so a
+  // concurrent respawn that already re-registered this id is not evicted by our
+  // failure.
+  sink.register(sessionId, session)
+  let child: ReturnType<typeof ptyHost.spawn>
+  try {
+    child = ptyHost.spawn(argv, {
     cwd,
     env: childEnv,
     onData: (chunk) => {
@@ -564,6 +613,15 @@ async function spawnSession(
       }
     }
   }))
+  } catch (e) {
+    // The spawn never produced a child, so the registration it was made for must not
+    // outlive it. `unregisterIf` rather than `unregister`: a concurrent respawn may
+    // already hold this session id, and evicting ITS credential would turn our failure
+    // into a second one. The configs go too — they carry the credential in plaintext.
+    sink.unregisterIf(sessionId, session)
+    unlinkSessionConfigs(session)
+    throw e
+  }
 
   // Post-spawn assertion: child alive → /channel-ready (transport attached) →
   // HTTP /health → /channel-bound (MCP handshake complete).
@@ -1115,14 +1173,22 @@ export async function waitForReplIdle(session: ReplSession, quietMs: number, max
 }
 
 export async function injectMessage(
-  channelPort: number,
+  session: ReplSession,
   text: string,
   turnId: string,
   additional = false,
 ): Promise<void> {
+  const channelPort = session.channelPort
+  if (channelPort === undefined) {
+    throw new Error('persistent-repl: inject before the dev-channel bound a port')
+  }
+  // THIS CHILD'S credential, not the instance root: the child validates the inbound
+  // header against the `SINK_TOKEN` it was baked with (`dev-channel-impl.ts`), and
+  // that is now per-incarnation. Derived rather than stored so it cannot drift from
+  // what the sink authorizes.
   const resp = await fetch(`http://127.0.0.1:${channelPort}/message`, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'X-Sink-Token': sink.token },
+    headers: { 'Content-Type': 'application/json', 'X-Sink-Token': sink.credentialFor(session) },
     // `turn_id` round-trips through the dev-channel onto the matching reply so
     // `onReply` can correlate the completion to this exact turn (Argus r5 fix).
     body: JSON.stringify({ text, turn_id: turnId, additional }),

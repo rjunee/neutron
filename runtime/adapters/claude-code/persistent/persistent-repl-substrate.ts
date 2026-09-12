@@ -45,7 +45,10 @@ export type { RateLimitBannerNotice, RecoveredReply, PersistentReplSubstrateOpti
 export {
   setReplToolBridge,
   clearReplToolBridgeIf,
+  bakedChildSinkInfo,
   getReplSinkInfo,
+  parseSinkPortOverride,
+  setReplSinkPortOverride,
   setReplTodoSync,
   clearReplTodoSyncIf,
   type ReplTodoSync,

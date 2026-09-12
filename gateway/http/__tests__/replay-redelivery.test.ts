@@ -26,6 +26,7 @@ import {
   createPersistentReplSubstrate,
   drainPendingRespawns,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   registerSupervisedSubstrate,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
@@ -336,7 +337,7 @@ function makeCrashHost(): { host: PtyHost } {
       const r = argv.indexOf('--resume')
       const s = argv.indexOf('--session-id')
       const sid = (r >= 0 ? argv[r + 1] : s >= 0 ? argv[s + 1] : undefined) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {

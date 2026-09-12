@@ -437,6 +437,37 @@ export interface PersistentReplSubstrateOptions {
    *  via `postAlert` (else stderr). Defaults to
    *  `<dir(replRegistryPath)>/.restart-markers.json`. */
   restartMarkersPath?: string
+  /**
+   * Path to the reply sink's PERSISTED auth token (ISSUES #537). Same family as
+   * `replRegistryPath` above and derived from the same place
+   * (`deriveReplSupervisionPaths(home).sinkTokenPath` →
+   * `<home>/.neutron/.sink-token`), because it is durable REPL state for the same
+   * reason: a spawned REPL is baked with the sink's token + port and can never be
+   * re-pointed, so a gateway that restarts must present the token the surviving
+   * children already hold. Created 0600 on first use; a group/world-accessible,
+   * symlinked, empty or short file is refused and re-minted (loudly).
+   *
+   * Unset ⇒ the sink uses `defaultSinkTokenPath()`. The sink is a PER-PROCESS
+   * singleton, so the first substrate to start it fixes the token for the process;
+   * a later, different path is reported on stderr and ignored (the live token is
+   * already baked into live children).
+   */
+  sinkTokenPath?: string
+  /**
+   * Override the reply sink's loopback port. Resolved and VALIDATED by the one
+   * chokepoint `resolveSinkPort` (`sink-coordinates.ts`), which takes this first,
+   * then `NEUTRON_REPL_SINK_PORT`, then the PER-INSTANCE default — a port derived
+   * from this substrate's supervision state dir (`deriveSinkPort`), so it is stable
+   * across restarts of one instance without being shared by two.
+   *
+   * Which means an override is rarely needed: it is the escape hatch for a hash
+   * collision between two instances on one box, or an operator pinning a port for a
+   * firewall rule. A `0` here is REFUSED with a loud error rather than honoured —
+   * it asks the kernel for an ephemeral port, which is the #537 bug itself — and so
+   * is any non-integer or out-of-range value. A port already in use is a LOUD
+   * failure after a short bounded retry, never a silent ephemeral fallback.
+   */
+  sinkPort?: number
   /** Override the JSONL-existence probe that flips a record's `has_session`
    *  true (consumes `captureSession`'s result). Tests inject `() => true`;
    *  production uses `makeJsonlExistsProbe(projectsDir)`. */

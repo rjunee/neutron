@@ -17,11 +17,14 @@ import type { PtyChild, PtyHost } from '../pty-host.ts'
 import {
   createPersistentReplSubstrate,
   getReplSinkInfo,
+  bakedChildSinkInfo,
   setReplToolBridge,
   shutdownAllPersistentRepls,
   type PersistentReplSubstrateOptions,
   type ReplToolBridge,
 } from '../persistent-repl-substrate.ts'
+import { sink } from '../pool-state.ts'
+import { ReplSession } from '../repl-session.ts'
 import { McpServer } from '@neutronai/mcp/server.ts'
 import { ToolRegistry } from '@neutronai/tools/registry.ts'
 
@@ -42,7 +45,7 @@ function makeCapturingHost(): { host: PtyHost; argvs: string[][] } {
       const i = argv.indexOf('--session-id')
       const r = argv.indexOf('--resume')
       const sid = (i >= 0 ? argv[i + 1] : r >= 0 ? argv[r + 1] : undefined) as string
-      const { port: sinkPort, token } = getReplSinkInfo()
+      const { port: sinkPort, token } = bakedChildSinkInfo(argv)
       let hasExited = false
       let exitResolve: (code: number | null) => void = () => {}
       const exited = new Promise<number | null>((res) => {
@@ -212,22 +215,46 @@ describe('P0-1 native-MCP tool bridge — spawn wiring', () => {
 })
 
 describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
-  async function sinkPost(path: string, body: unknown): Promise<{ status: number; json: any }> {
-    const { port, token } = getReplSinkInfo()
+  // EVERY DISPATCH ROUTE NOW REQUIRES A REGISTERED SESSION. These cases used to post
+  // `session_id: 's'` — an id the gateway had never heard of — because the routes were
+  // answered before the session lookup, on the reasoning that they dispatch against the
+  // process-global bridge rather than a per-session driver. ISSUES #537 made the sink
+  // token durable, which turned that into "an orphaned child from a previous
+  // incarnation can dispatch tools with a fabricated session id", so the routes are
+  // gated on a live session and these cases register one. The denial half lives in
+  // `sink-restart-survival.test.ts`, with the rest of the #537 boundary.
+  const LIVE_SESSION_ID = 'tool-bridge-live-session'
+  let liveCredential = ''
+  function registerLiveSession(projectId?: string): void {
+    const session = new ReplSession('k', 'gen', LIVE_SESSION_ID, 'chan', '/tmp')
+    if (projectId !== undefined) session.projectId = projectId
+    sink.register(LIVE_SESSION_ID, session)
+    liveCredential = sink.credentialFor(session)
+  }
+  afterEach(() => {
+    sink.unregister(LIVE_SESSION_ID)
+    liveCredential = ''
+  })
+
+  // The dispatch routes authorize CREDENTIAL → session, so a test standing in for a
+  // child presents that child's credential. The instance root token is not one.
+  async function sinkPost(path: string, body: unknown, credential?: string): Promise<{ status: number; json: any }> {
+    const { port } = await getReplSinkInfo()
     const resp = await fetch(`http://127.0.0.1:${port}${path}`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': token },
+      headers: { 'Content-Type': 'application/json', 'X-Sink-Token': credential ?? liveCredential },
       body: JSON.stringify(body),
     })
     return { status: resp.status, json: await resp.json() }
   }
 
   it('/tools returns the wired bridge schemas (empty when unwired)', async () => {
-    getReplSinkInfo() // ensure sink is up
+    await getReplSinkInfo() // ensure sink is up
+    registerLiveSession()
     setReplToolBridge(undefined)
-    expect((await sinkPost('/tools', {})).json.tools).toEqual([])
+    expect((await sinkPost('/tools', { session_id: LIVE_SESSION_ID })).json.tools).toEqual([])
     setReplToolBridge(fakeBridge([]))
-    const tools = (await sinkPost('/tools', {})).json.tools
+    const tools = (await sinkPost('/tools', { session_id: LIVE_SESSION_ID })).json.tools
     expect(tools).toHaveLength(1)
     expect(tools[0].name).toBe('doc_search')
   })
@@ -235,7 +262,8 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
   it('/tool-call dispatches against the registry and returns a structured result', async () => {
     const calls: Array<{ tool_name: string; args: unknown }> = []
     setReplToolBridge(fakeBridge(calls))
-    const { json } = await sinkPost('/tool-call', { session_id: 's', tool_name: 'doc_search', args: { query: 'taxes' }, call_id: 'c1' })
+    registerLiveSession()
+    const { json } = await sinkPost('/tool-call', { session_id: LIVE_SESSION_ID, tool_name: 'doc_search', args: { query: 'taxes' }, call_id: 'c1' })
     expect(json.ok).toBe(true)
     expect(json.result.results[0].id).toBe('doc-1')
     expect(json.result.echoed).toEqual({ query: 'taxes' })
@@ -244,17 +272,21 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
 
   it('/tool-call returns ok:false (not an HTTP fault) when the handler throws', async () => {
     setReplToolBridge(fakeBridge([]))
-    const { status, json } = await sinkPost('/tool-call', { session_id: 's', tool_name: 'boom', args: {}, call_id: 'c2' })
+    registerLiveSession()
+    const { status, json } = await sinkPost('/tool-call', { session_id: LIVE_SESSION_ID, tool_name: 'boom', args: {}, call_id: 'c2' })
     expect(status).toBe(200)
     expect(json.ok).toBe(false)
     expect(json.error).toContain('handler exploded')
   })
 
   it('/tool-call 503s when no bridge is wired; 400s on a missing tool_name', async () => {
+    registerLiveSession()
     setReplToolBridge(undefined)
-    expect((await sinkPost('/tool-call', { tool_name: 'x', args: {} })).status).toBe(503)
+    expect(
+      (await sinkPost('/tool-call', { session_id: LIVE_SESSION_ID, tool_name: 'x', args: {} })).status,
+    ).toBe(503)
     setReplToolBridge(fakeBridge([]))
-    expect((await sinkPost('/tool-call', { args: {} })).status).toBe(400)
+    expect((await sinkPost('/tool-call', { session_id: LIVE_SESSION_ID, args: {} })).status).toBe(400)
   })
 
   it('threads the calling session’s ACTIVE project scope into dispatch.project_id (P0 work-board fix)', async () => {
@@ -276,16 +308,30 @@ describe('P0-1 native-MCP tool bridge — reply-sink dispatch routes', () => {
       opts(host, { enableToolBridge: true, user_id: 'u-scope', project_id: 'acme', credential_identity: 'cred-scope' }),
     )
     await drain(sub.start(spec('hi')))
-    // Recover the session_id the spawn used (the tools-bridge POSTs it verbatim).
+    // Recover what the SPAWN actually handed the child: the session id it resumes under
+    // AND the credential baked into its per-session MCP config, which is what the
+    // tools-bridge presents. Reading them from argv/config is the child's own view.
     const argv = argvs[0]!
     const sidIdx = argv.indexOf('--session-id')
     const sessionId = argv[sidIdx + 1]!
-    // A tool call from THAT session must carry project_id = 'acme'.
-    await sinkPost('/tool-call', { session_id: sessionId, tool_name: 'work_board_add', args: { title: 'x' }, call_id: 'k' })
+    const childCredential = bakedChildSinkInfo(argv).token
+    // A tool call from THAT child must carry project_id = 'acme' — the scope comes from
+    // the session the CREDENTIAL resolved to, so it cannot be steered by the body.
+    await sinkPost(
+      '/tool-call',
+      { session_id: sessionId, tool_name: 'work_board_add', args: { title: 'x' }, call_id: 'k' },
+      childCredential,
+    )
     expect(seen).toEqual(['acme'])
-    // A tool call from an UNKNOWN session degrades to null (General / owner slug).
-    await sinkPost('/tool-call', { session_id: 'no-such-session', tool_name: 'work_board_add', args: {}, call_id: 'k2' })
-    expect(seen).toEqual(['acme', null])
+    // And a caller that is NOT that child is refused even while naming that child's
+    // real session id — the process table publishes the id, so an id proves nothing.
+    const orphan = await sinkPost(
+      '/tool-call',
+      { session_id: sessionId, tool_name: 'work_board_add', args: {}, call_id: 'k2' },
+      'f'.repeat(64),
+    )
+    expect(orphan.status).toBe(401)
+    expect(seen).toEqual(['acme'])
   })
 })
 

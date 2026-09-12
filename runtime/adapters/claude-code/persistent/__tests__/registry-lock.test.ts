@@ -6,7 +6,7 @@
  */
 
 import { describe, it, expect } from 'bun:test'
-import { mkdtempSync } from 'node:fs'
+import { linkSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { registryLockPath, withFlockSync } from '../registry-lock.ts'
@@ -16,6 +16,43 @@ describe('registry-lock', () => {
     expect(registryLockPath('/srv/neutron/.neutron/repl-registry.json')).toBe(
       '/srv/neutron/.neutron/.registry.lock',
     )
+  })
+
+  it('refuses a lock path that opens to a NON-REGULAR file, and does not run fn', () => {
+    // The fstat check, and the only case that can falsify it. O_NOFOLLOW rejects a
+    // symlink and the other non-regular types fail at `open` anyway — a FIFO and a
+    // socket answer ENXIO under O_WRONLY|O_NONBLOCK, a directory answers EISDIR — so
+    // without a type that OPENS successfully and is not a regular file, the check is
+    // unfalsifiable and would be believed rather than tested.
+    //
+    // `/dev/null` is that type, and it needs no CAP_MKNOD: it opens cleanly with the
+    // production flags and `fstat` reports a character device. Without the check,
+    // `flock` on it succeeds and `fn` RUNS — so the assertion is that fn does not.
+    let ran = false
+    expect(() =>
+      withFlockSync('/dev/null', () => {
+        ran = true
+        return 'should not happen'
+      }),
+    ).toThrow(/not a regular file/)
+    expect(ran).toBe(false)
+  })
+
+  it('does not truncate a HARD-LINKED target — the lock carries no payload, so it never truncates', () => {
+    // O_NOFOLLOW stops a symlink and does nothing about a hard link: the alias IS a
+    // regular file, `fstat` agrees, and with O_TRUNC the original would already be empty
+    // before any check could run. No ordering of validations fixes a truncation that
+    // happens at open, so the destructive flag is gone instead.
+    const dir = mkdtempSync(join(tmpdir(), 'neutron-lock-hardlink-'))
+    const victim = join(dir, 'precious.txt')
+    const contents = 'bytes that must survive\n'
+    writeFileSync(victim, contents, { mode: 0o600 })
+
+    const lock = join(dir, '.registry.lock')
+    linkSync(victim, lock)
+
+    expect(withFlockSync(lock, () => 'ran')).toBe('ran')
+    expect(readFileSync(victim, 'utf8')).toBe(contents)
   })
 
   it('runs fn under the lock and returns its value', () => {
